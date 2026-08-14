@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -13,10 +14,11 @@ namespace HartsyInference.Audio.Pipelines;
 /// under classifier-free guidance and the depth decoder samples the seven residual codes, and the per-frame hidden
 /// states of both are concatenated into the conditioning the flow-matching stage consumes.
 ///
-/// <para>Classifier-free guidance runs as two batch-1 branches with their own KV caches rather than one batch-2
-/// pass, matching how the engine's other guided autoregressive audio models decode. The two branches differ only in
-/// their prompt: the unconditional one replaces every token except the first and the last two with the audio-CFG
-/// token.</para></summary>
+/// <para>Classifier-free guidance keeps one KV cache per branch, but the steady-state decode runs both branches
+/// through a single batch-2 forward: at one token per step the language model is bound by streaming its weights,
+/// so two batch-1 forwards read all of them twice per frame. The branches differ only in their prompt — the
+/// unconditional one replaces every token except the first and the last two with the audio-CFG token — so they stay
+/// position-aligned and can share a step. <c>HARTSY_MM3_CFG_BATCH=0</c> restores the two-forward decode.</para></summary>
 public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 {
     /// <summary>Autoregressive frames per second.</summary>
@@ -37,6 +39,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 
     private readonly MiniMaxMusic3GlobalLm _languageModel;
     private readonly MiniMaxMusic3DepthDecoder _depthDecoder;
+    private readonly bool _batchCfg = EnvSwitch.IsEnabled("HARTSY_MM3_CFG_BATCH", defaultOn: true);
     private int _disposed;
 
     public MiniMaxMusic3ArPipeline(MiniMaxMusic3GlobalLm languageModel, MiniMaxMusic3DepthDecoder depthDecoder)
@@ -86,16 +89,21 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         List<float[]> frames = new List<float[]>(Math.Min(frameLimit, 1024));
         int[] frameCodes = new int[codebooks];
 
-        Tensor conditionalHidden;
-        Tensor unconditionalHidden;
+        Tensor conditionalPrefill;
         using (Tensor conditionalEmbeds = _languageModel.Embed(conditionalIds))
         {
-            conditionalHidden = _languageModel.Forward(backend, conditionalEmbeds, conditionalCache);
+            conditionalPrefill = _languageModel.Forward(backend, conditionalEmbeds, conditionalCache);
         }
+        Tensor unconditionalPrefill;
         using (Tensor unconditionalEmbeds = _languageModel.Embed(unconditionalIds))
         {
-            unconditionalHidden = _languageModel.Forward(backend, unconditionalEmbeds, unconditionalCache);
+            unconditionalPrefill = _languageModel.Forward(backend, unconditionalEmbeds, unconditionalCache);
         }
+        // Prefill stays one forward per branch — it runs twice per song, not twice per frame, and the two prompts
+        // are separate sequences of many tokens rather than one aligned step.
+        Tensor hiddens = StackRows(conditionalPrefill, unconditionalPrefill, hidden);
+        conditionalPrefill.Dispose();
+        unconditionalPrefill.Dispose();
 
         try
         {
@@ -106,7 +114,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 long phase = Stopwatch.GetTimestamp();
                 int semanticCode = forcedCodes is not null
                     ? (frameIndex < forcedCodes.Count ? forcedCodes[frameIndex][0] : MiniMaxMusic3GlobalLm.AudioEndLogitIndex)
-                    : SampleSemantic(backend, conditionalHidden, unconditionalHidden, ref rng);
+                    : SampleSemantic(backend, hiddens, ref rng);
                 sampleTicks += Stopwatch.GetTimestamp() - phase;
                 if (semanticCode == MiniMaxMusic3GlobalLm.AudioEndLogitIndex)
                 {
@@ -115,14 +123,14 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 
                 frameCodes[0] = semanticCode;
                 phase = Stopwatch.GetTimestamp();
-                float[] depthHidden = DecodeDepth(backend, conditionalHidden, unconditionalHidden, frameCodes,
+                float[] depthHidden = DecodeDepth(backend, hiddens, frameCodes,
                     ref rng, forcedCodes is not null ? forcedCodes[frameIndex] : null, depthCache);
                 depthTicks += Stopwatch.GetTimestamp() - phase;
 
                 if (frameIndex > 0)
                 {
                     float[] frame = new float[FrameHiddenWidth];
-                    conditionalHidden.AsReadOnlySpan<float>().CopyTo(frame);
+                    hiddens.AsReadOnlySpan<float>()[..hidden].CopyTo(frame);
                     depthHidden.CopyTo(frame, hidden);
                     frames.Add(frame);
                     onFrame?.Invoke(frames.Count, frameLimit);
@@ -133,22 +141,20 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 }
 
                 phase = Stopwatch.GetTimestamp();
-                using Tensor feedback = BuildFeedback(frameCodes);
+                using Tensor feedback = BuildFeedback(frameCodes, _batchCfg ? CfgRows : 1);
                 feedbackTicks += Stopwatch.GetTimestamp() - phase;
                 phase = Stopwatch.GetTimestamp();
-                Tensor nextConditional = _languageModel.Forward(backend, feedback, conditionalCache);
-                Tensor nextUnconditional = _languageModel.Forward(backend, feedback, unconditionalCache);
+                Tensor next = _batchCfg
+                    ? _languageModel.ForwardCfgStep(backend, feedback, conditionalCache, unconditionalCache)
+                    : ForwardBranches(backend, feedback, conditionalCache, unconditionalCache, hidden);
                 lmTicks += Stopwatch.GetTimestamp() - phase;
-                conditionalHidden.Dispose();
-                unconditionalHidden.Dispose();
-                conditionalHidden = nextConditional;
-                unconditionalHidden = nextUnconditional;
+                hiddens.Dispose();
+                hiddens = next;
             }
         }
         finally
         {
-            conditionalHidden.Dispose();
-            unconditionalHidden.Dispose();
+            hiddens.Dispose();
         }
 
         double ms = 1000.0 / Stopwatch.Frequency;
@@ -170,16 +176,64 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 
     public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
 
-    /// <summary>Guided semantic draw: the candidate set is the conditional branch's top-K, but the distribution
-    /// sampled is the guided one. Guidance over two masked-out logits would be NaN, so the mask is applied after.</summary>
-    private int SampleSemantic(IBackend backend, Tensor conditionalHidden, Tensor unconditionalHidden, ref uint rng)
+    /// <summary>Stacks the two branches' last hidden states into <c>[2, 4096]</c>, row 0 conditional.</summary>
+    private static Tensor StackRows(Tensor conditional, Tensor unconditional, int hidden)
     {
-        using Tensor conditionalLogits = _languageModel.SemanticLogits(backend, conditionalHidden);
-        using Tensor unconditionalLogits = _languageModel.SemanticLogits(backend, unconditionalHidden);
+        Tensor rows = new Tensor(new TensorShape(CfgRows, hidden), DType.F32);
+        float* data = (float*)rows.DataPointer;
+        conditional.AsReadOnlySpan<float>()[..hidden].CopyTo(new Span<float>(data, hidden));
+        unconditional.AsReadOnlySpan<float>()[..hidden].CopyTo(new Span<float>(data + hidden, hidden));
+        return rows;
+    }
+
+    /// <summary>The pre-batching decode: one batch-1 forward per branch, stacked into the same <c>[2, 4096]</c> the
+    /// batched step returns. Reachable only through <c>HARTSY_MM3_CFG_BATCH=0</c>.</summary>
+    private Tensor ForwardBranches(IBackend backend, Tensor feedback, IKvCache conditionalCache,
+        IKvCache unconditionalCache, int hidden)
+    {
+        using Tensor conditional = _languageModel.Forward(backend, feedback, conditionalCache);
+        using Tensor unconditional = _languageModel.Forward(backend, feedback, unconditionalCache);
+        return StackRows(conditional, unconditional, hidden);
+    }
+
+    /// <summary>Row <paramref name="row"/> of a <c>[rows, hidden]</c> tensor as its own <c>[1, hidden]</c>.</summary>
+    private static Tensor Row(Tensor rows, int row, int hidden)
+    {
+        Tensor single = new Tensor(new TensorShape(1, hidden), DType.F32);
+        rows.AsReadOnlySpan<float>()
+            .Slice(row * hidden, hidden)
+            .CopyTo(new Span<float>((float*)single.DataPointer, hidden));
+        return single;
+    }
+
+    /// <summary>Guided semantic draw: the candidate set is the conditional branch's top-K, but the distribution
+    /// sampled is the guided one. Guidance over two masked-out logits would be NaN, so the mask is applied after.
+    ///
+    /// <para>The head runs per branch even though both rows are on hand. Batching it saves ~0.2 s per 15 s of audio,
+    /// but cuBLAS picks a different algorithm at two rows than at one, and the last-bit difference in the logits is
+    /// enough to make the sampler pick a different song for the same seed — measured, not theoretical. Batching the
+    /// DECODE step is bit-exact and free of that; this is not, and 0.2 s does not buy a reproducibility break.</para></summary>
+    private int SampleSemantic(IBackend backend, Tensor hiddens, ref uint rng)
+    {
         int count = MiniMaxMusic3GlobalLm.SemanticVocabSize + 1;
-        ReadOnlySpan<float> conditional = conditionalLogits.AsReadOnlySpan<float>()[..count];
-        ReadOnlySpan<float> unconditional = unconditionalLogits.AsReadOnlySpan<float>()[..count];
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
         float[] guided = new float[count];
+        using (Tensor conditionalRow = Row(hiddens, 0, hidden))
+        using (Tensor unconditionalRow = Row(hiddens, 1, hidden))
+        using (Tensor conditionalLogits = _languageModel.SemanticLogits(backend, conditionalRow))
+        using (Tensor unconditionalLogits = _languageModel.SemanticLogits(backend, unconditionalRow))
+        {
+            BlendGuided(guided, conditionalLogits.AsReadOnlySpan<float>()[..count],
+                unconditionalLogits.AsReadOnlySpan<float>()[..count], count);
+        }
+        return NucleusSampler.Draw(guided, count, temperature: 1f, topK: TopK, topP: 1f, ref rng);
+    }
+
+    /// <summary>Writes the guided distribution over the conditional branch's top-K into <paramref name="guided"/>,
+    /// masking the rest to <c>-inf</c> AFTER the blend — guidance over two already-masked logits is NaN.</summary>
+    private static void BlendGuided(float[] guided, ReadOnlySpan<float> conditional,
+        ReadOnlySpan<float> unconditional, int count)
+    {
         float threshold = KthLargest(conditional, TopK);
         for (int i = 0; i < count; i++)
         {
@@ -187,13 +241,12 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 ? float.NegativeInfinity
                 : unconditional[i] + ((conditional[i] - unconditional[i]) * CfgScale);
         }
-        return NucleusSampler.Draw(guided, count, temperature: 1f, topK: TopK, topP: 1f, ref rng);
     }
 
     /// <summary>Samples the seven residual codes for one frame and returns their concatenated conditional hidden
     /// states, <c>[7 · 4096]</c>. Both classifier-free rows share every sampled code, so the depth sequence differs
     /// between them only in its first element.</summary>
-    private float[] DecodeDepth(IBackend backend, Tensor conditionalHidden, Tensor unconditionalHidden,
+    private float[] DecodeDepth(IBackend backend, Tensor hiddens,
         int[] frameCodes, ref uint rng, int[]? forced, MiniMaxMusic3DepthCache cache)
     {
         int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
@@ -207,8 +260,9 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         using (Tensor prefix = new Tensor(new TensorShape(CfgRows, 2, hidden), DType.F32))
         {
             float* prefixData = (float*)prefix.DataPointer;
-            conditionalHidden.AsReadOnlySpan<float>().CopyTo(new Span<float>(prefixData, hidden));
-            unconditionalHidden.AsReadOnlySpan<float>().CopyTo(new Span<float>(prefixData + (2 * hidden), hidden));
+            ReadOnlySpan<float> rows = hiddens.AsReadOnlySpan<float>();
+            rows[..hidden].CopyTo(new Span<float>(prefixData, hidden));
+            rows.Slice(hidden, hidden).CopyTo(new Span<float>(prefixData + (2 * hidden), hidden));
             _languageModel.ReadEmbeddingRow(MiniMaxMusic3GlobalLm.AudioCodeOffset + frameCodes[0],
                 new Span<float>(prefixData + hidden, hidden));
             new ReadOnlySpan<float>(prefixData + hidden, hidden).CopyTo(new Span<float>(prefixData + (3 * hidden), hidden));
@@ -282,18 +336,24 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
     }
 
     /// <summary>The global model's next input: the semantic code's token embedding plus every residual code's
-    /// embedding, scaled by <c>numCodebooks^-0.5</c>. Both branches consume the same frame, so one row suffices.</summary>
-    private Tensor BuildFeedback(ReadOnlySpan<int> frameCodes)
+    /// embedding, scaled by <c>numCodebooks^-0.5</c>. Both branches consume the same frame, so the single computed
+    /// row is simply repeated <paramref name="rows"/> times for the batched step.</summary>
+    private Tensor BuildFeedback(ReadOnlySpan<int> frameCodes, int rows)
     {
         int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
-        Tensor feedback = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
-        Span<float> values = new Span<float>((float*)feedback.DataPointer, hidden);
+        Tensor feedback = new Tensor(new TensorShape(1, rows, hidden), DType.F32);
+        float* data = (float*)feedback.DataPointer;
+        Span<float> values = new Span<float>(data, hidden);
         _languageModel.ReadEmbeddingRow(MiniMaxMusic3GlobalLm.AudioCodeOffset + frameCodes[0], values);
         _depthDecoder.AccumulateFrameResiduals(frameCodes, values);
         float scale = 1f / MathF.Sqrt(MiniMaxMusic3DepthDecoder.NumCodebooks);
         for (int i = 0; i < hidden; i++)
         {
             values[i] *= scale;
+        }
+        for (int row = 1; row < rows; row++)
+        {
+            new ReadOnlySpan<float>(data, hidden).CopyTo(new Span<float>(data + ((long)row * hidden), hidden));
         }
         return feedback;
     }

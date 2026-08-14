@@ -2322,8 +2322,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             for (int s = 0; s < b; s++)
             {
                 // Slice this sequence's single token out of the batched projections. q rows are head-major
-                // [B, Hq, D]; [1,Hq,1,D] and [1,1,Hq,D] share memory (Tq=1), so the slice doubles as the
-                // multi-head layout FlashAttention wants and the [1,1,Hq,D] piece Concat reassembles.
+                // [B, Hq, D], so the slice is already the [1,Hq,1,D] multi-head layout FlashAttention wants.
                 Tensor qMh = new(new TensorShape(1, hq, 1, d), DType.F32);
                 Tensor kMh = new(new TensorShape(1, hkv, 1, d), DType.F32);
                 Tensor vMh = new(new TensorShape(1, hkv, 1, d), DType.F32);
@@ -2336,15 +2335,19 @@ public sealed unsafe class GenericTransformer : IDisposable
                 kMh.Dispose(); vMh.Dispose();
                 int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
                 int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
-                Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
+                // Head-major like qMh: FlashAttention requires output.Shape to EQUAL Q's, and CudaBackend
+                // enforces it (a token-major [1,1,hq,d] segment threw on every CUDA batched decode, invisible on
+                // CpuBackend, which does not validate). At Tq=1 the two layouts are byte-identical, so the
+                // segments still concatenate — along dim 0 now — into the token-major o_proj input.
+                Tensor attnSeg = new(new TensorShape(1, hq, 1, d), DType.F32);
                 backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
                     kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
                 qMh.Dispose();
                 segs[s] = attnSeg;
             }
 
-            Tensor attnConcat = new(new TensorShape(1, b, hq, d), DType.F32);
-            backend.Concat(attnConcat, segs, dim: 1);
+            Tensor attnConcat = new(new TensorShape(b, hq, 1, d), DType.F32);
+            backend.Concat(attnConcat, segs, dim: 0);
             foreach (Tensor seg in segs) seg.Dispose();
 
             Tensor attnOut = new(flat, DType.F32);   // o_proj reads attnConcat as [B, QDim]

@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -73,6 +74,11 @@ internal static class MiniMaxMusic3MusicModel
 
         IReadOnlyDictionary<string, Tensor> preparedLanguage =
             MiniMaxMusic3WeightPolicy.PrepareLanguageModel(languageWeights, repo, quant, out IDisposable? quantCache);
+        // HARTSY_MM3_DEPTH_QUANT=0 leaves the depth decoder at checkpoint precision, so its share of the
+        // autoregressive stage can be measured independently of the language model's.
+        string? depthQuant = EnvSwitch.IsEnabled("HARTSY_MM3_DEPTH_QUANT", defaultOn: true) ? quant : null;
+        IReadOnlyDictionary<string, Tensor> preparedDepth =
+            MiniMaxMusic3WeightPolicy.PrepareDepthDecoder(depthWeights, repo, depthQuant, out IDisposable? depthQuantCache);
         IReadOnlyDictionary<string, Tensor> preparedDit =
             MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, quant, out IDisposable? ditCast);
         ModelAssets.Lora.LoraStack? loras = ApplyLoras(context, ref preparedLanguage, ref preparedDit);
@@ -82,7 +88,7 @@ internal static class MiniMaxMusic3MusicModel
         MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.Device.IsCuda);
         languageModel.LoadWeights(preparedLanguage);
         MiniMaxMusic3DepthDecoder depthDecoder = new MiniMaxMusic3DepthDecoder();
-        depthDecoder.LoadWeights(depthWeights);
+        depthDecoder.LoadWeights(preparedDepth);
         MiniMaxMusic3ConditionEncoder conditionEncoder = new MiniMaxMusic3ConditionEncoder();
         conditionEncoder.LoadWeights(conditionWeights);
         MiniMaxMusic3Dit dit = new MiniMaxMusic3Dit();
@@ -186,7 +192,7 @@ internal static class MiniMaxMusic3MusicModel
 
         IDisposable?[] keep =
         [
-            autoregressive, flow, languageModel, depthDecoder, conditionEncoder, dit, vocoder, quantCache, ditCast, loras,
+            autoregressive, flow, languageModel, depthDecoder, conditionEncoder, dit, vocoder, quantCache, depthQuantCache, ditCast, loras,
             .. languageLoaders, .. depthLoaders, .. conditionLoaders, .. ditLoaders, .. vocoderLoaders,
         ];
         return new MusicRunner(vocoder.SampleRate, Synth, keep);

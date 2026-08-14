@@ -25,30 +25,75 @@ internal static class MiniMaxMusic3WeightPolicy
         {
             return weights;
         }
-
         // Only the decoder layers are quantized. The embedding table and the output head are read row-wise on the
         // host (the head is sliced to 16385 rows at load), so quantizing them would buy nothing and would break the
         // row reader; they stay mmapped from the source checkpoint.
-        Dictionary<string, Tensor> quantizable = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+        return QuantizeToCache(weights,
+            key => key.StartsWith("model.layers.", StringComparison.Ordinal),
+            PolicyFor(backbone.Value),
+            CachePath(repo, quant!, "lm"),
+            "language model", backbone.Value, out cache);
+    }
+
+    /// <summary>Applies the depth decoder's quantization, returning the weights to load and (when quantizing) the
+    /// GGUF mapping that owns them — keep it alive for the model's lifetime.
+    ///
+    /// <para>The depth decoder runs eight forwards per audio frame, so its 1.3 GB of BF16 is re-read far more often
+    /// than the language model's weights are; leaving it unquantized under <c>:q8</c>/<c>:q4</c> made it the second
+    /// biggest term in the autoregressive stage.</para></summary>
+    internal static IReadOnlyDictionary<string, Tensor> PrepareDepthDecoder(
+        IReadOnlyDictionary<string, Tensor> weights, string repo, string? quant, out IDisposable? cache)
+    {
+        cache = null;
+        DType? backbone = CsmWeightCache.ResolveQuant(quant);
+        if (backbone is null)
+        {
+            return weights;
+        }
+        // Only the projections go through a backend op. audio_embeddings, pos_embedding and every norm are read as
+        // RAW FLOATS on the host (MiniMaxMusic3DepthDecoder widens them at load), so a block-quantized layout would
+        // be read as garbage rather than rejected — they stay mmapped from the source checkpoint.
+        return QuantizeToCache(weights, IsDepthProjection, DepthPolicyFor(backbone.Value),
+            CachePath(repo, quant!, "depth"), "depth decoder", backbone.Value, out cache);
+    }
+
+    /// <summary>True for the depth decoder's matmul weights — everything else is read host-side as raw floats.</summary>
+    private static bool IsDepthProjection(string key)
+        => key.Contains(".attn.to_", StringComparison.Ordinal)
+            || key.EndsWith("gate_proj.weight", StringComparison.Ordinal)
+            || key.EndsWith("up_proj.weight", StringComparison.Ordinal)
+            || key.EndsWith("down_proj.weight", StringComparison.Ordinal)
+            || key.StartsWith("audio_heads.", StringComparison.Ordinal)
+            || key.Equals("projection.weight", StringComparison.Ordinal);
+
+    private static string CachePath(string repo, string quant, string component) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".cache", "hartsyinference", "minimax-music3",
+        component == "lm"
+            ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
+            : $"{repo.Replace('/', '_')}-{component}-{quant.ToLowerInvariant()}.gguf");
+
+    /// <summary>Quantizes the <paramref name="quantizable"/> subset of <paramref name="weights"/> into a disk-cached
+    /// GGUF (written once, on the first run) and returns it merged back over the untouched remainder.</summary>
+    private static IReadOnlyDictionary<string, Tensor> QuantizeToCache(
+        IReadOnlyDictionary<string, Tensor> weights, Func<string, bool> quantizable, GgufQuantPolicy policy,
+        string cachePath, string label, DType backbone, out IDisposable? cache)
+    {
+        Dictionary<string, Tensor> selected = new Dictionary<string, Tensor>(StringComparer.Ordinal);
         Dictionary<string, Tensor> passthrough = new Dictionary<string, Tensor>(StringComparer.Ordinal);
         foreach (KeyValuePair<string, Tensor> entry in weights)
         {
-            bool isLayer = entry.Key.StartsWith("model.layers.", StringComparison.Ordinal);
-            (isLayer ? quantizable : passthrough)[entry.Key] = entry.Value;
+            (quantizable(entry.Key) ? selected : passthrough)[entry.Key] = entry.Value;
         }
 
-        string cachePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".cache", "hartsyinference", "minimax-music3",
-            $"{repo.Replace('/', '_')}-{quant!.ToLowerInvariant()}.gguf");
         if (!File.Exists(cachePath))
         {
-            Logs.Info($"[Audio][MiniMaxMusic3] Quantizing the language model to {backbone.Value.Name} → {cachePath} (one-time)...");
+            Logs.Info($"[Audio][MiniMaxMusic3] Quantizing the {label} to {backbone.Name} → {cachePath} (one-time)...");
             Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
             string temporary = cachePath + ".tmp";
             try
             {
-                GgufQuantizer.ConvertDictionaryToGguf(quantizable, temporary, PolicyFor(backbone.Value), "minimax-music3");
+                GgufQuantizer.ConvertDictionaryToGguf(selected, temporary, policy, "minimax-music3");
                 File.Move(temporary, cachePath, overwrite: true);
             }
             catch
@@ -73,7 +118,7 @@ internal static class MiniMaxMusic3WeightPolicy
         {
             merged[name] = loader.GetTensor(name);
         }
-        Logs.Info($"[Audio][MiniMaxMusic3] Loaded the {backbone.Value.Name} language model from cache "
+        Logs.Info($"[Audio][MiniMaxMusic3] Loaded the {backbone.Name} {label} from cache "
             + $"({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");
         return merged;
     }
@@ -112,6 +157,17 @@ internal static class MiniMaxMusic3WeightPolicy
             name.Contains("v_proj", StringComparison.Ordinal) || name.Contains("o_proj", StringComparison.Ordinal),
         ShouldKeepF16 = (name, _) =>
             name.Contains("norm", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".bias", StringComparison.Ordinal),
+    };
+
+    /// <summary>Same mix for the depth decoder, whose attention weights are named <c>to_v</c>/<c>to_out</c> rather
+    /// than <c>v_proj</c>/<c>o_proj</c>. Nothing precision-sensitive reaches this policy — the caller only offers it
+    /// the projections — so there is no keep-at-F16 set.</summary>
+    private static GgufQuantPolicy DepthPolicyFor(DType backbone) => new()
+    {
+        BackboneDType = backbone,
+        HighFidelityDType = backbone == DType.Q4_K || backbone == DType.Q5_K ? DType.Q6_K : null,
+        IsHighFidelity = name =>
+            name.Contains(".to_v.", StringComparison.Ordinal) || name.Contains(".to_out.", StringComparison.Ordinal),
     };
 
     private sealed class OwnedTensors : IDisposable

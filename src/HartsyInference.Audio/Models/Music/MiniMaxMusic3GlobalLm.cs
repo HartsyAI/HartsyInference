@@ -29,6 +29,9 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     /// <summary>Backbone width.</summary>
     public const int HiddenSize = 4096;
 
+    /// <summary>Classifier-free branches decoded together: conditional, then unconditional.</summary>
+    public const int CfgRows = 2;
+
     private readonly Qwen3Model _backbone;
     private readonly bool _halfPrecisionKv;
     private Tensor? _embedTokens;
@@ -137,6 +140,34 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
             .Slice((steps - 1) * HiddenSize, HiddenSize)
             .CopyTo(new Span<float>((float*)last.DataPointer, HiddenSize));
         return last;
+    }
+
+    /// <summary>Runs ONE decode step for both classifier-free branches as a single batch-2 forward and returns their
+    /// final-normed hidden states <c>[2, 4096]</c>, row 0 conditional. <paramref name="embeds"/> is
+    /// <c>[1, 2, 4096]</c> in the same row order and each row appends to its own cache.
+    ///
+    /// <para>Single-token decode is bound by streaming the weights, not by the arithmetic, so running the two
+    /// branches as separate batch-1 forwards reads all 8.6 GB twice per frame. One batch-2 forward reads it once.
+    /// The branches stay position-aligned by construction (identical prompt length, one frame appended to each per
+    /// step), which is what lets them share a step at all. Caller owns the result.</para></summary>
+    public Tensor ForwardCfgStep(IBackend backend, Tensor embeds, IKvCache conditional, IKvCache unconditional)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(embeds);
+        ArgumentNullException.ThrowIfNull(conditional);
+        ArgumentNullException.ThrowIfNull(unconditional);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (embeds.Shape[1] != CfgRows)
+        {
+            throw new ArgumentException($"the classifier-free step takes [1, {CfgRows}, {HiddenSize}] embeds, got {embeds.Shape}.", nameof(embeds));
+        }
+        Span<int> positions = [conditional.CurrentLength, unconditional.CurrentLength];
+        using Tensor both = _backbone.ForwardBatchDecode(backend, embeds, positions, [conditional, unconditional]);
+        Tensor rows = new Tensor(new TensorShape(CfgRows, HiddenSize), DType.F32);
+        both.AsReadOnlySpan<float>()
+            .Slice(0, CfgRows * HiddenSize)
+            .CopyTo(new Span<float>((float*)rows.DataPointer, CfgRows * HiddenSize));
+        return rows;
     }
 
     /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> onto the reachable vocabulary:

@@ -64,6 +64,17 @@ public sealed class Qwen3Model : IDisposable
         return _transformer.ForwardEmbeds(backend, embeds, t, posStart, cache);
     }
 
+    /// <summary>Batched decode step: <paramref name="embeds"/> is <c>[1, B, hidden]</c> (one token per sequence),
+    /// <paramref name="positions"/>[b] is sequence b's absolute position and <paramref name="caches"/>[b] its own
+    /// cache. Returns the final-normed <c>[1, B, hidden]</c>. The projections run as one GEMM over all B rows, so
+    /// the weights stream from HBM once instead of once per sequence — the whole point at B tokens of decode.
+    /// See <see cref="GenericTransformer.ForwardBatchDecode"/>.</summary>
+    public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, IKvCache[] caches)
+    {
+        ThrowIfDisposed();
+        return _transformer.ForwardBatchDecode(backend, embeds, positions, caches);
+    }
+
     /// <summary>Allocates the efficient incremental decode cache for this model (<see cref="KvCaches.ForDecode"/>).
     /// Prefer this over hand-rolling a cache. Dispose when done.</summary>
     public IKvCache CreateDecodeCache(int maxSeqLen) => KvCaches.ForDecode(NumLayers, KvHeads, HeadDim, maxSeqLen);
