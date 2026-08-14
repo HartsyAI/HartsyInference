@@ -68,17 +68,26 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   decoder by name with *"sharper faces, legible text, fewer smears in fast motion"* — the exact softness a user
   reported. Selection is by which video VAE file the model directory carries; `HARTSY_LTX2_CONV_VAE=1` forces the
   conv path for a bundled checkpoint holding both.
-- [ ] **BLOCKER before it can be the default: `LtxVideo25NeighborhoodAttention3d.ApplyRope` runs on the HOST.**
-  It rotates every `(t,h,w,head)` position through `x.DataPointer`, dragging q and k off the GPU and back on every
-  NA block (16 of them). The attention itself is already a device kernel (`backend.Na3d`); it is only the rope.
-  At 512×320×25f — ~256k token positions, ~0.5 GB of q+k per round trip — the decode runs for many minutes at
-  ~30% GPU utilization. The parity tests only ever ran a **1×2×2 latent**, where that cost is invisible, which is
-  why it was never noticed.
-  Scope it as a **new kernel modelled on `IBackend.OasisRopeInterleaved`**, NOT a port of the DiT's
-  `ltx2_qk_norm_rope_headmajor_*`: this rope is *interleaved* (pairs `2i, 2i+1`) where the DiT's is *split*
-  (pairs `i, i+headDim/2`), and it rotates three contiguous per-axis chunks with a different coordinate each
-  (`_ropeSplit.(T,H,W)` at offsets 0 / T / T+H, indexed by the token's t / h / w). Embarrassingly parallel —
-  one thread per (token, head, pair), no reductions.
+- [ ] **BLOCKER before it can be the default: the neighborhood attention runs ENTIRELY ON THE HOST.**
+  `backend.Na3d` has **no CUDA override** — it resolves to the `IBackend` default (`IBackend.cs:1084`), whose own
+  doc says *"This managed implementation is the numerical reference, not a performance path"*: a plain six-deep
+  scalar loop. At 512×320×25f that is ~256k tokens × 4 heads × an 11×11×11 = 1331-element window × headDim 64,
+  i.e. ~349 GFLOP per stage-5 block and ~2.8 TFLOP over the eight of them, single-threaded and strided. A
+  512×320×**25f** decode ran **past 23 minutes at ~30% GPU utilization and never finished**.
+  `LtxVideo25NeighborhoodAttention3d.ApplyRope` is *also* host-side (it rotates every `(t,h,w,head)` position
+  through `x.DataPointer`), but it is the minor term — ~8.4 GB of q+k PCIe traffic across the blocks, seconds not
+  minutes. **The timeout is the proof: had the rope been the cost, the decode would have completed.** Fixing the
+  rope alone would move ~22 minutes to ~21 and read as a failed fix.
+  Both are needed, as one work item:
+  - **`Na3d`** — a real windowed-attention kernel; the managed version stays as the parity reference. Mind
+    `IBackend.Na3dWindowStart`'s slide-inward window rule at the volume edges.
+  - **the rope** — a **new kernel modelled on `IBackend.OasisRopeInterleaved`**, NOT a port of the DiT's
+    `ltx2_qk_norm_rope_headmajor_*`: this one is *interleaved* (pairs `2i, 2i+1`) where the DiT's is *split*
+    (pairs `i, i+headDim/2`), and it rotates three contiguous per-axis chunks each indexed by that token's own
+    t / h / w (`_ropeSplit.(T,H,W)` at offsets 0 / T / T+H). Embarrassingly parallel; keep the host-built cos/sin
+    tables so the F32 angle rounding still matches `BuildTable`.
+  The parity tests only ever ran a **1×2×2 latent**, where both costs are invisible — that is how a decoder with
+  no attention kernel at all passed as "ported and parity-checked".
 - [ ] **Memory is unmodelled at scale.** The stage-5 trunk is a transformer over patchified pixels: at
   768×512×97f the context is ~2.4M tokens (~5 GB per activation). A too-small VRAM bracket is worse than none —
   it silently skips the prefix eviction and OOMs mid-decode — so this path now drops the whole resident prefix
