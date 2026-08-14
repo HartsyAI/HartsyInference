@@ -141,6 +141,266 @@ extern "C" __global__ void ltx25_na3d_f32(
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Query-tiled variant of the same attention. The naive kernel above re-reads a whole kt*kh*kw window per
+// (query, head), which at the stage-5 trunk (window 11^3) is ~1300x more traffic than the data is worth.
+// Adjacent queries share almost all of that window, so a block here owns a TH x TW tile of queries at ONE
+// t and one head, and streams the tile's *union* window through shared memory once. Traffic drops by
+// TH*TW*window / union; compute rises by union/window, which is the trade this kernel is making.
+//
+// The tile is deliberately 1 deep in T. Temporal chunking re-decodes the volume in frame windows, and the
+// chunked/un-chunked decode must stay bit-identical: a tile spanning T would put the same global query into
+// differently-aligned tiles in the two arms, changing its accumulation order. H and W are never chunked, so
+// tiling them is safe. Within a tile every query walks its own window in the same (t, h, w) ascending order
+// no matter where the tile falls, which is what keeps the two arms identical.
+//
+// Softmax is online (flash-style): the tile's union does not fit as a score matrix, so the running max and
+// denominator are carried across chunks and the accumulator is rescaled when the max moves. Positions of the
+// union that fall outside a given query's own window are masked to -FLT_MAX and contribute exp() == 0, which
+// is an exact no-op on both the denominator and the accumulator.
+//
+// head_dim is fixed at 64 (the only value the shipped decoder uses) so the register tile is compile-time.
+
+#define NA3D_HD 64
+#define NA3D_CHUNK 32
+#define NA3D_THREADS 256
+#define NA3D_NEG_INF (-3.402823466e+38f)
+
+template<int TH, int TW>
+__device__ __forceinline__ void ltx25_na3d_tiled_impl(
+    float* __restrict__ out,
+    const float* __restrict__ q,
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    unsigned int batch, unsigned int dimT, unsigned int dimH, unsigned int dimW,
+    unsigned int heads,
+    unsigned int kt, unsigned int kh, unsigned int kw,
+    float scale)
+{
+    const int HD = NA3D_HD;
+    const int CHUNK = NA3D_CHUNK;
+    const int NT = NA3D_THREADS;
+    const int TQ = TH * TW;
+    const int QPT = 4;                 // queries each thread accumulates
+    const int QG = TQ / QPT;           // query groups per block
+    const int LANES = NT / QG;         // threads cooperating on one query group
+    const int PPT = CHUNK / LANES;     // window positions each thread scores
+    const int DPT = HD / LANES;        // head_dim lanes each thread accumulates
+
+    __shared__ float qs[TQ][HD + 1];
+    __shared__ float ks[CHUNK][HD + 1];
+    __shared__ float vs[CHUNK][HD + 1];
+    __shared__ float sc[TQ][CHUNK + 1];
+    __shared__ int qHs[TQ], qWs[TQ];
+    __shared__ unsigned char qOk[TQ];
+    __shared__ int pT[CHUNK], pH[CHUNK], pW[CHUNK];
+
+    unsigned int hTiles = (dimH + TH - 1) / TH;
+    unsigned int wTiles = (dimW + TW - 1) / TW;
+    unsigned long long gid = blockIdx.x;
+    unsigned int head = (unsigned int)(gid % heads); gid /= heads;
+    unsigned int wTile = (unsigned int)(gid % wTiles); gid /= wTiles;
+    unsigned int hTile = (unsigned int)(gid % hTiles); gid /= hTiles;
+    unsigned int it = (unsigned int)(gid % dimT); gid /= dimT;
+    unsigned int b = (unsigned int)gid;
+    if (b >= batch) return;
+
+    unsigned long long wStride = (unsigned long long)heads * HD;
+    unsigned long long hStride = (unsigned long long)dimW * wStride;
+    unsigned long long tStride = (unsigned long long)dimH * hStride;
+    unsigned long long bStride = (unsigned long long)dimT * tStride;
+    unsigned long long baseOff = (unsigned long long)b * bStride + (unsigned long long)head * HD;
+
+    int h0 = (int)hTile * TH, w0 = (int)wTile * TW;
+    int tStart = na3d_window_start((int)it, (int)dimT, (int)kt);
+    int tid = (int)threadIdx.x;
+
+    for (int qi = tid; qi < TQ; qi += NT)
+    {
+        int hh = h0 + qi / TW, ww = w0 + qi % TW;
+        bool ok = hh < (int)dimH && ww < (int)dimW;
+        qOk[qi] = ok ? 1 : 0;
+        qHs[qi] = ok ? na3d_window_start(hh, (int)dimH, (int)kh) : 0;
+        qWs[qi] = ok ? na3d_window_start(ww, (int)dimW, (int)kw) : 0;
+    }
+    for (int idx = tid; idx < TQ * HD; idx += NT)
+    {
+        int qi = idx / HD, d = idx - qi * HD;
+        int hh = h0 + qi / TW, ww = w0 + qi % TW;
+        float val = 0.0f;
+        if (hh < (int)dimH && ww < (int)dimW)
+        {
+            val = q[baseOff + (unsigned long long)it * tStride
+                + (unsigned long long)hh * hStride + (unsigned long long)ww * wStride + d];
+        }
+        qs[qi][d] = val;
+    }
+
+    // Union of the tile's windows. Window starts are monotonic in the query index, so the first and last
+    // in-range query of the tile bracket every window the tile can produce.
+    int hLast = h0 + TH - 1; if (hLast > (int)dimH - 1) hLast = (int)dimH - 1;
+    int wLast = w0 + TW - 1; if (wLast > (int)dimW - 1) wLast = (int)dimW - 1;
+    int uh0 = na3d_window_start(h0, (int)dimH, (int)kh);
+    int uw0 = na3d_window_start(w0, (int)dimW, (int)kw);
+    int uhN = na3d_window_start(hLast, (int)dimH, (int)kh) + (int)kh - uh0;
+    int uwN = na3d_window_start(wLast, (int)dimW, (int)kw) + (int)kw - uw0;
+    int total = (int)kt * uhN * uwN;
+
+    int qg = tid / LANES, lane = tid % LANES;
+    int qBase = qg * QPT, pBase = lane * PPT, dBase = lane * DPT;
+
+    // Running softmax state lives in registers, replicated across the LANES threads that share a query: every
+    // update below is a shuffle reduction over exactly those lanes, so the copies cannot drift, and the
+    // alternative — one thread per query scanning the chunk in shared memory — idles most of the block and costs
+    // two extra barriers per chunk.
+    float acc[QPT][DPT], runMax[QPT], runSum[QPT];
+#pragma unroll
+    for (int i = 0; i < QPT; i++)
+    {
+        runMax[i] = NA3D_NEG_INF;
+        runSum[i] = 0.0f;
+#pragma unroll
+        for (int jj = 0; jj < DPT; jj++) acc[i][jj] = 0.0f;
+    }
+
+    for (int chunkStart = 0; chunkStart < total; chunkStart += CHUNK)
+    {
+        for (int p = tid; p < CHUNK; p += NT)
+        {
+            int lin = chunkStart + p;
+            if (lin >= total) { pH[p] = -1; pW[p] = 0; pT[p] = 0; continue; }
+            int uw = lin % uwN, rest = lin / uwN;
+            pT[p] = tStart + rest / uhN;
+            pH[p] = uh0 + rest % uhN;
+            pW[p] = uw0 + uw;
+        }
+        __syncthreads();
+
+        for (int idx = tid; idx < CHUNK * HD; idx += NT)
+        {
+            int p = idx / HD, d = idx - p * HD;
+            float kv = 0.0f, vv = 0.0f;
+            if (pH[p] >= 0)
+            {
+                unsigned long long off = baseOff + (unsigned long long)pT[p] * tStride
+                    + (unsigned long long)pH[p] * hStride + (unsigned long long)pW[p] * wStride + d;
+                kv = k[off]; vv = v[off];
+            }
+            ks[p][d] = kv; vs[p][d] = vv;
+        }
+        __syncthreads();
+
+        float sAcc[QPT][PPT];
+#pragma unroll
+        for (int i = 0; i < QPT; i++)
+#pragma unroll
+            for (int j = 0; j < PPT; j++) sAcc[i][j] = 0.0f;
+#pragma unroll 8
+        for (int d = 0; d < HD; d++)
+        {
+            float qv[QPT], kv[PPT];
+#pragma unroll
+            for (int i = 0; i < QPT; i++) qv[i] = qs[qBase + i][d];
+#pragma unroll
+            for (int j = 0; j < PPT; j++) kv[j] = ks[pBase + j][d];
+#pragma unroll
+            for (int i = 0; i < QPT; i++)
+#pragma unroll
+                for (int j = 0; j < PPT; j++) sAcc[i][j] += qv[i] * kv[j];
+        }
+#pragma unroll
+        for (int i = 0; i < QPT; i++)
+        {
+            int qi = qBase + i;
+            float mx = NA3D_NEG_INF;
+#pragma unroll
+            for (int j = 0; j < PPT; j++)
+            {
+                int p = pBase + j;
+                float val = NA3D_NEG_INF;
+                if (qOk[qi] && pH[p] >= 0)
+                {
+                    int dh = pH[p] - qHs[qi], dw = pW[p] - qWs[qi];
+                    if (dh >= 0 && dh < (int)kh && dw >= 0 && dw < (int)kw) val = sAcc[i][j] * scale;
+                }
+                sAcc[i][j] = val;
+                if (val > mx) mx = val;
+            }
+            for (int off = LANES >> 1; off > 0; off >>= 1)
+            {
+                float other = __shfl_xor_sync(0xffffffffu, mx, off);
+                if (other > mx) mx = other;
+            }
+            float newMax = runMax[i] > mx ? runMax[i] : mx;
+            // Nothing valid has been seen yet — exp(-FLT_MAX + FLT_MAX) would be 1, not 0, so skip the chunk.
+            bool dead = newMax == NA3D_NEG_INF;
+            float rescale = dead ? 1.0f : expf(runMax[i] - newMax);
+            float sum = 0.0f;
+#pragma unroll
+            for (int j = 0; j < PPT; j++)
+            {
+                float e = dead ? 0.0f : expf(sAcc[i][j] - newMax);
+                sc[qi][pBase + j] = e;
+                sum += e;
+            }
+            for (int off = LANES >> 1; off > 0; off >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, off);
+            runMax[i] = newMax;
+            runSum[i] = runSum[i] * rescale + sum;
+#pragma unroll
+            for (int jj = 0; jj < DPT; jj++) acc[i][jj] *= rescale;
+        }
+        __syncthreads();
+
+        for (int p = 0; p < CHUNK; p++)
+        {
+            float pv[QPT], vv[DPT];
+#pragma unroll
+            for (int i = 0; i < QPT; i++) pv[i] = sc[qBase + i][p];
+#pragma unroll
+            for (int jj = 0; jj < DPT; jj++) vv[jj] = vs[p][dBase + jj];
+#pragma unroll
+            for (int i = 0; i < QPT; i++)
+#pragma unroll
+                for (int jj = 0; jj < DPT; jj++) acc[i][jj] += pv[i] * vv[jj];
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < QPT; i++)
+    {
+        int qi = qBase + i;
+        if (!qOk[qi]) continue;
+        int hh = h0 + qi / TW, ww = w0 + qi % TW;
+        unsigned long long off = baseOff + (unsigned long long)it * tStride
+            + (unsigned long long)hh * hStride + (unsigned long long)ww * wStride;
+        float inv = runSum[i] > 0.0f ? 1.0f / runSum[i] : 0.0f;
+#pragma unroll
+        for (int jj = 0; jj < DPT; jj++) out[off + dBase + jj] = acc[i][jj] * inv;
+    }
+}
+
+extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled8x8_f32(
+    float* __restrict__ out,
+    const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+    unsigned int batch, unsigned int dimT, unsigned int dimH, unsigned int dimW,
+    unsigned int heads, unsigned int headDim,
+    unsigned int kt, unsigned int kh, unsigned int kw,
+    float scale)
+{
+    ltx25_na3d_tiled_impl<8, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
+}
+
+extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled4x8_f32(
+    float* __restrict__ out,
+    const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+    unsigned int batch, unsigned int dimT, unsigned int dimH, unsigned int dimW,
+    unsigned int heads, unsigned int headDim,
+    unsigned int kt, unsigned int kh, unsigned int kw,
+    float scale)
+{
+    ltx25_na3d_tiled_impl<4, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
+}
+
 // 3-axis interleaved RoPE on x[1, t, h, w, heads, headDim], in place. Each head's channels split into three
 // contiguous chunks — T at offset 0, H at offset splitT, W at offset splitT+splitH — rotated by the token's
 // t / h / w coordinate respectively, over interleaved (2i, 2i+1) pairs. The cos/sin tables are built on the

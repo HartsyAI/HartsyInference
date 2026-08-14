@@ -34,6 +34,8 @@ public sealed class CudaKernels : IDisposable
     // backend then falls through to the managed reference rather than failing.
     private readonly CudaModule? _ltx25NaModule;
     private readonly nint _ltx25Na3dF32;
+    private readonly nint _ltx25Na3dTiled8x8F32;
+    private readonly nint _ltx25Na3dTiled4x8F32;
     private readonly nint _ltx25NaRope3dF32;
 
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
@@ -598,6 +600,18 @@ public sealed class CudaKernels : IDisposable
             _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
             _ltx25Na3dF32 = _ltx25NaModule.GetFunction("ltx25_na3d_f32");
             _ltx25NaRope3dF32 = _ltx25NaModule.GetFunction("ltx25_na_rope3d_f32");
+            // A PTX predating the query-tiled rewrite still serves the two above, so missing tiled entries
+            // demote to the untiled kernel rather than failing the whole module.
+            try
+            {
+                _ltx25Na3dTiled8x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled8x8_f32");
+                _ltx25Na3dTiled4x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled4x8_f32");
+            }
+            catch (CudaException)
+            {
+                _ltx25Na3dTiled8x8F32 = 0;
+                _ltx25Na3dTiled4x8F32 = 0;
+            }
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
@@ -2037,6 +2051,46 @@ public sealed class CudaKernels : IDisposable
         uint sharedBytes = (uint)Ltx25Na3dSharedBytes(headDim, kt, kh, kw);
         CudaDriverApi.cuLaunchKernel(_ltx25Na3dF32, gridDim, 1, 1, blockDim, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Query-tile height/width the tiled na3d kernels stage a shared window for, or (0, 0) when the shape
+    /// is not one they cover — head_dim must be 64, and a tile only pays for itself once it holds real queries.</summary>
+    public (int H, int W) Ltx25Na3dTile(int dimH, int dimW, int headDim)
+    {
+        if (_ltx25Na3dTiled8x8F32 == 0 || headDim != 64) return (0, 0);
+        // A tile wider than the volume is all padding, and the union it stages is then the whole volume anyway.
+        if (dimH >= 8 && dimW >= 8) return (8, 8);
+        if (dimH >= 4 && dimW >= 8) return (4, 8);
+        return (0, 0);
+    }
+
+    /// <summary>Query-tiled 3D neighborhood attention: one block per (batch, t, h-tile, w-tile, head), streaming the
+    /// tile's union window through shared memory. Same contract as <see cref="LaunchLtx25Na3d"/>; the tile must come
+    /// from <see cref="Ltx25Na3dTile"/>.</summary>
+    public unsafe void LaunchLtx25Na3dTiled(ulong output, ulong q, ulong k, ulong v,
+        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
+        int kt, int kh, int kw, float scale, int tileH, int tileW, nint stream)
+    {
+        nint func = tileH == 8 ? _ltx25Na3dTiled8x8F32 : _ltx25Na3dTiled4x8F32;
+        if (func == 0)
+            throw new InvalidOperationException("ltx25_na3d_tiled*_f32 is not loaded; gate on Ltx25Na3dTile first.");
+
+        ulong outArg = output, qArg = q, kArg = k, vArg = v;
+        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
+        uint headsArg = (uint)heads, hdArg = (uint)headDim;
+        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
+        float scaleArg = scale;
+
+        void** args = stackalloc void*[14];
+        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
+        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
+        args[8] = &headsArg; args[9] = &hdArg;
+        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
+
+        long hTiles = (dimH + tileH - 1) / tileH, wTiles = (dimW + tileW - 1) / tileW;
+        uint gridDim = (uint)((long)batch * dimT * hTiles * wTiles * heads);
+        CudaDriverApi.cuLaunchKernel(func, gridDim, 1, 1, 256, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>3-axis interleaved rope on x[1,t,h,w,heads,headDim], in place. cos/sin tables are per axis,

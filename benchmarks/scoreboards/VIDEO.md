@@ -71,23 +71,83 @@ across all 97 frames gives boundary transitions 2.47/2.83/2.43/2.01/2.81/2.84/2.
 (sd 0.400) — every boundary inside noise, and the series *minimum* is a boundary. The top spikes are wave motion.
 8×-amplified difference images at three boundaries are indistinguishable from three motion controls.
 
-### ⚠️ The real remaining cost: the decode is ~40× the conv decoder, and it is OUR KERNEL
+### The na3d kernel is now query-tiled — and it was never the whole gap (2026-08-14)
 
-At 768×512×97f: **115.5 s diffusion vs 2.878 s conv.** That gap — not memory, not correctness — is now the only
-reason the better-quality decoder cannot be the default. It is `ltx25_na3d_f32`, and the arithmetic says it is
-**bandwidth-bound on redundant window reads**, nowhere near a hardware limit:
+**The previous edition of this section said the ~40× gap to the conv decoder "is almost entirely this kernel."
+That was arithmetic, not measurement, and it was wrong.** Timed directly around `IBackend.Na3d` with a sync on
+each side, through the decoder class with no pipeline in the picture, on the 4090:
 
-| at 512×320×25f (256k stage-5 tokens, window 11³, 8 blocks) | |
-|---|---:|
-| compute | 2.79 TFLOP → **0.034 s** at the 4090's ~82 TFLOPS fp32 |
-| traffic, as written (every query re-reads its whole 1331-element K/V window) | 5.58 TB → **~5.6 s** at ~1 TB/s |
-| measured whole-VAE decode | 9.8 s |
+| na3d's measured share of the decode, BEFORE the rewrite | decode | na3d | share |
+|---|---:|---:|---:|
+| 512×320×25f | 9.13 s | 2.43 s | **27 %** |
+| 768×512×97f | 109.0 s | 40.6 s | **37 %** |
 
-So the kernel sits near its *naive-traffic* bound at ~1% of compute peak. Adjacent queries share almost all of an
-11×11×11 window, so staging K/V for a tile of queries in shared memory should cut traffic by roughly **6× (2³
-tile), 31× (4³), 117× (8³)** before shared-memory capacity bites — a 4³ tile wants 14³×64×4 B×2 = 1.4 MB, far over
-the limit, so it needs head_dim slabs, K/V phasing, or an anisotropic tile. This is the standard NATTEN
-optimization and it is the single biggest remaining perf item in this decoder.
+So even an infinitely fast na3d left ~68 s at 768×512×97f against the conv decoder's 2.878 s. **The other
+63-73 % of the decode is now the top perf item, and nobody has attributed it yet.**
+
+**What was built.** `ltx25_na3d_tiled8x8_f32` / `ltx25_na3d_tiled4x8_f32`: one block per (batch, t, h-tile,
+w-tile, head), staging the tile's *union* window through shared memory once instead of re-reading a full
+kt·kh·kw window per query. Softmax is online (flash-style) because the union does not fit as a score matrix;
+positions outside a given query's own window are masked to -FLT_MAX and contribute an exact zero. Selected
+automatically at head_dim 64; kill switch `HARTSY_LTX25_NA3D_TILED=0` restores the per-query kernel, which stays
+in the file as the fallback for every other shape.
+
+**The tile is 1 deep in T on purpose.** Temporal chunking must stay bit-identical, and a tile spanning T would
+put the same global query into differently-aligned tiles in the two arms. Measured after the change: chunked
+(4 frames/chunk) vs un-chunked at 512×320×25f is **0 of 12 288 000 elements different**.
+
+Matched-budget A/B, N=2 per arm, arms interleaved in one process with a fixed `ChunkWorkspaceBytes` so the chunk
+count cannot differ between them (it derives from free VRAM otherwise, and the halo re-attention scales with it):
+
+| 4090, direct decoder harness, real checkpoint | untiled | tiled |
+|---|---:|---:|
+| 512×320×25f — whole decode | 9.127 / 8.774 s | **6.933 / 6.281 s** |
+| 512×320×25f — na3d only | 2.433 / 2.420 s | **0.366 / 0.367 s** |
+| 768×512×97f — whole decode | 109.046 / 109.966 s | **75.914 / 75.711 s** |
+| 768×512×97f — na3d only | 40.615 / 40.715 s | **6.429 / 6.445 s** |
+| stage-5 trunk kernel, per diff block, 25×80×128×4 heads, window 11³ | 298 ms | **45.4 ms** |
+
+External baseline for the whole decode: the **conv** decoder is 2.878 s at 768×512×97f.
+
+Measured through the decoder class directly, **not** through SwarmUI: SwarmUI runs the *deployed* extension's
+DLL and PTX, so `ltx25_bench.sh` cannot see a kernel change without a redeploy.
+
+Where the stage-5 kernel now sits: an 8×8 query tile stages an 11×18×18 = 3564-position union instead of 64
+separate 1331-position windows, so it executes **2.68× more FLOP** than the window arithmetic requires and reads
+**~24× less**. At 45.4 ms/block that is **~20.5 TFLOP/s raw** (≈25 % of the 4090's ~82 TFLOPS fp32, up from
+~1 %) and **~0.65 TB/s** of union traffic — the kernel is now issue/shared-memory bound, not bandwidth bound.
+
+**Do not re-chase** (stage-5 trunk shape, best of 5-6 launches, each arm against the 8×8/256-thread control at the
+*same* source revision, 4090):
+
+- **A smaller 4×8 tile is slower**, 50.0 ms vs its control's 45.7 ms, despite 22 % less arithmetic (union 2772 vs
+  3564). Once tiled, this kernel is bound by shared-memory loads per FMA, and the bigger tile's fatter register
+  block wins by more than the extra FLOPs cost. Do not "optimize" by shrinking the tile.
+- **128 threads per block is slower**, 51.5 ms vs its control's 44.7 ms, even though it halves shared-memory loads
+  per FMA (PPT 2→4, DPT 4→8). The occupancy loss dominates. 256 is the setting.
+- The claim that the untiled kernel was **DRAM-bandwidth bound is also wrong**: it achieved ~2 TB/s of
+  *naive-model* traffic on a ~1 TB/s part, i.e. L2 was already absorbing half the redundancy. The win came from
+  the shared-memory staging and the register-blocked score/AV inner loops, not from saving DRAM reads.
+
+**Where both wrong claims came from, because the mistake is reusable.** Neither was a typo; they came from one
+step of bad reasoning written into this file earlier the same day. The roofline was computed as: naive window
+traffic 5.58 TB → ~5.6 s at ~1 TB/s, against a **measured whole-VAE decode of 9.8 s** — and that agreement was
+read as "the kernel sits near its traffic bound." **The 9.8 s was never the kernel's time.** Timing directly
+around `IBackend.Na3d` puts it at 2.43 s of that 9.8 s. So the traffic model actually over-predicted the kernel
+by ~2.3×, which is exactly the L2 reuse the measurement later found — the evidence that the premise was wrong
+was already in the arithmetic, hidden by comparing a component's model against the whole pipeline's clock.
+
+The lesson is the one this file keeps re-learning in different costumes: **a component's model must be compared
+against that component's measured time, never against the wall-clock of the thing containing it.** The same
+shape produced the "int8 GEMM is at the hardware wall" error (bare GEMM 537-620 TOPS vs 350 in-chain — always
+time the kernel alone) and the luminance-not-semantics metric in the retracted conditioning finding. Cheap
+insurance: an NVTX range or a stopwatch around the op costs minutes and would have killed both claims before
+they were written down.
+
+Untried, in rough order of expected value: a 64-position chunk (score inner loop 1.33 → 2.0 FMA per shared-memory
+load) needs 66 KB, so it wants the `MAX_DYNAMIC_SHARED_SIZE_BYTES` opt-in and drops to 1 block/SM — worth one
+measurement; and the deterministic stages 0-3 also route through the tiled kernel when their dims allow, but they
+are ~1 % of the decode and not worth tuning.
 
 ### Landmine: the diffusion env var alone is not enough
 

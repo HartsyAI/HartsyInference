@@ -950,6 +950,10 @@ public sealed class CudaBackend : IBackend
 
     private static bool SageExplicitlyEnabled => EnvFlag("HARTSY_SAGE_ATTN");
 
+    /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>HARTSY_LTX25_NA3D_TILED=0</c> falls back to the per-query one.
+    /// Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
+    private static bool UseLtx25Na3dTiled => Environment.GetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED") != "0";
+
     /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
     /// <remarks>The current Sage prologue materializes V as F16, so an F32 value outside the finite F16 range
     /// becomes infinity. Requiring a second, plainly unsafe opt-in quarantines that path until V is range-safe.</remarks>
@@ -4027,9 +4031,10 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Falls back to the managed reference
-    /// when <c>ltx25_na_decoder.ptx</c> has not been deployed, or when the window's scores would not fit the 48 KB
-    /// static shared-memory limit.</summary>
+    /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Prefers the query-tiled kernel,
+    /// which stages a whole tile's shared window instead of re-reading one window per query; falls back to the
+    /// per-query kernel on shapes it does not cover, and to the managed reference when <c>ltx25_na_decoder.ptx</c>
+    /// has not been deployed or the per-query kernel's scores would not fit 48 KB of shared memory.</summary>
     public void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
     {
         if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
@@ -4049,8 +4054,11 @@ public sealed class CudaBackend : IBackend
         int kt = Math.Min(kernelT, dimT), kh = Math.Min(kernelH, dimH), kw = Math.Min(kernelW, dimW);
 
         EnsureKernels();
+        (int tileH, int tileW) = _kernels is not null && UseLtx25Na3dTiled
+            ? _kernels.Ltx25Na3dTile(dimH, dimW, headDim)
+            : (0, 0);
         if (_kernels is null || !_kernels.HasLtx25NaKernels
-            || CudaKernels.Ltx25Na3dSharedBytes(headDim, kt, kh, kw) > 48 * 1024)
+            || (tileH == 0 && CudaKernels.Ltx25Na3dSharedBytes(headDim, kt, kh, kw) > 48 * 1024))
         {
             IBackend.Na3dReference(output, q, k, v, kernelT, kernelH, kernelW, scale);
             return;
@@ -4065,8 +4073,16 @@ public sealed class CudaBackend : IBackend
             pV = GpuTransferHelper.CopyToDevice(v);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels.LaunchLtx25Na3d(pOut, pQ, pK, pV, batch, dimT, dimH, dimW, heads, headDim,
-                kt, kh, kw, scale, _stream.Handle);
+            if (tileH > 0)
+            {
+                _kernels.LaunchLtx25Na3dTiled(pOut, pQ, pK, pV, batch, dimT, dimH, dimW, heads, headDim,
+                    kt, kh, kw, scale, tileH, tileW, _stream.Handle);
+            }
+            else
+            {
+                _kernels.LaunchLtx25Na3d(pOut, pQ, pK, pV, batch, dimT, dimH, dimW, heads, headDim,
+                    kt, kh, kw, scale, _stream.Handle);
+            }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
         }
         finally

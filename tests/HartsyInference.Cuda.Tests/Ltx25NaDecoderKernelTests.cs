@@ -81,6 +81,120 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
         AssertClose(expected, actual, 2e-5f, $"na3d {t}x{h}x{w} heads={heads} hd={headDim} kernel={kt}x{kh}x{kw}");
     }
 
+    /// <summary>The query-tiled kernel is a different algorithm — an online softmax over the union of a tile's
+    /// windows, with the positions outside each query's own window masked — and it only engages at head_dim 64 on a
+    /// volume wide enough to tile, a corner NONE of the cases above reach. Every case here is asserted to have taken
+    /// it. Shapes are chosen so H and W are each sometimes an exact multiple of the tile and sometimes not: a partial
+    /// tile at the volume edge is an edge condition the untiled kernel never had.</summary>
+    [Theory]
+    [InlineData(3, 16, 24, 2, 3, 3, 3)]      // exact tiles on both axes
+    [InlineData(3, 9, 13, 2, 3, 3, 3)]       // partial tile on both axes
+    [InlineData(4, 20, 12, 4, 11, 11, 11)]   // the shipped stage-5 window, sliding on every axis, partial tiles
+    [InlineData(2, 5, 11, 3, 11, 11, 11)]    // H below the 8-tile so the 4×8 kernel runs; T and H shorter than the kernel
+    [InlineData(5, 8, 8, 1, 5, 1, 3)]        // kernel 1 on H — the no-neighbour axis — with a tile exactly the volume
+    [InlineData(1, 17, 33, 4, 3, 7, 7)]      // single frame, odd extents: the last tile is one query wide
+    public void Na3dTiledMatchesTheManagedReference(int t, int h, int w, int heads, int kt, int kh, int kw)
+    {
+        const int headDim = 64;
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
+        using Tensor q = Random(shape, seed: 61);
+        using Tensor k = Random(shape, seed: 62);
+        using Tensor v = Random(shape, seed: 63);
+
+        using Tensor expected = new Tensor(shape, DType.F32);
+        IBackend.Na3dReference(expected, q, k, v, kt, kh, kw, scale: 0.35f);
+
+        using Tensor actual = new Tensor(shape, DType.F32);
+        cuda.Na3d(actual, q, k, v, kt, kh, kw, scale: 0.35f);
+        cuda.Sync();
+        AssertDevicePathTaken(cuda);
+        Assert.NotEqual((0, 0), cuda.Kernels!.Ltx25Na3dTile(h, w, headDim));
+
+        AssertClose(expected, actual, 2e-5f, $"na3d tiled {t}x{h}x{w} heads={heads} kernel={kt}x{kh}x{kw}");
+    }
+
+    /// <summary>The tiled kernel's faces, on a volume whose extents are not multiples of the tile: such a query sits
+    /// at the edge of both its window and its tile, and draws its scores from a union that is mostly other queries'
+    /// neighbourhoods.</summary>
+    [Fact]
+    public void Na3dTiledMatchesTheReferenceOnEveryFaceOfTheVolume()
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        const int t = 4, h = 11, w = 19, heads = 2, headDim = 64, kt = 3, kh = 5, kw = 7;
+        TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
+        using Tensor q = Random(shape, seed: 71);
+        using Tensor k = Random(shape, seed: 72);
+        using Tensor v = Random(shape, seed: 73);
+
+        using Tensor expected = new Tensor(shape, DType.F32);
+        IBackend.Na3dReference(expected, q, k, v, kt, kh, kw, scale: 1.0f);
+        using Tensor actual = new Tensor(shape, DType.F32);
+        cuda.Na3d(actual, q, k, v, kt, kh, kw, scale: 1.0f);
+        cuda.Sync();
+        AssertDevicePathTaken(cuda);
+        Assert.NotEqual((0, 0), cuda.Kernels!.Ltx25Na3dTile(h, w, headDim));
+
+        float* e = (float*)expected.DataPointer;
+        float* a = (float*)actual.DataPointer;
+        long wStride = (long)heads * headDim, hStride = w * wStride, tStride = (long)h * hStride;
+        int faces = 0;
+        for (int it = 0; it < t; it++)
+        for (int ih = 0; ih < h; ih++)
+        for (int iw = 0; iw < w; iw++)
+        {
+            bool onFace = it == 0 || it == t - 1 || ih == 0 || ih == h - 1 || iw == 0 || iw == w - 1;
+            if (!onFace) continue;
+            faces++;
+            long baseOff = it * tStride + ih * hStride + iw * wStride;
+            for (long d = 0; d < wStride; d++)
+            {
+                double err = Math.Abs((double)e[baseOff + d] - a[baseOff + d]);
+                Assert.True(err <= 2e-5f, $"tiled face token (t={it},h={ih},w={iw}) lane {d}: |Δ| {err:E3}");
+            }
+        }
+        Assert.Equal(t * h * w - (t - 2) * (h - 2) * (w - 2), faces);
+    }
+
+    /// <summary>Both kernels on the same volume, so the tiling is isolated from every other variable. They must agree
+    /// numerically but NOT bit for bit — the tiled path reorders the softmax, so identical bits would mean the
+    /// <c>HARTSY_LTX25_NA3D_TILED</c> kill switch never actually switched anything and this test proves nothing.</summary>
+    [Fact]
+    public void Na3dTiledAgreesWithTheUntiledKernelOnTheShippedWindow()
+    {
+        const int t = 6, h = 12, w = 20, heads = 4, headDim = 64, kernel = 11;
+        TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
+        using Tensor q = Random(shape, seed: 81);
+        using Tensor k = Random(shape, seed: 82);
+        using Tensor v = Random(shape, seed: 83);
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor tiled = new Tensor(shape, DType.F32);
+        cuda.Na3d(tiled, q, k, v, kernel, kernel, kernel, scale: 0.125f);
+        cuda.Sync();
+        AssertDevicePathTaken(cuda);
+        Assert.NotEqual((0, 0), cuda.Kernels!.Ltx25Na3dTile(h, w, headDim));
+
+        using Tensor untiled = new Tensor(shape, DType.F32);
+        Environment.SetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED", "0");
+        try
+        {
+            cuda.Na3d(untiled, q, k, v, kernel, kernel, kernel, scale: 0.125f);
+            cuda.Sync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED", null);
+        }
+
+        float* a = (float*)tiled.DataPointer;
+        float* b = (float*)untiled.DataPointer;
+        bool anyDifferent = false;
+        for (long i = 0; i < shape.ElementCount && !anyDifferent; i++) anyDifferent = a[i] != b[i];
+        Assert.True(anyDifferent, "the kill switch produced bit-identical output — the untiled kernel never ran.");
+        AssertClose(untiled, tiled, 2e-5f, "tiled vs untiled on the stage-5 window");
+    }
+
     /// <summary>The border is where a window kernel most easily diverges, so this asserts on the faces directly:
     /// every query whose window had to slide inward must still match the reference.</summary>
     [Fact]
