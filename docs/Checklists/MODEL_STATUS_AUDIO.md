@@ -487,3 +487,16 @@ forward. Parity is byte-identical across that change.
 
 Stage timing is emitted at `Info`; the CLI defaults to `Warning`, so use `HARTSY_LOG_LEVEL=Info` to see it.
 
+**Versus the reference** (4090, 15.0 s of audio = 375 frames = 3 windows, identical prompt/seed/steps, generation
+time only with model load excluded on both sides): this engine's Q8 path takes **36.7 s** (AR 26.0, flow 10.3,
+vocoder 0.4) against the diffusers reference's BF16 **49.4 s** (AR 34.9, flow+vocode 14.6) — **1.35× faster**, and
+faster in both stages independently. Reproduce the baseline with `mm3-ref/stagebench.py`, which stages AR then frees
+it before the flow stage exactly as the engine does; run it unstaged and the reference OOMs a 24 GB card at ~22 GB
+resident.
+
+The comparison is Q8 against BF16 because **this engine's own BF16 path does not fit 24 GB** while the reference's
+does: `CudaBackend.LinearImpl` runs with `cacheWeightCast: true`, so each BF16 weight also caches a device-side
+dtype cast, roughly doubling the 17.2 GB language model. That is a genuine gap, not a measurement artifact — a
+like-for-like BF16 comparison is not currently possible on this hardware, and fixing the cast caching would both
+close it and make the bare variant usable on a 24 GB card.
+
