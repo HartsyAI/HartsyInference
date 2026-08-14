@@ -8,10 +8,9 @@ namespace HartsyInference.Audio.Models.Music;
 /// residual RVQ codebooks from the global language model's hidden state and the frame's semantic code, and exposes
 /// the per-step hidden states that condition the flow-matching stage.
 ///
-/// <para>It runs without a KV cache, exactly as the reference does — the depth sequence never exceeds
-/// <see cref="NumCodebooks"/> steps, so recomputing it is cheaper than maintaining one. It also owns the residual
-/// codebooks' embedding table, which the autoregressive loop uses to embed complete frames for the global model's
-/// feedback.</para></summary>
+/// <para>Steps are decoded against a <see cref="MiniMaxMusic3DepthCache"/> rather than by re-running the sequence
+/// per codebook as the reference does. It also owns the residual codebooks' embedding table, which the
+/// autoregressive loop uses to embed complete frames for the global model's feedback.</para></summary>
 public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 {
     /// <summary>RVQ layers: one semantic codebook plus seven residual ones.</summary>
@@ -19,6 +18,10 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 
     /// <summary>Entries per residual codebook.</summary>
     public const int AudioVocabSize = 1024;
+
+    /// <summary>Longest depth sequence: the global hidden state, the frame's semantic code, and the six residual
+    /// codes that are fed back — the seventh is sampled from the last step and never re-enters.</summary>
+    public const int MaxDepthSteps = NumCodebooks;
 
     private const int HiddenSize = 4096;
     private const int IntermediateSize = 6144;
@@ -33,7 +36,6 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
     private Tensor? _positionEmbedding;
     private Tensor? _finalNorm;
     private readonly Tensor?[] _audioHeads = new Tensor?[NumCodebooks - 1];
-    private Tensor? _causalMask;
     private int _disposed;
 
     public MiniMaxMusic3DepthDecoder()
@@ -94,12 +96,23 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         }
     }
 
-    /// <summary>Runs the decoder stack over <paramref name="sequence"/> <c>[batch, steps, 4096]</c> and returns the
-    /// final-normed hidden states.</summary>
-    public Tensor Forward(IBackend backend, Tensor sequence)
+    /// <summary>A cache for one frame's depth sequence; <paramref name="batch"/> is the classifier-free row count.</summary>
+    public MiniMaxMusic3DepthCache CreateCache(int batch)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batch);
+        return new MiniMaxMusic3DepthCache(NumLayers, batch * NumHeads, HeadDim, MaxDepthSteps);
+    }
+
+    /// <summary>Appends <paramref name="sequence"/> <c>[batch, steps, 4096]</c> to <paramref name="cache"/> and
+    /// returns those steps' final-normed hidden states, same shape.</summary>
+    /// <remarks>The absolute position of each step is the cache's length plus its offset in the block, which is what
+    /// lets the absolute position embedding be added here — it is applied to the INPUT, before layer 0, so a cached
+    /// step only ever needs its own row.</remarks>
+    public Tensor Forward(IBackend backend, Tensor sequence, MiniMaxMusic3DepthCache cache)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(sequence);
+        ArgumentNullException.ThrowIfNull(cache);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_projection is null)
         {
@@ -107,6 +120,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         }
         int batch = (int)sequence.Shape[0];
         int steps = (int)sequence.Shape[1];
+        int position = cache.Length;
 
         Tensor hidden = new Tensor(sequence.Shape, DType.F32);
         float* destination = (float*)hidden.DataPointer;
@@ -114,7 +128,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         ReadOnlySpan<float> positions = _positionEmbedding!.AsReadOnlySpan<float>();
         for (int row = 0; row < batch * steps; row++)
         {
-            int step = row % steps;
+            int step = position + (row % steps);
             for (int channel = 0; channel < HiddenSize; channel++)
             {
                 destination[((long)row * HiddenSize) + channel] =
@@ -122,13 +136,13 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             }
         }
 
-        Tensor mask = CausalMask(steps);
-        foreach (Layer layer in _layers)
+        for (int index = 0; index < _layers.Length; index++)
         {
-            Tensor next = layer.Forward(backend, hidden, batch, steps, mask);
+            Tensor next = _layers[index].Forward(backend, hidden, batch, steps, cache, index);
             hidden.Dispose();
             hidden = next;
         }
+        cache.Advance(steps);
         Tensor normed = new Tensor(hidden.Shape, DType.F32);
         backend.RmsNorm(normed, hidden, _finalNorm!, RmsNormEps);
         hidden.Dispose();
@@ -176,31 +190,6 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             tensor.Dispose();
         }
         _owned.Clear();
-        _causalMask?.Dispose();
-        _causalMask = null;
-    }
-
-    private Tensor CausalMask(int steps)
-    {
-        if (_causalMask is not null && _causalMask.Shape[0] >= steps)
-        {
-            if (_causalMask.Shape[0] == steps)
-            {
-                return _causalMask;
-            }
-            _causalMask.Dispose();
-        }
-        Tensor mask = new Tensor(new TensorShape(steps, steps), DType.F32);
-        float* data = (float*)mask.DataPointer;
-        for (int query = 0; query < steps; query++)
-        {
-            for (int key = 0; key < steps; key++)
-            {
-                data[(query * steps) + key] = key <= query ? 0f : float.NegativeInfinity;
-            }
-        }
-        _causalMask = mask;
-        return mask;
     }
 
     /// <summary>Returns an F32 view of <paramref name="tensor"/>, tracking the cast for disposal when one happens.</summary>
@@ -254,36 +243,57 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             _down = weights[$"{prefix}.down_proj.weight"];
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, int batch, int steps, Tensor mask)
+        public Tensor Forward(IBackend backend, Tensor hidden, int batch, int steps, MiniMaxMusic3DepthCache cache, int index)
         {
             Tensor result = new Tensor(hidden.Shape, DType.F32);
             using (Tensor normed = new Tensor(hidden.Shape, DType.F32))
             {
                 backend.RmsNorm(normed, hidden, _inputNorm!, RmsNormEps);
-                using Tensor query = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
-                using Tensor key = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
-                using Tensor value = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
-                backend.Linear(query, normed, _toQ!, null);
-                backend.Linear(key, normed, _toK!, null);
-                backend.Linear(value, normed, _toV!, null);
-
-                // Allocated at rank 4 rather than reshaped into it: Tensor.Reshape reads DataPointer, which syncs
-                // a device tensor to the host and returns a HOST pointer, so the view has no GPU residency. The
-                // `merged` write target was the damaging one — the permute wrote host memory and the projection
-                // below then read a device copy nothing had written, corrupting every depth hidden state on CUDA.
-                TensorShape tokenMajor = new TensorShape(batch, steps, NumHeads, HeadDim);
-                TensorShape headMajor = new TensorShape(batch, NumHeads, steps, HeadDim);
-                using Tensor q = new Tensor(headMajor, DType.F32);
-                using Tensor k = new Tensor(headMajor, DType.F32);
-                using Tensor v = new Tensor(headMajor, DType.F32);
-                backend.Permute0213(q, query, steps, NumHeads, HeadDim);
-                backend.Permute0213(k, key, steps, NumHeads, HeadDim);
-                backend.Permute0213(v, value, steps, NumHeads, HeadDim);
+                // Head-major with the batch folded into the heads, the layout the cache stores. For ONE step that
+                // is byte-for-byte what Linear already emits — [batch, 1, heads, headDim] and [1, batch·heads, 1,
+                // headDim] are the same buffer — so the common path skips all four permutes.
+                TensorShape headMajor = new TensorShape(1, batch * NumHeads, steps, HeadDim);
+                using Tensor query = new Tensor(headMajor, DType.F32);
+                using Tensor key = new Tensor(headMajor, DType.F32);
+                using Tensor value = new Tensor(headMajor, DType.F32);
+                if (steps == 1)
+                {
+                    backend.Linear(query, normed, _toQ!, null);
+                    backend.Linear(key, normed, _toK!, null);
+                    backend.Linear(value, normed, _toV!, null);
+                }
+                else
+                {
+                    // Allocated at rank 4 rather than reshaped into it: Tensor.Reshape reads DataPointer, which syncs
+                    // a device tensor to the host and returns a HOST pointer, so the view has no GPU residency. The
+                    // `merged` write target was the damaging one — the permute wrote host memory and the projection
+                    // below then read a device copy nothing had written, corrupting every depth hidden state on CUDA.
+                    TensorShape tokenMajor = new TensorShape(batch, steps, NumHeads, HeadDim);
+                    using Tensor tokenQuery = new Tensor(tokenMajor, DType.F32);
+                    using Tensor tokenKey = new Tensor(tokenMajor, DType.F32);
+                    using Tensor tokenValue = new Tensor(tokenMajor, DType.F32);
+                    backend.Linear(tokenQuery, normed, _toQ!, null);
+                    backend.Linear(tokenKey, normed, _toK!, null);
+                    backend.Linear(tokenValue, normed, _toV!, null);
+                    backend.Permute0213(query, tokenQuery, steps, NumHeads, HeadDim);
+                    backend.Permute0213(key, tokenKey, steps, NumHeads, HeadDim);
+                    backend.Permute0213(value, tokenValue, steps, NumHeads, HeadDim);
+                }
+                Tensor mask = cache.Mask(steps);
+                cache.Append(backend, index, key, value);
                 using Tensor attention = new Tensor(headMajor, DType.F32);
-                backend.ScaledDotProductAttention(attention, q, k, v, mask, 1f / MathF.Sqrt(HeadDim));
-                using Tensor merged = new Tensor(tokenMajor, DType.F32);
-                backend.Permute0213(merged, attention, NumHeads, steps, HeadDim);
-                backend.Linear(result, merged, _toOut!, null);
+                backend.ScaledDotProductAttention(attention, query, cache.Keys(index), cache.Values(index), mask,
+                    1f / MathF.Sqrt(HeadDim));
+                if (steps == 1)
+                {
+                    backend.Linear(result, attention, _toOut!, null);
+                }
+                else
+                {
+                    using Tensor merged = new Tensor(new TensorShape(batch, steps, NumHeads, HeadDim), DType.F32);
+                    backend.Permute0213(merged, attention, NumHeads, steps, HeadDim);
+                    backend.Linear(result, merged, _toOut!, null);
+                }
             }
             backend.Add(result, result, hidden);
 
