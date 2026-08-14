@@ -313,7 +313,7 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. ([details](#yue)) |
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). ([details](#heartmula)) |
-| **MiniMax Music 3** | 🔬 | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR teacher-forced parity and the multi-window flow parity are the open gates. ([details](#minimax-music-3)) |
+| **MiniMax Music 3** | ✅ | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR teacher-forced parity corr 1.0; multi-window flow parity stitched-audio corr 0.999996. ([details](#minimax-music-3)) |
 | **RVC** (voice conversion) | 🔬 | RMVPE front-end wired as the default F0 estimator (`VcCatalog.ConvertRvc`), corr 1.000000/maxAbs 9.5e-8 vs real `rmvpe.pt` ([details](../Checklists/PARITY_VERIFICATION.md)). YIN remains selectable via `f0_method`. RVC flow/decoder + index/protect/rms_mix_rate still pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | ✅ | Fixed 2026-07-21 (unsloth/csm-1b key remap + bundled 32-cb Mimi + I32 codes dtype + real all-zero EOS + `[speaker]text` prompt template); Whisper word-perfect on two independent sentences. `hartsy speak -m csm`. |
@@ -451,26 +451,21 @@ Lyrics + caption → 44.1 kHz stereo, up to six minutes. Qwen3-8B global LM (one
 | Vocoder | maxAbs < 1e-4; left/right provably distinct |
 | Window/crop geometry | reproduces the reference's 529408-sample two-window stitch |
 
-**Open**: `MiniMaxMusic3ArParityTests` (teacher-forced) fails at its current tolerance and the divergence is not yet
-characterized; `MiniMaxMusic3FlowParityTests` (reference frame hiddens + forced noise across two windows) is the
-experiment that isolates whether the AR stage is the only thing wrong. Until both pass, the AR loop and the
-overlap/carry logic are covered only by their component pieces and by listening.
+**Both gates now pass.** `MiniMaxMusic3ArParityTests` (teacher-forced, 8 frames) reaches corr 1.00000000 at
+meanAbs 6.8e-7, and its frame-0 assertion confirms the skip rule directly. `MiniMaxMusic3FlowParityTests` runs the
+whole flow stage from the reference's frame hiddens and forced noise across two windows: per-window latents
+corr 0.9999990, stitched audio corr 0.9999963.
 
-**Flow-stage divergence (measured, 2026-08-13)**: with the reference's own `flow_frame_hiddens` and forced noise,
-window 0 comes out `meanAbs 0.395 / maxAbs 2.57 / corr 0.870`. Window 0 has no overlap, so the blend, splice and
-carry logic are NOT implicated — the divergence is in the per-step loop itself. Two things are already ruled out:
-the full 36-layer DiT matches a single forward at <1e-3, and the schedule is confirmed correct (the checkpoint's
-`invert_sigmas` config really does yield timesteps `[0, .25, .5, .75]` with sigmas `[0, .25, .5, .75, 1.0]`, i.e.
-a uniform `1/N` Euler walk — verified by instantiating the reference scheduler). **The guidance convention is also ruled out** — I checked the guider
-rather than assuming: diffusers' `ClassifierFreeGuidance` defaults to `use_original_formulation=False`, i.e.
-`uncond + s·(cond − uncond)` with `guidance_rescale=0.0`, which is exactly `CfgHelper.ApplyCfg`. Do NOT switch to
-`ApplyCfgCondAnchored`.
-
-So the cause is still unlocated. What remains inside window 0's loop: the condition tensor actually handed to the
-DiT (the encoder passed at <1e-5 on a 40-frame case, but the flow test slices a 300-frame dump to 200), the
-Fourier/timestep embedding at non-zero `t` (the DiT parity probed t=0 and t=0.5 and passed, so this is unlikely),
-and the forced-noise layout. The cheapest next probe is to dump the reference's post-step-0 latents and compare a
-SINGLE Euler step — that separates "one step is wrong" from "the steps compound wrong".
+**The flow-stage divergence, found and fixed (2026-08-13)**: the stage first measured `corr 0.870` against the
+reference *even when fed the reference's own frame hiddens and forced noise*. Bisecting one Euler step against
+captured internals (`--stage flowprobe`) cleared the condition encoder (corr 0.99999996) and pinned it to the DiT —
+which nonetheless passed on `CpuBackend`. The cause is engine-wide, not model-specific: **`Tensor.Reshape` reads
+`DataPointer`, which syncs a device tensor back to the host and hands out a HOST pointer**, so the returned view has
+no GPU residency. Applying rotary in place through such a view wrote to host memory while the device copy stayed
+un-rotated, and CUDA then ran attention with no rotary at all. Allocating q/k/v directly at the rank-4 shape the
+rotary op wants — and dropping the token-major attention entry point, which forced the reshape — cut the DiT's error
+36x (meanAbs 4.1e-2 to 1.1e-3) and took the flow stage to stitched-audio corr 0.999996. **The generalizable lesson:
+never `Reshape` a tensor that may be device-resident and then mutate it in place.**
 
 **Levels**: a 17.8 s multi-window clip (3060, `:q4`) measures -19.5 dBFS peak 0.60 against the official 32 kHz
 asset's -16.6, with no level step at either window seam (0.97 ratio at 5.0 s and 12.0 s). Clips under ~10 s measure

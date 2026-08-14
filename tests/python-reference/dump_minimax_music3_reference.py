@@ -249,11 +249,85 @@ def dump_ar(model: Path, out: Path, meta: dict) -> None:
     meta["ar_last_hidden_count"] = len(hiddens)
 
 
+def dump_flowprobe(model: Path, out: Path, meta: dict) -> None:
+    """Capture window 0's per-step internals so the C# port can be bisected: the condition tensor the transformer
+    actually receives, each branch's velocity at step 0, and the latents step 0 produced."""
+    import diffusers.modular_pipelines.minimax_music3.denoise as denoise_module
+    from diffusers.modular_pipelines import SequentialPipelineBlocks
+    from diffusers.modular_pipelines.minimax_music3.before_denoise import MiniMaxMusic3PrepareChunksStep
+    from diffusers.modular_pipelines.minimax_music3.denoise import MiniMaxMusic3ChunkDenoiseStep
+
+    from diffusers import (
+        FlowMatchEulerDiscreteScheduler,
+        MiniMaxMusic3ConditionEncoder,
+        MiniMaxMusic3Transformer1DModel,
+    )
+
+    draws: list[torch.Tensor] = []
+    original = denoise_module.randn_tensor
+
+    def recording_randn(*args, **kwargs):
+        drawn = original(*args, **kwargs)
+        draws.append(drawn.detach().clone())
+        return drawn
+
+    denoise_module.randn_tensor = recording_randn
+
+    class ProbeBlocks(SequentialPipelineBlocks):
+        model_name = "minimax-music3"
+        block_classes = [MiniMaxMusic3PrepareChunksStep, MiniMaxMusic3ChunkDenoiseStep]
+        block_names = ["prepare_chunks", "denoise"]
+
+    condition_encoder = MiniMaxMusic3ConditionEncoder.from_pretrained(
+        model, subfolder="condition_encoder", dtype=torch.float32
+    )
+    transformer = MiniMaxMusic3Transformer1DModel.from_pretrained(model, subfolder="transformer", dtype=torch.float32)
+    pipe = ProbeBlocks().init_pipeline(str(model))
+    pipe.update_components(
+        condition_encoder=condition_encoder,
+        transformer=transformer,
+        scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(model, subfolder="scheduler"),
+    )
+
+    conditions: list[torch.Tensor] = []
+    calls: list[tuple] = []
+    condition_encoder.register_forward_hook(lambda m, a, o: conditions.append(o.detach().clone()))
+
+    def transformer_hook(_module, args, kwargs, output):
+        if len(calls) < 4:
+            calls.append((
+                kwargs["hidden_states"].detach().clone(),
+                kwargs["timestep"].detach().clone(),
+                kwargs["encoder_hidden_states"].detach().clone(),
+                output[0].detach().clone(),
+            ))
+
+    transformer.register_forward_hook(transformer_hook, with_kwargs=True)
+
+    generator = torch.Generator().manual_seed(0)
+    frame_hiddens = torch.randn(1, FLOW_FRAMES, 32768, generator=generator)
+    pipe(frame_hiddens=frame_hiddens, num_inference_steps=FLOW_STEPS, generator=generator)
+    denoise_module.randn_tensor = original
+
+    meta["probe_condition"] = save(out, "probe_condition", conditions[0])
+    meta["probe_noise"] = save(out, "probe_noise", draws[0])
+    meta["probe_timesteps"] = [float(t.reshape(-1)[0]) for _, t, _, _ in calls]
+    # Calls 0/1 are step 0's conditional and unconditional branches; call 2 is step 1, whose input latents are
+    # exactly what step 0 produced.
+    meta["probe_latents_step0"] = save(out, "probe_latents_step0", calls[0][0])
+    meta["probe_velocity_cond"] = save(out, "probe_velocity_cond", calls[0][3])
+    meta["probe_velocity_uncond"] = save(out, "probe_velocity_uncond", calls[1][3])
+    meta["probe_encoder_cond"] = save(out, "probe_encoder_cond", calls[0][2])
+    meta["probe_encoder_uncond"] = save(out, "probe_encoder_uncond", calls[1][2])
+    meta["probe_latents_step1"] = save(out, "probe_latents_step1", calls[2][0])
+    print("probe: timesteps", meta["probe_timesteps"], "conditions", len(conditions), "calls", len(calls))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--out", type=Path, default=OUT_DIR)
-    parser.add_argument("--stage", choices=["components", "flow", "ar"], required=True)
+    parser.add_argument("--stage", choices=["components", "flow", "flowprobe", "ar"], required=True)
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -261,7 +335,7 @@ def main() -> None:
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     torch.set_grad_enabled(False)
 
-    {"components": dump_components, "flow": dump_flow, "ar": dump_ar}[args.stage](args.model, args.out, meta)
+    {"components": dump_components, "flow": dump_flow, "flowprobe": dump_flowprobe, "ar": dump_ar}[args.stage](args.model, args.out, meta)
 
     meta_path.write_text(json.dumps(meta, indent=1))
     print("wrote", meta_path)

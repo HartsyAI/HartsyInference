@@ -121,13 +121,12 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
 
         using Tensor output = new Tensor(new TensorShape(length, channels), DType.F32);
         backend.Linear(output, body, _projOut!, null);
-        using Tensor post = new Tensor(new TensorShape(length, channels), DType.F32);
+        using Tensor post = new Tensor(new TensorShape(1, length, channels), DType.F32);
         backend.Linear(post, output, _postprocessConv!, null);
         backend.Add(post, post, output);
 
         Tensor velocity = new Tensor(new TensorShape(1, channels, length), DType.F32);
-        using Tensor postTokens = post.Reshape(new TensorShape(1, length, channels));
-        backend.Transpose2D(velocity, postTokens, length, channels);
+        backend.Transpose2D(velocity, post, length, channels);
         return velocity;
     }
 
@@ -326,24 +325,22 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             using (Tensor normed = new Tensor(hidden.Shape, DType.F32))
             {
                 backend.LayerNorm(normed, hidden, _norm1Weight!, _norm1Bias!, config.LayerNormEps);
-                using Tensor query = new Tensor(hidden.Shape, DType.F32);
-                using Tensor key = new Tensor(hidden.Shape, DType.F32);
-                using Tensor value = new Tensor(hidden.Shape, DType.F32);
+                // Allocated at the rank-4 shape the rotary op needs rather than reshaped into it: Tensor.Reshape
+                // reads DataPointer, which syncs a device tensor back to the host and hands out a HOST pointer, so
+                // the view loses GPU residency. Roping through such a view left the device copy un-rotated and the
+                // attention ran without rotary on CUDA while CPU was correct.
+                TensorShape headed = new TensorShape(1, rows, heads, headDim);
+                using Tensor query = new Tensor(headed, DType.F32);
+                using Tensor key = new Tensor(headed, DType.F32);
+                using Tensor value = new Tensor(headed, DType.F32);
                 backend.Linear(query, normed, _toQ!, null);
                 backend.Linear(key, normed, _toK!, null);
                 backend.Linear(value, normed, _toV!, null);
 
-                // Reshape hands back a rooted view, not a borrowed span — leaving one per projection per block
-                // undisposed grew the device activation cache by tens of megabytes per denoising step.
-                TensorShape headMajorView = new TensorShape(1, rows, heads, headDim);
-                using (Tensor queryHeads = query.Reshape(headMajorView))
-                using (Tensor keyHeads = key.Reshape(headMajorView))
-                {
-                    backend.ApplyRopeSingle(queryHeads, cos, sin, config.RotaryDim);
-                    backend.ApplyRopeSingle(keyHeads, cos, sin, config.RotaryDim);
-                }
+                backend.ApplyRopeSingle(query, cos, sin, config.RotaryDim);
+                backend.ApplyRopeSingle(key, cos, sin, config.RotaryDim);
 
-                using Tensor attention = new Tensor(hidden.Shape, DType.F32);
+                using Tensor attention = new Tensor(headed, DType.F32);
                 Attend(backend, attention, query, key, value, rows, heads, headDim);
                 backend.Linear(result, attention, _toOut!, null);
             }
@@ -377,30 +374,23 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             }
         }
 
+        /// <summary>Head-major attention over rank-4 <c>[1, rows, heads, headDim]</c> tensors. The token-major
+        /// entry point is deliberately not used: it wants rank-2, and getting there from the rotary op's rank-4
+        /// layout requires a reshape, which is what broke GPU residency.</summary>
         private static void Attend(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value,
             int rows, int heads, int headDim)
         {
             float scale = 1f / MathF.Sqrt(headDim);
-            if (backend.SupportsTokenMajorAttention)
-            {
-                backend.ScaledDotProductAttentionTokenMajor(output, query, key, value, null, heads, headDim, scale);
-                return;
-            }
-            TensorShape tokenMajor = new TensorShape(1, rows, heads, headDim);
             TensorShape headMajor = new TensorShape(1, heads, rows, headDim);
             using Tensor q = new Tensor(headMajor, DType.F32);
             using Tensor k = new Tensor(headMajor, DType.F32);
             using Tensor v = new Tensor(headMajor, DType.F32);
-            using Tensor queryTokens = query.Reshape(tokenMajor);
-            using Tensor keyTokens = key.Reshape(tokenMajor);
-            using Tensor valueTokens = value.Reshape(tokenMajor);
-            backend.Permute0213(q, queryTokens, rows, heads, headDim);
-            backend.Permute0213(k, keyTokens, rows, heads, headDim);
-            backend.Permute0213(v, valueTokens, rows, heads, headDim);
+            backend.Permute0213(q, query, rows, heads, headDim);
+            backend.Permute0213(k, key, rows, heads, headDim);
+            backend.Permute0213(v, value, rows, heads, headDim);
             using Tensor attention = new Tensor(headMajor, DType.F32);
             backend.ScaledDotProductAttention(attention, q, k, v, null, scale);
-            using Tensor outputTokens = output.Reshape(tokenMajor);
-            backend.Permute0213(outputTokens, attention, heads, rows, headDim);
+            backend.Permute0213(output, attention, heads, rows, headDim);
         }
     }
 }
