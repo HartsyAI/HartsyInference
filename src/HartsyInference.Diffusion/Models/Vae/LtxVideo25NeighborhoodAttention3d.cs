@@ -8,6 +8,9 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <see cref="IBackend.Na3d"/> → output projection, over a channels-last <c>[T·H·W, dim]</c> token grid.</summary>
 internal sealed class LtxVideo25NeighborhoodAttention3d
 {
+    /// <summary>Set by the ComfyUI layer-diff harness to tap this module's internals; null in production.</summary>
+    internal static Action<string, Tensor>? Tap;
+
     private readonly int _dim;
     private readonly int _heads;
     private readonly int _headDim;
@@ -75,77 +78,55 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         backend.SliceLastDim(k, qkv, _dim);
         backend.SliceLastDim(v, qkv, 2 * _dim);
 
-        TensorShape perHead = new TensorShape(tokens * _heads, _headDim);
-        using (Tensor qRows = q.Reshape(perHead))
-        using (Tensor kRows = k.Reshape(perHead))
+        // Normalize q/k on the tensors themselves, NOT through a [tokens·heads, head_dim] Reshape view: RmsNorm
+        // already rows by the last dim, and an in-place op on a view leaves its result in the view's own device
+        // cache, which Dispose frees without writing back — the ApplyKeyframesAbsPos defect, which passes on
+        // CpuBackend and silently feeds un-normalized q/k to attention on CUDA.
+        Tap?.Invoke("attn_qkv", qkv);
+        backend.RmsNorm(q, q, _qNormWeight!, _eps);
+        backend.RmsNorm(k, k, _kNormWeight!, _eps);
+        Tap?.Invoke("attn_qnorm", q);
+        using (Tensor cosT = BuildTable(t, _invFreqT, sine: false))
+        using (Tensor sinT = BuildTable(t, _invFreqT, sine: true))
+        using (Tensor cosH = BuildTable(h, _invFreqH, sine: false))
+        using (Tensor sinH = BuildTable(h, _invFreqH, sine: true))
+        using (Tensor cosW = BuildTable(w, _invFreqW, sine: false))
+        using (Tensor sinW = BuildTable(w, _invFreqW, sine: true))
         {
-            backend.RmsNorm(qRows, qRows, _qNormWeight!, _eps);
-            backend.RmsNorm(kRows, kRows, _kNormWeight!, _eps);
+            backend.Ltx25NaRope3d(q, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
+            backend.Ltx25NaRope3d(k, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
         }
-        ApplyRope(q, t, h, w);
-        ApplyRope(k, t, h, w);
 
+        Tap?.Invoke("attn_qrope", q);
+        Tap?.Invoke("attn_krope", k);
+        Tap?.Invoke("attn_v", v);
         using Tensor attended = new Tensor(headShape, DType.F32);
         backend.Na3d(attended, q, k, v, _kernel.T, _kernel.H, _kernel.W, scale: 1f);
 
+        Tap?.Invoke("attn_na3d", attended);
         Tensor result = new Tensor(new TensorShape(tokens, _dim), DType.F32);
         using Tensor attendedRows = attended.Reshape(new TensorShape(tokens, _dim));
         backend.Linear(result, attendedRows, _projWeight!, _projBias);
+        Tap?.Invoke("attn_out", result);
         return result;
     }
 
-    /// <summary>Rotates <c>[1, t, h, w, heads, head_dim]</c> in place: each head's channels split into three
-    /// contiguous chunks rotated by the token's global t / h / w coordinate, interleaved (even, odd) pairs.</summary>
-    private unsafe void ApplyRope(Tensor x, int t, int h, int w)
-    {
-        (float[] cosT, float[] sinT) = BuildTable(t, _invFreqT);
-        (float[] cosH, float[] sinH) = BuildTable(h, _invFreqH);
-        (float[] cosW, float[] sinW) = BuildTable(w, _invFreqW);
-        int pairsT = _invFreqT.Length, pairsH = _invFreqH.Length, pairsW = _invFreqW.Length;
-        int offsetH = _ropeSplit.T, offsetW = _ropeSplit.T + _ropeSplit.H;
-        float* p = (float*)x.DataPointer;
-
-        for (int ti = 0; ti < t; ti++)
-        for (int hi = 0; hi < h; hi++)
-        for (int wi = 0; wi < w; wi++)
-        {
-            long tokenBase = (((long)ti * h + hi) * w + wi) * _heads * _headDim;
-            for (int head = 0; head < _heads; head++)
-            {
-                float* row = p + tokenBase + (long)head * _headDim;
-                Rotate(row, pairsT, cosT, sinT, ti * pairsT);
-                Rotate(row + offsetH, pairsH, cosH, sinH, hi * pairsH);
-                Rotate(row + offsetW, pairsW, cosW, sinW, wi * pairsW);
-            }
-        }
-    }
-
-    private static unsafe void Rotate(float* row, int pairs, float[] cos, float[] sin, int tableOffset)
-    {
-        for (int i = 0; i < pairs; i++)
-        {
-            float even = row[2 * i], odd = row[2 * i + 1];
-            float c = cos[tableOffset + i], s = sin[tableOffset + i];
-            row[2 * i] = even * c - odd * s;
-            row[2 * i + 1] = even * s + odd * c;
-        }
-    }
-
-    /// <summary>Angles are formed and rounded in F32 exactly like the reference's <c>pos[:, None] * inv[None, :]</c>.</summary>
-    private static (float[] Cos, float[] Sin) BuildTable(int length, float[] inverseFrequencies)
+    /// <summary>One <c>[length, pairs]</c> rope table. Angles are formed and rounded in F32 exactly like the
+    /// reference's <c>pos[:, None] * inv[None, :]</c>, and on the host in both backends, so the device path cannot
+    /// drift from the reference through a different <c>cos</c>/<c>sin</c> implementation.</summary>
+    private static unsafe Tensor BuildTable(int length, float[] inverseFrequencies, bool sine)
     {
         int pairs = inverseFrequencies.Length;
-        float[] cos = new float[(long)length * pairs];
-        float[] sin = new float[(long)length * pairs];
+        Tensor table = new Tensor(new TensorShape(length, pairs), DType.F32);
+        float* p = (float*)table.DataPointer;
         for (int position = 0; position < length; position++)
         {
             for (int i = 0; i < pairs; i++)
             {
                 float angle = position * inverseFrequencies[i];
-                cos[position * pairs + i] = MathF.Cos(angle);
-                sin[position * pairs + i] = MathF.Sin(angle);
+                p[position * pairs + i] = sine ? MathF.Sin(angle) : MathF.Cos(angle);
             }
         }
-        return (cos, sin);
+        return table;
     }
 }

@@ -116,6 +116,7 @@ internal static class MiniMaxMusic3MusicModel
                 ? (float)request.CfgScale.Value
                 : MiniMaxMusic3FlowPipeline.DefaultCfgScale;
 
+            long autoregressiveStart = Environment.TickCount64;
             backend.PreloadWeights(languageModel.EnumerateWeights());
             backend.PreloadWeights(depthDecoder.EnumerateWeights());
             float[] frameHiddens;
@@ -131,8 +132,11 @@ internal static class MiniMaxMusic3MusicModel
                 backend.FreeWeights(languageModel.EnumerateWeights());
                 backend.FreeWeights(depthDecoder.EnumerateWeights());
             }
+            long autoregressiveMs = Environment.TickCount64 - autoregressiveStart;
             Logs.Info($"[Audio][MiniMaxMusic3] Autoregressive stage produced {produced} frames "
-                + $"({produced / MiniMaxMusic3ArPipeline.FrameRate:0.0}s of audio); flow-matching {steps} steps per window.");
+                + $"({produced / MiniMaxMusic3ArPipeline.FrameRate:0.0}s of audio) in {autoregressiveMs / 1000.0:0.0}s "
+                + $"({autoregressiveMs / (double)Math.Max(1, produced):0.0} ms/frame); flow-matching {steps} steps per window.");
+            long flowStart = Environment.TickCount64;
 
             backend.PreloadWeights(conditionEncoder.EnumerateWeights());
             backend.PreloadWeights(dit.EnumerateWeights());
@@ -148,6 +152,8 @@ internal static class MiniMaxMusic3MusicModel
                 backend.FreeWeights(conditionEncoder.EnumerateWeights());
             }
 
+            long flowMs = Environment.TickCount64 - flowStart;
+            long vocodeStart = Environment.TickCount64;
             backend.PreloadWeights(vocoder.EnumerateWeights());
             Tensor[] waveforms = new Tensor[chunks.Length];
             try
@@ -158,6 +164,9 @@ internal static class MiniMaxMusic3MusicModel
                     waveforms[i] = vocoder.Decode(backend, chunks[i]);
                 }
                 (float[] left, float[] right) = MiniMaxMusic3FlowPipeline.Stitch(waveforms, MiniMaxMusic3Vocoder.LatentHopLength);
+                Logs.Info($"[Audio][MiniMaxMusic3] Stage timing — autoregressive {autoregressiveMs / 1000.0:0.0}s, "
+                    + $"flow {flowMs / 1000.0:0.0}s over {chunks.Length} window(s), "
+                    + $"vocoder {(Environment.TickCount64 - vocodeStart) / 1000.0:0.0}s.");
                 return MusicAudio.Stereo(left, right);
             }
             finally

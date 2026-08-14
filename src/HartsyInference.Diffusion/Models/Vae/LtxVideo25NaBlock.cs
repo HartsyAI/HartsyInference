@@ -81,12 +81,15 @@ internal sealed class LtxVideo25NaBlock
             if (_isDiffusion) Modulate(normed, modulation!, ScaleMsaChunk, ShiftMsaChunk, tokens);
             using Tensor attended = _attention.Forward(backend, normed, t, h, w);
             backend.Add(x, x, attended);
+            LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_resid", x);
         }
 
         using Tensor normed2 = new Tensor(new TensorShape(tokens, _dim), DType.F32);
         backend.RmsNorm(normed2, x, _norm2Weight!, _eps);
         if (_isDiffusion) Modulate(normed2, modulation!, ScaleMlpChunk, ShiftMlpChunk, tokens);
+        LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_norm2", normed2);
         using Tensor mlp = Feedforward(backend, normed2, tokens);
+        LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_mlp", mlp);
         backend.Add(x, x, mlp);
     }
 

@@ -102,9 +102,9 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         {
             backend.Linear(projected, preprocessed, _projIn!, null);
             using Tensor temb = EmbedTimestep(backend, timestep);
-            float* destination = (float*)hidden.DataPointer;
-            temb.AsReadOnlySpan<float>().CopyTo(new Span<float>(destination, inner));
-            projected.AsReadOnlySpan<float>().CopyTo(new Span<float>(destination + inner, length * inner));
+            // Concat on the backend rather than two host copies: reading DataPointer here synced the whole block
+            // input back from the device on every forward.
+            backend.Concat(hidden, [temb, projected], dim: 0);
         }
 
         (Tensor cos, Tensor sin) = RopeTables(length + 1);
@@ -116,7 +116,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         }
 
         using Tensor body = new Tensor(new TensorShape(length, inner), DType.F32);
-        hidden.AsReadOnlySpan<float>()[inner..].CopyTo(new Span<float>((float*)body.DataPointer, length * inner));
+        backend.SliceRows(body, hidden, rowOffset: 1);
         hidden.Dispose();
 
         using Tensor output = new Tensor(new TensorShape(length, channels), DType.F32);

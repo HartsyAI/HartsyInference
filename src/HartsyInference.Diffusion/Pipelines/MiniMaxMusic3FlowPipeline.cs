@@ -158,6 +158,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
                 Tensor latents = DrawNoise(length, seed, forcedNoise, chunk);
                 using Tensor noisePrompt = SliceLeading(latents, overlap);
                 using Tensor zeros = new Tensor(condition.Shape, DType.F32);
+                IBackend backendOps = Backend;
 
                 for (int step = 0; step < stepCount; step++)
                 {
@@ -170,7 +171,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
                     using Tensor conditional = _dit.Forward(Backend, latents, time, condition);
                     using Tensor unconditional = _dit.Forward(Backend, latents, time, zeros);
                     using Tensor velocity = CfgHelper.ApplyCfg(unconditional, conditional, cfgScale);
-                    Advance(latents, velocity, 1f / stepCount);
+                    latents = Advance(backendOps, latents, velocity, 1f / stepCount);
                     onStep?.Invoke(++completedSteps, totalSteps);
                 }
 
@@ -254,14 +255,16 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         }
     }
 
-    private static void Advance(Tensor latents, Tensor velocity, float dt)
+    /// <summary>One Euler step, entirely on the backend. The host loop this replaces read <c>DataPointer</c> on the
+    /// latents, which synced them off the device and back for every step of every window.</summary>
+    private static Tensor Advance(IBackend backend, Tensor latents, Tensor velocity, float dt)
     {
-        Span<float> target = new Span<float>((float*)latents.DataPointer, (int)latents.Shape.ElementCount);
-        ReadOnlySpan<float> step = new ReadOnlySpan<float>((float*)velocity.DataPointer, target.Length);
-        for (int i = 0; i < target.Length; i++)
-        {
-            target[i] += dt * step[i];
-        }
+        using Tensor scaled = new Tensor(velocity.Shape, DType.F32);
+        backend.Scale(scaled, velocity, dt);
+        Tensor next = new Tensor(latents.Shape, DType.F32);
+        backend.Add(next, latents, scaled);
+        latents.Dispose();
+        return next;
     }
 
     private static Tensor SliceLeading(Tensor latents, int overlap)

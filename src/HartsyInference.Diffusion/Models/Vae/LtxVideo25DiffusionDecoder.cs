@@ -47,6 +47,10 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
 
     public LtxVideo25DiffusionDecoderConfig Config => _config;
 
+    /// <summary>Per-stage tap for the ComfyUI layer-diff harness (<c>LtxVideo25ReferenceLayerDiffTests</c>). Null in
+    /// production, so this costs one null check per stage and nothing else.</summary>
+    internal Action<string, Tensor>? Tap { get; set; }
+
     /// <summary>Checkpoint keys read by the last <see cref="LoadWeights"/>; the caller can diff this against the
     /// bucket to catch a key the decoder silently ignores.</summary>
     public IReadOnlyCollection<string> ConsumedKeys => _scope?.Consumed ?? (IReadOnlyCollection<string>)Array.Empty<string>();
@@ -153,15 +157,21 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
         Tensor x = new Tensor(new TensorShape(tokens.Shape[0], _config.StageChannels[0]), DType.F32);
         backend.Linear(x, tokens, _convInWeight!, _convInBias);
         tokens.Dispose();
+        Tap?.Invoke("conv_in", x);
 
         for (int stage = 0; stage < _detStages.Length; stage++)
         {
-            foreach (LtxVideo25NaBlock block in _detStages[stage])
-                block.Forward(backend, x, null, null, currentT, currentH, currentW);
+            for (int bi = 0; bi < _detStages[stage].Length; bi++)
+            {
+                _detStages[stage][bi].Forward(backend, x, null, null, currentT, currentH, currentW);
+                Tap?.Invoke($"stage{stage}_block{bi}", x);
+            }
+            Tap?.Invoke($"stage{stage}_blocks", x);
             Tensor next = _upsamples[stage].Forward(backend, x, currentT, currentH, currentW,
                 dropLeadingFrame: true, out currentT, out currentH, out currentW);
             x.Dispose();
             x = next;
+            Tap?.Invoke($"stage{stage}_up", x);
         }
 
         int keep = currentT - pad * _config.TemporalUpscale;
@@ -192,6 +202,7 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
                 + "reference's Euler update (velocity = (x_t − x0)/t, x_t −= (t − t_next)·velocity) around this call.");
         }
         using Tensor context = EncodeContext(backend, latent, out int frames, out int height, out int width);
+        Tap?.Invoke("context", context);
         TensorShape expected = NoiseShape((int)latent.Shape[2], (int)latent.Shape[3], (int)latent.Shape[4]);
         if (!noise.Shape.Equals(expected))
             throw new ArgumentException($"noise is {noise.Shape}, expected {expected}.", nameof(noise));
@@ -209,19 +220,29 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
         using (Tensor patched = PatchifyPixels(noise, frames, height, width))
             backend.Linear(x, patched, _convInXtWeight!, _convInXtBias);
 
+        Tap?.Invoke("conv_in_x_t", x);
+
         using (Tensor modulation = Modulation(backend, timestep, stage5))
         {
-            foreach (LtxVideo25NaBlock block in _diffBlocks)
-                block.Forward(backend, x, context, modulation, frames, height, width);
+            Tap?.Invoke("modulation", modulation);
+            for (int i = 0; i < _diffBlocks.Length; i++)
+            {
+                _diffBlocks[i].Forward(backend, x, context, modulation, frames, height, width);
+                Tap?.Invoke($"diff{i}", x);
+            }
         }
 
         int packedChannels = _config.OutChannels * _config.PatchSize * _config.PatchSize;
         using Tensor normed = new Tensor(new TensorShape(tokens, stage5), DType.F32);
         backend.RmsNorm(normed, x, _normOutWeight!, _config.NormEps);
         x.Dispose();
+        Tap?.Invoke("norm_out", normed);
         using Tensor packed = new Tensor(new TensorShape(tokens, packedChannels), DType.F32);
         backend.Linear(packed, normed, _convOutWeight!, _convOutBias);
-        return UnpatchifyPixels(packed, frames, height, width);
+        Tap?.Invoke("conv_out", packed);
+        Tensor pixels = UnpatchifyPixels(packed, frames, height, width);
+        Tap?.Invoke("pixels", pixels);
+        return pixels;
     }
 
     /// <summary>Sinusoidal embedding of <c>scale·t</c> → <c>t_embedder</c> MLP → SiLU → <c>shared_adaln.proj</c>,
@@ -237,9 +258,17 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
         using Tensor embedding = new Tensor(new TensorShape(1, _config.TimestepEmbedDim), DType.F32);
         backend.Linear(embedding, hidden, _tEmbWeight2!, _tEmbBias2);
         backend.Silu(embedding, embedding);
+        // Linear must NOT write into a Reshape view of `modulation`: on CUDA the result lands in the view's own
+        // device cache and Dispose frees it without a write-back, so `modulation` stayed all zeros and every AdaLN
+        // scale/shift silently degenerated to this block's scale_shift_table alone. Same defect as
+        // ApplyKeyframesAbsPos and the q/k norm; write into a real tensor and copy.
         Tensor modulation = new Tensor(new TensorShape(7, stage5), DType.F32);
-        using Tensor flat = modulation.Reshape(new TensorShape(1, 7L * stage5));
-        backend.Linear(flat, embedding, _adaLnWeight!, _adaLnBias);
+        using (Tensor flat = new Tensor(new TensorShape(1, 7L * stage5), DType.F32))
+        {
+            backend.Linear(flat, embedding, _adaLnWeight!, _adaLnBias);
+            long bytes = flat.ElementCount * sizeof(float);
+            Buffer.MemoryCopy((void*)flat.DataPointer, (void*)modulation.DataPointer, bytes, bytes);
+        }
         return modulation;
     }
 
