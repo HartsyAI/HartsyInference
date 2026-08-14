@@ -5,7 +5,7 @@ namespace HartsyInference.API.Endpoints;
 /// <summary>Envelope for <c>/v1/native/speech</c>. <see cref="AudioClip.Data"/>/<see cref="SpeechRequest.Reference"/>
 /// bytes travel as base64 within the JSON body (System.Text.Json's built-in <c>byte[]</c> handling) — same envelope
 /// pattern as every other native route, no separate multipart plumbing.</summary>
-public sealed class NativeSpeechRequest
+public sealed class NativeSpeechRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }
@@ -35,7 +35,7 @@ public sealed class NativeTranscribeRequest
 }
 
 /// <summary>Envelope for <c>/v1/native/voice-convert</c>.</summary>
-public sealed class NativeVoiceConvertRequest
+public sealed class NativeVoiceConvertRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }
@@ -50,7 +50,7 @@ public sealed class NativeVoiceConvertRequest
 }
 
 /// <summary>Envelope for <c>/v1/native/fx/separate</c>.</summary>
-public sealed class NativeFxSeparateRequest
+public sealed class NativeFxSeparateRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }
@@ -65,7 +65,7 @@ public sealed class NativeFxSeparateRequest
 }
 
 /// <summary>Envelope for <c>/v1/native/fx/enhance</c>.</summary>
-public sealed class NativeFxEnhanceRequest
+public sealed class NativeFxEnhanceRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }

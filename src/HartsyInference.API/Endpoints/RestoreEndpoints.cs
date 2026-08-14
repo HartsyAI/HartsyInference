@@ -1,3 +1,4 @@
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
@@ -28,6 +29,7 @@ public static class RestoreEndpoints
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
                 int frameCount = 0;
+                List<VideoFrame> collected = new List<VideoFrame>();
                 await foreach (VideoFrame frame in engine.Restore.RestoreAsync(spec, req.Request, progress, ct))
                 {
                     writer.TryWrite(SseHelpers.Event("frame", new
@@ -35,9 +37,15 @@ public static class RestoreEndpoints
                         index = frame.Index,
                         png = Convert.ToBase64String(PngEncoder.Encode(frame.Rgb, frame.Width, frame.Height)),
                     }, jsonOptions));
+                    // Only retained when the caller wants the sequence on disk — restore clips are large.
+                    if (req.Save != false) { collected.Add(frame); }
                     frameCount++;
                 }
-                writer.TryWrite(SseHelpers.Event("complete", new { frames = frameCount }, jsonOptions));
+                writer.TryWrite(SseHelpers.Event("complete", new
+                {
+                    frames = frameCount,
+                    savedPath = PersistFrames(req, collected),
+                }, jsonOptions));
             }, ct);
         });
 
@@ -48,11 +56,13 @@ public static class RestoreEndpoints
             try
             {
                 ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Restore);
+                List<VideoFrame> raw = new List<VideoFrame>();
                 List<object> frames = await queue.EnqueueAsync(async () =>
                 {
                     List<object> collected = new List<object>();
                     await foreach (VideoFrame frame in engine.Restore.RestoreAsync(spec, req.Request, null, ct))
                     {
+                        raw.Add(frame);
                         collected.Add(new
                         {
                             index = frame.Index,
@@ -63,12 +73,33 @@ public static class RestoreEndpoints
                     }
                     return collected;
                 }, ct);
-                return Results.Ok(new { frames });
+                return Results.Ok(new { frames, savedPath = PersistFrames(req, raw) });
             }
             catch (Exception ex)
             {
                 return GenerationErrors.Map(ex);
             }
         });
+    }
+
+    /// <summary>Writes a restored frame sequence into a numbered directory under the output root, matching the
+    /// CLI's layout. Null when the request opted out, nothing was produced, or the write failed.</summary>
+    private static string? PersistFrames(NativeRestoreRequest req, IReadOnlyList<VideoFrame> frames)
+    {
+        if (req.Save == false || frames.Count == 0)
+            return null;
+        try
+        {
+            byte[][] rgb = new byte[frames.Count][];
+            for (int i = 0; i < frames.Count; i++)
+                rgb[i] = frames[i].Rgb;
+            return FrameWriter.WriteFrames(rgb, frames[0].Width, frames[0].Height,
+                OutputWriter.ResolveDir(req.OutputDir), "restored");
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[api] restored frames could not be saved: {ex.Message}");
+            return null;
+        }
     }
 }

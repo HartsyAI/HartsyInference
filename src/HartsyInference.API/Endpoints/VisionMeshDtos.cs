@@ -20,7 +20,7 @@ public sealed class NativeVisionRequest
 }
 
 /// <summary>Envelope for <c>/v1/native/mesh</c>.</summary>
-public sealed class NativeMeshRequest
+public sealed class NativeMeshRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }

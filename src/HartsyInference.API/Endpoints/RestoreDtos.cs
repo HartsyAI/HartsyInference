@@ -5,7 +5,7 @@ namespace HartsyInference.API.Endpoints;
 /// <summary>Envelope for <c>/v1/native/restore</c> and <c>/v1/native/restore/stream</c>. The inner request's
 /// <see cref="RestoreRequest.Video"/> carries container bytes base64-encoded by JSON — large uploads are the
 /// caller's bandwidth to spend; every native route is JSON-only (no multipart anywhere in this API).</summary>
-public sealed class NativeRestoreRequest
+public sealed class NativeRestoreRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id (seedvr2-3b, seedvr2-7b), local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }

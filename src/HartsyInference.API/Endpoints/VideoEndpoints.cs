@@ -1,3 +1,4 @@
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -49,8 +50,37 @@ public static class VideoEndpoints
                         wav = Convert.ToBase64String(AudioClipCodec.EncodeWav(result.Audio)),
                     }, jsonOptions));
                 }
-                writer.TryWrite(SseHelpers.Event("complete", new { frames = result.Frames.Count }, jsonOptions));
+                writer.TryWrite(SseHelpers.Event("complete", new
+                {
+                    frames = result.Frames.Count,
+                    savedPath = Persist(req, result),
+                }, jsonOptions));
             }, ct);
         });
+    }
+
+    /// <summary>Writes the frame sequence (and the soundtrack beside it) into a numbered directory under the output
+    /// root, the same layout the CLI produces. Null when the request opted out or the write failed.</summary>
+    private static string? Persist(NativeVideoRequest req, VideoGenerationResult result)
+    {
+        if (req.Save == false || result.Frames.Count == 0)
+            return null;
+        try
+        {
+            VideoFrame first = result.Frames[0];
+            byte[][] rgb = new byte[result.Frames.Count][];
+            for (int i = 0; i < result.Frames.Count; i++)
+                rgb[i] = result.Frames[i].Rgb;
+            string dir = FrameWriter.WriteFrames(rgb, first.Width, first.Height,
+                OutputWriter.ResolveDir(req.OutputDir), req.Request.Prompt);
+            if (result.Audio is not null && !result.Audio.IsEmpty)
+                File.WriteAllBytes(Path.Combine(dir, "audio.wav"), AudioClipCodec.EncodeWav(result.Audio));
+            return dir;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[api] generated video could not be saved: {ex.Message}");
+            return null;
+        }
     }
 }

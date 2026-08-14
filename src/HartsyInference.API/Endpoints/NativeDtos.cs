@@ -2,10 +2,23 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.API.Endpoints;
 
+/// <summary>Persistence controls shared by every route that produces a file. Generated media is written to disk by
+/// default — the CLI has always done this and an HTTP client should not have to re-encode a base64 payload just to
+/// keep what it asked for.</summary>
+public abstract class NativeArtifactRequest
+{
+    /// <summary>Set false to return the artifact in the response only, writing nothing to disk.</summary>
+    public bool? Save { get; set; }
+
+    /// <summary>Directory to write into; unset uses the server's output root (<c>HARTSYINFERENCE_OUTPUT</c>, else
+    /// <c>&lt;repo&gt;/Output</c>). Note this lets a client direct writes anywhere the server process can reach.</summary>
+    public string? OutputDir { get; set; }
+}
+
 /// <summary>Envelope for every native generation route: model selection alongside the untouched native request
 /// record. <c>model</c>/<c>modelPath</c> live in the body (not the query string) so this shape stays identical
 /// across every modality and lines up with where the OpenAI-compat layer already carries <c>model</c>.</summary>
-public sealed class NativeImageRequest
+public sealed class NativeImageRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }

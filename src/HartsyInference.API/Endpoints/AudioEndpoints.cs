@@ -22,7 +22,7 @@ public static class AudioEndpoints
             try
             {
                 AudioResult result = await queue.EnqueueAsync(() => engine.Speech.SynthesizeAsync(spec, req.Request, ct), ct);
-                return Results.Ok(result);
+                return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Text, result.Format)));
             }
             catch (Exception ex)
             {
@@ -50,7 +50,7 @@ public static class AudioEndpoints
             try
             {
                 AudioResult result = await queue.EnqueueAsync(() => engine.VoiceConversion.ConvertAsync(spec, req.Request, ct), ct);
-                return Results.Ok(result);
+                return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, "voice-convert", result.Format)));
             }
             catch (Exception ex)
             {
@@ -64,7 +64,8 @@ public static class AudioEndpoints
             try
             {
                 StemsResult result = await queue.EnqueueAsync(() => engine.Fx.SeparateAsync(spec, req.Request, ct), ct);
-                return Results.Ok(result);
+                return Results.Ok(new { result.Stems, result.Format, result.SampleRate,
+                    savedPath = ArtifactPersistence.SaveGroup(req, result.Stems, "separate", result.Format) });
             }
             catch (Exception ex)
             {
@@ -78,7 +79,7 @@ public static class AudioEndpoints
             try
             {
                 AudioResult result = await queue.EnqueueAsync(() => engine.Fx.EnhanceAsync(spec, req.Request, ct), ct);
-                return Results.Ok(result);
+                return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, "enhance", result.Format)));
             }
             catch (Exception ex)
             {
@@ -86,4 +87,15 @@ public static class AudioEndpoints
             }
         });
     }
+
+    /// <summary>Re-emits the native audio fields plus where the file landed. Property names match
+    /// <see cref="AudioResult"/> exactly, so this is additive for existing clients.</summary>
+    private static object WithSavedPath(AudioResult result, string? savedPath) => new
+    {
+        result.Data,
+        result.Format,
+        result.DurationSeconds,
+        result.SampleRate,
+        savedPath,
+    };
 }

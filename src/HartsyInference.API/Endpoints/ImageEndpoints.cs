@@ -20,7 +20,7 @@ public static class ImageEndpoints
             try
             {
                 ImageResult result = await GenerateAsync(engine, queue, spec, ApplyImageComposition(req), progress: null, ct);
-                return Results.Ok(ToResponse(result));
+                return Results.Ok(ToResponse(result, Persist(req, result, req.Request.Prompt)));
             }
             catch (Exception ex)
             {
@@ -39,7 +39,7 @@ public static class ImageEndpoints
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
                 ImageResult result = await engine.Images.GenerateAsync(spec, ApplyImageComposition(req), progress, ct);
-                writer.TryWrite(SseHelpers.Event("complete", ToResponse(result), jsonOptions));
+                writer.TryWrite(SseHelpers.Event("complete", ToResponse(result, Persist(req, result, req.Request.Prompt)), jsonOptions));
             }, ct);
         });
     }
@@ -78,13 +78,18 @@ public static class ImageEndpoints
         queue.EnqueueAsync(() => engine.Images.GenerateAsync(spec, request, progress, ct), ct);
 
     /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no
-    /// codec of its own).</summary>
-    internal static object ToResponse(ImageResult result) => new
+    /// codec of its own), and reports where it was saved.</summary>
+    internal static object ToResponse(ImageResult result, string? savedPath = null) => new
     {
         png = Convert.ToBase64String(PngEncoder.Encode(result.Rgb, result.Width, result.Height)),
         result.Width,
         result.Height,
         result.Seed,
         result.Meta,
+        savedPath,
     };
+
+    /// <summary>Persists the PNG unless the request opted out; null when nothing was written.</summary>
+    internal static string? Persist(NativeArtifactRequest req, ImageResult result, string slugSource) =>
+        ArtifactPersistence.Save(req, PngEncoder.Encode(result.Rgb, result.Width, result.Height), slugSource, "png");
 }

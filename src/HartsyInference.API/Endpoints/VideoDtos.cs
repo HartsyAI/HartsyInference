@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 namespace HartsyInference.API.Endpoints;
 
 /// <summary>Envelope for <c>/v1/native/video/stream</c>.</summary>
-public sealed class NativeVideoRequest
+public sealed class NativeVideoRequest : NativeArtifactRequest
 {
     /// <summary>Catalog id, local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }

@@ -19,7 +19,7 @@ public static class MeshEndpoints
             try
             {
                 MeshResult result = await queue.EnqueueAsync(() => engine.Mesh.GenerateAsync(spec, req.Request, progress: null, ct), ct);
-                return Results.Ok(result);
+                return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)));
             }
             catch (Exception ex)
             {
@@ -36,8 +36,18 @@ public static class MeshEndpoints
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
                 MeshResult result = await engine.Mesh.GenerateAsync(spec, req.Request, progress, ct);
-                writer.TryWrite(SseHelpers.Event("complete", result, jsonOptions));
+                writer.TryWrite(SseHelpers.Event("complete",
+                    WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)), jsonOptions));
             }, ct);
         });
     }
+
+    /// <summary>Re-emits the native mesh fields plus where the file landed; property names match
+    /// <see cref="MeshResult"/>, so this is additive for existing clients.</summary>
+    private static object WithSavedPath(MeshResult result, string? savedPath) => new
+    {
+        result.Data,
+        result.Format,
+        savedPath,
+    };
 }

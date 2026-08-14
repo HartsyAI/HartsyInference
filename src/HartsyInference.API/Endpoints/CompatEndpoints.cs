@@ -269,7 +269,9 @@ public static class CompatEndpoints
                 for (int i = 0; i < n; i++)
                 {
                     ImageResult result = await ImageEndpoints.GenerateAsync(engine, queue, spec, imageRequest, progress: null, ct);
-                    images.Add(new ImageData { B64Json = Convert.ToBase64String(PngEncoder.Encode(result.Rgb, result.Width, result.Height)) });
+                    byte[] png = PngEncoder.Encode(result.Rgb, result.Width, result.Height);
+                    ArtifactPersistence.Save(png, imageRequest.Prompt, "png");
+                    images.Add(new ImageData { B64Json = Convert.ToBase64String(png) });
                 }
                 return Results.Ok(new ImageGenerationResponse { Created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Data = images });
             }
@@ -295,8 +297,9 @@ public static class CompatEndpoints
                     writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
                 // Runs inside the queue's held slot — call the service directly, not the GenerateAsync helper.
                 ImageResult result = await engine.Images.GenerateAsync(spec, imageRequest, progress, ct);
-                string png = Convert.ToBase64String(PngEncoder.Encode(result.Rgb, result.Width, result.Height));
-                writer.TryWrite(SseHelpers.Event("complete", new { b64_json = png }, jsonOptions));
+                byte[] pngBytes = PngEncoder.Encode(result.Rgb, result.Width, result.Height);
+                ArtifactPersistence.Save(pngBytes, imageRequest.Prompt, "png");
+                writer.TryWrite(SseHelpers.Event("complete", new { b64_json = Convert.ToBase64String(pngBytes) }, jsonOptions));
             }, ct);
         });
     }
