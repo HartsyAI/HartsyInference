@@ -230,6 +230,16 @@ Distilled runs at CFG 1 (no guidance). The **dev** checkpoint uses `PipelinePara
 video CFG 3.0 / audio CFG 7.0, `rescale_scale 0.7`, `modality_scale 3.0`, STG on block 28 (2.3+) or 29 (2.0),
 `skip_step 0`.
 
+> **These are the DOCUMENTED settings, not what the reference we benchmark against actually runs (2026-08-13).**
+> The captured ComfyUI graph (`Swarm/.../Data/Logs/2026-08/13-19-42.log:1423`) uses a single `SwarmKSampler`
+> with **joint CFG 3.0** over the concatenated AV latent, `euler`/`normal`, 30 steps — no `LTXVDualCFGGuider`,
+> no `LTXVModalityGuidance`, no `LTXVSpatioTemporalGuidance`, no CFG-rescale. ComfyUI's LTX nodes do not
+> implement CFG-rescale at all, and diffusers defaults `guidance_rescale`/`stg_scale` to 0.0 and
+> `modality_scale` to 1.0 (all disabled). So the machinery listed above is **opt-in and off by default**, and
+> its absence from this port does NOT explain any observed gap against a ComfyUI generation. This was read as a
+> missing-machinery lead once already — see the retracted audio-level section in
+> `docs/Checklists/MODEL_STATUS_VIDEO.md`.
+
 Frame/size constraints: `num_frames % 8 == 1`, width/height divisible by 32, 24 fps default.
 
 ### NADiffusionDecoder (`ltx-2.5-video-vae-bf16.safetensors`)

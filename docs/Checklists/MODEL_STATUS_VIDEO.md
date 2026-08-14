@@ -179,7 +179,31 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Wan multi-frame encode.
 - [ ] Native 3D-conv / temporal-attn PTX.
 
-### LTX-2.3 audio is ~80 dB too quiet (open, localized 2026-08-01)
+### LTX-2 audio level — CLOSED 2026-08-13, NOT a defect (was: "~80 dB too quiet", localized 2026-08-01)
+
+> ⚠️ **READ FIRST — the PREMISE of this whole section is not established (2026-08-13).** Every figure below
+> compares a level against an assumed "healthy" level that was never measured. Decoded RMS at a FIXED prompt and
+> settings varies enormously by seed: **−54.1 / −25.2 / −37.9 / −38.5 / −21.7 dBFS for seeds 1–5**, and
+> ComfyUI's own reference draw (−33.7 dBFS) sits **mid-distribution**, with three of five of our seeds LOUDER
+> than it. A single-seed measurement cannot distinguish "too quiet" from "an ordinary quiet draw."
+>
+> Also invalid: **same-seed comparison against ComfyUI**. We derive the audio noise from `seed ^ 0x5D2B`; the
+> reference draws video then audio sequentially from one generator, so matched seeds are not matched noise.
+>
+> What survives: the audio VAE and vocoder are **proven correct** against ComfyUI (log-mel relL2 9e-5 on the
+> same checkpoint and latent; a unit-Gaussian latent decodes to −29.8 dBFS ours vs −29.7 theirs), and the
+> `AudioGuidanceRescale` A/B below is a valid SAME-SEED relative measurement. What is wrong is the framing that
+> it is repairing a defect. A separate finding also explains the "muffled" character as inherent rather than a
+> port bug: **LTX-2.5 is a 16 kHz-bandwidth system in a 48 kHz container** (VAE mel at `sampling_rate 16000`,
+> `mel_fmax 8000`; 8–12 kHz carries 0.705% of energy, 16–24 kHz 0.001%), and ComfyUI's decode shows the same
+> cliff with even LESS high-frequency content than ours.
+>
+> Before doing any further work here, establish the healthy distribution first — sweep seeds, and compare
+> against a ComfyUI draw that is not seed-matched. See the memory notes `ltx25-audio-quiet-is-seed-variance`
+> and `ltx25-conditioning-inert` (the latter retracted for the same class of error on the video side — but
+> note its own retraction was then partly walked back: 8 of 9 prompt×seed combinations adhere, and one
+> reproducibly does not, so "inert" is dead while an occasional failure to escape a strong prior is real).
+
 Real generation (512×320×25f, seed 42) produces a stereo soundtrack with correct duration, true L/R
 decorrelation and real temporal structure — but at **peak −43.9 dBFS / RMS −59.4 dBFS**, effectively
 inaudible. `HARTSY_LTX2_PROBE=1` now covers the audio stages (`ProbeTensor` in `LtxVideo2Pipeline`) and
@@ -233,11 +257,31 @@ the audio latent itself is off-distribution** — mean −1.48 / σ 2.89 against
 | 3.0 (= video, shipped behaviour) | 2.22 | −10.10 | −43.9 dBFS |
 | 7.0 (the authors' recommendation) | 2.69 | −11.09 | −60.5 dBFS |
 
-**Do not "fix" this by raising `audio_guidance_scale` to the authors' 7.0** — measured, it makes the
-soundtrack ~17 dB QUIETER. Their recommendation assumes the guidance rescale + STG + modality-isolation
-guidance that accompany it in `pipeline_ltx2.py`, none of which this port implements. `AudioGuidanceScale`
-exists on the config (null = follow the video scale, the reference default) with `HARTSY_LTX2_AUDIO_CFG`
-for A/B, but the default is deliberately NOT 7.0.
+**⚠️ The "raising audio CFG makes it quieter" claim below is CONTRADICTED at the production operating point
+(2026-08-13).** The 8-step / 512×320 / seed-42 table above measured cfg 7.0 as ~17 dB quieter. At **30 steps,
+768×512×97f, seed 1** the direction reverses — raising audio CFG makes it monotonically LOUDER:
+
+| audio CFG | rescale | latent mean | decoded RMS |
+|---:|---:|---:|---:|
+| 3 (= video, shipped default) | 1.0 | −0.453 | −54.1 dBFS |
+| 3 | 0.0 | −0.462 | −54.5 dBFS |
+| 7 | 1.0 | −0.308 | −45.7 dBFS |
+| 7 | 0.0 | −0.275 | −43.3 dBFS |
+| 12 | 0.7 | −0.131 | −36.1 dBFS |
+
+Both measurements stand; they are different operating points and step count is the obvious confound. Treat
+neither as settled guidance. What IS settled: audio CFG is a **loudness lever that amplifies a small
+cond−uncond difference**, not a repair. `AudioGuidanceScale` stays null (follow the video scale) because that
+is what the reference run actually used — see the next paragraph. `HARTSY_LTX2_AUDIO_CFG` remains the A/B knob.
+
+**What the ComfyUI reference run actually used** (captured graph, `Data/Logs/2026-08/13-19-42.log:1423`):
+a single `SwarmKSampler` with **joint CFG 3.0** over the concatenated AV latent, `euler` / `normal`, 30 steps,
+`LTXVAudioVAEDecode` (no normalization), and **no** `LTXVDualCFGGuider`, **no** modality guidance, **no** STG.
+SwarmUI adds no audio gain anywhere — the mux is `clip(x,−1,1)*32767` → AAC, no `loudnorm`, no `-af`.
+So the −33.7 dBFS reference figure was produced at **the same guidance this port already uses**. Do not read
+the reference's *documented* settings (audio CFG 7.0 / `rescale_scale` 0.7 / `modality_scale` 3.0 / STG,
+recorded in `docs/Research/LTX_2_5.md`) as machinery whose absence explains a level gap — the run we
+benchmarked against used none of it.
 
 **PARTIAL FIX SHIPPED — guidance rescale (2026-08-02).** `AudioGuidanceRescale` (default **1.0**, knob
 `HARTSY_LTX2_AUDIO_RESCALE`) applies diffusers' `rescale_noise_cfg` to the audio stream: the guided velocity
@@ -251,18 +295,43 @@ Effect at 8 steps: latent σ **2.216 → 1.141** (checkpoint target 1.17), log-m
 **peak −43.9 → −28.2 dBFS, RMS −59.4 → −45.4 dBFS** (~14 dB recovered), still true stereo, 25 frames intact,
 video coherent and visually unchanged (the video Euler step is untouched).
 
-**Still not fully fixed.** −28 dBFS peak is audible but roughly 20 dB below a healthy soundtrack, and the
-log-mel (−6.60) remains short of the −4.34 a training-distribution latent produces in the VAE diagnostic.
-The gain at 20 steps (~14 dB) is also smaller than the 8-step log-mel delta suggested (~30 dB), so step
-count interacts with the residual. Remaining suspects, in order: the STG (`stg_scale` 1.0, blocks `[28]`)
-and modality-isolation guidance (`modality_scale` 3.0) that the reference pairs with LTX-2.3 and this port
-does not implement — those add extra DiT forward passes with modified conditioning, so they are a real
-piece of work; then a parity dump of the audio VAE/vocoder, which still have no captured reference
-activations.
+**~~Still not fully fixed.~~ RETRACTED 2026-08-13.** The claim that −28 dBFS is "roughly 20 dB below a healthy
+soundtrack" assumed a healthy level that was never measured. It was wrong — see the banner. Do not resume the
+"remaining suspects" hunt (STG, modality-isolation guidance) on level grounds; the reference run used neither.
 
-Still unvalidated independently: the audio VAE and vocoder have no reference activations captured (the
-BigVGAN anti-alias filters are recomputed rather than loaded), so a parity dump remains worthwhile even
-though the level defect is now traced upstream of them.
+**The audio VAE and vocoder now HAVE reference parity (2026-08-13)** — this closes the "no captured reference
+activations" gap, and it closes it in our favour:
+
+| stage, same checkpoint + same latent, ours vs ComfyUI's `AudioVAE` | agreement |
+|---|---|
+| denormalize + unpack `[1,8,64,16]` | **bit-identical** (relL2 0.000) |
+| audio VAE → log-mel `[1,2,253,64]` | **relL2 9.05e-5**, max abs diff 0.0022 |
+| vocoder → waveform `[1,2,121440]` | relL2 6.8e-2, RMS 0.03294 vs 0.03381 (2.6%) |
+
+Tests: `tests/HartsyInference.Diffusion.Tests/LtxAudioDecodeRealWeightParityTests.cs`. The stage-by-stage test
+needs `HARTSY_LTX2_AUDIO_REFDIR` (dumps + the generator script are preserved at `~/Desktop/ltx25-audio-ref/`);
+`AudioDecode_UnitGaussianLatent_LandsInAPlausibleLoudnessBand` is standalone and **absolute** — a deterministic
+unit-Gaussian latent must decode into −46 … −16 dBFS. That absolute assertion exists because every audio check
+before it was an identity comparison against a control carrying the same suspected defect, which is precisely
+why a non-defect survived as a "known bug" for eleven days.
+
+The residual 2.6% on the waveform is the only open item here: the BigVGAN anti-alias filters are recomputed
+rather than loaded, and ComfyUI and diffusers disagree on whether vocoder stage 1 clamps to ±1
+(ComfyUI's `apply_final_activation` defaults true → `clamp`; diffusers applies nothing). Worth closing, but it
+is a numerics detail, not a level defect.
+
+**Fixed in passing:** `LtxVideo2Pipeline.AudioCfgEulerStep` was matching the conditional velocity's **mean** as
+well as its std. Diffusers' `rescale_noise_cfg` — which the method's own doc comment cites — is std-only;
+expanding its blend gives exactly our `A` coefficient and no additive `B`. The `B` term was pushed into the
+audio latent via `AddScalar` on every step. Removed. Measured effect at the default cfg 3 is within noise
+(latent mean −0.453 with it, −0.462 without), so this is a correctness fix, not a level fix.
+
+**Separately, the "muffled / low quality" character is inherent to the model, not a port bug.** LTX-2 is a
+**16 kHz-bandwidth system in a 48 kHz container**: the audio VAE's mel is computed at `sampling_rate 16000`
+with `mel_fmax 8000`, stage 1 renders 16 kHz, and the BWE stage upsamples to 48 kHz while adding almost
+nothing above 8 kHz. Measured band energy on a real generation: 8–12 kHz **0.705%**, 12–16 kHz **0.053%**,
+16–24 kHz **0.001%** of total. ComfyUI's own decode shows the same cliff with *less* HF than ours. Expect this
+to be re-filed as an audio-quality bug; it is not fixable short of a different vocoder.
 
 ### MiniMax-H3
 - [x] **Borrowed-view-as-output sweep — done 2026-08-03, no other site affected.** H3's mosaic bug was a

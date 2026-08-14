@@ -51,6 +51,31 @@ Partition it first, cheaply, before touching the model:
 - Sweep guidance to 1 and to 10. Identical output at both rules out CFG wiring.
 - Change the seed. A completely different scene confirms the model is sampling from its prior.
 
+**Before believing ANY single-draw symptom on a generative model: sweep seeds, then check what your metric
+actually measures.** Three "bugs" on LTX-2.5 were diagnosed and closed on 2026-08-13, all of them a single
+observation with a plausible mechanism attached:
+
+1. *"Audio is 20 dB too quiet."* One seed. The same prompt and settings measure **−54.1 / −25.2 / −37.9 /
+   −38.5 / −21.7 dBFS across seeds 1–5**, and the ComfyUI draw it was compared against (−33.7) sits
+   mid-distribution. The symptom was an outlier draw. Worse, everyone who "confirmed" it by listening had
+   heard clips from that same seed — corroboration that was really one observation counted twice.
+2. *"Conditioning is inert (~1% difference between prompts)."* The metric was mean pixel |Δ|, which measures
+   **luminance, not semantics**: two dark night scenes score close to each other and far from a bright
+   sunset one. It reproduced faithfully across seeds while being uninformative about the question asked.
+   A metric can be stable, reproducible, and measuring the wrong quantity — reproducibility is not validity.
+3. *"The connector dilutes conditioning (99% learnable registers vs 7% on the 2.3 path)."* Refuted by reading
+   the reference: ComfyUI pads to `max(1024, L)` with `registers[p % 128]` and forces an all-attend mask,
+   identical to `ReplacePaddingWithRegisters` (`comfy/ldm/lightricks/embeddings_connector.py:282-290`).
+   High substitution is what the reference does too, and the reference adheres.
+
+Two rules fall out. **Calibrate the metric against a known-good control before trusting it** — a signature can
+be real and reproducible without being pathological (the LTX-2.5 audio latent's "temporal collapse", per-feature
+std 0.32 vs a healthy ~1.0, was real, reproducible, and not the defect). And **a retraction needs the same
+evidentiary bar as the claim it retracts**: "conditioning is inert" died at n=1, but the follow-up "there is no
+conditioning bug at all" was also asserted from two seeds and the third contradicted it — 8 of 9 prompt×seed
+combinations adhere, one reproducibly does not. Occasional failure to escape a strong prior is not the same
+finding as a routing defect, and neither is the same as "no bug".
+
 **Higher-order lessons:**
 - A passing **synthetic-weight** parity harness proves the backbone MATH, not the encoder or the
   real-weight load. Math-proven but image wrong ⇒ suspect encoder concat/tap order → tokenizer/chat

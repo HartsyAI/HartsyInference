@@ -560,11 +560,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         return (video, audio);
     }
 
-    /// <summary>CFG + Euler for the audio stream, optionally rescaling the guided velocity back to the conditional's
-    /// mean/std (diffusers' <c>rescale_noise_cfg</c>). CFG over-disperses this stream badly — at guidance 3 the latent
-    /// lands 2.5x wider than the checkpoint's own latent stats, and the decoded soundtrack drops ~40 dB.
-    /// The blend is affine in the guided velocity, so only the four scalars come to the host and the step stays on
-    /// device (the latent is never written host-side, which would go stale against its GPU cache).</summary>
+    /// <summary>CFG + Euler for the audio stream, optionally rescaling the guided velocity toward the conditional's
+    /// std (diffusers' <c>rescale_noise_cfg</c>). Std only — the reference has no mean-matching term, and adding one
+    /// injects a DC offset into the latent. The blend is affine in the guided velocity, so only the scalars come to
+    /// the host and the step stays on device (the latent is never written host-side, which would go stale against
+    /// its GPU cache).</summary>
     private void AudioCfgEulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float rescale, float delta)
     {
         if (rescale <= 0f)
@@ -593,12 +593,28 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
         double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
         double a = rescale * factor + (1f - rescale);
-        double b = rescale * (meanC - factor * meanG);
         Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
-        if (Math.Abs(b) > 1e-12)
+    }
+
+    /// <summary>Writes a stage tensor as raw little-endian F32 + a shape sidecar into
+    /// <c>HARTSY_LTX2_AUDIO_DUMP</c>; no-op when unset. Lets the reference implementation decode OUR tensors.</summary>
+    private static void DumpTensor(string name, Tensor tensor)
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_DUMP") is not { Length: > 0 } dir)
         {
-            Backend.AddScalar(z, z, (float)(b * delta));
+            return;
         }
+        Directory.CreateDirectory(dir);
+        Tensor f32 = tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
+        long n = f32.ElementCount;
+        using (FileStream fs = File.Create(Path.Combine(dir, name + ".bin")))
+        {
+            fs.Write(new ReadOnlySpan<byte>((byte*)f32.DataPointer, checked((int)(n * 4))));
+        }
+        File.WriteAllText(Path.Combine(dir, name + ".json"),
+            "{\"shape\":[" + string.Join(",", Enumerable.Range(0, f32.Shape.Rank).Select(i => f32.Shape[i])) + "]}");
+        if (!ReferenceEquals(f32, tensor)) f32.Dispose();
+        Logs.Warning($"[ltx2-dump] wrote {name} {tensor.Shape} to {dir}");
     }
 
     /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
@@ -642,10 +658,12 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int latentChannels = 8;
         int melLat = _config.AudioInChannels / latentChannels;   // 128 / 8 = 16
         ProbeTensor("audio latent (raw, pre-denorm)", audioLat);
+        DumpTensor("audio_latent_raw", audioLat);
         Tensor unpacked = UnpackAudioLatents(audioLat, audioFrames, latentChannels, melLat);
         ProbeTensor("audio latent (unpacked, post-denorm)", unpacked);
         Tensor mel = _audioVae.Decode(VaeBackend, unpacked);     // [1, 2, T, 64]
         ProbeTensor("audio VAE out (log-mel)", mel);
+        DumpTensor("audio_mel", mel);
         unpacked.Dispose();
         VaeBackend.Sync();
         Logs.Info($"[ltx2-phase]   audio VAE (preload+unpack+decode): {phase.ElapsedMilliseconds} ms");
