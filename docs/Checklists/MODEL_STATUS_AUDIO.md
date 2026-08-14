@@ -467,15 +467,20 @@ rotary op wants — and dropping the token-major attention entry point, which fo
 36x (meanAbs 4.1e-2 to 1.1e-3) and took the flow stage to stitched-audio corr 0.999996. **The generalizable lesson:
 never `Reshape` a tensor that may be device-resident and then mutate it in place.**
 
-**Levels**: a 17.8 s multi-window clip (3060, `:q4`) measures -19.5 dBFS peak 0.60 against the official 32 kHz
-asset's -16.6, with no level step at either window seam (0.97 ratio at 5.0 s and 12.0 s). Clips under ~10 s measure
-20 dB quieter — that is intro material, not a decode bug, and it is the third short-clip level scare on this
-machine. Do not "fix" it with normalization.
+**Levels**: the rotary fix is audible in the numbers. Same seed, same prompt, 17.8 s multi-window on the 3060 at
+`:q4` — before the fix -19.5 dBFS peak 0.60, after it **-15.8 dBFS peak 1.0**, against the official 32 kHz asset's
+-16.6. No level step at either window seam. Clips under ~10 s still measure ~20 dB quieter; that is intro material,
+not a decode bug, and it is the third short-clip level scare on this machine. Do not "fix" it with normalization.
 
-**Measured VRAM** (3060, `:q4`, 17.8 s): 10.3 GB peak, dropping to 7.3 GB at the AR-to-flow handoff. Undisposed
-`Tensor.Reshape` views in the DiT's attention path used to grow the activation cache per denoising step and could
-exhaust even a 24 GB card on a long generation; they are disposed now, and the fingerprint of that class of bug is
-VRAM climbing with the number of forwards rather than with tensor size.
+**Measured VRAM** (3060, `:q4`, 17.8 s): 10.3 GB peak, dropping to 7.3 GB at the AR-to-flow handoff. Two separate
+VRAM lessons live here. First, undisposed `Tensor.Reshape` views used to grow the activation cache per denoising
+step and could exhaust a 24 GB card on a long generation — the fingerprint is VRAM climbing with the *number of
+forwards* rather than with tensor size. Second, and **currently open**: the correctness fix that removed those
+reshapes had to abandon the token-major attention entry point (it requires rank-2, and reaching it from the rotary
+op's rank-4 layout is what forced the reshape). The head-major path allocates four extra full-width buffers per
+block, and that regressed the 3060 from a working 30 s generation to OOM at 12 s. The 4090 is unaffected. The fix
+is to hoist those per-block scratch buffers to instance-level and reuse them across the 36 blocks; correctness must
+not be traded back for it.
 
 **Usage**: the caption goes in `--genre`, the lyrics in the prompt (the ACE-Step mapping the CLI already speaks).
 `-m minimaxmusic3` is the BF16 parity baseline and wants a 24 GB card; `:q8`/`:q4` quantize the language model into
