@@ -2176,6 +2176,17 @@ public interface IBackend : IDisposable
         foreach (LinearOp op in ops) Linear(op.Output, input, op.Weight, op.Bias);
     }
 
+    /// <summary>LTX-2's per-head output gate followed by a projection. A backend whose Linear already walks the
+    /// activation (to quantize it) can apply the gate in that pass instead of in one of its own; the default is
+    /// the two ops in sequence, which is what the caller did before and which mutates <paramref name="input"/>
+    /// in place.</summary>
+    unsafe void LinearHeadGated(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        Tensor gateLogits, int heads, int headDim)
+    {
+        Ltx2HeadGate(input, gateLogits, (int)input.Shape[0], heads, headDim);
+        Linear(output, input, weight, bias);
+    }
+
     /// <summary>LTX-2 block norm+modulate in one pass: <c>out[r,d] = rms(in[r,:])[d] * (1+scale[d]) + shift[d]</c>,
     /// where the RMS carries no affine weight. Replaces RmsNorm-then-AddScalar-then-AffineBroadcastLastDim, which
     /// walked the activation twice. Default: composes exactly those ops.</summary>

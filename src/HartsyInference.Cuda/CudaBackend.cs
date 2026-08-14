@@ -1406,8 +1406,12 @@ public sealed class CudaBackend : IBackend
     /// a single unchunked m·n·4 buffer runs to gigabytes (H3's mlp.fc1 is n=28672). Each chunk is padded up to the
     /// 32-row granularity cuBLASLt's int8 TN kernels want, exactly as comfy-kitchen's own _int8_matmul_accumulate
     /// does — 31 wasted rows of int8 compute beats materializing the weight.</remarks>
+    /// <summary>An LTX-2 per-head output gate to apply as the activation is quantized, instead of as its own
+    /// pass. <c>Logits</c> = 0 means no gate.</summary>
+    private readonly record struct Int8PreGate(ulong Logits, int Heads, int HeadDim);
+
     private unsafe void RunResidentInt8(ulong pInput, DType inputDType, int m, int k, int group,
-        ReadOnlySpan<Int8ResidentTarget> targets)
+        ReadOnlySpan<Int8ResidentTarget> targets, Int8PreGate preGate = default)
     {
         bool srcF16 = inputDType == DType.F16;
         int inputElementBytes = inputDType.SizeInBytes;
@@ -1441,7 +1445,15 @@ public sealed class CudaBackend : IBackend
                 // Sub-scopes: "Linear" is FOUR kernels (rotate, quant, GEMM, dequant) and the whole-chain
                 // label cannot say which one costs. HARTSY_PROFILE_FINE only — thousands of pushes per step.
                 using (NvtxRange.PushFine("Int8.Quant"))
-                if (group > 0 && _kernels!.HasFusedConvRotQuant(k, group))
+                if (preGate.Logits != 0)
+                {
+                    // The caller's per-head gate folds into this load, so its own full read+write pass over the
+                    // activation disappears. Eligibility was settled before the chunk loop (CanPreGate).
+                    _kernels!.LaunchConvRotQuantRowwiseGated(pAct8, pRowScale, inputChunk, rows, k, group,
+                        _stream.Handle, preGate.Logits + (ulong)((long)firstRow * preGate.Heads * sizeof(ushort)),
+                        preGate.Heads, preGate.HeadDim);
+                }
+                else if (group > 0 && _kernels!.HasFusedConvRotQuant(k, group))
                 {
                     // Rotation + per-row quant in one pass: the split pair wrote a full-width rotated
                     // activation to HBM only for the quantizer to read it straight back.
@@ -1515,6 +1527,37 @@ public sealed class CudaBackend : IBackend
     /// preloaded weight (fast, but the cast occupies F16-sized VRAM).</remarks>
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
+
+    /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization
+    /// (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
+    internal static bool FuseHeadGateIntoQuant = Environment.GetEnvironmentVariable("HARTSY_LTX2_GATEFUSE") != "0";
+
+    /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the
+    /// activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of
+    /// its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place
+    /// exactly as the caller's own sequence did.</summary>
+    /// <remarks>The gate is a full read AND write of a <c>[seq, heads·headDim]</c> tensor — 81.8 MB per call at
+    /// LTX-2.5's video shape — whose only consumer is this projection, which then reads the same tensor again to
+    /// quantize it. Bit-identical either way: the fused kernel reproduces the separate pass's f16 store.</remarks>
+    public unsafe void LinearHeadGated(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        Tensor gateLogits, int heads, int headDim)
+    {
+        bool fused = FuseHeadGateIntoQuant
+            && input.DType == DType.F16 && gateLogits.DType == DType.F16
+            && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
+            && qi.ConvRotGroupSize > 0
+            && CanRunResidentInt8(output, input, weight, qi, 0, -1)
+            && _kernels is not null
+            && _kernels.HasFusedGatedConvRotQuant((int)weight.Shape[1], qi.ConvRotGroupSize, srcF16: true, heads, headDim);
+        if (!fused)
+        {
+            Ltx2HeadGate(input, gateLogits, (int)input.Shape[0], heads, headDim);
+            Linear(output, input, weight, bias);
+            return;
+        }
+        LinearImpl(output, input, weight, bias, cacheWeightCast: true, preGate: gateLogits, preGateHeads: heads,
+            preGateHeadDim: headDim);
+    }
 
     /// <summary>Fused quantized matmul (the low-VRAM path): same GEMM as <see cref="Linear"/> but the dequantized weight is never cached.</summary>
     /// <remarks>The quantized weight bytes stay resident (preloaded), so a Q4/Q5/Q6/Q8 model keeps its on-device
@@ -1681,7 +1724,8 @@ public sealed class CudaBackend : IBackend
     }
 
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
-        int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false)
+        int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false,
+        Tensor? preGate = null, int preGateHeads = 0, int preGateHeadDim = 0)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Linear");
         EnterOp();
@@ -2108,7 +2152,17 @@ public sealed class CudaBackend : IBackend
                         ? 0
                         : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast),
                     int8RowScaleDev, n, output.DType == DType.F16, fuseGelu);
-                RunResidentInt8(pInput, input.DType, m, k, weight.QuantInfo!.ConvRotGroupSize, [target]);
+                Int8PreGate gate = preGate is null
+                    ? default
+                    : new(GpuTransferHelper.CopyToDevice(preGate), preGateHeads, preGateHeadDim);
+                try
+                {
+                    RunResidentInt8(pInput, input.DType, m, k, weight.QuantInfo!.ConvRotGroupSize, [target], gate);
+                }
+                finally
+                {
+                    if (gate.Logits != 0) GpuTransferHelper.FreeDevice(gate.Logits);
+                }
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
                 return;

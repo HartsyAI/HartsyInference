@@ -533,6 +533,32 @@ That is the roadmap for `Kernels/dequant/int8_mma_gemm.cu` (currently 268 TOPS, 
 beat the cuBLASLt+dequant pair and ~550 to match them). Stream-K in particular matters at LTX's shapes: with
 m=4992 padded and n=4096, a fixed swizzle leaves SMs idle on the tail wave.
 
+### The per-head gate, folded into the activation quantization (2026-08-13) — SHIPPED, e2e UNMEASURED
+
+`Ltx2HeadGate` was a full read AND write of an attention output — 81.8 MB per video-width call at ~581 calls
+per step — purely to scale it, immediately before `to_out`'s Linear read the same tensor again to quantize it.
+The gate now folds into that quantization pass (`convrot_quant_rowwise_gated_f16`), so it costs no traffic of
+its own; `IBackend.LinearHeadGated` carries it, with a default that runs the old gate-then-Linear sequence.
+Kill switch `HARTSY_LTX2_GATEFUSE=0`.
+
+**Bit-identical** to the separate pass (0 of 163,840 F16 words differ, `GroupedLinearTests`). That is by
+construction and deliberately fragile-looking: the fused kernel reproduces the separate pass's **f16 store** and
+keeps its `(x · 2) · sig` multiply association rather than the algebraically equal `x · (2 · sig)`. Either
+shortcut would silently change every attention output in the model.
+
+**The end-to-end campaign never completed** — a concurrent session working the audio bug was rebuilding the
+shared `bin/Release` output mid-run and competing for the 4090. The one pair that did complete was
+1422.2 vs 1422.7 ms/step, i.e. **null**. Traffic arithmetic says ~23 GB/step ≈ 15–23 ms, but this file's own
+history says arithmetic over-predicts, and one pair establishes nothing either way. **Treat this as unverified
+and re-run `ltx25_ab.sh HARTSY_LTX2_GATEFUSE 0 1 4` on a quiet GPU.** It ships on because it is bit-identical
+and strictly deletes a kernel and a memory pass, not because it was shown to be faster.
+
+**Concurrent-session hazard, now closed.** Two sessions sharing this repo collide on BUILD OUTPUT as well as on
+the GPU, and the build collision is the quieter one: `HartsyInference.Video.dll` was rebuilt between rep 1 and
+rep 2 of a campaign, silently swapping the binary under an A/B. The free-VRAM guard in `ltx25_bench.sh` catches
+GPU contention loudly; nothing caught this. `ltx25_bench.sh` now takes `LTX25_BENCH_CLI` to point at a private
+snapshot of the Release output — use it whenever anyone else might be building.
+
 ### ⚠️ The harness's noise floor — read before trusting any delta in this file (2026-08-13)
 
 **The same build, same seed, run back to back, spreads ~25 ms/step; sd across 4 reps is 17–20 ms.** Measured

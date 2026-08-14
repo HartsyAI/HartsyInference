@@ -45,6 +45,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _convRotRotateF16;
     private readonly nint _convRotRotateF32;
     private readonly nint _convRotQuantF16;
+    private readonly nint _convRotQuantGatedF16;
     private readonly nint _convRotQuantF32;
     private readonly CudaModule? _int8MmaModule;
     private readonly nint _int8MmaGemmF16;
@@ -603,6 +604,7 @@ public sealed class CudaKernels : IDisposable
             _convRotRotateF16 = _convRotModule.GetFunction("convrot_rotate_f16");
             _convRotRotateF32 = _convRotModule.GetFunction("convrot_rotate_f32");
             _convRotQuantF16 = _convRotModule.GetFunction("convrot_quant_rowwise_f16");
+            _convRotQuantGatedF16 = _convRotModule.GetFunction("convrot_quant_rowwise_gated_f16");
             _convRotQuantF32 = _convRotModule.GetFunction("convrot_quant_rowwise_f32");
         }
 
@@ -2077,6 +2079,33 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Fused ConvRot rotation + per-row dynamic int8 quantization: replaces
     /// <see cref="LaunchConvRotRotate"/> followed by <see cref="LaunchW8A8QuantRowwise"/>, dropping the
     /// full-width rotated intermediate (7 bytes/element of traffic down to 3). Bit-identical to that pair.</summary>
+    /// <summary>Whether the gated variant can serve this head layout: F16 source (the DiT activation dtype the
+    /// gate kernel writes), a head count the per-block sigmoid cache holds, and a power-of-two head dim (the
+    /// inner loop shifts rather than divides).</summary>
+    public bool HasFusedGatedConvRotQuant(int cols, int group, bool srcF16, int heads, int headDim) =>
+        HasFusedConvRotQuant(cols, group) && srcF16 && heads > 0 && heads <= 128
+        && headDim > 0 && (headDim & (headDim - 1)) == 0 && heads * headDim == cols;
+
+    /// <inheritdoc cref="LaunchConvRotQuantRowwise(ulong,ulong,ulong,int,int,int,nint,bool)"/>
+    /// <summary>Fused ConvRot + quant with LTX-2's per-head output gate applied on load, replacing a separate
+    /// <see cref="LaunchLtx2HeadGate"/> pass over the same tensor. Bit-identical to that pair.</summary>
+    public unsafe void LaunchConvRotQuantRowwiseGated(ulong q, ulong rowScale, ulong x, int rows, int cols,
+        int group, nint stream, ulong logits, int heads, int headDim)
+    {
+        if (!HasFusedGatedConvRotQuant(cols, group, srcF16: true, heads, headDim))
+            throw new InvalidOperationException(
+                $"fused gated ConvRot+quant unavailable for cols={cols}, group={group}, heads={heads}, headDim={headDim}.");
+        ulong xArg = x, qArg = q, sArg = rowScale, lArg = logits;
+        uint colsArg = (uint)cols, groupArg = (uint)group, headsArg = (uint)heads;
+        uint shiftArg = (uint)System.Numerics.BitOperations.TrailingZeroCount((uint)headDim);
+        void** args = stackalloc void*[8];
+        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg; args[4] = &groupArg;
+        args[5] = &lArg; args[6] = &headsArg; args[7] = &shiftArg;
+        uint gatedShared = (uint)((long)cols * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(_convRotQuantGatedF16,
+            (uint)rows, 1, 1, 256, 1, 1, gatedShared, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public unsafe void LaunchConvRotQuantRowwise(ulong q, ulong rowScale, ulong x, int rows, int cols,
         int group, nint stream, bool srcF16)
     {

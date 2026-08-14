@@ -200,6 +200,47 @@ public sealed unsafe class GroupedLinearTests
         AssertIdentical(_output, "fused-vs-pair through Linear", fused, pair);
     }
 
+    /// <summary>LTX-2's per-head gate folded into the activation quantization, against the gate-then-Linear pair
+    /// it replaces. The fused kernel reproduces the separate pass's f16 store and its <c>(x·2)·sig</c> multiply
+    /// association deliberately, so the bar is BYTE-IDENTICAL — an algebraically-equal-but-differently-rounded
+    /// gate would silently change every attention output in the model.</summary>
+    [Fact]
+    public void FusedHeadGateMatchesSeparateGatePass()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
+        using CudaBackend backend = new CudaBackend(0, PtxDir());
+
+        const int Seq = 320, Heads = 16, HeadDim = 64, OutDim = 512;
+        const int Inner = Heads * HeadDim;
+        Random rng = new Random(1717);
+        using Tensor w = Int8Weight(OutDim, Inner, 256, rng);
+        using Tensor b = RandomF16(rng, OutDim);
+        // Logits spanning both sigmoid branches, so the sign-aware form is actually exercised.
+        using Tensor logits = RandomF16(rng, Seq, Heads);
+        using Tensor baseAct = RandomF16(rng, Seq, Inner);
+        using Tensor fusedIn = RandomF16(rng, Seq, Inner);
+        using Tensor pairIn = RandomF16(rng, Seq, Inner);
+        Buffer.MemoryCopy((void*)baseAct.DataPointer, (void*)fusedIn.DataPointer,
+            baseAct.ElementCount * 2, baseAct.ElementCount * 2);
+        Buffer.MemoryCopy((void*)baseAct.DataPointer, (void*)pairIn.DataPointer,
+            baseAct.ElementCount * 2, baseAct.ElementCount * 2);
+
+        using Tensor fused = new Tensor(new TensorShape(Seq, OutDim), DType.F16);
+        using Tensor pair = new Tensor(new TensorShape(Seq, OutDim), DType.F16);
+        bool saved = CudaBackend.FuseHeadGateIntoQuant;
+        try
+        {
+            CudaBackend.FuseHeadGateIntoQuant = true;
+            backend.LinearHeadGated(fused, fusedIn, w, b, logits, Heads, HeadDim);
+            CudaBackend.FuseHeadGateIntoQuant = false;
+            backend.LinearHeadGated(pair, pairIn, w, b, logits, Heads, HeadDim);
+            backend.Sync();
+        }
+        finally { CudaBackend.FuseHeadGateIntoQuant = saved; }
+
+        AssertIdentical(_output, "fused head gate vs separate pass", fused, pair);
+    }
+
     /// <summary>The kill switch has to be a real seam: with it off, LinearMulti must degrade to the per-op loop and
     /// still produce the same bytes, so a bisect can turn the feature off and trust the result.</summary>
     [Fact]

@@ -129,6 +129,36 @@ extern "C" __global__ void convrot_quant_rowwise_f16(
     CONVROT_QUANT_BODY(__half2float(xr[i]), __half2float(__float2half(sh[i])))
 }
 
+// ── …with LTX-2's per-head output gate folded into the load ─────────────────
+// `ltx2_head_gate_f16` scales an attention output in place — a full read AND write of a [seq, heads*headDim]
+// tensor (81.8 MB per call at LTX-2.5's video shape) whose only consumer is the to_out projection, which then
+// reads the very same tensor again to quantize it. Applying the gate as this kernel loads deletes that pass
+// outright.
+//
+// Bit-identical to the unfused pair by construction: the separate gate kernel STORED its result as f16, so the
+// f16 round-trip is reproduced here, and the multiply keeps that kernel's `(x * 2) * sig` association rather
+// than the algebraically equal `x * (2 * sig)`. Logits are f16 and per (row, head), so the block computes its
+// row's `heads` sigmoids once into shared instead of once per element. headDim is passed as a shift because it
+// is always a power of two here and a runtime integer divide in the inner loop is not.
+#define LTX2_MAX_HEADS 128
+
+extern "C" __global__ void convrot_quant_rowwise_gated_f16(
+    const __half* __restrict__ x, signed char* __restrict__ q,
+    float* __restrict__ rowScale, unsigned int cols, unsigned int group,
+    const __half* __restrict__ logits, unsigned int heads, unsigned int headDimShift)
+{
+    __shared__ float sgate[LTX2_MAX_HEADS];
+    for (unsigned int h = threadIdx.x; h < heads; h += blockDim.x)
+    {
+        float g = __half2float(logits[(unsigned long long)blockIdx.x * heads + h]);
+        sgate[h] = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+    }
+    __syncthreads();
+    const __half* xr = x + (unsigned long long)blockIdx.x * cols;
+    CONVROT_QUANT_BODY(__half2float(__float2half(__half2float(xr[i]) * 2.0f * sgate[i >> headDimShift])),
+                       __half2float(__float2half(sh[i])))
+}
+
 extern "C" __global__ void convrot_quant_rowwise_f32(
     const float* __restrict__ x, signed char* __restrict__ q,
     float* __restrict__ rowScale, unsigned int cols, unsigned int group)

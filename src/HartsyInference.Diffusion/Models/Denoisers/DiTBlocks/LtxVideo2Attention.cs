@@ -127,14 +127,18 @@ public sealed unsafe class LtxVideo2Attention
             qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
             flat = FromBhsd(backend, attn, sq, act); attn.Dispose();   // [Sq, inner]
         }
+        // The gate is a full read+write of `flat` whose only consumer is to_out, which reads `flat` again to
+        // quantize it — so hand both to the backend and let it apply the gate during that pass if it can.
+        Tensor outT = new(new TensorShape(sq, _outDim), act);
         if (gateLogits is not null)
         {
-            backend.Ltx2HeadGate(flat, gateLogits, sq, _heads, _headDim);
+            backend.LinearHeadGated(outT, flat, _oW!, _oB, gateLogits, _heads, _headDim);
             gateLogits.Dispose();
         }
-
-        Tensor outT = new(new TensorShape(sq, _outDim), act);
-        backend.Linear(outT, flat, _oW!, _oB);
+        else
+        {
+            backend.Linear(outT, flat, _oW!, _oB);
+        }
         flat.Dispose();
         return outT;
     }

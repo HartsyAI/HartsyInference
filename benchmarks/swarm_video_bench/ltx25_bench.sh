@@ -16,7 +16,13 @@ WIDTH=${5:-768}
 HEIGHT=${6:-512}
 
 REPO=/home/hartsy/Desktop/HartsyInference
-CLI=$REPO/src/HartsyInference.Cli/bin/Release/net10.0/HartsyInference.Cli.dll
+# LTX25_BENCH_CLI points this at a PRIVATE COPY of the Release output. The default path is shared build output:
+# another session rebuilding the tree mid-campaign silently swaps the binary between reps and every number in
+# that campaign becomes uncomparable (happened 2026-08-13 — HartsyInference.Video.dll was rebuilt between rep 1
+# and rep 2). Snapshot before a campaign whenever anyone else might be building:
+#   cp -r src/HartsyInference.Cli/bin/Release/net10.0 /tmp/benchcli
+#   LTX25_BENCH_CLI=/tmp/benchcli/HartsyInference.Cli.dll ./ltx25_ab.sh VAR 0 1 4
+CLI=${LTX25_BENCH_CLI:-$REPO/src/HartsyInference.Cli/bin/Release/net10.0/HartsyInference.Cli.dll}
 MODEL_DIR=${LTX25_BENCH_MODEL:-$REPO/Models/Stable-Diffusion/LTX-2.5}
 OUT=${LTX25_BENCH_OUT:-/tmp/ltx25_bench}
 PROMPT=${LTX25_BENCH_PROMPT:-"a lone lighthouse keeper walking along a rocky coastline at sunset, waves crashing, cinematic wide shot, volumetric light, highly detailed, 35mm film look"}
