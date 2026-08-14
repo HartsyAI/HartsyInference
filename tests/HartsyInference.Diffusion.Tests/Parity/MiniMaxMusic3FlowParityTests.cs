@@ -116,9 +116,14 @@ public sealed unsafe class MiniMaxMusic3FlowParityTests(ITestOutputHelper output
 
     private static IBackend CreateBackend()
     {
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            return new CpuBackend();   // tier-lint: guarded
+        }
         try
         {
-            return new CudaBackend();
+            return new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
         }
         catch (Exception)
         {
