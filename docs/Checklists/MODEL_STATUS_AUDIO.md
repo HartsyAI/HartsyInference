@@ -476,34 +476,14 @@ never `Reshape` a tensor that may be device-resident and then mutate it in place
 -16.6. No level step at either window seam. Clips under ~10 s still measure ~20 dB quieter; that is intro material,
 not a decode bug, and it is the third short-clip level scare on this machine. Do not "fix" it with normalization.
 
-**Measured VRAM** (3060, `:q4`, 17.8 s): 10.3 GB peak, dropping to 7.3 GB at the AR-to-flow handoff. Two separate
-VRAM lessons live here. First, undisposed `Tensor.Reshape` views used to grow the activation cache per denoising
-step and could exhaust a 24 GB card on a long generation — the fingerprint is VRAM climbing with the *number of
-forwards* rather than with tensor size. Second, and **currently open**: the correctness fix that removed those
-reshapes had to abandon the token-major attention entry point (it requires rank-2, and reaching it from the rotary
-op's rank-4 layout is what forced the reshape). The head-major path allocates four extra full-width buffers per
-block, and that regressed the 3060 from a working 30 s generation to OOM at 12 s. The 4090 is unaffected. The fix
-is to hoist those per-block scratch buffers to instance-level and reuse them across the 36 blocks; correctness must
-not be traded back for it.
+**Measured VRAM and timing** (3060, `:q4`, 30 s of audio, 7 windows): completes at ~10 GB peak in 226 s —
+autoregressive 110.5 s, flow 105.0 s, vocoder 2.2 s. Two VRAM lessons are baked in here. Undisposed
+`Tensor.Reshape` views used to grow the activation cache per denoising step, whose fingerprint is VRAM climbing
+with the *number of forwards* rather than with tensor size. And the correctness fix that removed those reshapes had
+to drop the token-major attention entry point (it needs rank-2, and reaching it from the rotary op's rank-4 layout
+is what forced the reshape), which regressed the 3060 from a working 30 s generation to OOM at 12 s — fixed by
+hoisting the fourteen per-block working tensors to one instance-level set reused across all 36 blocks and every
+forward. Parity is byte-identical across that change.
 
-**Usage**: the caption goes in `--genre`, the lyrics in the prompt (the ACE-Step mapping the CLI already speaks).
-`-m minimaxmusic3` is the BF16 parity baseline and wants a 24 GB card; `:q8`/`:q4` quantize the language model into
-a disk-cached GGUF, cast the DiT to BF16 and switch the KV cache to F16, which is the 12 GB path. Two bugs the first
-real generation found that no shape check would have: the depth decoder's BF16 embedding tables and the DiT's
-`time_proj` are read host-side as raw floats and must be widened at load.
+Stage timing is emitted at `Info`; the CLI defaults to `Warning`, so use `HARTSY_LOG_LEVEL=Info` to see it.
 
-**LoRA**: `MusicRequest.Loras` merges into the language model and the DiT before load (`LoraStack.ApplyTo`), and the
-set is part of the runner cache key. Entries must be absolute **paths** — `AddFromPath` does not resolve ids. No
-MiniMax Music 3 LoRAs have been published, so this path has never been exercised against a real adapter.
-
-### HeartMuLa
-
-LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`HARTSY_CSM_GRAPH`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (`HARTSY_HEARTMULA_QUANT=q8_0`) is **1.41× faster** (64.8 ms/frame ≈ 15.4 fr/s, past real-time) + ~1/2 VRAM — the fix was pinning the quant weights GPU-resident (`PreloadWeights`, quantized-only); the Q8 fused GEMV is faster than bf16 when resident.
-
-### Stable Audio Open Small
-
-DiT/VAE/timing-conditioner parity cosine 1.0 each. **Engine-wired 2026-07-20** as `stableaudio` (was built+parity-verified but had no `MusicCatalog` entry, and the AudioLab extension's own binding was also missing — both fixed). **GPU-residency perf pass 2026-07-20**: host RoPE/multi-head-reshape/ping-pong-scheduler loops ported to existing `IBackend` ops (`ApplyRopeSingle`/`Permute0213`/`RepeatKvHeads`/chained `Scale`+`Add`) — no new kernels needed, cosine 1.0 held after rewrite. Swarm `/API/GenerateText2Image` verified: 11.89s stereo 44.1kHz in 2.85s gen time.
-
-### PocketTTS
-
-**Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). All transformer layers + hidden + latents **corr 1.000000** vs `pocket_tts` 2.1.0. Voice REQUIRED (default `alba`). Weights = non-gated `kyutai/pocket-tts-without-voice-cloning` `languages/english/` (NOT the generic `tts_*.safetensors`). Whisper `medium.en` word-perfect via `/API/GenerateText2Image`.

@@ -29,6 +29,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     private Tensor? _ropeCos;
     private Tensor? _ropeSin;
     private int _ropeLength;
+    private BlockScratch? _scratch;
     private int _disposed;
 
     public MiniMaxMusic3Dit(MiniMaxMusic3DitConfig? config = null)
@@ -108,9 +109,10 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         }
 
         (Tensor cos, Tensor sin) = RopeTables(length + 1);
+        BlockScratch scratch = Scratch(length + 1);
         foreach (Block block in _blocks)
         {
-            Tensor next = block.Forward(backend, hidden, _config, cos, sin);
+            Tensor next = block.Forward(backend, hidden, _config, cos, sin, scratch);
             hidden.Dispose();
             hidden = next;
         }
@@ -138,10 +140,11 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(hidden);
         (Tensor cos, Tensor sin) = RopeTables((int)hidden.Shape[0]);
+        BlockScratch scratch = Scratch((int)hidden.Shape[0]);
         Tensor current = hidden;
         foreach (Block block in _blocks)
         {
-            Tensor next = block.Forward(backend, current, _config, cos, sin);
+            Tensor next = block.Forward(backend, current, _config, cos, sin, scratch);
             if (!ReferenceEquals(current, hidden))
             {
                 current.Dispose();
@@ -187,6 +190,8 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         _ropeSin?.Dispose();
         _ropeCos = null;
         _ropeSin = null;
+        _scratch?.Dispose();
+        _scratch = null;
     }
 
     /// <summary>Lays out <c>[latent, zeros(latent), condition]</c> token-major, the channel concatenation the
@@ -272,6 +277,80 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         return (cos, sin);
     }
 
+    /// <summary>Per-block working tensors, allocated once per sequence length and reused by every block and every
+    /// forward. Allocating fourteen device buffers per block, 36 blocks a forward, fragmented the CUDA pool badly
+    /// enough to OOM a 12 GB card on longer generations.</summary>
+    private BlockScratch Scratch(int rows)
+    {
+        if (_scratch is not null && _scratch.Rows == rows)
+        {
+            return _scratch;
+        }
+        _scratch?.Dispose();
+        _scratch = new BlockScratch(rows, _config);
+        return _scratch;
+    }
+
+    private sealed class BlockScratch : IDisposable
+    {
+        private readonly List<Tensor> _owned = [];
+
+        internal BlockScratch(int rows, MiniMaxMusic3DitConfig config)
+        {
+            Rows = rows;
+            TensorShape flat = new TensorShape(rows, config.InnerDim);
+            TensorShape tokenMajor = new TensorShape(1, rows, config.NumAttentionHeads, config.AttentionHeadDim);
+            TensorShape headMajor = new TensorShape(1, config.NumAttentionHeads, rows, config.AttentionHeadDim);
+            TensorShape wide = new TensorShape(rows, config.FfInnerDim);
+            Normed = Track(flat);
+            Query = Track(tokenMajor);
+            Key = Track(tokenMajor);
+            Value = Track(tokenMajor);
+            Attention = Track(tokenMajor);
+            HeadQuery = Track(headMajor);
+            HeadKey = Track(headMajor);
+            HeadValue = Track(headMajor);
+            HeadAttention = Track(headMajor);
+            Normed2 = Track(flat);
+            Gated = Track(new TensorShape(rows, 2 * config.FfInnerDim));
+            States = Track(wide);
+            Gate = Track(wide);
+            Projected = Track(flat);
+        }
+
+        internal int Rows { get; }
+        internal Tensor Normed { get; }
+        internal Tensor Query { get; }
+        internal Tensor Key { get; }
+        internal Tensor Value { get; }
+        internal Tensor Attention { get; }
+        internal Tensor HeadQuery { get; }
+        internal Tensor HeadKey { get; }
+        internal Tensor HeadValue { get; }
+        internal Tensor HeadAttention { get; }
+        internal Tensor Normed2 { get; }
+        internal Tensor Gated { get; }
+        internal Tensor States { get; }
+        internal Tensor Gate { get; }
+        internal Tensor Projected { get; }
+
+        private Tensor Track(TensorShape shape)
+        {
+            Tensor tensor = new Tensor(shape, DType.F32);
+            _owned.Add(tensor);
+            return tensor;
+        }
+
+        public void Dispose()
+        {
+            foreach (Tensor tensor in _owned)
+            {
+                tensor.Dispose();
+            }
+            _owned.Clear();
+        }
+    }
+
     private Tensor AsLinear(Tensor kernelOneConv)
     {
         if (kernelOneConv.Shape.Rank != 3 || kernelOneConv.Shape[2] != 1)
@@ -314,50 +393,31 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             _ffOutBias = weights[$"{prefix}.ff_out.bias"];
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, MiniMaxMusic3DitConfig config, Tensor cos, Tensor sin)
+        public Tensor Forward(IBackend backend, Tensor hidden, MiniMaxMusic3DitConfig config, Tensor cos, Tensor sin,
+            BlockScratch scratch)
         {
             int rows = (int)hidden.Shape[0];
-            int inner = config.InnerDim;
             int heads = config.NumAttentionHeads;
             int headDim = config.AttentionHeadDim;
 
             Tensor result = new Tensor(hidden.Shape, DType.F32);
-            using (Tensor normed = new Tensor(hidden.Shape, DType.F32))
-            {
-                backend.LayerNorm(normed, hidden, _norm1Weight!, _norm1Bias!, config.LayerNormEps);
-                // Allocated at the rank-4 shape the rotary op needs rather than reshaped into it: Tensor.Reshape
-                // reads DataPointer, which syncs a device tensor back to the host and hands out a HOST pointer, so
-                // the view loses GPU residency. Roping through such a view left the device copy un-rotated and the
-                // attention ran without rotary on CUDA while CPU was correct.
-                TensorShape headed = new TensorShape(1, rows, heads, headDim);
-                using Tensor query = new Tensor(headed, DType.F32);
-                using Tensor key = new Tensor(headed, DType.F32);
-                using Tensor value = new Tensor(headed, DType.F32);
-                backend.Linear(query, normed, _toQ!, null);
-                backend.Linear(key, normed, _toK!, null);
-                backend.Linear(value, normed, _toV!, null);
-
-                backend.ApplyRopeSingle(query, cos, sin, config.RotaryDim);
-                backend.ApplyRopeSingle(key, cos, sin, config.RotaryDim);
-
-                using Tensor attention = new Tensor(headed, DType.F32);
-                Attend(backend, attention, query, key, value, rows, heads, headDim);
-                backend.Linear(result, attention, _toOut!, null);
-            }
+            backend.LayerNorm(scratch.Normed, hidden, _norm1Weight!, _norm1Bias!, config.LayerNormEps);
+            backend.Linear(scratch.Query, scratch.Normed, _toQ!, null);
+            backend.Linear(scratch.Key, scratch.Normed, _toK!, null);
+            backend.Linear(scratch.Value, scratch.Normed, _toV!, null);
+            backend.ApplyRopeSingle(scratch.Query, cos, sin, config.RotaryDim);
+            backend.ApplyRopeSingle(scratch.Key, cos, sin, config.RotaryDim);
+            Attend(backend, scratch, rows, heads, headDim);
+            backend.Linear(result, scratch.Attention, _toOut!, null);
             backend.Add(result, result, hidden);
 
-            using Tensor normed2 = new Tensor(hidden.Shape, DType.F32);
-            backend.LayerNorm(normed2, result, _norm2Weight!, _norm2Bias!, config.LayerNormEps);
-            using Tensor gated = new Tensor(new TensorShape(rows, 2 * config.FfInnerDim), DType.F32);
-            backend.Linear(gated, normed2, _ffInWeight!, _ffInBias);
-            using Tensor states = new Tensor(new TensorShape(rows, config.FfInnerDim), DType.F32);
-            using Tensor gate = new Tensor(new TensorShape(rows, config.FfInnerDim), DType.F32);
-            backend.Split([states, gate], gated, dim: 1);
-            backend.Silu(gate, gate);
-            backend.Mul(states, states, gate);
-            using Tensor projected = new Tensor(hidden.Shape, DType.F32);
-            backend.Linear(projected, states, _ffOutWeight!, _ffOutBias);
-            backend.Add(result, result, projected);
+            backend.LayerNorm(scratch.Normed2, result, _norm2Weight!, _norm2Bias!, config.LayerNormEps);
+            backend.Linear(scratch.Gated, scratch.Normed2, _ffInWeight!, _ffInBias);
+            backend.Split([scratch.States, scratch.Gate], scratch.Gated, dim: 1);
+            backend.Silu(scratch.Gate, scratch.Gate);
+            backend.Mul(scratch.States, scratch.States, scratch.Gate);
+            backend.Linear(scratch.Projected, scratch.States, _ffOutWeight!, _ffOutBias);
+            backend.Add(result, result, scratch.Projected);
             return result;
         }
 
@@ -377,20 +437,17 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         /// <summary>Head-major attention over rank-4 <c>[1, rows, heads, headDim]</c> tensors. The token-major
         /// entry point is deliberately not used: it wants rank-2, and getting there from the rotary op's rank-4
         /// layout requires a reshape, which is what broke GPU residency.</summary>
-        private static void Attend(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value,
-            int rows, int heads, int headDim)
+        /// <summary>Head-major attention over the shared rank-4 scratch. The token-major entry point is not used:
+        /// it wants rank-2, and reaching that from the rotary op's rank-4 layout needs a reshape, which silently
+        /// drops GPU residency.</summary>
+        private static void Attend(IBackend backend, BlockScratch scratch, int rows, int heads, int headDim)
         {
-            float scale = 1f / MathF.Sqrt(headDim);
-            TensorShape headMajor = new TensorShape(1, heads, rows, headDim);
-            using Tensor q = new Tensor(headMajor, DType.F32);
-            using Tensor k = new Tensor(headMajor, DType.F32);
-            using Tensor v = new Tensor(headMajor, DType.F32);
-            backend.Permute0213(q, query, rows, heads, headDim);
-            backend.Permute0213(k, key, rows, heads, headDim);
-            backend.Permute0213(v, value, rows, heads, headDim);
-            using Tensor attention = new Tensor(headMajor, DType.F32);
-            backend.ScaledDotProductAttention(attention, q, k, v, null, scale);
-            backend.Permute0213(output, attention, heads, rows, headDim);
+            backend.Permute0213(scratch.HeadQuery, scratch.Query, rows, heads, headDim);
+            backend.Permute0213(scratch.HeadKey, scratch.Key, rows, heads, headDim);
+            backend.Permute0213(scratch.HeadValue, scratch.Value, rows, heads, headDim);
+            backend.ScaledDotProductAttention(scratch.HeadAttention, scratch.HeadQuery, scratch.HeadKey,
+                scratch.HeadValue, null, 1f / MathF.Sqrt(headDim));
+            backend.Permute0213(scratch.Attention, scratch.HeadAttention, heads, rows, headDim);
         }
     }
 }
