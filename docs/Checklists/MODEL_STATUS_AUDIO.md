@@ -487,6 +487,8 @@ forward. Parity is byte-identical across that change.
 
 Stage timing is emitted at `Info`; the CLI defaults to `Warning`, so use `HARTSY_LOG_LEVEL=Info` to see it.
 
+**Performance grind plan: `MINIMAX_MUSIC3_PERF.md`** (phases, hardware protocol, out-of-scope list).
+
 **Versus the reference** (4090, 15.0 s of audio = 375 frames = 3 windows, identical prompt/seed/steps, generation
 time only with model load excluded on both sides): this engine's Q8 path takes **36.7 s** (AR 26.0, flow 10.3,
 vocoder 0.4) against the diffusers reference's BF16 **49.4 s** (AR 34.9, flow+vocode 14.6) — **1.35× faster**, and
