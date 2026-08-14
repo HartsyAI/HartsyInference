@@ -159,6 +159,53 @@ true and routes the conv decoder's `decoder.*` keys into the diffusion bucket, c
 the log line `HARTSY_LTX2_DIFFUSION_VAE set — … (310 tensors)`. Full procedure in
 `benchmarks/swarm_video_bench/DIFFUSION_VAE_HEADTOHEAD.md`.
 
+## LTX-2.5 — diffusion decoder vs ComfyUI's, measured as a DELTA (2026-08-14)
+
+The matched-quality end-to-end row **could not be run**, for a reason worth recording (below). What could be
+measured is the thing that actually matters: **what each engine pays to use the diffusion decoder instead of the
+conv one**, at 768×512×97f/30 steps. Taking it as a delta against each engine's own conv run cancels the harness,
+so the two sides are comparable even though they were not measured the same way.
+
+| | conv | diffusion | **delta** |
+|---|---:|---:|---:|
+| **ComfyUI** (prompt-execution, same session, warm) | 41.47 s | 68.92 s | **+27.45 s** |
+| **Hartsy** (decode phase, direct harness, tiled kernel) | 2.878 s | 75.9 s | **+73.0 s** |
+
+**We are ~2.7× behind ComfyUI on the diffusion decode.** Not the 40× the earlier scoreboard implied, and not
+parity either. ComfyUI's arm is proven from the submitted workflow JSON — `"vae_name":
+"LTX-2/ltx-2.5-video-vae-bf16.safetensors"` decoded through `VAEDecodeTiled` at tile 2048 / temporal 64 /
+temporal_overlap 16 — and its conv control in the same session used
+`ltx-2.5-video-vae-conv-bf16.safetensors`, so the delta is a within-engine, within-session difference.
+
+Treat the 2.7× as indicative, not a scoreboard row: Comfy's figure is whole-prompt execution (so its delta
+includes any decode-related overhead beyond the VAE itself) while ours is the decode phase alone. The comparison
+is honest about direction and rough magnitude; it is not a like-for-like wall-clock row, and it is not labelled
+as one.
+
+### Why the end-to-end row is blocked: the deployed EXTENSION refuses the diffusion VAE
+
+Not the engine — the engine decodes with it correctly. The **SwarmUI extension** validates the model folder and
+refuses outright:
+
+> `LTX-2.5 bundle is incomplete — '…/LTX-2.5' contains the LTX-2.5 diffusion video VAE, which the engine's
+> LTX-2 pipeline does not decode with yet. Stage 'ltx-2.5-video-vae-conv-bf16.safetensors' instead…`
+
+That message is **stale** — the pipeline does decode with it now — but it is compiled into the deployed
+extension assembly, which `deploy_extension.sh` does not rebuild (it deploys the *engine* DLLs and PTX). Two
+things make patching it non-trivial, and neither should be attempted casually:
+
+- The check reads the file's **keys**, not its name: staging the diffusion VAE under the conv filename was tried
+  and still refused. So there is no configuration-only workaround.
+- **The deployed extension's source is not on disk.** Its DLL is `…-36c19cfa.dll`, matching the extension repo's
+  detached HEAD `36c19cf`, but the refusal string does not appear anywhere in that checkout. The deployed binary
+  contains code no source tree has — including, per the runbook, the folder-loading (`split bundle`) behaviour
+  the working conv path depends on. Rebuilding from the current source would therefore risk **losing** working
+  behaviour to fix a stale message. Reconstruct deliberately, with the conv path re-verified after, or not at all.
+
+Everything touched for this measurement was reverted and verified: `Backends.fds` and `Settings.fds` byte-identical
+to their timestamped backups, the VAE symlink back to conv, the systemd drop-in removed, hartsy backends 7/8
+enabled and running, comfy 0/1 disabled, and a normal generation confirmed working afterwards.
+
 ## LTX-2.5 — conv-vs-conv head-to-head, both arms re-measured (2026-08-14)
 
 Standard workload (768×512, 97f, 30 steps, cfg 3.0, **conv** decoder on both sides), SwarmUI API,
