@@ -104,6 +104,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Broadcast affine over the last dim: <c>out = in*scale + (shift ?? 0)</c>; null shift = Ideogram 4's scale-only adaLN.</summary>
     unsafe void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+        => AffineBroadcastLastDimReference(output, input, scale, shift);
+
+    /// <summary>The managed <see cref="AffineBroadcastLastDim"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).AffineBroadcastLastDim(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void AffineBroadcastLastDimReference(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
             throw new NotSupportedException("AffineBroadcastLastDim default fallback only supports F32.");
@@ -1084,6 +1090,64 @@ public interface IBackend : IDisposable
     unsafe void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
         => Na3dReference(output, q, k, v, kernelT, kernelH, kernelW, scale);
 
+    /// <summary>LTX-2.5 channels-last 3D pixel shuffle of one temporal chunk: each source token
+    /// <c>[·, strideT·strideH·strideW·outChannels]</c> unpacks into a <c>strideT×strideH×strideW</c> sub-block of
+    /// output tokens <c>[·, outChannels]</c>, source channel <c>((c·strideT+i1)·strideH+i2)·strideW+i3</c> going to
+    /// destination channel <c>c</c> of sub-block position <c>(i1, i2, i3)</c>.</summary>
+    /// <param name="output">The FULL <c>[outT·outH·outW, outChannels]</c> result; this call fills only the frames
+    /// this chunk covers, so the destination persists across chunk calls.</param>
+    /// <param name="start">First source frame of this chunk on the full temporal axis.</param>
+    /// <param name="dropped">1 while the causal shuffle's duplicated leading frame is being dropped, which shifts
+    /// every destination frame down by one and leaves this chunk's first sub-frame without a destination.</param>
+    unsafe void Ltx25PixelShuffle(Tensor output, Tensor projected, int start, int h, int w,
+        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW)
+        => Ltx25PixelShuffleReference(output, projected, start, h, w,
+            strideT, strideH, strideW, outChannels, dropped, outH, outW);
+
+    /// <summary>The managed <see cref="Ltx25PixelShuffle"/> body, callable directly so a device backend can fall back
+    /// to it without going through interface dispatch — which would re-enter the backend's own override, not this
+    /// default — and so a test can diff against it independently.</summary>
+    static unsafe void Ltx25PixelShuffleReference(Tensor output, Tensor projected, int start, int h, int w,
+        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW)
+    {
+        if (output.DType != DType.F32 || projected.DType != DType.F32)
+            throw new NotSupportedException($"Ltx25PixelShuffle default fallback only supports F32 — got output={output.DType}, projected={projected.DType}.");
+        int projChannels = strideT * strideH * strideW * outChannels;
+        long plane = (long)h * w;
+        int count = (int)(projected.Shape[0] / plane);
+        float* src = (float*)projected.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        for (int ti = start; ti < start + count; ti++)
+        for (int i1 = 0; i1 < strideT; i1++)
+        {
+            int frame = ti * strideT + i1 - dropped;
+            if (frame < 0) continue;
+            for (int hi = 0; hi < h; hi++)
+            for (int i2 = 0; i2 < strideH; i2++)
+            for (int wi = 0; wi < w; wi++)
+            for (int i3 = 0; i3 < strideW; i3++)
+            {
+                long srcRow = ((long)(ti - start) * h + hi) * w + wi;
+                long dstRow = (((long)frame * outH + hi * strideH + i2) * outW) + wi * strideW + i3;
+                for (int c = 0; c < outChannels; c++)
+                {
+                    int packed = ((c * strideT + i1) * strideH + i2) * strideW + i3;
+                    dst[dstRow * outChannels + c] = src[srcRow * projChannels + packed];
+                }
+            }
+        }
+    }
+
+    /// <summary>True when <paramref name="output"/> is either the rank-6 q grid or its contiguous
+    /// <c>[batch·T·H·W, heads·headDim]</c> flattening — the same bytes in the same order.</summary>
+    /// <remarks>Accepting the flat form lets a caller whose next op is a row-wise GEMM allocate the output already
+    /// flat, instead of reshaping the rank-6 result afterwards. <see cref="Tensor.Reshape"/> is not free: it reads
+    /// <c>DataPointer</c>, which pulls a device-resident tensor back to the host and drops the device copy, so the
+    /// following op re-uploads it — measured at 11.5 s of a 74.9 s LTX-2.5 decode.</remarks>
+    static bool Na3dOutputShapeMatches(TensorShape output, TensorShape q)
+        => output.Equals(q)
+            || (output.Rank == 2 && output[0] == q[0] * q[1] * q[2] * q[3] && output[1] == q[4] * q[5]);
+
     /// <summary>The managed <see cref="Na3d"/> body, callable directly so a device backend can fall back to it and a
     /// test can diff against it without going through interface dispatch.</summary>
     static unsafe void Na3dReference(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
@@ -1092,7 +1156,7 @@ public interface IBackend : IDisposable
             throw new NotSupportedException($"Na3d default fallback only supports F32 — got output={output.DType}, q={q.DType}, k={k.DType}, v={v.DType}.");
         if (q.Shape.Rank != 6)
             throw new ArgumentException($"Na3d expects [batch, T, H, W, heads, headDim]; got {q.Shape}.", nameof(q));
-        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !q.Shape.Equals(output.Shape))
+        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !Na3dOutputShapeMatches(output.Shape, q.Shape))
             throw new ArgumentException($"Na3d requires identical shapes; got q={q.Shape}, k={k.Shape}, v={v.Shape}, output={output.Shape}.");
         if (kernelT <= 0 || kernelH <= 0 || kernelW <= 0)
             throw new ArgumentException($"Na3d kernel must be positive; got ({kernelT}, {kernelH}, {kernelW}).");

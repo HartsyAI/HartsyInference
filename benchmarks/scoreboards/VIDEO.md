@@ -159,6 +159,63 @@ true and routes the conv decoder's `decoder.*` keys into the diffusion bucket, c
 the log line `HARTSY_LTX2_DIFFUSION_VAE set — … (310 tensors)`. Full procedure in
 `benchmarks/swarm_video_bench/DIFFUSION_VAE_HEADTOHEAD.md`.
 
+## LTX-2.5 diffusion decode: 79.2 s → 15.5 s, and now FASTER than ComfyUI's (2026-08-14)
+
+The decode was **~85% host-transfer tax, not GPU work.** A profiling pass (stopwatch around GPU-synced scopes
+plus A/B, not a roofline guess) attributed all but 0.4% of it, and the answer was that real GPU compute was only
+~10 s of 74.9 s. Three host loops were the cost:
+
+| target | measured cost | fix |
+|---|---:|---|
+| `LtxVideo25NaBlock.Modulate` — host loop over every token | **47.2 s (63%)** | `IBackend.AffineBroadcastLastDim` already existed with matching indexing; host loop deleted |
+| `attended.Reshape(...)` — `Tensor.Reshape` forces a full D2H for a **metadata-only** change | **~11.5 s** | `Na3d` relaxed to accept a rank-2 output of identical bytes, so the view disappears |
+| `LtxVideo25PixelShuffleUpsample` — host shuffle | **4.25 s** (re-measured; 3.71 predicted) | new `ltx25_pixel_shuffle_f32`; host loop kept as the numerical reference |
+
+| geometry | before | after |
+|---|---:|---:|
+| 768×512×97f | 79.16 s | **15.52 s** |
+| 512×320×25f | 6.92 s | **1.51 s** |
+
+### This flips the head-to-head on the quality decoder
+
+Using the same within-engine delta as the row below — what each engine pays to switch from the conv decoder to
+the diffusion one at 768×512×97f:
+
+| | delta for the diffusion decoder |
+|---|---:|
+| ComfyUI (tiled, `VAEDecodeTiled` temporal 64 / overlap 16) | +27.45 s |
+| **Hartsy** (15.52 s vs the conv path's 2.878 s) | **+12.64 s** |
+
+**We are now ~2.2× FASTER than ComfyUI on the diffusion decode**, having been ~2.7× slower this morning. Same
+caveat as that row: Comfy's figure is whole-prompt execution and ours is the decode phase, so read the direction
+and rough magnitude, not a precise ratio.
+
+Correctness held throughout, which matters because this decoder has already shipped three silent bugs: the
+ComfyUI layer-diff passes at every stage (1e-7–5e-4 relL2 against a 5e-3 threshold, verified by dumping our side
+and diffing in numpy rather than trusting a green test), chunked-vs-un-chunked stays bit-identical, 46 CUDA +
+26 diffusion tests pass, and the decoded frames are **bit-identical to the pre-change run at both geometries**,
+97/97 and 25/25, plus a visual check.
+
+### Two bugs in the `((IBackend)this).X()` fallback idiom
+
+A backend override calling `((IBackend)this).SomeOp(...)` to reach the managed default is **infinite recursion**,
+not a fallback: the class method implicitly implements the interface member, so interface dispatch re-enters the
+override. One instance was caught before shipping (in the new pixel-shuffle CUDA fallback, proven with a
+standalone repro and fixed via a static `Ltx25PixelShuffleReference`). **A second is live in shipped code and is
+now fixed here**: `VulkanBackend.AffineBroadcastLastDim` used it in its dtype-mismatch branch — a stack overflow
+on any non-F32/F16 input on Vulkan. The managed body is now `IBackend.AffineBroadcastLastDimReference`, matching
+the `Na3dReference` pattern, whose doc comment says exactly why it exists.
+
+### Still open
+
+~15.5 s remains against the profile's ~10 s compute estimate. The unmeasured candidates are the remaining host
+loops — `PatchifyPixels`/`UnpatchifyPixels` (~1.4 s combined at the old scale) and the slice-scatter staging in
+`AddContextPass`/`FlushAttention`. Also **recommended as a project, not a patch**: making `Tensor.Reshape`
+metadata-only for a device-resident tensor. It needs a *view-aware device cache*, because the cache is keyed by
+tensor identity and a view's writes are invisible to its parent — this codebase has been bitten by that exact
+gap three times (`ApplyKeyframesAbsPos`, the q/k-norm path, and a `Linear` into a reshaped `modulation` that
+left it all zeros and degenerated every AdaLN). Worth 11.5 s here and much more across every model.
+
 ## LTX-2.5 — diffusion decoder vs ComfyUI's, measured as a DELTA (2026-08-14)
 
 The matched-quality end-to-end row **could not be run**, for a reason worth recording (below). What could be

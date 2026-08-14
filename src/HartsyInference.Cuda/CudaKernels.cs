@@ -37,6 +37,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ltx25Na3dTiled8x8F32;
     private readonly nint _ltx25Na3dTiled4x8F32;
     private readonly nint _ltx25NaRope3dF32;
+    private readonly nint _ltx25PixelShuffleF32;
 
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
@@ -612,6 +613,9 @@ public sealed class CudaKernels : IDisposable
                 _ltx25Na3dTiled8x8F32 = 0;
                 _ltx25Na3dTiled4x8F32 = 0;
             }
+            // Same demotion for a PTX predating the pixel-shuffle entry: the upsample falls back to the host loop.
+            try { _ltx25PixelShuffleF32 = _ltx25NaModule.GetFunction("ltx25_pixel_shuffle_f32"); }
+            catch (CudaException) { _ltx25PixelShuffleF32 = 0; }
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
@@ -2020,6 +2024,9 @@ public sealed class CudaKernels : IDisposable
     /// (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).</summary>
     public bool HasLtx25NaKernels => _ltx25NaModule is not null;
 
+    /// <summary>Whether the loaded ltx25_na_decoder.ptx carries the pixel-shuffle entry.</summary>
+    public bool HasLtx25PixelShuffle => _ltx25PixelShuffleF32 != 0;
+
     /// <summary>Shared-memory bytes <see cref="LaunchLtx25Na3d"/> needs: the q row plus one score per window position.</summary>
     public static int Ltx25Na3dSharedBytes(int headDim, int kt, int kh, int kw) => (headDim + kt * kh * kw) * sizeof(float);
 
@@ -2095,6 +2102,33 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>3-axis interleaved rope on x[1,t,h,w,heads,headDim], in place. cos/sin tables are per axis,
     /// laid out [axisLength, pairs]; the three head chunks sit at offsets 0 / offsetH / offsetW.</summary>
+    /// <summary>Launches the channels-last 3D pixel shuffle over one temporal chunk; one thread per SOURCE element,
+    /// so <paramref name="total"/> is the projection's element count.</summary>
+    public unsafe void LaunchLtx25PixelShuffle(ulong dst, ulong src, int start, int h, int w,
+        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW,
+        long total, nint stream)
+    {
+        if (_ltx25PixelShuffleF32 == 0)
+            throw new InvalidOperationException("ltx25_pixel_shuffle_f32 is not loaded; gate on HasLtx25PixelShuffle first.");
+
+        ulong dstArg = dst, srcArg = src;
+        int startArg = start, hArg = h, wArg = w;
+        int p1Arg = strideT, p2Arg = strideH, p3Arg = strideW;
+        int ocArg = outChannels, dropArg = dropped, ohArg = outH, owArg = outW;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[13];
+        args[0] = &dstArg; args[1] = &srcArg;
+        args[2] = &startArg; args[3] = &hArg; args[4] = &wArg;
+        args[5] = &p1Arg; args[6] = &p2Arg; args[7] = &p3Arg;
+        args[8] = &ocArg; args[9] = &dropArg; args[10] = &ohArg; args[11] = &owArg;
+        args[12] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ltx25PixelShuffleF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public unsafe void LaunchLtx25NaRope3d(ulong x,
         ulong cosT, ulong sinT, ulong cosH, ulong sinH, ulong cosW, ulong sinW,
         int dimT, int dimH, int dimW, int heads, int headDim,

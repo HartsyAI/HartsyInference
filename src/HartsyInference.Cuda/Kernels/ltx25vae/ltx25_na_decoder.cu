@@ -452,3 +452,40 @@ extern "C" __global__ void ltx25_na_rope3d_f32(
     x[rowOff + 2u * pairIndex] = even * c - odd * s;
     x[rowOff + 2u * pairIndex + 1u] = even * s + odd * c;
 }
+
+// Channels-last 3D pixel shuffle of one temporal chunk of the upsample projection. Each source token
+// [row, projChannels] unpacks into a p1*p2*p3 sub-block of output tokens, taking channel `packed` of the
+// source to channel `c` of the destination, where packed = ((c*p1 + i1)*p2 + i2)*p3 + i3.
+// One thread per SOURCE element, so reads are fully coalesced and the strided access is on the write side.
+// `dropped` shifts the temporal axis by one frame (the causal shuffle's duplicated leading frame); the
+// source elements that map before frame 0 have no destination and simply return.
+extern "C" __global__ void ltx25_pixel_shuffle_f32(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    int start, int h, int w, int p1, int p2, int p3,
+    int outChannels, int dropped, int outH, int outW,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    int projChannels = p1 * p2 * p3 * outChannels;
+    unsigned long long srcRow = i / (unsigned long long)projChannels;
+    int packed = (int)(i - srcRow * (unsigned long long)projChannels);
+
+    int i3 = packed % p3; int rest = packed / p3;
+    int i2 = rest % p2; rest /= p2;
+    int i1 = rest % p1; int c = rest / p1;
+
+    int wi = (int)(srcRow % (unsigned long long)w);
+    unsigned long long r = srcRow / (unsigned long long)w;
+    int hi = (int)(r % (unsigned long long)h);
+    int tLocal = (int)(r / (unsigned long long)h);
+
+    int frame = (tLocal + start) * p1 + i1 - dropped;
+    if (frame < 0) return;
+
+    long long dstRow = ((long long)frame * outH + (long long)hi * p2 + i2) * (long long)outW
+                     + (long long)wi * p3 + i3;
+    dst[dstRow * (long long)outChannels + c] = src[i];
+}

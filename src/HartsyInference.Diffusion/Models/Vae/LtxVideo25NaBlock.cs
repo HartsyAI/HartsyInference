@@ -68,16 +68,46 @@ internal sealed class LtxVideo25NaBlock
     /// <param name="chunkBytes">Per-chunk activation budget; see <see cref="LtxVideo25TemporalChunks"/>. The three
     /// sub-passes run to completion one after another rather than fused per chunk, because the attention's halo
     /// reads rows that a fused loop would already have written a later pass's residual into.</param>
-    public unsafe void Forward(IBackend backend, Tensor x, Tensor? context, Tensor? modulation, int t, int h, int w,
+    public void Forward(IBackend backend, Tensor x, Tensor? context, Tensor? modulation, int t, int h, int w,
         long chunkBytes)
     {
         if (_isDiffusion && (context is null || modulation is null))
             throw new ArgumentNullException(nameof(context), "A diffusion block needs both the latent context and the AdaLN modulation.");
         long plane = (long)h * w;
         if (_isDiffusion) AddContextPass(backend, x, context!, t, plane, chunkBytes);
-        AttentionPass(backend, x, modulation, t, h, w, plane, chunkBytes);
-        LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_resid", x);
-        MlpPass(backend, x, modulation, t, plane, chunkBytes);
+        Modulation msa = _isDiffusion ? Modulation.Build(modulation!, _scaleShiftTable!, ScaleMsaChunk, ShiftMsaChunk, _dim) : default;
+        Modulation mlp = _isDiffusion ? Modulation.Build(modulation!, _scaleShiftTable!, ScaleMlpChunk, ShiftMlpChunk, _dim) : default;
+        try
+        {
+            AttentionPass(backend, x, msa, t, h, w, plane, chunkBytes);
+            LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_resid", x);
+            MlpPass(backend, x, mlp, t, plane, chunkBytes);
+        }
+        finally { msa.Dispose(); mlp.Dispose(); }
+    }
+
+    /// <summary>One AdaLN slot's <c>1 + scale</c> and <c>shift</c> as <c>[dim]</c> rows, ready to broadcast over every
+    /// token. Built once per block call rather than per chunk: the sum is over the shared modulation and this block's
+    /// table, neither of which varies across chunks.</summary>
+    private readonly record struct Modulation(Tensor? ScalePlus1, Tensor? Shift)
+    {
+        public static unsafe Modulation Build(Tensor modulation, Tensor scaleShiftTable, int scaleChunk, int shiftChunk, int dim)
+        {
+            Tensor scalePlus1 = new Tensor(new TensorShape(dim), DType.F32);
+            Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
+            float* mod = (float*)modulation.DataPointer;
+            float* table = (float*)scaleShiftTable.DataPointer;
+            float* s = (float*)scalePlus1.DataPointer;
+            float* b = (float*)shift.DataPointer;
+            for (int i = 0; i < dim; i++)
+            {
+                s[i] = 1f + (mod[scaleChunk * dim + i] + table[scaleChunk * dim + i]);
+                b[i] = mod[shiftChunk * dim + i] + table[shiftChunk * dim + i];
+            }
+            return new Modulation(scalePlus1, shift);
+        }
+
+        public void Dispose() { ScalePlus1?.Dispose(); Shift?.Dispose(); }
     }
 
     private void AddContextPass(IBackend backend, Tensor x, Tensor context, int frames, long plane, long chunkBytes)
@@ -101,7 +131,7 @@ internal sealed class LtxVideo25NaBlock
     /// <summary>Attention residual, one halo-padded temporal chunk at a time. A chunk's residual write is deferred
     /// until no still-unprocessed chunk's halo covers it, so every chunk reads the same pre-attention <c>x</c> a
     /// single untiled pass would have read.</summary>
-    private unsafe void AttentionPass(IBackend backend, Tensor x, Tensor? modulation, int frames, int h, int w,
+    private void AttentionPass(IBackend backend, Tensor x, Modulation modulation, int frames, int h, int w,
         long plane, long chunkBytes)
     {
         // Live at the attention's peak: the normed window, the fused qkv, and q/k/v.
@@ -119,7 +149,7 @@ internal sealed class LtxVideo25NaBlock
             {
                 backend.SliceRowsGeneric(normed, x, checked((int)((long)windowStart * plane)));
                 backend.RmsNorm(normed, normed, _norm1Weight!, _eps);
-                if (_isDiffusion) Modulate(normed, modulation!, ScaleMsaChunk, ShiftMsaChunk, windowRows);
+                if (_isDiffusion) backend.AffineBroadcastLastDim(normed, normed, modulation.ScalePlus1!, modulation.Shift!);
                 delta = _attention.Forward(backend, normed, windowFrames, h, w, windowStart);
             }
             if (start != windowStart || end - start != windowFrames)
@@ -159,7 +189,7 @@ internal sealed class LtxVideo25NaBlock
         pending.RemoveRange(kept, pending.Count - kept);
     }
 
-    private unsafe void MlpPass(IBackend backend, Tensor x, Tensor? modulation, int frames, long plane, long chunkBytes)
+    private void MlpPass(IBackend backend, Tensor x, Modulation modulation, int frames, long plane, long chunkBytes)
     {
         long bytesPerToken = (3L * _dim + 2L * _hidden) * sizeof(float);
         int step = LtxVideo25TemporalChunks.FramesPerChunk(chunkBytes, plane, bytesPerToken, frames);
@@ -173,7 +203,7 @@ internal sealed class LtxVideo25NaBlock
             using Tensor normed = new Tensor(shape, DType.F32);
             backend.SliceRowsGeneric(slice, x, rowOffset);
             backend.RmsNorm(normed, slice, _norm2Weight!, _eps);
-            if (_isDiffusion) Modulate(normed, modulation!, ScaleMlpChunk, ShiftMlpChunk, rows);
+            if (_isDiffusion) backend.AffineBroadcastLastDim(normed, normed, modulation.ScalePlus1!, modulation.Shift!);
             // The layer-diff harness compares whole-tensor dumps, so these taps only carry a full tensor when the
             // geometry it runs at leaves the pass un-chunked.
             if (count == frames) LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_norm2", normed);
@@ -197,24 +227,5 @@ internal sealed class LtxVideo25NaBlock
         Tensor result = new Tensor(new TensorShape(tokens, _dim), DType.F32);
         backend.Linear(result, gate, _downWeight!, null);
         return result;
-    }
-
-    /// <summary><c>x = x·(1 + scale) + shift</c> where scale/shift are the per-block sums of the shared AdaLN chunk
-    /// and this block's <c>scale_shift_table</c> row, broadcast over every token.</summary>
-    private unsafe void Modulate(Tensor x, Tensor modulation, int scaleChunk, int shiftChunk, long tokens)
-    {
-        float* rows = (float*)x.DataPointer;
-        float* mod = (float*)modulation.DataPointer;
-        float* table = (float*)_scaleShiftTable!.DataPointer;
-        for (long token = 0; token < tokens; token++)
-        {
-            float* row = rows + token * _dim;
-            for (int i = 0; i < _dim; i++)
-            {
-                float scale = mod[scaleChunk * _dim + i] + table[scaleChunk * _dim + i];
-                float shift = mod[shiftChunk * _dim + i] + table[shiftChunk * _dim + i];
-                row[i] = row[i] * (1f + scale) + shift;
-            }
-        }
     }
 }

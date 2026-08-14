@@ -106,13 +106,15 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         Tap?.Invoke("attn_qrope", q);
         Tap?.Invoke("attn_krope", k);
         Tap?.Invoke("attn_v", v);
-        using Tensor attended = new Tensor(headShape, DType.F32);
+        // Allocated flat, NOT reshaped from the rank-6 grid afterwards: the bytes are identical either way, but
+        // Reshape reads DataPointer, which drags a device-resident result back to the host and forces the
+        // projection below to re-upload it.
+        using Tensor attended = new Tensor(new TensorShape(tokens, _dim), DType.F32);
         backend.Na3d(attended, q, k, v, _kernel.T, _kernel.H, _kernel.W, scale: 1f);
 
         Tap?.Invoke("attn_na3d", attended);
         Tensor result = new Tensor(new TensorShape(tokens, _dim), DType.F32);
-        using Tensor attendedRows = attended.Reshape(new TensorShape(tokens, _dim));
-        backend.Linear(result, attendedRows, _projWeight!, _projBias);
+        backend.Linear(result, attended, _projWeight!, _projBias);
         Tap?.Invoke("attn_out", result);
         return result;
     }

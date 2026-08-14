@@ -341,4 +341,43 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
         for (long i = 0; i < shape.ElementCount; i++) p[i] = value;
         return t;
     }
+
+    /// <summary>The pixel-shuffle kernel against the managed reference, driven the way the decoder drives it: the
+    /// destination spans the whole clip and each call fills only one temporal chunk, so a second call with
+    /// <c>start &gt; 0</c> must land its frames in the right place without disturbing the first chunk's. Production
+    /// geometries currently leave this pass un-chunked, so <c>start &gt; 0</c> is reachable only here. Strides are
+    /// distinct per axis and <c>dropped=1</c> is on, which is the case whose off-by-one silently shifts the clip.</summary>
+    [Fact]
+    public void Ltx25PixelShuffleMatchesTheReferenceAcrossAChunkBoundary()
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        const int t = 6, h = 3, w = 4, p1 = 2, p2 = 2, p3 = 1, outChannels = 5, dropped = 1;
+        const int projChannels = p1 * p2 * p3 * outChannels;
+        int outT = t * p1 - dropped, outH = h * p2, outW = w * p3;
+        long plane = (long)h * w;
+        TensorShape outShape = new TensorShape((long)outT * outH * outW, outChannels);
+
+        using Tensor projected = Random(new TensorShape(t * plane, projChannels), seed: 71);
+        using Tensor expected = new Tensor(outShape, DType.F32);
+        IBackend.Ltx25PixelShuffleReference(expected, projected, 0, h, w, p1, p2, p3, outChannels, dropped, outH, outW);
+
+        // Two chunks of 4 and 2 frames, mirroring LtxVideo25PixelShuffleUpsample's loop.
+        using Tensor actual = new Tensor(outShape, DType.F32);
+        foreach ((int start, int count) in new[] { (0, 4), (4, 2) })
+        {
+            using Tensor chunk = new Tensor(new TensorShape(count * plane, projChannels), DType.F32);
+            Buffer.MemoryCopy((byte*)projected.DataPointer + start * plane * projChannels * sizeof(float),
+                (void*)chunk.DataPointer, chunk.ElementCount * sizeof(float), chunk.ElementCount * sizeof(float));
+            cuda.Ltx25PixelShuffle(actual, chunk, start, h, w, p1, p2, p3, outChannels, dropped, outH, outW);
+        }
+        cuda.Sync();
+        Assert.True(cuda.Kernels is not null && cuda.Kernels.HasLtx25PixelShuffle,
+            "ltx25_pixel_shuffle_f32 is not loaded — this test would be comparing the managed reference against itself.");
+
+        float* e = (float*)expected.DataPointer;
+        float* a = (float*)actual.DataPointer;
+        // A pure permutation: anything but bit-equality is a wrong index, not a tolerance question.
+        for (long i = 0; i < outShape.ElementCount; i++)
+            Assert.True(e[i] == a[i], $"element {i}: reference {e[i]} vs chunked device {a[i]}");
+    }
 }

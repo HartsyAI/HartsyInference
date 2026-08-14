@@ -4031,6 +4031,44 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>LTX-2.5 channels-last 3D pixel shuffle — see <see cref="IBackend.Ltx25PixelShuffle"/>. The output
+    /// spans every chunk, so it is allocated once and written in place rather than recached per call.</summary>
+    public void Ltx25PixelShuffle(Tensor output, Tensor projected, int start, int h, int w,
+        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx25PixelShuffle");
+        if (output.DType != DType.F32 || projected.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Ltx25PixelShuffle supports F32 only — got output={output.DType}, projected={projected.DType}.");
+        EnsureKernels();
+        if (_kernels is null || !_kernels.HasLtx25PixelShuffle)
+        {
+            IBackend.Ltx25PixelShuffleReference(output, projected, start, h, w,
+                strideT, strideH, strideW, outChannels, dropped, outH, outW);
+            return;
+        }
+
+        EnterOp();
+        ulong pSrc = 0;
+        try
+        {
+            pSrc = GpuTransferHelper.CopyToDevice(projected);
+            // The destination persists across the caller's chunk loop — allocate on the first chunk without an
+            // upload (every destination element is written exactly once across the whole loop) and reuse after.
+            if (!GpuTransferHelper.IsActivationCached(output))
+            {
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                GpuTransferHelper.CacheActivation(output, GpuTransferHelper.AllocateDevice(outBytes), outBytes);
+            }
+            ulong pDst = GpuTransferHelper.CopyToDevice(output);
+            _kernels.LaunchLtx25PixelShuffle(pDst, pSrc, start, h, w, strideT, strideH, strideW,
+                outChannels, dropped, outH, outW, projected.ElementCount, _stream.Handle);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pSrc);
+        }
+    }
+
     /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Prefers the query-tiled kernel,
     /// which stages a whole tile's shared window instead of re-reading one window per query; falls back to the
     /// per-query kernel on shapes it does not cover, and to the managed reference when <c>ltx25_na_decoder.ptx</c>
@@ -4041,7 +4079,7 @@ public sealed class CudaBackend : IBackend
             throw new NotSupportedException($"CUDA Na3d supports F32 only — got output={output.DType}, q={q.DType}, k={k.DType}, v={v.DType}.");
         if (q.Shape.Rank != 6)
             throw new ArgumentException($"Na3d expects [batch, T, H, W, heads, headDim]; got {q.Shape}.", nameof(q));
-        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !q.Shape.Equals(output.Shape))
+        if (!q.Shape.Equals(k.Shape) || !q.Shape.Equals(v.Shape) || !IBackend.Na3dOutputShapeMatches(output.Shape, q.Shape))
             throw new ArgumentException($"Na3d requires identical shapes; got q={q.Shape}, k={k.Shape}, v={v.Shape}, output={output.Shape}.");
         if (kernelT <= 0 || kernelH <= 0 || kernelW <= 0)
             throw new ArgumentException($"Na3d kernel must be positive; got ({kernelT}, {kernelH}, {kernelW}).");

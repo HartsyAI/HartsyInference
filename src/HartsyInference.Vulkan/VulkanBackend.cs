@@ -1708,7 +1708,7 @@ public sealed class VulkanBackend : IBackend
         if ((input.DType != DType.F32 && input.DType != DType.F16) || output.DType != input.DType
             || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
         {
-            ((IBackend)this).AffineBroadcastLastDim(output, input, scale, shift);
+            IBackend.AffineBroadcastLastDimReference(output, input, scale, shift);
             return;
         }
         int rank = input.Shape.Rank;
