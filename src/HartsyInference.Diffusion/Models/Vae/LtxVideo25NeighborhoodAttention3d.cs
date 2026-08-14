@@ -63,35 +63,41 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
     }
 
     /// <summary>Attends <paramref name="x"/> <c>[t·h·w, dim]</c> and returns a freshly allocated result of the same shape.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, int t, int h, int w)
+    /// <param name="frameOffset">Position of this window's first frame on the FULL temporal axis. A temporally
+    /// chunked caller must pass it: the rotation is relative, so a window decoded at local positions still scores
+    /// identically, but only global positions reproduce the untiled tables bit for bit.</param>
+    public Tensor Forward(IBackend backend, Tensor x, int t, int h, int w, int frameOffset = 0)
     {
         long tokens = (long)t * h * w;
         TensorShape headShape = new TensorShape([1, t, h, w, _heads, _headDim]);
 
-        using Tensor qkv = new Tensor(new TensorShape(tokens, 3L * _dim), DType.F32);
-        backend.Linear(qkv, x, _qkvWeight!, _qkvBias);
-
         using Tensor q = new Tensor(headShape, DType.F32);
         using Tensor k = new Tensor(headShape, DType.F32);
         using Tensor v = new Tensor(headShape, DType.F32);
-        backend.SliceLastDim(q, qkv, 0);
-        backend.SliceLastDim(k, qkv, _dim);
-        backend.SliceLastDim(v, qkv, 2 * _dim);
+        // Freed before the attention output and projection are allocated: the fused buffer is three times the width
+        // of everything else here, and holding it across the whole call is what sets this pass's peak.
+        using (Tensor qkv = new Tensor(new TensorShape(tokens, 3L * _dim), DType.F32))
+        {
+            backend.Linear(qkv, x, _qkvWeight!, _qkvBias);
+            backend.SliceLastDim(q, qkv, 0);
+            backend.SliceLastDim(k, qkv, _dim);
+            backend.SliceLastDim(v, qkv, 2 * _dim);
+            Tap?.Invoke("attn_qkv", qkv);
+        }
 
         // Normalize q/k on the tensors themselves, NOT through a [tokens·heads, head_dim] Reshape view: RmsNorm
         // already rows by the last dim, and an in-place op on a view leaves its result in the view's own device
         // cache, which Dispose frees without writing back — the ApplyKeyframesAbsPos defect, which passes on
         // CpuBackend and silently feeds un-normalized q/k to attention on CUDA.
-        Tap?.Invoke("attn_qkv", qkv);
         backend.RmsNorm(q, q, _qNormWeight!, _eps);
         backend.RmsNorm(k, k, _kNormWeight!, _eps);
         Tap?.Invoke("attn_qnorm", q);
-        using (Tensor cosT = BuildTable(t, _invFreqT, sine: false))
-        using (Tensor sinT = BuildTable(t, _invFreqT, sine: true))
-        using (Tensor cosH = BuildTable(h, _invFreqH, sine: false))
-        using (Tensor sinH = BuildTable(h, _invFreqH, sine: true))
-        using (Tensor cosW = BuildTable(w, _invFreqW, sine: false))
-        using (Tensor sinW = BuildTable(w, _invFreqW, sine: true))
+        using (Tensor cosT = BuildTable(frameOffset, t, _invFreqT, sine: false))
+        using (Tensor sinT = BuildTable(frameOffset, t, _invFreqT, sine: true))
+        using (Tensor cosH = BuildTable(0, h, _invFreqH, sine: false))
+        using (Tensor sinH = BuildTable(0, h, _invFreqH, sine: true))
+        using (Tensor cosW = BuildTable(0, w, _invFreqW, sine: false))
+        using (Tensor sinW = BuildTable(0, w, _invFreqW, sine: true))
         {
             backend.Ltx25NaRope3d(q, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
             backend.Ltx25NaRope3d(k, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
@@ -111,10 +117,11 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         return result;
     }
 
-    /// <summary>One <c>[length, pairs]</c> rope table. Angles are formed and rounded in F32 exactly like the
-    /// reference's <c>pos[:, None] * inv[None, :]</c>, and on the host in both backends, so the device path cannot
-    /// drift from the reference through a different <c>cos</c>/<c>sin</c> implementation.</summary>
-    private static unsafe Tensor BuildTable(int length, float[] inverseFrequencies, bool sine)
+    /// <summary>One <c>[length, pairs]</c> rope table for global positions <c>[offset, offset+length)</c>. Angles are
+    /// formed and rounded in F32 exactly like the reference's <c>pos[:, None] * inv[None, :]</c>, and on the host in
+    /// both backends, so the device path cannot drift from the reference through a different <c>cos</c>/<c>sin</c>
+    /// implementation.</summary>
+    private static unsafe Tensor BuildTable(int offset, int length, float[] inverseFrequencies, bool sine)
     {
         int pairs = inverseFrequencies.Length;
         Tensor table = new Tensor(new TensorShape(length, pairs), DType.F32);
@@ -123,7 +130,7 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         {
             for (int i = 0; i < pairs; i++)
             {
-                float angle = position * inverseFrequencies[i];
+                float angle = (offset + position) * inverseFrequencies[i];
                 p[position * pairs + i] = sine ? MathF.Sin(angle) : MathF.Cos(angle);
             }
         }

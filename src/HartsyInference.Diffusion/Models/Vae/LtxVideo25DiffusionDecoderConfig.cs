@@ -48,6 +48,11 @@ public sealed record LtxVideo25DiffusionDecoderConfig
 
     public float RopeBase { get; init; } = 10000f;
 
+    /// <summary>Activation-workspace bracket for one temporal chunk (see <see cref="LtxVideo25TemporalChunks"/>).
+    /// Zero derives it from the backend's free VRAM at decode time. Chunking is exact, so this trades decode time —
+    /// a chunk narrower than its halo re-attends the halo rows — for peak memory, and nothing else.</summary>
+    public long ChunkWorkspaceBytes { get; init; }
+
     public float NormEps { get; init; } = 1e-6f;
 
     /// <summary>SwiGLU hidden width, rounded up to a multiple of 16 exactly as the reference does.</summary>

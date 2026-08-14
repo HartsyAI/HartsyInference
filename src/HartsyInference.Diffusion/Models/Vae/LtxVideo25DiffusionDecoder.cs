@@ -23,6 +23,9 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// checkpoint and is read by neither reference implementation, so it is deliberately not loaded.</para></summary>
 public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
 {
+    /// <summary>Chunk budget used when the backend reports no free-memory figure (every non-CUDA backend).</summary>
+    private const long DefaultChunkBytes = 2L << 30;
+
     private readonly LtxVideo25DiffusionDecoderConfig _config;
     private readonly float[]? _latentsMean;
     private readonly float[]? _latentsStd;
@@ -148,6 +151,7 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
     public Tensor EncodeContext(IBackend backend, Tensor latent, out int frames, out int height, out int width)
     {
         ValidateLatent(latent);
+        long chunkBytes = ResolveChunkBytes(backend);
         int latentFrames = (int)latent.Shape[2], latentHeight = (int)latent.Shape[3], latentWidth = (int)latent.Shape[4];
         int pad = _config.TrailingPadLatentFrames;
 
@@ -163,12 +167,12 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
         {
             for (int bi = 0; bi < _detStages[stage].Length; bi++)
             {
-                _detStages[stage][bi].Forward(backend, x, null, null, currentT, currentH, currentW);
+                _detStages[stage][bi].Forward(backend, x, null, null, currentT, currentH, currentW, chunkBytes);
                 Tap?.Invoke($"stage{stage}_block{bi}", x);
             }
             Tap?.Invoke($"stage{stage}_blocks", x);
             Tensor next = _upsamples[stage].Forward(backend, x, currentT, currentH, currentW,
-                dropLeadingFrame: true, out currentT, out currentH, out currentW);
+                dropLeadingFrame: true, chunkBytes, out currentT, out currentH, out currentW);
             x.Dispose();
             x = next;
             Tap?.Invoke($"stage{stage}_up", x);
@@ -213,8 +217,17 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
     /// <c>model_output_type = "x0"</c> and a single step this output is the decode itself.</summary>
     private Tensor DiffusionStep(IBackend backend, Tensor context, Tensor noise, int frames, int height, int width, float timestep)
     {
+        long chunkBytes = ResolveChunkBytes(backend);
         int stage5 = _config.StageChannels[^1];
         long tokens = (long)frames * height * width;
+        long plane = (long)height * width;
+        // The chunk plan is the one thing a decode-time OOM or an unexpected decode time needs, and nothing else
+        // records it: the budget is derived from free VRAM, so it differs run to run at the same geometry.
+        int attentionChunk = LtxVideo25TemporalChunks.AttentionFramesPerChunk(chunkBytes, plane,
+            7L * stage5 * sizeof(float), frames, _config.Stage5Kernel.T);
+        HartsyInference.Core.Logging.Logs.Info($"[ltx25-vae] stage 5: {frames}x{height}x{width} tokens={tokens}, "
+            + $"chunk budget {chunkBytes >> 20} MB -> attention {attentionChunk} of {frames} frames per chunk "
+            + $"(+{_config.Stage5Kernel.T / 2} halo each side)");
 
         Tensor x = new Tensor(new TensorShape(tokens, stage5), DType.F32);
         using (Tensor patched = PatchifyPixels(noise, frames, height, width))
@@ -227,22 +240,47 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
             Tap?.Invoke("modulation", modulation);
             for (int i = 0; i < _diffBlocks.Length; i++)
             {
-                _diffBlocks[i].Forward(backend, x, context, modulation, frames, height, width);
+                _diffBlocks[i].Forward(backend, x, context, modulation, frames, height, width, chunkBytes);
                 Tap?.Invoke($"diff{i}", x);
             }
         }
 
         int packedChannels = _config.OutChannels * _config.PatchSize * _config.PatchSize;
-        using Tensor normed = new Tensor(new TensorShape(tokens, stage5), DType.F32);
-        backend.RmsNorm(normed, x, _normOutWeight!, _config.NormEps);
-        x.Dispose();
-        Tap?.Invoke("norm_out", normed);
         using Tensor packed = new Tensor(new TensorShape(tokens, packedChannels), DType.F32);
-        backend.Linear(packed, normed, _convOutWeight!, _convOutBias);
+        long bytesPerToken = (long)(2 * stage5 + packedChannels) * sizeof(float);
+        int step = LtxVideo25TemporalChunks.FramesPerChunk(chunkBytes, plane, bytesPerToken, frames);
+        for (int start = 0; start < frames; start += step)
+        {
+            int count = Math.Min(step, frames - start);
+            int rowOffset = checked((int)((long)start * plane));
+            TensorShape shape = new TensorShape((long)count * plane, stage5);
+            using Tensor slice = new Tensor(shape, DType.F32);
+            using Tensor normed = new Tensor(shape, DType.F32);
+            using Tensor chunk = new Tensor(new TensorShape((long)count * plane, packedChannels), DType.F32);
+            backend.SliceRowsGeneric(slice, x, rowOffset);
+            backend.RmsNorm(normed, slice, _normOutWeight!, _config.NormEps);
+            // The layer-diff harness compares whole-tensor dumps, so this tap only carries a full tensor when the
+            // geometry it runs at leaves the tail un-chunked.
+            if (count == frames) Tap?.Invoke("norm_out", normed);
+            backend.Linear(chunk, normed, _convOutWeight!, _convOutBias);
+            backend.ScatterRowsGeneric(packed, chunk, rowOffset);
+        }
+        x.Dispose();
         Tap?.Invoke("conv_out", packed);
         Tensor pixels = UnpatchifyPixels(packed, frames, height, width);
         Tap?.Invoke("pixels", pixels);
         return pixels;
+    }
+
+    /// <summary>Per-chunk activation budget. Auto-sizing off free VRAM is deliberate: chunking costs decode time
+    /// (attention re-reads its halo), so the widest chunk the device can hold is the fastest correct one, and a
+    /// constant tuned at one geometry would either OOM at a larger one or crawl at a smaller one.</summary>
+    private long ResolveChunkBytes(IBackend backend)
+    {
+        if (_config.ChunkWorkspaceBytes > 0) return _config.ChunkWorkspaceBytes;
+        long free = backend.FreeMemoryBytes();
+        if (free <= 0) return DefaultChunkBytes;
+        return Math.Clamp(free / 3, 768L << 20, 8L << 30);
     }
 
     /// <summary>Sinusoidal embedding of <c>scale·t</c> → <c>t_embedder</c> MLP → SiLU → <c>shared_adaln.proj</c>,

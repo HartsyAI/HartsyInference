@@ -39,9 +39,11 @@ internal sealed class LtxVideo25PixelShuffleUpsample
         if (_projBias is not null) yield return _projBias;
     }
 
-    /// <summary>Upsamples <paramref name="x"/> <c>[t·h·w, in]</c> to <c>[outT·outH·outW, OutChannels]</c>.</summary>
+    /// <summary>Upsamples <paramref name="x"/> <c>[t·h·w, in]</c> to <c>[outT·outH·outW, OutChannels]</c>. Pointwise
+    /// along the temporal axis, so <paramref name="chunkBytes"/> bounds the widened projection without changing a
+    /// single output value.</summary>
     public unsafe Tensor Forward(IBackend backend, Tensor x, int t, int h, int w, bool dropLeadingFrame,
-        out int outT, out int outH, out int outW)
+        long chunkBytes, out int outT, out int outH, out int outW)
     {
         int p1 = _stride.T, p2 = _stride.H, p3 = _stride.W;
         int dropped = p1 == 2 && dropLeadingFrame ? 1 : 0;
@@ -49,28 +51,37 @@ internal sealed class LtxVideo25PixelShuffleUpsample
         outH = h * p2;
         outW = w * p3;
 
-        using Tensor projected = new Tensor(new TensorShape((long)t * h * w, _projChannels), DType.F32);
-        backend.Linear(projected, x, _projWeight!, _projBias);
-
         int outChannels = OutChannels;
+        long plane = (long)h * w;
         Tensor result = new Tensor(new TensorShape((long)outT * outH * outW, outChannels), DType.F32);
-        float* src = (float*)projected.DataPointer, dst = (float*)result.DataPointer;
-        for (int ti = 0; ti < t; ti++)
-        for (int i1 = 0; i1 < p1; i1++)
+        float* dst = (float*)result.DataPointer;
+        long bytesPerToken = (long)(_inChannels + _projChannels) * sizeof(float);
+        int step = LtxVideo25TemporalChunks.FramesPerChunk(chunkBytes, plane, bytesPerToken, t);
+        for (int start = 0; start < t; start += step)
         {
-            int frame = ti * p1 + i1 - dropped;
-            if (frame < 0) continue;
-            for (int hi = 0; hi < h; hi++)
-            for (int i2 = 0; i2 < p2; i2++)
-            for (int wi = 0; wi < w; wi++)
-            for (int i3 = 0; i3 < p3; i3++)
+            int count = Math.Min(step, t - start);
+            using Tensor projected = new Tensor(new TensorShape((long)count * plane, _projChannels), DType.F32);
+            using Tensor? slice = count == t ? null : new Tensor(new TensorShape((long)count * plane, _inChannels), DType.F32);
+            if (slice is not null) backend.SliceRowsGeneric(slice, x, checked((int)((long)start * plane)));
+            backend.Linear(projected, slice ?? x, _projWeight!, _projBias);
+            float* src = (float*)projected.DataPointer;
+            for (int ti = start; ti < start + count; ti++)
+            for (int i1 = 0; i1 < p1; i1++)
             {
-                long srcRow = ((long)ti * h + hi) * w + wi;
-                long dstRow = (((long)frame * outH + hi * p2 + i2) * outW) + wi * p3 + i3;
-                for (int c = 0; c < outChannels; c++)
+                int frame = ti * p1 + i1 - dropped;
+                if (frame < 0) continue;
+                for (int hi = 0; hi < h; hi++)
+                for (int i2 = 0; i2 < p2; i2++)
+                for (int wi = 0; wi < w; wi++)
+                for (int i3 = 0; i3 < p3; i3++)
                 {
-                    int packed = ((c * p1 + i1) * p2 + i2) * p3 + i3;
-                    dst[dstRow * outChannels + c] = src[srcRow * _projChannels + packed];
+                    long srcRow = ((long)(ti - start) * h + hi) * w + wi;
+                    long dstRow = (((long)frame * outH + hi * p2 + i2) * outW) + wi * p3 + i3;
+                    for (int c = 0; c < outChannels; c++)
+                    {
+                        int packed = ((c * p1 + i1) * p2 + i2) * p3 + i3;
+                        dst[dstRow * outChannels + c] = src[srcRow * _projChannels + packed];
+                    }
                 }
             }
         }
