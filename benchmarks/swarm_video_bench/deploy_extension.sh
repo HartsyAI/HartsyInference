@@ -49,6 +49,17 @@ WAS_UP=0
 systemctl --user is-active --quiet swarmui.service && WAS_UP=1
 if [ "$WAS_UP" = 1 ]; then echo ">>> stopping swarmui.service …"; systemctl --user stop swarmui.service; sleep 6; fi
 
+# Name every DLL whose bytes actually change. This deploys the WHOLE engine, so it can silently overwrite
+# another session's work — on 2026-08-14 it replaced HartsyInference.Audio.dll out from under the MiniMax
+# Music 3 session, whose SwarmUI-measured numbers then described someone else's build. Listing the changes is
+# what lets whoever is affected be told.
+for f in "$BUILD"/HartsyInference.*.dll; do
+    b=$(basename "$f"); d="$EXT/$b"
+    if [ ! -f "$d" ] || [ "$(md5sum "$f" | cut -d' ' -f1)" != "$(md5sum "$d" | cut -d' ' -f1)" ]; then
+        echo "    CHANGED: $b"
+    fi
+done
+echo "    ^ if any of the above are owned by another session, tell them to re-measure."
 cp -f "$BUILD"/HartsyInference.*.dll "$EXT"/ || { echo "FATAL: DLL copy failed"; exit 1; }
 mkdir -p "$EXT/Ptx"
 cp -f "$PTX_SRC"/*.ptx "$EXT/Ptx"/ || { echo "FATAL: PTX copy failed"; exit 1; }
