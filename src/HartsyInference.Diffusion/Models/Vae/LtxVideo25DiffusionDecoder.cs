@@ -278,9 +278,18 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
     private long ResolveChunkBytes(IBackend backend)
     {
         if (_config.ChunkWorkspaceBytes > 0) return _config.ChunkWorkspaceBytes;
+        // Trim first: FreeMemoryBytes is cuMemGetInfo, which counts stream-ordered pool blocks this decode has
+        // ALREADY freed as used. Stages 1-4 churn ~10 GB of transients through that pool, so the stage-5 sizing
+        // read 9.4 GB where 21.6 GB was really available and picked an 8-frame chunk instead of a 29-frame one —
+        // and a decode starting under enough pressure hit the 768 MB floor, i.e. 1 frame per chunk with a 5-frame
+        // halo each side, ~11x redundant attention. The trim costs one driver reservation the chunk loop pays back.
+        backend.TrimMemoryPool();
         long free = backend.FreeMemoryBytes();
         if (free <= 0) return DefaultChunkBytes;
-        return Math.Clamp(free / 3, 768L << 20, 8L << 30);
+        long bytes = Math.Clamp(free / 3, 768L << 20, 8L << 30);
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[ltx25-vae] chunk budget {bytes >> 20} MB from {free >> 20} MB free (pool-trimmed).");
+        return bytes;
     }
 
     /// <summary>Sinusoidal embedding of <c>scale·t</c> → <c>t_embedder</c> MLP → SiLU → <c>shared_adaln.proj</c>,

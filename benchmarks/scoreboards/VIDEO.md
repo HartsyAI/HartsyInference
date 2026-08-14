@@ -176,19 +176,34 @@ plus A/B, not a roofline guess) attributed all but 0.4% of it, and the answer wa
 | 768×512×97f | 79.16 s | **15.52 s** |
 | 512×320×25f | 6.92 s | **1.51 s** |
 
-### This flips the head-to-head on the quality decoder
+### ⚠️ RETRACTED: this did NOT flip the head-to-head. Warm-vs-warm, we are SLOWER.
 
-Using the same within-engine delta as the row below — what each engine pays to switch from the conv decoder to
-the diffusion one at 768×512×97f:
+An earlier revision of this section claimed ~2.2× faster than ComfyUI on the diffusion decode. **That was
+wrong, and the error was mine, not an agent's.** ComfyUI's "cost of the diffusion decoder" was computed as
+**+27.45 s** by differencing its **cold** diffusion run (68.92 s, which included loading the 1.5 GB VAE)
+against its **warm** conv run (41.47 s). Cold against warm. That inflated Comfy's decode cost by roughly a
+whole model load, and every conclusion drawn from it inherited the inflation.
 
-| | delta for the diffusion decoder |
-|---|---:|
-| ComfyUI (tiled, `VAEDecodeTiled` temporal 64 / overlap 16) | +27.45 s |
-| **Hartsy** (15.52 s vs the conv path's 2.878 s) | **+12.64 s** |
+Re-measured properly — both engines through the SwarmUI API, both on the **diffusion** VAE, both **warm**,
+768×512×97f/30 steps, VAE identity confirmed in every submitted workflow, DiT residency confirmed 48/48:
 
-**We are now ~2.2× FASTER than ComfyUI on the diffusion decode**, having been ~2.7× slower this morning. Same
-caveat as that row: Comfy's figure is whole-prompt execution and ours is the decode phase, so read the direction
-and rough magnitude, not a precise ratio.
+| | warm wall | evidence |
+|---|---:|---|
+| **ComfyUI** | **42.1 s** (42.22 / 42.09) | `Prompt executed in`, `vae_name: ltx-2.5-video-vae-bf16` on every submission |
+| **Hartsy** | **60 s** (cold 76 s) | decode 12.96 s, plan `6706 MB → 29 of 97 f/chunk`, h264+AAC, 4.0417 s = 97/24 |
+
+**Hartsy is 1.43× SLOWER on the quality decoder** — worse than the 1.12× on the conv path, because Comfy's
+warm diffusion decode costs it almost nothing over conv (42.1 vs 41.5) while ours costs ~10 s. The decoder work
+in this section is still real and large (79.2 → 12.9 s decode, geometry ceiling gone, visibly cleaner output);
+it closed a far worse gap, but it did not close it.
+
+**Two methodology rules this cost us, both now mandatory for any row in this file:**
+1. **Never difference a cold measurement against a warm one.** A cold arm carries model load; here that was
+   ~27 s, larger than the effect being claimed.
+2. **Record DiT residency with every SwarmUI number.** A first attempt at the Hartsy arm returned 68.8 s purely
+   because the DiT was in streaming mode (`resident prefix 18, streamed 30`), which starves the decode's
+   VRAM-derived chunk budget AND cripples the denoise. Nothing in the harness flags it. **A run without
+   `resident prefix 48, streamed 0` in its log is void** — including, potentially, rows taken earlier today.
 
 Correctness held throughout, which matters because this decoder has already shipped three silent bugs: the
 ComfyUI layer-diff passes at every stage (1e-7–5e-4 relL2 against a 5e-3 threshold, verified by dumping our side

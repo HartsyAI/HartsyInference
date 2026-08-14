@@ -457,7 +457,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             Logs.Info($"[ltx2-phase] dropping the resident prefix for the diffusion VAE decode "
                 + $"(free {Backend.FreeMemoryBytes() >> 20} MB before).");
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            long freeAfterDrop = Backend.FreeMemoryBytes();
             Backend.TrimMemoryPool();
+            Logs.Info($"[ltx2-phase] diffusion-VAE prefix drop: free {freeAfterDrop >> 20} MB after FreeWeights, "
+                + $"{Backend.FreeMemoryBytes() >> 20} MB after TrimMemoryPool.");
             _prefixResident = false;
         }
         else if (_prefixResident && ReferenceEquals(VaeBackend, Backend) && Backend.FreeMemoryBytes() < decodeNeed)

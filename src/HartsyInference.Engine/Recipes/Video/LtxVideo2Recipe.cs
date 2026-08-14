@@ -141,7 +141,13 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo25DiffusionDecoder? diffusionVae = null;
             if (conv.VaeDiffusionDecoder.Count > 0 && wantDiffusionVae)
             {
-                diffusionVae = new LtxVideo25DiffusionDecoder();
+                // Pinning the budget pins the chunk PLAN, and decode time is a function of the plan — so an A/B or a
+                // reproducible benchmark row needs this, and so does proving a plan change leaves the pixels alone.
+                long chunkMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX25_VAE_CHUNK_MB"),
+                    out long cm) && cm > 0 ? cm : 0;
+                diffusionVae = chunkMb > 0
+                    ? new LtxVideo25DiffusionDecoder(new LtxVideo25DiffusionDecoderConfig { ChunkWorkspaceBytes = chunkMb << 20 })
+                    : new LtxVideo25DiffusionDecoder();
                 diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
                 Logs.Info($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
                     + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Temporally chunked: no geometry "
