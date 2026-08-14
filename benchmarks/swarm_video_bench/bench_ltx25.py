@@ -12,7 +12,81 @@ Protocol: 1 cold gen (model load) + REPS warm gens, RANDOM SEED each (defeats th
 result cache). Model: LTX-2.5/ltx-2.5-22b-dev-transformer-int8_lean_convrot (dev, non-distilled,
 comfy-kitchen int8-convrot on both DiT and Gemma-4 TE).
 """
-import argparse, json, subprocess, sys, threading, time, urllib.request
+import argparse, glob, hashlib, json, os, subprocess, sys, threading, time, urllib.request
+
+# The SwarmUI API exercises the DEPLOYED EXTENSION, not this repo's build output. On 2026-08-14 the deployed
+# DLLs were 21 hours stale and missing a PTX file entirely, so every SwarmUI-side number taken that day measured
+# old code — the second time this has cost a scoreboard row (see `stale-deployed-dll-trap`). A memory note is not
+# a control; this is. Same shape as the free-VRAM guard and GPU-name assertion in ltx25_bench.sh, which do work.
+EXT_DIR = ("/home/hartsy/Desktop/Swarm/SwarmUI.not too old/src/bin/extensions/"
+           "SwarmExtensionSwarmUI-HartsyInference-Backend")
+BUILD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "../../src/HartsyInference.Cli/bin/Release/net8.0")
+
+
+def _md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def assert_extension_matches_build():
+    """Refuse to benchmark a stale deployment. Skipped only if the local build does not exist at all."""
+    if os.environ.get("LTX25_SKIP_DEPLOY_CHECK") == "1":
+        print("!!! deploy check SKIPPED by LTX25_SKIP_DEPLOY_CHECK=1", file=sys.stderr)
+        return
+    # HOLE 1 (was a silent skip): no local build meant the check passed by doing nothing, which is the exact
+    # failure it exists to prevent. A missing build is now fatal — you cannot verify a deployment against nothing.
+    if not os.path.isdir(BUILD_DIR):
+        print(f"FATAL: no local net8.0 build at {BUILD_DIR}, so the deployment cannot be verified.\n"
+              f"       Run: dotnet build src/HartsyInference.Cli -c Release -f net8.0", file=sys.stderr)
+        sys.exit(2)
+    stale = []
+    # HOLE 2 (was invisible): this compares deployed-vs-local, so a STALE LOCAL BUILD passed happily. Catch it by
+    # requiring the build to be newer than every source file feeding it. Source edited after the last build means
+    # the deployed DLLs cannot contain it, no matter how well they match. This is how temporal chunking landed in
+    # source at 08:54 while the extension still served 08:17 binaries.
+    repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+    newest_build = max((os.path.getmtime(p) for p in glob.glob(os.path.join(BUILD_DIR, "HartsyInference.*.dll"))),
+                       default=0)
+    newest_src, newest_src_path = 0, None
+    for root, dirs, files in os.walk(os.path.join(repo, "src")):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
+        for fn in files:
+            if fn.endswith((".cs", ".ptx", ".csproj")):
+                p = os.path.join(root, fn)
+                m = os.path.getmtime(p)
+                if m > newest_src:
+                    newest_src, newest_src_path = m, p
+    if newest_src > newest_build:
+        stale.append(f"LOCAL BUILD IS STALE: {os.path.relpath(newest_src_path, repo)} is newer than the net8.0 "
+                     f"build output ({time.strftime('%H:%M:%S', time.localtime(newest_src))} vs "
+                     f"{time.strftime('%H:%M:%S', time.localtime(newest_build))}) — rebuild, then redeploy")
+    for built in sorted(glob.glob(os.path.join(BUILD_DIR, "HartsyInference.*.dll"))):
+        deployed = os.path.join(EXT_DIR, os.path.basename(built))
+        if not os.path.exists(deployed):
+            stale.append(f"{os.path.basename(built)}: MISSING from the deployed extension")
+        elif _md5(built) != _md5(deployed):
+            stale.append(f"{os.path.basename(built)}: deployed md5 != freshly built md5")
+    for ptx in sorted(glob.glob(os.path.join(os.path.dirname(BUILD_DIR.rstrip('/')), "../../../HartsyInference.Cuda/Ptx/*.ptx"))):
+        deployed = os.path.join(EXT_DIR, "Ptx", os.path.basename(ptx))
+        if not os.path.exists(deployed):
+            stale.append(f"Ptx/{os.path.basename(ptx)}: MISSING from the deployed extension")
+        elif _md5(ptx) != _md5(deployed):
+            stale.append(f"Ptx/{os.path.basename(ptx)}: deployed md5 != repo md5")
+    if stale:
+        print("FATAL: the deployed extension does not match this repo's build — any number from this run would\n"
+              "       describe old code. Deploy first (build net8.0, copy HartsyInference.*.dll AND Ptx/*.ptx\n"
+              "       into the extension, restart swarmui.service), or set LTX25_SKIP_DEPLOY_CHECK=1 if you\n"
+              "       genuinely mean to benchmark the deployed build.\n", file=sys.stderr)
+        for s in stale[:12]:
+            print(f"       {s}", file=sys.stderr)
+        if len(stale) > 12:
+            print(f"       ... and {len(stale) - 12} more", file=sys.stderr)
+        sys.exit(2)
+    print(">>> deploy check OK: deployed extension matches the local net8.0 build", file=sys.stderr)
 
 BASE = "http://192.168.10.188:7801"
 REPS = 5
@@ -75,6 +149,8 @@ def main():
     ap.add_argument("--backend", required=True, help="tag: hartsy | comfy")
     ap.add_argument("--out", default="/tmp/bench_ltx25.json")
     args = ap.parse_args()
+    if args.backend == "hartsy":
+        assert_extension_matches_build()
     model = MODELS[args.backend]
     sid = new_session()
     base_seed = 900000 + int(time.time()) % 1000

@@ -25,7 +25,7 @@ how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512
 | LTX-0.9 2B (fp16, 20 steps) | RTX 4090 | 4.59 s | **2.84 s** | 1.62× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
 | Wan 2.2 TI2V-5B (fp16, 20 steps) | RTX 4090 | 15.5 s | **4.52 s** | 3.4× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
 | LTX-2.3 22B (video+audio, 20 steps) | RTX 4090 | 42.3 s | n/a — no comparable Comfy workflow | n/a | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
-| LTX-2.5 22B dev (video+audio, int8-convrot, 30 steps)† | RTX 4090 | 50.54 s | **42.76 s** | 1.18× slower | 2026-08-13 | bench_ltx25.py |
+| LTX-2.5 22B dev (video+audio, int8-convrot, 30 steps)† | RTX 4090 | **47.40 s** | **42.48 s** | **1.12× slower** | 2026-08-14 | bench_ltx25.py |
 | HunyuanVideo 13B T2V (fp8, 20 steps) | RTX 4090 | 1m26s e2e (~2.15 s/step) | n/a — no Comfy Hunyuan T2V workflow benched yet | n/a | 2026-07-02 | hunyuanvideo_e2e_2026-07-02.md |
 | Kandinsky-5.0 T2V Lite (2B, 30 steps) | RTX 4090 | 102.0 s e2e (~2.9 s/step) | n/a — not yet wired through SwarmUI (in-engine text encoders pending) | n/a | 2026-07-02 | kandinsky5_t2v_e2e_2026-07-02.md |
 
@@ -39,6 +39,148 @@ harness's delta onto another's wall clock is how a scoreboard starts lying. Re-r
 checking the deployed extension DLL against engine HEAD) to refresh it.
 
 **Before adding or trusting any row or delta here, read "The harness's noise floor" below.**
+
+## LTX-2.5 diffusion decoder — temporal tiling, and the 40× that remains (2026-08-14)
+
+**The geometry ceiling is gone.** Every pass in the decoder now runs over halo-padded temporal chunks sized
+against a VRAM budget (`LtxVideo25TemporalChunks`, `ChunkWorkspaceBytes`; 0 = derive from free VRAM). 768×512×97f
+decodes where it previously OOMed (9312 MB needed vs 7981 free).
+
+| geometry | before | after |
+|---|---:|---:|
+| 768×512×97f | **OOM** | **115.5 s** (8 chunks of 13 frames + 5 halo) |
+| 512×320×97f | 38.4 s | **35.99 s** (2 chunks — faster despite halo overhead) |
+
+**It is EXACT, not an approximation** — this is the part that matters and it was verified three ways: chunked vs
+un-chunked decode is **bit-identical on CPU (max-abs diff 0.0)** and **bit-identical on CUDA with the real
+checkpoint** at 512×320×25f, and the ComfyUI layer-diff still passes at every stage. Two design choices buy that:
+a **deferred-write FIFO** holds each chunk's residual add until no unprocessed chunk's halo still needs the
+pre-attention value, and the rope is built at **global** frame positions so the tables reproduce the untiled ones
+exactly. Halo is `kernelT/2` per side **per block** (5 output frames at stage 5) — chunking per block rather than
+around the whole stack is what makes a small halo sufficient. Note the padded window must also be floored at the
+kernel width, since `Na3d` collapses to `min(kernel, frames)` and a short end window would silently change every
+window inside it.
+
+Not comparable to ComfyUI's `temporal_overlap 16`: that is a **blend** overlap for an approximate scheme, ours is
+an **exact** halo. Deliberately not matched. Whole-decode tiling could not have been made seam-free here anyway —
+the stage-5 stack's receptive field is ±40 output frames, ~18 latent frames per side, wider than the entire
+13-latent-frame clip.
+
+Seam check (the expected failure mode, and the reason "it didn't OOM" is not success): adjacent-frame mean|diff|
+across all 97 frames gives boundary transitions 2.47/2.83/2.43/2.01/2.81/2.84/2.58 against a series mean of 2.499
+(sd 0.400) — every boundary inside noise, and the series *minimum* is a boundary. The top spikes are wave motion.
+8×-amplified difference images at three boundaries are indistinguishable from three motion controls.
+
+### ⚠️ The real remaining cost: the decode is ~40× the conv decoder, and it is OUR KERNEL
+
+At 768×512×97f: **115.5 s diffusion vs 2.878 s conv.** That gap — not memory, not correctness — is now the only
+reason the better-quality decoder cannot be the default. It is `ltx25_na3d_f32`, and the arithmetic says it is
+**bandwidth-bound on redundant window reads**, nowhere near a hardware limit:
+
+| at 512×320×25f (256k stage-5 tokens, window 11³, 8 blocks) | |
+|---|---:|
+| compute | 2.79 TFLOP → **0.034 s** at the 4090's ~82 TFLOPS fp32 |
+| traffic, as written (every query re-reads its whole 1331-element K/V window) | 5.58 TB → **~5.6 s** at ~1 TB/s |
+| measured whole-VAE decode | 9.8 s |
+
+So the kernel sits near its *naive-traffic* bound at ~1% of compute peak. Adjacent queries share almost all of an
+11×11×11 window, so staging K/V for a tile of queries in shared memory should cut traffic by roughly **6× (2³
+tile), 31× (4³), 117× (8³)** before shared-memory capacity bites — a 4³ tile wants 14³×64×4 B×2 = 1.4 MB, far over
+the limit, so it needs head_dim slabs, K/V phasing, or an anisotropic tile. This is the standard NATTEN
+optimization and it is the single biggest remaining perf item in this decoder.
+
+### Landmine: the diffusion env var alone is not enough
+
+`Models/Stable-Diffusion/LTX-2.5/` carries the **conv** VAE, and the engine loads the **folder**, not a file.
+`HARTSY_LTX2_DIFFUSION_VAE=1` on its own therefore **silently falls through to the conv decoder** — a
+768×512×97f run "succeeded" in 2.9 s and proved nothing. Worse, you must **swap** the symlink, never add a
+second one: `IsDiffusionVideoVae` is one boolean over the *merged* key set, so having both VAEs present flips it
+true and routes the conv decoder's `decoder.*` keys into the diffusion bucket, corrupting both. Always confirm
+the log line `HARTSY_LTX2_DIFFUSION_VAE set — … (310 tensors)`. Full procedure in
+`benchmarks/swarm_video_bench/DIFFUSION_VAE_HEADTOHEAD.md`.
+
+## LTX-2.5 — conv-vs-conv head-to-head, both arms re-measured (2026-08-14)
+
+Standard workload (768×512, 97f, 30 steps, cfg 3.0, **conv** decoder on both sides), SwarmUI API,
+`bench_ltx25.py`, N=5 warm + 1 cold, random seed per gen, 4090 (nvidia-smi index 1). **Both arms measured the
+same day against the same weights** — nothing carried forward, per this file's no-splicing rule.
+
+| | Hartsy | ComfyUI |
+|---|---:|---:|
+| **Warm mean (N=5)** | **47.40 s** | **42.48 s** |
+| Warm spread | 47.13–47.56 (sd 0.17) | 42.08–42.73 (sd 0.29) |
+| Cold | 87.39 s | 82.92 s |
+| Peak VRAM | 23730 MiB | 24050 MiB |
+
+**Ratio: 1.12× slower** (was 1.18× on the 08-12 row). Hartsy improved 50.54 → 47.40 s across the 08-14 fixes.
+
+**The decoder question is CLOSED, and closed by evidence rather than by assumption.** Both arms are proven to
+have decoded with `LTX-2/ltx-2.5-video-vae-conv-bf16.safetensors`, read out of the workflow JSON SwarmUI logs
+before submission (`Data/Logs/2026-08/14-08-47.log`): `VAELoader` → the conv VAE, `CLIPLoader` → the
+comfy-format `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot` at type `ltxv`, `UNETLoader` →
+`ltx-2.5-22b-dev-transformer-int8_lean_convrot` at `weight_dtype: default` (**no fp8 cast** — the `.swarm.json`
+carries a stale `special_format: fp8_scaled` tag on an int8 file, and SwarmUI happens to map that to
+`dtype=default`, which is correct here by luck rather than by design). Workload re-confirmed from the graph
+(`EmptyLTXVLatentVideo 97/512/768`, `SwarmKSampler steps 30 cfg 3`) and by ffprobe on a warm output
+(768×512, 97 frames, 24 fps, h264 **+ aac**, so both engines produced dual-stream A/V).
+
+**The 08-12 42.76 s row was ALSO conv** — `Data/Logs/2026-08/13-09-56.log` holds exactly that campaign's 6 gens,
+all at this workload, all on the same conv VAE. So today's number **confirms** that row rather than replacing it,
+and the "which decoder did Comfy use" caveat is retired.
+
+⚠️ **One real asymmetry, in Comfy's favour and worth keeping in mind:** Comfy decodes through `VAEDecodeTiled`
+(tile 2048, overlap 256, **temporal 64, temporal_overlap 16**) — spatially a single tile at 768 wide, but
+temporally chunked. Hartsy's conv decode is untiled. Same weights and same decoder, so the row is fair; but it
+means Comfy is not paying a peak-memory penalty we would pay, and it is the same tiling capability we lack on
+the diffusion decoder.
+
+**No repack rebuild was needed after all.** The flat model name is recreated by a one-line setting —
+`SDModelFolder: Stable-Diffusion` → `Stable-Diffusion;diffusion_models` — because the DiT already lives in
+`Models/diffusion_models/`, and `IsDiffusionModelsFormat` then routes it to `UNETLoader` with
+`LoadingVAE == null`, which is exactly what selects Comfy's separate-VAE loader branch.
+`CommonModels.Known["ltx2-5-video-vae"]` already points at the conv VAE on disk. No symlinks, no copies, no
+downloads. Setting reverted after the run (both `Settings.fds` and `Backends.fds` restored byte-identical to
+their timestamped backups; service left active with the hartsy backends enabled).
+
+### Two landmines this campaign surfaced
+
+- **A backend's `GPU_ID` is a CUDA ordinal, not an nvidia-smi index, and they disagree on this box.** Backend
+  **id=0 has `GPU_ID: 1` and runs on the 3060**; backend **id=1 has `GPU_ID: 0` and runs on the 4090**, because
+  `CUDA_VISIBLE_DEVICES` enumerates fastest-first. The first attempt launched ComfyUI on the 3060 and had to be
+  thrown away. Every historical Comfy benchmark in the logs ran as `ComfyUI-1` — **use backend id=1**, and
+  confirm from the log line `[ComfyUI-1] Device: cuda:0 NVIDIA GeForce RTX 4090` before trusting a number.
+- **A crashed ComfyUI writes a multi-GB systemd coredump, and this box has no headroom for one.** The aborted
+  3060 run produced an **8.7 GB** core, which took the root filesystem to **zero bytes free**. That ENOSPC then
+  landed mid-write on `Backends.fds` and truncated it to 0 bytes; SwarmUI restarted with no backends and
+  crash-looped, producing five more cores, until the file was restored from backup and rewritten atomically.
+  Recovered fully — but ~11 GB of root-owned dumps remain in `/var/lib/systemd/coredump` and need root to clear.
+  **Cap it** (`Storage=none` or a small `MaxUse=` in `/etc/systemd/coredump.conf`) before running another
+  campaign on a near-full disk.
+
+⚠️ **The deployed extension was 21 hours stale when this campaign started** — DLLs from Aug 13 10:26, and
+`ltx25_na_decoder.ptx` absent from its `Ptx/` entirely. So the SwarmUI backend had been running without the new
+attention kernel and without any of the 08-14 correctness fixes, and **any SwarmUI-side number taken earlier on
+08-14 describes old code**. Redeployed (14 DLLs + 78 PTX, unit restarted, deployed `HartsyInference.Cuda.dll`
+md5-matching a fresh net8.0 build) before the numbers above were taken. This is the **second** scoreboard-grade
+measurement lost to this trap, so it is now a **hard guard rather than a memory note**:
+`bench_ltx25.py` md5-compares every deployed `HartsyInference.*.dll` and every `Ptx/*.ptx` against the local
+net8.0 build and **refuses to run** on a mismatch (`LTX25_SKIP_DEPLOY_CHECK=1` to override deliberately).
+Verified both ways — corrupting one deployed PTX byte makes it exit 2 naming that file; restoring it passes.
+
+### Why the matched-decoder head-to-head is still open
+
+The point of the campaign was a like-for-like comparison, and it is blocked in two different ways:
+
+- **Diffusion-vs-diffusion cannot run at the standard workload — we OOM.** 768×512×97f needs **9312 MB** for the
+  decode against **7981 MB** free: stage 5 there is ~2.4M tokens and we have **no tiling**. It runs at
+  512×320×97f (decode 38.4 s) and 512×320×25f (9.8 s). ComfyUI decodes this VAE **tiled**
+  (`VAEDecodeTiled [512, 64, 64, 16]`), which is why it has no such ceiling. **Temporal tiling is the sized next
+  feature**, and the reference is built for it — `forward_pre_diffusion` already takes `drop_leading_frame` /
+  `pad_trailing` precisely so a tiled caller can decode a later temporal chunk. Expect Hartsy to lose that row on
+  wall-clock when it can finally be run: an untiled 38.4 s decode against a tiled one. **That gap is the tiling
+  prize, measured.**
+- ~~Conv-vs-conv could not be run.~~ **DONE — see the head-to-head section above.** It needed no repack rebuild
+  at all, only the one-line `SDModelFolder` addition.
 
 ## LTX-2.5 diffusion VAE decoder on the GPU (2026-08-13)
 
@@ -71,13 +213,46 @@ under heavy full-frame noise — and a ComfyUI layer-diff found three separate d
 on the same frame: **11.8 (broken) → 2.06, against the conv decoder's 3.10**, so the diffusion decode is now
 the cleaner of the two, which is what the model card claims for it.
 
+### Diffusion vs conv decoder — quality pass (2026-08-14)
+
+Four prompts chosen to test the model card's specific claims, each decoded **both** ways from the same prompt and
+seed, so the latent is identical and the ONLY difference is the decode. 512×320×25f, 30 steps, seed 1, 4090.
+
+| scene | grain conv | grain diff | decode conv | decode diff |
+|---|---:|---:|---:|---:|
+| lighthouse | 2.91 | **2.06** | 355 ms | 9610 ms |
+| portrait (faces) | 1.63 | **0.93** | 320 ms | 9554 ms |
+| neon street (legible text) | 4.83 | **4.47** | 362 ms | 10053 ms |
+| desert car (fast motion) | 1.90 | **1.20** | 357 ms | 9230 ms |
+
+Grain (mean local deviation from a 3×3 neighbourhood) is lower on the diffusion decode in all four, by
+**7–43%** — 43% on the portrait, 37% on the car, 29% on the lighthouse, and only **7.5%** on the neon street.
+
+**Read that last figure the right way round: neon has the SMALLEST grain delta and by far the LARGEST visual
+difference.** The conv decode renders the shop sign as illegible smear and streaks the whole frame horizontally;
+the diffusion decode renders distinct characters. Conv's failure there is *smearing*, which a local-deviation
+metric barely registers — so the table understates exactly the case the model card is about. The conv desert-car
+frame likewise carries a cross-hatch artifact across the entire image that the diffusion one does not. **Look at
+the frames; the table is a floor on the difference, not a measure of it.**
+
+⚠️ **A sharpness metric was tried and is NOT reported as evidence.** p90 gradient magnitude comes out slightly
+*higher* for the conv decode in 3 of 4 scenes — because conv's own cross-hatch and streaking are high-gradient,
+so the metric scores its artifacts as edges. That is the same failure as the retracted "conditioning is inert"
+pixel-delta metric: real number, wrong quantity. Grain is reported because a local-deviation measure over a
+matched latent is meaningful; sharpness is left to the frames.
+
+**Cost:** the diffusion decode adds **~9.3 s** per 25-frame generation over conv (~0.35 s). Unmeasured and
+relevant before defaulting it on: it drops the whole resident DiT prefix (`dropping the resident prefix for the
+diffusion VAE decode`), which in a long-lived SwarmUI process makes the *next* generation pay a re-preload. The
+CLI harness runs one generation per process, so it cannot see that cost.
+
 ### The three defects, and how they were found (2026-08-14)
 
 Structural inspection found **none** of them. Block wiring, AdaLN chunk order, `scale_shift_table`, patchify
 channel packing (`c·16 + r·4 + q`, W-sub outer — the unusual bit), pixel-shuffle grouping, the timestep
 embedding (4e-5 vs the reference), and the NATTEN window rule (~1e-7 vs `comfy_kitchen.na3d` in every sliding
 and clamped regime) were all read and all correct. What found the bugs was a **numerical layer-diff against
-ComfyUI's `NADiffusionDecoder`** — `LtxVideo25ReferenceLayerDiffTests` plus `scratchpad/ref_dump.py`, both
+ComfyUI's `NADiffusionDecoder`** — `LtxVideo25ReferenceLayerDiffTests` plus `benchmarks/ltx25_layerdiff/`, both
 sides consuming the same file-supplied latent and noise so the pipeline is out of the picture.
 
 1. **q/k reached attention un-normalized on CUDA.** `Forward` RMS-normed them through a `Reshape` view in a
