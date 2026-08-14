@@ -36,7 +36,7 @@ day range. Both numbers are real; they measure different things.
 
 | Model | Type | GPU | RTF (audio÷wall, higher=faster) | Baseline | Ratio | Date | Path | Source |
 |---|---|---|---:|---|---:|---|---|---|
-| MiniMax Music 3 (Q8) | Music | 4090 | **0.41×** (36.7s gen for 15.0s audio) | diffusers PR #14456 bf16, same card/prompt/steps: 49.4s | **1.35× faster** | 2026-08-14 | CLI | staged: AR 26.0s vs 34.9s, flow+vocode 10.7s vs 14.6s |
+| MiniMax Music 3 (Q8) | Music | 4090 | **0.48×** (31.3s gen for 15.0s audio) | diffusers PR #14456 bf16, same card/prompt/steps: 49.4s | **1.58× faster** | 2026-08-14 | CLI | after the depth KV cache; was 36.7s / 1.35× before it. Stages: AR 21.2s vs 34.9s, flow+vocode 10.1s vs 14.6s |
 | Piper (VITS) | TTS | 3060 / 4090 | **8.6× / 8.3×** | self-comparison | — | 2026-07-12 | Swarm | `audio_tts_stt_2026-07-12.md` |
 | Kokoro-82M (StyleTTS2) | TTS | 3060 / 4090 | **4.5× / 5.2×** | self-comparison | — | 2026-07-12 | Swarm | `audio_tts_stt_2026-07-12.md` |
 | StyleTTS2 (LibriTTS) | TTS (clone) | 4090 | **~1.3×** | self-comparison | — | 2026-07-15 | Swarm | `audio_tts_stt_2026-07-12.md` |
