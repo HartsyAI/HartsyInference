@@ -29,6 +29,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     private Tensor? _ropeCos;
     private Tensor? _ropeSin;
     private int _ropeLength;
+    private int _ropeBatch;
     private BlockScratch? _scratch;
     private int _disposed;
 
@@ -68,68 +69,73 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     /// conditions on zeros rather than re-encoding an empty prompt. Caller owns the result.</summary>
     public Tensor Forward(IBackend backend, Tensor latents, float timestep, Tensor condition)
     {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(latents);
         ArgumentNullException.ThrowIfNull(condition);
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (_projIn is null)
-        {
-            throw new InvalidOperationException($"{nameof(MiniMaxMusic3Dit)}.{nameof(LoadWeights)} must run before {nameof(Forward)}.");
-        }
-        int channels = _config.InChannels;
-        if (latents.Shape.Rank != 3 || latents.Shape[0] != 1 || latents.Shape[1] != channels)
-        {
-            throw new ArgumentException($"expected latents [1, {channels}, length], got {latents.Shape}.", nameof(latents));
-        }
-        int length = (int)latents.Shape[2];
-        if (condition.Shape.Rank != 3 || condition.Shape[1] != length || condition.Shape[2] != _config.ConditionDim)
-        {
-            throw new ArgumentException(
-                $"expected condition [1, {length}, {_config.ConditionDim}], got {condition.Shape}.", nameof(condition));
-        }
-
-        int concat = _config.ConcatChannels;
+        int length = ValidateForward(backend, latents, condition);
         int inner = _config.InnerDim;
-        using Tensor tokens = new Tensor(new TensorShape(length, concat), DType.F32);
-        BuildTokens(backend, tokens, latents, condition, length);
-
-        // preprocess_conv is kernel-1: a per-position linear plus the residual the reference adds around it.
-        using Tensor preprocessed = new Tensor(new TensorShape(length, concat), DType.F32);
-        backend.Linear(preprocessed, tokens, _preprocessConv!, null);
-        backend.Add(preprocessed, preprocessed, tokens);
-
+        using Tensor latentsTokenMajor = TokenMajorLatents(backend, latents, length);
         Tensor hidden = new Tensor(new TensorShape(length + 1, inner), DType.F32);
-        using (Tensor projected = new Tensor(new TensorShape(length, inner), DType.F32))
+        using (Tensor projected = ProjectBranch(backend, latentsTokenMajor, condition, length))
+        using (Tensor temb = EmbedTimestep(backend, timestep))
         {
-            backend.Linear(projected, preprocessed, _projIn!, null);
-            using Tensor temb = EmbedTimestep(backend, timestep);
             // Concat on the backend rather than two host copies: reading DataPointer here synced the whole block
             // input back from the device on every forward.
             backend.Concat(hidden, [temb, projected], dim: 0);
         }
 
-        (Tensor cos, Tensor sin) = RopeTables(length + 1);
-        BlockScratch scratch = Scratch(length + 1);
-        foreach (Block block in _blocks)
+        Tensor blocks = RunBlocks(backend, hidden, length + 1, batch: 1);
+        hidden.Dispose();
+        using Tensor body = new Tensor(new TensorShape(length, inner), DType.F32);
+        backend.SliceRows(body, blocks, rowOffset: 1);
+        blocks.Dispose();
+        return ProjectVelocity(backend, body, length);
+    }
+
+    /// <summary>Batch-2 twin of <see cref="Forward"/>: the conditional branch and the zero-conditioned unconditional
+    /// branch run as one row-stacked pass, so the 36 blocks amortize their weight reads and pay one kernel launch
+    /// where the two separate forwards paid two. Returns the two velocities in that order; the caller owns both.
+    ///
+    /// <para>The unconditional branch is built here rather than taken as an argument precisely so it stays the
+    /// reference's ZERO conditioning and can never drift into a re-encoded empty prompt.</para></summary>
+    public (Tensor Conditional, Tensor Unconditional) ForwardCfg(IBackend backend, Tensor latents, float timestep, Tensor condition)
+    {
+        ArgumentNullException.ThrowIfNull(condition);
+        int length = ValidateForward(backend, latents, condition);
+        int inner = _config.InnerDim;
+        int rows = length + 1;
+        using Tensor latentsTokenMajor = TokenMajorLatents(backend, latents, length);
+        Tensor hidden = new Tensor(new TensorShape(2 * rows, inner), DType.F32);
+        using (Tensor conditional = ProjectBranch(backend, latentsTokenMajor, condition, length))
+        using (Tensor unconditional = ProjectBranch(backend, latentsTokenMajor, null, length))
+        using (Tensor temb = EmbedTimestep(backend, timestep))
         {
-            Tensor next = block.Forward(backend, hidden, _config, cos, sin, scratch);
-            hidden.Dispose();
-            hidden = next;
+            // Both branches share the timestep token, and both need it at their own row 0 — hence four pieces.
+            backend.Concat(hidden, [temb, conditional, temb, unconditional], dim: 0);
         }
 
-        using Tensor body = new Tensor(new TensorShape(length, inner), DType.F32);
-        backend.SliceRows(body, hidden, rowOffset: 1);
+        Tensor blocks = RunBlocks(backend, hidden, rows, batch: 2);
         hidden.Dispose();
+        using Tensor bodyConditional = new Tensor(new TensorShape(length, inner), DType.F32);
+        using Tensor bodyUnconditional = new Tensor(new TensorShape(length, inner), DType.F32);
+        try
+        {
+            backend.SliceRows(bodyConditional, blocks, rowOffset: 1);
+            backend.SliceRows(bodyUnconditional, blocks, rowOffset: rows + 1);
+        }
+        finally
+        {
+            blocks.Dispose();
+        }
 
-        using Tensor output = new Tensor(new TensorShape(length, channels), DType.F32);
-        backend.Linear(output, body, _projOut!, null);
-        using Tensor post = new Tensor(new TensorShape(1, length, channels), DType.F32);
-        backend.Linear(post, output, _postprocessConv!, null);
-        backend.Add(post, post, output);
-
-        Tensor velocity = new Tensor(new TensorShape(1, channels, length), DType.F32);
-        backend.Transpose2D(velocity, post, length, channels);
-        return velocity;
+        Tensor conditionalVelocity = ProjectVelocity(backend, bodyConditional, length);
+        try
+        {
+            return (conditionalVelocity, ProjectVelocity(backend, bodyUnconditional, length));
+        }
+        catch
+        {
+            conditionalVelocity.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Runs only the transformer blocks over an already-projected token-major hidden state
@@ -139,8 +145,15 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(hidden);
-        (Tensor cos, Tensor sin) = RopeTables((int)hidden.Shape[0]);
-        BlockScratch scratch = Scratch((int)hidden.Shape[0]);
+        return RunBlocks(backend, hidden, (int)hidden.Shape[0], batch: 1);
+    }
+
+    /// <summary>Walks the block stack over <paramref name="batch"/> row-blocks of <paramref name="rows"/> tokens each.
+    /// Never disposes <paramref name="hidden"/> — the caller owns it.</summary>
+    private Tensor RunBlocks(IBackend backend, Tensor hidden, int rows, int batch)
+    {
+        (Tensor cos, Tensor sin) = RopeTables(rows, batch);
+        BlockScratch scratch = Scratch(rows, batch);
         Tensor current = hidden;
         foreach (Block block in _blocks)
         {
@@ -194,25 +207,85 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         _scratch = null;
     }
 
+    private int ValidateForward(IBackend backend, Tensor latents, Tensor condition)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(latents);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_projIn is null)
+        {
+            throw new InvalidOperationException($"{nameof(MiniMaxMusic3Dit)}.{nameof(LoadWeights)} must run before {nameof(Forward)}.");
+        }
+        int channels = _config.InChannels;
+        if (latents.Shape.Rank != 3 || latents.Shape[0] != 1 || latents.Shape[1] != channels)
+        {
+            throw new ArgumentException($"expected latents [1, {channels}, length], got {latents.Shape}.", nameof(latents));
+        }
+        int length = (int)latents.Shape[2];
+        if (condition.Shape.Rank != 3 || condition.Shape[1] != length || condition.Shape[2] != _config.ConditionDim)
+        {
+            throw new ArgumentException(
+                $"expected condition [1, {length}, {_config.ConditionDim}], got {condition.Shape}.", nameof(condition));
+        }
+        return length;
+    }
+
+    private Tensor TokenMajorLatents(IBackend backend, Tensor latents, int length)
+    {
+        Tensor tokenMajor = new Tensor(new TensorShape(1, length, _config.InChannels), DType.F32);
+        backend.Transpose2D(tokenMajor, latents, _config.InChannels, length);
+        return tokenMajor;
+    }
+
+    /// <summary>One branch's block input: token concatenation, the kernel-1 preprocess convolution and its residual,
+    /// then <c>proj_in</c>. A null <paramref name="condition"/> is the unconditional branch, whose conditioning is
+    /// zeros rather than a re-encoded empty prompt.</summary>
+    private Tensor ProjectBranch(IBackend backend, Tensor latentsTokenMajor, Tensor? condition, int length)
+    {
+        int concat = _config.ConcatChannels;
+        using Tensor tokens = new Tensor(new TensorShape(length, concat), DType.F32);
+        BuildTokens(tokens, latentsTokenMajor, condition, length);
+        using Tensor preprocessed = new Tensor(new TensorShape(length, concat), DType.F32);
+        backend.Linear(preprocessed, tokens, _preprocessConv!, null);
+        backend.Add(preprocessed, preprocessed, tokens);
+        Tensor projected = new Tensor(new TensorShape(length, _config.InnerDim), DType.F32);
+        backend.Linear(projected, preprocessed, _projIn!, null);
+        return projected;
+    }
+
+    /// <summary><c>proj_out</c>, the kernel-1 postprocess convolution and its residual, then back to channel-major.</summary>
+    private Tensor ProjectVelocity(IBackend backend, Tensor body, int length)
+    {
+        int channels = _config.InChannels;
+        using Tensor output = new Tensor(new TensorShape(length, channels), DType.F32);
+        backend.Linear(output, body, _projOut!, null);
+        using Tensor post = new Tensor(new TensorShape(1, length, channels), DType.F32);
+        backend.Linear(post, output, _postprocessConv!, null);
+        backend.Add(post, post, output);
+        Tensor velocity = new Tensor(new TensorShape(1, channels, length), DType.F32);
+        backend.Transpose2D(velocity, post, length, channels);
+        return velocity;
+    }
+
     /// <summary>Lays out <c>[latent, zeros(latent), condition]</c> token-major, the channel concatenation the
     /// reference performs before the kernel-1 preprocess convolution.</summary>
-    private void BuildTokens(IBackend backend, Tensor tokens, Tensor latents, Tensor condition, int length)
+    private void BuildTokens(Tensor tokens, Tensor latentsTokenMajor, Tensor? condition, int length)
     {
         int channels = _config.InChannels;
         int concat = _config.ConcatChannels;
-        using Tensor latentsTokenMajor = new Tensor(new TensorShape(1, length, channels), DType.F32);
-        backend.Transpose2D(latentsTokenMajor, latents, channels, length);
-
         float* destination = (float*)tokens.DataPointer;
         new Span<float>(destination, length * concat).Clear();
         ReadOnlySpan<float> latentValues = latentsTokenMajor.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> conditionValues = condition.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> conditionValues = condition is null ? default : condition.AsReadOnlySpan<float>();
         for (int position = 0; position < length; position++)
         {
             long row = (long)position * concat;
             latentValues.Slice(position * channels, channels).CopyTo(new Span<float>(destination + row, channels));
-            conditionValues.Slice(position * _config.ConditionDim, _config.ConditionDim)
-                .CopyTo(new Span<float>(destination + row + (2 * channels), _config.ConditionDim));
+            if (condition is not null)
+            {
+                conditionValues.Slice(position * _config.ConditionDim, _config.ConditionDim)
+                    .CopyTo(new Span<float>(destination + row + (2 * channels), _config.ConditionDim));
+            }
         }
     }
 
@@ -240,23 +313,29 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
 
     /// <summary>Partial-rotary cos/sin tables, cached across steps. Only the leading <c>RotaryDim</c> entries of each
     /// head-width row are populated; <see cref="IBackend.ApplyRopeSingle"/> reads no further.</summary>
-    private (Tensor Cos, Tensor Sin) RopeTables(int sequenceLength)
+    /// <remarks>The rotary op indexes cos/sin as <c>[batch, seq, headDim]</c>, so a batched pass needs the table
+    /// repeated per batch element — and unlike the batch-1 table, a longer cached one is then unusable, because the
+    /// second batch element's block starts at the ACTUAL sequence length rather than the cached one.</remarks>
+    private (Tensor Cos, Tensor Sin) RopeTables(int sequenceLength, int batch)
     {
-        if (_ropeCos is not null && _ropeLength >= sequenceLength)
+        bool reusable = _ropeCos is not null && _ropeBatch == batch
+            && (batch == 1 ? _ropeLength >= sequenceLength : _ropeLength == sequenceLength);
+        if (reusable)
         {
-            return (_ropeCos, _ropeSin!);
+            return (_ropeCos!, _ropeSin!);
         }
         _ropeCos?.Dispose();
         _ropeSin?.Dispose();
         int headDim = _config.AttentionHeadDim;
         int rotary = _config.RotaryDim;
         int half = rotary / 2;
-        Tensor cos = new Tensor(new TensorShape(1, sequenceLength, headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(1, sequenceLength, headDim), DType.F32);
+        Tensor cos = new Tensor(new TensorShape(batch, sequenceLength, headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(batch, sequenceLength, headDim), DType.F32);
         float* cosData = (float*)cos.DataPointer;
         float* sinData = (float*)sin.DataPointer;
-        new Span<float>(cosData, sequenceLength * headDim).Clear();
-        new Span<float>(sinData, sequenceLength * headDim).Clear();
+        long table = (long)sequenceLength * headDim;
+        new Span<float>(cosData, (int)(table * batch)).Clear();
+        new Span<float>(sinData, (int)(table * batch)).Clear();
         for (int position = 0; position < sequenceLength; position++)
         {
             long row = (long)position * headDim;
@@ -271,23 +350,29 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
                 sinData[row + half + i] = sinData[row + i];
             }
         }
+        for (int element = 1; element < batch; element++)
+        {
+            new ReadOnlySpan<float>(cosData, (int)table).CopyTo(new Span<float>(cosData + (element * table), (int)table));
+            new ReadOnlySpan<float>(sinData, (int)table).CopyTo(new Span<float>(sinData + (element * table), (int)table));
+        }
         _ropeCos = cos;
         _ropeSin = sin;
         _ropeLength = sequenceLength;
+        _ropeBatch = batch;
         return (cos, sin);
     }
 
     /// <summary>Per-block working tensors, allocated once per sequence length and reused by every block and every
     /// forward. Allocating fourteen device buffers per block, 36 blocks a forward, fragmented the CUDA pool badly
     /// enough to OOM a 12 GB card on longer generations.</summary>
-    private BlockScratch Scratch(int rows)
+    private BlockScratch Scratch(int rows, int batch)
     {
-        if (_scratch is not null && _scratch.Rows == rows)
+        if (_scratch is not null && _scratch.Rows == rows && _scratch.Batch == batch)
         {
             return _scratch;
         }
         _scratch?.Dispose();
-        _scratch = new BlockScratch(rows, _config);
+        _scratch = new BlockScratch(rows, batch, _config);
         return _scratch;
     }
 
@@ -295,13 +380,14 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     {
         private readonly List<Tensor> _owned = [];
 
-        internal BlockScratch(int rows, MiniMaxMusic3DitConfig config)
+        internal BlockScratch(int rows, int batch, MiniMaxMusic3DitConfig config)
         {
             Rows = rows;
-            TensorShape flat = new TensorShape(rows, config.InnerDim);
-            TensorShape tokenMajor = new TensorShape(1, rows, config.NumAttentionHeads, config.AttentionHeadDim);
-            TensorShape headMajor = new TensorShape(1, config.NumAttentionHeads, rows, config.AttentionHeadDim);
-            TensorShape wide = new TensorShape(rows, config.FfInnerDim);
+            Batch = batch;
+            TensorShape flat = new TensorShape(batch * rows, config.InnerDim);
+            TensorShape tokenMajor = new TensorShape(batch, rows, config.NumAttentionHeads, config.AttentionHeadDim);
+            TensorShape headMajor = new TensorShape(batch, config.NumAttentionHeads, rows, config.AttentionHeadDim);
+            TensorShape wide = new TensorShape(batch * rows, config.FfInnerDim);
             Normed = Track(flat);
             Query = Track(tokenMajor);
             Key = Track(tokenMajor);
@@ -312,13 +398,16 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             HeadValue = Track(headMajor);
             HeadAttention = Track(headMajor);
             Normed2 = Track(flat);
-            Gated = Track(new TensorShape(rows, 2 * config.FfInnerDim));
+            Gated = Track(new TensorShape(batch * rows, 2 * config.FfInnerDim));
             States = Track(wide);
             Gate = Track(wide);
             Projected = Track(flat);
         }
 
+        /// <summary>Tokens per batch element, NOT the row count of the flat tensors.</summary>
         internal int Rows { get; }
+
+        internal int Batch { get; }
         internal Tensor Normed { get; }
         internal Tensor Query { get; }
         internal Tensor Key { get; }
@@ -396,7 +485,8 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         public Tensor Forward(IBackend backend, Tensor hidden, MiniMaxMusic3DitConfig config, Tensor cos, Tensor sin,
             BlockScratch scratch)
         {
-            int rows = (int)hidden.Shape[0];
+            // Per-batch-element tokens, which is what the permutes need — hidden's row count is batch times this.
+            int rows = scratch.Rows;
             int heads = config.NumAttentionHeads;
             int headDim = config.AttentionHeadDim;
 

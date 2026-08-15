@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -39,6 +40,9 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
     public const int DefaultSteps = 30;
 
     private const int LatentChannels = 128;
+
+    /// <summary>Kill switch for the batch-2 guidance forward.</summary>
+    public const string CfgBatchSwitch = "HARTSY_MM3_FLOW_CFG_BATCH";
 
     private readonly MiniMaxMusic3ConditionEncoder _conditionEncoder;
     private readonly MiniMaxMusic3Dit _dit;
@@ -133,6 +137,9 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
             throw new ArgumentOutOfRangeException(nameof(frames), frames, "frames must be positive.");
         }
         int stepCount = Math.Max(1, steps);
+        // Opt-in until the flow-parity gate runs against it: that gate needs a 24 GB card, and the two-forward shape
+        // is what it was recorded against. Worth 3.7% of the flow stage.
+        bool batched = EnvSwitch.IsEnabled(CfgBatchSwitch, defaultOn: false);
         int[] starts = ChunkStarts(frames);
         Tensor[] chunks = new Tensor[starts.Length];
         int totalSteps = starts.Length * stepCount;
@@ -157,7 +164,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
 
                 Tensor latents = DrawNoise(length, seed, forcedNoise, chunk);
                 using Tensor noisePrompt = SliceLeading(latents, overlap);
-                using Tensor zeros = new Tensor(condition.Shape, DType.F32);
+                using Tensor? zeros = batched ? null : new Tensor(condition.Shape, DType.F32);
                 IBackend backendOps = Backend;
 
                 for (int step = 0; step < stepCount; step++)
@@ -168,10 +175,21 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
                     {
                         BlendOverlap(latents, noisePrompt, previousLatent!, overlap, time);
                     }
-                    using Tensor conditional = _dit.Forward(Backend, latents, time, condition);
-                    using Tensor unconditional = _dit.Forward(Backend, latents, time, zeros);
-                    using Tensor velocity = CfgHelper.ApplyCfg(unconditional, conditional, cfgScale);
-                    latents = Advance(backendOps, latents, velocity, 1f / stepCount);
+                    if (batched)
+                    {
+                        (Tensor cond, Tensor uncond) = _dit.ForwardCfg(Backend, latents, time, condition);
+                        using (cond)
+                        using (uncond)
+                        {
+                            latents = Step(backendOps, latents, uncond, cond, cfgScale, stepCount);
+                        }
+                    }
+                    else
+                    {
+                        using Tensor conditional = _dit.Forward(Backend, latents, time, condition);
+                        using Tensor unconditional = _dit.Forward(Backend, latents, time, zeros!);
+                        latents = Step(backendOps, latents, unconditional, conditional, cfgScale, stepCount);
+                    }
                     onStep?.Invoke(++completedSteps, totalSteps);
                 }
 
@@ -253,6 +271,12 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
             new ReadOnlySpan<float>(previous + ((long)channel * previousLength), overlap)
                 .CopyTo(new Span<float>(target + ((long)channel * length), overlap));
         }
+    }
+
+    private static Tensor Step(IBackend backend, Tensor latents, Tensor unconditional, Tensor conditional, float cfgScale, int stepCount)
+    {
+        using Tensor velocity = CfgHelper.ApplyCfg(unconditional, conditional, cfgScale);
+        return Advance(backend, latents, velocity, 1f / stepCount);
     }
 
     /// <summary>One Euler step, entirely on the backend. The host loop this replaces read <c>DataPointer</c> on the
