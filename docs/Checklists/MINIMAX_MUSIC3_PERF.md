@@ -50,6 +50,17 @@ how the branches are batched. That is why batching alone bottomed out at 9.9 s. 
 **Landmine:** graph-decode output is only deterministic on an otherwise-idle GPU (learned on H3). Do not chase
 phantom hash differences while the other agent is working.
 
+### 2b. F16 KV is 32% SLOWER than F32 KV — the biggest unexplained number here
+Phase 2 set out to measure graph capture and found something larger by accident. On a 3060 at `:q4`, LM stage:
+F16 KV eager 16.2 s vs F32 KV eager 12.3 s. Same kernels, same batching; the only change is cache dtype. A
+half-width cache moving half the bytes should be *faster*. Whatever causes this is worth more than every other
+item on this list combined (4.0 s vs the graph's 0.4 s), and it is not MiniMax-specific — `FixedKvCache` F16 is
+shared, so any model using an F16 cache is likely paying it.
+
+Suspect a per-access widening conversion, an F16 path that falls back to a slower attention kernel, or a
+non-vectorized F16 load. Diagnose before patching. Fixing it plausibly gets the graph win *and* keeps the memory,
+which is what would let phase 2 default on.
+
 ### 3. Autoregressive host glue — the ~2.6 s unaccounted
 Two sources, neither ever removed: the per-frame frame-emit D2H, and `DecodeDepth`'s host-built sequence plus
 per-step logits/state readbacks (~7 round trips per frame per branch). Keeping the depth sequence device-resident
