@@ -18,7 +18,12 @@ namespace HartsyInference.Audio.Pipelines;
 /// through a single batch-2 forward: at one token per step the language model is bound by streaming its weights,
 /// so two batch-1 forwards read all of them twice per frame. The branches differ only in their prompt — the
 /// unconditional one replaces every token except the first and the last two with the audio-CFG token — so they stay
-/// position-aligned and can share a step. <c>HARTSY_MM3_CFG_BATCH=0</c> restores the two-forward decode.</para></summary>
+/// position-aligned and can share a step. <c>HARTSY_MM3_CFG_BATCH=0</c> restores the two-forward decode.</para>
+///
+/// <para>That batch-2 step is then CUDA-graph captured once and replayed per frame: at one token per step the
+/// per-frame cost is as much host launch overhead across the backbone's 36 layers as it is arithmetic.
+/// <c>HARTSY_MM3_LM_GRAPH=0</c> restores the eager batched step (and with it the F16 KV cache, which the graph's
+/// device-position kernels cannot read).</para></summary>
 public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 {
     /// <summary>Autoregressive frames per second.</summary>
@@ -79,6 +84,9 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         using IKvCache conditionalCache = _languageModel.CreateCache(cacheLength);
         using IKvCache unconditionalCache = _languageModel.CreateCache(cacheLength);
         using MiniMaxMusic3DepthCache depthCache = _depthDecoder.CreateCache(CfgRows);
+        using MiniMaxMusic3GlobalLm.CfgGraphSession? cfgGraph = _batchCfg
+            ? _languageModel.CreateCfgGraph(backend, cacheLength)
+            : null;
 
         uint rng = DeterministicRng.Seed(seed);
         // Phase attribution for the perf grind. CUDA launches are async, so each phase is billed at the next host
@@ -145,7 +153,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 feedbackTicks += Stopwatch.GetTimestamp() - phase;
                 phase = Stopwatch.GetTimestamp();
                 Tensor next = _batchCfg
-                    ? _languageModel.ForwardCfgStep(backend, feedback, conditionalCache, unconditionalCache)
+                    ? _languageModel.ForwardCfgStep(backend, feedback, conditionalCache, unconditionalCache, cfgGraph)
                     : ForwardBranches(backend, feedback, conditionalCache, unconditionalCache, hidden);
                 lmTicks += Stopwatch.GetTimestamp() - phase;
                 hiddens.Dispose();
