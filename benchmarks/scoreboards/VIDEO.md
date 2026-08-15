@@ -797,6 +797,77 @@ spill — impossible if the cap were real. (2) `cuFuncSetAttribute(MAX_DYNAMIC_S
 room" is not free: that budget is what the driver sizes occupancy against, so it forces one block per SM. Ask for
 exactly what the kernel uses (`CudaKernels.Int8MmaSharedBytes`).
 
+### ⚠️ Re-baselined and profiled 2026-08-14 — five claims below are STALE. Read this first.
+
+A fresh measurement pass (cold-L2 trio, `HARTSY_PROFILE_FINE=1`, 4-rep `ltx25_ab.sh`, and Nsight Compute against
+a like-for-like control) corrected five things recorded in this section:
+
+1. **The "203 ms/step INT32 round trip" prize is already ~62% collected.** `Int8.Dequant` now measures **80.2
+   ms/step sync-inflated → 67.8 deflated** over 2005 calls, not 202.8 over 3021 — because the fused kernel
+   already took the 960 square video-width projections (960 × 0.132 ms = 127 ms/step; 202.8 − 127 = 76 against
+   80.2 measured, which closes). **Remaining round-trip prize ≈ 68 ms/step ≈ 2.0 s over 30 steps**, now dominated
+   by ffn_up (96 calls × 0.523 ms ≈ 50 ms/step).
+2. **`Linear` is ~53% of the step gap, not 83%.** Our int8 chain is 750 ms/step deflated against Comfy's ~629,
+   so ~121 ms/step of a ~230 ms/step gap. (Comfy's side is carried from 08-13, not re-measured; ours is fresh.)
+3. **The kernel ships at 3 stages / 92.16 KB shared, not 2 / 60 KB.** `#define STAGES 3` in the source and ncu
+   confirms 92.16 KB. "Shipping at 2 stages, 60 KB" below is wrong. **Deeper staging is already taken.**
+4. **The Stream-K note is based on a misread symbol.** `nm -DC` on comfy-kitchen finds **zero** `StreamK`
+   symbols; all 576 Sm80 int8 kernels use `GemmIdentityThreadblockSwizzle<1>`. Drop Stream-K from consideration.
+5. **"We beat comfy-kitchen's chain on two shapes" was apples-to-oranges** — it compared our fused GEMM+dequant
+   (no quant) against their full chain (with quant). Against **our own pair**, cold: attn_qkvo **+7.9%**,
+   ffn_up **−2.2%** (a net loss), ffn_down **−26.4%**.
+
+Fresh trio, cold-L2, GPU idle. Note bare cuBLASLt is *faster* cold than the old warm reference (537/545/620 →
+568.7/575.3/668.0), so the mainloop deficit is slightly larger than recorded:
+
+| shape | fused mma | cuBLASLt+dequant pair | bare cuBLASLt | fused vs pair |
+|---|---:|---:|---:|---:|
+| attn_qkvo | 424.1 TOPS | 393.0 | **568.7** | **+7.9%** |
+| ffn_up | 388.4 | 397.0 | **575.3** | −2.2% |
+| ffn_down | 438.6 | 595.9 | **668.0** | −26.4% |
+
+Live baseline `ltx25_ab.sh HARTSY_INT8_FUSED_MMA`, 4 reps interleaved, private CLI snapshot: **1397.3 ms/step**
+shipping vs 1417.0 fused-off. The fused kernel is worth **−19.7 ms/step** (all four pairs same sign, paired
+t = 5.2) — better than the −10.5 recorded below.
+
+#### The profile: it is ONE instruction, and cuBLASLt is a like-for-like control
+
+cuBLASLt's kernel demangles to `cutlass_80_tensorop_i16832gemm_s8_256x128_64x3_tn_align16` — **cuBLASLt *is*
+CUTLASS at the same tile, warp, instruction, swizzle and stage count as ours.** So the gap is implementation
+quality, not configuration, and there is nothing left to copy.
+
+| | ours | cuBLASLt (CUTLASS) |
+|---|---:|---:|
+| duration | 427.8 µs | 308.5 µs |
+| tensor pipe % of peak | **58.3** | **80.9** |
+| total L2 sectors | **47.36M** | **33.25M** (storing 2× our bytes) |
+| global LD sectors/request | **18.88** | **16.00 = ideal** |
+| shared ST bank conflicts | **2,236,416** | **0** |
+| stall mio_throttle | **3.48** | 0.33 |
+| stall long_scoreboard | 0.17 of 15.8 | 0.36 |
+| achieved occupancy | 16.66% | 16.34% |
+
+Duration ratio 1.386× ≈ L2 sector ratio 1.424× — a tight fit for an L2-bound kernel. **The predicted 77% tensor
+utilization was wrong; it is 58.3%.** Per-SASS attribution localizes **100% of the excess L2 traffic to a single
+instruction**, `LDGSTS.E.BYPASS.128` (the cp.async operand loads): 1.50× ideal sectors and 3.75× ideal shared
+wavefronts, with the epilogue STS slab at 8.00×. Everything else is perfect — `ldmatrix` 1.00×, epilogue stores
+1.00×, scale/bias loads 1.00× (the fused epilogue is nearly free, adding 119,808 requests for 0.6% of sectors).
+ffn_up shows the identical defect (18.882 sectors/request).
+
+**Next step (R1): replace the `BK+16` pad with CUTLASS's unpadded XOR-swizzled shared layout**, epilogue slab
+included. Two caveats: the causal link from the 80-byte stride to the *global*-side 1.50× is the strongest
+hypothesis with an empirical control, not a proven mechanism — the swizzle is itself the deciding experiment;
+and it must preserve the `ldmatrix` conflict-freedom the pad currently buys. **Do NOT** add a 4th stage
+(`long_scoreboard` is 0.17 of 15.8 — there is no global latency to hide, and cuBLASLt wins at 3) or try 128×128
+(cuBLASLt wins at identical occupancy; 128×128 already measured 288 vs 413). The kernel comment's "BK=128 next
+experiment" is refuted — the cuBLASLt control runs BK=64 at exactly 1.00× sectors.
+
+**Honest prize, and it does NOT flip the headline row.** If the mainloop reached cuBLASLt's rate: ~71 ms/step on
+already-fused calls plus ~60 ms/step from newly-admissible ffn_up = **ceiling ≈ 130 ms/step ≈ 3.9 s over 30
+steps**, which equals the entire measured Linear gap (self-consistent). Against this file's documented 2–3×
+optimism, **realistic ≈ 45–70 ms/step ≈ 1.4–2.1 s**. The conv row is 47.40 s against Comfy's 42.48 s, so even
+the *ceiling* lands at ~43.5 s — still behind. This work narrows the gap; it does not close it.
+
 ### The rewrite: 128×256 tile + shared-memory epilogue — the fused GEMM now WINS (2026-08-13)
 
 Two changes, both taken from comfy-kitchen's shipped configuration, each verified bit-exact (max abs 0) against
