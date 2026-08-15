@@ -40,6 +40,105 @@ checking the deployed extension DLL against engine HEAD) to refresh it.
 
 **Before adding or trusting any row or delta here, read "The harness's noise floor" below.**
 
+⚠️ **The deployed SwarmUI extension carries the sigma terminal stretch default-ON as of `715ee947`** — any
+LTX-2.5 **quality** measurement taken before that deploy sampled a different schedule and is not comparable.
+It does **not** void the perf rows: the stretch changes the sigma values, not the step count or the per-step
+work, so wall-clock and ms/step figures taken before it stand.
+
+## LTX-2.5 — two quality bugs, both fixed (2026-08-15)
+
+**The sampler stopped early: the sigma schedule had no terminal stretch (`715ee947`).** Every part of
+ComfyUI's `LTXVScheduler` was implemented except its terminal stretch, so sampling ended while the latent was
+still visibly noisy. The residual scales with the token-dependent shift, so the defect got **worse as
+resolution went up** — at 1280×736×97f the last non-zero sigma was **0.817 against ComfyUI's 0.100**. This is
+the root cause of the long-standing observation that raising LTX-2.5 resolution degraded output. **It hides
+at the geometries this scoreboard benchmarks at** — 768×512 only moves the terminal 0.270 → 0.100. A/B at
+1280×736×97f / 20 steps / cfg 3.0 / seed 424242 / diffusion decoder: stretch **off** is formless brown mush,
+**on** is a coherent, correctly-composed shot with recognisable subject, wing detail and landscape — gradient
+energy 0.558 → 0.679 (1.22×). Knobs: `SigmaStretch` (default true), `SigmaTerminal` (0.1, what the shipped
+templates pass), kill switch `HARTSY_LTX2_SIGMA_STRETCH=0`; `FixedSigmas` bypasses the stretch entirely
+because distilled checkpoints bake their sigmas in. The stretch is deliberately local to `LtxVideo2Pipeline`
+rather than folded into the shared `LancePipelineCommon.BuildShiftedTimesteps`, which five other pipelines
+call with their own schedule conventions. Pinned by `LtxVideo2SigmaScheduleTests` (5 tests) against ComfyUI's
+own tail sigmas.
+
+⚠️ **Every LTX-2.5 quality comparison taken before `715ee947` is VOID, not merely noisy.** The sampler
+stopped further from zero the higher the resolution, so any geometry ladder run on it ranks resolutions
+**inverted** — the earlier 23-run quality ablation that concluded "lower resolution is better" and "1280×736
+is the worst geometry" is measuring this bug. That ablation was never written to disk; this line is its
+record. Re-measure, do not re-cite.
+
+**The conv VAE decoder was misconfigured (`7a141e93`).** `upsampleResidual` defaulted to `[true,true,true]`
+where the checkpoints' own `__metadata__.config` carries no residual key on any upsampler — ComfyUI's
+`block_params.get("residual", False)` therefore reads False — and the up-stage residual flag was hardcoded
+`true` instead of reading the per-stage config; separately `spatialReflectPad` was passed `true` at six call
+sites where `spatial_padding_mode` is zeros. Attribution on final pixels: reflect alone **0.207**, residual
+alone **0.313**, both **0.370**. A layer-diff against ComfyUI's `causal_video_autoencoder` settles that the
+port itself is faithful — the reference forced into OUR configuration matched at ~1e-6 at every stage, while
+against the true reference ours diverged at `conv_in` (relL2 0.345) and stayed wrong to pixels.
+**Landmine:** the up-stage loop is open-ended and can exceed the per-block config arrays, which is why the
+`_residualRev` field existed and was never used; the index is now bounds-guarded.
+
+## LTX-2.5 — post-fix quality sweep, and the recommended profile (2026-08-15)
+
+The sweep the two fixes above unblocked, run at the geometry the sigma bug hurt most. Every row:
+**1280×736×145f (6.0 s at 24 fps), seed 424242, 4090, SwarmUI API, warm, conv decoder, n=1** unless the row
+says otherwise (the decoder row below is the one diffusion-decode measurement).
+DiT fully resident on every Hartsy run.
+
+⚠️ **Every row here is n=1 and this harness's spread is 17–20 ms sd** (see "The harness's noise floor" below).
+Read them as direction and rank order, not as a settled baseline, and do not re-derive a per-step figure from one.
+
+**Quality parity with ComfyUI is reached.** At matched settings (20 steps, cfg 3.0) both engines produce clean,
+undistorted faces — freckles, skin pores, individual eyelashes, catchlights, separated teeth. **The verdict is
+visual, and it has to be:** the same seed drives a different RNG path in each engine, so the two arms are
+*different scenes*. This is a coherence-and-detail judgement on the frames, not a pixel diff.
+
+**The sigma bug, proven causally at this geometry.** Same seed and settings with `HARTSY_LTX2_SIGMA_STRETCH=0`
+gives an unresolved blur carrying visible latent-grid texture. Un-stretched, the last non-zero sigma at 20 steps
+here is **0.9801** — the latent is essentially never denoised. With the stretch on, the engine logs
+`shift=936.779 ... last 0.1000`, and ComfyUI's own `exp(tokens*mm+b)` at this geometry's **17,480** latent tokens
+gives **936.779** to three decimals. The schedule is the reference's, not merely a better-looking one.
+
+**Recommended profile: 1280×736, 20 steps, cfg 4.0, conv decoder, 24 fps — 159.4 s warm for 145 frames.**
+
+| knob | verdict |
+|---|---|
+| steps | **20.** 30 (229.1 s) and 40 (300.6 s) add micro-detail and fix nothing structural. |
+| cfg | **4.0**, ahead of 3.0 and 2.5 on both metrics and on inspection. No oversharpening halos, +4% wall. |
+| decoder | **conv.** Diffusion decode is 95.7 s against conv's 9.9 s (9.7×, +59% total wall) to buy smoother skin that is only visible at ~3× zoom. |
+
+**Speed is NOT at parity.** Matched settings, warm, n=1 per arm:
+
+| | Hartsy | ComfyUI |
+|---|---:|---:|
+| Warm | 153.18 s | **142.86 s** |
+| Cold warmup (6 steps) | **81.27 s** | 85.76 s |
+| Peak VRAM | 23415 MiB | 24019 MiB |
+
+**Hartsy is 7.2% slower warm.** Consistent in direction with the 1.12× conv-vs-conv row at 768×512×97f, so the
+new geometry does not change who is ahead.
+
+**241 frames (10.0 s) at the recommended profile fits in 24 GB:** 338.25 s **cold**, decode 16.15 s. No warm
+figure was taken, so it is not comparable to the 145-frame rows above.
+
+⚠️ **Sharpness metrics INVERT on broken output — never rank frames by one alone.** The pre-fix blur scores
+Laplacian variance **322** against the good frame's **60**, because latent-grid noise is high-frequency and the
+metric counts it as detail. Same failure class as the p90-gradient measure rejected in the decoder quality pass
+below, and as the retracted "conditioning is inert" pixel-delta: real number, wrong quantity.
+
+⚠️ **Cross-arm sharpness was unusable here for a second reason.** ComfyUI's frame puts the face larger in shot,
+so its lower lapvar reports *scale*, not quality. That is why the parity verdict above is visual and no
+cross-engine sharpness number is quoted.
+
+**One data-collection defect, corrected.** A decode-time scrape was off by one run — SwarmUI buffers its log
+writes, so a run inherited its predecessor's decode time. Every decode figure above is re-attributed by
+wall-clock window.
+
+**Scope of the void, stated so nobody over-voids:** the sigma bug voided **quality** conclusions only. The
+schedule changes sigma values, not step count or per-step work, so the LTX-2.5 **perf** material in this file —
+step times, the roofline, the do-not-retry list — stands unchanged.
+
 ## LTX-2.5 diffusion decoder — temporal tiling, and the 40× that remains (2026-08-14)
 
 **The geometry ceiling is gone.** Every pass in the decoder now runs over halo-padded temporal chunks sized
@@ -393,6 +492,10 @@ on the same frame: **11.8 (broken) → 2.06, against the conv decoder's 3.10**, 
 the cleaner of the two, which is what the model card claims for it.
 
 ### Diffusion vs conv decoder — quality pass (2026-08-14)
+
+⚠️ **Every conv number below predates `7a141e93`**, i.e. it was measured through the misconfigured conv
+decoder (final-pixel relL2 0.370 against the reference), and every latent predates `715ee947`. The
+comparison has not been re-run against a fixed conv decoder.
 
 Four prompts chosen to test the model card's specific claims, each decoded **both** ways from the same prompt and
 seed, so the latent is identical and the ONLY difference is the decode. 512×320×25f, 30 steps, seed 1, 4090.
