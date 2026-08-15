@@ -77,7 +77,8 @@ def newest_log():
 
 def scrape_engine_facts(since_pos):
     """Decode ms, chunk plan and decoder identity, read from the engine's own log rather than inferred."""
-    facts = {"decode_ms": None, "chunk_plan": None, "diffusion_confirmed": False, "vae_seen": None}
+    facts = {"decode_ms": None, "chunk_plan": None, "diffusion_confirmed": False, "vae_seen": None,
+             "resident_blocks": None, "streamed_blocks": None, "residency_ok": None}
     log = newest_log()
     if not log:
         return facts, since_pos
@@ -93,6 +94,15 @@ def scrape_engine_facts(since_pos):
         facts["diffusion_confirmed"] = True          # the ~3 s silent conv fall-through is the trap this catches
     for m in re.finditer(r'"vae_name": "([^"]*video[^"]*)"', tail):
         facts["vae_seen"] = m.group(1)
+    # THE RESIDENCY CONTROL. Measured 2026-08-14: the identical 768x512x97f generation decoded in 68.8 s with the
+    # DiT streaming (resident prefix 18, streamed 30) against 12.9 s fully resident — streaming starves the
+    # decode's free-VRAM-derived chunk budget AND cripples the denoise. Nothing else in the stack reports it, so
+    # a run without it is not slow, it is UNINTERPRETABLE. Rows are marked void rather than silently averaged in.
+    for m in re.finditer(r"resident prefix (\d+), streamed (\d+)", tail):
+        facts["resident_blocks"] = int(m.group(1))
+        facts["streamed_blocks"] = int(m.group(2))
+    if facts["streamed_blocks"] is not None:
+        facts["residency_ok"] = facts["streamed_blocks"] == 0
     return facts, pos
 
 
@@ -179,9 +189,21 @@ def main():
                 else:
                     dec = f"{r['decode_ms']}ms" if r["decode_ms"] else "?"
                     aud = "A/V" if r["media"].get("has_audio") else "video-only"
+                    if r.get("residency_ok") is False:
+                        res = f"VOID resident={r['resident_blocks']} streamed={r['streamed_blocks']}"
+                    elif r.get("residency_ok") is True:
+                        res = "resident"
+                    else:
+                        res = "residency-unknown"          # comfy arm has no such line; not a fault
                     print(f"    {prompt_key:8s} {frames:4d}f rep{rep}  wall {r['wall']:7.2f}s  "
-                          f"decode {dec:>8s}  peak {r['peak_vram']}MiB  {aud}", file=sys.stderr)
+                          f"decode {dec:>8s}  peak {r['peak_vram']}MiB  {aud}  {res}", file=sys.stderr)
                 json.dump(results, open(args.out, "w"), indent=1)   # write as we go; a long matrix can die
+    void = [r for r in results if r.get("residency_ok") is False]
+    if void:
+        print(f"!!! {len(void)} of {len(results)} runs are VOID (DiT was streaming, not fully resident).",
+              file=sys.stderr)
+        print("!!! Do NOT average these in. Restart swarmui.service to re-establish residency and re-run them.",
+              file=sys.stderr)
     print(f">>> wrote {args.out}", file=sys.stderr)
 
 
