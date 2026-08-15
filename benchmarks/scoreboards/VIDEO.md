@@ -94,6 +94,20 @@ undistorted faces — freckles, skin pores, individual eyelashes, catchlights, s
 visual, and it has to be:** the same seed drives a different RNG path in each engine, so the two arms are
 *different scenes*. This is a coherence-and-detail judgement on the frames, not a pixel diff.
 
+⚠️ **SCOPED, same day (2026-08-15) — this row is spatial-only and does NOT mean LTX-2.5 quality is settled.**
+It is a **single-frame, spatial-detail** judgement. Three things it never measured, all of which fail:
+**(1) temporal coherence** — at `1280×704×241f` the subject's identity and the background drift across the clip
+("morphing"); **(2) audio** — not assessed at all, and the 2–4 kHz noise floor collapses to +3.5 dB relative to
+clip RMS with only 22 dB of dynamic range (healthy geometries: −9…−16 dB, 41–50 dB); **(3) the geometry it was
+taken at was already broken** — 17,480 tokens ⇒ shift 936.8 ⇒ 14 of 20 sigmas above 0.9. The `shift = exp(tokens·m + b)`
+fit is calibrated on 1024→4096 tokens and is being extrapolated; at 27,280 tokens it reaches **31,306** and
+**33 of 40 steps** sit above sigma 0.9 — an effectively ~4-step denoise, which is why raising step count does not help.
+Additionally the **ComfyUI arm was plausibly running the shipped two-stage distilled template** (half-res +
+`ManualSigmas` + `LTXVLatentUpsampler` ×2 + 3-step refine + `VAEDecodeTiled`), i.e. a structurally different
+pipeline — the shipped 2.5 templates never call `LTXVScheduler` at all. **Do not cite this row as evidence that
+quality is at parity; re-measure with a temporal and an audio criterion.** Full analysis:
+`~/Desktop/ltx25-quality-audit-2026-08-15.md`.
+
 **The sigma bug, proven causally at this geometry.** Same seed and settings with `HARTSY_LTX2_SIGMA_STRETCH=0`
 gives an unresolved blur carrying visible latent-grid texture. Un-stretched, the last non-zero sigma at 20 steps
 here is **0.9801** — the latent is essentially never denoised. With the stretch on, the engine logs
