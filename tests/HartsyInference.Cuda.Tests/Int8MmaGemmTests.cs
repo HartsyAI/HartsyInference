@@ -50,6 +50,14 @@ public sealed unsafe class Int8MmaGemmTests
     [InlineData(256, 512, 128, 1u, "gelu")]
     [InlineData(129, 768, 64, 0u, "raggedM_wideN")]   // one k-tile, 3 N tiles, ragged M
     [InlineData(4992, 4096, 4096, 0u, "attn_qkvo")]
+    // The M the kernel actually sees is NOT the token count: Int8ResidentRowChunk splits it against a byte budget,
+    // so 1280x736x145f's 17,480 tokens arrive as 9362 + 8118 — both ragged, at 64 k-tiles. Every ragged case above
+    // is a shallow-K toy (1 or 3 k-tiles) and the only deep-K case is tile-aligned, so the shipping geometry's cell
+    // was the one combination never covered. Worse, that budget derives from FREE VRAM unless
+    // HARTSY_INT8_ROW_BUDGET_MB pins it, so these split points move run to run and a defect here would appear and
+    // vanish across identical invocations.
+    [InlineData(9362, 4096, 4096, 0u, "raggedM_deepK_chunk0")]
+    [InlineData(8118, 4096, 4096, 0u, "raggedM_deepK_chunk1")]
     public void FusedMmaGemm_MatchesCublasLtPlusDequant(int m, int n, int k, uint actMode, string label)
     {
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
