@@ -144,9 +144,12 @@ public sealed unsafe class KvF16StorageTests
         Assert.True(maxDiff <= 5e-3f, $"FlashAttention F16-KV diverges from F32-KV by {maxDiff:E3} (prefill={prefill}) — beyond plausible F16-rounding.");
     }
 
-    /// <summary>Split-K must never engage for F16 KV (LaunchFlashAttentionSplit has no F16-KV variant) — forcing
-    /// it via HARTSY_FLASH_SPLIT_FORCE must still produce the monolithic-kernel result, not silently read F16
-    /// data through the F32 split kernel's pointer arithmetic (which would corrupt output, not just be slow).</summary>
+    /// <summary>Split-K over an F16 cache must still land within F16-rounding distance of the F32-cache answer.
+    /// This once asserted that split-K never engaged for F16 KV, which stopped being true when
+    /// <c>lm_flash_attn_f16kv_f32_split</c> was added; what it actually pins now is that forcing the split path
+    /// does not read F16 data through F32 pointer arithmetic, which would corrupt output rather than merely slow
+    /// it. The tolerance here is wide enough to pass on either kernel, so it is a smoke test — the real
+    /// split-vs-monolithic gate at decode geometry is <see cref="KvF16SplitDecodeTests"/>.</summary>
     [Fact]
     public void FlashAttention_F16Kv_SplitForceEnv_StillMatchesMonolithicF32Kv()
     {

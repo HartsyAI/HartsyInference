@@ -9096,8 +9096,8 @@ public sealed class CudaBackend : IBackend
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
         // F16-storage KV cache (halved VRAM): key/value are the FixedKvCache buffers, which under kvDtype=F16
-        // are __half-typed; Q/out/sink/alibi are unaffected (still F32). v1 scope: monolithic kernel only —
-        // the split-K path below is forced off for this case (LaunchFlashAttentionF16Kv has no split variant).
+        // are __half-typed; Q/out/sink/alibi are unaffected (still F32). Both the monolithic and the split-K
+        // path have an F16 twin, so the dtype no longer decides which kernel runs — only sink/alibi do.
         bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
         if (!kernelOk)
         {
@@ -9128,8 +9128,7 @@ public sealed class CudaBackend : IBackend
             // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
             // heads, so the monolithic path put 4 blocks on 28 SMs (measured 5.4× slower than llama.cpp e2e).
-            // F16 KV forces the monolithic path — LaunchFlashAttentionSplit has no F16-KV variant (v1 scope).
-            bool splitEligible = pSink == 0 && pAlibi == 0 && !f16Kv;
+            bool splitEligible = pSink == 0 && pAlibi == 0;
             bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
             // Occupancy-limited = the LLM decode case (tq=1, few heads → e.g. 16 blocks on 28 SMs). Splitting the
             // key axis there fills the GPU and is a large decode win (attention was ~30% of decode; split-K ≈ +38%
@@ -9168,7 +9167,7 @@ public sealed class CudaBackend : IBackend
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle,
-                        softcap: softcap, slidingWindow: slidingWindow);
+                        softcap: softcap, slidingWindow: slidingWindow, f16Kv: f16Kv);
                     _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
                 }
                 finally

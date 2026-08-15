@@ -180,6 +180,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _flashAttnF16Kv;
     private readonly CudaModule _flashAttnF32SplitModule;
     private readonly nint _flashAttnF32Split;
+    private readonly nint _flashAttnF32SplitF16Kv;
     private readonly CudaModule _flashV2Module;
     private readonly nint _flashV2Tf32;
     private readonly nint _flashAttnF32Combine;
@@ -978,6 +979,7 @@ public sealed class CudaKernels : IDisposable
         _flashAttnF16Kv = _flashAttnF32Module.GetFunction("lm_flash_attn_f16kv_f32");
         _flashAttnF32SplitModule = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
+        _flashAttnF32SplitF16Kv = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f16kv_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
         _flashV2Module = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_v2_tf32.ptx"));
         _flashV2Tf32 = _flashV2Module.GetFunction("lm_flash_attn_v2_tf32");
@@ -2760,7 +2762,7 @@ public sealed class CudaKernels : IDisposable
     public unsafe void LaunchFlashAttentionSplit(ulong partialM, ulong partialL, ulong partialAcc,
         ulong q, ulong k, ulong v, int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen,
         int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream, ulong dPos = 0,
-        float softcap = 0f, int slidingWindow = 0)
+        float softcap = 0f, int slidingWindow = 0, bool f16Kv = false)
     {
         ValidateFlashAttentionHeadDim(headDim);
         ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v, dPosArg = dPos;
@@ -2783,7 +2785,7 @@ public sealed class CudaKernels : IDisposable
         uint gridDim = (uint)((long)batch * hq * tq * splits);
         uint sharedBytes = blockThreads * sizeof(float);
         CudaDriverApi.cuLaunchKernel(
-            _flashAttnF32Split, gridDim, 1, 1, blockThreads, 1, 1,
+            f16Kv ? _flashAttnF32SplitF16Kv : _flashAttnF32Split, gridDim, 1, 1, blockThreads, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 

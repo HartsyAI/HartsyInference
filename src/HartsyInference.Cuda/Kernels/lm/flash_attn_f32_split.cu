@@ -22,16 +22,24 @@
 //
 // Build:  ../lm/build.sh   (compiled to flash_attn_f32_split.ptx)
 
+#include <cuda_fp16.h>
+
 #define INF_F 3.402823466e+38f
 
+// K/V element access. The F16 overload upconverts on load, exactly as lm_flash_attn_f16kv_f32 does; everything
+// downstream stays F32, so the two instantiations are numerically identical apart from the stored KV precision.
+__device__ __forceinline__ float kvLoad(const float* p, size_t i) { return p[i]; }
+__device__ __forceinline__ float kvLoad(const __half* p, size_t i) { return __half2float(p[i]); }
+
 // One block per (idx, g): blockIdx.x = idx*G + g. blockDim.x = next pow2 >= max(D,32).
-extern "C" __global__ void lm_flash_attn_f32_split(
+template <typename KvT>
+__device__ __forceinline__ void flashAttnSplitBody(
     float* __restrict__ partialM,
     float* __restrict__ partialL,
     float* __restrict__ partialAcc,
     const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
+    const KvT* __restrict__ K,
+    const KvT* __restrict__ V,
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
     int causal, int qOffset, float scale, float softcap, int slidingWindow,
@@ -73,7 +81,7 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     for (int k = kStart; k <= kEnd; k++)
     {
         size_t kvBase = (((size_t)b * Hkv + hkv) * Lk + (unsigned int)k) * D;
-        sdata[tid] = (tid < D) ? qv * K[kvBase + tid] : 0.0f;
+        sdata[tid] = (tid < D) ? qv * kvLoad(K, kvBase + tid) : 0.0f;
         __syncthreads();
         for (unsigned int s = blockDim.x >> 1; s >= 32; s >>= 1)
         {
@@ -97,7 +105,7 @@ extern "C" __global__ void lm_flash_attn_f32_split(
         float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
-        float vval = (tid < D) ? V[kvBase + tid] : 0.0f;
+        float vval = (tid < D) ? kvLoad(V, kvBase + tid) : 0.0f;
         acc = acc * corr + p * vval;
         m = newM;
         __syncthreads();   // ensure all threads read sdata[0] before the next key overwrites it
@@ -111,6 +119,41 @@ extern "C" __global__ void lm_flash_attn_f32_split(
         partialL[pBase] = l;
     }
     if (tid < D) partialAcc[pBase * D + tid] = acc;
+}
+
+extern "C" __global__ void lm_flash_attn_f32_split(
+    float* __restrict__ partialM,
+    float* __restrict__ partialL,
+    float* __restrict__ partialAcc,
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
+    unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
+    int causal, int qOffset, float scale, float softcap, int slidingWindow,
+    unsigned int G, unsigned int chunk,
+    const int* __restrict__ dPos)
+{
+    flashAttnSplitBody<float>(partialM, partialL, partialAcc, Q, K, V, B, Hq, Tq, D, Hkv, Lk, kvLen, kvGroup,
+                              causal, qOffset, scale, softcap, slidingWindow, G, chunk, dPos);
+}
+
+// F16-storage KV twin. Pairs with the SAME lm_flash_attn_f32_combine — the partials are F32 either way.
+extern "C" __global__ void lm_flash_attn_f16kv_f32_split(
+    float* __restrict__ partialM,
+    float* __restrict__ partialL,
+    float* __restrict__ partialAcc,
+    const float* __restrict__ Q,
+    const __half* __restrict__ K,
+    const __half* __restrict__ V,
+    unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
+    unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
+    int causal, int qOffset, float scale, float softcap, int slidingWindow,
+    unsigned int G, unsigned int chunk,
+    const int* __restrict__ dPos)
+{
+    flashAttnSplitBody<__half>(partialM, partialL, partialAcc, Q, K, V, B, Hq, Tq, D, Hkv, Lk, kvLen, kvGroup,
+                               causal, qOffset, scale, softcap, slidingWindow, G, chunk, dPos);
 }
 
 // One block per idx = (b*Hq + h)*Tq + r. blockDim.x = next pow2 >= max(D,32). Merges the
