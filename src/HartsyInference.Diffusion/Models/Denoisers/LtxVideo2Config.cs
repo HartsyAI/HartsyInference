@@ -114,6 +114,18 @@ public sealed record LtxVideo2Config
     /// <summary>Terminal sigma for <see cref="SigmaStretch"/>. 0.1 is what the shipped LTX-2.5 templates pass.</summary>
     public float SigmaTerminal { get; init; } = 0.1f;
 
+    /// <summary>Caps the token count fed to the dynamic shift formula; 0 leaves it uncapped. The formula is an
+    /// exponential fit over 1024→4096 tokens, so a 10-second 1080p generation (27,280 tokens) extrapolates it to
+    /// shift 31,306 and the schedule stops moving. 4096 reproduces the constant 7.768 the diffusers pipeline
+    /// pins. Env override: <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>.</summary>
+    public int ShiftMaxTokens { get; init; }
+
+    /// <summary>Uses this shift verbatim instead of the fit; 0 leaves the fit in charge. Independent of
+    /// <see cref="ShiftMaxTokens"/> and wins over it, because a token cap cannot express the low end — the
+    /// formula floors at exp(0.583) = 1.79, and 1.0 (no shift) is what SwarmUI's ComfyUI backend actually runs
+    /// for LTX-2, which builds a plain <c>BasicScheduler</c>. Env override: <c>HARTSY_LTX2_SHIFT</c>.</summary>
+    public float ShiftOverride { get; init; }
+
     /// <summary>Distilled 2.5 schedule (8 steps: 9 sigmas ending at 0), from the reference pipeline's
     /// <c>DISTILLED_SIGMA_VALUES</c>. A fresh array per call — a shared instance would let one in-place edit
     /// anywhere corrupt every config built afterwards.</summary>

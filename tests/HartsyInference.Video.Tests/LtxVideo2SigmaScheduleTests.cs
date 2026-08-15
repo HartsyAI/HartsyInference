@@ -69,6 +69,118 @@ public sealed class LtxVideo2SigmaScheduleTests
         }
     }
 
+    /// <summary>The shift fit is calibrated on 1024→4096 tokens and extrapolated with <c>exp()</c>, so it explodes
+    /// where nobody calibrated it. Pinning the uncapped values is what makes every capped assertion below mean
+    /// something — without it a broken formula would satisfy the cap tests too.</summary>
+    [Theory]
+    [InlineData(4992, 10.71f)]        // 768×512×97f — the benchmarked geometry, still sane
+    [InlineData(11440, 107.74f)]      // 1280×704×97f
+    [InlineData(27280, 31305.92f)]    // 1280×704×241f — the user's 10-second clip
+    public void UncappedShiftExplodesWithTokenCount(int tokens, float expected)
+    {
+        float got = LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config());
+        Assert.True(System.Math.Abs(got - expected) / expected < 0.01f,
+            $"uncapped shift at {tokens} tokens = {got:F2}, expected ~{expected:F2}");
+    }
+
+    /// <summary>Capped, the shift stops being a function of resolution — 4096 is the constant seq len the
+    /// diffusers LTX-2 pipeline passes, which always yields max_shift 2.05 → exp(2.05) = 7.768.</summary>
+    [Theory]
+    [InlineData(11440)]
+    [InlineData(17480)]
+    [InlineData(27280)]
+    public void CapPinsTheShiftAcrossGeometries(int tokens)
+    {
+        float got = LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftMaxTokens = 4096 });
+        Assert.True(System.Math.Abs(got - 7.768f) < 1e-2f, $"capped shift at {tokens} tokens = {got:F4}, expected 7.7680");
+    }
+
+    /// <summary>Default-OFF is the whole gating contract: unset, and at any cap the geometry does not reach, the
+    /// engine must produce the exact float it produced before this knob existed.</summary>
+    [Theory]
+    [InlineData(4992, 0)]
+    [InlineData(4992, 4992)]      // cap == tokens
+    [InlineData(4992, 8000)]      // cap above tokens
+    [InlineData(27280, 0)]
+    [InlineData(27280, -1)]       // a negative cap is not a cap
+    public void CapIsInertUnlessItBites(int tokens, int cap)
+    {
+        Assert.Equal(ShiftForTokens(tokens), LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftMaxTokens = cap }));
+    }
+
+    /// <summary>The env override exists so an arm can be selected without a rebuild; it must beat the config.</summary>
+    [Fact]
+    public void EnvOverrideBeatsTheConfiguredCap()
+    {
+        try
+        {
+            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", "4096");
+            Assert.True(System.Math.Abs(LtxVideo2Pipeline.ComputeShift(27280, new LtxVideo2Config()) - 7.768f) < 1e-2f);
+            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", "0");
+            Assert.True(LtxVideo2Pipeline.ComputeShift(27280, new LtxVideo2Config { ShiftMaxTokens = 4096 }) > 30000f);
+        }
+        finally
+        {
+            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", null);
+        }
+    }
+
+    /// <summary>The direct override replaces the fit outright, at any geometry. It exists because the token cap
+    /// bottoms out at exp(0.583) = 1.79 and cannot reach shift 1 — which is what SwarmUI's ComfyUI backend runs
+    /// for LTX-2, since <c>IsLTXV2()</c> never selects the <c>ltxv</c> scheduler.</summary>
+    [Theory]
+    [InlineData(4992, 1.0f)]
+    [InlineData(27280, 1.0f)]
+    [InlineData(27280, 7.768f)]
+    public void DirectOverrideReplacesTheFit(int tokens, float shift)
+    {
+        Assert.Equal(shift, LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftOverride = shift }));
+        // It also outranks a token cap — the two knobs are independent and this one wins.
+        Assert.Equal(shift, LtxVideo2Pipeline.ComputeShift(tokens,
+            new LtxVideo2Config { ShiftOverride = shift, ShiftMaxTokens = 4096 }));
+    }
+
+    /// <summary>Unset (0) the override must not perturb a single float, at capped and uncapped geometries alike.</summary>
+    [Theory]
+    [InlineData(4992)]
+    [InlineData(27280)]
+    public void DirectOverrideIsInertWhenUnset(int tokens)
+    {
+        Assert.Equal(ShiftForTokens(tokens), LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config()));
+        Assert.Equal(LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftMaxTokens = 4096 }),
+            LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftMaxTokens = 4096, ShiftOverride = 0f }));
+    }
+
+    /// <summary>Shift 1 is the identity of the shift transform, so the pre-stretch schedule is linspace — the
+    /// arm that reproduces what the ComfyUI backend samples.</summary>
+    [Fact]
+    public void ShiftOneGivesLinspaceBeforeTheStretch()
+    {
+        float[] s = LancePipelineCommon.BuildShiftedTimesteps(40,
+            LtxVideo2Pipeline.ComputeShift(27280, new LtxVideo2Config { ShiftOverride = 1.0f }));
+        for (int i = 0; i <= 40; i++)
+        {
+            Assert.True(System.Math.Abs(s[i] - (1f - i / 40f)) < 1e-6f, $"sigma[{i}] = {s[i]:F6}, expected linspace");
+        }
+    }
+
+    /// <summary>What the cap is actually for: at the user's geometry the post-stretch schedule spends 33 of its 40
+    /// steps above σ 0.9 — an effectively 4-step denoise — and the cap restores a spread like the geometry that
+    /// works (15 of 30 at 768×512×97f).</summary>
+    [Fact]
+    public void CapRestoresSigmaSpreadAtTheFailingGeometry()
+    {
+        LtxVideo2Config capped = new LtxVideo2Config { ShiftMaxTokens = 4096 };
+        float[] raw = LtxVideo2Pipeline.StretchTerminalForTests(
+            LancePipelineCommon.BuildShiftedTimesteps(40, ShiftForTokens(27280)), capped, 1f);
+        float[] fixedUp = LtxVideo2Pipeline.StretchTerminalForTests(
+            LancePipelineCommon.BuildShiftedTimesteps(40, LtxVideo2Pipeline.ComputeShift(27280, capped)), capped, 1f);
+        int rawStuck = System.Linq.Enumerable.Count(raw[..^1], s => s > 0.9f);
+        int cappedStuck = System.Linq.Enumerable.Count(fixedUp[..^1], s => s > 0.9f);
+        Assert.Equal(33, rawStuck);
+        Assert.True(cappedStuck <= 20, $"capped schedule still stalls for {cappedStuck} of 40 steps");
+    }
+
     /// <summary>Distilled checkpoints bake their sigmas in; re-transforming them would corrupt that path.</summary>
     [Fact]
     public void FixedSigmasAreNeverStretched()

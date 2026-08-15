@@ -155,12 +155,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             audioRescale = parsedRescale;
         }
 
-        // Dynamic flow-match shift (LTX-2 scheduler: base_seq 1024 → base_shift 0.95, max_seq 4096 → max_shift 2.05).
-        double m = (2.05 - 0.95) / (4096 - 1024), bShift = 0.95 - m * 1024;
-        float shift = (float)Math.Exp(sv * m + bShift);
+        float shift = ComputeShift(sv, _config), formulaShift = FormulaShift(sv);
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, " +
-            $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, shift={shift:F3})");
+            $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, " +
+            $"shift={shift:F3}{(shift == formulaShift ? "" : $", overriding the fit's {formulaShift:F3}")})");
 
         // 1. Text conditioning: Gemma 49-layer features → per-modality connector embeddings. Cached across
         // generations keyed on the token ids (the FLite/Flux2 prompt-cache pattern) — a hit skips the whole
@@ -621,6 +620,43 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
         double a = rescale * factor + (1f - rescale);
         Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
+    }
+
+    /// <summary>Token count the shift formula is evaluated at: the real count, unless <see
+    /// cref="LtxVideo2Config.ShiftMaxTokens"/> (or <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>, which wins) caps it.</summary>
+    internal static int ShiftTokens(int videoTokens, LtxVideo2Config config)
+    {
+        int cap = config.ShiftMaxTokens;
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS") is { Length: > 0 } capOverride
+            && int.TryParse(capOverride, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedCap))
+        {
+            cap = parsedCap;
+        }
+        return cap > 0 && videoTokens > cap ? cap : videoTokens;
+    }
+
+    /// <summary>Dynamic flow-match shift (LTX-2 scheduler: base_seq 1024 → base_shift 0.95, max_seq 4096 →
+    /// max_shift 2.05). The fit is calibrated on 1024→4096 tokens and <c>exp()</c> extrapolates: 27,280 tokens
+    /// (1280x704x241f) gives shift 31,306, a schedule where 33 of 40 steps move sigma by a rounding error. Both
+    /// references keep the shift resolution-INDEPENDENT — diffusers passes a constant 4096 seq len, and the
+    /// distilled sigmas are token-count free — so <see cref="LtxVideo2Config.ShiftMaxTokens"/> caps the token
+    /// count fed here (4096 reproduces diffusers' constant 7.768).</summary>
+    internal static float ComputeShift(int videoTokens, LtxVideo2Config config)
+    {
+        float direct = config.ShiftOverride;
+        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_SHIFT") is { Length: > 0 } shiftOverride
+            && float.TryParse(shiftOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedShift))
+        {
+            direct = parsedShift;
+        }
+        return direct > 0f ? direct : FormulaShift(ShiftTokens(videoTokens, config));
+    }
+
+    /// <summary>The fit itself, uncapped — kept separate so the log can show what the knobs changed.</summary>
+    internal static float FormulaShift(int tokens)
+    {
+        double m = (2.05 - 0.95) / (4096 - 1024), b = 0.95 - m * 1024;
+        return (float)Math.Exp(tokens * m + b);
     }
 
     /// <summary>Test seam for <see cref="StretchTerminal"/> — the schedule is pure math and worth pinning against

@@ -14,4 +14,8 @@
     <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Video.Tests" />
+  </ItemGroup>
+
 </Project>
