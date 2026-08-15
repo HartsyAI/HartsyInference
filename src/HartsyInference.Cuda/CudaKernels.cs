@@ -59,6 +59,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _convRotQuantF32;
     private readonly CudaModule? _int8MmaModule;
     private readonly nint _int8MmaGemmF16;
+    private readonly nint _int8MmaGemmF16Pad;
 
     // Optional: NVFP4 packed-weight dequant (dequant_nvfp4_to_f16.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the
     // per-GEMM unpack that lets a ComfyUI nvfp4 checkpoint stay resident at 0.5 byte/param. Null when not compiled.
@@ -653,14 +654,18 @@ public sealed class CudaKernels : IDisposable
             // smaller tile wants two blocks per SM, since the driver's PTX JIT ignores `.minnctapersm`.
             _int8MmaModule = LoadOwnedModule(mmaPath);
             _int8MmaGemmF16 = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16");
+            _int8MmaGemmF16Pad = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16_pad");
             // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the 48 KB default —
             // never to the SM ceiling. This budget is what the driver uses to decide blocks-per-SM, so asking for
             // 99 KB "to leave room" makes two blocks arithmetically impossible, which silently overrides the
             // kernel's own `.minnctapersm 2` and lets ptxas spend all 256 registers per thread.
             // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
-            uint mmaShared = Int8MmaSharedBytes;
-            if (mmaShared > 48 * 1024)
-                CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)mmaShared);
+            // The two entry points have DIFFERENT footprints (the padded one carries 16 B of pad per row), so
+            // each opts in to its own — a shared "max of both" would mis-budget the swizzled kernel's occupancy.
+            if (Int8MmaSharedBytes > 48 * 1024)
+                CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)Int8MmaSharedBytes);
+            if (Int8MmaSharedBytesPad > 48 * 1024)
+                CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16Pad, 8, (int)Int8MmaSharedBytesPad);
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -2298,10 +2303,24 @@ public sealed class CudaKernels : IDisposable
     /// <summary>The fused mma GEMM's CUfunction, for occupancy/register diagnostics. 0 when the module is absent.</summary>
     internal nint Int8MmaGemmFunction => _int8MmaGemmF16;
 
-    /// <summary>Dynamic shared bytes the fused mma GEMM needs: STAGES × (BM + BN) rows × SMEM_STRIDE.
+    /// <summary>The padded control entry point's CUfunction. Its register count is the check that the A/B baseline
+    /// really is the shipped kernel — if it moved, the control was contaminated by the edit and the delta is void.</summary>
+    internal nint Int8MmaGemmPadFunction => _int8MmaGemmF16Pad;
+
+    /// <summary>Dynamic shared bytes the SWIZZLED fused mma GEMM needs: STAGES × (BM + BN) rows × BK, unpadded.
     /// MUST track <c>int8_mma_gemm.cu</c> — it is both the launch argument and the occupancy budget the driver
     /// reasons about, so an over-estimate here costs registers, not just address space.</summary>
-    internal const uint Int8MmaSharedBytes = 3u * (128u + 256u) * 80u;
+    internal const uint Int8MmaSharedBytes = 3u * (128u + 256u) * 64u;
+
+    /// <summary>Dynamic shared bytes the PADDED control entry point needs (rows × <c>BK+16</c>). The two kernels
+    /// must never be launched with each other's budget: over-budgeting the swizzled one throws away exactly the
+    /// occupancy headroom the unpadded layout buys, and under-budgeting the padded one corrupts its last stage.</summary>
+    internal const uint Int8MmaSharedBytesPad = 3u * (128u + 256u) * 80u;
+
+    /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>HARTSY_INT8_MMA_SWIZZLE=0</c>
+    /// picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is
+    /// <c>HARTSY_INT8_FUSED_MMA=0</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
+    internal static readonly bool Int8MmaSwizzle = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_SWIZZLE") != "0";
 
     /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
     private const int Int8MmaTileN = 256;
@@ -2314,6 +2333,14 @@ public sealed class CudaKernels : IDisposable
     /// reaches HBM. <paramref name="actMode"/> matches that kernel's (0 none, 1 gelu-tanh).</summary>
     public unsafe void LaunchInt8MmaGemmDequant(ulong d, ulong a, ulong b, ulong actScale, ulong wScale,
         ulong bias, int m, int n, int k, uint actMode, nint stream)
+        => LaunchInt8MmaGemmDequant(d, a, b, actScale, wScale, bias, m, n, k, actMode, stream, Int8MmaSwizzle);
+
+    /// <param name="swizzle">Layout arm. Exposed so a benchmark can time both entry points against the same cold
+    /// buffers in ONE process — the env var is read once at type init, so an env-only switch would force separate
+    /// processes and reintroduce the between-run spread the comparison is trying to resolve.</param>
+    /// <inheritdoc cref="LaunchInt8MmaGemmDequant(ulong,ulong,ulong,ulong,ulong,ulong,int,int,int,uint,nint)"/>
+    public unsafe void LaunchInt8MmaGemmDequant(ulong d, ulong a, ulong b, ulong actScale, ulong wScale,
+        ulong bias, int m, int n, int k, uint actMode, nint stream, bool swizzle)
     {
         if (!HasInt8MmaGemm(m, n, k))
             throw new InvalidOperationException($"fused int8 mma GEMM unavailable for {m}x{n}x{k}.");
@@ -2322,9 +2349,11 @@ public sealed class CudaKernels : IDisposable
         void** args = stackalloc void*[10];
         args[0] = &dA; args[1] = &aA; args[2] = &bA; args[3] = &asA; args[4] = &wsA; args[5] = &biA;
         args[6] = &mA; args[7] = &nA; args[8] = &kA; args[9] = &actA;
-        uint shared = Int8MmaSharedBytes;
+        // Function and shared budget are picked together — they are not independently valid.
+        nint fn = swizzle ? _int8MmaGemmF16 : _int8MmaGemmF16Pad;
+        uint shared = swizzle ? Int8MmaSharedBytes : Int8MmaSharedBytesPad;
         uint gridX = (uint)(n / Int8MmaTileN), gridY = (uint)((m + 127) / 128);
-        CudaDriverApi.cuLaunchKernel(_int8MmaGemmF16, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(fn, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>

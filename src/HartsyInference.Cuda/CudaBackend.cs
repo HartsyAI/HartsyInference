@@ -1393,9 +1393,17 @@ public sealed class CudaBackend : IBackend
     /// <para>Every bound exists because a per-shape microbenchmark is NOT evidence about the workload: this gate
     /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
     /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
+    /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>),
+    /// which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the
+    /// unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was
+    /// −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that
+    /// sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also
+    /// the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
+    private static readonly bool WideMmaGate = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_WIDE_GATE") == "1";
+
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
         FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
-        && k <= 2L * n && n <= 2L * k && _kernels!.HasInt8MmaGemm(rows, n, k);
+        && k <= 2L * n && n <= (WideMmaGate ? 4L : 2L) * k && _kernels!.HasInt8MmaGemm(rows, n, k);
 
     /// <summary>One resident-int8 projection for <see cref="RunResidentInt8"/>: device pointers already resolved,
     /// so the helper never touches the transfer caches (see the prologue ordering note in <c>LinearImpl</c>).</summary>

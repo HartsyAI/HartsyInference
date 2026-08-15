@@ -868,6 +868,150 @@ steps**, which equals the entire measured Linear gap (self-consistent). Against 
 optimism, **realistic ≈ 45–70 ms/step ≈ 1.4–2.1 s**. The conv row is 47.40 s against Comfy's 42.48 s, so even
 the *ceiling* lands at ~43.5 s — still behind. This work narrows the gap; it does not close it.
 
+### R1 done: the XOR swizzle deletes ALL the excess L2 traffic and buys 4% (2026-08-14)
+
+The unpadded XOR-swizzled operand layout shipped. It did exactly what the profile predicted to the traffic
+counters and **almost nothing to the clock**, which is the finding: it removes the entire measured L2 excess and
+the kernel gets 4% faster, so **L2 traffic was never what the kernel was waiting on.**
+
+`int8_mma_gemm.cu` now carries two entry points — the swizzled one and the padded one it replaced, kept verbatim
+as an A/B control (`HARTSY_INT8_MMA_SWIZZLE=0`). Bodies are duplicated, not templated: a template parameter
+threaded through one body perturbs register allocation on *both* instantiations, and the control's whole job is
+to reproduce the shipped SASS. It does — 195 regs / 0 spill, unchanged, verified with `ptxas -v`.
+
+**The layout.** `physical byte offset of vector v of row r = r*64 + ((v ^ ((r>>1) & 3)) << 4)`. This is CUTLASS's
+`TensorOpMultiplicandCrosswise<8,64>` permutation: that layout's `kFactor` is
+`kTileShapeContiguous*kElementsPerAccess/Crosswise = 8*16/64 = 2`, it folds two strided rows into each 128-byte
+line, and permutes with `partition_contiguous_residual ^ (partition_strided_residual % 4)` — at this shape,
+exactly `v ^ ((r/2) & 3)`. **`v ^ (r & 3)`, which is what you write first, is wrong**: a 64-byte row makes the
+bank pattern repeat every *two* rows, so it has period 4 and collides r=0 with r=4. That mistake produces a
+kernel that is correct, conflicted, and slower — i.e. a confusing null result, not a crash.
+
+| ncu @ attn_qkvo | padded (control) | **swizzled** | cuBLASLt (CUTLASS) |
+|---|---:|---:|---:|
+| duration | 437.4 µs | **417.2** | 307.8 |
+| tensor pipe % peak | 59.82 | **62.09** | 85.83 |
+| **total L2 sectors** | **47,356,502** | **32,023,088** | 33,242,204 |
+| global LD sectors/request | 18.88 | **15.12** | 16.00 |
+| global LD sectors | 38,458,368 | **30,790,656** | 30,670,848 |
+| **L2 throughput %** | **85.25** | **50.42** | 73.01 |
+| shared ST bank conflicts | 2,236,416 | 2,236,416 | 0 |
+| stall mio_throttle | 3.57 | 2.27 | 0.33 |
+| achieved occupancy | 16.69 | 16.66 | 16.75 |
+
+**The premise the change was commissioned on was wrong, and the change worked anyway.** R1 was framed as "the
+pad forces a thread map whose 128-bit *global* loads split cache lines." It does not: `load_tile`'s global
+address is `gr*K + k0 + (tid&3)*16` and **never involves the shared stride at all**, K and k0 are both multiples
+of 64, so every 64-byte run is 64-byte aligned across exactly 2 sectors of one line — already ideal, and the
+thread map (4 threads along K × 8 rows per warp) already *was* CUTLASS's `PitchLinearWarpRakedThreadMap`
+arrangement. Not one global address changed in this commit.
+
+What the pad actually split was the **instruction**. `LDGSTS` is one op whose *destination* addressing is the
+shared side; L1TEX serializes it into wavefronts by shared-bank conflict, and each wavefront runs its own global
+tag lookup, so the same sectors are re-tagged and counted again. The banked numbers already implied this and it
+went unnoticed: 18.88/16 = **1.18×** per request against **1.50×** on total sectors, with the loads 97.5% L2
+hits throughout — the residual is extra *requests*, not extra bytes. Hence the falsifiable prediction, and it
+held: **7.7M global sectors and 15.3M L2 sectors vanished without a single global address changing.** Total
+global sectors now match cuBLASLt to 0.4%; per-request lands at 16.06 once the epilogue's 119,808 scale/bias
+requests are excluded (2,036,736 − 1,916,928 = 119,808 exactly, as recorded above).
+
+**And the 2,236,416 shared-store conflicts were never the operand loads — they are 100% the epilogue slab.**
+The profile presented them as part of the same `LDGSTS` defect; they are a second, unrelated one. The arithmetic
+closes to the digit: 624 blocks × 8 warps × (4 i × 2 half × 8 j) = 319,488 ideal wavefronts, ×8 = 2,555,904
+measured, conflicts = 7/8 = 2,236,416. `LDGSTS` does not retire through the LSU shared-store path these counters
+watch, which is why the operand conflicts showed up as global replays instead.
+
+**Trio, cold-L2, all three arms in one process** (the control reproduces its banked 424.1/393.0/568.7):
+
+| shape | **swizzled** | padded (control) | pair | bare cuBLASLt | sw vs pair | **sw vs padded** |
+|---|---:|---:|---:|---:|---:|---:|
+| attn_qkvo 4992×4096×4096 | **437.5** | 420.1 | 391.0 | 565.7 | +11.9% | **+4.1%** |
+| ffn_up 4992×16384×4096 | **411.0** | 403.3 | 397.1 | 575.3 | **+3.5%** | +1.9% |
+| ffn_down 4992×4096×16384 | 465.1 | 439.8 | 596.4 | 664.9 | −22.0% | +5.8% |
+| audio_attn 256×2048×2048 | 52.1 | 51.1 | 166.5 | 218.1 | −68.7% | +1.9% |
+| audio_ffn_up 256×8192×2048 | 205.5 | 202.0 | 256.4 | 325.6 | −19.9% | +1.7% |
+| text_kv 512×4096×4096 | 221.7 | 218.6 | 322.4 | 372.0 | −31.2% | +1.4% |
+
+Bit-exact (max abs **0**) against cuBLASLt+dequant at all five shapes including ragged-M, on **both** arms; the
+correctness gate was tightened from `maxRel < 2e-2` to `maxAbs == 0` to match what the kernel actually
+guarantees. 46/46 `Ltx2` CUDA tests pass.
+
+**Criteria met and missed.** Shared-ST conflicts → ~0: **missed, and the criterion was misattributed** — they
+are the epilogue, see (b) below. Sectors/request → ~16: **met** (15.12 raw, 16.06 excluding scale/bias). Tensor
+pipe → ~80%: **missed**, 59.82 → 62.09 against cuBLASLt's 85.83. attn_qkvo ≥ 520 TOPS: **missed**, 437.5.
+ffn_up ≥ 480: **missed**, 411.0 — but its sign against the pair **did flip**, −2.2% → **+3.5%**.
+
+**CONFIRMED −18.4 ms/step end-to-end** (`ltx25_ab.sh HARTSY_INT8_MMA_SWIZZLE 0 1 4`, arms interleaved, private
+CLI snapshot verified to carry both entry points in the PTX *and* the Cuda DLL). All four pairs same sign
+(−15.6, −15.7, −25.7, −16.6), **paired t = 7.53**, and the delta is larger than either arm's own spread:
+
+| | mean ms/step | median | range | spread |
+|---|---:|---:|---:|---:|
+| `HARTSY_INT8_MMA_SWIZZLE=0` (padded) | 1387.8 | 1387.5 | 1381.3–1395.2 | 13.9 |
+| **swizzled (ships)** | **1369.5** | 1369.0 | 1365.7–1374.0 | 8.3 |
+
+That is **−0.55 s over 30 steps**. The commissioning bar was −40 ms/step: **missed, by better than 2×.** This is
+banked on top of the fused kernel's own −19.7 ms/step, not a re-count of it.
+
+**Why the clock barely moved, stated plainly.** The 08-13 profile read `duration ratio 1.386× ≈ L2 sector ratio
+1.424×` as a tight fit for an L2-bound kernel. That was a coincidence. We removed 32% of L2 sectors and 41% of
+L2 throughput utilization and got **4.6%** of kernel wall clock; the kernel is now at 50% L2 utilization — less
+loaded than cuBLASLt's 73% — and still 1.36× slower than it. **Whatever the remaining gap is, it is not L2
+bandwidth, and the "moving fewer bytes through L2 is the only way this goes faster" thesis is falsified by its
+own experiment.** The surviving asymmetry is `mio_throttle` 2.27 vs 0.33 with `long_scoreboard` *lower* than
+cuBLASLt's and occupancy identical — an issue-side stall on the memory-IO pipe, not bandwidth and not latency.
+**That is the open question for whoever goes next**, and it is a different one from the one this file has been
+chasing since 08-13. Note the honest bound on the whole line of work: the R1 ceiling was priced at ~130 ms/step
+assuming the mainloop reached cuBLASLt's rate; the actual delivery is 18.4, i.e. **7× under its own estimate**,
+which is worse than this file's documented 2–3× optimism.
+
+### (b) The epilogue slab swizzle: mechanically perfect, worth exactly nothing (2026-08-14)
+
+Measured separately, on top of R1, and **reverted**. Permuting the slab's 16-byte vector index by its row
+(`physical = logical ^ (slabRow & 7)`) is conflict-free by construction and measured exactly that:
+
+| ncu @ attn_qkvo | (a) only | (a)+(b) | cuBLASLt |
+|---|---:|---:|---:|
+| shared ST bank conflicts | 2,236,416 | **0** | 0 |
+| shared ST wavefronts | 2,555,904 | **319,488** (ideal) | 638,976 |
+| stall mio_throttle | 2.27 | 2.21 | 0.33 |
+| duration | 417.2 µs | 423.0 | 307.8 |
+
+Every conflict gone, wavefronts at the theoretical floor and **half cuBLASLt's**, and the kernel did not get
+faster — attn_qkvo 437.5 → 435.9 TOPS, ffn_up 411.0 → 403.2, all against a control arm stable to 0.2% in the
+same process. `mio_throttle` moved 2.27 → 2.21, which also says the epilogue's conflicts were not what was
+throttling the MIO pipe. Reverted; the shipped PTX is byte-identical to the (a)-only build that was measured.
+
+**This is the useful half of the result.** A bank-conflict counter is not a stall. L1/TEX has headroom here (SM
+throughput 60%, L2 50% after the operand fix) to absorb an 8-way store conflict in an epilogue worth a few
+percent of the kernel. The 08-13 entry made the mirror-image error in the other direction — it ruled conflicts
+out *because* L1/TEX had headroom, which was wrong reasoning that reached the right answer for (b) and the wrong
+one for (a). Neither utilization headroom nor a conflict count localizes a stall; only per-SASS attribution and
+an A/B do.
+
+### Widening the gate to admit ffn_up: NOT worth measuring, and the ~60 ms/step estimate was inflated
+
+`HARTSY_INT8_MMA_WIDE_GATE=1` exists (loosens `n <= 2k` to `n <= 4k`, admitting ffn_up 4992×16384×4096 and
+nothing else; `k <= 2n` still excludes ffn_down) and is **default OFF, deliberately unmeasured**.
+
+The ceiling note above priced newly-admissible ffn_up at **~60 ms/step**. That number assumed the fused kernel
+reaching bare cuBLASLt's 575.3 TOPS. It does not — it reaches 411.0. The gate decision is only ever fused-vs-pair
+at the rate we actually have:
+
+| | ms/call | × 96 calls/step |
+|---|---:|---:|
+| fused (swizzled) | 1.662 | |
+| cuBLASLt + dequant pair | 1.687 | |
+| **actual gain** | −0.025 | **−2.4 ms/step** |
+| hypothetical, if fused matched bare cuBLASLt | 1.165 | −50.1 ms/step |
+
+**−2.4 ms/step is ~8× below this harness's 17–20 ms between-run sd**, so a campaign could not resolve it, and
+the sign is not safe either: the padded arm reads ffn_up at +1.6% vs the pair here against −2.2% recorded on
+08-14, i.e. ffn_up sits on the break-even line within ±4 points of run-to-run. Widening the gate on a margin
+that thin is exactly the error that cost +38.7 ms/step when the fused path was first wired in without a floor.
+**Leave it off until the mainloop is actually faster** — the gain is a function of the kernel's rate, so this
+reopens only if someone closes the `mio_throttle` gap.
+
 ### The rewrite: 128×256 tile + shared-memory epilogue — the fused GEMM now WINS (2026-08-13)
 
 Two changes, both taken from comfy-kitchen's shipped configuration, each verified bit-exact (max abs 0) against
@@ -1044,15 +1188,22 @@ Everything we inferred is confirmed, and the remaining unknowns are now specific
   `VisitorAuxStore` writes bf16/half/float straight out. **The int32 accumulator never reaches HBM** — which is
   precisely the ~165 ms/step round trip we cannot remove with cuBLASLt.
 - **The same `mma.m16n8k32` instruction** our own kernel already uses. The instruction is not the gap.
-- **Where our kernel actually differs**: they run **3–4 pipeline stages** (ours: 2), a **128×256×64** tile as
-  well as 128×128×64 (ours: 128×128×64 only), **`ThreadblockSwizzleLeanStreamK`** (ours: default swizzle), and
-  **alignment-16 vectorized operand loads**. They also ship a full tile ladder — 16×64×64, 16×128×64, 32×64×64,
-  32×128×64, 64×64×64, 64×128×64, 64×256×64, 128×128×64, 128×256×64, 64×64×128, 128×256×128 — and select per
-  shape, where ours has one tile for everything.
+- **Where our kernel actually differs**: they run **3–4 pipeline stages** (ours, at the time: 2), a
+  **128×256×64** tile as well as 128×128×64 (ours: 128×128×64 only), and **alignment-16 vectorized operand
+  loads**. They also ship a full tile ladder — 16×64×64, 16×128×64, 32×64×64, 32×128×64, 64×64×64, 64×128×64,
+  64×256×64, 128×128×64, 128×256×64, 64×64×128, 128×256×128 — and select per shape, where ours has one tile for
+  everything.
 
-That is the roadmap for `Kernels/dequant/int8_mma_gemm.cu` (currently 268 TOPS, wired to nothing, needs ~383 to
-beat the cuBLASLt+dequant pair and ~550 to match them). Stream-K in particular matters at LTX's shapes: with
-m=4992 padded and n=4096, a fixed swizzle leaves SMs idle on the tail wave.
+That was the roadmap for `Kernels/dequant/int8_mma_gemm.cu` (then 268 TOPS, wired to nothing, needing ~383 to
+beat the cuBLASLt+dequant pair and ~550 to match them). **Stages and the 128×256 tile have both been taken —
+see the sections above; the rest of this list is stale, and one item of it is refuted.**
+
+> **CORRECTION — `ThreadblockSwizzleLeanStreamK` was a misread symbol, and Stream-K is dropped entirely.**
+> `nm -DC` on comfy-kitchen finds **zero** `StreamK` symbols; all 576 Sm80 int8 kernels use
+> `GemmIdentityThreadblockSwizzle<1>` — the same fixed swizzle we already run. The follow-on claim that
+> "Stream-K matters at LTX's shapes because a fixed swizzle leaves SMs idle on the tail wave" therefore rested
+> on nothing, and is withdrawn: cuBLASLt beats us at an **identical achieved occupancy** (16.34 vs 16.66), which
+> is the opposite of a tail-wave problem. Do not re-propose it.
 
 ### Profiling the fused GEMM: the limiter is L2 BANDWIDTH, not compute (2026-08-13)
 

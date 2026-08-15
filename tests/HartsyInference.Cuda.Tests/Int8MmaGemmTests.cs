@@ -69,26 +69,34 @@ public sealed unsafe class Int8MmaGemmTests
         ulong dAcc = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 4));
         try
         {
-            ker.LaunchInt8MmaGemmDequant(dMma, dA, dB, dAS, dWS, 0, m, n, k, actMode, 0);
             gemm.Run(dB, dA, dAcc, m, n, k, 0);
             ker.LaunchW8A8DequantBias(dRef, dAcc, dAS, dWS, 0, m, n, 0, outF16: true, actMode: actMode);
             cuda.Sync();
-
-            GpuTransferHelper.CopyToHost(outMma, dMma, (nuint)((long)m * n * 2));
             GpuTransferHelper.CopyToHost(outRef, dRef, (nuint)((long)m * n * 2));
-            using Tensor fa = outMma.CastTo(DType.F32);
             using Tensor fb = outRef.CastTo(DType.F32);
-            float* pa = (float*)fa.DataPointer, pb = (float*)fb.DataPointer;
-            double maxAbs = 0, maxRel = 0;
-            for (long i = 0; i < (long)m * n; i++)
+
+            // BOTH layout arms against the same reference, in one process. The swizzled kernel parks operands
+            // somewhere else in shared; it does not change what mma sees, so anything but max abs 0 is an
+            // indexing bug — the mainloop accumulates int32 (order-independent) and the epilogue is per-element.
+            foreach (bool swizzle in new[] { true, false })
             {
-                double d = Math.Abs(pa[i] - pb[i]);
-                if (d > maxAbs) maxAbs = d;
-                double denom = Math.Abs(pb[i]) + 1e-3;
-                if (d / denom > maxRel) maxRel = d / denom;
+                ker.LaunchInt8MmaGemmDequant(dMma, dA, dB, dAS, dWS, 0, m, n, k, actMode, 0, swizzle);
+                cuda.Sync();
+                GpuTransferHelper.CopyToHost(outMma, dMma, (nuint)((long)m * n * 2));
+                using Tensor fa = outMma.CastTo(DType.F32);
+                float* pa = (float*)fa.DataPointer, pb = (float*)fb.DataPointer;
+                double maxAbs = 0, maxRel = 0;
+                for (long i = 0; i < (long)m * n; i++)
+                {
+                    double d = Math.Abs(pa[i] - pb[i]);
+                    if (d > maxAbs) maxAbs = d;
+                    double denom = Math.Abs(pb[i]) + 1e-3;
+                    if (d / denom > maxRel) maxRel = d / denom;
+                }
+                string arm = swizzle ? "swizzled" : "padded";
+                _output.WriteLine($"{label} [{arm}]: max abs {maxAbs:G4}, max rel {maxRel:G4}");
+                Assert.True(maxAbs == 0, $"{label} [{arm}]: max abs {maxAbs} — fused mma disagrees with cuBLASLt+dequant");
             }
-            _output.WriteLine($"{label}: max abs {maxAbs:G4}, max rel {maxRel:G4}");
-            Assert.True(maxRel < 2e-2, $"{label}: max rel {maxRel} — fused mma disagrees with cuBLASLt+dequant");
         }
         finally
         {
@@ -171,24 +179,33 @@ public sealed unsafe class Int8MmaGemmTests
             // of latency hiding. CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK = 0, LOCAL_SIZE_BYTES = 3, NUM_REGS = 4.
             CudaDriverApi.cuFuncGetAttribute(out int numRegs, 4, ker.Int8MmaGemmFunction);
             CudaDriverApi.cuFuncGetAttribute(out int spillBytes, 3, ker.Int8MmaGemmFunction);
-            _output.WriteLine($"  kernel: {numRegs} regs/thread, {spillBytes} B local (spill), "
+            CudaDriverApi.cuFuncGetAttribute(out int padRegs, 4, ker.Int8MmaGemmPadFunction);
+            CudaDriverApi.cuFuncGetAttribute(out int padSpill, 3, ker.Int8MmaGemmPadFunction);
+            _output.WriteLine($"  swizzled: {numRegs} regs/thread, {spillBytes} B local (spill), "
                 + $"{CudaKernels.Int8MmaSharedBytes} B dynamic -> regs cap {65536 / Math.Max(1, numRegs * 256)} blocks/SM, "
                 + $"shared caps {100 * 1024 / CudaKernels.Int8MmaSharedBytes} blocks/SM");
+            // If the padded control's register count or spill moved, the file edit contaminated the BASELINE and
+            // every delta below is void. It shipped at 195 regs, 0 spill.
+            _output.WriteLine($"  padded  : {padRegs} regs/thread, {padSpill} B local (spill), "
+                + $"{CudaKernels.Int8MmaSharedBytesPad} B dynamic");
 
-            double mmaMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0));
+            double mmaMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0, true));
+            double padMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0, false));
             double pairMs = BestMs(r =>
             {
                 gemm.Run(weights[r], dA, dAcc, m, n, k, 0);
                 ker.LaunchW8A8DequantBias(dOut, dAcc, dAS, dWS, 0, m, n, 0, outF16: true, actMode: 0u);
             });
             // The pair is INVARIANT across kernel edits — if its TOPS moves between runs, the measurement is
-            // drifting and the fused arm's number is not comparable either.
+            // drifting and the fused arms' numbers are not comparable either.
             double gemmOnlyMs = BestMs(r => gemm.Run(weights[r], dA, dAcc, m, n, k, 0));
 
-            _output.WriteLine($"{label,-10} m={m} n={n} k={k}   fused-mma {mmaMs:F3} ms = {flop / (mmaMs * 1e-3) / 1e12:F1} TOPS" +
-                $"   |  pair {pairMs:F3} ms = {flop / (pairMs * 1e-3) / 1e12:F1} TOPS" +
+            _output.WriteLine($"{label,-10} m={m} n={n} k={k}   swizzled {mmaMs:F3} ms = {flop / (mmaMs * 1e-3) / 1e12:F1} TOPS" +
+                $"  |  padded {padMs:F3} ms = {flop / (padMs * 1e-3) / 1e12:F1} TOPS" +
+                $"  |  pair {pairMs:F3} ms = {flop / (pairMs * 1e-3) / 1e12:F1} TOPS" +
                 $"   (gemm alone {flop / (gemmOnlyMs * 1e-3) / 1e12:F1} TOPS, dequant {pairMs - gemmOnlyMs:F3} ms)" +
-                $"   |  {(pairMs / mmaMs - 1) * 100:+0.0;-0.0}% vs pair  [{weights.Count} cold weight buffers]");
+                $"  |  swizzled vs pair {(pairMs / mmaMs - 1) * 100:+0.0;-0.0}%" +
+                $"  vs padded {(padMs / mmaMs - 1) * 100:+0.0;-0.0}%  [{weights.Count} cold weight buffers]");
             Assert.True(mmaMs > 0);
         }
         finally
