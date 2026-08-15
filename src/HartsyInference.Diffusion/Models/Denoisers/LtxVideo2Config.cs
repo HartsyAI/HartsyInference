@@ -104,6 +104,16 @@ public sealed record LtxVideo2Config
     /// shift when set. Distillation baked these values in, so a different step count is not a valid schedule.</summary>
     public float[]? FixedSigmas { get; init; }
 
+    /// <summary>Rescale the shifted sigma schedule so its last non-zero value lands on <see cref="SigmaTerminal"/>.
+    /// LTX's own scheduler node does this by default; without it the sampler stops while the latent is still
+    /// noticeably noisy, and the error grows with token count because the shift does — at 1280x736x97f the last
+    /// non-zero sigma reaches 0.817 instead of 0.100, which is why raising resolution used to make output WORSE.
+    /// Applies only to the dynamic schedule; <see cref="FixedSigmas"/> is verbatim and must not be re-transformed.</summary>
+    public bool SigmaStretch { get; init; } = true;
+
+    /// <summary>Terminal sigma for <see cref="SigmaStretch"/>. 0.1 is what the shipped LTX-2.5 templates pass.</summary>
+    public float SigmaTerminal { get; init; } = 0.1f;
+
     /// <summary>Distilled 2.5 schedule (8 steps: 9 sigmas ending at 0), from the reference pipeline's
     /// <c>DISTILLED_SIGMA_VALUES</c>. A fresh array per call — a shared instance would let one in-place edit
     /// anywhere corrupt every config built afterwards.</summary>

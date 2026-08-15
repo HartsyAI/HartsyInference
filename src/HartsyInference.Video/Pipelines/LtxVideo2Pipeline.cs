@@ -336,7 +336,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioFrames, audioChannels), seed ^ 0x5D2B);
         // Distilled checkpoints baked their sigma schedule in, so it replaces the dynamic flow-match shift outright
         // and a different step count is not a valid schedule for them.
-        float[] tsteps = _config.FixedSigmas ?? LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        float[] tsteps = _config.FixedSigmas ?? StretchTerminal(
+            LancePipelineCommon.BuildShiftedTimesteps(steps, shift), _config, shift);
         Logs.Info($"[ltx2-phase] DiT preload+prime: {phase.ElapsedMilliseconds} ms");
 
         for (int k = 0; k < steps; k++)
@@ -617,6 +618,35 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
         double a = rescale * factor + (1f - rescale);
         Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
+    }
+
+    /// <summary>Rescales a shifted flow-match schedule so its last non-zero sigma lands on the config's terminal
+    /// value, matching LTX's own scheduler (<c>stretch=True, terminal=0.1</c> in the shipped templates). Without it
+    /// the denoise stops early: the shift grows with token count, so at 1280x736x97f the schedule ends at sigma
+    /// 0.817 and drops to zero in one step. <c>HARTSY_LTX2_SIGMA_STRETCH=0</c> restores the un-stretched schedule.</summary>
+    /// <summary>Test seam for <see cref="StretchTerminal"/> — the schedule is pure math and worth pinning against
+    /// ComfyUI's numbers without standing up a pipeline.</summary>
+    internal static float[] StretchTerminalForTests(float[] sigmas, LtxVideo2Config config, float shift)
+        => StretchTerminal(sigmas, config, shift);
+
+    private static float[] StretchTerminal(float[] sigmas, LtxVideo2Config config, float shift)
+    {
+        if (!config.SigmaStretch || Environment.GetEnvironmentVariable("HARTSY_LTX2_SIGMA_STRETCH") == "0")
+        {
+            return sigmas;
+        }
+        // The schedule ends in an explicit 0; the value to pin is the last NON-zero entry.
+        int last = sigmas.Length - 1;
+        while (last > 0 && sigmas[last] == 0f) last--;
+        if (last <= 0) return sigmas;
+        float scale = (1f - sigmas[last]) / (1f - config.SigmaTerminal);
+        if (scale <= 0f) return sigmas;
+        for (int i = 0; i <= last; i++)
+        {
+            if (sigmas[i] != 0f) sigmas[i] = 1f - ((1f - sigmas[i]) / scale);
+        }
+        Logs.Debug($"[ltx2] sigma stretch: shift={shift:F3} last {sigmas[last]:F4} (terminal {config.SigmaTerminal:F2})");
+        return sigmas;
     }
 
     /// <summary>Decodes the unpacked video latent to RGB through whichever decoder the checkpoint shipped. The
