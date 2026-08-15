@@ -38,6 +38,13 @@ public sealed unsafe class LtxVaeUpsampler3d
         if (_conv is not null) foreach (Tensor t in _conv.EnumerateWeights()) yield return t;
     }
 
+    /// <summary>Compact geometry description for a parity harness to assert against the reference's own modules.</summary>
+    internal string Describe() => $"stride({_stride.T},{_stride.H},{_stride.W}),upscale{_upscale}";
+
+    /// <summary>The two behaviour flags the geometry does NOT pin down, which the reference takes from the
+    /// checkpoint's config rather than from weight shapes.</summary>
+    internal string DescribeFlags() => $"residual{(_residual ? 1 : 0)},reflect{(_spatialReflectPad ? 1 : 0)}";
+
     public Tensor Forward(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];

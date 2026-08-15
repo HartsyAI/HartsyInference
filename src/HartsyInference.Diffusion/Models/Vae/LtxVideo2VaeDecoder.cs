@@ -51,6 +51,28 @@ public sealed unsafe class LtxVideo2VaeDecoder
     private UpStage[] _upStages = [];
     private bool[] _temporalScaleInferred = [];  // per up-stage: does it upscale the temporal axis (st0 == 2)?
 
+    /// <summary>Per-stage tensor tap for the ComfyUI layer-diff (<c>benchmarks/ltx2_conv_layerdiff</c>).</summary>
+    internal Action<string, Tensor>? Tap { get; set; }
+
+    /// <summary>The structure LoadWeights inferred from the weight shapes, so a diff harness can assert it instead
+    /// of trusting that a silently-short <see cref="CountResnets"/> walk found every block.</summary>
+    internal string InferredStructure => Describe(u => u.Describe());
+
+    /// <summary>Per-upsampler behaviour flags, which come from the config rather than the weight shapes.</summary>
+    internal string InferredFlags => Describe(u => u.DescribeFlags());
+
+    private string Describe(Func<LtxVaeUpsampler3d, string> part)
+    {
+        List<string> parts = [$"mid:{_midResnets.Length}"];
+        for (int i = 0; i < _upStages.Length; i++)
+        {
+            UpStage s = _upStages[i];
+            parts.Add(s.Upsampler is null ? $"up{i}:none" : $"up{i}:{part(s.Upsampler)}");
+            parts.Add($"res{i}:{s.Resnets.Length}");
+        }
+        return string.Join(" ", parts);
+    }
+
     public LtxVideo2VaeDecoder(
         int latentChannels = 128, int outChannels = 3,
         int[]? blockOutChannels = null, bool[]? spatioTemporalScaling = null, int[]? layersPerBlock = null,
@@ -67,7 +89,9 @@ public sealed unsafe class LtxVideo2VaeDecoder
         spatioTemporalScaling ??= [true, true, true];
         layersPerBlock ??= [5, 5, 5, 5];
         upsampleFactor ??= [2, 2, 2];
-        upsampleResidual ??= [true, true, true];
+        // The LTX-2 checkpoints ship NO residual on any upsampler — their own __metadata__.config
+        // omits the key, and ComfyUI's block_params.get("residual", False) therefore reads False.
+        upsampleResidual ??= [false, false, false];
         _blockOutRev = Reverse(blockOutChannels);
         _scalingRev = Reverse(spatioTemporalScaling);
         _layersRev = Reverse(layersPerBlock);
@@ -93,14 +117,14 @@ public sealed unsafe class LtxVideo2VaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
         int nMid = CountResnets(w, "decoder.mid_block");
         _midResnets = new LtxVaeResnetBlock3d[nMid];
         for (int j = 0; j < nMid; j++)
         {
-            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
             _midResnets[j].LoadWeights(w, $"decoder.mid_block.resnets.{j}");
         }
 
@@ -126,7 +150,10 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 int upscale = convIn / outNom;                 // diffusers: convIn  = outNom · upscale
                 (int T, int H, int W) stride = StrideFromProduct(strideProd);
                 stage.Upsampler = new LtxVaeUpsampler3d(convIn, stride, upscaleFactor: upscale,
-                    residual: true, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+                    // Bounds-guarded: the up-stage loop is open-ended (it stops when the weights run out) and
+                    // can exceed the per-block config arrays, which is why this field was never wired in before.
+                    residual: i < _residualRev.Length && _residualRev[i],
+                    isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
                 temporal.Add(stride.T == 2);
             }
@@ -135,7 +162,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 outNom = (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0];
                 if (output != outNom)
                 {
-                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
                     stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
                 }
                 temporal.Add(false);
@@ -144,7 +171,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
             stage.Resnets = new LtxVaeResnetBlock3d[nRes];
             for (int j = 0; j < nRes; j++)
             {
-                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
             stages.Add(stage);
@@ -154,7 +181,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _temporalScaleInferred = [.. temporal];
 
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: true, computeDtype: _computeDtype);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
     }
 
     /// <summary>Counts the contiguous <c>{prefix}.resnets.{j}.conv1.conv.weight</c> entries present in the dict.</summary>
@@ -204,6 +231,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         bool probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
         Tensor denorm = Denormalize(latent);
         if (probe) ProbeStats("denorm", denorm);
+        Tap?.Invoke("denorm", denorm);
         // The latent is tiny (one stage-0 grid) so un-normalizing on the host stays cheap; widen to the decode's
         // activation dtype here so every stage below runs in it.
         if (_computeDtype != DType.F32)
@@ -216,16 +244,20 @@ public sealed unsafe class LtxVideo2VaeDecoder
         Tensor h = _convIn!.Forward(backend, denorm);
         denorm.Dispose();
         if (probe) ProbeStats("conv_in", h);
+        Tap?.Invoke("conv_in", h);
         foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
         if (probe) ProbeStats("mid_resnets", h);
+        Tap?.Invoke("mid_resnets", h);
 
         int stageIdx = 0;
         foreach (UpStage s in _upStages)
         {
             if (s.ConvIn is not null) { Tensor n = s.ConvIn.Forward(backend, h, null); h.Dispose(); h = n; }
             if (s.Upsampler is not null) { Tensor n = s.Upsampler.Forward(backend, h); h.Dispose(); h = n; }
+            Tap?.Invoke($"up{stageIdx}_up", h);
             foreach (LtxVaeResnetBlock3d r in s.Resnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
             if (probe) ProbeStats($"up_stage_{stageIdx}", h);
+            Tap?.Invoke($"up{stageIdx}_res", h);
             stageIdx++;
         }
 
@@ -236,10 +268,12 @@ public sealed unsafe class LtxVideo2VaeDecoder
         backend.WanRmsNormChannel(normed, h, null, 1e-8f);
         h.Dispose();
         if (probe) ProbeStats("norm_out", normed);
+        Tap?.Invoke("norm_out", normed);
         backend.Silu(normed, normed);
         Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
         if (probe) ProbeStats("conv_out", patched);
+        Tap?.Invoke("conv_out", patched);
         int pb = (int)patched.Shape[0], pc = (int)patched.Shape[1], pf = (int)patched.Shape[2];
         int ph = (int)patched.Shape[3], pw = (int)patched.Shape[4];
         int oc = pc / (_patch * _patch);
@@ -257,6 +291,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
             rgb = rgbF32;
         }
         if (probe) ProbeStats("unpatchify", rgb);
+        Tap?.Invoke("pixels", rgb);
         return rgb;
     }
 

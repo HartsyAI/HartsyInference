@@ -12,6 +12,10 @@ public static class VaePrecisionHelper
     public static DType PreferredVaeDtype(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        // HARTSY_VAE_F32=1 forces the F32 decode path. BF16 was adopted for speed and VRAM (LTX-2.5 conv decode
+        // 3.94 -> 2.89 s) and validated at SSIM 0.9983-0.9986 on SHORT clips; this switch exists so that trade can
+        // be re-tested against long, motion-heavy content, where SSIM is a poor detector of periodic texture loss.
+        if (Environment.GetEnvironmentVariable("HARTSY_VAE_F32") == "1") return DType.F32;
         return backend.Capabilities.SupportsBF16 ? DType.BF16 : DType.F32;
     }
 

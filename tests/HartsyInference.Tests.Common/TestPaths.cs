@@ -188,6 +188,9 @@ public static class TestPaths
         /// <summary>Standalone LTX-2.5 video VAE — the diffusion (<c>NADiffusionDecoder</c>) decoder, not the
         /// convolutional one bundled with 2.3. Override with LTX25_VIDEO_VAE_PATH.</summary>
         public static string VideoVae25     => Resolve("LTX25_VIDEO_VAE_PATH",  Path.Combine(ModelsDir, "VAE", "LTX-2", "ltx-2.5-video-vae-bf16.safetensors"));
+        /// <summary>Standalone LTX-2.5 video VAE with the CONVOLUTIONAL decoder. Override with
+        /// LTX25_VIDEO_VAE_CONV_PATH.</summary>
+        public static string VideoVae25Conv => Resolve("LTX25_VIDEO_VAE_CONV_PATH", Path.Combine(ModelsDir, "VAE", "LTX-2", "ltx-2.5-video-vae-conv-bf16.safetensors"));
     }
 
     /// <summary>HunyuanVideo (Tencent 13B T2V) paths. The DiT single-file is the Comfy-Org repacked bf16 (original
