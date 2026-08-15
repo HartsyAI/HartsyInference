@@ -620,15 +620,15 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
     }
 
-    /// <summary>Rescales a shifted flow-match schedule so its last non-zero sigma lands on the config's terminal
-    /// value, matching LTX's own scheduler (<c>stretch=True, terminal=0.1</c> in the shipped templates). Without it
-    /// the denoise stops early: the shift grows with token count, so at 1280x736x97f the schedule ends at sigma
-    /// 0.817 and drops to zero in one step. <c>HARTSY_LTX2_SIGMA_STRETCH=0</c> restores the un-stretched schedule.</summary>
     /// <summary>Test seam for <see cref="StretchTerminal"/> — the schedule is pure math and worth pinning against
     /// ComfyUI's numbers without standing up a pipeline.</summary>
     internal static float[] StretchTerminalForTests(float[] sigmas, LtxVideo2Config config, float shift)
         => StretchTerminal(sigmas, config, shift);
 
+    /// <summary>Rescales a shifted flow-match schedule so its last non-zero sigma lands on the config's terminal
+    /// value, matching LTX's own scheduler (<c>stretch=True, terminal=0.1</c> in the shipped templates). Without it
+    /// the denoise stops early: the shift grows with token count, so at 1280x736x97f the schedule ends at sigma
+    /// 0.817 and drops to zero in one step. <c>HARTSY_LTX2_SIGMA_STRETCH=0</c> restores the un-stretched schedule.</summary>
     private static float[] StretchTerminal(float[] sigmas, LtxVideo2Config config, float shift)
     {
         if (!config.SigmaStretch || Environment.GetEnvironmentVariable("HARTSY_LTX2_SIGMA_STRETCH") == "0")
