@@ -102,10 +102,19 @@ clip RMS with only 22 dB of dynamic range (healthy geometries: −9…−16 dB, 
 taken at was already broken** — 17,480 tokens ⇒ shift 936.8 ⇒ 14 of 20 sigmas above 0.9. The `shift = exp(tokens·m + b)`
 fit is calibrated on 1024→4096 tokens and is being extrapolated; at 27,280 tokens it reaches **31,306** and
 **33 of 40 steps** sit above sigma 0.9 — an effectively ~4-step denoise, which is why raising step count does not help.
-Additionally the **ComfyUI arm was plausibly running the shipped two-stage distilled template** (half-res +
-`ManualSigmas` + `LTXVLatentUpsampler` ×2 + 3-step refine + `VAEDecodeTiled`), i.e. a structurally different
-pipeline — the shipped 2.5 templates never call `LTXVScheduler` at all. **Do not cite this row as evidence that
-quality is at parity; re-measure with a temporal and an audio criterion.** Full analysis:
+Additionally — **settled from SwarmUI's source, not inferred** — the ComfyUI arm was **not running the same
+schedule we were**. In `WorkflowGenerator.cs:901-917` the line `defscheduler ??= "ltxv"` sits inside
+`if (IsLTXV())`, i.e. LTX-Video 1.x only; `IsLTXV2()` never sets it, so LTX-2.5 falls through to
+`DefaultScheduler = "normal"` (`:759`) and builds a plain `BasicScheduler` (`:1160-1166`) — on a CONST/flow model
+that is `linspace(1,0,steps+1)`, with **no `LTXVScheduler`, no `exp(tokens·m+b)` and no stretch**. So this row
+compared our shift-936.8 schedule against ComfyUI's straight linear one. (The arm was also single-pass, not the
+shipped two-stage template: `WorkflowGeneratorSteps.cs:1658-1695` builds `LTXVLatentUpsampler` for `IsLTXV2()`
+only when Refiner Upscale Method starts with `latentmodel-`.) **Do not cite this row as evidence that quality is
+at parity; re-measure with a temporal and an audio criterion, and state which schedule each arm ran.**
+
+That makes **four independent references, none of which scale the shift with token count**: the checkpoint's own
+`sampler LinearQuadratic, shifting null`; diffusers pinning mu at `max_shift 2.05`; the shipped ComfyUI templates
+using `ManualSigmas`; and SwarmUI's own ComfyUI backend using `normal`. Full analysis:
 `~/Desktop/ltx25-quality-audit-2026-08-15.md`.
 
 **The sigma bug, proven causally at this geometry.** Same seed and settings with `HARTSY_LTX2_SIGMA_STRETCH=0`
