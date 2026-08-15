@@ -534,7 +534,11 @@ internal static unsafe class GpuTransferHelper
         // reuse); pinned src stays alive until the stream-ordered FreeDevice. No CPU read happens here, so no
         // correctness dependency on the copy completing before this returns — only stream order, which holds.
         // HARTSY_PROFILE visibility into miss H2D volume.
-        using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");
+        using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20)
+            ? (Profiling.NvtxRange.ProfileShapes
+                ? $"H2D_MISS_BIG {string.Join("x", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]))} {cpuTensor.DType}"
+                : "H2D_MISS_BIG")
+            : "H2D_MISS_SMALL");
         if (_traceBigMisses && Interlocked.Increment(ref _bigMissTraceCount) <= _traceBigMissLimit)
         {
             string shape = string.Join("x", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
@@ -893,6 +897,22 @@ internal static unsafe class GpuTransferHelper
 
     /// <summary>True when this backend's activation cache currently holds a device copy of <paramref name="tensor"/>.</summary>
     internal static bool HasCachedActivation(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
+
+    /// <summary>The device pointer already backing <paramref name="tensor"/>, without uploading anything. For an op
+    /// that OVERWRITES its destination in full: <see cref="CopyToDevice"/> would stage the host bytes over PCIe
+    /// first, and the very next line discards them.</summary>
+    internal static bool TryGetCachedDevice(Tensor tensor, out ulong gpuPtr)
+    {
+        State s = Resolve();
+        if (s.WeightCache.TryGetValue(tensor, out gpuPtr)) return true;
+        if (s.ActivationCache.TryGetValue(tensor, out (ulong GpuPtr, nuint Bytes) activation))
+        {
+            gpuPtr = activation.GpuPtr;
+            return true;
+        }
+        gpuPtr = 0;
+        return false;
+    }
 
     /// <summary>Number of activations this backend currently holds on device.</summary>
     internal static int CachedActivationCount => Resolve().ActivationCache.Count;

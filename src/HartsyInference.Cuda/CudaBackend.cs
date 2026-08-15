@@ -589,6 +589,12 @@ public sealed class CudaBackend : IBackend
     // Int8GemmEpilogueProbeTests) and which our own mma kernel is not yet fast enough to justify.
     private const int DefaultInt8ColChunk = int.MaxValue;
 
+    /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving
+    /// it from free VRAM. 0 keeps the derived behaviour.</summary>
+    private static readonly long RowChunkBudgetOverrideBytes =
+        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_ROW_BUDGET_MB"), out long mb) && mb > 0
+            ? mb << 20 : 0;
+
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
     {
         // 256 MB is the measured optimum, not a guess: shrinking the chunk so the int32 IMMA accumulator becomes
@@ -601,8 +607,12 @@ public sealed class CudaBackend : IBackend
         // across ~2,700 resident-int8 Linears — but caching it buys nothing, because this path is GPU-bound at
         // 99-100% SM and host queuing time never reaches the wall clock. See Int8GemmExecutor's remarks for the
         // interleaved 4-rep campaign that measured the same null on a 45k-call-per-step version of this idea.
-        (long freeBytes, _) = CudaMemory.GetMemInfo();
-        long budget = Math.Clamp(freeBytes / 8, FloorBytes, CeilingBytes);
+        // HARTSY_INT8_ROW_BUDGET_MB pins the budget. Deriving it from free VRAM makes the chunk count — and with it
+        // the launch count and the GEMM's M — a function of whatever else is transiently allocated, so any A/B that
+        // changes device-memory pressure silently changes this too and stops being a controlled comparison.
+        long budget = RowChunkBudgetOverrideBytes > 0
+            ? RowChunkBudgetOverrideBytes
+            : Math.Clamp(CudaMemory.GetMemInfo().FreeBytes / 8, FloorBytes, CeilingBytes);
         long perRowBytes = (long)n * sizeof(int) + k + (long)k * activationBytes;
         return (int)Math.Min(m, Math.Max(1, budget / Math.Max(1, perRowBytes)));
     }
@@ -1401,6 +1411,15 @@ public sealed class CudaBackend : IBackend
     /// the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
     private static readonly bool WideMmaGate = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_WIDE_GATE") == "1";
 
+    /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces.
+    /// **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down
+    /// (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end
+    /// A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM
+    /// against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the
+    /// occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is
+    /// not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
+    private static readonly bool UseWideConvRotQuant = Environment.GetEnvironmentVariable("HARTSY_CONVROT_WIDE") == "1";
+
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
         FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
         && k <= 2L * n && n <= (WideMmaGate ? 4L : 2L) * k && _kernels!.HasInt8MmaGemm(rows, n, k);
@@ -1435,10 +1454,16 @@ public sealed class CudaBackend : IBackend
         int paddedChunk = PadInt8Rows(rowChunk);
         int accCols = Math.Min(nMax, colChunk);
 
+        // The rotated full-width intermediate only exists for the split rotate-then-quant pair; every fused
+        // variant reads the activation once. Skipping the allocation matters beyond the pool: `rowChunk` above
+        // is sized off free VRAM, so a 134 MB transient nobody reads shrinks the next Linear's chunk.
+        bool fusedQuant = group > 0 && (preGate.Logits != 0 || _kernels!.HasFusedConvRotQuant(k, group)
+            || (UseWideConvRotQuant && _kernels.HasWideConvRotQuant(k, group, srcF16)));
+
         ulong pRot = 0, pAct8 = 0, pRowScale = 0, pOut32 = 0;
         try
         {
-            if (group > 0)
+            if (group > 0 && !fusedQuant)
                 pRot = GpuTransferHelper.AllocateDevice((nuint)((long)rowChunk * k * inputElementBytes));
             pAct8 = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * k));
             pRowScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedChunk * sizeof(float)));
@@ -1470,6 +1495,12 @@ public sealed class CudaBackend : IBackend
                     // Rotation + per-row quant in one pass: the split pair wrote a full-width rotated
                     // activation to HBM only for the quantizer to read it straight back.
                     _kernels.LaunchConvRotQuantRowwise(pAct8, pRowScale, inputChunk, rows, k, group, _stream.Handle, srcF16);
+                }
+                else if (group > 0 && UseWideConvRotQuant && _kernels!.HasWideConvRotQuant(k, group, srcF16))
+                {
+                    // Same win one row width up: LTX-2.5's FFN-down activation is 16384 wide, too wide for the
+                    // f32-staged kernel above, and was paying 7 bytes/element instead of 3.
+                    _kernels.LaunchConvRotQuantRowwiseWide(pAct8, pRowScale, inputChunk, rows, k, group, _stream.Handle);
                 }
                 else
                 {
@@ -1659,7 +1690,7 @@ public sealed class CudaBackend : IBackend
         ulong[] biasCasts = new ulong[grouped];
         // Scoped as "Linear" so a grouped step's profile stays comparable with an ungrouped one; the ineligible
         // stragglers below push their own, outside this scope, so nothing is counted twice.
-        using (NvtxRange.Push("Linear"))
+        using (NvtxRange.Push(NvtxRange.ProfileShapes ? $"Linear grp m={m} g={grouped}" : "Linear"))
         try
         {
             pInput = GpuTransferHelper.CopyToDevice(input);
@@ -1739,7 +1770,9 @@ public sealed class CudaBackend : IBackend
         int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false,
         Tensor? preGate = null, int preGateHeads = 0, int preGateHeadDim = 0)
     {
-        using NvtxRange _nvtx = NvtxRange.Push("Linear");
+        using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
+            ? $"Linear m={input.ElementCount / weight.Shape[weight.Shape.Rank - 1]}x{weight.Shape[0]}x{weight.Shape[weight.Shape.Rank - 1]}"
+            : "Linear");
         EnterOp();
         EnsureKernels();
 
@@ -3976,11 +4009,15 @@ public sealed class CudaBackend : IBackend
         EnterOp();
         EnsureKernels();
         ulong pSrc = 0;
-        ulong pDst = GpuTransferHelper.CopyToDevice(dst);
+        nuint bytes = GpuTransferHelper.ByteSize(dst);
+        // The copy overwrites dst's buffer in full, so a first call must ALLOCATE, not upload: CopyToDevice would
+        // stage dst's (here uninitialized) host bytes over PCIe and the DtoD below would immediately discard them.
+        // LTX-2.5's CFG-pair split hits this once per step at 143 MB.
+        ulong pDst = GpuTransferHelper.TryGetCachedDevice(dst, out ulong cachedDst)
+            ? cachedDst : GpuTransferHelper.AllocateDevice(bytes);
         try
         {
             pSrc = GpuTransferHelper.CopyToDevice(src);
-            nuint bytes = GpuTransferHelper.ByteSize(dst);
             CudaDriverApi.cuMemcpyDtoDAsync(pDst, pSrc, bytes, _stream.Handle).ThrowOnError();
             // In-place re-assert (the CfgEulerStep pattern): dst keeps this buffer across the copy.
             dst._gpuSyncCallback = null;
@@ -6818,18 +6855,11 @@ public sealed class CudaBackend : IBackend
         // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
         // SageAttention F16-ingest (opt-in): native-F16 Q/K/V/out via the f16h prologues + f16io flash
         // kernel. Competes with the CAST-FREE cuDNN branch below, which Sage only beats at long seq —
-        // gate high (HARTSY_SAGE_F16_MIN_SKV, default 12288) until the crossover is measured per-arch.
-        if (UseSageAttn && mask is null && (d == 64 || d == 128)
-            && query.DType == DType.F16 && key.DType == DType.F16
-            && value.DType == DType.F16 && output.DType == DType.F16
-            && skv >= SageF16MinSkv())
+        // gate high (HARTSY_SAGE_F16_MIN_SKV, default 8192) until the crossover is measured per-arch.
+        if (SageF16Preferred(query, key, value, output, mask, sq, skv, d))
         {
-            EnsureKernels();
-            if (_kernels!.HasSageAttentionKernels && _kernels.HasSageV1)
-            {
-                SageAttentionInt8(output, query, key, value, scale);
-                return;
-            }
+            SageAttentionInt8(output, query, key, value, scale);
+            return;
         }
 
         if (CudnnMaskCompatible(mask, b, sq, skv) && query.DType == DType.F16 && key.DType == DType.F16
@@ -7172,10 +7202,25 @@ public sealed class CudaBackend : IBackend
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
     {
-        using NvtxRange _nvtx = NvtxRange.Push("SDPA-TM");
+        using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
+            ? $"SDPA-TM {query.Shape[0]}x{key.Shape[0]}x{heads}x{headDim}" : "SDPA-TM");
         ValidateTokenMajorAttentionContract(output, query, key, value, mask, heads, headDim, scale);
         long sq = query.Shape[0], skv = key.Shape[0], d = headDim;
-        if (CudnnMaskCompatible(mask, 1, sq, skv)
+        // SageAttention has no token-major kernel, so this entry point reaches cuDNN and a long-sequence DiT
+        // (LTX-2.5 at 17480 video tokens) runs fp16 flash while the INT8 path it qualifies for sits unused.
+        // Declining cuDNN here routes the call through the permute pair below into the head-major dispatch, which
+        // owns the Sage gate.
+        //
+        // OPT-IN, and here is the whole measurement. LTX-2.5 1280x736x145f on a 4090: the CLI harness (4 interleaved
+        // reps, ~25 ms/step spread) puts it at a clean **-71 ms/step**, every pair the same sign. It still does not
+        // ship on, for two reasons the CLI cannot see. (1) Through SwarmUI, N=3 warm per arm, it is unresolvable —
+        // that harness drifts monotonically within a session and spans 8.4 s, so a 1.4 s effect is invisible.
+        // (2) Sage's Q8/K8/scale/V-transpose workspaces raise peak VRAM by **494 MiB** (23539 -> 24033 of 24564),
+        // and this geometry already runs 531 MiB from the ceiling — spending that headroom for 0.9% of wall clock
+        // is the wrong trade for a user one setting away from an OOM. Quality is a third, smaller reason: SSIM
+        // 0.9927 (min 0.9908) against the fp16 arm over 145 frames, audio relL2 0.18 at matched seed.
+        if (!(SageTokenMajorDetour && SageF16Preferred(query, key, value, output, mask, sq, skv, d))
+            && CudnnMaskCompatible(mask, 1, sq, skv)
             && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
             && (query.DType == DType.F16 || (query.DType == DType.F32 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)))
         {
@@ -7538,6 +7583,28 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pV);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
+    }
+
+    /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into
+    /// the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
+    private static readonly bool SageTokenMajorDetour =
+        Environment.GetEnvironmentVariable("HARTSY_LTX2_SAGE_TOKENMAJOR") == "1";
+
+    /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash.
+    /// Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above
+    /// the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
+    private bool SageF16Preferred(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask,
+        long sq, long skv, long d)
+    {
+        if (!UseSageAttn || mask is not null || (d != 64 && d != 128)) return false;
+        if (query.DType != DType.F16 || key.DType != DType.F16
+            || value.DType != DType.F16 || output.DType != DType.F16) return false;
+        // BOTH sides must be long. The prologue (K quant, V transpose, K mean) is paid per KEY while the INT8 QK^T
+        // saving is per query x key, so a short-query cross-attention over a long key stream is all prologue: at
+        // LTX-2.5's 151-query / 17480-key audio->video attention Sage measured 2.53 ms/call against cuDNN's 0.51.
+        if (skv < SageF16MinSkv() || sq < SageF16MinSkv()) return false;
+        EnsureKernels();
+        return _kernels!.HasSageAttentionKernels && _kernels.HasSageV1;
     }
 
     /// <summary>Min Skv (override: HARTSY_SAGE_F16_MIN_SKV) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>

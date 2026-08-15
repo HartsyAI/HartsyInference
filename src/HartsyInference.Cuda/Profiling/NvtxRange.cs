@@ -40,6 +40,11 @@ public readonly ref struct NvtxRange
     internal static readonly bool ProfileFine =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE_FINE") == "1";
 
+    /// <summary>HARTSY_PROFILE_SHAPES=1: split selected op labels by shape, so one label's total can be attributed
+    /// to the call regimes inside it. Off by default — it multiplies the label count.</summary>
+    internal static readonly bool ProfileShapes =
+        Environment.GetEnvironmentVariable("HARTSY_PROFILE_SHAPES") == "1";
+
     private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
 
     /// <summary>Writes the accumulated per-op wall-time table (sorted by total) to <paramref name="path"/>.</summary>

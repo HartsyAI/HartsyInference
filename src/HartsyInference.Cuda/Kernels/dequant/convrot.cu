@@ -166,3 +166,66 @@ extern "C" __global__ void convrot_quant_rowwise_f32(
     const float* xr = x + (unsigned long long)blockIdx.x * cols;
     CONVROT_QUANT_BODY(xr[i], sh[i])
 }
+
+// ── Wide rows: stage the row as f16, not f32 ────────────────────────────────
+// The body above holds the whole row as floats, which caps `cols` at 8192 (32 KB) and sent LTX-2.5's
+// FFN-down activation (cols 16384) back to the 7-bytes/element rotate->quant pair. The rotated value is
+// rounded through f16 anyway — that is what makes the fused kernel bit-identical to the pair — so the row
+// can be STORED as f16 and only the radix-4 butterflies need float, and they are group-local. So a small
+// float tile carries the rotation and the f16 row carries everything after it: 16384 cols costs
+// cols*2 + tile*4 = 40 KB, inside the 48 KB no-opt-in ceiling.
+//
+// `tile` must be a multiple of `group` (the butterflies never cross a group) and the caller sizes shared as
+// tile*4 + cols*2. Bit-identical to BOTH narrow paths: same stages, same f16 rounding, same amax/127.
+extern "C" __global__ void convrot_quant_rowwise_wide_f16(
+    const __half* __restrict__ x, signed char* __restrict__ q,
+    float* __restrict__ rowScale, unsigned int cols, unsigned int group, unsigned int tile)
+{
+    extern __shared__ float smem[];
+    float* scratch = smem;
+    __half* row = (__half*)(smem + tile);
+    __shared__ float sm[256];
+    __shared__ float sInv;
+    unsigned int tid = threadIdx.x;
+    const __half* xr = x + (unsigned long long)blockIdx.x * cols;
+    signed char* qr = q + (unsigned long long)blockIdx.x * cols;
+    unsigned int quarter = group >> 2;
+    float m = 0.0f;
+    for (unsigned int base = 0; base < cols; base += tile)
+    {
+        unsigned int n = (cols - base) < tile ? (cols - base) : tile;
+        for (unsigned int i = tid; i < n; i += blockDim.x) scratch[i] = __half2float(xr[base + i]);
+        __syncthreads();
+        CONVROT_STAGE(scratch, group, quarter, (n / group) * quarter)
+        for (unsigned int i = tid; i < n; i += blockDim.x)
+        {
+            __half h = __float2half(scratch[i]);
+            row[base + i] = h;
+            float a = fabsf(__half2float(h));
+            if (a > m) m = a;
+        }
+        __syncthreads();
+    }
+    sm[tid] = m;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (tid < s && sm[tid + s] > sm[tid]) sm[tid] = sm[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        float amax = sm[0];
+        rowScale[blockIdx.x] = amax > 0.0f ? amax / 127.0f : 1.0f;
+        sInv = amax > 0.0f ? 127.0f / amax : 0.0f;
+    }
+    __syncthreads();
+    float inv = sInv;
+    for (unsigned int i = tid; i < cols; i += blockDim.x)
+    {
+        int iv = __float2int_rn(__half2float(row[i]) * inv);
+        if (iv > 127) iv = 127;
+        if (iv < -127) iv = -127;
+        qr[i] = (signed char)iv;
+    }
+}

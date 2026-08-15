@@ -7,6 +7,19 @@ namespace HartsyInference.Video;
 /// (Lance/LTX/Wan/Matrix-Game all decode to the same layout).</summary>
 public static unsafe class VideoRgbFrames
 {
+    /// <summary>Every frame of the clip. Identical output to calling <see cref="ExtractFrame"/> per frame — the
+    /// frames are independent, and at LTX-2.5's 145×1280×736 the scalar loop is ~410 M iterations of pure host
+    /// work sitting in the generation's wall clock.</summary>
+    /// <remarks><paramref name="rgb"/> is materialized to host BEFORE the workers start: the first
+    /// <c>DataPointer</c> read fires the lazy device sync, which several threads must not race.</remarks>
+    public static byte[][] ExtractAllFrames(Tensor rgb)
+    {
+        _ = rgb.DataPointer;
+        byte[][] frames = new byte[(int)rgb.Shape[2]][];
+        System.Threading.Tasks.Parallel.For(0, frames.Length, i => frames[i] = ExtractFrame(rgb, i));
+        return frames;
+    }
+
     /// <summary>Extracts frame <paramref name="frameIndex"/> as interleaved RGB bytes (channels beyond the tensor's C fill 0).</summary>
     public static byte[] ExtractFrame(Tensor rgb, int frameIndex)
     {

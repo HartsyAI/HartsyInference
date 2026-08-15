@@ -44,7 +44,8 @@ for rep in $(seq 1 "$REPS"); do
     for arm in off on; do
         [ "$arm" = off ] && val=$OFF || val=$ON
         label=ab_${VAR}_${val}_${rep}
-        env "$VAR=$val" "$HERE/ltx25_bench.sh" "$STEPS" "$label" 1 >/dev/null 2>&1
+        env "$VAR=$val" "$HERE/ltx25_bench.sh" "$STEPS" "$label" 1 \
+            "${LTX25_AB_FRAMES:-97}" "${LTX25_AB_WIDTH:-768}" "${LTX25_AB_HEIGHT:-512}" >/dev/null 2>&1
         ms=$(stepmean "$OUT/${label}_s${STEPS}_seed1.log")
         echo "  rep$rep  $VAR=$val  $ms ms/step"
         [ "$arm" = off ] && A_VALS+=("$ms") || B_VALS+=("$ms")

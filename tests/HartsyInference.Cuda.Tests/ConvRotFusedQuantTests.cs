@@ -81,4 +81,64 @@ public sealed unsafe class ConvRotFusedQuantTests
             foreach (ulong p in new[] { dx, dRot, dQFused, dQRef, dSFused, dSRef }) GpuTransferHelper.FreeDevice(p);
         }
     }
+
+    /// <summary>Same contract for the wide (f16-staged) variant, which serves the row widths the f32-staged
+    /// kernel above refuses. 16384 is LTX-2.5's FFN-down activation width — the shape this kernel exists for.</summary>
+    [Theory]
+    [InlineData(37, 16384, 64)]
+    [InlineData(11, 12288, 256)]
+    [InlineData(3, 12288, 4096)]     // group wider than the default float tile
+    [InlineData(129, 10240, 1024)]
+    public void WideConvRotQuant_MatchesRotateThenQuant(int rows, int cols, int group)
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        CudaKernels k = cuda.Kernels!;
+        Assert.False(k.HasFusedConvRotQuant(cols, group), $"cols={cols} should be too wide for the f32-staged kernel");
+        Assert.True(k.HasWideConvRotQuant(cols, group, srcF16: true), $"wide path unavailable for cols={cols}");
+
+        Tensor xF32 = new Tensor(new TensorShape(rows, cols), DType.F32);
+        float* px = (float*)xF32.DataPointer;
+        Random rng = new Random(99);
+        for (long i = 0; i < (long)rows * cols; i++) px[i] = (float)(rng.NextDouble() * 6 - 3);
+        using Tensor x = xF32.CastTo(DType.F16);
+        xF32.Dispose();
+
+        long n = (long)rows * cols;
+        using Tensor qWide = new Tensor(new TensorShape(rows, cols), DType.I8);
+        using Tensor qRef = new Tensor(new TensorShape(rows, cols), DType.I8);
+        using Tensor sWide = new Tensor(new TensorShape(rows), DType.F32);
+        using Tensor sRef = new Tensor(new TensorShape(rows), DType.F32);
+
+        ulong dx = GpuTransferHelper.CopyToDevice(x);
+        ulong dRot = GpuTransferHelper.AllocateDevice((nuint)(n * 2));
+        ulong dQWide = GpuTransferHelper.AllocateDevice((nuint)n);
+        ulong dQRef = GpuTransferHelper.AllocateDevice((nuint)n);
+        ulong dSWide = GpuTransferHelper.AllocateDevice((nuint)(rows * 4));
+        ulong dSRef = GpuTransferHelper.AllocateDevice((nuint)(rows * 4));
+        try
+        {
+            k.LaunchConvRotRotate(dRot, dx, n, group, 0, srcF16: true);
+            k.LaunchW8A8QuantRowwise(dQRef, dSRef, dRot, rows, cols, 0, srcF16: true);
+            k.LaunchConvRotQuantRowwiseWide(dQWide, dSWide, dx, rows, cols, group, 0);
+            cuda.Sync();
+
+            GpuTransferHelper.CopyToHost(qWide, dQWide, (nuint)n);
+            GpuTransferHelper.CopyToHost(qRef, dQRef, (nuint)n);
+            GpuTransferHelper.CopyToHost(sWide, dSWide, (nuint)(rows * 4));
+            GpuTransferHelper.CopyToHost(sRef, dSRef, (nuint)(rows * 4));
+
+            float* pw = (float*)sWide.DataPointer, pr = (float*)sRef.DataPointer;
+            for (int r = 0; r < rows; r++)
+                Assert.True(pr[r] == pw[r], $"row {r} scale: wide {pw[r]} vs unfused {pr[r]}");
+            sbyte* qw = (sbyte*)qWide.DataPointer, qr2 = (sbyte*)qRef.DataPointer;
+            long diffs = 0;
+            for (long i = 0; i < n; i++) if (qw[i] != qr2[i]) diffs++;
+            _output.WriteLine($"rows={rows} cols={cols} group={group}: {diffs} of {n} int8 codes differ");
+            Assert.Equal(0, diffs);
+        }
+        finally
+        {
+            foreach (ulong p in new[] { dx, dRot, dQWide, dQRef, dSWide, dSRef }) GpuTransferHelper.FreeDevice(p);
+        }
+    }
 }

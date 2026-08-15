@@ -57,6 +57,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _convRotQuantF16;
     private readonly nint _convRotQuantGatedF16;
     private readonly nint _convRotQuantF32;
+    private readonly nint _convRotQuantWideF16;
     private readonly CudaModule? _int8MmaModule;
     private readonly nint _int8MmaGemmF16;
     private readonly nint _int8MmaGemmF16Pad;
@@ -643,6 +644,7 @@ public sealed class CudaKernels : IDisposable
             _convRotQuantF16 = _convRotModule.GetFunction("convrot_quant_rowwise_f16");
             _convRotQuantGatedF16 = _convRotModule.GetFunction("convrot_quant_rowwise_gated_f16");
             _convRotQuantF32 = _convRotModule.GetFunction("convrot_quant_rowwise_f32");
+            _convRotQuantWideF16 = _convRotModule.GetFunction("convrot_quant_rowwise_wide_f16");
         }
 
         // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
@@ -2254,6 +2256,47 @@ public sealed class CudaKernels : IDisposable
         _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols
         && group >= 4 && cols % group == 0
         && (group & (group - 1)) == 0 && (group & 0x55555554) != 0;
+
+    /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside
+    /// (48 KB is the per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost
+    /// occupancy). The static reduction scratch is counted against the same budget.</summary>
+    private const int WideConvRotTileFloats = 2048;
+    private const int WideConvRotSharedCeiling = (48 << 10) - 2048;
+
+    /// <summary>Shared bytes and float-tile width the wide fused kernel needs for a row, or (0, 0) if it cannot
+    /// serve the shape. The tile carries the group-local butterflies, so it must be a whole number of groups.</summary>
+    private static (uint SharedBytes, uint Tile) WideConvRotPlan(int cols, int group)
+    {
+        long tile = Math.Max(group, WideConvRotTileFloats / group * group);
+        if (tile > cols) tile = cols;
+        long shared = tile * sizeof(float) + (long)cols * sizeof(ushort);
+        return shared > WideConvRotSharedCeiling ? (0u, 0u) : ((uint)shared, (uint)tile);
+    }
+
+    /// <summary>Whether <see cref="LaunchConvRotQuantRowwiseWide"/> serves this row — the f16-staged variant for
+    /// rows too wide for <see cref="HasFusedConvRotQuant"/>. F16 source only: the f32 activation path is not on
+    /// any wide-row model here, and adding it would be an untested second kernel.</summary>
+    public bool HasWideConvRotQuant(int cols, int group, bool srcF16) =>
+        _convRotModule is not null && srcF16 && cols > FusedConvRotMaxCols
+        && group >= 4 && cols % group == 0
+        && (group & (group - 1)) == 0 && (group & 0x55555554) != 0
+        && WideConvRotPlan(cols, group).SharedBytes != 0;
+
+    /// <summary>Wide-row twin of <see cref="LaunchConvRotQuantRowwise"/>, bit-identical to it and to the
+    /// rotate-then-quant pair. Gate with <see cref="HasWideConvRotQuant"/>.</summary>
+    public unsafe void LaunchConvRotQuantRowwiseWide(ulong q, ulong rowScale, ulong x, int rows, int cols,
+        int group, nint stream)
+    {
+        if (!HasWideConvRotQuant(cols, group, srcF16: true))
+            throw new InvalidOperationException($"wide ConvRot+quant unavailable for cols={cols}, group={group}.");
+        (uint sharedBytes, uint tile) = WideConvRotPlan(cols, group);
+        ulong xArg = x, qArg = q, sArg = rowScale;
+        uint colsArg = (uint)cols, groupArg = (uint)group, tileArg = tile;
+        void** args = stackalloc void*[6];
+        args[0] = &xArg; args[1] = &qArg; args[2] = &sArg; args[3] = &colsArg; args[4] = &groupArg; args[5] = &tileArg;
+        CudaDriverApi.cuLaunchKernel(_convRotQuantWideF16,
+            (uint)rows, 1, 1, 256, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Fused ConvRot rotation + per-row dynamic int8 quantization: replaces
     /// <see cref="LaunchConvRotRotate"/> followed by <see cref="LaunchW8A8QuantRowwise"/>, dropping the

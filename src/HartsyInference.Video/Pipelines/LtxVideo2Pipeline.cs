@@ -398,7 +398,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 });
                 preview.Dispose();
             }
+            // Window the op profiler onto the steady-state steps: step 1 carries the int8 row-scale upload storm,
+            // and everything before the loop is text encode. No-op when profiling is off.
+            if (k == 0) Backend.ResetOpProfile();
         }
+        Backend.DumpOpProfile($"denoise{Math.Max(1, steps - 1)}");
 
         Backend.Sync();
         // The captured graph bakes the DiT weight pointers; invalidate before any FreeWeights below so the next
@@ -514,8 +518,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Info($"[ltx2-phase] video VAE decode: {phase.ElapsedMilliseconds} ms");
         phase.Restart();
         int f = (int)rgb.Shape[2];
-        byte[][] frames = new byte[f][];
-        for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
+        byte[][] frames = VideoRgbFrames.ExtractAllFrames(rgb);
         rgb.Dispose();
         Logs.Info($"[ltx2-phase] rgb frame extract: {phase.ElapsedMilliseconds} ms");
         phase.Restart();

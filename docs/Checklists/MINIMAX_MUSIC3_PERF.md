@@ -50,7 +50,24 @@ how the branches are batched. That is why batching alone bottomed out at 9.9 s. 
 **Landmine:** graph-decode output is only deterministic on an otherwise-idle GPU (learned on H3). Do not chase
 phantom hash differences while the other agent is working.
 
-### 2b. F16 KV is 32% SLOWER than F32 KV — the biggest unexplained number here
+### 2b. F16 KV lost split-K attention — FIXED, `c81c42a4`, on by default
+Confirmed end to end on a 3060 at `:q4`, 15 s of audio, n=2 per arm, one build:
+
+| stage | split-K off | split-K on |
+|---|---|---|
+| **language model** | 16.2, 16.3 s | **12.4, 12.4 s** |
+| depth decoder | 9.6, 8.8 s | 9.3, 9.3 s |
+| flow, 3 windows | 43.5, 43.5 s | 43.4, 43.9 s |
+| vocoder | 1.0 s | 1.0 s |
+
+−3.9 s, −24% on the language-model stage, with the halved KV cache kept. The controls carry the argument: the
+only stage that moved is the one that reads the KV cache, and a 43.5 s flow stage sat still while it did. Each
+arm is byte-identical across its runs (`89ad9c6f` off, `d5917952` on); the arms differ from each other because
+split-K re-associates and the sampler forks on last bits.
+
+Original diagnosis below, kept because the reasoning is the reusable part.
+
+### 2b-old. F16 KV is 32% SLOWER than F32 KV — the biggest unexplained number here
 Phase 2 set out to measure graph capture and found something larger by accident. On a 3060 at `:q4`, LM stage:
 F16 KV eager 16.2 s vs F32 KV eager 12.3 s. Same kernels, same batching; the only change is cache dtype. A
 half-width cache moving half the bytes should be *faster*. Whatever causes this is worth more than every other

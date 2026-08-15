@@ -89,14 +89,17 @@ def assert_extension_matches_build():
     print(">>> deploy check OK: deployed extension matches the local net8.0 build", file=sys.stderr)
 
 BASE = "http://192.168.10.188:7801"
-REPS = 5
+REPS = int(os.environ.get("LTX25_REPS", 5))
 GPU_SMI_INDEX = 1  # nvidia-smi index 1 = RTX 4090
 MODELS = {"hartsy": "LTX-2.5/ltx-2.5-22b-dev-transformer-int8_lean_convrot",
           "comfy": "ltx-2.5-22b-dev-transformer-int8_lean_convrot"}
 PROMPT = ("a lone lighthouse keeper walking along a rocky coastline at sunset, waves crashing, "
           "cinematic wide shot, volumetric light, highly detailed, 35mm film look")
-PARAMS = {"width": 768, "height": 512, "steps": 30, "cfgscale": 3.0,
-          "text2videoframes": 97, "videofps": 24}
+# Env-overridable so a campaign can pin a geometry without editing the file — the workload must be identical
+# across arms, so the OVERRIDES ARE PART OF THE ROW and belong in whatever the numbers are written into.
+PARAMS = {"width": int(os.environ.get("LTX25_W", 768)), "height": int(os.environ.get("LTX25_H", 512)),
+          "steps": int(os.environ.get("LTX25_STEPS", 30)), "cfgscale": 3.0,
+          "text2videoframes": int(os.environ.get("LTX25_FRAMES", 97)), "videofps": 24}
 COMMON = {"videoresolution": "Image", "videoformat": "h264-mp4"}
 
 

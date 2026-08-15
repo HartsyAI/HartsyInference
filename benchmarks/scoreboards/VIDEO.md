@@ -139,6 +139,136 @@ wall-clock window.
 schedule changes sigma values, not step count or per-step work, so the LTX-2.5 **perf** material in this file —
 step times, the roofline, the do-not-retry list — stands unchanged.
 
+## LTX-2.5 — speed pass at 1280×736×145f, and why the CLI's win did not reach SwarmUI (2026-08-15)
+
+**Pinned geometry: 1280×736×145f = 17,480 latent tokens, 20 steps, cfg 3.0, conv decoder, seed 1, 4090.**
+`resident prefix 48, streamed 0` on **every** run in every table below — no run here streamed.
+
+### Phase 0 — the attribution, re-done at this geometry
+
+`HARTSY_PROFILE_SYNC` (step 7102.2 ms against an unprofiled 6874.2, i.e. **3.3%** sync inflation, not the ~19–23%
+this file records at 4992 tokens). Op totals sum to 7101.1 against the 7102.2 step, so nothing large is
+un-scoped; note `H2D_MISS_BIG` nests **inside** `CopyInto`, so ~35 ms of those two rows is one cost, not two.
+
+| op | ms/step | share |
+|---|---:|---:|
+| `SDPA-TM` | 3357.5 | **47.3%** |
+| `Linear` | 2984.6 | **42.0%** |
+| `Ltx2QkNormRopeTokenMajor` | 235.2 | 3.3% |
+| `GatedResidual` | 192.2 | 2.7% |
+| `Ltx2RmsModulate` / `AffineBroadcast` / `RmsNorm` / `SliceRows` | 232.3 | 3.3% |
+| `CopyInto` (contains the `H2D_MISS_BIG` row) | 37.1 | 0.5% |
+| everything else | ~62 | |
+
+**Attention's share doubled, and it is a wall, not a gap.** Split by shape, video self-attention
+(17480×17480×32×128) is **96 calls/step, 3066.3 ms/step, 31.94 ms/call** = 5.006 TFLOP/call → **156.7 TFLOPS
+measured, 162 deflated, against the 4090's 165.2 TFLOPS fp16/fp32-accum peak — 95–98% of peak.** ComfyUI runs the
+same flash-class fp16 kernel on the same shapes, so **the 10.3 s gap is not here**, exactly as at 4992 tokens.
+The rest of attention is small: cross-text 208.8, a2v 24.9, v2a 48.5 ms/step.
+
+`Linear` remains the gap. Per-shape (sync-inflated): ffn_down 17480×4096×16384 **697.8** (7.268 ms/call, 323
+TOPS), ffn_up 17480×16384×4096 **675.8** (333 TOPS), 17480×4096×4096 ×288 **549.8** (307 TOPS), grouped 644.5.
+Bare cuBLASLt measures 565–668 TOPS at these shapes, so **~870 ms/step is chain overhead around the GEMM**.
+`HARTSY_PROFILE_FINE`: `Int8.GemmDequant` 1083.8, `Int8.Gemm` 933.8, `Int8.Quant` 534.1, `Int8.Dequant` 246.2,
+~281 ms/step host/alloc residual inside `Linear`.
+
+### ⚠️ The harness, and the one methodological result worth more than the perf
+
+**`Int8ResidentRowChunk` polls free VRAM per call, and at 17,480 rows that made the harness unusable.** The
+budget is `freeBytes/8`, so the chunk count — and with it the launch count and the GEMM's M — is a function of
+whatever else is transiently allocated. Any A/B that moves device memory silently moves this too. Measured
+per-arm spread at this geometry, same build, same seed:
+
+| | per-arm spread, one row per campaign arm |
+|---|---:|
+| derived budget (shipping default) | **105.9 / 137.6 / 330.7 ms/step** |
+| `HARTSY_INT8_ROW_BUDGET_MB=256` | **19.0 / 19.2 / 26.6 / 78.3 — and one arm at 346.7** |
+
+New env `HARTSY_INT8_ROW_BUDGET_MB` pins it. **Pin it for every A/B at this geometry** — unpinned, nothing
+under ~150 ms/step is resolvable. **The pin removes the chunk-count confound, not all between-process
+variance**: one pinned arm still threw a single rep 320 ms above its three siblings (6722/6748/6749/**7069**),
+so read a pinned campaign by its per-pair signs and median, not by its mean. As a *speed* change it is worth −12.9 ms/step, inside its own spread, so the
+derived default is unchanged; the knob exists to make measurement possible, which is the actual finding.
+
+**And the SwarmUI harness cannot resolve this size of change at all.** Three N=3 warm campaigns, same day, same
+box: every one drifts monotonically upward across its own reps — 152.34/153.94/154.14, 152.73/154.79/155.19,
+149.97/158.10/158.41. Total span **8.4 s**. A 2–5 s effect is invisible there. The CLI harness
+(`ltx25_bench.sh`, one process per generation) is the resolving instrument at this geometry, and any SwarmUI
+row taken at n=1 — including the 153.18 s this campaign started from — is a draw from that 8.4 s band.
+
+### What shipped, and it is bit-identical
+
+Interleaved N=3 per arm, shipping config on both arms, pre-change build vs post-change build:
+
+| | step mean | spread | wall | rgb extract |
+|---|---:|---:|---:|---:|
+| before | 6902.8 ms | 14.4 | 188.71 s | 1857.3 ms |
+| **after** | **6721.7 ms** | 63.5 | **184.14 s** | **541.0 ms** |
+
+**−181.1 ms/step** (pairs −147.9 / −225.8 / −169.6) and **−4.57 s** of CLI wall.
+
+⚠️ **That "after" arm was built with the Sage token-major detour ON, which subsequently shipped OFF** (see the
+negatives below), so it is **not** the shipping delta. Sage's own contribution measured −71 ms/step on the same
+harness at the same geometry on the same day, so the shipping configuration is **≈ −110 ms/step ≈ −2.2 s over
+20 steps**, plus the −1.32 s tail — call it **≈ −3.5 s**. That figure is a subtraction of two same-harness
+measurements, **not a directly measured arm**; anyone who needs it exact should re-run the pair.
+
+Frames + audio are **bit-identical** to the pre-change build (27/27 md5 at 512×320×25f, seed 1) in the shipping
+configuration, so what ships is pure overhead removal:
+
+- **`CopyInto` uploaded its destination's uninitialized host bytes before overwriting them.** `CopyToDevice(dst)`
+  on a first call is an H2D; the very next line is a full-size DtoD over the top. LTX-2.5's CFG-pair split
+  (`CopyInto(hidU, hidC)`) hit it once per step at **143 MB**. Now: allocate when uncached, upload never.
+  Profile, 3 steps: `CopyInto` **105.4 → 1.0 ms** and the `H2D_MISS_BIG 17480x4096 F16` row disappears outright.
+- **`VideoRgbFrames.ExtractAllFrames`** — the per-frame scalar loop is ~410 M iterations at this geometry and the
+  frames are independent. **1857 → 541 ms**, and it is the same `ExtractFrame` per frame, so byte-for-byte equal.
+- **The rotated-activation scratch is no longer allocated when the quant is fused** (`fusedQuant` in
+  `RunResidentInt8`). It was allocated on every convrot Linear and read by none of the fused ones — and because
+  `Int8ResidentRowChunk` sizes off free VRAM, a 134 MB transient nobody reads shrank the *next* Linear's chunk.
+
+### Three negatives, kept out
+
+- **Wide fused ConvRot+quant — correct, and slower.** LTX-2.5's FFN-down activation is 16384 wide, past the
+  f32-staged kernel's 8192 cap, so it paid the split rotate→quant pair's 7 bytes/element instead of 3. A new
+  `convrot_quant_rowwise_wide_f16` stages the row as **f16** (bit-identical: the rotated value is rounded through
+  f16 in all three paths) with a small f32 tile for the group-local butterflies — 40 KB shared, inside the 48 KB
+  no-opt-in ceiling. It is bit-exact (`ConvRotFusedQuantTests`, 8/8, against the pair at four shapes each) and it
+  **loses**: `Int8.Quant` 1557.7 → 1607.8 ms over 3 steps, end-to-end −9.4 ms/step inside a 19 ms spread. 40 KB of
+  shared is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels, and **the occupancy is
+  worth more than the traffic**. Default OFF (`HARTSY_CONVROT_WIDE=1`), kept unit-pinned so nobody re-derives the
+  byte ratio and mistakes it for evidence.
+- **The fused int8 mma GEMM is unresolved at this geometry, not confirmed.** `HARTSY_INT8_FUSED_MMA` 0-vs-1,
+  4 interleaved reps: −12.9 ms/step against per-arm spreads of 105.9 and 330.7. That campaign also predates the
+  row-budget pin *and* was contaminated by builds running during timed reps. Shipping default (on) kept on the
+  strength of the 4992-token evidence already in this file; **this geometry has not tested it.**
+- **SageAttention INT8 on the video self-attention — real −71 ms/step, and still opt-in.** The token-major SDPA
+  entry point reaches cuDNN unconditionally, so LTX-2.5 at 17,480 tokens never consults the engine's default-on
+  Sage gate (`skv >= 8192`) — the bypass is invisible at 4992 tokens because Sage would not have fired there
+  anyway. Routing it through the permute pair into the head-major dispatch measures **−71 ms/step** on the CLI
+  (4 interleaved reps, every pair the same sign, median 6748.1 → 6676.0). It ships **off**
+  (`HARTSY_LTX2_SAGE_TOKENMAJOR=1`) because the CLI is the only place that win exists: SwarmUI cannot resolve it
+  (see the 8.4 s band above), Sage's Q8/K8/scale/V-transpose workspaces raise peak VRAM **23539 → 24033 MiB of
+  24564** — 494 MiB out of 531 MiB of remaining headroom — and it moves output (SSIM **0.9927**, min 0.9908 over
+  145 frames; audio relL2 0.18, RMS −53.14 → −52.99 dBFS at matched seed). Frames are visually indistinguishable
+  and the SSIM sits inside this file's own precedent for accepted numerics changes; the VRAM is the veto.
+  **The `sq` floor added with it is kept on, and it is NOT LTX-only**: the gate now requires BOTH sides long,
+  because the prologue is paid per key while the saving is per query×key — at LTX-2.5's 151-query/17480-key a2v
+  attention Sage measured **2.53 ms/call against cuDNN's 0.51**. ⚠️ `SageF16Preferred` is the **shared** gate, so
+  this **changes output bytes on any model with a short-query/long-key head-major attention** that Sage used to
+  serve — MiniMax-H3 is the obvious candidate and is **unverified**. The same arithmetic says it is a speed win
+  there too, but that is a prediction, not a measurement, and `HARTSY_SAGE_F16_MIN_SKV` tunes only the skv side:
+  **nothing reverts the floor except editing the code.** Anyone hash-gating H3 output should re-baseline.
+
+### Where the gap stands
+
+In the shipping configuration the step is ~6874 → ~6790 ms and the tail is 1.3 s lighter, so **~3.5 s of a
+10.3 s n=1 gap is closed on the instrument that can see it** — narrowed, not closed, and note the gap itself is
+an n=1 draw from a band this file now knows is 8.4 s wide. What remains is where Phase 0 put it: ~870 ms/step of int8
+chain overhead around a GEMM that is itself fine, and the `mio_throttle` mainloop question this file already
+owns. Attention should not be re-chased for the *gap* — it is at 95–98% of the fp16 wall and Comfy pays the same
+— but INT8/FP8 attention remains the one lever that could beat Comfy rather than match it, and the blocker is
+now known to be VRAM headroom at this geometry, not throughput.
+
 ## LTX-2.5 diffusion decoder — temporal tiling, and the 40× that remains (2026-08-14)
 
 **The geometry ceiling is gone.** Every pass in the decoder now runs over halo-padded temporal chunks sized
