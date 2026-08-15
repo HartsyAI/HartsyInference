@@ -66,7 +66,16 @@ Two sources, neither ever removed: the per-frame frame-emit D2H, and `DecodeDept
 per-step logits/state readbacks (~7 round trips per frame per branch). Keeping the depth sequence device-resident
 also *enables* phase 5. Fully 3060-friendly.
 
-### 4. Flow-stage CFG batching
+### 4. Flow-stage CFG batching — DONE, `fc163303`, opt-in
+−1.63 s of a 43.5 s flow stage (−3.7%) on a 3060 at `:q4`, n=4 per arm with disjoint ranges. The ~20% estimate
+below was wrong: the DiT moves ~4.84 GB of weights per forward, so halving weight traffic caps the win near
+1.2 s. Nothing further for batching to take. `HARTSY_MM3_FLOW_CFG_BATCH=1` enables; it stays off until the flow
+parity gate runs against it.
+
+**Every absolute number in this file is stale.** The 26.4 s chain and the 48.4 s flow figure came from different
+trees; a same-tree measurement puts the flow stage at 43.5 s. Trust same-tree A/B deltas, re-measure absolutes.
+
+### 4-old. Flow-stage CFG batching — original estimate, kept for the record
 The DiT runs conditional and unconditional as two separate forwards per step. At L=689 it is compute-bound, so the
 win is launch count and weight amortization rather than 2× — expect 9.5 → ~7.5–8 s. Note the asymmetry with the
 semantic head: there is **no sampling in the flow stage**, so last-bit GEMM drift cannot fork the output. It stays
@@ -92,6 +101,21 @@ needs a cross-model throughput A/B before any default changes. Late, or its own 
 ### 8. Small wins
 - Model load is ~10 s of wall time (parallel shard mmap, defer the head slice). UX, not generation time.
 - One long-duration run per major phase to catch scaling regressions — the KV cache reaches ~2.6 GB at 9000 frames.
+
+## Parked behind a 4090 window
+
+Two shipped-but-disabled features. Both are switched off only because the gate that would clear them cannot run
+on a 12 GB card, not because anything is known wrong with them. When a window opens, run
+`MiniMaxMusic3ArParityTests`, `MiniMaxMusic3FlowParityTests` and `MiniMaxMusic3FlowStepParityTests`, then flip
+whichever pass:
+
+- `HARTSY_MM3_FLOW_CFG_BATCH` — flow guidance batching, −3.7% (`fc163303`).
+- `HARTSY_MM3_LM_GRAPH` — graph-captured guided decode, −4.6 s but forces F32 KV (`7bbe4b24`). Do **not** flip
+  this one on the strength of parity alone — it also needs the four-minute cache ceiling resolved, which is
+  what phase 2b is really about.
+
+Also un-run for want of the card: the Python reference baseline, and a HeartMuLa CFG smoke test to confirm
+`98b3f54c` un-broke that model on CUDA.
 
 ## Explicitly out of scope — do not redo these
 
