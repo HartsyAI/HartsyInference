@@ -135,7 +135,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // claims for it. Every pass now runs over halo-padded temporal chunks sized off free VRAM
             // (LtxVideo25TemporalChunks), exact rather than blended, so the geometry ceiling is gone and
             // 768x512x97f decodes. It stays opt-in on cost, not correctness: currently ~40x the conv decoder at
-            // matched geometry (115.5 s vs 2.878 s at 768x512x97f).
+            // matched geometry (12.9 s vs 2.878 s at 768x512x97f, measured 2026-08-14 after the decode
+            // work; it was 115.5 s before that).
             bool wantDiffusionVae = EnvSwitch.IsEnabled("HARTSY_LTX2_DIFFUSION_VAE", defaultOn: false);
             bool haveConvDecoder = conv.Vae.ContainsKey("decoder.conv_in.conv.weight");
             LtxVideo25DiffusionDecoder? diffusionVae = null;
@@ -151,7 +152,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
                 Logs.Info($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
                     + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Temporally chunked: no geometry "
-                    + "ceiling, but ~115 s at 768x512x97f against the conv decoder's ~3 s.");
+                    + "ceiling, but ~13 s at 768x512x97f against the conv decoder's ~3 s.");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0 && haveConvDecoder)
             {
