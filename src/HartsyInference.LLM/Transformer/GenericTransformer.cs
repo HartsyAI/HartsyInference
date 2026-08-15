@@ -2066,21 +2066,24 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
 
             // Attention per row (each token attends only its own stream's prefix; ~1.4 ms/frame — the GEMV
-            // batching above is where the win lives). [1,1,hq,d] and [1,hq,1,d] are byte-identical at t=1, so
-            // the segments concat along dim 1 straight back into the token-major [1,2,hq,d] o_proj input.
+            // batching above is where the win lives). Head-major like the Q rows: FlashAttention requires
+            // output.Shape to EQUAL Q's and CudaBackend enforces it (a token-major [1,1,hq,d] segment threw on
+            // every CUDA dual-graph step, invisible on CpuBackend, which does not validate). At Tq=1 the two
+            // layouts are byte-identical, so the segments still concatenate — along dim 0 now — into the
+            // token-major o_proj input.
             float scale = _cfg.AttnScale;
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor[] segs = new Tensor[b];
             for (int s = 0; s < b; s++)
             {
-                Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
+                Tensor attnSeg = new(new TensorShape(1, hq, 1, d), DType.F32);
                 backend.FlashAttentionDev(attnSeg, qRows[s], caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
                     0, group, causal: true, 0, scale, devicePos, _cfg.AttnLogitSoftcap, window);
                 qRows[s].Dispose();
                 segs[s] = attnSeg;
             }
-            Tensor attnConcat = new(new TensorShape(1, b, hq, d), DType.F32);
-            backend.Concat(attnConcat, segs, dim: 1);
+            Tensor attnConcat = new(new TensorShape(b, hq, 1, d), DType.F32);
+            backend.Concat(attnConcat, segs, dim: 0);
             foreach (Tensor seg in segs) seg.Dispose();
 
             Tensor attnOut = new(flat, DType.F32);
