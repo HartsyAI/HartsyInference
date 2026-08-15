@@ -57,9 +57,33 @@ half-width cache moving half the bytes should be *faster*. Whatever causes this 
 item on this list combined (4.0 s vs the graph's 0.4 s), and it is not MiniMax-specific — `FixedKvCache` F16 is
 shared, so any model using an F16 cache is likely paying it.
 
-Suspect a per-access widening conversion, an F16 path that falls back to a slower attention kernel, or a
-non-vectorized F16 load. Diagnose before patching. Fixing it plausibly gets the graph win *and* keeps the memory,
-which is what would let phase 2 default on.
+**DIAGNOSED. An F16 KV cache disqualifies itself from split-K attention** and silently falls back to the
+monolithic kernel. `CudaBackend.FlashAttention` line 9132: `splitEligible = pSink == 0 && pAlibi == 0 && !f16Kv`.
+The comment above it says "v1 scope" — this was a deliberate shortcut, not a bug, and nobody had measured what it
+cost. It costs 18–25% of decode.
+
+The F16 kernel is not slower. At the real decode shape, F16 and F32-monolithic are within 0.05% at every kvLen —
+so the *whole* gap is the lost fast path, and disabling split-K for F32 reproduces the F16 number exactly
+(15.8 s, matching F16's 15.8 s, against F32-with-split's 12.4 s).
+
+**Not MiniMax-specific.** Same signature on Qwen3-4B text decode with no source edits: 45.3 s F32 → 53.4 s under
+`HARTSY_KV_F16=1`, and 53.6 s for F32 with split forced off. Split-K engages whenever `b*hq*tq < 2*SM`, i.e.
+`hq < 56` on a 3060 — effectively every decode step of every model. Prefill is unaffected.
+
+Three F16 construction sites exist: `MiniMaxMusic3GlobalLm.cs` (the only one on by default), plus
+`KvCaches.ForDecode` and `TextGenerationPipeline`, both behind `HARTSY_KV_F16`. `PagedKvCache` is F32-only.
+
+**Fix, ~90 lines, NOT applied** — it lands in `CudaBackend.cs` / `CudaKernels.cs` / `Kernels/lm/`, which another
+session is actively committing to. Add an `lm_flash_attn_f16kv_f32_split` entry point to
+`flash_attn_f32_split.cu` (`__half` K/V plus `__half2float` on the two loads — character-for-character the diff
+that already exists between `lm_flash_attn_f32` and `lm_flash_attn_f16kv_f32`), thread a `f16Kv` flag through
+`LaunchFlashAttentionSplit`, and drop `!f16Kv` from the eligibility test. The combine kernel is untouched, and
+`KvF16StorageTests.FlashAttention_F16Kv_SplitForceEnv_StillMatchesMonolithicF32Kv` — which passes vacuously
+today — becomes the real gate.
+
+Expected: MiniMax `:q4` LM 15.8 → ~12.4 s *while keeping the halved cache*. It also unlocks F16 for the
+graph path (`FlashAttentionDev` uses the same split/combine pair), which is what would let phase 2 default on
+without the four-minute ceiling. Bench to A/B against: `tests/HartsyInference.Cuda.Tests/KvF16DecodeAttentionBench.cs`.
 
 ### 3. Autoregressive host glue — the ~2.6 s unaccounted
 Two sources, neither ever removed: the per-frame frame-emit D2H, and `DecodeDepth`'s host-built sequence plus

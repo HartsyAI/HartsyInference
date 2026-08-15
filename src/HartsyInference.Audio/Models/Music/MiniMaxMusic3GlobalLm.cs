@@ -82,8 +82,9 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     /// <summary>Allocates a decode cache sized for <paramref name="maxSeqLen"/> tokens. One per classifier-free
     /// branch; the caller disposes them.
     ///
-    /// <para>The graph-captured step forces F32 storage: its device-position attention and KV-scatter kernels have
-    /// no F16 variant, and the F16 cache would silently drop the whole step back to the eager path. That doubles
+    /// <para>The graph-captured step forces F32 storage: its device-position attention has no F16 variant, so the
+    /// F16 cache would silently drop the whole step back to the eager path. (The KV-scatter half does have one —
+    /// <c>lm_kv_append_f16</c> already takes a device position; only the C# guard routes it away.) That doubles
     /// the cache to ~576 KB per frame across the guided pair — measured at 8.9 GB steady state for 375 frames on a
     /// 12 GB card, leaving room for roughly 5,800 frames, so <c>HARTSY_MM3_LM_GRAPH=1</c> buys ~4.6 s on a short
     /// song and costs the back half of a six-minute one. It stays opt-in until that choice is made per request
