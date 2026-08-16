@@ -298,6 +298,16 @@ section below; bring-up debugging notes live in [TROUBLESHOOTING.md](TROUBLESHOO
 | **Moonshine streaming** (tiny/small/medium) | ✅ | Real-weight parity verified 2026-07-19 (encoder/decoder cosine ~1.0); **Engine-wired 2026-07-20** as `moonshinestreaming` — JFK clip word-perfect end-to-end (CPU). Full-utterance batch only; true chunked/incremental streaming not yet implemented. |
 | **Kyutai STT** (stt-1b / 2.6b) | 🔧 | Shares the moshi backbone; parity pending (no depformer). |
 
+## Wake word
+
+| Model | Status | Notes |
+|---|---|---|
+| **Wake front-end + backbone** (openWakeWord mel + Google `speech_embedding`) | ✅ | Real-weight parity vs the shipped ONNX graphs under onnxruntime 2026-08-16: mel max abs 2e-3, embedding relative L2 2e-3. Constants were read out of the graphs, not the upstream docs, which are wrong — n_fft/window is **512** (not the commonly cited 25 ms), hop 160, 32 bins, power spectrum, `10·log10`, floor `max − 80 dB`. Backbone activation is a **clipped LeakyReLU** `max(leaky(x,0.2), −0.4)`, not ReLU. Weights via `OnnxWeightLoader`; forward passes are C#. See `docs/Research/WAKE_WORD_DETECTION.md`. |
+| **Wake heads** (openWakeWord family) | ✅ | All three shipped architectures load and match onnxruntime within 1e-4 (alexa agrees to 7 decimals). They genuinely differ: `alexa` has no LayerNorm, `hey_mycroft` does, `hey_jarvis` prefixes weights with `model.` **and bundles a second `verifier_model.*` that must not be loaded as the main head**. The loader discovers width and LayerNorm presence from the weight names. hey-buddy's gated/residual heads are a different architecture and are not supported. |
+| **Wake streaming pipeline** | ✅ | Reproduces openWakeWord's streaming contract (1280 new samples + 480 left context per mel call), verified against a Python implementation of the same contract over 11 s of real speech: 113 consecutive scores within 1e-4. Diverges deliberately by withholding scores until 76 real mel and 16 real embedding frames exist (~1.3 s) instead of seeding buffers with random audio. |
+| **Wake satellite transport** | ✅ | TCP + Wyoming-style framing; device-keyed sessions, ping/pong, seq-gap reset. Hosted by the API server behind `HartsyInference__WakeEnabled`. Protocol contract in `docs/Research/WAKE_SATELLITE_PROTOCOL.md`. |
+| **Silero VAD v6** | ❌ | Not built. Weights present and verified (309,633 params, MIT, `Models/audio/wake/vad/`), graph structure extracted (fixed-DFT Conv1d STFT kernel 256/stride 128 → **magnitude**, 4 conv encoder with strides 1/2/2/1 pad 1, LSTMCell 128, final conv + sigmoid). Blocked on a torch reference for parity. Wake detection runs without it; it is needed for utterance endpointing and to cut idle-audio scoring cost. |
+
 ## Codec / voice conversion / music / separation
 
 | Model | Status | Notes |
