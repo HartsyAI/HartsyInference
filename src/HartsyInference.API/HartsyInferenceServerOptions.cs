@@ -53,6 +53,20 @@ public sealed class HartsyInferenceServerOptions
 
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
+
+    /// <summary>Opens the always-on wake-word listener that voice satellites stream into. Off by default: it
+    /// binds a second port and holds a detection thread, which a server used only for HTTP inference should
+    /// not pay for.</summary>
+    public bool WakeEnabled { get; set; }
+
+    /// <summary>TCP port satellites connect to when <see cref="WakeEnabled"/>.</summary>
+    public int WakePort { get; set; } = 10_800;
+
+    /// <summary>Wake assets directory; defaults to <c>{models}/audio/wake</c>.</summary>
+    public string? WakeModelRoot { get; set; }
+
+    /// <summary>Whether a detection also transcribes the command that follows it.</summary>
+    public bool WakeTranscribeOnDetection { get; set; } = true;
 }
 
 /// <summary>One entry in <see cref="HartsyInferenceServerOptions.ApiKeys"/> — a secret plus the identity/limits

@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Threading.RateLimiting;
 using HartsyInference.API.Endpoints;
 using HartsyInference.Engine;
+using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Services;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.RateLimiting;
@@ -43,6 +45,18 @@ public static class HartsyInferenceServiceExtensions
             new InferenceQueue(options.MaxLongRunningConcurrency, options.MaxLongRunningQueueDepth));
 
         services.AddSingleton(new WorldSessionRegistry(TimeSpan.FromMinutes(options.WorldSessionIdleTimeoutMinutes)));
+
+        // The wake listener is a peer of the HTTP surface, not a route: satellites hold one long-lived TCP
+        // connection each rather than making requests. It deliberately bypasses InferenceQueue — see WakeWorker.
+        if (options.WakeEnabled)
+        {
+            services.AddSingleton(sp => new WakeService(sp.GetRequiredService<IInferenceEngine>(), new WakeServiceOptions
+            {
+                Port = options.WakePort,
+                ModelRoot = options.WakeModelRoot,
+                TranscribeOnDetection = options.WakeTranscribeOnDetection,
+            }));
+        }
 
         // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
         // ApiMetrics adds on top of ASP.NET Core's own request instrumentation (see WithMetrics below).
@@ -104,6 +118,19 @@ public static class HartsyInferenceServiceExtensions
         ApiKeyStore apiKeyStore = app.Services.GetRequiredService<ApiKeyStore>();
         UsageTracker usageTracker = app.Services.GetRequiredService<UsageTracker>();
         ApiMetrics metrics = app.Services.GetRequiredService<ApiMetrics>();
+
+        if (options.WakeEnabled)
+        {
+            WakeService wake = app.Services.GetRequiredService<WakeService>();
+            // Started here rather than lazily on first use: an always-on listener that only appears once
+            // something asks for it would silently miss every satellite until then.
+            app.Lifetime.ApplicationStarted.Register(() =>
+            {
+                try { wake.Start(); }
+                catch (Exception ex) { Logs.Error("[Audio][Wake] Listener failed to start; satellites cannot connect.", ex); }
+            });
+            app.Lifetime.ApplicationStopping.Register(wake.Dispose);
+        }
 
         // Last-resort safety net: catches any exception a route handler doesn't already handle itself and turns
         // it into a structured, logged response instead of a bare/blank one. Registered first so it wraps every
