@@ -41,6 +41,9 @@ public static class Program
             config.AddCommand<SpeechCommand>("speak")
                 .WithDescription("Synthesize speech from text with Piper (saves a WAV).")
                 .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
+            config.AddCommand<WakeClientCommand>("wake-client")
+                .WithDescription("Stream a WAV to the wake-word listener as if it were a voice satellite.")
+                .WithExample("wake-client", "speech.wav", "--host", "127.0.0.1", "-p", "10800");
             config.AddCommand<ThreeDCommand>("3d")
                 .WithDescription("Generate a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, or TRELLIS.")
                 .WithExample("3d", "photo.png", "-m", "triposr", "--model-path", "/models/triposr");
