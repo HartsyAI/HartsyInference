@@ -104,6 +104,12 @@ public sealed record LtxVideo2Config
     /// shift when set. Distillation baked these values in, so a different step count is not a valid schedule.</summary>
     public float[]? FixedSigmas { get; init; }
 
+    /// <summary>Run the shipped LTX-2.5 two-stage flow (half-resolution denoise → learned x2 latent upsample →
+    /// 3-step refine) instead of a single full-resolution pass. Needs the latent upsampler side file, and is
+    /// verified only for the DISTILLED family — the dev checkpoints ship no two-stage reference configuration.
+    /// Env override: <c>HARTSY_LTX2_TWO_STAGE</c>.</summary>
+    public bool TwoStage { get; init; }
+
     /// <summary>Use ancestral (eta=1) Euler instead of plain Euler: the deterministic step lands on
     /// <c>sigma_down = s1²/s0</c> and fresh noise carries the latent back up to <c>s1</c>. This is what both
     /// samplers in the shipped LTX-2.5 templates run. Off by default — the single-pass plain-Euler arm is the

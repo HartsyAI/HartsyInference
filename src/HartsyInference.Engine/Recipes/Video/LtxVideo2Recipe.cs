@@ -27,6 +27,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Gemma context length fed to the connectors (padded to a register multiple inside the pipeline).</summary>
     internal const int TokenLength = 256;
 
+    /// <summary>Models-root-relative folder the shipped workflows keep the latent upsampler in.</summary>
+    private const string UpsamplerSubdir = "latent_upscale_models";
+    private const string DefaultLatentUpsamplerFile = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
+
     private readonly bool _distilled;
 
     /// <summary>Constructs the recipe for the dev/base LTX-2 families.</summary>
@@ -260,12 +264,16 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
             }
 
+            LtxLatentUpsampler? latentUpsampler = LoadLatentUpsampler(config, loaders);
+
             LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config,
                 audioVae, vocoder, audioMean, audioStd, diffusionVae, videoMean, videoStd)
             {
                 MinimumTextConditioningLength = tokenizer.MinimumConditioningLength,
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
+                TwoStage = latentUpsampler is not null,
+                LatentUpsampler = latentUpsampler,
             };
             Logs.Info($"[LtxVideo2Recipe] LTX-2 ready (text-to-video{(vocoder is not null ? "+audio" : "")}).");
             return new LtxVideo2RecipePipeline(pipeline, config, tokenizer, gemma, transformer, connectors, vocoder, loaders);
@@ -279,6 +287,67 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             }
             throw;
         }
+    }
+
+    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow
+    /// is off. Off by default: <c>HARTSY_LTX2_TWO_STAGE=1</c> (or <see cref="LtxVideo2Config.TwoStage"/>) turns it
+    /// on, and only for the distilled family — the dev checkpoints ship no two-stage reference configuration, so
+    /// enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped
+    /// name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
+    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
+    {
+        if (!EnvSwitch.IsEnabled("HARTSY_LTX2_TWO_STAGE", defaultOn: config.TwoStage))
+        {
+            return null;
+        }
+        if (!_distilled)
+        {
+            Logs.Warning("[LtxVideo2Recipe] HARTSY_LTX2_TWO_STAGE is set but this is not the distilled family — "
+                + "the two-stage sigma schedule and upsample point are only documented for ltx-2.5-distilled. Running single-pass.");
+            return null;
+        }
+        string? named = Environment.GetEnvironmentVariable("HARTSY_LTX2_UPSAMPLER") is { Length: > 0 } n ? n : null;
+        string requested = named ?? DefaultLatentUpsamplerFile;
+        // The folder scan is DISCOVERY for the default name only. Falling back to it when the caller named a file
+        // would load a different upsampler than the one they asked for, with only an Info line to notice.
+        string path = ModelFileLocator.Find(requested, UpsamplerSubdir)
+            ?? (named is null ? FindAnyLatentUpsampler() : null)
+            ?? throw new FileNotFoundException(
+                $"LTX-2.5 two-stage is enabled but the latent upsampler '{requested}' was not found under "
+                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Download it from "
+                + "Lightricks/LTX-2.5 (latent_upscale_models/) or unset HARTSY_LTX2_TWO_STAGE.");
+
+        SafeTensorsLoader loader = new SafeTensorsLoader();
+        loader.Load(path);
+        loaders.Add(loader);
+        LtxLatentUpsampler upsampler = new LtxLatentUpsampler();
+        // F32 throughout: Conv3d has no lower-precision path on any backend, so the BF16 file doubles on load.
+        upsampler.LoadWeights(VaePrecisionHelper.CastVaeWeights(loader.GetAllTensors(), DType.F32),
+            loader.Metadata is not null && loader.Metadata.TryGetValue("config", out string? cfg) ? cfg : null);
+        Logs.Info($"[LtxVideo2Recipe] Two-stage enabled: latent upsampler {Path.GetFileName(path)} "
+            + $"(in={upsampler.InChannels} mid={upsampler.MidChannels} blocks={upsampler.NumBlocksPerStage} x{upsampler.SpatialScale}).");
+        return upsampler;
+    }
+
+    /// <summary>Any safetensors under the upsampler folder whose name looks like a latent upscaler — the shipped
+    /// file carries a version suffix that a future release will bump.</summary>
+    private static string? FindAnyLatentUpsampler()
+    {
+        string dir = Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir);
+        if (!Directory.Exists(dir))
+        {
+            return null;
+        }
+        foreach (string file in Directory.EnumerateFiles(dir, "*.safetensors", SearchOption.AllDirectories))
+        {
+            string name = Path.GetFileName(file);
+            if (name.Contains("upscaler", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("upsampler", StringComparison.OrdinalIgnoreCase))
+            {
+                return file;
+            }
+        }
+        return null;
     }
 
     /// <summary>Merges one safetensors file (or every shard under a directory) into the routing dictionary.</summary>
