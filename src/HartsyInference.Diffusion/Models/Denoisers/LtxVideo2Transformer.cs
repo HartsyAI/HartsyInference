@@ -64,7 +64,14 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     /// self-disable). The pipeline keeps the four velocity buffers (transformer-owned fixed buffers, rewritten next
     /// step) instead of disposing them while this holds — including the warm calls, which already return the fixed
     /// buffers. (LTX-2.3 has no mid-loop FreeActivations, so unlike Kandinsky this need not wait for the capture.)</summary>
-    public bool StepGraphActive => DiTBlocks.DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
+    public bool StepGraphActive => DiTBlocks.DitStepGraph.Enabled && !_graphDead && !StepGraphSuspended
+        && _graphSig != long.MinValue;
+
+    /// <summary>Makes forwards run eager and stay INVISIBLE to the graph state machine — no signature compare, no
+    /// flip counted, no capture. The two-stage pipeline's refine stage sets this: it runs at a different grid, and
+    /// letting that grid reach the signature would both burn two of the eight allowed flips per generation (after
+    /// which the graph is disabled for the session) and capture on its own last step, never replaying.</summary>
+    public bool StepGraphSuspended { get; set; }
 
     /// <summary>Invalidates the captured graph — MUST run before the DiT weights are freed (the graph bakes weight
     /// pointers). The next generation re-warms and re-captures.</summary>
@@ -370,7 +377,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         // Step-graph fast path (opt-in): capture the whole CFG pair once and replay it. FULLY RESIDENT only —
         // BeforeBlockForward null means no block streaming (a captured graph can't span re-pointered weights).
         // Diagnostic hooks off (they inject host reads). Self-disables to eager on capture failure.
-        if (DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+        if (DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && !StepGraphSuspended
             && BeforeBlockForward is null && OnBlockOutput is null)
         {
             return ForwardCfgPairGraph(backend, videoTokens, audioTokens,

@@ -36,6 +36,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// multiple. LTX-2.5's Gemma 4 conditions at 1024; LTX-2.3 leaves this 0 and is unaffected.</summary>
     public int MinimumTextConditioningLength { get; init; }
 
+    /// <summary>Runs the shipped LTX-2.5 two-stage flow: denoise at HALF resolution, run the learned x2 latent
+    /// upsampler, then refine 3 steps at full resolution. Requires <see cref="LatentUpsampler"/>; ignored without
+    /// it. The half-resolution stage keeps the token count inside the 1024–4096 window the shift fit was
+    /// calibrated on, which is the whole point — a full-resolution single pass never was.</summary>
+    public bool TwoStage { get; init; }
+
+    /// <summary>The learned x2 spatial latent upsampler for <see cref="TwoStage"/>. Weights live on the host and
+    /// are uploaded/freed around the single stage-transition call.</summary>
+    public LtxLatentUpsampler? LatentUpsampler { get; init; }
+
     private readonly LtxVideo2Transformer _transformer;
     private readonly LtxVideo2TextConnectors _connectors;
     private readonly LtxVideo2VaeDecoder _vae;
@@ -118,6 +128,23 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1;
         int hLat = height / sp, wLat = width / sp;
+        // Two-stage geometry: stage 1 is the requested size halved and snapped DOWN to the latent grid, and the
+        // upsampler doubles that — so a half-size that is not itself a whole number of latent cells loses one, and
+        // a 1280x736 request renders 1280x704. The output dimensions are corrected here rather than at the end so
+        // every downstream consumer (the result record included) sees what was actually rendered.
+        bool twoStage = TwoStage && LatentUpsampler is not null;
+        int hLatStage1 = 0, wLatStage1 = 0;
+        if (twoStage)
+        {
+            // Both normalization helpers degrade to a plain COPY when a stat is absent, so a checkpoint without
+            // per-channel statistics would silently feed the upsampler normalized latents and produce a plausible
+            // wrong video. Two-stage without the stats is not a degraded mode.
+            if (_videoLatentsMean is null || _videoLatentsStd is null)
+                throw new InvalidOperationException("LTX-2.5 two-stage needs the video VAE's per-channel latent statistics: the latent upsampler is defined on UN-normalized latents.");
+            (hLatStage1, wLatStage1, hLat, wLat) = TwoStageGrid(width, height, sp);
+            height = hLat * sp;
+            width = wLat * sp;
+        }
         int sv = tLat * hLat * wLat;
         int videoChannels = _config.InChannels;
 
@@ -155,10 +182,15 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             audioRescale = parsedRescale;
         }
 
-        float shift = ComputeShift(sv, _config), formulaShift = FormulaShift(sv);
+        // Stage 1 is what the sampler actually denoises, so it owns the schedule's token count.
+        int svStage1 = twoStage ? tLat * hLatStage1 * wLatStage1 : sv;
+        float[]? refineSigmas = twoStage ? LtxVideo2Config.Ltx25TwoStageRefineSigmas : null;
+        int refineSteps = refineSigmas is null ? 0 : refineSigmas.Length - 1;
+        float shift = ComputeShift(svStage1, _config), formulaShift = FormulaShift(svStage1);
 
-        Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, " +
-            $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, " +
+        Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps}{(twoStage ? $"+{refineSteps}" : "")} steps, " +
+            $"cfg={guidance}, seed={seed} (video {tLat}x{(twoStage ? hLatStage1 : hLat)}x{(twoStage ? wLatStage1 : wLat)}" +
+            $"={svStage1} tokens, audio {audioFrames} tokens, " +
             $"shift={shift:F3}{(shift == formulaShift ? "" : $", overriding the fit's {formulaShift:F3}")})");
 
         // 1. Text conditioning: Gemma 49-layer features → per-modality connector embeddings. Cached across
@@ -243,6 +275,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // persistent block prefix stay resident). CPU/Vulkan (no streaming cache) preload everything eagerly.
         HartsyInference.Core.MemoryManagement.BlockStreamingController? streamer = null;
         int residentBlocks = 0;
+        // Releases / re-uploads the DiT weights THIS generation parked on device, for the two-stage transition: the
+        // ~2 GB F32 upsampler may have to displace them to fit. Deliberately excludes the streamed suffix — the
+        // streaming controller owns those uploads and freeing them behind its back would leave it believing blocks
+        // it no longer holds are resident.
+        Action? releaseDitWeights = null, restoreDitWeights = null;
         if (Backend.StreamingCache is not null)
         {
             Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
@@ -311,6 +348,17 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             if (residentBlocks > 0)
             {
                 Backend.PreloadWeights(BlockRangeWeights(0, residentBlocks));
+                int pinned = residentBlocks;
+                releaseDitWeights = () =>
+                {
+                    Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                    Backend.FreeWeights(BlockRangeWeights(0, pinned));
+                };
+                restoreDitWeights = () =>
+                {
+                    Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                    Backend.PreloadWeights(BlockRangeWeights(0, pinned));
+                };
             }
             if (residentBlocks < blocks.Length)
             {
@@ -330,8 +378,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         else
         {
             Backend.PreloadWeights(_transformer.EnumerateWeights());
+            releaseDitWeights = () => Backend.FreeWeights(_transformer.EnumerateWeights());
+            restoreDitWeights = () => Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
-        Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(sv, videoChannels), seed);
+        Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(twoStage ? svStage1 : sv, videoChannels), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioFrames, audioChannels), seed ^ 0x5D2B);
         // Distilled checkpoints baked their sigma schedule in, so it replaces the dynamic flow-match shift outright
         // and a different step count is not a valid schedule for them.
@@ -339,69 +389,39 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             LancePipelineCommon.BuildShiftedTimesteps(steps, shift), _config, shift);
         Logs.Info($"[ltx2-phase] DiT preload+prime: {phase.ElapsedMilliseconds} ms");
 
-        for (int k = 0; k < steps; k++)
+        DenoiseStage(videoLat, audioLat, tsteps, twoStage ? (tLat, hLatStage1, wLatStage1) : (tLat, hLat, wLat),
+            audioFrames, frameRate, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
+            guidance, audioGuidance, audioRescale, unguided, 0, steps + refineSteps, videoChannels, onProgress,
+            twoStage ? "s1 " : "");
+
+        if (twoStage)
         {
-            Stopwatch sw = Stopwatch.StartNew();
-            float dt = tsteps[k] - tsteps[k + 1];
-            float tEmb = tsteps[k] * _config.TimestepScaleMultiplier;   // flow sigma (≈1..0) scaled to ≈0..1000
-
-            Tensor vCondV, vCondA, vUncondV, vUncondA;
-            bool paired = !unguided;
-            if (unguided)
-            {
-                // At guidance 1 the pair reduces to the conditional branch, so running the unconditional one is pure
-                // waste — half the DiT work per step, which is most of the step. The distilled schedule always
-                // lands here.
-                (vCondV, vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
-                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null);
-                vUncondV = vCondV;
-                vUncondA = vCondA;
-            }
-            else
-            {
-                // CFG-paired forward: both branches share each block's (streamed) weights within the step — half the
-                // weight traffic of two sequential forwards.
-                ((vCondV, vCondA), (vUncondV, vUncondA)) = _transformer.ForwardCfgPair(
-                    Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
-                    tEmb, (tLat, hLat, wLat), audioFrames, frameRate);
-            }
-
-            // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
-            // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
-            // With guidance 1 the cond tensor is passed for both operands, which the op collapses to plain Euler.
-            Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
-            AudioCfgEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
-            // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
-            // don't dispose them; on the eager path they're fresh and must be freed. The unguided path aliases the
-            // cond tensors into the uncond slots, so it must not double-free them.
-            if (!_transformer.StepGraphActive)
-            {
-                vCondV.Dispose();
-                vCondA.Dispose();
-                if (paired) { vUncondV.Dispose(); vUncondA.Dispose(); }
-            }
-
             Backend.Sync();
-            sw.Stop();
-            Logs.Info($"[ltx2-phase] step {k + 1}/{steps}: {sw.ElapsedMilliseconds} ms (paired CFG)");
-            // The preview drain reads the latent on host, which EVICTS it from the GPU — incompatible with the step
-            // graph, whose capture bakes the resident latent's device address (a re-upload would move it). Skip the
-            // preview while the graph is active (correctness > the optional live thumbnail).
-            if (onProgress is not null && !_transformer.StepGraphActive)
+            // The refine stage runs at a DIFFERENT grid and rebuilds the RoPE tables, which would strand the
+            // pointers a stage-1 capture baked. Invalidate before the transition; the stage itself is then hidden
+            // from the graph state machine entirely, so its grid never reaches the signature.
+            _transformer.InvalidateStepGraph(Backend);
+            (Tensor refineVideo, Tensor refineAudio) = UpsampleAndRenoise(videoLat, audioLat,
+                tLat, hLatStage1, wLatStage1, videoChannels, refineSigmas![0], seed, releaseDitWeights, restoreDitWeights);
+            videoLat.Dispose();
+            audioLat.Dispose();
+            videoLat = refineVideo;
+            audioLat = refineAudio;
+            Logs.Info($"[ltx2-two-stage] refine at {tLat}x{hLat}x{wLat}={sv} tokens ({width}x{height}), "
+                + $"sigmas [{string.Join(", ", refineSigmas.Select(s => s.ToString("0.######", CultureInfo.InvariantCulture)))}], eager (no step graph).");
+            _transformer.StepGraphSuspended = true;
+            try
             {
-                Tensor preview = ExtractMiddleFrame(videoLat, tLat, hLat, wLat, videoChannels);
-                onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
-                {
-                    Latent = preview,
-                    LatentArch = LatentArchitecture.Ltx,
-                });
-                preview.Dispose();
+                DenoiseStage(videoLat, audioLat, refineSigmas, (tLat, hLat, wLat), audioFrames, frameRate,
+                    encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
+                    guidance, audioGuidance, audioRescale, unguided, steps, steps + refineSteps, videoChannels,
+                    onProgress, "s2 ");
             }
-            // Window the op profiler onto the steady-state steps: step 1 carries the int8 row-scale upload storm,
-            // and everything before the loop is text encode. No-op when profiling is off.
-            if (k == 0) Backend.ResetOpProfile();
+            finally
+            {
+                _transformer.StepGraphSuspended = false;
+            }
         }
-        Backend.DumpOpProfile($"denoise{Math.Max(1, steps - 1)}");
 
         Backend.Sync();
         // The captured graph bakes the DiT weight pointers; invalidate before any FreeWeights below so the next
@@ -532,6 +552,163 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         Logs.Info($"LTX-2 complete ({frames.Length} frames" + (audio is not null ? " + audio" : "") + $", seed={seed})");
         return new Ltx2Result(frames, width, height, seed, audio, audioSampleRate);
+    }
+
+    /// <summary>Two-stage latent grid for a requested pixel size: stage 1 is the request HALVED and snapped down to
+    /// the latent grid, stage 2 is that doubled. The halving is what can lose a cell — a 1280x736 request denoises
+    /// at 20x11 and renders 1280x704, one latent row short of the request, because 736/2 = 368 is not a whole number
+    /// of 32-px cells. Returns (stage-1 h, stage-1 w, final h, final w) in LATENT cells.</summary>
+    internal static (int Stage1Height, int Stage1Width, int Height, int Width) TwoStageGrid(
+        int width, int height, int spatialCompression)
+    {
+        int h1 = height / 2 / spatialCompression, w1 = width / 2 / spatialCompression;
+        if (h1 < 1 || w1 < 1)
+            throw new ArgumentException($"LTX-2.5 two-stage needs at least {spatialCompression * 2} px on each axis; got {width}x{height}.");
+        return (h1, w1, h1 * 2, w1 * 2);
+    }
+
+    /// <summary>One flow-match denoise stage, in place on both latents. <paramref name="sigmas"/> has one more entry
+    /// than the stage has steps; <paramref name="stepBase"/>/<paramref name="stepTotal"/> place those steps inside
+    /// the generation's overall progress, and <paramref name="stageTag"/> labels its log lines.</summary>
+    private void DenoiseStage(Tensor videoLat, Tensor audioLat, float[] sigmas,
+        (int Frames, int Height, int Width) grid, int audioFrames, double frameRate,
+        Tensor encVideoPos, Tensor encAudioPos, Tensor encVideoNeg, Tensor encAudioNeg,
+        float guidance, float audioGuidance, float audioRescale, bool unguided,
+        int stepBase, int stepTotal, int videoChannels, Action<GenerationProgress>? onProgress, string stageTag)
+    {
+        int steps = sigmas.Length - 1;
+        for (int k = 0; k < steps; k++)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            float dt = sigmas[k] - sigmas[k + 1];
+            float tEmb = sigmas[k] * _config.TimestepScaleMultiplier;   // flow sigma (≈1..0) scaled to ≈0..1000
+
+            Tensor vCondV, vCondA, vUncondV, vUncondA;
+            bool paired = !unguided;
+            if (unguided)
+            {
+                // At guidance 1 the pair reduces to the conditional branch, so running the unconditional one is pure
+                // waste — half the DiT work per step, which is most of the step. The distilled schedule always
+                // lands here.
+                (vCondV, vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
+                    tEmb, grid, audioFrames, frameRate, null, null);
+                vUncondV = vCondV;
+                vUncondA = vCondA;
+            }
+            else
+            {
+                // CFG-paired forward: both branches share each block's (streamed) weights within the step — half the
+                // weight traffic of two sequential forwards.
+                ((vCondV, vCondA), (vUncondV, vUncondA)) = _transformer.ForwardCfgPair(
+                    Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
+                    tEmb, grid, audioFrames, frameRate);
+            }
+
+            // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
+            // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
+            // With guidance 1 the cond tensor is passed for both operands, which the op collapses to plain Euler.
+            Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
+            AudioCfgEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
+            // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
+            // don't dispose them; on the eager path they're fresh and must be freed. The unguided path aliases the
+            // cond tensors into the uncond slots, so it must not double-free them.
+            if (!_transformer.StepGraphActive)
+            {
+                vCondV.Dispose();
+                vCondA.Dispose();
+                if (paired) { vUncondV.Dispose(); vUncondA.Dispose(); }
+            }
+
+            Backend.Sync();
+            sw.Stop();
+            Logs.Info($"[ltx2-phase] {stageTag}step {stepBase + k + 1}/{stepTotal}: {sw.ElapsedMilliseconds} ms (paired CFG)");
+            // The preview drain reads the latent on host, which EVICTS it from the GPU — incompatible with the step
+            // graph, whose capture bakes the resident latent's device address (a re-upload would move it). Skip the
+            // preview while the graph is active (correctness > the optional live thumbnail).
+            if (onProgress is not null && !_transformer.StepGraphActive)
+            {
+                Tensor preview = ExtractMiddleFrame(videoLat, grid.Frames, grid.Height, grid.Width, videoChannels);
+                onProgress.Invoke(new GenerationProgress(stepBase + k + 1, stepTotal, sw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = preview,
+                    LatentArch = LatentArchitecture.Ltx,
+                });
+                preview.Dispose();
+            }
+            // Window the op profiler onto the steady-state steps: step 1 carries the int8 row-scale upload storm,
+            // and everything before the loop is text encode. No-op when profiling is off.
+            if (k == 0) Backend.ResetOpProfile();
+        }
+        Backend.DumpOpProfile($"denoise{stageTag.Trim()}{Math.Max(1, steps - 1)}");
+    }
+
+    /// <summary>Stage-1 → stage-2 handoff. Un-normalizes the video latent, runs the learned x2 latent upsampler
+    /// (which is defined on UN-normalized latents), re-normalizes, repacks at the doubled grid, and re-noises BOTH
+    /// streams to <paramref name="sigma"/>. The audio latent is CARRIED at its own rate — it is never upsampled,
+    /// only re-noised alongside. Caller owns the returned tensors and still owns the inputs.</summary>
+    private (Tensor Video, Tensor Audio) UpsampleAndRenoise(Tensor videoLat, Tensor audioLat,
+        int tLat, int hLat, int wLat, int videoChannels, float sigma, int seed,
+        Action? releaseDitWeights, Action? restoreDitWeights)
+    {
+        Stopwatch phase = Stopwatch.StartNew();
+        Tensor packed = UnpackVideoLatents(videoLat, tLat, hLat, wLat, videoChannels);
+        Tensor denorm = LtxVideo2VaeDecoder.DenormalizeLatent(packed, _videoLatentsMean, _videoLatentsStd);
+        packed.Dispose();
+        ProbeTensor("two-stage upsampler input (denormalized)", denorm);
+
+        long upsamplerBytes = 0;
+        foreach (Tensor t in LatentUpsampler!.EnumerateWeights())
+            upsamplerBytes += t.DType.ComputeByteCount(t.ElementCount);
+        Backend.TrimMemoryPool();
+        // The upsampler is F32-only (Conv3d has no lower-precision path), so its ~2 GB has to fit beside whatever
+        // the DiT parked. Displace the DiT rather than OOM — restoreDitWeights re-uploads before the refine stage.
+        long need = upsamplerBytes + (1L << 30);
+        bool displacedDit = false;
+        if (releaseDitWeights is not null && restoreDitWeights is not null && Backend.FreeMemoryBytes() < need)
+        {
+            Logs.Info($"[ltx2-two-stage] releasing the resident DiT weights for the upsampler (free "
+                + $"{Backend.FreeMemoryBytes() >> 20} MB < {need >> 20} MB needed); re-uploaded before the refine stage.");
+            releaseDitWeights();
+            Backend.TrimMemoryPool();
+            displacedDit = true;
+        }
+        Backend.PreloadWeights(LatentUpsampler.EnumerateWeights());
+        Tensor upsampled = LatentUpsampler.Forward(Backend, denorm);
+        denorm.Dispose();
+        Backend.Sync();
+        Backend.FreeWeights(LatentUpsampler.EnumerateWeights());
+        Backend.TrimMemoryPool();
+        if (displacedDit) restoreDitWeights!.Invoke();
+        Logs.Info($"[ltx2-two-stage] latent upsample {hLat}x{wLat} -> {hLat * 2}x{wLat * 2}: {phase.ElapsedMilliseconds} ms"
+            + $" ({upsamplerBytes >> 20} MB of F32 weights)");
+        ProbeTensor("two-stage upsampler output (un-normalized)", upsampled);
+
+        Tensor renormalized = LtxVideo2VaeDecoder.NormalizeLatent(upsampled, _videoLatentsMean, _videoLatentsStd);
+        upsampled.Dispose();
+        Tensor videoTokens = PackVideoLatents(renormalized, videoChannels);
+        renormalized.Dispose();
+
+        // Both latents re-enter the schedule at the refine stage's first sigma. Salts follow the existing
+        // convention (video latent `seed`, audio `seed ^ 0x5D2B`, diffusion-decoder noise `seed ^ 0x2D5B`).
+        Backend.Sync();
+        using Tensor videoNoise = SeedGenerator.CreateNoise(videoTokens.Shape, seed ^ 0x6C41);
+        using Tensor audioNoise = SeedGenerator.CreateNoise(audioLat.Shape, seed ^ 0x6C42);
+        Tensor renoisedVideo = Renoise(videoTokens, videoNoise, sigma);
+        videoTokens.Dispose();
+        Tensor renoisedAudio = Renoise(audioLat, audioNoise, sigma);
+        return (renoisedVideo, renoisedAudio);
+    }
+
+    /// <summary>Flow-match re-noise into a FRESH tensor: <c>sigma·noise + (1−sigma)·x</c> (ComfyUI
+    /// <c>ModelSamplingDiscreteFlow.noise_scaling</c>). Out-of-place because writing a device-resident latent
+    /// host-side leaves its GPU cache stale.</summary>
+    internal static Tensor Renoise(Tensor x, Tensor noise, float sigma)
+    {
+        Tensor outT = new Tensor(x.Shape, DType.F32);
+        float* xp = (float*)x.DataPointer, np = (float*)noise.DataPointer, op = (float*)outT.DataPointer;
+        long n = x.ElementCount;
+        for (long i = 0; i < n; i++) op[i] = sigma * np[i] + (1f - sigma) * xp[i];
+        return outT;
     }
 
     /// <summary>Runs Gemma over the (register-padded) tokens, relayouts the 49 hidden states into the connector's
@@ -832,7 +1009,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Unpacks video tokens <c>[S, C]</c> (f,h,w order, channel-last) → <c>[1, C, T, H, W]</c>.</summary>
-    private static Tensor UnpackVideoLatents(Tensor tokens, int t, int h, int w, int channels)
+    internal static Tensor UnpackVideoLatents(Tensor tokens, int t, int h, int w, int channels)
     {
         Tensor outT = new Tensor(new TensorShape([1L, channels, t, h, w]), DType.F32);
         float* sp = (float*)tokens.DataPointer;
@@ -872,6 +1049,26 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         _cachedVideoNeg?.Dispose(); _cachedAudioNeg?.Dispose();
         _cachedVideoPos = _cachedAudioPos = _cachedVideoNeg = _cachedAudioNeg = null;
         _cachedPosKey = null; _cachedNegKey = null;
+    }
+
+    /// <summary>Packs a video latent <c>[1, C, T, H, W] → [T·H·W, C]</c> in (f,h,w) order — the exact inverse of
+    /// <see cref="UnpackVideoLatents"/>.</summary>
+    internal static Tensor PackVideoLatents(Tensor latent, int channels)
+    {
+        int t = (int)latent.Shape[2], h = (int)latent.Shape[3], w = (int)latent.Shape[4];
+        long spatial = (long)t * h * w;
+        Tensor outT = new Tensor(new TensorShape((int)spatial, channels), DType.F32);
+        float* sp = (float*)latent.DataPointer;
+        float* dp = (float*)outT.DataPointer;
+        for (int ti = 0; ti < t; ti++)
+            for (int hi = 0; hi < h; hi++)
+                for (int wi = 0; wi < w; wi++)
+                {
+                    long token = ((long)ti * h + hi) * w + wi;
+                    for (int c = 0; c < channels; c++)
+                        dp[token * channels + c] = sp[(long)c * spatial + token];
+                }
+        return outT;
     }
 
     /// <summary>Middle latent frame <c>[1, C, H, W]</c> for latent2rgb previews.</summary>
