@@ -46,7 +46,6 @@ public sealed class WakeDetectionPipeline : IDisposable
     private const int MelRingFrames = 128;      // > 76 + 8, power of two
     private const int FeatureRingFrames = 32;   // > 16 + 1, power of two
 
-    private readonly IBackend _backend;
     private readonly WakeMelFrontend _mel;
     private readonly SpeechEmbeddingModel _embedding;
     private readonly List<HeadState> _heads = [];
@@ -74,16 +73,17 @@ public sealed class WakeDetectionPipeline : IDisposable
     /// <summary>Wake words currently loaded.</summary>
     public IReadOnlyCollection<string> Words => _heads.Select(static h => h.Head.Name).ToArray();
 
-    /// <summary>Takes ownership of <paramref name="mel"/> and <paramref name="embedding"/>; both are disposed with the pipeline.</summary>
-    public WakeDetectionPipeline(IBackend backend, WakeMelFrontend mel, SpeechEmbeddingModel embedding)
+    /// <summary>Borrows <paramref name="mel"/> and <paramref name="embedding"/>. They are stateless and therefore
+    /// shared by every device on the single worker thread, so the caller owns and disposes them.</summary>
+    public WakeDetectionPipeline(WakeMelFrontend mel, SpeechEmbeddingModel embedding)
     {
-        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _mel = mel ?? throw new ArgumentNullException(nameof(mel));
         _embedding = embedding ?? throw new ArgumentNullException(nameof(embedding));
     }
 
-    /// <summary>Adds a wake word. Takes ownership of <paramref name="head"/>. Safe to call between pushes, so
-    /// a newly trained word reaches live sessions without restarting them.</summary>
+    /// <summary>Adds a wake word. The head is borrowed, not owned — heads are stateless and shared across
+    /// devices, while the smoothing and refractory state that is per-device lives here. Safe to call between
+    /// pushes, so a newly trained word reaches live sessions without restarting them.</summary>
     public void AddWord(WakeHead head, WakeWordSettings? settings = null)
     {
         ArgumentNullException.ThrowIfNull(head);
@@ -92,20 +92,20 @@ public sealed class WakeDetectionPipeline : IDisposable
         _heads.Add(new HeadState(head, settings ?? new WakeWordSettings()));
     }
 
-    /// <summary>Removes a wake word and disposes its head. Returns false if it was not loaded.</summary>
+    /// <summary>Stops scoring a wake word on this device. The head itself is owned elsewhere and is not disposed.</summary>
     public bool RemoveWord(string name)
     {
         int i = _heads.FindIndex(h => h.Head.Name == name);
         if (i < 0) return false;
-        _heads[i].Head.Dispose();
         _heads.RemoveAt(i);
         return true;
     }
 
     /// <summary>Feeds audio and reports any words that fired. <paramref name="detections"/> is cleared first.
     /// Any number of samples may be pushed; work happens per whole 80 ms chunk.</summary>
-    public void Push(ReadOnlySpan<float> samples, List<WakeDetection> detections)
+    public void Push(IBackend backend, ReadOnlySpan<float> samples, List<WakeDetection> detections)
     {
+        ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(detections);
         detections.Clear();
         if (_heads.Count == 0) return;
@@ -118,7 +118,7 @@ public sealed class WakeDetectionPipeline : IDisposable
             samples = samples[take..];
 
             if (_pendingCount < ChunkSamples) break;
-            ProcessChunk(detections);
+            ProcessChunk(backend, detections);
             _pendingCount = 0;
         }
     }
@@ -138,7 +138,7 @@ public sealed class WakeDetectionPipeline : IDisposable
         foreach (HeadState head in _heads) head.Reset();
     }
 
-    private void ProcessChunk(List<WakeDetection> detections)
+    private void ProcessChunk(IBackend backend, List<WakeDetection> detections)
     {
         // Slide the 480-sample left context down and append the new chunk.
         if (_historyCount > LeftContextSamples)
@@ -150,7 +150,7 @@ public sealed class WakeDetectionPipeline : IDisposable
         _historyCount += ChunkSamples;
         _samplesConsumed += ChunkSamples;
 
-        int frames = _mel.Compute(_backend, _history.AsSpan(0, _historyCount), _melScratch);
+        int frames = _mel.Compute(backend, _history.AsSpan(0, _historyCount), _melScratch);
         for (int f = 0; f < frames; f++)
         {
             int slot = (int)((_melFramesWritten + f) % MelRingFrames);
@@ -163,7 +163,7 @@ public sealed class WakeDetectionPipeline : IDisposable
 
         CopyRingTail(_melRing, MelRingFrames, WakeMelFrontend.MelBins, _melFramesWritten,
             SpeechEmbeddingModel.WindowFrames, _melWindow);
-        _embedding.Forward(_backend, _melWindow, _embedScratch);
+        _embedding.Forward(backend, _melWindow, _embedScratch);
 
         int featureSlot = (int)(_featureFramesWritten % FeatureRingFrames);
         Array.Copy(_embedScratch, 0, _featureRing,
@@ -177,7 +177,7 @@ public sealed class WakeDetectionPipeline : IDisposable
 
         foreach (HeadState head in _heads)
         {
-            float smoothed = head.Observe(_backend, _featureWindow);
+            float smoothed = head.Observe(backend, _featureWindow);
             if (smoothed < head.Settings.Threshold) continue;
             if (_samplesConsumed < head.RefractoryUntilSample) continue;
 
@@ -200,10 +200,7 @@ public sealed class WakeDetectionPipeline : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        foreach (HeadState head in _heads) head.Head.Dispose();
         _heads.Clear();
-        _mel.Dispose();
-        _embedding.Dispose();
     }
 
     private sealed class HeadState(WakeHead head, WakeWordSettings settings)
