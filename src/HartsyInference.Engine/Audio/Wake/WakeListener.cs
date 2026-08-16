@@ -97,6 +97,13 @@ public sealed class WakeListener : IDisposable
                         string deviceId = frame.Data.DeviceId ?? throw new InvalidOperationException($"hello from {remote} has no device_id.");
                         ValidateFormat(frame.Data, remote);
                         session = _sessions.GetOrAdd(deviceId, _sessionFactory);
+                        if (session.Codec is not null)
+                        {
+                            // Two live connections claiming one device id — usually cloned firmware that never
+                            // got a unique id. Both would write into one single-producer buffer, so the older
+                            // one is dropped rather than letting them interleave into corrupt audio.
+                            Logs.Warning($"[Audio][Wake] Device id '{deviceId}' reconnected from {remote} while another connection was live; dropping the older one. Give each satellite a unique device_id.");
+                        }
                         session.OnReconnected(codec);
                         Logs.Info($"[Audio][Wake] Device '{deviceId}' connected from {remote} ({string.Join(", ", session.Pipeline.Words)}).");
                         await codec.WriteAsync("hello-ack", $"{{\"words\":[{string.Join(",", session.Pipeline.Words.Select(WakeFrameCodec.Escape))}]}}", connectionCancel.Token).ConfigureAwait(false);

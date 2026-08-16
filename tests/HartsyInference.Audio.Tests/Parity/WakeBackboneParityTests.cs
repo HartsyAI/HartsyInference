@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Wake;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -98,7 +99,7 @@ public sealed class WakeBackboneParityTests
         float[] reference = ReadF32(Path.Combine(refDir, "wake_stream_scores.bin"));
 
         using CpuBackend backend = new();
-        using WakeDetectionPipeline pipeline = new(backend, LoadMel(modelsDir), LoadEmbedding(modelsDir));
+        using WakeDetectionPipeline pipeline = new(LoadMel(modelsDir), LoadEmbedding(modelsDir));
 
         // Threshold 0 with no smoothing or refractory turns every step into a reported score, which is how
         // the per-step sequence is compared; production settings are exercised by the detection tests.
@@ -115,7 +116,7 @@ public sealed class WakeBackboneParityTests
         for (int offset = 0; offset < pcm.Length; offset += 997)
         {
             int take = Math.Min(997, pcm.Length - offset);
-            pipeline.Push(pcm.AsSpan(offset, take), detections);
+            pipeline.Push(backend, pcm.AsSpan(offset, take), detections);
             foreach (WakeDetection d in detections) scores.Add(d.Score);
         }
 
@@ -127,13 +128,50 @@ public sealed class WakeBackboneParityTests
     }
 
     [Fact]
+    public void StreamingPipeline_FiresOnTheWakeWord_AtDefaultSettings()
+    {
+        if (!TryPaths(out string refDir, out string modelsDir)) return;
+        string wav = Path.Combine(refDir, "alexa_16k.wav");
+        if (!File.Exists(wav)) { Assert.True(true, $"missing {wav}"); return; }
+
+        // The rest of the suite proves the port matches openWakeWord numerically; this proves the thing the
+        // user actually cares about — saying the word produces a detection — at the shipped threshold, with
+        // no test-only settings.
+        WavFile.DecodedAudio audio = WavFile.Read(wav);
+        float[] mono = audio.ToMono();
+        float[] pcm = new float[mono.Length];
+        for (int i = 0; i < mono.Length; i++) pcm[i] = mono[i] * 32768f;
+
+        using CpuBackend backend = new();
+        using WakeDetectionPipeline pipeline = new(LoadMel(modelsDir), LoadEmbedding(modelsDir));
+        using OnnxWeightLoader headLoader = new();
+        headLoader.Load(Path.Combine(modelsDir, "heads", "oww_alexa_v0.1.onnx"));
+        WakeHead head = new("alexa");
+        head.LoadWeights(headLoader.GetAllTensors());
+        pipeline.AddWord(head);
+
+        List<WakeDetection> detections = [];
+        List<WakeDetection> all = [];
+        for (int offset = 0; offset < pcm.Length; offset += WakeDetectionPipeline.ChunkSamples)
+        {
+            int take = Math.Min(WakeDetectionPipeline.ChunkSamples, pcm.Length - offset);
+            pipeline.Push(backend, pcm.AsSpan(offset, take), detections);
+            all.AddRange(detections);
+        }
+
+        Assert.True(all.Count > 0, "the wake word did not fire at the default threshold");
+        Assert.Equal("alexa", all[0].Word);
+        Assert.True(all[0].Score >= 0.5f, $"fired at {all[0].Score}, below the configured threshold");
+    }
+
+    [Fact]
     public void StreamingPipeline_DoesNotFireOnUnrelatedSpeech()
     {
         if (!TryPaths(out string refDir, out string modelsDir)) return;
 
         float[] pcm = ReadF32(Path.Combine(refDir, "wake_stream_input.bin"));
         using CpuBackend backend = new();
-        using WakeDetectionPipeline pipeline = new(backend, LoadMel(modelsDir), LoadEmbedding(modelsDir));
+        using WakeDetectionPipeline pipeline = new(LoadMel(modelsDir), LoadEmbedding(modelsDir));
 
         using OnnxWeightLoader headLoader = new();
         headLoader.Load(Path.Combine(modelsDir, "heads", "oww_alexa_v0.1.onnx"));
@@ -146,7 +184,7 @@ public sealed class WakeBackboneParityTests
         for (int offset = 0; offset < pcm.Length; offset += WakeDetectionPipeline.ChunkSamples)
         {
             int take = Math.Min(WakeDetectionPipeline.ChunkSamples, pcm.Length - offset);
-            pipeline.Push(pcm.AsSpan(offset, take), detections);
+            pipeline.Push(backend, pcm.AsSpan(offset, take), detections);
             fired += detections.Count;
         }
         Assert.Equal(0, fired);

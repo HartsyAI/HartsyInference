@@ -34,6 +34,13 @@ public sealed record WakeServiceOptions
 
     /// <summary>Model id used for that transcription.</summary>
     public string TranscribeModel { get; init; } = "whisper";
+
+    /// <summary>Wraps the post-detection transcription call so the host can put it behind its own admission
+    /// gate. The engine is not safely re-entrant per backend, so in the API server this routes through the
+    /// same <c>InferenceQueue</c> every HTTP route uses — otherwise a detection could run Whisper on the
+    /// shared backend while an image or video job is mid-generation. Null runs it directly, which is correct
+    /// for a host that has no other traffic.</summary>
+    public Func<Func<Task<string?>>, Task<string?>>? TranscribeGate { get; init; }
 }
 
 /// <summary>Per-word configuration. <see cref="Route"/> is opaque to the engine: it is echoed back on the

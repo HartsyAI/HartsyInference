@@ -82,7 +82,9 @@ public sealed class WakeService : IDisposable
         {
             try
             {
-                transcript = await TranscribeUtteranceAsync(session).ConfigureAwait(false);
+                transcript = _options.TranscribeGate is null
+                    ? await TranscribeUtteranceAsync(session).ConfigureAwait(false)
+                    : await _options.TranscribeGate(() => TranscribeUtteranceAsync(session)).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

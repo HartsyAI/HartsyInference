@@ -3,6 +3,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.ModelAssets.Onnx;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Audio.Wake;
 
@@ -95,10 +96,20 @@ public sealed class WakeModelSet : IDisposable
 
         try
         {
-            using OnnxWeightLoader loader = new();
-            loader.Load(path);
             WakeHead head = new(name);
-            head.LoadWeights(loader.GetAllTensors());
+            // Shipped heads are ONNX; heads trained in-engine are safetensors. Both are weights-only reads.
+            if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+            {
+                using SafeTensorsLoader loader = new();
+                loader.Load(path);
+                head.LoadWeights(loader.GetAllTensors());
+            }
+            else
+            {
+                using OnnxWeightLoader loader = new();
+                loader.Load(path);
+                head.LoadWeights(loader.GetAllTensors());
+            }
             lock (_lock)
             {
                 if (_heads.Remove(name, out (WakeHead Head, WakeWordConfig Config) old)) old.Head.Dispose();

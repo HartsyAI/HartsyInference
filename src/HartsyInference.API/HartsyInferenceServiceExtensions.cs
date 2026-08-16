@@ -50,12 +50,19 @@ public static class HartsyInferenceServiceExtensions
         // connection each rather than making requests. It deliberately bypasses InferenceQueue — see WakeWorker.
         if (options.WakeEnabled)
         {
-            services.AddSingleton(sp => new WakeService(sp.GetRequiredService<IInferenceEngine>(), new WakeServiceOptions
+            services.AddSingleton(sp =>
             {
-                Port = options.WakePort,
-                ModelRoot = options.WakeModelRoot,
-                TranscribeOnDetection = options.WakeTranscribeOnDetection,
-            }));
+                InferenceQueue queue = sp.GetRequiredService<InferenceQueue>();
+                return new WakeService(sp.GetRequiredService<IInferenceEngine>(), new WakeServiceOptions
+                {
+                    Port = options.WakePort,
+                    ModelRoot = options.WakeModelRoot,
+                    TranscribeOnDetection = options.WakeTranscribeOnDetection,
+                    // Detection itself runs off-queue on its own backend, but the transcription it triggers
+                    // shares the engine backend with every HTTP route, and the engine is not re-entrant there.
+                    TranscribeGate = work => queue.EnqueueAsync(work, CancellationToken.None),
+                });
+            });
         }
 
         // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
