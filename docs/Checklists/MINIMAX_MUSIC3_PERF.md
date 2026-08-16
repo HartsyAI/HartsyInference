@@ -133,6 +133,68 @@ unlabelled kernels. Install NVTX first (may need sudo — ask).
 nine text models, and every measurement in this grind so far points at launch overhead and host glue, not kernel
 quality. Write or rewrite a kernel only where a profile shows a specific kernel below its bandwidth or FLOP bound.
 
+### 6b. VRAM audit — why long songs OOM. PLAN, not yet executed
+Written 2026-08-16 after ten full-length songs peaked at **23,940 MiB of 24,564** on a 4090 (97.5%), with the
+disco and synthwave tracks stopping at exactly 240.3 s because they hit the cap rather than finishing. A 150 s
+batch had already failed all ten on the 3060, OOMing in the AR stage at frame 1900 of 3750.
+
+**Do not start from the assumption that the cast cache is the cause.** Two facts from the logs cut against it:
+
+1. `EvictAllWeightCasts` released **6336 MB / 6528 MB** on some attempts but only **80 MB** on the one that
+   actually died — so at the moment of failure the cache was already small and something else held the card.
+2. The q4 batch peaked **higher** than the q8 probe (23,940 vs 20,183 MiB) despite roughly 4 GB lighter
+   weights. Backwards for a weights-dominated story; consistent with a frames-dominated one, since the q4 songs
+   ran 2–3× the frames.
+
+Arithmetic on those two points: q8 ≈ 8.8 GB over ~2218 frames ≈ 4 MB/frame; q4 ≈ 16 GB over ~5–6k frames ≈
+3 MB/frame. The F16 KV cache accounts for **0.29 MB/frame**. So several MB/frame is unexplained, which over
+36 layers is ~80–110 KB/layer/frame — transient-sized, i.e. leak-shaped. This engine has a documented history
+of exactly that (an undisposed `Tensor.Reshape` view OOM'd a 24 GB card during the Music3 port).
+
+#### Phase 0 — the discriminator. Run this BEFORE designing a fix.
+One 4090 run and one 3060 run, instrumented:
+- Per-frame VRAM curve: `cuMemGetInfo` sampled in the AR `onFrame` callback every ~50 frames.
+- Cast-cache census at frame ~200 and at peak: entry count, total bytes, source→cast dtype, weight identity.
+- Pool stats via `cuMemPoolGetAttribute` (reserved vs used high-water) — separates live allocations from pool
+  retention.
+- Read `LinearImpl` (CudaBackend.cs ~1769–1810 and ~2079–2247) and settle whether the batch-2 CFG input routes
+  to dequant-to-F16 + GEMM (which would cache multi-GB dequants) or to a row-wise quantized GEMV. Note the CFG
+  batch was byte-identical to two separate forwards, which hints GEMV and would kill the dequant story.
+
+Decision table: **linear slope in MB/frame → hunt the leak** (audit every per-frame allocation in the AR and
+depth loops for a missing Dispose, `Reshape` views included). **Flat-but-high with a large census → budget the
+cache and add an m=2 quantized kernel.** **Reserved ≫ used → pool retention policy.**
+
+#### Fix levers, ROI-ordered, conditional on Phase 0
+1. **Budgeted LRU cast cache** — worth doing whichever story wins. `GpuTransferHelper.WeightCastCache` (line 48)
+   is an unbounded dictionary with no budget and no LRU; the only eviction is all-or-nothing and fires *after* an
+   OOM. Give it a byte budget, LRU ordering, and a headroom-aware insert that declines to cache when free VRAM is
+   below a reserve (`cuMemGetInfo` costs 5.2 µs and inserts are first-touch only). Add a partial-LRU rung to the
+   `CudaMemory` ladder before evict-all. Kill-switch env; `=0` reproduces today exactly.
+2. **An m=2 quantized kernel for the CFG pair**, if Phase 0 confirms dequant+GEMM — reads q4 once instead of
+   materializing F16, removing the cache's reason to exist for quantized models. Carries the known last-bit fork
+   risk (different song at the same seed), so: kill-switch, documented, CUDA parity gate.
+3. **KV grow-on-demand instead of prealloc.** `CreateCache(maxSeqLen)` allocates the full cap up front, so a
+   240 s cap costs ~1.8 GB even when the song ends at 90 s. `PagedKvCache` exists but is F32-only; an F16 paged
+   variant is the clean shape. Matters most on the 3060.
+4. Re-derive the per-card frame ceilings, update the AudioLab provider VRAM strings, and re-run the two tracks
+   that hit the cap.
+
+#### On the two ideas the user raised
+- **Unified/managed memory ("cuda map")**: a spike only if 1–3 leave a gap. Expect it to lose — weights and KV
+  are read every frame, so there are no cold pages to evict and managed memory would thrash the decode hot path.
+- **CPU overflow so we never OOM**: the large host-spillable things are already host-side (`frame_hiddens`) or
+  rebuildable (casts — never spill them, just rebuild from the resident quantized source). KV cannot spill, since
+  the full prefix is read every frame — but six minutes is ~9000 frames ≈ 2.6 GB at F16, which fits even a 12 GB
+  card. So "never OOM" is reachable by **policy** — budget, evict-before-fail, grow-on-demand — not by building a
+  host-overflow subsystem.
+
+#### Guardrails
+`CacheWeightCasts` is global, so any semantic change needs the cross-model throughput A/B this file already
+demands, plus the LLM suite, plus attention to the auto-promote regression class (the weight cache is read before
+the activation cache — cache-lifetime changes are how that bug comes back). CUDA parity gates before commit,
+never CPU-only. Same-seed WAV bytes may shift once per lever; document each rather than chasing it.
+
 ### 7. BF16 cast caching in `LinearImpl` — separate track
 `cacheWeightCast: true` caches a device-side dtype cast per weight, roughly doubling the 17.2 GB language model,
 which is why the bare BF16 variant does not fit a 24 GB card while the reference's BF16 does. Fixing it unlocks the
