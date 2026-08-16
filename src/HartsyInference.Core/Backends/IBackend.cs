@@ -2876,6 +2876,36 @@ public interface IBackend : IDisposable
                                     }
     }
 
+    /// <summary>Spatial-only pixel-shuffle over a 5-D volume (torch <c>nn.PixelShuffle</c> applied per depth slice):
+    /// <c>[N,C·r²,D,H,W] → [N,C,D,rH,rW]</c> with source channel <c>c·r² + p1·r + p2</c>. Channel-OUTER nesting —
+    /// <see cref="SeedVr2PixelShuffle"/> nests the other way and is not interchangeable. Default is the host reference.</summary>
+    unsafe void PixelShuffle2d(Tensor output, Tensor input, int ratio)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException("PixelShuffle2d default fallback only supports F32.");
+        Sync();
+        int n = (int)input.Shape[0], cIn = (int)input.Shape[1];
+        int d = (int)input.Shape[2], iH = (int)input.Shape[3], iW = (int)input.Shape[4];
+        int r = ratio, r2 = r * r, cOut = cIn / r2;
+        int oH = iH * r, oW = iW * r;
+        if ((long)cOut * r2 != cIn || output.Shape[1] != cOut || output.Shape[3] != oH || output.Shape[4] != oW)
+            throw new ArgumentException($"PixelShuffle2d ratio {r}: input {input.Shape} does not shuffle into {output.Shape}.");
+        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        for (int b = 0; b < n; b++)
+            for (int c = 0; c < cOut; c++)
+                for (int z = 0; z < d; z++)
+                    for (int h = 0; h < iH; h++)
+                        for (int w = 0; w < iW; w++)
+                            for (int p1 = 0; p1 < r; p1++)
+                                for (int p2 = 0; p2 < r; p2++)
+                                {
+                                    long ci = (long)c * r2 + p1 * r + p2;
+                                    long si = ((((long)b * cIn + ci) * d + z) * iH + h) * iW + w;
+                                    long di = ((((long)b * cOut + c) * d + z) * oH + (h * r + p1)) * oW + (w * r + p2);
+                                    dst[di] = src[si];
+                                }
+    }
+
     /// <summary>Channel-axis LayerNorm over <c>[N,C,D,H,W]</c> (TRELLIS <c>ChannelLayerNorm32</c>): normalizes across C, affine <c>[C]</c>.</summary>
     unsafe void ChannelLayerNorm3d(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps)
     {
