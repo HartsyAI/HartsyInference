@@ -2349,6 +2349,11 @@ public sealed unsafe class GenericTransformer : IDisposable
                 segs[s] = attnSeg;
             }
 
+            // The per-row slices above are copies, not views, so the batched projections die here. Omitting this
+            // leaked three tensors per layer per step, and the activation cache keys on the Tensor itself, so
+            // nothing could ever reclaim them: 1.688 MB/frame, which is what capped song length.
+            q.Dispose(); k.Dispose(); v.Dispose();
+
             Tensor attnConcat = new(new TensorShape(b, hq, 1, d), DType.F32);
             backend.Concat(attnConcat, segs, dim: 0);
             foreach (Tensor seg in segs) seg.Dispose();
