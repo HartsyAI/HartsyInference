@@ -123,4 +123,45 @@ public sealed unsafe class LtxVideo2TwoStageTests
     [Fact]
     public void TwoStageGridRejectsGeometryBelowTwoLatentCells()
         => Assert.Throws<ArgumentException>(() => LtxVideo2Pipeline.TwoStageGrid(32, 512, 32));
+
+    /// <summary>Ancestral (eta=1) coefficients, against values read out of ComfyUI's own
+    /// <c>sample_euler_ancestral_RF</c> expressions at the two schedules this pipeline runs. The deterministic
+    /// step goes to <c>sigma_down = s1²/s0</c>, NOT to <c>s1</c> — using the plain <c>s0−s1</c> delta alongside the
+    /// noise injection would over-denoise and over-noise at every step.</summary>
+    [Theory]
+    [InlineData(0.85f, 0.725f, 0.231617647f, 0.720616570f, 0.571883618f)]
+    [InlineData(0.725f, 0.421875f, 0.479512392f, 0.766223333f, 0.377620885f)]
+    [InlineData(1.0f, 0.99375f, 0.012460937f, 0.501567398f, 0.861510149f)]
+    public void AncestralCoefficientsMatchComfyUi(float s0, float s1, float delta, float zScale, float noiseScale)
+    {
+        (float gotDelta, float gotZ, float gotNoise) = LtxVideo2Pipeline.AncestralCoefficients(s0, s1);
+        Assert.Equal(delta, gotDelta, 5);
+        Assert.Equal(zScale, gotZ, 5);
+        Assert.Equal(noiseScale, gotNoise, 5);
+    }
+
+    /// <summary>The terminal pair degenerates to plain Euler — same delta, identity blend, no noise. Without this
+    /// the last step would inject noise into the final latent.</summary>
+    [Fact]
+    public void AncestralTerminalStepIsPlainEuler()
+    {
+        (float delta, float zScale, float noiseScale) = LtxVideo2Pipeline.AncestralCoefficients(0.421875f, 0f);
+        Assert.Equal(0.421875f, delta, 6);
+        Assert.Equal(1f, zScale, 6);
+        Assert.Equal(0f, noiseScale, 6);
+    }
+
+    /// <summary>The property that makes the injection marginal-preserving: the deterministic step's residual noise
+    /// scaled by the blend, plus the injected noise, sums in quadrature back to <c>s1</c>.</summary>
+    [Theory]
+    [InlineData(0.85f, 0.725f)]
+    [InlineData(0.725f, 0.421875f)]
+    [InlineData(0.975f, 0.909375f)]
+    public void AncestralInjectionRestoresTheTargetSigma(float s0, float s1)
+    {
+        (float delta, float zScale, float noiseScale) = LtxVideo2Pipeline.AncestralCoefficients(s0, s1);
+        float sigmaDown = s0 - delta;
+        float restored = zScale * sigmaDown * (zScale * sigmaDown) + noiseScale * noiseScale;
+        Assert.True(System.MathF.Abs(restored - s1 * s1) < 1e-6f, $"restored {restored:F8} vs s1² {s1 * s1:F8}");
+    }
 }

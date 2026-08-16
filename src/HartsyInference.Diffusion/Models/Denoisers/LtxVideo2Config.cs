@@ -104,6 +104,12 @@ public sealed record LtxVideo2Config
     /// shift when set. Distillation baked these values in, so a different step count is not a valid schedule.</summary>
     public float[]? FixedSigmas { get; init; }
 
+    /// <summary>Use ancestral (eta=1) Euler instead of plain Euler: the deterministic step lands on
+    /// <c>sigma_down = s1²/s0</c> and fresh noise carries the latent back up to <c>s1</c>. This is what both
+    /// samplers in the shipped LTX-2.5 templates run. Off by default — the single-pass plain-Euler arm is the
+    /// empirically validated one, and switching it silently would invalidate its measurements.</summary>
+    public bool EulerAncestral { get; init; }
+
     /// <summary>Rescale the shifted sigma schedule so its last non-zero value lands on <see cref="SigmaTerminal"/>.
     /// LTX's own scheduler node does this by default; without it the sampler stops while the latent is still
     /// noticeably noisy, and the error grows with token count because the shift does — at 1280x736x97f the last

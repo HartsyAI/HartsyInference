@@ -187,11 +187,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float[]? refineSigmas = twoStage ? LtxVideo2Config.Ltx25TwoStageRefineSigmas : null;
         int refineSteps = refineSigmas is null ? 0 : refineSigmas.Length - 1;
         float shift = ComputeShift(svStage1, _config), formulaShift = FormulaShift(svStage1);
+        // Both samplers in the shipped two-stage template are euler_ancestral, so that arm follows them; the
+        // single-pass arm keeps plain Euler, which is the empirically measured one. HARTSY_LTX2_ANCESTRAL forces
+        // either direction.
+        bool ancestral = EnvSwitch.IsEnabled("HARTSY_LTX2_ANCESTRAL", defaultOn: _config.EulerAncestral || twoStage);
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps}{(twoStage ? $"+{refineSteps}" : "")} steps, " +
             $"cfg={guidance}, seed={seed} (video {tLat}x{(twoStage ? hLatStage1 : hLat)}x{(twoStage ? wLatStage1 : wLat)}" +
             $"={svStage1} tokens, audio {audioFrames} tokens, " +
-            $"shift={shift:F3}{(shift == formulaShift ? "" : $", overriding the fit's {formulaShift:F3}")})");
+            $"shift={shift:F3}{(shift == formulaShift ? "" : $", overriding the fit's {formulaShift:F3}")}, " +
+            $"{(ancestral ? "euler_ancestral" : "euler")})");
 
         // 1. Text conditioning: Gemma 49-layer features → per-modality connector embeddings. Cached across
         // generations keyed on the token ids (the FLite/Flux2 prompt-cache pattern) — a hit skips the whole
@@ -392,7 +397,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         DenoiseStage(videoLat, audioLat, tsteps, twoStage ? (tLat, hLatStage1, wLatStage1) : (tLat, hLat, wLat),
             audioFrames, frameRate, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
             guidance, audioGuidance, audioRescale, unguided, 0, steps + refineSteps, videoChannels, onProgress,
-            twoStage ? "s1 " : "");
+            twoStage ? "s1 " : "", ancestral, seed);
 
         if (twoStage)
         {
@@ -415,7 +420,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 DenoiseStage(videoLat, audioLat, refineSigmas, (tLat, hLat, wLat), audioFrames, frameRate,
                     encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
                     guidance, audioGuidance, audioRescale, unguided, steps, steps + refineSteps, videoChannels,
-                    onProgress, "s2 ");
+                    onProgress, "s2 ", ancestral, seed);
             }
             finally
             {
@@ -574,13 +579,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         (int Frames, int Height, int Width) grid, int audioFrames, double frameRate,
         Tensor encVideoPos, Tensor encAudioPos, Tensor encVideoNeg, Tensor encAudioNeg,
         float guidance, float audioGuidance, float audioRescale, bool unguided,
-        int stepBase, int stepTotal, int videoChannels, Action<GenerationProgress>? onProgress, string stageTag)
+        int stepBase, int stepTotal, int videoChannels, Action<GenerationProgress>? onProgress, string stageTag,
+        bool ancestral, int seed)
     {
         int steps = sigmas.Length - 1;
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float dt = sigmas[k] - sigmas[k + 1];
+            (float dt, float zScale, float noiseScale) = ancestral
+                ? AncestralCoefficients(sigmas[k], sigmas[k + 1])
+                : (sigmas[k] - sigmas[k + 1], 1f, 0f);
             float tEmb = sigmas[k] * _config.TimestepScaleMultiplier;   // flow sigma (≈1..0) scaled to ≈0..1000
 
             Tensor vCondV, vCondA, vUncondV, vUncondA;
@@ -618,6 +626,12 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 vCondA.Dispose();
                 if (paired) { vUncondV.Dispose(); vUncondA.Dispose(); }
             }
+            if (noiseScale > 0f)
+            {
+                // Fresh noise per step per stream, seeded off the generation seed so a repeat reproduces.
+                AncestralRenoise(videoLat, zScale, noiseScale, seed ^ 0x71A3 ^ (stepBase + k));
+                AncestralRenoise(audioLat, zScale, noiseScale, seed ^ 0x71C5 ^ (stepBase + k));
+            }
 
             Backend.Sync();
             sw.Stop();
@@ -640,6 +654,30 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             if (k == 0) Backend.ResetOpProfile();
         }
         Backend.DumpOpProfile($"denoise{stageTag.Trim()}{Math.Max(1, steps - 1)}");
+    }
+
+    /// <summary>Ancestral-Euler (eta=1) step coefficients for a sigma pair, from ComfyUI's
+    /// <c>sample_euler_ancestral_RF</c>: the deterministic Euler step goes to <c>sigma_down = s1²/s0</c> instead of
+    /// <c>s1</c>, then <c>z = zScale·z + noiseScale·noise</c> carries it back up. By construction
+    /// <c>(zScale·sigma_down)² + noiseScale² = s1²</c>, which is what makes the injection marginal-preserving.
+    /// The terminal pair (<c>s1 = 0</c>) degenerates to plain Euler: zScale 1, noiseScale 0.</summary>
+    internal static (float Delta, float ZScale, float NoiseScale) AncestralCoefficients(float s0, float s1)
+    {
+        float sigmaDown = s0 <= 0f ? 0f : s1 * s1 / s0;
+        float zScale = (1f - s1) / (1f - sigmaDown);
+        float noiseScale = MathF.Sqrt(MathF.Max(0f, s1 * s1 - sigmaDown * sigmaDown * zScale * zScale));
+        return (s0 - sigmaDown, zScale, noiseScale);
+    }
+
+    /// <summary>Ancestral noise injection, in place on device: <c>z = zScale·z + noiseScale·noise</c>. Composed from
+    /// <c>AffineMix</c> + <c>CopyInto</c> rather than a new kernel — both are existing device ops, and the pair
+    /// keeps the latent's tensor identity (and its device buffer) across the step.</summary>
+    private void AncestralRenoise(Tensor z, float zScale, float noiseScale, int seed)
+    {
+        using Tensor noise = SeedGenerator.CreateNoise(z.Shape, seed);
+        using Tensor mixed = new Tensor(z.Shape, DType.F32);
+        Backend.AffineMix(mixed, z, noise, zScale, noiseScale);
+        Backend.CopyInto(z, mixed);
     }
 
     /// <summary>Stage-1 → stage-2 handoff. Un-normalizes the video latent, runs the learned x2 latent upsampler
