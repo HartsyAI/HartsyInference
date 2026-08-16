@@ -187,10 +187,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float[]? refineSigmas = twoStage ? LtxVideo2Config.Ltx25TwoStageRefineSigmas : null;
         int refineSteps = refineSigmas is null ? 0 : refineSigmas.Length - 1;
         float shift = ComputeShift(svStage1, _config), formulaShift = FormulaShift(svStage1);
-        // Both samplers in the shipped two-stage template are euler_ancestral, so that arm follows them; the
-        // single-pass arm keeps plain Euler, which is the empirically measured one. HARTSY_LTX2_ANCESTRAL forces
-        // either direction.
-        bool ancestral = EnvSwitch.IsEnabled("HARTSY_LTX2_ANCESTRAL", defaultOn: _config.EulerAncestral || twoStage);
+        // The shipped template runs euler_ancestral in both stages, but measured here it costs audio: same prompt,
+        // seed and geometry, the 2-4 kHz dynamic range is 39.5 dB ancestral against 47.8 dB plain, and the noise
+        // floor -5.6 dB against -14.2 dB. Three ancestral injections is enough to leave a broadband bed the 3-step
+        // refine cannot re-absorb. Plain Euler is the default in both arms; HARTSY_LTX2_ANCESTRAL=1 opts back in.
+        bool ancestral = EnvSwitch.IsEnabled("HARTSY_LTX2_ANCESTRAL", defaultOn: _config.EulerAncestral);
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps}{(twoStage ? $"+{refineSteps}" : "")} steps, " +
             $"cfg={guidance}, seed={seed} (video {tLat}x{(twoStage ? hLatStage1 : hLat)}x{(twoStage ? wLatStage1 : wLat)}" +
