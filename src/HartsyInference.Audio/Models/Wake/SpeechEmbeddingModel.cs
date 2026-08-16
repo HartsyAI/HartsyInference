@@ -76,9 +76,7 @@ public sealed unsafe class SpeechEmbeddingModel : IDisposable
     }
 
     private static Tensor Get(IReadOnlyDictionary<string, Tensor> weights, string name) =>
-        weights.TryGetValue(name, out Tensor? t)
-            ? WhisperOps.EnsureF32(t)
-            : throw new HartsyInferenceException($"Speech embedding backbone is missing '{name}'. Expected openWakeWord's embedding_model.onnx.");
+        WakeWeights.Require(weights, name, "openWakeWord's embedding_model.onnx");
 
     /// <summary>Embeds one mel window. <paramref name="melWindow"/> is <c>76×32</c> row-major (frame-major);
     /// <paramref name="output"/> receives 96 floats.</summary>

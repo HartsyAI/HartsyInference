@@ -46,9 +46,9 @@ public sealed unsafe class WakeMelFrontend : IDisposable
     /// <summary>Loads the DFT basis and mel matrix from <c>melspectrogram.onnx</c>'s initializers.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _convReal = WhisperOps.EnsureF32(Get(weights, "0.stft.conv_real.weight"));
-        _convImag = WhisperOps.EnsureF32(Get(weights, "0.stft.conv_imag.weight"));
-        _melW = WhisperOps.EnsureF32(Get(weights, "1.melW"));
+        _convReal = Get(weights, "0.stft.conv_real.weight");
+        _convImag = Get(weights, "0.stft.conv_imag.weight");
+        _melW = Get(weights, "1.melW");
 
         if (_convReal.Shape[0] != SpecBins || _convReal.Shape[2] != NFft)
             throw new HartsyInferenceException($"Wake mel STFT basis must be [{SpecBins},1,{NFft}], got {_convReal.Shape}.");
@@ -57,9 +57,7 @@ public sealed unsafe class WakeMelFrontend : IDisposable
     }
 
     private static Tensor Get(IReadOnlyDictionary<string, Tensor> weights, string name) =>
-        weights.TryGetValue(name, out Tensor? t)
-            ? t
-            : throw new HartsyInferenceException($"Wake mel front-end is missing '{name}'. Expected openWakeWord's melspectrogram.onnx.");
+        WakeWeights.Require(weights, name, "openWakeWord's melspectrogram.onnx");
 
     /// <summary>Computes mel frames for <paramref name="samples"/> (int16-scaled, 16 kHz mono) into
     /// <paramref name="output"/>, which must hold <c>FrameCount(samples.Length) * 32</c> floats. Returns the frame count.</summary>

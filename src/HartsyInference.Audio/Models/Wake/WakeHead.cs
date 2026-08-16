@@ -49,7 +49,7 @@ public sealed unsafe class WakeHead : IDisposable
         {
             if (!weights.TryGetValue($"{prefix}{i}.weight", out Tensor? w)) continue;
             weights.TryGetValue($"{prefix}{i}.bias", out Tensor? b);
-            entries.Add((i, Track(WhisperOps.EnsureF32(w)), b is null ? null : Track(WhisperOps.EnsureF32(b)), w.Shape.Rank == 2));
+            entries.Add((i, Track(WakeWeights.Own(w)), b is null ? null : Track(WakeWeights.Own(b)), w.Shape.Rank == 2));
         }
 
         int linearCount = entries.Count(static e => e.IsLinear);

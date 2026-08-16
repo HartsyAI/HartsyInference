@@ -72,6 +72,50 @@ def main():
         scores.append(float(out.ravel()[0]))
     write(os.path.join(out_dir, "wake_head_scores.bin"), np.array(scores))
 
+    # Whole-stream reference: every 80 ms score over real speech, driven through the same chunking
+    # WakeDetectionPipeline uses. This is what catches ring-buffer and windowing mistakes that the
+    # single-shot fixtures above cannot see.
+    wav = sys.argv[3] if len(sys.argv) > 3 else None
+    if wav and os.path.exists(wav):
+        head_path = os.path.join(wake_dir, "heads", "oww_alexa_v0.1.onnx")
+        head_sess = ort.InferenceSession(head_path)
+        head_input = head_sess.get_inputs()[0].name
+        pcm = read_wav_int16(wav)
+        write(os.path.join(out_dir, "wake_stream_input.bin"), pcm)
+        stream = stream_scores(mel_sess, emb_sess, head_sess, head_input, pcm)
+        write(os.path.join(out_dir, "wake_stream_scores.bin"), np.array(stream))
+        print(f"  stream steps={len(stream)} max_score={max(stream):.6f}")
+
+
+def read_wav_int16(path):
+    import wave
+    with wave.open(path) as w:
+        assert w.getnchannels() == 1 and w.getframerate() == 16000 and w.getsampwidth() == 2
+        raw = w.readframes(w.getnframes())
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+
+
+def stream_scores(mel_sess, emb_sess, head_sess, head_input, pcm):
+    """openWakeWord's streaming contract, minus the random-audio buffer seeding: scores are withheld
+    until 76 real mel frames and 16 real embedding frames exist, matching WakeDetectionPipeline."""
+    mel_ring, feat_ring, out = [], [], []
+    history = np.zeros(0, dtype=np.float32)
+    for start in range(0, len(pcm) - CHUNK + 1, CHUNK):
+        chunk = pcm[start:start + CHUNK]
+        history = np.concatenate([history[-LEFT_CONTEXT:], chunk]) if len(history) else chunk
+        frames = np.squeeze(mel_sess.run(None, {"input": history[None, :]})[0]) / 10.0 + 2.0
+        mel_ring.extend(frames)
+        if len(mel_ring) < WINDOW:
+            continue
+        window = np.array(mel_ring[-WINDOW:], dtype=np.float32)
+        emb = emb_sess.run(None, {"input_1": window[None, :, :, None]})[0].reshape(-1)
+        feat_ring.append(emb)
+        if len(feat_ring) < CONTEXT:
+            continue
+        feats = np.array(feat_ring[-CONTEXT:], dtype=np.float32)
+        out.append(float(head_sess.run(None, {head_input: feats[None, :, :]})[0].ravel()[0]))
+    return out
+
 
 if __name__ == "__main__":
     main()
