@@ -35,6 +35,10 @@ public sealed record WakeServiceOptions
     /// <summary>Model id used for that transcription.</summary>
     public string TranscribeModel { get; init; } = "whisper";
 
+    /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to
+    /// one engine's wake events without being in-process — the same detection can drive several agents.</summary>
+    public IReadOnlyList<string> Webhooks { get; init; } = [];
+
     /// <summary>Wraps the post-detection transcription call so the host can put it behind its own admission
     /// gate. The engine is not safely re-entrant per backend, so in the API server this routes through the
     /// same <c>InferenceQueue</c> every HTTP route uses — otherwise a detection could run Whisper on the

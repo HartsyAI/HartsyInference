@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Logging;
@@ -34,9 +37,11 @@ public sealed class WakeService : IDisposable
     private readonly ConcurrentDictionary<string, WakeSession> _sessions = new();
     private readonly IInferenceEngine _engine;
     private readonly WakeServiceOptions _options;
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
     private WakeModelSet? _models;
     private WakeListener? _listener;
     private WakeWorker? _worker;
+    private WakeWordConfigStore? _configStore;
     private int _disposed;
 
     /// <summary>Raised on every detection, after transcription when it is enabled.</summary>
@@ -63,8 +68,15 @@ public sealed class WakeService : IDisposable
     public void Start()
     {
         string root = _options.ModelRoot ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake");
+
+        // Persisted per-word settings are the base; anything passed in options wins, so a host can override
+        // without rewriting the file.
+        _configStore = new WakeWordConfigStore(root);
+        Dictionary<string, WakeWordConfig> words = new(_configStore.Load());
+        foreach ((string name, WakeWordConfig config) in _options.Words) words[name] = config;
+
         _models = new WakeModelSet(root);
-        _models.Load(_options.Words);
+        _models.Load(words);
 
         _worker = new WakeWorker(_sessions, OnDetectionAsync);
         _worker.Start();
@@ -105,6 +117,7 @@ public sealed class WakeService : IDisposable
         };
 
         await NotifyDeviceAsync(session, evt).ConfigureAwait(false);
+        await PostWebhooksAsync(evt).ConfigureAwait(false);
         try { Detected?.Invoke(evt); }
         catch (Exception ex) { Logs.Error("[Audio][Wake] A detection subscriber threw.", ex); }
     }
@@ -131,6 +144,38 @@ public sealed class WakeService : IDisposable
             Audio = new AudioClip { Data = ms.ToArray(), Format = "wav" },
         }).ConfigureAwait(false);
         return result.Text;
+    }
+
+    /// <summary>Persists a word's settings so they survive a restart, and applies them to future sessions.</summary>
+    public void ConfigureWord(string name, WakeWordConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        _configStore?.Set(name, config);
+        _models?.TryLoadHead(name, config);
+    }
+
+    /// <summary>Per-word settings currently in effect.</summary>
+    public IReadOnlyDictionary<string, WakeWordConfig> WordSettings => _configStore?.Entries ?? new Dictionary<string, WakeWordConfig>();
+
+    private async Task PostWebhooksAsync(WakeEvent evt)
+    {
+        if (_options.Webhooks.Count == 0) return;
+        string payload = JsonSerializer.Serialize(evt);
+        foreach (string url in _options.Webhooks)
+        {
+            try
+            {
+                using StringContent content = new(payload, Encoding.UTF8, "application/json");
+                using HttpResponseMessage response = await _http.PostAsync(url, content).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                    Logs.Warning($"[Audio][Wake] Webhook {url} returned {(int)response.StatusCode}.");
+            }
+            catch (Exception ex)
+            {
+                // One unreachable subscriber must not stop the others or the detection itself.
+                Logs.Warning($"[Audio][Wake] Webhook {url} failed: {ex.Message}");
+            }
+        }
     }
 
     private static async Task NotifyDeviceAsync(WakeSession session, WakeEvent evt)
@@ -161,5 +206,6 @@ public sealed class WakeService : IDisposable
         foreach (WakeSession session in _sessions.Values) session.Dispose();
         _sessions.Clear();
         _models?.Dispose();
+        _http.Dispose();
     }
 }

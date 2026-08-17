@@ -106,12 +106,12 @@ public sealed class WakeTrainingJob
         string name = options.Name ?? Slugify(options.Phrase);
         progress?.Report($"Synthesizing '{options.Phrase}' across {options.Voices.Count} voices x {options.Speeds.Count} speeds");
 
-        List<float[]> positiveClips = await SynthesizeAsync(options.Phrase, options, cancel).ConfigureAwait(false);
+        List<(float[] Clip, string Voice)> positiveClips = await SynthesizeAsync(options.Phrase, options, cancel).ConfigureAwait(false);
         if (positiveClips.Count == 0) throw new HartsyInferenceException($"No positive audio was synthesized for '{options.Phrase}'.");
 
         List<float[]> negativeClips = [];
         foreach (string phrase in options.NegativePhrases)
-            negativeClips.AddRange(await SynthesizeAsync(phrase, options, cancel).ConfigureAwait(false));
+            negativeClips.AddRange((await SynthesizeAsync(phrase, options, cancel).ConfigureAwait(false)).Select(static c => c.Clip));
         negativeClips.AddRange(LoadNegativeAudio(options.NegativeAudioDirectory, progress));
         if (negativeClips.Count == 0)
             progress?.Report("WARNING: no negative audio — the head will fire readily. Supply --negative-audio for a usable false-accept rate.");
@@ -121,10 +121,18 @@ public sealed class WakeTrainingJob
         using WakeMelFrontend mel = LoadMel();
         using SpeechEmbeddingModel embedding = LoadEmbedding();
 
-        // Hold out whole CLIPS, not windows. Consecutive windows from one clip overlap by 15 of their 16
-        // frames, so a per-window split puts near-duplicates on both sides and reports a recall and
-        // false-accept rate that mean nothing.
-        (List<float[]> posTrainClips, List<float[]> posTestClips) = Split(positiveClips);
+        // Hold out an entire VOICE, not a sample of windows. Two reasons, both learned the hard way.
+        // Consecutive windows from one clip share 15 of their 16 frames, so splitting by window puts
+        // near-duplicates on both sides and reports a meaningless 100%. And splitting by clip while keeping
+        // every voice on both sides measures nothing about the thing that actually fails: a speaker the head
+        // never heard. Holding out a voice makes the recall figure — and the threshold picked from it —
+        // predictive of a real person walking up to the microphone.
+        string heldOutVoice = positiveClips.Select(static c => c.Voice).Distinct().Skip(1).FirstOrDefault()
+            ?? positiveClips[0].Voice;
+        List<float[]> posTrainClips = [.. positiveClips.Where(c => c.Voice != heldOutVoice).Select(static c => c.Clip)];
+        List<float[]> posTestClips = [.. positiveClips.Where(c => c.Voice == heldOutVoice).Select(static c => c.Clip)];
+        if (posTrainClips.Count == 0) (posTrainClips, posTestClips) = (posTestClips, posTrainClips);
+        progress?.Report($"Holding out voice '{heldOutVoice}' entirely, so recall measures an unheard speaker");
         (List<float[]> negTrainClips, List<float[]> negTestClips) = Split(negativeClips);
 
         List<float[]> trainPos = ExtractFeatures(backend, mel, embedding, posTrainClips, augment: true);
@@ -172,9 +180,9 @@ public sealed class WakeTrainingJob
         };
     }
 
-    private async Task<List<float[]>> SynthesizeAsync(string text, WakeTrainingOptions options, CancellationToken cancel)
+    private async Task<List<(float[] Clip, string Voice)>> SynthesizeAsync(string text, WakeTrainingOptions options, CancellationToken cancel)
     {
-        List<float[]> clips = [];
+        List<(float[] Clip, string Voice)> clips = [];
         ModelSpec spec = Registry.ModelResolver.Resolve(options.SpeechModel, null, Modality.Speech);
         foreach (string voice in options.Voices)
         {
@@ -189,7 +197,7 @@ public sealed class WakeTrainingJob
                         Voice = voice,
                         Speed = speed,
                     }, cancel).ConfigureAwait(false);
-                    clips.Add(DecodeToInt16Scaled(result.Data));
+                    clips.Add((DecodeToInt16Scaled(result.Data), voice));
                 }
                 catch (Exception ex)
                 {

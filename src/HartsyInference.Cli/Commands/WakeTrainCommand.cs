@@ -44,6 +44,10 @@ public sealed class WakeTrainCommand : AsyncCommand<WakeTrainCommand.Settings>
         [Description("Training epochs.")]
         public int Epochs { get; init; } = 120;
 
+        [CommandOption("--route")]
+        [Description("Opaque tag echoed on the detection event, for sending different words to different agents.")]
+        public string? Route { get; init; }
+
         [CommandOption("-b|--backend")]
         [Description("Backend for the TTS stage: auto, cpu, cuda, or vulkan.")]
         public string Backend { get; init; } = "auto";
@@ -81,7 +85,18 @@ public sealed class WakeTrainCommand : AsyncCommand<WakeTrainCommand.Settings>
         Progress<string> progress = new(message => AnsiConsole.MarkupLine($"[grey]{message.EscapeMarkup()}[/]"));
         WakeTrainingResult result = await job.RunAsync(options, progress);
 
+        // Record the measured threshold beside the head. Without this the number is printed once and lost,
+        // and the word falls back to a global default that was never measured for it.
+        WakeWordConfigStore store = new(modelRoot);
+        store.Load();
+        store.Set(result.Name, new WakeWordConfig
+        {
+            Threshold = result.SuggestedThreshold,
+            Route = settings.Route,
+        });
+
         AnsiConsole.MarkupLine($"[green]Trained[/] '{result.Name.EscapeMarkup()}' → {result.HeadPath.EscapeMarkup()}");
+        AnsiConsole.MarkupLine($"  settings written to {store.Path.EscapeMarkup()}");
         AnsiConsole.MarkupLine($"  windows: {result.PositiveWindows} positive / {result.NegativeWindows} negative");
         AnsiConsole.MarkupLine($"  held-out recall [bold]{result.Recall:P1}[/] at threshold [bold]{result.SuggestedThreshold:F2}[/]");
         AnsiConsole.MarkupLine($"  false accepts [bold]{result.FalseAcceptRate:P2}[/] per window = [bold]{result.FalseAcceptsPerHour:F0}[/] per hour");
