@@ -11,12 +11,13 @@ namespace HartsyInference.Video.Tests;
 /// transposed repack and a re-noise with the blend the wrong way round all produce a plausible video.</summary>
 public sealed unsafe class LtxVideo2TwoStageTests
 {
-    /// <summary>The template's stage-2 ManualSigmas node. It is NOT a tail of the distilled 8-step schedule — that
-    /// one's corresponding entry is 0.909375, and using it would start the refine 6% further from the data.</summary>
+    /// <summary>The template's stage-2 ManualSigmas node, verbatim — including its literal 0.4219 (not 0.421875).
+    /// It is NOT a tail of the distilled 8-step schedule — that one's corresponding entry is 0.909375, and using
+    /// it would start the refine 6% further from the data.</summary>
     [Fact]
     public void RefineSigmasMatchTheShippedTemplate()
     {
-        float[] expected = [0.85f, 0.725f, 0.421875f, 0.0f];
+        float[] expected = [0.85f, 0.725f, 0.4219f, 0.0f];
         Assert.Equal<IEnumerable<float>>(expected, LtxVideo2Config.Ltx25TwoStageRefineSigmas);
         Assert.NotEqual(LtxVideo2Config.Ltx25DistilledSigmas[5], LtxVideo2Config.Ltx25TwoStageRefineSigmas[0]);
     }

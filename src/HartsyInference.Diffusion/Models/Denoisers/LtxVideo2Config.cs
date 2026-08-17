@@ -145,11 +145,13 @@ public sealed record LtxVideo2Config
         [1.0f, 0.99375f, 0.9875f, 0.98125f, 0.975f, 0.909375f, 0.725f, 0.421875f, 0.0f];
 
     /// <summary>Stage-2 refine schedule for the two-stage (latent-upsample + refine) pipeline: 3 steps at the
-    /// doubled grid, from the shipped <c>video_ltx2_5_t2v</c> template's own ManualSigmas node — which starts at
-    /// 0.85 rather than <see cref="Ltx25DistilledSigmas"/>'s 0.909375, so this is not a tail of that array. A fresh
-    /// array per call — a shared instance would let one in-place edit anywhere corrupt every config built
-    /// afterwards.</summary>
-    public static float[] Ltx25TwoStageRefineSigmas => [0.85f, 0.725f, 0.421875f, 0.0f];
+    /// doubled grid, the shipped <c>video_ltx2_5_t2v</c> template's own ManualSigmas literal <c>0.85, 0.7250,
+    /// 0.4219, 0.0</c> — verbatim, including 0.4219 (NOT 0.421875: ManualSigmas parses the text as written). It
+    /// starts at 0.85 rather than <see cref="Ltx25DistilledSigmas"/>'s 0.909375, so it is not a tail of that
+    /// array, and 0.909375 is the LTX-2.0-lineage refine head (<c>ltx-pipelines</c>' STAGE_2_DISTILLED_SIGMA).
+    /// A fresh array per call — a shared instance would let one in-place edit anywhere corrupt every config
+    /// built afterwards.</summary>
+    public static float[] Ltx25TwoStageRefineSigmas => [0.85f, 0.725f, 0.4219f, 0.0f];
 
     public static LtxVideo2Config V23 => new();
 

@@ -226,6 +226,15 @@ STAGE_2_DISTILLED_SIGMA = [0.909375, 0.725, 0.421875, 0.0]                      
 TDP_DISTILLED_SIGMAS    = [0.625, 0.4, 0.0]                                                          # multi-GPU tiled runner
 ```
 
+> **The shipped ComfyUI 2.5 templates do NOT use that stage-2 array.** All three `video_ltx2_5_*` templates'
+> refine-pass ManualSigmas literal is `0.85, 0.7250, 0.4219, 0.0` (verbatim — 0.4219, not 0.421875; ManualSigmas
+> parses the text as written). The 0.909375 head above is the LTX-2.0-lineage refine, still visible in
+> `video_ltx2_t2v_distilled.json`. Two more template facts the constants file does not record: the refine pass's
+> noise seed is hardcoded `42, fixed` (only the base pass gets the user seed), and both passes select
+> `euler_ancestral` with the RF defaults eta 1.0 / s_noise 1.0 (flf2v is the exception: single pass, eta 0).
+> The engine implements the 2.5 template values, keeps derived per-generation seeds, and defaults plain Euler
+> (measured: better audio — see `fca94ed2`).
+
 Distilled runs at CFG 1 (no guidance). The **dev** checkpoint uses `PipelineParams`: 30 steps (2.3 lineage),
 video CFG 3.0 / audio CFG 7.0, `rescale_scale 0.7`, `modality_scale 3.0`, STG on block 28 (2.3+) or 29 (2.0),
 `skip_step 0`.
