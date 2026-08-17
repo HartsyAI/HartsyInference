@@ -53,8 +53,10 @@ public sealed class WyomingFrameCodec(Stream stream, int maxPayloadBytes = 1 << 
         using (JsonDocument header = ParseHeader(headerBytes))
         {
             (type, dataLength, payloadLength) = ReadHeaderFields(header);
-            if (dataLength < 0 || dataLength > MaxHeaderBytes)
-                throw new HartsyInferenceException($"Wyoming frame declares a {dataLength}-byte data block; the limit is {MaxHeaderBytes}.");
+            // Bounded by the payload limit, not by the 8 KB header line: the block is read into its own array,
+            // and a `synthesize` carrying a long assistant reply routinely exceeds a header's worth of text.
+            if (dataLength < 0 || dataLength > maxPayloadBytes)
+                throw new HartsyInferenceException($"Wyoming frame declares a {dataLength}-byte data block; the limit is {maxPayloadBytes}.");
             if (payloadLength < 0 || payloadLength > maxPayloadBytes)
                 throw new HartsyInferenceException($"Wyoming frame declares a {payloadLength}-byte payload; the limit is {maxPayloadBytes}.");
 
@@ -154,7 +156,12 @@ public sealed class WyomingFrameCodec(Stream stream, int maxPayloadBytes = 1 << 
     {
         bool hasInline = inline.ValueKind == JsonValueKind.Object;
         bool hasBlock = block is not null && block.RootElement.ValueKind == JsonValueKind.Object;
-        if (!hasInline) return hasBlock ? block : null;
+        if (!hasInline)
+        {
+            if (hasBlock) return block;
+            block?.Dispose();
+            return null;
+        }
         if (!hasBlock)
         {
             block?.Dispose();
