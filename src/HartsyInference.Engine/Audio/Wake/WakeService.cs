@@ -111,6 +111,20 @@ public sealed class WakeService : IDisposable
 
     private async Task OnDetectionAsync(WakeSession session, WakeDetection detection)
     {
+        WakeWordConfig? config = _models?.ConfigFor(detection.Word);
+
+        // Tell the device the word fired BEFORE doing anything slow. Transcription has to wait for the command
+        // that follows the wake word and may load a model first, so folding it into one event left a satellite
+        // silent for seconds after the user spoke — long enough to look broken. The device acknowledges now
+        // (light, chime) and acts on the transcript when it arrives.
+        await NotifyDeviceAsync(session, "detection", new WakeEvent
+        {
+            DeviceId = session.DeviceId,
+            Word = detection.Word,
+            Score = detection.Score,
+            Route = config?.Route,
+        }).ConfigureAwait(false);
+
         string? transcript = null;
         if (_options.TranscribeOnDetection)
         {
@@ -128,11 +142,19 @@ public sealed class WakeService : IDisposable
             }
         }
 
-        WakeWordConfig? config = _models?.ConfigFor(detection.Word);
+        // Speaker identification runs here rather than before transcription because it scores the wake word
+        // together with the command that follows it, and that audio has only just arrived.
         string? speaker = IdentifySpeaker(session, config, out bool speakerAllowed);
         if (!speakerAllowed)
         {
             Logs.Info($"[Audio][Wake] '{detection.Word}' on '{session.DeviceId}' ignored: requires speaker '{config?.RequiredSpeaker}', heard '{speaker ?? "unknown"}'.");
+            await NotifyDeviceAsync(session, "detection-rejected", new WakeEvent
+            {
+                DeviceId = session.DeviceId,
+                Word = detection.Word,
+                Score = detection.Score,
+                Speaker = speaker,
+            }).ConfigureAwait(false);
             return;
         }
 
@@ -146,12 +168,15 @@ public sealed class WakeService : IDisposable
             Speaker = speaker,
         };
 
-        await NotifyDeviceAsync(session, evt).ConfigureAwait(false);
+        // The completed event: the device gets the transcript it was waiting for, and in-process subscribers
+        // plus webhooks see one event carrying everything.
+        await NotifyDeviceAsync(session, "transcript", evt).ConfigureAwait(false);
         await PostWebhooksAsync(evt).ConfigureAwait(false);
         try { Detected?.Invoke(evt); }
         catch (Exception ex) { Logs.Error("[Audio][Wake] A detection subscriber threw.", ex); }
     }
 
+    /// <summary>Captures the utterance around a detection and transcribes it.</summary>
     private async Task<string?> TranscribeUtteranceAsync(WakeSession session)
     {
         // Wait for the command that follows the wake word before transcribing; the detection fires as the
@@ -250,7 +275,7 @@ public sealed class WakeService : IDisposable
         }
     }
 
-    private static async Task NotifyDeviceAsync(WakeSession session, WakeEvent evt)
+    private static async Task NotifyDeviceAsync(WakeSession session, string type, WakeEvent evt)
     {
         WakeFrameCodec? codec = session.Codec;
         if (codec is null) return;
@@ -261,12 +286,12 @@ public sealed class WakeService : IDisposable
                 (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
                 (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
                 (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") + "}";
-            await codec.WriteAsync("detection", data, CancellationToken.None).ConfigureAwait(false);
+            await codec.WriteAsync(type, data, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             // The device may have dropped between detecting and reporting; its reconnect will re-register.
-            Logs.Verbose($"[Audio][Wake] Could not deliver detection to '{session.DeviceId}': {ex.Message}");
+            Logs.Verbose($"[Audio][Wake] Could not deliver '{type}' to '{session.DeviceId}': {ex.Message}");
         }
     }
 

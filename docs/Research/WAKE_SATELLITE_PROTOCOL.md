@@ -97,15 +97,29 @@ Confirms registration and lists the wake words active for this device.
 Sent every 10 s while idle. **Answer it.** A device that lost its access point leaves a socket that still looks
 writable to the sender indefinitely; missing pongs are what actually surfaces the loss.
 
-### `detection`
+### `detection` — sent immediately when the word fires
 ```json
-{"type":"detection","data":{"name":"alexa","score":0.9812,"route":"home-agent",
-                            "transcript":"turn on the kitchen light","speaker":"kaleb"}}
+{"type":"detection","data":{"name":"hey_hartsy","score":0.9812,"route":"home-agent"}}
 ```
-`name` is the wake word; `score` is the smoothed probability. `route` is an opaque tag from server-side
-configuration — the engine never interprets it, so one server can feed several agents. `transcript` is present
-when transcription is enabled, and arrives a few seconds after the word fires because the command that follows
-it has to be captured first. `speaker` appears once speaker identification is enabled.
+Arrives within ~100 ms of the word finishing, **before** any transcription. Use it for instant feedback: light
+the LED, play the chime. It deliberately carries no transcript — waiting for one would leave the device silent
+for seconds after the user spoke, which reads as broken.
+
+### `transcript` — sent when the command has been captured and transcribed
+```json
+{"type":"transcript","data":{"name":"hey_hartsy","score":0.9812,"route":"home-agent",
+                             "transcript":"turn on the kitchen light","speaker":"kaleb"}}
+```
+Arrives a few seconds after `detection`. This is the one to act on. `route` is an opaque tag from server-side
+configuration — the engine never interprets it, so one server can feed several agents. `speaker` appears when
+speaker identification is enabled. If transcription is disabled server-side, this event still arrives, with a
+null transcript, so a device can always treat it as "the utterance is over".
+
+### `detection-rejected`
+```json
+{"type":"detection-rejected","data":{"name":"hey_hartsy","score":0.98,"speaker":"guest"}}
+```
+The word fired but was restricted to a different enrolled speaker. Cancel whatever `detection` started.
 
 ### `error`
 ```json
