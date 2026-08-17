@@ -226,8 +226,12 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         List<int> ids = new(symbols.Count);
         foreach (string symbol in symbols)
         {
-            if (_tokenToId.TryGetValue(symbol, out int id)) ids.Add(id);
-            else if (_unkId >= 0) ids.Add(_unkId);
+            if (_tokenToId.TryGetValue(symbol, out int id)) { ids.Add(id); continue; }
+            if (_unkId >= 0) { ids.Add(_unkId); continue; }
+            // Byte fallback guarantees every base symbol is encodable, so an unknown MERGED symbol means the
+            // merge table references a piece the vocab lacks — a corrupt tokenizer, not a user-input problem.
+            throw new InvalidOperationException(
+                $"BPE merge produced '{symbol}', which is not in the vocab and there is no <unk> id — corrupt tokenizer.json.");
         }
         return [.. ids];
     }
@@ -277,8 +281,8 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
     private void TryEnqueue(PriorityQueue<(int, int, string), long> queue, string[] text, int left, int right)
     {
         if (!_mergeRanks.TryGetValue((text[left], text[right]), out int rank)) return;
-        // Ties on rank are impossible (ranks are unique), so the left index only breaks ordering between
-        // distinct ranks that never actually collide; it keeps the pop order deterministic regardless.
+        // The same pair occurring at multiple positions shares one rank, so ties are real; the left index
+        // in the low bits makes equal-rank merges apply leftmost-first, matching SentencePiece.
         queue.Enqueue((left, right, text[left] + text[right]), ((long)rank << 32) | (uint)left);
     }
 

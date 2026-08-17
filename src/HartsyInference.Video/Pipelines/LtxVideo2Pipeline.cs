@@ -28,8 +28,6 @@ namespace HartsyInference.Video.Pipelines;
 /// which are the defaults).</para></summary>
 public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 {
-    private const int GemmaCaptionChannels = 3840;
-    private const int GemmaLayers = 49;             // 48 transformer layers + 1 embedding
     private const int ConnectorRegisters = 128;     // text seq is padded to a multiple of this
 
     /// <summary>Shortest conditioning sequence to pad to, whatever the prompt length; 0 uses only the register
@@ -772,25 +770,29 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float[] validMask = new float[seq];
         for (int i = 0; i < real; i++) validMask[i] = 1f;
 
-        int[] layerIndices = new int[GemmaLayers];
-        for (int i = 0; i < GemmaLayers; i++) layerIndices[i] = i;       // 0=embeddings, 1..48=post-layer
+        // States and width come from the tower and DiT config so a variant mismatch fails loudly in the
+        // connector shapes instead of silently mis-relayouting here.
+        int states = _gemma.NumLayers + 1;              // 0=embeddings, 1..NumLayers=post-layer
+        int captionChannels = _config.CaptionChannels;
+        int[] layerIndices = new int[states];
+        for (int i = 0; i < states; i++) layerIndices[i] = i;
         Stopwatch sub = Stopwatch.StartNew();
-        Tensor multi = _gemma.EncodeMultiLayer(TextEncoderBackend, [padded], layerIndices);  // [1, seq, 49·3840] layer-outer
+        Tensor multi = _gemma.EncodeMultiLayer(TextEncoderBackend, [padded], layerIndices);  // [1, seq, states·channels] layer-outer
         Logs.Info($"[ltx2-phase]   gemma encode ({seq} tok): {sub.ElapsedMilliseconds} ms");
         sub.Restart();
 
-        // Relayout to channel-outer (feature = channel·49 + layer), which the connector consumes.
-        Tensor feats = new Tensor(new TensorShape(seq, GemmaLayers * GemmaCaptionChannels), DType.F32);
+        // Relayout to channel-outer (feature = channel·states + layer), which the connector consumes.
+        Tensor feats = new Tensor(new TensorShape(seq, states * captionChannels), DType.F32);
         float* sp = (float*)multi.DataPointer;
         float* dp = (float*)feats.DataPointer;
-        long stride = (long)GemmaLayers * GemmaCaptionChannels;
+        long stride = (long)states * captionChannels;
         for (int t = 0; t < seq; t++)
         {
-            float* srcRow = sp + (long)t * stride;     // [layer·3840 + channel]
-            float* dstRow = dp + (long)t * stride;     // [channel·49 + layer]
-            for (int l = 0; l < GemmaLayers; l++)
-                for (int c = 0; c < GemmaCaptionChannels; c++)
-                    dstRow[(long)c * GemmaLayers + l] = srcRow[(long)l * GemmaCaptionChannels + c];
+            float* srcRow = sp + (long)t * stride;     // [layer·channels + channel]
+            float* dstRow = dp + (long)t * stride;     // [channel·states + layer]
+            for (int l = 0; l < states; l++)
+                for (int c = 0; c < captionChannels; c++)
+                    dstRow[(long)c * states + l] = srcRow[(long)l * captionChannels + c];
         }
         multi.Dispose();
         Logs.Info($"[ltx2-phase]   gemma relayout (host): {sub.ElapsedMilliseconds} ms");

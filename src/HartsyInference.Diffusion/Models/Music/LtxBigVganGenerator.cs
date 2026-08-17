@@ -349,12 +349,13 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         /// <c>[C]</c> tensor the <see cref="IBackend.Snake"/> kernel can consume directly.</summary>
         private static Tensor ExpLoad(Tensor src)
         {
-            Tensor f = src.DType == DType.F32 ? src : src.CastTo(DType.F32);
+            Tensor f = AudioWeightNorm.AsF32(src, out bool owned);
             int n = (int)f.ElementCount;
             Tensor o = new(new TensorShape(n), DType.F32);
             float* sp = (float*)f.DataPointer;
             float* op = (float*)o.DataPointer;
             for (int i = 0; i < n; i++) op[i] = MathF.Exp(sp[i]);
+            if (owned) f.Dispose();
             return o;
         }
     }

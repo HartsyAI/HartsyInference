@@ -37,6 +37,7 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
 
     private Tensor? _forwardBasis;   // [NumFreqs*2, 1, FilterLength]
     private Tensor? _melBasis;       // [NumMelChannels, NumFreqs]
+    private bool _melBasisOwned;     // true when _melBasis is a cast copy this class must dispose
 
     /// <summary>Output waveform sample rate, known after <see cref="LoadWeights"/> (48 kHz BWE / 24 kHz single).</summary>
     public int SampleRate { get; private set; }
@@ -64,7 +65,7 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
             _main.LoadWeights(w, "vocoder.vocoder");
             _bwe.LoadWeights(w, "vocoder.bwe_generator");
             _forwardBasis = w["vocoder.mel_stft.stft_fn.forward_basis"];
-            _melBasis = AsF32(w["vocoder.mel_stft.mel_basis"]);
+            _melBasis = AudioWeightNorm.AsF32(w["vocoder.mel_stft.mel_basis"], out _melBasisOwned);
             SampleRate = OutputSamplingRate;
             return;
         }
@@ -211,14 +212,17 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         return o;
     }
 
-    private static Tensor AsF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-
     public void Dispose()
     {
         _main?.Dispose();
         _bwe?.Dispose();
         _single?.Dispose();
         _resampler?.Dispose();
+        if (_melBasisOwned)
+        {
+            _melBasis?.Dispose();
+            _melBasis = null;
+        }
     }
 
     /// <summary>Hann-windowed sinc resampler (the reference's <c>UpSample1d(window_type="hann")</c>): replicate-pad,
