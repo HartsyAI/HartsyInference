@@ -522,10 +522,15 @@ The dev and distilled 2.5 transformers are **indistinguishable from the checkpoi
 `model_version` (`2.5.0`), zero differences across the whole `config.transformer` object, and the same 4349
 tensor keys. Nothing in the file says which schedule the weights were distilled onto.
 
-So the sampling contract cannot be detected — it must arrive as user intent. The engine exposes two catalog
-ids, `ltx-2.5` (dev: 50 steps, guidance 3.0) and `ltx-2.5-distilled` (8 steps, guidance 1.0, the fixed sigma
-list), each backed by its own `LtxVideo2Recipe` instance. A filename containing `distilled` may be logged as a
-hint but must never silently switch the schedule, because repacks rename freely.
+So the sampling contract cannot be detected from the tensors — it arrives as user intent, or as the filename.
+The engine exposes two catalog ids, `ltx-2.5` (dev) and `ltx-2.5-distilled` (8 steps, guidance 1.0, fixed
+sigmas, two-stage), each backed by its own `LtxVideo2Recipe` instance — AND
+`LtxVideo2DistilledRouting.RemapFamilyId` routes a dev-family id whose checkpoint filename (or staged
+directory contents) says `distilled` to the distilled contract, with a log line naming the switch. This
+REVERSES the earlier "never silently switch on filename" rule (2026-08-17, by decision): SwarmUI can only
+send the dev family id, so without the remap the distilled contract is unreachable from it, and the remap is
+the same approach SwarmUI itself ships for Hunyuan 1.5 distilled. It is not silent — the log records it —
+and a renamed repack degrades to the dev contract, exactly what it got before the remap existed.
 
 ## Verification status of the DiT-flag work
 

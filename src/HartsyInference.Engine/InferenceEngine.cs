@@ -310,7 +310,12 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The officially recommended video defaults for <paramref name="spec"/>, resolved through the same
     /// family-id + registry lookup <see cref="GetOrConstructVideoRecipe"/> uses.</summary>
     internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
-        => VideoRecipeRegistry.Resolve(ResolveFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
+        => VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
+
+    /// <summary>Video-path family id: <see cref="ResolveFamilyId"/> plus checkpoint-aware remaps (currently only
+    /// LTX-2.5 distilled-by-filename). Video-only — image recipes carry no per-checkpoint contracts by name.</summary>
+    internal static string ResolveVideoFamilyId(ModelSpec spec)
+        => Recipes.Video.LtxVideo2DistilledRouting.RemapFamilyId(ResolveFamilyId(spec), spec.LocalPath);
 
     /// <summary>The conditioning the video recipe for <paramref name="spec"/> declares it can apply. Resolved through
     /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.
@@ -318,7 +323,7 @@ public sealed class InferenceEngine : IInferenceEngine
     /// header sniff, exactly like the construction-time delegation.</summary>
     internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
     {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveFamilyId(spec));
+        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
         return recipe switch
         {
             null => VideoFeatures.None,
@@ -360,7 +365,7 @@ public sealed class InferenceEngine : IInferenceEngine
         // Same switch-pressure eviction as the image path — video DiTs are the largest residents of all.
         EvictOtherCheckpointPipelines(spec.LocalPath);
 
-        string familyId = ResolveFamilyId(spec);
+        string familyId = ResolveVideoFamilyId(spec);
         IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
             ?? throw new NotSupportedException(
                 $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +

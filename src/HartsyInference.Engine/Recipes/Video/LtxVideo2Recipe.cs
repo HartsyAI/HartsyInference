@@ -57,17 +57,12 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <inheritdoc/>
-    public string Name => _distilled ? "ltx-2.5-distilled" : "ltx-video-2";
+    public string Name => _distilled ? LtxVideo2DistilledRouting.DistilledFamilyId : "ltx-video-2";
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled
-        ? string.Equals(familyId, "ltx-2.5-distilled", StringComparison.OrdinalIgnoreCase)
-        : string.Equals(familyId, "ltx-video-2", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(familyId, "ltx-video2", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(familyId, "lightricks-ltx-video-2", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(familyId, "ltx-2", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(familyId, "ltx-2.3", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(familyId, "ltx-2.5", StringComparison.OrdinalIgnoreCase);
+        ? string.Equals(familyId, LtxVideo2DistilledRouting.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
+        : LtxVideo2DistilledRouting.IsDevFamilyId(familyId);
 
     /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0, 512x320, 25 frames @ 24fps —
     /// the geometry <c>LtxVideo2GenerationTests</c> verified coherent, 22B being too heavy to sample at full 704x480
@@ -120,15 +115,12 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
             if (_distilled)
             {
-                config = config with
-                {
-                    FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
-                    NumInferenceSteps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
-                    GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
-                    TwoStage = LtxVideo2Config.V25Distilled.TwoStage,
-                };
-                Logs.Info("[LtxVideo2Recipe] Distilled variant selected — 8-step baked schedule, guidance 1, "
-                    + "two-stage default-on (HARTSY_LTX2_TWO_STAGE=0 for single-pass).");
+                config = ApplyDistilledContract(config);
+                Logs.Info(config.TwoStage
+                    ? "[LtxVideo2Recipe] Distilled variant selected — 8-step baked schedule, guidance 1, "
+                        + "two-stage default-on (HARTSY_LTX2_TWO_STAGE=0 for single-pass)."
+                    : "[LtxVideo2Recipe] Distilled variant selected on a pre-2.5 checkpoint — 8-step baked schedule, "
+                        + "guidance 1, single-pass (the x2 latent upsampler is a 2.5 model; no two-stage here).");
             }
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
             transformer.LoadWeights(conv.Transformer);
@@ -289,6 +281,18 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             throw;
         }
     }
+
+    /// <summary>The distilled sampling contract over a DETECTED architecture config. The 8-step base schedule is
+    /// shared by every 2.x distilled template, but two-stage stays 2.5-only: distilled builds exist for older
+    /// generations too (2.0's templates ship a 0.909375-head refine; a 2.3 distilled LoRA is documented), and the
+    /// x2 upsampler is a 2.5 model — running it on 2.3 latents is unverified numerics.</summary>
+    internal static LtxVideo2Config ApplyDistilledContract(LtxVideo2Config detected) => detected with
+    {
+        FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
+        NumInferenceSteps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
+        GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
+        TwoStage = detected.UseKeyframesAbsPosEmbedding && LtxVideo2Config.V25Distilled.TwoStage,
+    };
 
     /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow
     /// is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries
