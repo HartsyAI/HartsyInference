@@ -205,6 +205,25 @@ needs a cross-model throughput A/B before any default changes. Late, or its own 
 - Model load is ~10 s of wall time (parallel shard mmap, defer the head slice). UX, not generation time.
 - One long-duration run per major phase to catch scaling regressions — the KV cache reaches ~2.6 GB at 9000 frames.
 
+## OPEN BUG — dual-stream device attention is wrong on high-SM cards
+
+`GraphDecodeDualEmbedsTests` **passes on the 3060 and fails on the 4090**, diverging 1.05e-3 against a 1e-6 bar
+on the very first eager dual step — before any graph capture, so this is `FlashAttentionDev` arithmetic, not
+capture. Reproduced with `af2900fd`'s changes reverted, so it predates them; the test was written against the
+3060 and the card difference hid it.
+
+Prime suspect is split-K selection, which keys off SM count: eligibility is `baseBlocks < 2*SM` and the split
+count is clamped against SM count, so a 128-SM card picks many more splits than a 28-SM one for the same tiny
+cache, leaving far more empty chunks for the combine to merge. Note the split kernel's own header says split-K
+is gated to `b==1` because "the split/combine kernels have a latent batch>1 bug".
+
+**This blocks `HARTSY_MM3_LM_GRAPH`**, which routes through that path — its parity gate passes, but a path that
+is wrong on the bigger card must not become a default. Fix the divergence first, then flip.
+
+Reproduce: `CUDA_VISIBLE_DEVICES=0 dotnet test tests/HartsyInference.Cuda.Tests --filter GraphDecodeDualEmbeds`
+(fails) versus `CUDA_VISIBLE_DEVICES=1` (passes). **Run CUDA tests on both cards from now on** — a suite that is
+green on one GPU says nothing about the other, which is how this survived.
+
 ## Parked behind a 4090 window
 
 Two shipped-but-disabled features. Both are switched off only because the gate that would clear them cannot run
