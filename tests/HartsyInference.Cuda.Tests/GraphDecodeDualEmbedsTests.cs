@@ -61,6 +61,13 @@ public sealed unsafe class GraphDecodeDualEmbedsTests
         IBackend b = backend;
         using GenericTransformer model = new(cfg);
         model.LoadWeights(w, "model");
+        // The dual step batches its projections into one 2-row GEMM while the eager streams do two 1-row ones.
+        // Under the default TF32 compute type those are not the same arithmetic: cuBLAS picks tensor cores per
+        // shape and per architecture, and a 10-bit mantissa costs ~1e-4 relative — which is 1e-3 by the end of
+        // two layers. This test is about the dual path's plumbing, not cuBLAS's heuristics, so pin full precision
+        // and let BatchedGemmPrecisionProbe own the precision question. Without this the test passed on a 3060
+        // (where cuBLAS declines tensor cores at 32 wide) and failed on a 4090, which is luck, not coverage.
+        backend.HighPrecisionGemm = true;
         Assert.True(model.SupportsDualGraphDecode(b), "small dense backbone must be dual-graph-decode eligible");
 
         const int prefill = 5, steps = 6, maxLen = 64;

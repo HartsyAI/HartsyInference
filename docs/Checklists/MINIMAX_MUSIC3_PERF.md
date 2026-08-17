@@ -244,24 +244,34 @@ windows, vocoder 28.3 s — about 38 minutes of compute for 6 minutes of audio, 
 The margin is real but thin: ~680 MiB spare on the 3060 at maximum length. Anything that adds resident VRAM on
 the autoregressive path costs six-minute songs on that card, so re-run this measurement after any such change.
 
-## OPEN BUG — dual-stream device attention is wrong on high-SM cards
+## RESOLVED — the 4090-only dual-stream divergence was TF32, not attention
 
-`GraphDecodeDualEmbedsTests` **passes on the 3060 and fails on the 4090**, diverging 1.05e-3 against a 1e-6 bar
-on the very first eager dual step — before any graph capture, so this is `FlashAttentionDev` arithmetic, not
-capture. Reproduced with `af2900fd`'s changes reverted, so it predates them; the test was written against the
-3060 and the card difference hid it.
+`GraphDecodeDualEmbedsTests` failed on the 4090 and passed on the 3060 by 1.05e-3. Two hypotheses died first:
+SM-count-driven split selection (killed by arithmetic — both cards choose splits=4 at that shape), and split-K
+itself (an `HARTSY_FLASH_SPLIT_OFF` A/B appeared to refute it, but that lever is only read in the *eager*
+`FlashAttention`, never in `FlashAttentionDev`, so both arms were identical and the experiment proved nothing).
 
-Prime suspect is split-K selection, which keys off SM count: eligibility is `baseBlocks < 2*SM` and the split
-count is clamped against SM count, so a 128-SM card picks many more splits than a 28-SM one for the same tiny
-cache, leaving far more empty chunks for the combine to merge. Note the split kernel's own header says split-K
-is gated to `b==1` because "the split/combine kernels have a latent batch>1 bug".
+**The cause is the GEMM compute type.** The dual step batches its projections into one 2-row GEMM; the eager
+streams do two 1-row ones. `Compute32F` returns `CUBLAS_COMPUTE_32F_FAST_TF32` for F32 operands unless
+`HighPrecisionGemm`, and TF32's 10-bit mantissa costs ~1e-4 relative per projection, which reaches 1e-3 after two
+layers. Measured with a 2-row-vs-two-1-row probe:
 
-**This blocks `HARTSY_MM3_LM_GRAPH`**, which routes through that path — its parity gate passes, but a path that
-is wrong on the bigger card must not become a default. Fix the divergence first, then flip.
+| shape | default | `HighPrecisionGemm` |
+|---|---|---|
+| 32×32 on a 4090 | 1.494e-4 | 1.241e-7 |
+| 32×32 on a 3060 | 1.241e-7 | 1.241e-7 |
+| 4096×4096, both cards | ~2.9e-4 | 6.169e-7 |
 
-Reproduce: `CUDA_VISIBLE_DEVICES=0 dotnet test tests/HartsyInference.Cuda.Tests --filter GraphDecodeDualEmbeds`
-(fails) versus `CUDA_VISIBLE_DEVICES=1` (passes). **Run CUDA tests on both cards from now on** — a suite that is
-green on one GPU says nothing about the other, which is how this survived.
+So batched and single-row projections **do not agree bit-for-bit at default precision on any card** — the 3060
+merely looked exact at 32 wide because cuBLAS declines tensor cores at that size. That is a heuristic, not a
+guarantee, and a driver update could flip it.
+
+**Fix:** the dual-graph test pins `HighPrecisionGemm` so it tests the dual path's plumbing rather than cuBLAS's
+shape heuristics, and `BatchedGemmPrecisionProbe` now owns the precision question explicitly on both cards.
+Production precision is unchanged — TF32 is a deliberate throughput choice, and the real-weight AR parity gate
+passes identically with graph decode on and off (corr 0.99999913, meanAbs 8.203e-4 vs 8.204e-4).
+
+**Nothing in production was wrong.** The bug was a test asserting an equality the engine never promised.
 
 ## Parked behind a 4090 window
 
