@@ -233,11 +233,16 @@ The right shape, if a bounded footprint is ever needed, is `PagedKvCache` — fi
 gathered into a contiguous scratch per call so `FlashAttention`'s contract is untouched. Uniform sizes are exactly
 what a keep-everything pool rewards. It would need an F16 variant and pays a per-call gather.
 
-**But measure before building it.** With the decode leak fixed (`19e68209`) and F16 preserved on the graph path
-(`af2900fd`), six minutes of song is ~9000 frames at 288 KB/frame across the guided pair = **~2.6 GB of KV**
-against ~5.7 GB of `:q4` weights. That plausibly fits a 12 GB card outright, in which case preallocation is
-simply correct and paged F16 buys nothing. Generate the longest song each card can manage and write the numbers
-here first.
+**MEASURED 2026-08-17 — paged F16 is NOT needed, and this item is closed.** A 3060 generated the model's hard
+maximum, **9000 frames / 360.5 s / 6.01 min**, at `:q4` with the full cap preallocated. Peak VRAM **11,608 MiB of
+12,288** (94.5%). So the smaller card reaches the longest song the model can produce, and preallocation is simply
+correct — there is nothing for a bounded-footprint cache to buy. Do not build paged F16 for this reason.
+
+Stage split for that run: autoregressive 1016.0 s (LM 773.9, depth 214.0, sampling 16.1), flow 1273.2 s over 89
+windows, vocoder 28.3 s — about 38 minutes of compute for 6 minutes of audio, 112.9 ms/frame.
+
+The margin is real but thin: ~680 MiB spare on the 3060 at maximum length. Anything that adds resident VRAM on
+the autoregressive path costs six-minute songs on that card, so re-run this measurement after any such change.
 
 ## OPEN BUG — dual-stream device attention is wrong on high-SM cards
 
