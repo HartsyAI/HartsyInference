@@ -205,6 +205,42 @@ needs a cross-model throughput A/B before any default changes. Late, or its own 
 - Model load is ~10 s of wall time (parallel shard mmap, defer the head slice). UX, not generation time.
 - One long-duration run per major phase to catch scaling regressions — the KV cache reaches ~2.6 GB at 9000 frames.
 
+## Mempool retention — what it is, and why it is probably NOT worth a project
+
+Recorded 2026-08-17 because KV grow-on-demand tripped over it and the next person will wonder the same thing.
+
+**The engine deliberately runs its device mempool at a keep-everything release threshold** (`HARTSY_MEMPOOL_KEEP`,
+default on, applied by `DeviceMempoolPolicy`). A zero threshold hands every freed activation back to the driver
+and re-acquires it on the next allocation; that was measured at **~13 s of pure alloc/free round-trips on a
+single Krea2 1024² image**. So retention is a real optimisation, not an oversight.
+
+Two consequences worth internalising:
+
+1. **"Used VRAM" is the pool's high-water mark, not live data.** A freed buffer stays in the pool. This is not a
+   leak — the OOM ladder (`SyncStreamsAndReleasePool`) and `cuMemPoolTrimTo` both reclaim on demand — but it means
+   nvidia-smi overstates what is actually in use.
+2. **It punishes allocation patterns with many distinct sizes.** Uniform sizes are reused perfectly; a
+   grow-and-copy pattern makes 36 layers × N chunk crossings worth of odd sizes and the pool keeps them all. That
+   is exactly why growth measured worse (see `5f231b71`).
+
+### Do we need a bigger fix? Probably not, and here is the reasoning
+The proper shape for growth already exists: `PagedKvCache` allocates **fixed-size pages** from a shared
+`PagedKvPool` and is "physically paged, logically contiguous" — it gathers pages into a contiguous scratch tensor
+per call, so `FlashAttention`'s existing contract is untouched. Uniform page sizes turn pool retention from a cost
+into a benefit. `DynamicBatchScheduler` already uses it. It would need an F16 variant, and it pays a per-call
+gather that a 36-layer, thousands-of-frames decode would feel.
+
+**But the premise may be dead.** Growth existed to avoid preallocating a whole duration cap. With the batched
+decode leak fixed (`19e68209`) and F16 storage now preserved on the graph path (`af2900fd`), a full six-minute
+song is ~9000 frames at 288 KB/frame across the guided pair = **~2.6 GB of KV**, against ~5.7 GB of `:q4` weights.
+That plausibly fits a 12 GB card outright, in which case preallocation is simply fine and the entire
+paged-F16 project buys nothing.
+
+**So: measure the real per-card ceiling before building anything.** Generate the longest song each card can
+manage, post-fix, and write the numbers here. Only if the 3060 cannot reach six minutes does paged F16 become
+worth its cost — and even then, compare it against the cheaper option of sizing the cache to what the card can
+afford rather than to whatever cap the user typed.
+
 ## OPEN BUG — dual-stream device attention is wrong on high-SM cards
 
 `GraphDecodeDualEmbedsTests` **passes on the 3060 and fails on the 4090**, diverging 1.05e-3 against a 1e-6 bar
