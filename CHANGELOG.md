@@ -8,6 +8,17 @@ stable release will require. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **LTX-2.5 defaults are template-faithful.** Distilled checkpoints now run the shipped ComfyUI workflow by
+  default: 8-step fixed-sigma base pass at the half grid, learned x2 latent upsample (auto-downloaded side
+  model), 3-step refine (`HARTSY_LTX2_TWO_STAGE=0` restores single-pass). A `distilled`-named checkpoint
+  selected under the plain `ltx-2.5`/`ltx-2` id auto-routes to that contract with a log line, which also
+  makes it reachable from SwarmUI. Default geometry for both LTX-2.5 families is now 1280x736 (two-stage
+  decodes 1280x704), 121 frames @ 24 fps — the template's 5-second clip — and the dev family's default
+  sampling moved from the never-measured 50 steps / cfg 3.0 to the measured parity profile 20 steps /
+  cfg 4.0. Default generations are minutes, not seconds; pass explicit `--width/--height/--frames/--steps`
+  for quick turnarounds. The 2.3-lineage ids share the dev defaults.
+
 ### Removed
 - **`VideoRequest.VideoExtendModel`** — never consumed by any recipe on either side of the contract since the
   DTO's introduction (video extension was explicitly out of scope in the extension's own plan). Breaking

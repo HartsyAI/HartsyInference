@@ -44,13 +44,16 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         _distilled = distilled;
         if (distilled)
         {
+            // The shipped template geometry: 1280x736 nominal (the two-stage half-grid snap decodes it at
+            // 1280x704), 121 frames = 5 s at 24 fps. Same defaults as dev below — the families differ only in
+            // the sampling contract.
             Defaults = new VideoDefaults
             {
                 Steps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
                 CfgScale = LtxVideo2Config.V25Distilled.GuidanceScale,
-                Width = 512,
-                Height = 320,
-                Frames = 25,
+                Width = 1280,
+                Height = 736,
+                Frames = 121,
                 Fps = 24,
             };
         }
@@ -64,11 +67,11 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         ? string.Equals(familyId, LtxVideo2DistilledRouting.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
         : LtxVideo2DistilledRouting.IsDevFamilyId(familyId);
 
-    /// <summary>LTX-Video 2's official sampling settings: 50 steps at guidance 3.0, 512x320, 25 frames @ 24fps —
-    /// the geometry <c>LtxVideo2GenerationTests</c> verified coherent, 22B being too heavy to sample at full 704x480
-    /// in a reasonable CLI turnaround (<c>LtxVideo2Config.NumInferenceSteps</c>/<c>GuidanceScale</c>). The distilled
-    /// 2.5 variant instead runs its baked-in 8-step schedule unguided.</summary>
-    public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
+    /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks
+    /// ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile
+    /// from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The
+    /// distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
+    public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)

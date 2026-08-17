@@ -523,8 +523,9 @@ The dev and distilled 2.5 transformers are **indistinguishable from the checkpoi
 tensor keys. Nothing in the file says which schedule the weights were distilled onto.
 
 So the sampling contract cannot be detected from the tensors — it arrives as user intent, or as the filename.
-The engine exposes two catalog ids, `ltx-2.5` (dev) and `ltx-2.5-distilled` (8 steps, guidance 1.0, fixed
-sigmas, two-stage), each backed by its own `LtxVideo2Recipe` instance — AND
+The engine exposes two catalog ids, `ltx-2.5` (dev: 20 steps, cfg 4.0 — the measured parity profile) and
+`ltx-2.5-distilled` (8 steps, guidance 1.0, fixed sigmas, two-stage), both defaulting to the template
+geometry (1280x736, 121f, 24 fps), each backed by its own `LtxVideo2Recipe` instance — AND
 `LtxVideo2DistilledRouting.RemapFamilyId` routes a dev-family id whose checkpoint filename (or staged
 directory contents) says `distilled` to the distilled contract, with a log line naming the switch. This
 REVERSES the earlier "never silently switch on filename" rule (2026-08-17, by decision): SwarmUI can only

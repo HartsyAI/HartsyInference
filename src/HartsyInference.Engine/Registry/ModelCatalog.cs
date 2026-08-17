@@ -1644,11 +1644,12 @@ public static class ModelCatalog
                 Architecture = "dual-stream DiT + video/audio VAE + Gemma-4-12B", Status = vp, CliDrivable = true,
             },
             // Separate id because the distilled and dev checkpoints are byte-indistinguishable — same model_version,
-            // same architecture config, same tensor keys — so picking this id is the only way to ask for the baked-in
-            // 8-step unguided schedule.
+            // same architecture config, same tensor keys. This id asks for the distilled contract explicitly; a
+            // "distilled"-named checkpoint under the dev id routes here too (LtxVideo2DistilledRouting).
             new CatalogEntry
             {
-                Id = "ltx-2.5-distilled", Modality = vid, DisplayName = "LTX-2.5 (22B distilled, 8-step)",
+                Id = "ltx-2.5-distilled", Modality = vid,
+                DisplayName = "LTX-2.5 (22B distilled: 8-step + x2 upsample + 3-step refine)",
                 Architecture = "dual-stream DiT + video/audio VAE + Gemma-4-12B", Status = vp, CliDrivable = true,
             },
             // Cosmos-Predict1 Video2World — discrete-token autoregressive video continuation (T5-11B cross-attn +
