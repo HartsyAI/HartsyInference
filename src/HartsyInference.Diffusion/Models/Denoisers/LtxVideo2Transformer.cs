@@ -276,23 +276,15 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     /// /<paramref name="encoderAudio"/> are the per-modality text-connector outputs (<c>[Lv, 4096]</c>/<c>[La,
     /// 2048]</c>); <paramref name="timestep"/> is the scheduler timestep (≈0..1000). Returns the (video, audio)
     /// velocities <c>[Sv, outChannels]</c>/<c>[Sa, audioOutChannels]</c>; the inputs are consumed.</summary>
-    public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor videoTokens, Tensor audioTokens,
-        Tensor encoderVideo, Tensor encoderAudio, float timestep,
-        (int Frames, int Height, int Width) grid, int audioFrames, double fps,
-        Tensor? encoderVideoMask, Tensor? encoderAudioMask)
+    /// <summary>The ten per-step timestep-derived tensors every forward variant consumes. One producer
+    /// (<see cref="ComputeTimestepTables"/>) — the eager, CFG-pair, and graph paths used to each carry a copy of
+    /// the 8-modulator block, and a fix to one copy could silently miss the others.</summary>
+    private readonly record struct TimestepTables(
+        Tensor TVideo, Tensor TAudio, Tensor? TPromptV, Tensor? TPromptA,
+        Tensor TCaVss, Tensor TCaAss, Tensor TCaVGate, Tensor TCaAGate, Tensor EmbV, Tensor EmbA);
+
+    private TimestepTables ComputeTimestepTables(IBackend backend, float timestep)
     {
-        int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
-        int v = _config.InnerDim, a = _config.AudioInnerDim;
-
-        // proj_in patchify projections. Same activation-dtype choice as ForwardCfgPair — see the note there.
-        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
-        Tensor hidden = new Tensor(new TensorShape(sv, v), act);
-        backend.Linear(hidden, videoTokens, _projInW!, _projInB);
-        ApplyKeyframesAbsPos(backend, hidden, grid);
-        Tensor audioHidden = new Tensor(new TensorShape(sa, a), act);
-        backend.Linear(audioHidden, audioTokens, _audioProjInW!, _audioProjInB);
-
-        // Global modulation tables + the two embedded-timesteps used by the output layer.
         (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
         (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
         Tensor? tPromptV = null, tPromptA = null;
@@ -308,39 +300,78 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
         (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
         (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
+        return new TimestepTables(tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate, embV, embA);
+    }
 
-        // RoPE tables depend only on (grid, fps, audioFrames) — fixed for a whole generation — so build them once
-        // and reuse across every step/CFG forward.
+    /// <summary>Disposes the 8 modulation tables (the embV/embA pair outlives them — the output layers read it).</summary>
+    private static void DisposeModulationTables(in TimestepTables t)
+    {
+        foreach (Tensor? x in new[] { t.TVideo, t.TAudio, t.TPromptV, t.TPromptA, t.TCaVss, t.TCaAss, t.TCaVGate, t.TCaAGate })
+            x?.Dispose();
+    }
+
+    /// <summary>proj_in patchify projections for one branch. proj_in is where the block stream's activation dtype
+    /// is CHOSEN; every block/attention helper inherits it from its input, and OutputLayer converts back to F32
+    /// for the pipeline's F32-only Euler step. Gated on the backend: the CPU Linear is F32-only.</summary>
+    private (Tensor Hidden, Tensor AudioHidden) ProjIn(IBackend backend, Tensor videoTokens, Tensor audioTokens,
+        (int Frames, int Height, int Width) grid, int sv, int sa, int v, int a)
+    {
+        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
+        Tensor hidden = new Tensor(new TensorShape(sv, v), act);
+        backend.Linear(hidden, videoTokens, _projInW!, _projInB);
+        ApplyKeyframesAbsPos(backend, hidden, grid);
+        Tensor audioHidden = new Tensor(new TensorShape(sa, a), act);
+        backend.Linear(audioHidden, audioTokens, _audioProjInW!, _audioProjInB);
+        return (hidden, audioHidden);
+    }
+
+    /// <summary>Rebuilds the grid-keyed RoPE cache when the key changed; true when it rebuilt (the graph path
+    /// must re-pin its capture inputs then).</summary>
+    private bool EnsureRopeTables(IBackend backend, (int Frames, int Height, int Width) grid, int audioFrames, double fps)
+    {
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
-        if (_ropeKey != ropeKey)
-        {
-            BuildRopeTables(backend, grid, audioFrames, fps);
-            _ropeKey = ropeKey;
-        }
-        (Tensor vCos, Tensor vSin) = (_vCosC!, _vSinC!);
-        (Tensor aCos, Tensor aSin) = (_aCosC!, _aSinC!);
-        (Tensor cvCos, Tensor cvSin) = (_cvCosC!, _cvSinC!);
+        if (_ropeKey == ropeKey) return false;
+        BuildRopeTables(backend, grid, audioFrames, fps);
+        _ropeKey = ropeKey;
+        return true;
+    }
 
-        LtxVideo2BlockContext ctx = new()
-        {
-            Encoder = encoderVideo,
-            AudioEncoder = encoderAudio,
-            EncoderMask = encoderVideoMask,
-            AudioEncoderMask = encoderAudioMask,
-            TembVideo = tVideo,
-            TembAudio = tAudio,
-            TembPromptVideo = tPromptV,
-            TembPromptAudio = tPromptA,
-            TembCaVideoScaleShift = tCaVss,
-            TembCaAudioScaleShift = tCaAss,
-            TembCaVideoGate = tCaVGate,
-            TembCaAudioGate = tCaAGate,
-            VideoRope = _videoRope, VideoCos = vCos, VideoSin = vSin,
-            AudioRope = _audioRope, AudioCos = aCos, AudioSin = aSin,
-            CaVideoRope = _caVideoRope, CaVideoCos = cvCos, CaVideoSin = cvSin,
-            // Audio-cross shares the audio self rope + coordinates.
-            CaAudioRope = _audioRope, CaAudioCos = aCos, CaAudioSin = aSin,
-        };
+    /// <summary>The one block-context builder all three forward paths share; the graph path passes a
+    /// <see cref="TimestepTables"/> view over its fixed buffers.</summary>
+    private LtxVideo2BlockContext MakeContext(in TimestepTables t, Tensor encV, Tensor encA,
+        Tensor? encVMask, Tensor? encAMask) => new()
+    {
+        Encoder = encV,
+        AudioEncoder = encA,
+        EncoderMask = encVMask,
+        AudioEncoderMask = encAMask,
+        TembVideo = t.TVideo,
+        TembAudio = t.TAudio,
+        TembPromptVideo = t.TPromptV,
+        TembPromptAudio = t.TPromptA,
+        TembCaVideoScaleShift = t.TCaVss,
+        TembCaAudioScaleShift = t.TCaAss,
+        TembCaVideoGate = t.TCaVGate,
+        TembCaAudioGate = t.TCaAGate,
+        VideoRope = _videoRope, VideoCos = _vCosC!, VideoSin = _vSinC!,
+        AudioRope = _audioRope, AudioCos = _aCosC!, AudioSin = _aSinC!,
+        CaVideoRope = _caVideoRope, CaVideoCos = _cvCosC!, CaVideoSin = _cvSinC!,
+        // Audio-cross shares the audio self rope + coordinates.
+        CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
+    };
+
+    public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor videoTokens, Tensor audioTokens,
+        Tensor encoderVideo, Tensor encoderAudio, float timestep,
+        (int Frames, int Height, int Width) grid, int audioFrames, double fps,
+        Tensor? encoderVideoMask, Tensor? encoderAudioMask)
+    {
+        int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
+        int v = _config.InnerDim, a = _config.AudioInnerDim;
+
+        (Tensor hidden, Tensor audioHidden) = ProjIn(backend, videoTokens, audioTokens, grid, sv, sa, v, a);
+        TimestepTables tables = ComputeTimestepTables(backend, timestep);
+        EnsureRopeTables(backend, grid, audioFrames, fps);
+        LtxVideo2BlockContext ctx = MakeContext(tables, encoderVideo, encoderAudio, encoderVideoMask, encoderAudioMask);
 
         OnBlockOutput?.Invoke(-1, hidden, audioHidden);   // post-proj_in state (parity harness)
         for (int i = 0; i < _blocks.Length; i++)
@@ -350,13 +381,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             OnBlockOutput?.Invoke(i, hidden, audioHidden);
         }
 
-        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate })
-            t?.Dispose();
+        DisposeModulationTables(tables);
 
-        Tensor video = OutputLayer(backend, hidden, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
-        Tensor audio = OutputLayer(backend, audioHidden, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB,
+        Tensor video = OutputLayer(backend, hidden, tables.EmbV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audio = OutputLayer(backend, audioHidden, tables.EmbA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB,
             sa, a, _config.AudioOutChannels);
-        hidden.Dispose(); audioHidden.Dispose(); embV.Dispose(); embA.Dispose();
+        hidden.Dispose(); audioHidden.Dispose(); tables.EmbV.Dispose(); tables.EmbA.Dispose();
         return (video, audio);
     }
 
@@ -385,62 +415,16 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
                 timestep, grid, audioFrames, fps, sv, sa, v, a);
         }
 
-        // proj_in is where the block stream's activation dtype is CHOSEN; every block/attention helper below
-        // inherits it from its input, and OutputLayer converts back to F32 for the pipeline's F32-only Euler step.
-        // The latent in, the connector encoder, the AdaLN modulation vectors and every norm/rope parameter stay F32.
-        // Gated on the backend: the CPU backend's Linear is F32-only, so it keeps the F32 path.
-        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
-        Tensor hidC = new Tensor(new TensorShape(sv, v), act);
-        backend.Linear(hidC, videoTokens, _projInW!, _projInB);
-        ApplyKeyframesAbsPos(backend, hidC, grid);
-        Tensor audC = new Tensor(new TensorShape(sa, a), act);
-        backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
-        Tensor hidU = new Tensor(new TensorShape(sv, v), act);
+        (Tensor hidC, Tensor audC) = ProjIn(backend, videoTokens, audioTokens, grid, sv, sa, v, a);
+        Tensor hidU = new Tensor(hidC.Shape, hidC.DType);
         backend.CopyInto(hidU, hidC);
-        Tensor audU = new Tensor(new TensorShape(sa, a), act);
+        Tensor audU = new Tensor(audC.Shape, audC.DType);
         backend.CopyInto(audU, audC);
 
-        (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
-        (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
-        Tensor? tPromptV = null, tPromptA = null;
-        if (_hasPromptMod)
-        {
-            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
-            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
-        }
-        (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
-        (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
-        (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
-        (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
-
-        (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
-        if (_ropeKey != ropeKey)
-        {
-            BuildRopeTables(backend, grid, audioFrames, fps);
-            _ropeKey = ropeKey;
-        }
-
-        LtxVideo2BlockContext MakeCtx(Tensor encV, Tensor encA) => new()
-        {
-            Encoder = encV,
-            AudioEncoder = encA,
-            EncoderMask = null,
-            AudioEncoderMask = null,
-            TembVideo = tVideo,
-            TembAudio = tAudio,
-            TembPromptVideo = tPromptV,
-            TembPromptAudio = tPromptA,
-            TembCaVideoScaleShift = tCaVss,
-            TembCaAudioScaleShift = tCaAss,
-            TembCaVideoGate = tCaVGate,
-            TembCaAudioGate = tCaAGate,
-            VideoRope = _videoRope, VideoCos = _vCosC!, VideoSin = _vSinC!,
-            AudioRope = _audioRope, AudioCos = _aCosC!, AudioSin = _aSinC!,
-            CaVideoRope = _caVideoRope, CaVideoCos = _cvCosC!, CaVideoSin = _cvSinC!,
-            CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
-        };
-        LtxVideo2BlockContext ctxC = MakeCtx(encoderVideoCond, encoderAudioCond);
-        LtxVideo2BlockContext ctxU = MakeCtx(encoderVideoUncond, encoderAudioUncond);
+        TimestepTables tables = ComputeTimestepTables(backend, timestep);
+        EnsureRopeTables(backend, grid, audioFrames, fps);
+        LtxVideo2BlockContext ctxC = MakeContext(tables, encoderVideoCond, encoderAudioCond, null, null);
+        LtxVideo2BlockContext ctxU = MakeContext(tables, encoderVideoUncond, encoderAudioUncond, null, null);
 
         OnBlockOutput?.Invoke(-1, hidC, audC);
         bool probeThisForward = Ltx2Probe && !_probedOnce;
@@ -455,14 +439,13 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         }
         if (probeThisForward) _probedOnce = true;
 
-        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate })
-            t?.Dispose();
+        DisposeModulationTables(tables);
 
-        Tensor videoC = OutputLayer(backend, hidC, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
-        Tensor audioC = OutputLayer(backend, audC, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
-        Tensor videoU = OutputLayer(backend, hidU, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
-        Tensor audioU = OutputLayer(backend, audU, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
-        hidC.Dispose(); audC.Dispose(); hidU.Dispose(); audU.Dispose(); embV.Dispose(); embA.Dispose();
+        Tensor videoC = OutputLayer(backend, hidC, tables.EmbV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioC = OutputLayer(backend, audC, tables.EmbA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        Tensor videoU = OutputLayer(backend, hidU, tables.EmbV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioU = OutputLayer(backend, audU, tables.EmbA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        hidC.Dispose(); audC.Dispose(); hidU.Dispose(); audU.Dispose(); tables.EmbV.Dispose(); tables.EmbA.Dispose();
         return ((videoC, audioC), (videoU, audioU));
     }
 
@@ -477,36 +460,20 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         int sv, int sa, int v, int a)
     {
         // ── Build the per-step timestep tables OUTSIDE the capture; land them in the fixed buffers ──
-        (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
-        (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
-        RefreshFixed(backend, ref _gTVideo, tVideo);
-        RefreshFixed(backend, ref _gTAudio, tAudio);
-        RefreshFixed(backend, ref _gEmbV, embV);
-        RefreshFixed(backend, ref _gEmbA, embA);
-        if (_hasPromptMod)
-        {
-            (Tensor tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
-            (Tensor tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
-            RefreshFixed(backend, ref _gTPromptV, tPromptV);
-            RefreshFixed(backend, ref _gTPromptA, tPromptA);
-        }
-        (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
-        (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
-        (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
-        (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
-        RefreshFixed(backend, ref _gTCaVss, tCaVss);
-        RefreshFixed(backend, ref _gTCaAss, tCaAss);
-        RefreshFixed(backend, ref _gTCaVGate, tCaVGate);
-        RefreshFixed(backend, ref _gTCaAGate, tCaAGate);
+        TimestepTables fresh = ComputeTimestepTables(backend, timestep);
+        RefreshFixed(backend, ref _gTVideo, fresh.TVideo);
+        RefreshFixed(backend, ref _gTAudio, fresh.TAudio);
+        RefreshFixed(backend, ref _gEmbV, fresh.EmbV);
+        RefreshFixed(backend, ref _gEmbA, fresh.EmbA);
+        if (fresh.TPromptV is not null) RefreshFixed(backend, ref _gTPromptV, fresh.TPromptV);
+        if (fresh.TPromptA is not null) RefreshFixed(backend, ref _gTPromptA, fresh.TPromptA);
+        RefreshFixed(backend, ref _gTCaVss, fresh.TCaVss);
+        RefreshFixed(backend, ref _gTCaAss, fresh.TCaAss);
+        RefreshFixed(backend, ref _gTCaVGate, fresh.TCaVGate);
+        RefreshFixed(backend, ref _gTCaAGate, fresh.TCaAGate);
 
-        // ── RoPE tables (cached per grid; step-invariant) ──
-        (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
-        if (_ropeKey != ropeKey)
-        {
-            BuildRopeTables(backend, grid, audioFrames, fps);
-            _ropeKey = ropeKey;
-            _graphPinned = false;
-        }
+        // ── RoPE tables (cached per grid; step-invariant); a rebuild must re-pin the capture inputs ──
+        if (EnsureRopeTables(backend, grid, audioFrames, fps)) _graphPinned = false;
 
         // ── Signature / owner management ──
         long sig = ((long)grid.Frames * 73856093L) ^ ((long)grid.Height * 19349663L)
@@ -542,8 +509,10 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         _gVUncondV ??= new Tensor(new TensorShape(sv, _config.OutChannels), DType.F32);
         _gVUncondA ??= new Tensor(new TensorShape(sa, _config.AudioOutChannels), DType.F32);
 
-        LtxVideo2BlockContext ctxC = MakeGraphCtx(encVCond, encACond);
-        LtxVideo2BlockContext ctxU = MakeGraphCtx(encVUncond, encAUncond);
+        TimestepTables fixedTables = new TimestepTables(_gTVideo!, _gTAudio!, _gTPromptV, _gTPromptA,
+            _gTCaVss!, _gTCaAss!, _gTCaVGate!, _gTCaAGate!, _gEmbV!, _gEmbA!);
+        LtxVideo2BlockContext ctxC = MakeContext(fixedTables, encVCond, encACond, null, null);
+        LtxVideo2BlockContext ctxU = MakeContext(fixedTables, encVUncond, encAUncond, null, null);
 
         if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
         {
@@ -590,20 +559,6 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         fresh.Dispose();
     }
 
-    /// <summary>Block context wired to the FIXED per-step timestep buffers + cached RoPE (mirrors the eager MakeCtx).</summary>
-    private LtxVideo2BlockContext MakeGraphCtx(Tensor encV, Tensor encA) => new()
-    {
-        Encoder = encV, AudioEncoder = encA, EncoderMask = null, AudioEncoderMask = null,
-        TembVideo = _gTVideo!, TembAudio = _gTAudio!,
-        TembPromptVideo = _gTPromptV, TembPromptAudio = _gTPromptA,
-        TembCaVideoScaleShift = _gTCaVss!, TembCaAudioScaleShift = _gTCaAss!,
-        TembCaVideoGate = _gTCaVGate!, TembCaAudioGate = _gTCaAGate!,
-        VideoRope = _videoRope, VideoCos = _vCosC!, VideoSin = _vSinC!,
-        AudioRope = _audioRope, AudioCos = _aCosC!, AudioSin = _aSinC!,
-        CaVideoRope = _caVideoRope, CaVideoCos = _cvCosC!, CaVideoSin = _cvSinC!,
-        CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
-    };
-
     /// <summary>The captured (or capture-warming) CFG-pair body: proj_in ×4 → blocks (cond then uncond per block)
     /// → 4 output layers, landing the velocities in the fixed buffers. All device ops; reads only fixed/pinned/
     /// resident tensors.</summary>
@@ -611,15 +566,10 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         LtxVideo2BlockContext ctxC, LtxVideo2BlockContext ctxU, int sv, int sa, int v, int a,
         (int Frames, int Height, int Width) grid)
     {
-        DType act = backend.SupportsF16Activations ? DiTBlocks.DitDtype.Act : DType.F32;
-        Tensor hidC = new Tensor(new TensorShape(sv, v), act);
-        backend.Linear(hidC, videoTokens, _projInW!, _projInB);
-        ApplyKeyframesAbsPos(backend, hidC, grid);
-        Tensor audC = new Tensor(new TensorShape(sa, a), act);
-        backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
-        Tensor hidU = new Tensor(new TensorShape(sv, v), act);
+        (Tensor hidC, Tensor audC) = ProjIn(backend, videoTokens, audioTokens, grid, sv, sa, v, a);
+        Tensor hidU = new Tensor(hidC.Shape, hidC.DType);
         backend.CopyInto(hidU, hidC);
-        Tensor audU = new Tensor(new TensorShape(sa, a), act);
+        Tensor audU = new Tensor(audC.Shape, audC.DType);
         backend.CopyInto(audU, audC);
 
         for (int i = 0; i < _blocks.Length; i++)
