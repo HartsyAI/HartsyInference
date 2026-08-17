@@ -102,6 +102,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
     /// zeros padded tokens. Input/output layout is the flattened <c>channel·49 + layer</c> ordering.</summary>
     private static Tensor PerTokenRmsNormMasked(Tensor gemma, ReadOnlySpan<float> validMask, int seq)
     {
+        // per_token_rms_norm's default eps (diffusers ltx2/connectors.py:81), independent of the DiT norm_eps.
         const float eps = 1e-6f;
         Tensor o = new(new TensorShape(seq, FeatureDim), DType.F32);
         float* gp = (float*)gemma.DataPointer;

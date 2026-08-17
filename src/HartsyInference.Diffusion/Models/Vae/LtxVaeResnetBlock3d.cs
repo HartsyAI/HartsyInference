@@ -164,6 +164,8 @@ public sealed unsafe class LtxVaeResnetBlock3d
                 mean /= c;
                 double var = 0;
                 for (int ci = 0; ci < c; ci++) { double d = xp[basePos + (long)ci * spatial] - mean; var += d * d; }
+                // norm3 really is LayerNorm eps 1e-6 while norm1/2 are RMSNorm eps 1e-8 in the reference
+                // (autoencoder_kl_ltx.py:120,134) — the asymmetry is faithful, not a typo.
                 float inv = 1f / MathF.Sqrt((float)(var / c) + 1e-6f);
                 for (int ci = 0; ci < c; ci++)
                 {

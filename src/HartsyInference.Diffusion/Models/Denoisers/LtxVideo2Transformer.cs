@@ -662,6 +662,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         // LayerNormNoAffine and AffineBroadcastLastDim both reject a mixed input/output pair, so these follow the
         // stream; the final proj_out writes F32 because the pipeline's CfgEulerStep is F32-only.
         Tensor normed = new Tensor(new TensorShape(s, dim), hidden.DType);
+        // The reference hardcodes norm_out at 1e-6 independent of norm_eps (transformer_ltx2.py:1313).
         backend.LayerNormNoAffine(normed, hidden, 1e-6f);
         Tensor modded = new Tensor(new TensorShape(s, dim), hidden.DType);
         backend.AffineBroadcastLastDim(modded, normed, scale1p, shift);

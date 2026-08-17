@@ -82,6 +82,8 @@ public sealed record LtxVideo25DiffusionDecoderConfig
 
     /// <summary>Latent frames replicated past the end before stages 1-4, then cropped off the context. NATTEN slides
     /// its window inward at the border, so the true last frames would otherwise be attended asymmetrically.</summary>
+    // Verbatim (stage_kernels[0][0] // 2) * 2 — single-stage by design, the reference does no per-stage
+    // padding (comfy na_diffusion_decoder.py:340).
     public int TrailingPadLatentFrames => StageKernels[0].T / 2 * 2;
 
     /// <summary>Output frames for a latent frame count: every temporally-strided upsample drops its duplicated

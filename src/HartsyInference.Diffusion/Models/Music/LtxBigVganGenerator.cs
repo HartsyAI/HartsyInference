@@ -148,6 +148,7 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         if ((int)x.Shape[1] != _inChannels)
             throw new ArgumentException($"expected {_inChannels} input channels, got {x.Shape[1]}.");
 
+        // conv_pre/post are hardcoded k7/pad3 in the reference too (lightricks vocoder.py:458,497) — not derived.
         Tensor cur = Conv(backend, x, _convInW!, _convInB, _hiddenChannels, padL: 3, padR: 3, dilation: 1);
         int numUps = _upsampleFactors.Length;
         int resPerUp = _resnetKernels.Length;
