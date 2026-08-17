@@ -39,9 +39,9 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
 
     private readonly Qwen3Model _backbone;
     private readonly bool _halfPrecisionKv;
-    // HARTSY_MM3_LM_GRAPH=0 restores the eager step. The captured step keeps the F16 cache (af2900fd) and passes
-    // real-weight parity identically to eager, so the two reasons it was held back are both gone.
-    private readonly bool _graphDecode = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH", defaultOn: true);
+    // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
+    // 3060, fails on a 4090 by 1e-3) — see MINIMAX_MUSIC3_PERF.md. The old F32-KV reason is gone.
+    private readonly bool _graphDecode = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH", defaultOn: false);
     // Diagnostic: keeps the dual step and its F32 cache but never captures, which is the only way to A/B the
     // capture itself against the identical kernel sequence run eagerly.
     private readonly bool _graphCapture = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH_CAPTURE", defaultOn: true);
