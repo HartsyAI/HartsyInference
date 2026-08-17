@@ -223,23 +223,21 @@ Two consequences worth internalising:
    grow-and-copy pattern makes 36 layers × N chunk crossings worth of odd sizes and the pool keeps them all. That
    is exactly why growth measured worse (see `5f231b71`).
 
-### Do we need a bigger fix? Probably not, and here is the reasoning
-The proper shape for growth already exists: `PagedKvCache` allocates **fixed-size pages** from a shared
-`PagedKvPool` and is "physically paged, logically contiguous" — it gathers pages into a contiguous scratch tensor
-per call, so `FlashAttention`'s existing contract is untouched. Uniform page sizes turn pool retention from a cost
-into a benefit. `DynamicBatchScheduler` already uses it. It would need an F16 variant, and it pays a per-call
-gather that a 36-layer, thousands-of-frames decode would feel.
+### Grow-on-demand was built, measured, and REMOVED
+Growing the cache in chunks instead of preallocating cost ~4 GB of peak VRAM and ~20% of the decode stage, in the
+very case it was meant to win (short song, large cap). Output was byte-identical, so it was correct — just a
+pessimisation, because the pool retains every intermediate buffer size. The code is deleted rather than parked:
+it would never be the right answer to a VRAM ceiling, since it makes VRAM worse.
 
-**But the premise may be dead.** Growth existed to avoid preallocating a whole duration cap. With the batched
-decode leak fixed (`19e68209`) and F16 storage now preserved on the graph path (`af2900fd`), a full six-minute
-song is ~9000 frames at 288 KB/frame across the guided pair = **~2.6 GB of KV**, against ~5.7 GB of `:q4` weights.
-That plausibly fits a 12 GB card outright, in which case preallocation is simply fine and the entire
-paged-F16 project buys nothing.
+The right shape, if a bounded footprint is ever needed, is `PagedKvCache` — fixed-size pages from a shared pool,
+gathered into a contiguous scratch per call so `FlashAttention`'s contract is untouched. Uniform sizes are exactly
+what a keep-everything pool rewards. It would need an F16 variant and pays a per-call gather.
 
-**So: measure the real per-card ceiling before building anything.** Generate the longest song each card can
-manage, post-fix, and write the numbers here. Only if the 3060 cannot reach six minutes does paged F16 become
-worth its cost — and even then, compare it against the cheaper option of sizing the cache to what the card can
-afford rather than to whatever cap the user typed.
+**But measure before building it.** With the decode leak fixed (`19e68209`) and F16 preserved on the graph path
+(`af2900fd`), six minutes of song is ~9000 frames at 288 KB/frame across the guided pair = **~2.6 GB of KV**
+against ~5.7 GB of `:q4` weights. That plausibly fits a 12 GB card outright, in which case preallocation is
+simply correct and paged F16 buys nothing. Generate the longest song each card can manage and write the numbers
+here first.
 
 ## OPEN BUG — dual-stream device attention is wrong on high-SM cards
 

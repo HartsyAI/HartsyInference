@@ -39,7 +39,8 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
 
     private readonly Qwen3Model _backbone;
     private readonly bool _halfPrecisionKv;
-    // Off by default: it forces F32 KV (see CreateCache), which caps a 12 GB card near four minutes of song.
+    // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
+    // 3060, fails on a 4090 by 1e-3) — see MINIMAX_MUSIC3_PERF.md. The old F32-KV reason is gone.
     private readonly bool _graphDecode = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH", defaultOn: false);
     // Diagnostic: keeps the dual step and its F32 cache but never captures, which is the only way to A/B the
     // capture itself against the identical kernel sequence run eagerly.
@@ -84,29 +85,12 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     ///
     /// <para>The graph-captured step used to force F32 storage because its device-position attention had no F16
     /// variant; both halves have one now, so the quantized variants keep their half-width cache either way —
-    /// 288 KB per frame across the guided pair rather than 576.</para>
-    ///
-    /// <para>The eager cache grows in <see cref="KvGrowthChunk"/>-token steps instead of allocating the whole
-    /// requested duration, because the duration is a cap and not a target: a song that reaches end-of-audio after
-    /// ninety seconds otherwise pays for six minutes. Growth stays off under <c>HARTSY_MM3_LM_GRAPH</c> — the
-    /// captured step writes K/V through the caches' baked device addresses without ever calling
-    /// <c>AppendStep</c>, so a reallocation would neither be triggered nor observed by the replay.</para></summary>
+    /// 288 KB per frame across the guided pair rather than 576.</para></summary>
     public IKvCache CreateCache(int maxSeqLen) => _halfPrecisionKv
         ? new FixedKvCache(_backbone.NumLayers, batch: 1, _backbone.KvHeads, _backbone.HeadDim, Math.Max(1, maxSeqLen),
-            DType.F16, _graphDecode ? 0 : KvGrowthChunk)
+            DType.F16)
         : _backbone.CreateDecodeCache(maxSeqLen);
 
-    /// <summary>Tokens the decode cache grows by; 0 preallocates the full cap, which is the default because
-    /// growing measured WORSE on both axes. Set <c>HARTSY_MM3_KV_GROW</c> to a positive chunk to re-enable.
-    ///
-    /// <para>Measured on a 4090 at <c>:q4</c>, same seed, a song that ends far short of its cap — the case growth
-    /// exists to win. Peak VRAM 22,544 MB grown against 18,397 preallocated at a 360 s cap, and 20,528 against
-    /// 17,248 at 150 s; the autoregressive stage also ran 18-21% slower. The device mempool's release threshold is
-    /// keep-everything, so each grow's discarded buffer stays in the pool: across 36 layers and repeated chunk
-    /// crossings the pool ends up holding every intermediate size as well as the final one. Growing only starts
-    /// paying once that retention is bounded.</para></summary>
-    private static int KvGrowthChunk { get; } =
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_MM3_KV_GROW"), out int chunk) && chunk >= 0 ? chunk : 0;
 
     /// <summary>Embeds <paramref name="tokenIds"/> into <c>[1, count, 4096]</c>. Caller owns the result.</summary>
     public Tensor Embed(ReadOnlySpan<int> tokenIds)
