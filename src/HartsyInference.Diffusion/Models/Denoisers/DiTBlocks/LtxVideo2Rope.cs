@@ -33,7 +33,7 @@ public sealed unsafe class LtxVideo2Rope
     /// clip). Not a trade worth taking by default; the seam stays so the experiment is repeatable.</summary>
     internal static bool F16Tables = Environment.GetEnvironmentVariable("HARTSY_LTX2_ROPEF16") == "1";
 
-    public enum Modality { Video, Audio }
+    private enum Modality { Video, Audio }
 
     /// <summary>Rotary apply convention. <see cref="Split"/> is LTX-2.3 (22B checkpoint <c>rope_type=split</c>);
     /// <see cref="Interleaved"/> is base LTX / the diffusers default.</summary>
@@ -150,8 +150,6 @@ public sealed unsafe class LtxVideo2Rope
         }
     }
 
-    public int Dim => _dim;
-
     /// <summary>Builds video cos/sin <c>[F·H·W, cosWidth]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
     /// flavor each token's single coordinate is its frame midpoint; otherwise all three axes are written.</summary>
     public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps)
@@ -182,7 +180,7 @@ public sealed unsafe class LtxVideo2Rope
     }
 
     /// <summary>Builds audio cos/sin <c>[numFrames, cosWidth]</c>; coordinates are patch-midpoint timestamps in seconds.</summary>
-    public (Tensor Cos, Tensor Sin) BuildAudio(int numFrames, int shift = 0)
+    public (Tensor Cos, Tensor Sin) BuildAudio(int numFrames)
     {
         if (_modality != Modality.Audio) throw new InvalidOperationException("BuildAudio on a video RoPE.");
         (Tensor cos, Tensor sin) = Alloc(numFrames);
@@ -193,7 +191,7 @@ public sealed unsafe class LtxVideo2Rope
         double melToSec = (double)_hopLength / _samplingRate;
         for (int fi = 0; fi < numFrames; fi++)
         {
-            int f = fi + shift;
+            int f = fi;
             double startMel = Math.Max(0.0, (double)f * sf + _causalOffset - sf);
             double endMel = Math.Max(0.0, (double)(f + _patchSizeT) * sf + _causalOffset - sf);
             double norm = ((startMel * melToSec + endMel * melToSec) / 2.0) / _baseFrames;

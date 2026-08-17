@@ -247,21 +247,6 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         return o;
     }
 
-    /// <summary>Device <c>x·(1+scale)+shift</c>; consumes <paramref name="x"/> and returns a fresh tensor.</summary>
-    private static Tensor ShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift)
-    {
-        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
-        // The modulation vectors stay F32 — they are tiny per-channel vectors, AddScalar is F32-only, and the
-        // F16 AffineBroadcastLastDim kernel requires exactly this shape (F16 activation, F32 scale/shift).
-        Tensor scale1 = new(new TensorShape(dim), DType.F32);
-        backend.AddScalar(scale1, scale, 1f);
-        Tensor o = new(x.Shape, x.DType);
-        backend.AffineBroadcastLastDim(o, x, scale1, shift);
-        scale1.Dispose();
-        x.Dispose();
-        return o;
-    }
-
     /// <summary>Out-of-place <c>x·(1+scale)+shift</c> (used for inputs we must not mutate, e.g. the shared
     /// connector encoder and the shared a2v/v2a norms).</summary>
     private static Tensor ModulateRows(IBackend backend, Tensor x, Tensor scale, Tensor shift, int dim)

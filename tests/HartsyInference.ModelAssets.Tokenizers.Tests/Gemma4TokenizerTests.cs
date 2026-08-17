@@ -125,7 +125,7 @@ public sealed class Gemma4TokenizerTests
     [Fact]
     public void Conditioning_PrependsBosExactlyOnce_NoEos_PaddedTo1024()
     {
-        int[] sequence = Make().EncodeForConditioning("abc");
+        int[] sequence = Gemma4Tokenizer.BuildConditioningSequence(Make().Encode("abc"));
         Assert.Equal(1024, sequence.Length);
         Assert.Equal(Gemma4Tokenizer.BosTokenId, sequence[0]);
         Assert.Equal(1, sequence.Count(id => id == Gemma4Tokenizer.BosTokenId));

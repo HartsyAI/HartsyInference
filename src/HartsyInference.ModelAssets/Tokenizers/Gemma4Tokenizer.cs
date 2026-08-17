@@ -155,14 +155,9 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         return [.. ids];
     }
 
-    /// <summary>Encodes a prompt into the LTX-2.5 conditioning sequence: BOS exactly once, no EOS, right-padded
-    /// with <see cref="PadTokenId"/> to at least <paramref name="minLength"/>.</summary>
-    public int[] EncodeForConditioning(string text, int minLength = LtxMinLength) =>
-        BuildConditioningSequence(Encode(text), minLength);
-
     /// <summary>RAW ids — BOS + content, NO padding. The pipeline pads to <see cref="LtxMinLength"/> and marks
     /// which positions are real; padding here instead would hand the connector 1000+ pad tokens as content.</summary>
-    int[] ILtx2PromptTokenizer.EncodeForConditioning(string text) => EncodeForConditioning(text, minLength: 0);
+    int[] ILtx2PromptTokenizer.EncodeForConditioning(string text) => BuildConditioningSequence(Encode(text), minLength: 0);
 
     /// <summary>ComfyUI conditions Gemma 4 at 1024 tokens, and length is part of the conditioning.</summary>
     int ILtx2PromptTokenizer.MinimumConditioningLength => LtxMinLength;

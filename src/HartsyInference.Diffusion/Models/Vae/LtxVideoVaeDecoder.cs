@@ -282,7 +282,7 @@ public sealed unsafe class LtxVideoVaeDecoder
                         for (int wo = 0; wo < outW; wo++)
                         {
                             int wi = wo / p, pa = wo % p;
-                            int ch = oc > 0 ? (c * p + pa) * p + pb : 0;
+                            int ch = (c * p + pa) * p + pb;
                             long srcOff = (((long)bi * srcC + ch) * f + fi) * srcFrame + (long)hi * w + wi;
                             long dstOff = (((long)bi * oc + c) * f + fi) * dstFrame + (long)ho * outW + wo;
                             op[dstOff] = sp[srcOff];

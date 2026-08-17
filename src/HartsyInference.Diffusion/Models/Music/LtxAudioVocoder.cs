@@ -231,7 +231,6 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
     private sealed class Resampler : IDisposable
     {
         private readonly int _ratio;
-        private readonly int _channels;
         private readonly int _kernel;
         private readonly int _pad, _cropLeft, _cropRight;
         private readonly Tensor _weight;   // [channels, 1, kernel]
@@ -239,7 +238,6 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         public Resampler(int ratio, int channels)
         {
             _ratio = ratio;
-            _channels = channels;
             float[] filter = LtxVocoderDsp.HannSincFilter(ratio, out _pad, out _cropLeft, out _cropRight);
             _kernel = filter.Length;
             _weight = new Tensor(new TensorShape(channels, 1, _kernel), DType.F32);

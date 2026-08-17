@@ -22,12 +22,11 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <c>decoder.mid.block_{1,2}.*</c>, <c>decoder.up.{i}.block.{j}.*</c> (+ <c>nin_shortcut</c> on channel change),
 /// <c>decoder.up.{i}.upsample.conv.conv.*</c>, <c>decoder.conv_out.conv.*</c>. Verified vs the LTX-2.3 header.
 /// Numerics vs the real checkpoint are validation-pending.</para></summary>
-public sealed unsafe class LtxAudioVaeDecoder
+public sealed class LtxAudioVaeDecoder
 {
     private const float PixelNormEps = 1e-6f;
 
     private readonly int _latentChannels;
-    private readonly int _outChannels;
     private readonly int _baseChannels;
     private readonly int[] _chMult;
     private readonly int _numResBlocks;
@@ -35,7 +34,6 @@ public sealed unsafe class LtxAudioVaeDecoder
     private LtxAudioCausalConv2d? _convIn, _convOut;
     private LtxAudioResnetBlock[] _midResnets = [];
     private UpLevel[] _upLevels = [];   // indexed by resolution level (0..n-1); forward iterates high→low
-    private int _finalChannels;
 
     private sealed class UpLevel
     {
@@ -44,11 +42,9 @@ public sealed unsafe class LtxAudioVaeDecoder
     }
 
     public LtxAudioVaeDecoder(
-        int latentChannels = 8, int outChannels = 2,
-        int baseChannels = 128, int[]? chMult = null, int numResBlocks = 2)
+        int latentChannels = 8, int baseChannels = 128, int[]? chMult = null, int numResBlocks = 2)
     {
         _latentChannels = latentChannels;
-        _outChannels = outChannels;
         _baseChannels = baseChannels;
         _chMult = chMult ?? [1, 2, 4];
         _numResBlocks = numResBlocks;
@@ -88,7 +84,6 @@ public sealed unsafe class LtxAudioVaeDecoder
             _upLevels[level] = stage;
         }
 
-        _finalChannels = blockIn;
         _convOut = new LtxAudioCausalConv2d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"));
     }
 
@@ -137,7 +132,7 @@ public sealed unsafe class LtxAudioVaeDecoder
 /// The backend's <see cref="IBackend.Conv2D"/> pads symmetrically, so the causal TIME axis (height) is padded
 /// manually with <c>k-1</c> zero rows on top (none on the bottom); the mel axis (width) uses the symmetric
 /// <c>Conv2D</c> padding. Size-preserving for stride 1.</summary>
-public sealed unsafe class LtxAudioCausalConv2d
+public sealed class LtxAudioCausalConv2d
 {
     private readonly Tensor _weight;   // [outC, inC, kh, kw]
     private readonly Tensor? _bias;
@@ -195,7 +190,7 @@ public static class LtxAudioPixelNorm
 /// <summary>LTX-2 audio VAE resnet block (<c>LTX2AudioResnetBlock</c>, pixel-norm variant):
 /// pixelNorm → SiLU → conv1 → pixelNorm → SiLU → conv2 → + shortcut. The shortcut is a 1×1 causal conv
 /// (<c>nin_shortcut</c>) when in≠out, else identity.</summary>
-public sealed unsafe class LtxAudioResnetBlock
+public sealed class LtxAudioResnetBlock
 {
     private readonly int _inC, _outC;
     private LtxAudioCausalConv2d? _conv1, _conv2, _ninShortcut;
@@ -249,7 +244,7 @@ public sealed unsafe class LtxAudioResnetBlock
 
 /// <summary>LTX-2 audio VAE upsample (<c>LTX2AudioUpsample</c>, causality_axis="height"): nearest-×2 on both
 /// axes → time-causal conv → drop the first (time) row to keep the temporal causal alignment.</summary>
-public sealed unsafe class LtxAudioUpsample
+public sealed class LtxAudioUpsample
 {
     private LtxAudioCausalConv2d? _conv;
 

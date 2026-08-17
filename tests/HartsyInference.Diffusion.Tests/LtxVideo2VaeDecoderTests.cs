@@ -19,7 +19,7 @@ public unsafe class LtxVideo2VaeDecoderTests
     public void Decode_22bTopology_InfersStructureAndProducesFiniteRgb()
     {
         CpuBackend backend = new();
-        LtxVideo2VaeDecoder decoder = new(latentChannels: 128, outChannels: 3, patchSize: 2, isCausal: false);
+        LtxVideo2VaeDecoder decoder = new(latentChannels: 128, patchSize: 2, isCausal: false);
         decoder.LoadWeights(Build22bAnalog());
 
         // 4 up-stages; temporal upscale on stages 0,1 (spatio-temporal) and 2 (temporal) → 3 temporal doublings.

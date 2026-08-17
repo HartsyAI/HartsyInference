@@ -41,6 +41,10 @@ public sealed unsafe class LtxVideo2Attention
     {
         _qW = w[$"{p}.to_q.weight"]; w.TryGetValue($"{p}.to_q.bias", out _qB);
         _kW = w[$"{p}.to_k.weight"]; w.TryGetValue($"{p}.to_k.bias", out _kB);
+        long qIn = _qW.Shape[_qW.Shape.Rank - 1], kvIn = _kW.Shape[_kW.Shape.Rank - 1];
+        if (qIn != _qInDim || kvIn != _kvInDim)
+            throw new InvalidOperationException(
+                $"'{p}' attention weights are [{qIn}]/[{kvIn}] wide; the block declared q={_qInDim} kv={_kvInDim}.");
         _vW = w[$"{p}.to_v.weight"]; w.TryGetValue($"{p}.to_v.bias", out _vB);
         _oW = w[$"{p}.to_out.0.weight"]; w.TryGetValue($"{p}.to_out.0.bias", out _oB);
         _nq = LoadF32(w, $"{p}.q_norm.weight");
@@ -189,23 +193,6 @@ public sealed unsafe class LtxVideo2Attention
             s, _heads, _headDim, _qkEps);
         src.Dispose();
         return o;
-    }
-
-    // One constant [inner, heads] expansion matrix per (heads, headDim) head layout, shared across every attention
-    // instance (per-instance copies would cost ~150 MB across 48 dual-stream blocks). Never disposed: process-lifetime
-    // constants totaling <1 MB, re-uploaded on demand if a backend context is torn down.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int Heads, int HeadDim), Tensor> HeadExpandWeights = new();
-
-    private static Tensor BuildHeadExpand((int Heads, int HeadDim) key)
-    {
-        Tensor w = new(new TensorShape(key.Heads * key.HeadDim, key.Heads), DType.F32);
-        float* p = (float*)w.DataPointer;
-        long total = (long)key.Heads * key.HeadDim * key.Heads;
-        for (long i = 0; i < total; i++) p[i] = 0f;
-        for (int h = 0; h < key.Heads; h++)
-            for (int d = 0; d < key.HeadDim; d++)
-                p[((long)h * key.HeadDim + d) * key.Heads + h] = 1f;
-        return w;
     }
 
     // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer

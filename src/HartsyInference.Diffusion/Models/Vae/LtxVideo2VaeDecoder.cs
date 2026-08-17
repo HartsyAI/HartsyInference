@@ -31,13 +31,8 @@ public sealed unsafe class LtxVideo2VaeDecoder
     }
 
     private readonly int _latentChannels;
-    private readonly int _outChannels;
     private readonly int _patch;
     private readonly bool _isCausal;
-    private readonly int[] _blockOutRev;         // reversed block_out_channels
-    private readonly bool[] _scalingRev;         // reversed spatio_temporal_scaling
-    private readonly int[] _layersRev;           // reversed layers_per_block (mid + up-blocks)
-    private readonly int[] _upscaleRev;          // reversed upsample_factor
     private readonly bool[] _residualRev;        // reversed upsample_residual
     private readonly float[]? _latentsMean;      // [latentChannels], pre-cast to F32
     private readonly float[]? _latentsStd;       // [latentChannels], pre-cast to F32
@@ -74,28 +69,18 @@ public sealed unsafe class LtxVideo2VaeDecoder
     }
 
     public LtxVideo2VaeDecoder(
-        int latentChannels = 128, int outChannels = 3,
-        int[]? blockOutChannels = null, bool[]? spatioTemporalScaling = null, int[]? layersPerBlock = null,
-        int[]? upsampleFactor = null, bool[]? upsampleResidual = null,
+        int latentChannels = 128, bool[]? upsampleResidual = null,
         int patchSize = 4, bool isCausal = false,
         float[]? latentsMean = null, float[]? latentsStd = null, DType? computeDtype = null)
     {
         _computeDtype = computeDtype ?? DType.F32;
         _latentChannels = latentChannels;
-        _outChannels = outChannels;
         _patch = patchSize;
         _isCausal = isCausal;
-        blockOutChannels ??= [256, 512, 1024];
-        spatioTemporalScaling ??= [true, true, true];
-        layersPerBlock ??= [5, 5, 5, 5];
-        upsampleFactor ??= [2, 2, 2];
         // The LTX-2 checkpoints ship NO residual on any upsampler — their own __metadata__.config
         // omits the key, and ComfyUI's block_params.get("residual", False) therefore reads False.
+        // Everything else about the structure is inferred from the weight shapes in LoadWeights.
         upsampleResidual ??= [false, false, false];
-        _blockOutRev = Reverse(blockOutChannels);
-        _scalingRev = Reverse(spatioTemporalScaling);
-        _layersRev = Reverse(layersPerBlock);
-        _upscaleRev = Reverse(upsampleFactor);
         _residualRev = Reverse(upsampleResidual);
         _latentsMean = latentsMean;
         _latentsStd = latentsStd;

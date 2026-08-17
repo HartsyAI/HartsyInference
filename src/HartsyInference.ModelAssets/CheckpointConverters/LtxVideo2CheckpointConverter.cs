@@ -296,85 +296,9 @@ public sealed class LtxVideo2CheckpointConverter
         if (!File.Exists(checkpointPath))
             throw new FileNotFoundException($"LTX-2 checkpoint not found: {checkpointPath}");
 
-        // fp8 (opt-in, HARTSY_LTX2_FP8=1): the LTX-2.3 DiT ships in BF16 (~35 GB, streams on a 24 GB card). Build a
-        // persistent fp8 REPACK once (quantize the DiT block Linears to fp8_scaled → ~18 GB, fully resident, ~6×
-        // faster steps + graph-eligible), save it next to the checkpoint, and reuse it on every future run — no
-        // re-quantization. The repack is a drop-in fp8 checkpoint that can also be shared/uploaded as an official
-        // download. NOT default: the user opts into fp8 for the model; without it the original BF16 is used unchanged.
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_FP8") == "1")
-        {
-            string repackPath = checkpointPath[..^".safetensors".Length] + ".dit-fp8.safetensors";
-            if (File.Exists(repackPath))
-            {
-                HartsyInference.Core.Logging.Logs.Info($"[LTX-2 fp8] using cached fp8 repack: {Path.GetFileName(repackPath)}");
-                checkpointPath = repackPath;   // load the cached repack through the normal path below
-            }
-            else
-            {
-                // Building the repack needs room for both the original and the (smaller) fp8 file during the write.
-                // If disk is short, DON'T fill it — quantize in memory this run instead (same speed, re-done next
-                // cold load; free disk to cache it). Guards against the disk-full crash.
-                long needBytes = new FileInfo(checkpointPath).Length + (2L << 30);
-                long freeBytes = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(repackPath))!).AvailableFreeSpace;
-                SafeTensorsLoader loader0 = new();
-                loader0.Load(checkpointPath);
-                if (freeBytes >= needBytes)
-                {
-                    HartsyInference.Core.Logging.Logs.Info($"[LTX-2 fp8] building fp8 repack (one-time): {Path.GetFileName(repackPath)}");
-                    Dictionary<string, Tensor> all = new(loader0.GetAllTensors());
-                    CheckpointConvertUtils.QuantizeDitBlocksToFp8(all, "diffusion_model.transformer_blocks.");
-                    SafeTensorsWriter.Save(repackPath, all);
-                    HartsyInference.Core.Logging.Logs.Info($"[LTX-2 fp8] fp8 repack saved ({new FileInfo(repackPath).Length >> 30} GB); future loads reuse it.");
-                    loader0.Dispose();
-                    checkpointPath = repackPath;   // reload the repack cleanly below
-                }
-                else
-                {
-                    HartsyInference.Core.Logging.Logs.Warning(
-                        $"[LTX-2 fp8] not enough disk to cache the fp8 repack ({freeBytes >> 30} GB free, need ~{needBytes >> 30} GB) — " +
-                        $"quantizing in memory this run (free disk to save a reusable repack). ");
-                    ConvertedWeights conv = Convert(loader0.GetAllTensors());
-                    CheckpointConvertUtils.QuantizeDitBlocksToFp8(conv.Transformer, "transformer_blocks.");
-                    return (conv, loader0);
-                }
-            }
-        }
-
         SafeTensorsLoader loader = new();
         loader.Load(checkpointPath);
         ConvertedWeights converted = Convert(loader.GetAllTensors());
         return (converted, loader);
-    }
-
-    /// <summary>Loads and merges every <c>*.safetensors</c> shard in a directory (a bundled multi-shard checkpoint or
-    /// a diffusers repo root), then routes the merged dictionary.</summary>
-    public static (ConvertedWeights Weights, List<SafeTensorsLoader> Loaders) LoadAndConvertShards(string dir)
-    {
-        if (!Directory.Exists(dir))
-            throw new DirectoryNotFoundException($"LTX-2 checkpoint dir not found: {dir}");
-        string[] shards = Directory.GetFiles(dir, "*.safetensors", SearchOption.AllDirectories);
-        if (shards.Length == 0)
-            throw new FileNotFoundException($"No safetensors shards found in: {dir}");
-        Array.Sort(shards, StringComparer.Ordinal);
-
-        List<SafeTensorsLoader> loaders = new(shards.Length);
-        Dictionary<string, Tensor> merged = new(4096);
-        try
-        {
-            foreach (string shard in shards)
-            {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                    merged[kvp.Key] = kvp.Value;
-            }
-            return (Convert(merged), loaders);
-        }
-        catch
-        {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
-            throw;
-        }
     }
 }

@@ -66,15 +66,6 @@ public sealed record Gemma4TextEncoderConfig
     /// <summary>Maximum sequence length RoPE tables may be built for; acts as a prompt-length cap.</summary>
     public int MaxPositionEmbeddings { get; init; } = 262_144;
 
-    /// <summary>Padding token id.</summary>
-    public int PadTokenId { get; init; } = 0;
-
-    /// <summary>End-of-sequence token id.</summary>
-    public int EosTokenId { get; init; } = 1;
-
-    /// <summary>Beginning-of-sequence token id (the encoder does not insert it; the tokenizer does).</summary>
-    public int BosTokenId { get; init; } = 2;
-
     /// <summary>Gemma-3n per-layer-input width. Gemma-4-12B has this mechanism OFF; a nonzero value is rejected
     /// rather than silently ignored.</summary>
     public int HiddenSizePerLayerInput { get; init; } = 0;
@@ -91,12 +82,6 @@ public sealed record Gemma4TextEncoderConfig
 
     /// <summary>Multiplier applied to token embeddings right after lookup (the Gemma "normalizer").</summary>
     public float EmbeddingScale => (float)Math.Sqrt(HiddenSize);
-
-    /// <summary>Q projection output width on the given layer.</summary>
-    public int QDimFor(int layerIndex) => NumQueryHeads * HeadDimFor(layerIndex);
-
-    /// <summary>K/V projection output width on the given layer.</summary>
-    public int KvDimFor(int layerIndex) => KvHeadsFor(layerIndex) * HeadDimFor(layerIndex);
 
     /// <summary>True when the layer is a global/full-attention layer (the last of each <see cref="GlobalLayerPeriod"/> cycle).</summary>
     public bool IsGlobalLayer(int layerIndex) => layerIndex % GlobalLayerPeriod == GlobalLayerPeriod - 1;

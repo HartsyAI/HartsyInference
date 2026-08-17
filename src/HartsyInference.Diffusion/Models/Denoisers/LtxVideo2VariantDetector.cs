@@ -18,6 +18,10 @@ public static class LtxVideo2VariantDetector
     /// <summary>Bias whose absence means the video FFN is bias-free, in post-conversion naming.</summary>
     public const string VideoFfnBiasKey = "transformer_blocks.0.ff.net.0.proj.bias";
 
+    /// <summary>Marker for the prompt-modulation AdaLN stack, in post-conversion naming. The transformer loads by
+    /// key presence, so a config claiming otherwise would be silently ignored — the detector cross-checks instead.</summary>
+    public const string PromptModKey = "prompt_adaln.emb.timestep_embedder.linear_1.weight";
+
     /// <summary>Builds the config for a checkpoint. <paramref name="hasKey"/> is queried with post-conversion
     /// transformer-bucket names (the output of <c>LtxVideo2CheckpointConverter</c>).</summary>
     /// <param name="metadata">The safetensors <c>__metadata__</c> entries, or null when the file carries none.</param>
@@ -28,6 +32,7 @@ public static class LtxVideo2VariantDetector
         LtxVideo2Config config = LtxVideo2Config.V23;
         string version = "unknown";
         bool ffBiasFromConfig = false;
+        bool crossAttnModFromConfig = false;
 
         if (metadata is not null)
         {
@@ -46,6 +51,8 @@ public static class LtxVideo2VariantDetector
                         config = ApplyTransformerConfig(config, transformer);
                         ffBiasFromConfig = transformer.TryGetProperty("ff_bias", out JsonElement ff)
                             && ff.ValueKind is JsonValueKind.True or JsonValueKind.False;
+                        crossAttnModFromConfig = transformer.TryGetProperty("cross_attention_adaln", out JsonElement ca)
+                            && ca.ValueKind is JsonValueKind.True or JsonValueKind.False;
                     }
                 }
                 catch (JsonException ex)
@@ -65,8 +72,20 @@ public static class LtxVideo2VariantDetector
 
         config = config with { UseKeyframesAbsPosEmbedding = hasKeyframes, FfBias = ffBias };
 
+        // The transformer loads the prompt-modulation stack purely by key presence, so a config that disagrees
+        // would be silently overridden at load — surface the disagreement here instead. Only warn when the
+        // metadata explicitly stated the flag; a bare repack correcting the preset default is routine, not news.
+        bool hasPromptMod = hasKey(PromptModKey);
+        if (crossAttnModFromConfig && config.CrossAttnMod != hasPromptMod)
+        {
+            Logs.Warning($"[LtxVideo2VariantDetector] config says cross_attention_adaln={config.CrossAttnMod} but the "
+                + $"checkpoint {(hasPromptMod ? "has" : "lacks")} '{PromptModKey}' — trusting the weights.");
+        }
+        config = config with { CrossAttnMod = hasPromptMod };
+
         Logs.Info($"LTX-2 variant: model_version={version}, layers={config.NumLayers}, rope={config.RopeType}, " +
-            $"ff_bias={config.FfBias}, keyframes_abs_pos={config.UseKeyframesAbsPosEmbedding}");
+            $"ff_bias={config.FfBias}, keyframes_abs_pos={config.UseKeyframesAbsPosEmbedding}, " +
+            $"cross_attn_mod={config.CrossAttnMod}");
         return config;
     }
 

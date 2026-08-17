@@ -30,14 +30,10 @@ public sealed class Gemma4TextEncoderConfigTests
     {
         Assert.Equal(256, Config.HeadDimFor(0));
         Assert.Equal(8, Config.KvHeadsFor(0));
-        Assert.Equal(4096, Config.QDimFor(0));
-        Assert.Equal(2048, Config.KvDimFor(0));
         Assert.False(Config.KEqualsVFor(0));
 
         Assert.Equal(512, Config.HeadDimFor(5));
         Assert.Equal(1, Config.KvHeadsFor(5));
-        Assert.Equal(8192, Config.QDimFor(5));
-        Assert.Equal(512, Config.KvDimFor(5));
         Assert.True(Config.KEqualsVFor(5));
     }
 
