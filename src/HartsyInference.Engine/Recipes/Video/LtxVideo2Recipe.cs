@@ -308,13 +308,25 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         string? named = Environment.GetEnvironmentVariable("HARTSY_LTX2_UPSAMPLER") is { Length: > 0 } n ? n : null;
         string requested = named ?? DefaultLatentUpsamplerFile;
         // The folder scan is DISCOVERY for the default name only. Falling back to it when the caller named a file
-        // would load a different upsampler than the one they asked for, with only an Info line to notice.
-        string path = ModelFileLocator.Find(requested, UpsamplerSubdir)
-            ?? (named is null ? FindAnyLatentUpsampler() : null)
-            ?? throw new FileNotFoundException(
+        // would load a different upsampler than the one they asked for, with only an Info line to notice. When
+        // nothing was named and nothing is on disk, fetch the shipped upsampler — two-stage is the distilled
+        // default, so a missing side file must not turn a working install into a throw.
+        string? path = ModelFileLocator.Find(requested, UpsamplerSubdir)
+            ?? (named is null ? FindAnyLatentUpsampler() : null);
+        if (path is null && named is null)
+        {
+            Logs.Info($"[LtxVideo2Recipe] Latent upsampler not on disk — downloading {SideModels.Ltx25LatentUpsampler.Repo}/"
+                + $"{SideModels.Ltx25LatentUpsampler.RepoPath}.");
+            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, onProgress: null, CancellationToken.None)
+                .GetAwaiter().GetResult();
+        }
+        if (path is null)
+        {
+            throw new FileNotFoundException(
                 $"LTX-2.5 two-stage is enabled but the latent upsampler '{requested}' was not found under "
                 + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Download it from "
-                + "Lightricks/LTX-2.5 (latent_upscale_models/) or unset HARTSY_LTX2_TWO_STAGE.");
+                + "Lightricks/LTX-2.5 (latent_upscale_models/) or set HARTSY_LTX2_TWO_STAGE=0 for single-pass.");
+        }
 
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(path);

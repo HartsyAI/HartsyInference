@@ -484,6 +484,17 @@ public static class SideModels
         Sha256 = "911d59bb4cb7708179c9a0045ea0fe41212ecfb77aed3a02702b7c0a8274911f"
     };
 
+    /// <summary>LTX-2.5 learned x2 spatial latent upsampler for the distilled two-stage flow (~950 MB BF16).</summary>
+    public static readonly ModelAsset Ltx25LatentUpsampler = new ModelAsset
+    {
+        Repo = "Lightricks/LTX-2.5",
+        RepoPath = "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        TargetSubdir = "latent_upscale_models",
+        TargetName = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        Role = "latent upsampler",
+        Sha256 = "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"
+    };
+
     // ── TAESD preview decoders (folder = "VAE", subfolder "Taesd/") ──
 
     /// <summary>TAESD SD 1.5 preview decoder (madebyollin, ~10 MB); hash intentionally empty (upstream publishes no canonical sha256, loader fails loudly on truncation).</summary>
