@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -13,6 +14,9 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed unsafe class Ltx25InPlaceAddThenNormTests
 {
+    private readonly ITestOutputHelper _output;
+    public Ltx25InPlaceAddThenNormTests(ITestOutputHelper output) => _output = output;
+
     private static string PtxDir()
     {
         string dir = Path.Combine(AppContext.BaseDirectory, "Ptx");
@@ -53,6 +57,7 @@ public sealed unsafe class Ltx25InPlaceAddThenNormTests
     [InlineData(80, false)]
     public void InPlaceAddThenNormMatchesCpu(int rows, bool readBackBetween)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int dim = 2048;
         using Tensor x0 = Rand(new TensorShape(rows, dim), seed: 1);
         using Tensor y = Rand(new TensorShape(rows, dim), seed: 2, scale: 0.07f);

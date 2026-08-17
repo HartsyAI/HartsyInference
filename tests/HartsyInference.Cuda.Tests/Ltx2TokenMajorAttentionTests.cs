@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -14,6 +15,8 @@ namespace HartsyInference.Cuda.Tests;
 public sealed unsafe class Ltx2TokenMajorAttentionTests
 {
     private const float Eps = 1e-6f;
+    private readonly ITestOutputHelper _output;
+    public Ltx2TokenMajorAttentionTests(ITestOutputHelper output) => _output = output;
 
     private static string PtxDir()
     {
@@ -54,6 +57,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     [InlineData(512, 32, 128, true)]
     public void QkNormRopeTokenMajor_IsHeadMajorReindexed(int seq, int heads, int headDim, bool f16)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         int inner = heads * headDim;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -76,6 +80,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     [InlineData(true)]
     public void QkNormRopeTokenMajor_WithoutRope_IsHeadMajorReindexed(bool f16)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         const int seq = 37, heads = 8, headDim = 64;
         int inner = heads * headDim;
@@ -98,6 +103,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     [InlineData(true)]
     public void ScaledDotProductAttentionTokenMajor_MatchesHeadMajorDispatch(bool f16)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         const int sq = 37, sk = 53, heads = 8, headDim = 64;
         int inner = heads * headDim;
@@ -131,6 +137,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     [InlineData(true, 2e-2f)]
     public void Forward_TokenMajorMatchesHeadMajor(bool f16, float tol)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         const int sq = 37, sk = 53, heads = 8, headDim = 64, qIn = 96, kvIn = 80, outDim = 72;
         int inner = heads * headDim;

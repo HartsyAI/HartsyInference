@@ -93,6 +93,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
     [InlineData(512, 32, 128)]
     public void TokenMajor_F16Tables_MatchF32Tables(int seq, int heads, int headDim)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         int inner = heads * headDim;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         using Tensor x = Uniform(new TensorShape(seq, inner), seed: 3, DType.F16);
@@ -119,6 +120,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
     [Fact]
     public void HeadMajor_F16Tables_MatchF32Tables()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int seq = 37, heads = 8, headDim = 64, inner = heads * headDim;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         using Tensor x = Uniform(new TensorShape(seq, inner), seed: 13, DType.F16);
@@ -146,6 +148,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
     [Fact]
     public void TokenMajor_TableDtype_Throughput()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int seq = 4992, heads = 32, headDim = 128, inner = heads * headDim;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());   // establishes the CUDA context the module loads into
         using CudaKernels kernels = new CudaKernels(PtxDir());

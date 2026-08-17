@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -12,6 +13,9 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed unsafe class Ltx25HostWriteAfterDeviceOpTests
 {
+    private readonly ITestOutputHelper _output;
+    public Ltx25HostWriteAfterDeviceOpTests(ITestOutputHelper output) => _output = output;
+
     private static string PtxDir()
     {
         string dir = Path.Combine(AppContext.BaseDirectory, "Ptx");
@@ -31,6 +35,7 @@ public sealed unsafe class Ltx25HostWriteAfterDeviceOpTests
     [Fact]
     public void HostWriteBetweenTwoDeviceOpsIsVisibleToTheSecond()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int rows = 8, dim = 16;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
 

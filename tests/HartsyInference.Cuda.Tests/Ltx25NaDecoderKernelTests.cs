@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -14,6 +15,9 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed unsafe class Ltx25NaDecoderKernelTests
 {
+    private readonly ITestOutputHelper _output;
+    public Ltx25NaDecoderKernelTests(ITestOutputHelper output) => _output = output;
+
     private static string PtxDir()
     {
         string dir = Path.Combine(AppContext.BaseDirectory, "Ptx");
@@ -64,6 +68,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [InlineData(3, 5, 4, 2, 64, 3, 3, 3)]     // head_dim 64, the shipped decoder's width
     public void Na3dMatchesTheManagedReference(int t, int h, int w, int heads, int headDim, int kt, int kh, int kw)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
         using Tensor q = Random(shape, seed: 11);
@@ -95,6 +100,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [InlineData(1, 17, 33, 4, 3, 7, 7)]      // single frame, odd extents: the last tile is one query wide
     public void Na3dTiledMatchesTheManagedReference(int t, int h, int w, int heads, int kt, int kh, int kw)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int headDim = 64;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
@@ -120,6 +126,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Na3dTiledMatchesTheReferenceOnEveryFaceOfTheVolume()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         const int t = 4, h = 11, w = 19, heads = 2, headDim = 64, kt = 3, kh = 5, kw = 7;
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
@@ -162,6 +169,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Na3dTiledAgreesWithTheUntiledKernelOnTheShippedWindow()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int t = 6, h = 12, w = 20, heads = 4, headDim = 64, kernel = 11;
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
         using Tensor q = Random(shape, seed: 81);
@@ -200,6 +208,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Na3dMatchesTheReferenceOnEveryFaceOfTheVolume()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         const int t = 6, h = 5, w = 7, heads = 3, headDim = 16, kt = 3, kh = 5, kw = 3;
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
@@ -240,6 +249,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Na3dSpanningTheGridEqualsDenseAttention()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         const int t = 2, h = 3, w = 2, heads = 1, hd = 4;
         TensorShape shape = new TensorShape([1, t, h, w, heads, hd]);
@@ -285,6 +295,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [InlineData(4, 3, 5, 5, 16, 4, 6)]
     public void Rope3dMatchesTheManagedReference(int t, int h, int w, int heads, int headDim, int splitT, int splitH)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         TensorShape shape = new TensorShape([1, t, h, w, heads, headDim]);
         int splitW = headDim - splitT - splitH;
@@ -311,6 +322,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Rope3dWithIdentityTablesIsAnExactNoOp()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         const int t = 3, h = 4, w = 5, heads = 2, headDim = 64, splitT = 16, splitH = 24;
         int splitW = headDim - splitT - splitH;
@@ -350,6 +362,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Fact]
     public void Ltx25PixelShuffleMatchesTheReferenceAcrossAChunkBoundary()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
         const int t = 6, h = 3, w = 4, p1 = 2, p2 = 2, p3 = 1, outChannels = 5, dropped = 1;
         const int projChannels = p1 * p2 * p3 * outChannels;

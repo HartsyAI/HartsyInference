@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -14,6 +15,8 @@ namespace HartsyInference.Cuda.Tests;
 public sealed unsafe class Ltx2FusedAttentionGlueTests
 {
     private const float Eps = 1e-6f;
+    private readonly ITestOutputHelper _output;
+    public Ltx2FusedAttentionGlueTests(ITestOutputHelper output) => _output = output;
 
     private static string PtxDir()
     {
@@ -54,6 +57,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
     [InlineData(true, 4e-3f)]
     public void QkNormRopeHeadMajor_MatchesUnfusedSequence(bool f16, float tol)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         const int seq = 5, heads = 3, headDim = 8;
         int inner = heads * headDim;
@@ -80,6 +84,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
     [Fact]
     public void QkNormRopeHeadMajor_WithoutRope_IsNormThenHeadMajor()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int seq = 7, heads = 2, headDim = 4;
         int inner = heads * headDim;
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -102,6 +107,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
     [InlineData(true, 3e-3f)]
     public void HeadGate_MatchesSigmoidScaleExpandMultiply(bool f16, float tol)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         DType act = f16 ? DType.F16 : DType.F32;
         const int seq = 6, heads = 3, headDim = 4;
         int inner = heads * headDim;
@@ -131,6 +137,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
     [Fact]
     public void HeadGate_CudaMatchesManagedDefault()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int seq = 4, heads = 2, headDim = 6;
         int inner = heads * headDim;
         using Tensor xCpu = Random(new TensorShape(seq, inner), seed: 31);

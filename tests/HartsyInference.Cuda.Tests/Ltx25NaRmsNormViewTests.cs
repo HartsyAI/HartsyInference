@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
@@ -14,6 +15,9 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed unsafe class Ltx25NaRmsNormViewTests
 {
+    private readonly ITestOutputHelper _output;
+    public Ltx25NaRmsNormViewTests(ITestOutputHelper output) => _output = output;
+
     private static string PtxDir()
     {
         string dir = Path.Combine(AppContext.BaseDirectory, "Ptx");
@@ -55,6 +59,7 @@ public sealed unsafe class Ltx25NaRmsNormViewTests
     [Fact]
     public void RmsNormDirectlyOnTheRank6TensorMatchesCpu()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int t = 2, h = 3, w = 2, heads = 2, headDim = 8;
         TensorShape headShape = new TensorShape([1, t, h, w, heads, headDim]);
 
@@ -78,6 +83,7 @@ public sealed unsafe class Ltx25NaRmsNormViewTests
     [Fact]
     public void InPlaceOpThroughAReshapeViewStillDoesNotReachTheParentOnCuda()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int t = 2, h = 3, w = 2, heads = 2, headDim = 8;
         TensorShape headShape = new TensorShape([1, t, h, w, heads, headDim]);
         long rows = (long)t * h * w * heads;
