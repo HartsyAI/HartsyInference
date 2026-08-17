@@ -125,8 +125,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
                     NumInferenceSteps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
                     GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
+                    TwoStage = LtxVideo2Config.V25Distilled.TwoStage,
                 };
-                Logs.Info("[LtxVideo2Recipe] Distilled variant selected by model id — 8-step baked schedule, guidance 1.");
+                Logs.Info("[LtxVideo2Recipe] Distilled variant selected — 8-step baked schedule, guidance 1, "
+                    + "two-stage default-on (HARTSY_LTX2_TWO_STAGE=0 for single-pass).");
             }
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
             transformer.LoadWeights(conv.Transformer);
@@ -289,10 +291,11 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow
-    /// is off. Off by default: <c>HARTSY_LTX2_TWO_STAGE=1</c> (or <see cref="LtxVideo2Config.TwoStage"/>) turns it
-    /// on, and only for the distilled family — the dev checkpoints ship no two-stage reference configuration, so
-    /// enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped
-    /// name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
+    /// is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries
+    /// <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in
+    /// probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration,
+    /// so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped
+    /// name is resolved under <c>Models/latent_upscale_models/</c> (auto-downloaded when absent).</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!EnvSwitch.IsEnabled("HARTSY_LTX2_TWO_STAGE", defaultOn: config.TwoStage))

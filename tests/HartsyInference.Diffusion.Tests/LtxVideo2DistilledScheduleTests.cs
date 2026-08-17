@@ -17,13 +17,16 @@ public sealed class LtxVideo2DistilledScheduleTests
 
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++) Assert.Equal(expected[i], actual[i], 6);
+
+        // The shipped 2.5 templates are all two-stage; the preset must carry the flow, not just the sigmas.
+        Assert.True(LtxVideo2Config.V25Distilled.TwoStage);
     }
 
     [Fact]
     public void DistilledDiffersFromDevOnlyInSampling()
     {
         // The two checkpoints are architecturally indistinguishable, so the presets must not diverge on anything
-        // the weights would have to agree with — only on the schedule and guidance.
+        // the weights would have to agree with — only on the sampling contract (schedule, guidance, two-stage).
         LtxVideo2Config dev = LtxVideo2Config.V25;
         LtxVideo2Config distilled = LtxVideo2Config.V25Distilled;
 
@@ -36,6 +39,7 @@ public sealed class LtxVideo2DistilledScheduleTests
         Assert.Equal(dev.CrossAttentionDim, distilled.CrossAttentionDim);
         Assert.Equal(dev.AudioCrossAttentionDim, distilled.AudioCrossAttentionDim);
         Assert.Null(dev.FixedSigmas);
+        Assert.False(dev.TwoStage);
     }
 
     [Fact]

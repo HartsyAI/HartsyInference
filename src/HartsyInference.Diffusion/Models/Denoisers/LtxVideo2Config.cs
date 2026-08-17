@@ -105,9 +105,10 @@ public sealed record LtxVideo2Config
     public float[]? FixedSigmas { get; init; }
 
     /// <summary>Run the shipped LTX-2.5 two-stage flow (half-resolution denoise → learned x2 latent upsample →
-    /// 3-step refine) instead of a single full-resolution pass. Needs the latent upsampler side file, and is
-    /// verified only for the DISTILLED family — the dev checkpoints ship no two-stage reference configuration.
-    /// Env override: <c>HARTSY_LTX2_TWO_STAGE</c>.</summary>
+    /// 3-step refine) instead of a single full-resolution pass. Default ON for <see cref="V25Distilled"/> (it is
+    /// the shipped template flow); needs the latent upsampler side file (auto-downloaded), and is verified only
+    /// for the DISTILLED family — the dev checkpoints ship no two-stage reference configuration.
+    /// <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch (or =1 the opt-in where it is off).</summary>
     public bool TwoStage { get; init; }
 
     /// <summary>Use ancestral (eta=1) Euler instead of plain Euler: the deterministic step lands on
@@ -160,11 +161,15 @@ public sealed record LtxVideo2Config
     public static LtxVideo2Config V25 => new() { FfBias = false, UseKeyframesAbsPosEmbedding = true };
 
     /// <summary>LTX-2.5 distilled. Architecturally indistinguishable from <see cref="V25"/> — the checkpoints share
-    /// a model version, config and tensor keys — so this is selected by the caller's intent, never by inspection.</summary>
+    /// a model version, config and tensor keys — so this is selected by the caller's intent (the distilled id, or
+    /// a "distilled" filename routed by <c>LtxVideo2Recipe.RemapFamilyId</c>). Two-stage ON: the shipped 2.5
+    /// templates are all two-stage, so the 8-step base + x2 upsample + 3-step refine IS the normal distilled
+    /// generation (<c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch).</summary>
     public static LtxVideo2Config V25Distilled => V25 with
     {
         FixedSigmas = Ltx25DistilledSigmas,
         NumInferenceSteps = 8,
         GuidanceScale = 1.0f,
+        TwoStage = true,
     };
 }

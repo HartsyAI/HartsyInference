@@ -157,8 +157,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             int distilledSteps = fixedSigmas.Length - 1;
             if (steps != distilledSteps)
             {
+                string refineNote = TwoStage && LatentUpsampler is not null
+                    ? $" (plus the fixed 3-step refine stage — {distilledSteps}+3 total)" : "";
                 Logs.Warning($"LTX-2 distilled: ignoring the requested {steps} steps — this checkpoint was distilled " +
-                    $"onto a fixed {distilledSteps}-step schedule, and any other count is a different schedule.");
+                    $"onto a fixed {distilledSteps}-step schedule{refineNote}, and any other count is a different schedule.");
                 steps = distilledSteps;
             }
         }
