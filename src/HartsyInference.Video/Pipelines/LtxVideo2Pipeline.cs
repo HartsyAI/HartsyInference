@@ -634,7 +634,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
             Backend.Sync();
             sw.Stop();
-            Logs.Info($"[ltx2-phase] {stageTag}step {stepBase + k + 1}/{stepTotal}: {sw.ElapsedMilliseconds} ms (paired CFG)");
+            Logs.Info($"[ltx2-phase] {stageTag}step {stepBase + k + 1}/{stepTotal}: {sw.ElapsedMilliseconds} ms "
+                + (paired ? "(paired CFG)" : "(single branch)"));
             // The preview drain reads the latent on host, which EVICTS it from the GPU — incompatible with the step
             // graph, whose capture bakes the resident latent's device address (a re-upload would move it). Skip the
             // preview while the graph is active (correctness > the optional live thumbnail).

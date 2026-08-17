@@ -4,9 +4,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Music;
 
 /// <summary>Device-resident layout helpers for the LTX-2 audio decode tail (audio VAE + vocoder), built purely
-/// from existing <see cref="IBackend"/> ops so the CPU and CUDA backends share one code path. These replace the
-/// host <c>DataPointer</c> pad/crop/transpose loops that forced a full-pipeline D2H drain between every GPU conv
-/// (the round-1 video-VAE lesson applied to the audio half).</summary>
+/// from existing <see cref="IBackend"/> ops so the CPU and CUDA backends share one code path — a host
+/// <c>DataPointer</c> loop here would force a full-pipeline D2H drain between every GPU conv.</summary>
 public static class LtxAudioDeviceOps
 {
     /// <summary>Edge-replicate ("replicate") padding of <c>[1, C, T]</c> along time. Runs as transpose →

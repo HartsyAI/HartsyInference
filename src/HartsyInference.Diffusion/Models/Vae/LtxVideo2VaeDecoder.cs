@@ -20,7 +20,8 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// loader strips): <c>decoder.conv_in.conv.*</c>, <c>decoder.mid_block.resnets.{j}.*</c>,
 /// <c>decoder.up_blocks.{i}.upsamplers.0.conv.conv.*</c>, <c>decoder.up_blocks.{i}.resnets.{j}.*</c>,
 /// <c>decoder.conv_out.conv.*</c>. All resnet/out RMS norms are parameter-free (no affine keys), eps 1e-8.
-/// <c>decoder_causal=false</c>. Numerics vs the real checkpoint are validation-pending.</para></summary>
+/// <c>decoder_causal=false</c>. Quality parity vs ComfyUI reached 2026-08-15 via the layer-diff harness
+/// (<c>benchmarks/ltx2_conv_layerdiff</c>; see MODEL_STATUS_VIDEO.md's LTX-2.5 row).</para></summary>
 public sealed unsafe class LtxVideo2VaeDecoder
 {
     private sealed class UpStage
@@ -136,7 +137,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 (int T, int H, int W) stride = StrideFromProduct(strideProd);
                 stage.Upsampler = new LtxVaeUpsampler3d(convIn, stride, upscaleFactor: upscale,
                     // Bounds-guarded: the up-stage loop is open-ended (it stops when the weights run out) and
-                    // can exceed the per-block config arrays, which is why this field was never wired in before.
+                    // can exceed the per-block config arrays.
                     residual: i < _residualRev.Length && _residualRev[i],
                     isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
@@ -201,13 +202,13 @@ public sealed unsafe class LtxVideo2VaeDecoder
         if (_convOut is not null) foreach (Tensor t in _convOut.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Decodes a latent <c>[1, latentChannels, T_lat, H, W]</c> to RGB <c>[1, 3, (T_lat−1)·8+1,
-    /// H·32, W·32]</c> in [-1,1]. Applies per-channel latent un-normalization (<c>z = latent·std + mean</c>)
-    /// first when stats are present (diffusers <c>_denormalize_latents</c>, scaling_factor 1.0).</summary>
     /// <summary>Activation width the decode runs at. The caller sizes its VRAM reserve off this: the peak is a
     /// fixed number of full-output-grid tensors, so it scales linearly with the element width.</summary>
     public DType ComputeDtype => _computeDtype;
 
+    /// <summary>Decodes a latent <c>[1, latentChannels, T_lat, H, W]</c> to RGB <c>[1, 3, (T_lat−1)·8+1,
+    /// H·32, W·32]</c> in [-1,1]. Applies per-channel latent un-normalization (<c>z = latent·std + mean</c>)
+    /// first when stats are present (diffusers <c>_denormalize_latents</c>, scaling_factor 1.0).</summary>
     public Tensor Decode(IBackend backend, Tensor latent)
     {
         if ((int)latent.Shape[1] != _latentChannels)

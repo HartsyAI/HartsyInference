@@ -140,9 +140,8 @@ public sealed unsafe class CausalConv3d
         // matching the per-frame skip; replicate-pad frames contribute exactly like F.pad(mode="replicate").
         if (batch == 1 && !DisableBatchedPath)
         {
-            // Both spatial pad modes are folded into BuildPaddedFrames' single pass — reflect used to run as a
-            // host scalar loop (ReflectPadSpatial5D) ahead of this, which D2H-drained the whole activation and
-            // re-uploaded it, and cost ~28 s of the LTX-2.5 VAE decode's 38 s at 768x512x97f.
+            // Both spatial pad modes are folded into BuildPaddedFrames' single pass — a separate host pad here
+            // would D2H-drain the whole activation and re-upload it between every conv.
             bool reflectPre = _spatialReflectPad && (_padH > 0 || _padW > 0);
             bool spatialPre = !reflectPre && _spatialReplicatePad && (_padH > 0 || _padW > 0);
             bool prePad = reflectPre || spatialPre;
@@ -193,10 +192,10 @@ public sealed unsafe class CausalConv3d
                     _spatialReplicatePad ? 0 : _padH, _spatialReplicatePad ? 0 : _padW);
                 frame.Dispose();
                 if (acc is null) { acc = conv; }
-                else { backend.Add(acc, acc, conv); conv.Dispose(); }   // accumulate taps on-GPU (was CPU AddInPlace → D2H per tap)
+                else { backend.Add(acc, acc, conv); conv.Dispose(); }   // taps must accumulate on-GPU: a host add is a D2H per tap
             }
 
-            // Write the accumulated (+bias) frame into output[:, :, to], on-GPU (was a host pointer loop).
+            // Write the accumulated (+bias) frame into output[:, :, to] on-GPU; a host write goes stale vs the device copy.
             if (acc is null)
             {
                 acc = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);

@@ -126,7 +126,7 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
             _ffW0, _ffB0, _ffW2, _ffB2, _aFfW0, _aFfB0, _aFfW2, _aFfB2 })
             if (t is not null) yield return t;
         // HOST-built, so without this they are neither a preloaded weight nor any device op's output: the norms
-        // read them 8x per block per CFG branch and each read took a cache miss + re-upload (595 H2D/step).
+        // read them 8x per block per CFG branch, and an unlisted tensor is a cache miss + re-upload on every read.
         yield return _onesV;
         yield return _onesA;
     }
@@ -207,8 +207,8 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
     }
 
     /// <summary>AdaLN params on-device: rows <c>[row, row+n)</c> of <paramref name="table"/> plus <paramref name="temb"/>
-    /// (<c>[n·dim]</c>), sliced into n <c>[dim]</c> vectors. Was a host <c>DataPointer</c> loop — a D2H drain of temb +
-    /// per-vector H2D re-uploads, ×48 blocks ×2 CFG per step (the Krea2/Chroma host-glue pathology).</summary>
+    /// (<c>[n·dim]</c>), sliced into n <c>[dim]</c> vectors. Must stay on-device — a host loop here is a D2H drain of
+    /// temb + per-vector H2D re-uploads on every block of every step (the Krea2/Chroma host-glue pathology).</summary>
     private static Tensor[] Modulation(IBackend backend, Tensor table, int row, Tensor temb, int n, int dim)
     {
         // Always slice the table rows first: elementwise Add sizes its launch from the FIRST operand, so the operand

@@ -4,10 +4,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Routes an LTX-2.3 (Lightricks, 22B audiovisual) checkpoint into the per-component weight dictionaries the
-/// model code consumes: the DiT (<c>LtxVideo2Transformer</c>), the per-modality text connectors
-/// (<c>LtxVideo2TextConnectors</c>), the video VAE (<c>LtxVideo2VaeDecoder</c>), the audio VAE
-/// (<c>LtxAudioVaeDecoder</c>), the vocoder (<c>LtxAudioVocoder</c>), and — when bundled — the Gemma-3-12B text tower.
+/// <summary>Routes an LTX-2.x (Lightricks, 22B audiovisual; 2.3 and 2.5) checkpoint into the per-component weight
+/// dictionaries the model code consumes: the DiT (<c>LtxVideo2Transformer</c>), the per-modality text connectors
+/// (<c>LtxVideo2TextConnectors</c>), the video VAEs (<c>LtxVideo2VaeDecoder</c> conv / <c>LtxVideo25DiffusionDecoder</c>),
+/// the audio VAE (<c>LtxAudioVaeDecoder</c>), the vocoder (<c>LtxAudioVocoder</c>), and — when bundled — the text
+/// tower (Gemma-3-12B on 2.3, Gemma-4-12B on 2.5).
 ///
 /// <para>The single-file Lightricks checkpoint (<c>ltx-2.3-22b-dev.safetensors</c>) carries the DiT and connectors
 /// under <c>model.diffusion_model.*</c>, the video VAE under <c>vae.*</c>, the audio VAE under <c>audio_vae.*</c>, the
@@ -16,10 +17,10 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// consumer looks the key up with its prefix intact (the connectors read <c>model.diffusion_model.*_embeddings_connector.*</c>
 /// and the vocoder reads <c>vocoder.vocoder.*</c> / <c>vocoder.bwe_generator.*</c> / <c>vocoder.mel_stft.*</c>).</para>
 ///
-/// <para><b>Status:</b> structural — routing matches the model code's <c>LoadWeights</c> contracts as written; the
-/// exact original-naming rename table for the DiT sub-modules is validation-pending against the real checkpoint
-/// header (the whole LTX-2 path is numerics-unverified). Already-diffusers-named inputs (folder shards) pass through
-/// the prefix routing unchanged.</para></summary>
+/// <para><b>Status:</b> the rename table is verified against the real checkpoint header (see the table comment
+/// below), and the conv-VAE + audio paths have real-weight parity vs ComfyUI; DiT end-to-end numeric parity is
+/// still tracked in PARITY_VERIFICATION.md. Already-diffusers-named inputs (folder shards) pass through the
+/// prefix routing unchanged.</para></summary>
 public sealed class LtxVideo2CheckpointConverter
 {
     private const string DiffusionPrefix = "model.diffusion_model.";

@@ -7,9 +7,7 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// (<see cref="LlamaStyleEncoder"/>); LTX-2.5 changed family to a Gemma 4 12B fine-tune
 /// (<see cref="Gemma4TextEncoder"/>) whose per-layer geometry cannot be expressed as a
 /// <see cref="LlamaStyleEncoderConfig"/> preset.</summary>
-/// <remarks>Both towers already exposed these three members with identical signatures, so this interface only
-/// names the contract the pipeline was relying on structurally — it does not reshape either implementation.
-/// The pipeline's <c>3840</c> caption channels and <c>49</c> harvested states hold for both families.</remarks>
+/// <remarks>The pipeline's <c>3840</c> caption channels and <c>49</c> harvested states hold for both families.</remarks>
 public interface ILtx2TextTower : IDisposable
 {
     /// <summary>Transformer block count; <see cref="EncodeMultiLayer"/> accepts state indices <c>0 … NumLayers</c>.</summary>

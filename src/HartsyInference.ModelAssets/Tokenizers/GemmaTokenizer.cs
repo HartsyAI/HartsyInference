@@ -55,8 +55,6 @@ public sealed class GemmaTokenizer : IDisposable, ILtx2PromptTokenizer
     /// <summary>Encodes a prompt to Gemma token ids (BOS prepended via the SentencePiece config), truncated
     /// to <see cref="DefaultMaxLength"/>/the ctor max. No padding or EOS — the pipeline assembles the
     /// conditioning sequence (Gemma-family text encoders condition on BOS + content).</summary>
-    /// <summary><see cref="Encode"/> already returns raw truncated ids with no padding, which is exactly the
-    /// contract; the pipeline pads.</summary>
     public int[] EncodeForConditioning(string text) => Encode(text);
 
     /// <summary>0 — LTX-2.3 conditions at whatever register multiple the prompt lands on, and that path is verified.</summary>

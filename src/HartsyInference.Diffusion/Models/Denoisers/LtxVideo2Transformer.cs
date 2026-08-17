@@ -5,7 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>LTX-2.3 dual-stream audio+video DiT (<c>LTX2VideoTransformer3DModel</c>), ported from the vendored
+/// <summary>LTX-2.x dual-stream audio+video DiT (<c>LTX2VideoTransformer3DModel</c>, 2.3 + 2.5), ported from the vendored
 /// diffusers <c>transformer_ltx2.py</c>. Single sample (B=1) over packed VAE-latent tokens: video <c>[Sv, 128]</c>
 /// and audio <c>[Sa, 128]</c>. Flow: <c>proj_in</c>/<c>audio_proj_in</c> patchify projections → 48
 /// <see cref="LtxVideo2Block"/>s (driven by a per-step <see cref="LtxVideo2BlockContext"/>) → per-stream AdaLN-Single
@@ -310,7 +310,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
 
         // RoPE tables depend only on (grid, fps, audioFrames) — fixed for a whole generation — so build them once
-        // and reuse across every step/CFG forward (was 3 host builds + uploads ×2 forwards ×steps per gen).
+        // and reuse across every step/CFG forward.
         (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
         if (_ropeKey != ropeKey)
         {
@@ -641,7 +641,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
 
     /// <summary>AdaLN-Single output, fully device-resident: <c>shift/scale = scale_shift_table + embedded</c> ([dim],
     /// broadcast over the sequence; table rows are [shift; scale] — keep that order), LayerNorm-no-affine,
-    /// <c>·(1+scale)+shift</c>, then <c>proj_out</c>. Was a host loop draining the full hidden state, 2×/forward.</summary>
+    /// <c>·(1+scale)+shift</c>, then <c>proj_out</c>. Must stay device-resident — a host loop drains the full hidden
+    /// state per forward.</summary>
     private static Tensor OutputLayer(IBackend backend, Tensor hidden, Tensor embedded, Tensor scaleShift,
         Tensor projW, Tensor? projB, int s, int dim, int outChannels)
     {
@@ -689,7 +690,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         // PIN them on the device. These are built on the HOST, so they are neither a preloaded weight nor any
         // device op's output — every attention that consumes one takes a cache miss and re-uploads it, then
         // frees it again. The big video tables are large enough for auto-promote to rescue; the audio pair
-        // ([Sa, audioInner/2], ~0.4 MB) is not, and it was being re-uploaded 1536 times per step — ~620 MB of
+        // ([Sa, audioInner/2], ~0.4 MB) is not, so unpinned it re-uploads on every attention of every step —
         // pure PCIe traffic for tables that never change within a generation.
         backend.PreloadWeights(EnumerateRopeTables());
     }
@@ -776,8 +777,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             backend.Linear(modFlat, sil, _linW!, _linB); sil.Dispose();
 
             // Returned as the [1, n·dim]/[1, dim] Linear outputs directly — every consumer is an element-count
-            // device op. The old host Buffer.MemoryCopy repack was a D2H drain of both tensors per modulator
-            // (8 modulators × 2 CFG forwards per step — the Kandinsky temb stream-drain pathology).
+            // device op, so a host repack here would D2H-drain both tensors per modulator per forward (the
+            // Kandinsky temb stream-drain pathology).
             return (modFlat, embedded2d);
         }
     }

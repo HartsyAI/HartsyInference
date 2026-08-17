@@ -271,8 +271,8 @@ public sealed unsafe class LtxVideo2Rope
         int seq = (int)x.Shape[0];
         if ((int)x.Shape[1] != _dim)
             throw new ArgumentException($"x dim {x.Shape[1]} != rope dim {_dim}.", nameof(x));
-        // Device-resident RoPE. The host DataPointer loop D2H'd + then re-uploaded the [S,dim] Q/K on every attention;
-        // on the block-swap-bound LTX-2.3 22B those re-uploads fought the 19 GB/forward weight stream on PCIe.
+        // Device-resident RoPE — a host loop here D2H's + re-uploads the [S,dim] Q/K on every attention, and on a
+        // block-swap-bound checkpoint those re-uploads fight the weight stream for PCIe.
         //  - Interleaved: adjacent-pair (2j,2j+1) over the full dim, duplicated-pair cos[2j]==cos[2j+1] → the shared
         //    wan_rope_interleaved kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
         //  - Split: rotate-half within each head, per-head cos[S,dim/2] with one angle per pair → the dedicated

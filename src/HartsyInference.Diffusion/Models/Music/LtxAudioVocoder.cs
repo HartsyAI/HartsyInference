@@ -16,8 +16,9 @@ namespace HartsyInference.Diffusion.Models.Music;
 /// HiFi-GAN generator (<c>vocoder.*</c>) with a final tanh; no BWE/STFT/resampler.</para>
 /// <para>The mel input is <c>[1, audioChannels, frames, melBins]</c> (audioChannels·melBins = the generator's
 /// flattened input channels). The STFT bases (<c>forward_basis</c>) and mel filterbank (<c>mel_basis</c>) are loaded
-/// from the checkpoint. Batch-1; stereo is carried as audioChannels = 2. Numerics validation-pending (the anti-alias
-/// lowpass filters are recomputed rather than loaded; no reference activations captured yet).</para></remarks>
+/// from the checkpoint. Batch-1; stereo is carried as audioChannels = 2. The BWE path (the LTX-2.5 checkpoint) is
+/// proven correct end-to-end vs ComfyUI (waveform relL2 9e-5, <c>LtxAudioDecodeRealWeightParityTests</c>); the
+/// single-stage 24 kHz variant (LTX-2 19B) has no reference capture yet.</para></remarks>
 public sealed unsafe class LtxAudioVocoder : IDisposable
 {
     // mel_stft config (BWE only).
@@ -194,7 +195,8 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
     }
 
     /// <summary><c>clamp(residual + skip, -1, 1)</c> then crop to <paramref name="outputSamples"/>, all on device.
-    /// The two inputs are aligned to their shared length defensively (exact-length parity is validation-pending).</summary>
+    /// The two inputs are aligned to their shared length defensively — the resampler and BWE paths can land a few
+    /// samples apart at some clip lengths.</summary>
     private static Tensor AddClampCrop(IBackend backend, Tensor residual, Tensor skip, int outputSamples)
     {
         int c = (int)residual.Shape[1];

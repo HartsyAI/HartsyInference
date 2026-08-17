@@ -98,9 +98,9 @@ public sealed unsafe class LtxVideo2Attention
             backend.LinearMulti(kvInput, [new LinearOp(k, _kW!, _kB), new(v, _vW!, _vB)]);
         }
 
-        // Full-width QK-RMSNorm (across heads) -> optional RoPE, fused into ONE pass per tensor. The unfused
-        // sequence read and wrote each [S, inner] tensor three times (RmsNorm, then in-place rope, then
-        // Permute0213); at 4992 tokens x 4096 inner that was the single largest non-GEMM cost in the step.
+        // Full-width QK-RMSNorm (across heads) -> optional RoPE, fused into ONE pass per tensor — the unfused
+        // sequence reads and writes each [S, inner] tensor three times (RmsNorm, in-place rope, Permute0213),
+        // which is bandwidth-bound at DiT shapes.
         // SDPA requires output/K/V to share Q's dtype, and a cross-attention K/V stream can arrive F32 (F32 text
         // connectors) against an F16 query — reconcile onto Q's dtype here rather than at each call site.
         // TOKEN-MAJOR when the backend serves it: Q/K/V stay in the [S, inner] layout the Linears emit and
@@ -195,8 +195,8 @@ public sealed unsafe class LtxVideo2Attention
         return o;
     }
 
-    // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer
-    // loop = a D2H sync + host copy + H2D per call, ×3/attention — the same host-excursion that dominated Wan/Flux).
+    // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 — a host loop here is a
+    // D2H sync + host copy + H2D on every call (the same host-excursion that dominated Wan/Flux).
     private Tensor ToBhsd(IBackend backend, Tensor x, int s, DType act)
     {
         // Permute0213 is a pure address shuffle with no dtype guard, so it cannot convert: cast first when the

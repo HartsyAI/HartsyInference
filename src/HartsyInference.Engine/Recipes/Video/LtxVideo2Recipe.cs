@@ -138,9 +138,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // it replaces (high-frequency energy 2.06 vs 3.10 on the same latent), which is what the model card
             // claims for it. Every pass now runs over halo-padded temporal chunks sized off free VRAM
             // (LtxVideo25TemporalChunks), exact rather than blended, so the geometry ceiling is gone and
-            // 768x512x97f decodes. It stays opt-in on cost, not correctness: currently ~40x the conv decoder at
-            // matched geometry (12.9 s vs 2.878 s at 768x512x97f, measured 2026-08-14 after the decode
-            // work; it was 115.5 s before that).
+            // 768x512x97f decodes. It stays opt-in on cost, not correctness: ~40x the conv decoder at matched
+            // geometry (12.9 s vs 2.878 s at 768x512x97f).
             bool wantDiffusionVae = EnvSwitch.IsEnabled("HARTSY_LTX2_DIFFUSION_VAE", defaultOn: false);
             bool haveConvDecoder = conv.Vae.ContainsKey("decoder.conv_in.conv.weight");
             LtxVideo25DiffusionDecoder? diffusionVae = null;
@@ -195,7 +194,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             {
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{context.CheckpointPath}' has no usable video decoder: no conv decoder keys "
-                    + "and no diffusion decoder (or it was disabled via HARTSY_LTX2_CONV_VAE).");
+                    + "and no diffusion decoder (or HARTSY_LTX2_DIFFUSION_VAE selected one that is not in the checkpoint).");
             }
 
             LtxAudioVaeDecoder? audioVae = null;
@@ -426,8 +425,6 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         return result;
     }
 
-    /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower —
-    /// Gemma ships no embedded tokenizer in the engine.</summary>
     /// <summary>Builds the Gemma 4 tokenizer from the <c>tokenizer_json</c> U8 tensor LTX-2.5 embeds in its text
     /// encoder — a ~32 MB HuggingFace <c>tokenizer.json</c> with no side file anywhere to fall back to.</summary>
     private static unsafe Gemma4Tokenizer ReadGemma4Tokenizer(Tensor tokenizerJson)
@@ -441,6 +438,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             new ReadOnlySpan<byte>(tokenizerJson.DataPointer, (int)tokenizerJson.ElementCount));
     }
 
+    /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower —
+    /// Gemma ships no embedded tokenizer in the engine.</summary>
     private static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
     {
         List<string> dirs = new List<string>();

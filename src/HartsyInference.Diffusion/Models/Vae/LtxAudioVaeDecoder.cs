@@ -21,7 +21,8 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// Keys (under the <c>audio_vae.</c> prefix the loader strips): <c>decoder.conv_in.conv.*</c>,
 /// <c>decoder.mid.block_{1,2}.*</c>, <c>decoder.up.{i}.block.{j}.*</c> (+ <c>nin_shortcut</c> on channel change),
 /// <c>decoder.up.{i}.upsample.conv.conv.*</c>, <c>decoder.conv_out.conv.*</c>. Verified vs the LTX-2.3 header.
-/// Numerics vs the real checkpoint are validation-pending.</para></summary>
+/// Proven correct vs ComfyUI's AudioVAE on the real 2.5 checkpoint (log-mel relL2 9e-5; see
+/// <c>LtxAudioDecodeRealWeightParityTests</c> and MODEL_STATUS_VIDEO.md).</para></summary>
 public sealed class LtxAudioVaeDecoder
 {
     private const float PixelNormEps = 1e-6f;

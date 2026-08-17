@@ -2,7 +2,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Configuration for LTX-2.3 (Lightricks, 22B) — a dual-stream audio+video DiT. Verified against the
+/// <summary>Configuration for LTX-2.x (Lightricks, 22B; 2.0/2.3/2.5) — a dual-stream audio+video DiT. Verified against the
 /// vendored diffusers <c>LTX2VideoTransformer3DModel</c> and the checkpoint header (original Lightricks key names
 /// under <c>model.diffusion_model.*</c>: <c>patchify_proj</c>, <c>adaln_single</c>, <c>av_ca_*</c>, the per-modality
 /// <c>{video,audio}_embeddings_connector</c>). Two interleaved streams — video (inner 4096 = 32×128) and audio

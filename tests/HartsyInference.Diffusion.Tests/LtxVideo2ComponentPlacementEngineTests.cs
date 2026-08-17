@@ -19,8 +19,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// ComponentPlacementEngineTests class exists"). Placing both encoders on the second GPU (DiT + both VAEs stay on
 /// the first) must reproduce the single-GPU baseline video AND audio. Needs the bundled/side-model-completed
 /// LTX-2.3 checkpoint (~22 GB transformer split + already-cached video/audio VAE + text-projection side models) —
-/// SKIPS cleanly (not a failure) when that's not on disk, exactly like the generation test this mirrors
-/// (<c>LtxVideo2GenerationTests</c>).</summary>
+/// SKIPS cleanly (not a failure) when that's not on disk.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class LtxVideo2ComponentPlacementEngineTests
