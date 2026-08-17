@@ -123,7 +123,7 @@ public sealed unsafe class LtxVideo25ReferenceLayerDiffTests
         HashSet<string> seen = [];
         if (attnDir is not null && Directory.Exists(attnDir))
         {
-            LtxVideo25NeighborhoodAttention3d.Tap = (name, t) =>
+            decoder.InnerTap = (name, t) =>
             {
                 if (!seen.Add(name)) return;   // first block only
                 Mirror(name, t);
@@ -133,7 +133,7 @@ public sealed unsafe class LtxVideo25ReferenceLayerDiffTests
         }
 
         using Tensor pixels = decoder.Decode(backend, latent, noise);
-        LtxVideo25NeighborhoodAttention3d.Tap = null;
+        decoder.InnerTap = null;
 
         string table = string.Join("\n", report.Select(r =>
             $"  {r.Name,-20} relL2 {(double.IsNaN(r.RelL2) ? "SHAPE-MISMATCH" : r.RelL2.ToString("E3")),-14} " +

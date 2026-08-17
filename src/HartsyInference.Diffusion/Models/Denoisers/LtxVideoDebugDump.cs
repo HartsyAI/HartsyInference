@@ -2,7 +2,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Optional layer-by-layer debug dump for LTX-Video. When <c>LTX_DEBUG_DIR</c> is set, writes each named tensor as raw little-endian F32 to <c>{dir}/layers/{safe_name}.bin</c>; zero-cost otherwise. Mirrors <see cref="LanceDebugDump"/> — for first-run Python layer-diff validation.</summary>
+/// <summary>Optional layer-by-layer debug dump for LTX-Video. When <c>LTX_DEBUG_DIR</c> is set, writes each named
+/// tensor as raw little-endian F32 to <c>{dir}/layers/{safe_name}.bin</c>; zero-cost otherwise. Mirrors <see
+/// cref="LanceDebugDump"/> — for first-run Python layer-diff validation.</summary>
 internal static unsafe class LtxVideoDebugDump
 {
     private static readonly string? _dumpDir = ResolveDir();

@@ -20,6 +20,16 @@ internal sealed class LtxVideo25NaBlock
     private readonly bool _isDiffusion;
     private readonly LtxVideo25NeighborhoodAttention3d _attention;
 
+    /// <summary>Per-instance bisect tap (attention internals + block stages); set via
+    /// <see cref="SetInnerTap"/> so the nested attention's tap stays in lockstep.</summary>
+    internal Action<string, Tensor>? Tap { get; private set; }
+
+    internal void SetInnerTap(Action<string, Tensor>? tap)
+    {
+        Tap = tap;
+        _attention.Tap = tap;
+    }
+
     private Tensor? _norm1Weight, _norm2Weight;
     private Tensor? _gateWeight, _upWeight, _downWeight;
     private Tensor? _contextProjWeight, _contextProjBias, _scaleShiftTable;
@@ -80,7 +90,7 @@ internal sealed class LtxVideo25NaBlock
         try
         {
             AttentionPass(backend, x, msa, t, h, w, plane, chunkBytes);
-            LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_resid", x);
+            Tap?.Invoke("blk_resid", x);
             MlpPass(backend, x, mlp, t, plane, chunkBytes);
         }
         finally { msa.Dispose(); mlp.Dispose(); }
@@ -206,9 +216,9 @@ internal sealed class LtxVideo25NaBlock
             if (_isDiffusion) backend.AffineBroadcastLastDim(normed, normed, modulation.ScalePlus1!, modulation.Shift!);
             // The layer-diff harness compares whole-tensor dumps, so these taps only carry a full tensor when the
             // geometry it runs at leaves the pass un-chunked.
-            if (count == frames) LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_norm2", normed);
+            if (count == frames) Tap?.Invoke("blk_norm2", normed);
             using Tensor mlp = Feedforward(backend, normed, rows);
-            if (count == frames) LtxVideo25NeighborhoodAttention3d.Tap?.Invoke("blk_mlp", mlp);
+            if (count == frames) Tap?.Invoke("blk_mlp", mlp);
             backend.Add(slice, slice, mlp);
             backend.ScatterRowsGeneric(x, slice, rowOffset);
         }

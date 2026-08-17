@@ -54,6 +54,20 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
     /// production, so this costs one null check per stage and nothing else.</summary>
     internal Action<string, Tensor>? Tap { get; set; }
 
+    /// <summary>Propagates the attention/block-internals bisect tap to every NA block of every stage — the
+    /// per-instance replacement for the old process-global static, which tapped all decoders on all threads.</summary>
+    internal Action<string, Tensor>? InnerTap
+    {
+        set
+        {
+            foreach (LtxVideo25NaBlock[] stage in _detStages)
+                foreach (LtxVideo25NaBlock block in stage)
+                    block.SetInnerTap(value);
+            foreach (LtxVideo25NaBlock block in _diffBlocks)
+                block.SetInnerTap(value);
+        }
+    }
+
     /// <summary>Checkpoint keys read by the last <see cref="LoadWeights"/>; the caller can diff this against the
     /// bucket to catch a key the decoder silently ignores.</summary>
     public IReadOnlyCollection<string> ConsumedKeys => _scope?.Consumed ?? (IReadOnlyCollection<string>)Array.Empty<string>();

@@ -3,7 +3,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
-/// <summary>LTX-Video VAE 3D ResNet block (<c>LTXVideoResnetBlock3d</c>), ported from diffusers. Channel-RMS norm (no affine, eps 1e-8) → optional AdaLN timestep conditioning → SiLU → causal conv → (×2) → residual. The decoder variant is **timestep-conditioned**: a per-block <c>scale_shift_table[4, C]</c> is added to a decode-timestep embedding to produce <c>(shift1, scale1, shift2, scale2)</c>. Reuses <see cref="CausalConv3d"/> (replicate-first-frame padding). Inject-noise (`per_channel_scale`) is omitted in v1 (small stochastic perturbation; documented).</summary>
+/// <summary>LTX-Video VAE 3D ResNet block (<c>LTXVideoResnetBlock3d</c>), ported from diffusers. Channel-RMS norm
+/// (no affine, eps 1e-8) → optional AdaLN timestep conditioning → SiLU → causal conv → (×2) → residual. The
+/// decoder variant is timestep-conditioned: a per-block <c>scale_shift_table[4, C]</c> is added to a
+/// decode-timestep embedding to produce <c>(shift1, scale1, shift2, scale2)</c>. Reuses
+/// <see cref="CausalConv3d"/> (replicate-first-frame padding). Inject-noise (<c>per_channel_scale</c>) is
+/// omitted in v1 (small stochastic perturbation; documented).</summary>
 public sealed unsafe class LtxVaeResnetBlock3d
 {
     private const float NormEps = 1e-8f;
@@ -116,7 +121,11 @@ public sealed unsafe class LtxVaeResnetBlock3d
         return (o[0], o[1], o[2], o[3]);
     }
 
-    /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation GPU-resident between the convs. The timestep-conditioned path stays on the host loop because <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would leave the device copy stale.</summary>
+    /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float
+    /// rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation
+    /// GPU-resident between the convs. The timestep-conditioned path stays on the host loop because
+    /// <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would
+    /// leave the device copy stale.</summary>
     private static Tensor ChannelRmsDevice(IBackend backend, Tensor x)
     {
         Tensor outT = new Tensor(x.Shape, x.DType);

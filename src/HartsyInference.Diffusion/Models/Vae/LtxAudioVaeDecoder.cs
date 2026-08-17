@@ -4,10 +4,10 @@ using HartsyInference.Diffusion.Models.Music;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
-/// <summary>LTX-2 audio VAE decoder (<c>AudioDecoder</c> in <c>AutoencoderKLLTX2Audio</c>), ported from diffusers.
-/// A 2-D causal-conv VAE that decodes the 8-channel audio latent <c>[B, 8, T_lat, mel_lat]</c> into a stereo
-/// log-mel spectrogram <c>[B, 2, T, mel]</c> (the vocoder then turns mel → waveform). The "image" axes are
-/// (height = time, width = mel); causality is on the TIME axis (<c>causality_axis="height"</c>).
+/// <summary>LTX-2 audio VAE decoder (<c>AudioDecoder</c> in <c>AutoencoderKLLTX2Audio</c>): decodes the 8-channel
+/// audio latent <c>[B, 8, T_lat, mel_lat]</c> into a stereo log-mel spectrogram the vocoder turns into a waveform.</summary>
+/// <remarks>A 2-D causal-conv VAE ported from diffusers. The "image" axes are (height = time, width = mel);
+/// causality is on the TIME axis (<c>causality_axis="height"</c>).
 ///
 /// <para>Structure: <c>conv_in</c>(8→512) → mid (2 resnets @512, no attention) → 3 up-levels iterated L2→L1→L0
 /// (L2: 3 resnets@512 + upsample; L1: 512→256 + upsample; L0: 256→128, no upsample) → parameter-free pixel
@@ -22,7 +22,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <c>decoder.mid.block_{1,2}.*</c>, <c>decoder.up.{i}.block.{j}.*</c> (+ <c>nin_shortcut</c> on channel change),
 /// <c>decoder.up.{i}.upsample.conv.conv.*</c>, <c>decoder.conv_out.conv.*</c>. Verified vs the LTX-2.3 header.
 /// Proven correct vs ComfyUI's AudioVAE on the real 2.5 checkpoint (log-mel relL2 9e-5; see
-/// <c>LtxAudioDecodeRealWeightParityTests</c> and MODEL_STATUS_VIDEO.md).</para></summary>
+/// <c>LtxAudioDecodeRealWeightParityTests</c> and MODEL_STATUS_VIDEO.md).</para></remarks>
 public sealed class LtxAudioVaeDecoder
 {
     private const float PixelNormEps = 1e-6f;

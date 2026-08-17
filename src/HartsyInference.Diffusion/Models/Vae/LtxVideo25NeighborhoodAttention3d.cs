@@ -9,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 internal sealed class LtxVideo25NeighborhoodAttention3d
 {
     /// <summary>Set by the ComfyUI layer-diff harness to tap this module's internals; null in production.</summary>
-    internal static Action<string, Tensor>? Tap;
+    internal Action<string, Tensor>? Tap { get; set; }
 
     private readonly int _dim;
     private readonly int _heads;
