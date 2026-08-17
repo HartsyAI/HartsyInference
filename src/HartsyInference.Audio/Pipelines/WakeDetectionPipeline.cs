@@ -102,13 +102,18 @@ public sealed class WakeDetectionPipeline : IDisposable
     }
 
     /// <summary>Feeds audio and reports any words that fired. <paramref name="detections"/> is cleared first.
-    /// Any number of samples may be pushed; work happens per whole 80 ms chunk.</summary>
-    public void Push(IBackend backend, ReadOnlySpan<float> samples, List<WakeDetection> detections)
+    /// Any number of samples may be pushed; work happens per whole 80 ms chunk.
+    ///
+    /// <para><paramref name="featureSink"/>, when supplied, receives a copy of every 16x96 feature window that
+    /// gets scored. Training uses it to build its dataset through this exact code path, so training features
+    /// cannot drift from inference features — a mismatch there produces a head that scores well while training
+    /// and misses in the room.</para></summary>
+    public void Push(IBackend backend, ReadOnlySpan<float> samples, List<WakeDetection> detections, List<float[]>? featureSink = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(detections);
         detections.Clear();
-        if (_heads.Count == 0) return;
+        if (_heads.Count == 0 && featureSink is null) return;
 
         while (!samples.IsEmpty)
         {
@@ -118,7 +123,7 @@ public sealed class WakeDetectionPipeline : IDisposable
             samples = samples[take..];
 
             if (_pendingCount < ChunkSamples) break;
-            ProcessChunk(backend, detections);
+            ProcessChunk(backend, detections, featureSink);
             _pendingCount = 0;
         }
     }
@@ -138,7 +143,7 @@ public sealed class WakeDetectionPipeline : IDisposable
         foreach (HeadState head in _heads) head.Reset();
     }
 
-    private void ProcessChunk(IBackend backend, List<WakeDetection> detections)
+    private void ProcessChunk(IBackend backend, List<WakeDetection> detections, List<float[]>? featureSink)
     {
         // Slide the 480-sample left context down and append the new chunk.
         if (_historyCount > LeftContextSamples)
@@ -174,6 +179,7 @@ public sealed class WakeDetectionPipeline : IDisposable
 
         CopyRingTail(_featureRing, FeatureRingFrames, SpeechEmbeddingModel.EmbeddingDim, _featureFramesWritten,
             WakeHead.ContextFrames, _featureWindow);
+        featureSink?.Add([.. _featureWindow]);
 
         foreach (HeadState head in _heads)
         {
