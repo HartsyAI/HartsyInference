@@ -6,6 +6,24 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Shared utility methods for DiT/MMDiT transformers. Consolidates helpers duplicated across FluxTransformer, Sd3Transformer, and future DiT models.</summary>
 public static unsafe class DiTUtils
 {
+    /// <summary>The checkpoint tensor widened to F32 when needed; the caller owns any cast copy for its model's
+    /// lifetime (small per-channel vectors — norms, tables, biases).</summary>
+    public static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
+    {
+        Tensor t = w[key];
+        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+    }
+
+    /// <summary>A [n] tensor of ones — the unit affine for RmsNorm calls where the checkpoint has no weight
+    /// (IBackend has LayerNormNoAffine but no no-affine RmsNorm overload, so callers synthesize one).</summary>
+    public static Tensor Ones(int n)
+    {
+        Tensor t = new Tensor(new TensorShape(n), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (int i = 0; i < n; i++) p[i] = 1f;
+        return t;
+    }
+
     /// <summary>Unparameterized LayerNorm (no learned scale/bias). Normalizes the last dimension to zero mean and unit variance.</summary>
     public static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim, float eps = 1e-6f)
     {

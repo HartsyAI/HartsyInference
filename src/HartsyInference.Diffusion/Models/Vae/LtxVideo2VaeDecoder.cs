@@ -102,7 +102,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
     /// block_out_channels/layers_per_block/etc. are ignored here in favour of the checkpoint's own shapes.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
+        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
@@ -166,7 +166,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _upStages = [.. stages];
         _temporalScaleInferred = [.. temporal];
 
-        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
+        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
     }
 
@@ -308,50 +308,31 @@ public sealed unsafe class LtxVideo2VaeDecoder
     /// <summary>Per-channel <c>x·std + mean</c> into a fresh F32 tensor (a plain copy when either stat is absent).
     /// Public because the LTX-2.5 diffusion decoder takes an already-un-normalized latent, so its caller has to do
     /// this step itself and must do it identically.</summary>
-    public static Tensor DenormalizeLatent(Tensor latent, float[]? latentsMean, float[]? latentsStd)
-    {
-        Tensor latF32 = latent.DType == DType.F32 ? latent : latent.CastTo(DType.F32);
-        if (latentsMean is null || latentsStd is null)
-        {
-            Tensor clone = new Tensor(latF32.Shape, DType.F32);
-            Buffer.MemoryCopy((void*)latF32.DataPointer, (void*)clone.DataPointer,
-                latF32.Shape.ElementCount * sizeof(float), latF32.Shape.ElementCount * sizeof(float));
-            if (!ReferenceEquals(latF32, latent)) latF32.Dispose();
-            return clone;
-        }
-        int b = (int)latF32.Shape[0], c = (int)latF32.Shape[1];
-        long spatial = latF32.Shape.ElementCount / ((long)b * c);
-        Tensor outT = new Tensor(latF32.Shape, DType.F32);
-        float* xp = (float*)latF32.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-            {
-                float std = latentsStd[ci], mean = latentsMean[ci];
-                long basePos = ((long)bi * c + ci) * spatial;
-                for (long s = 0; s < spatial; s++) op[basePos + s] = xp[basePos + s] * std + mean;
-            }
-        if (!ReferenceEquals(latF32, latent)) latF32.Dispose();
-        return outT;
-    }
+    public static Tensor DenormalizeLatent(Tensor latent, float[]? latentsMean, float[]? latentsStd) =>
+        PerChannelAffine(latent, latentsMean, latentsStd, denormalize: true);
 
     /// <summary>Per-channel <c>(x − mean)/std</c> into a fresh F32 tensor (a plain copy when either stat is absent) —
     /// the exact inverse of <see cref="DenormalizeLatent"/>. The latent upsampler consumes and produces UN-normalized
     /// latents, so its caller un-normalizes on the way in and comes back through here.</summary>
-    public static Tensor NormalizeLatent(Tensor latent, float[]? latentsMean, float[]? latentsStd)
+    public static Tensor NormalizeLatent(Tensor latent, float[]? latentsMean, float[]? latentsStd) =>
+        PerChannelAffine(latent, latentsMean, latentsStd, denormalize: false);
+
+    /// <summary>One body for both directions — the two 27-line copies had already been each other's only reviewer.
+    /// Always out-of-place: diffusers returns a new tensor, and an in-place variant silently double-denormalizes
+    /// any latent that is decoded twice (the LTX-1 footgun this replaced).</summary>
+    internal static Tensor PerChannelAffine(Tensor latent, float[]? latentsMean, float[]? latentsStd, bool denormalize)
     {
         Tensor latF32 = latent.DType == DType.F32 ? latent : latent.CastTo(DType.F32);
+        Tensor outT = new Tensor(latF32.Shape, DType.F32);
         if (latentsMean is null || latentsStd is null)
         {
-            Tensor clone = new Tensor(latF32.Shape, DType.F32);
-            Buffer.MemoryCopy((void*)latF32.DataPointer, (void*)clone.DataPointer,
+            Buffer.MemoryCopy((void*)latF32.DataPointer, (void*)outT.DataPointer,
                 latF32.Shape.ElementCount * sizeof(float), latF32.Shape.ElementCount * sizeof(float));
             if (!ReferenceEquals(latF32, latent)) latF32.Dispose();
-            return clone;
+            return outT;
         }
         int b = (int)latF32.Shape[0], c = (int)latF32.Shape[1];
         long spatial = latF32.Shape.ElementCount / ((long)b * c);
-        Tensor outT = new Tensor(latF32.Shape, DType.F32);
         float* xp = (float*)latF32.DataPointer;
         float* op = (float*)outT.DataPointer;
         for (int bi = 0; bi < b; bi++)
@@ -359,14 +340,19 @@ public sealed unsafe class LtxVideo2VaeDecoder
             {
                 float std = latentsStd[ci], mean = latentsMean[ci];
                 long basePos = ((long)bi * c + ci) * spatial;
-                for (long s = 0; s < spatial; s++) op[basePos + s] = (xp[basePos + s] - mean) / std;
+                if (denormalize)
+                {
+                    for (long s = 0; s < spatial; s++) op[basePos + s] = xp[basePos + s] * std + mean;
+                }
+                else
+                {
+                    for (long s = 0; s < spatial; s++) op[basePos + s] = (xp[basePos + s] - mean) / std;
+                }
             }
         if (!ReferenceEquals(latF32, latent)) latF32.Dispose();
         return outT;
     }
 
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : null;
 
     private static int[] Reverse(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Reverse(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }

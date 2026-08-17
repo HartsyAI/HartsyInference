@@ -39,7 +39,7 @@ public sealed unsafe class LtxVideoVaeDecoder
     private Tensor? _normOutScaleShift;          // [2, lastChannel]
     // Per-channel latent normalization stats (LTX trains the diffusion model on normalized latents:
     // (raw − mean)/std). The decoder must un-normalize before decode: raw = latent·std + mean. [latentChannels] each.
-    private Tensor? _latentsMean, _latentsStd;
+    private float[]? _latentsMean, _latentsStd;   // host-only: consumed by the shared per-channel affine
     /// <summary>True once <see cref="LoadWeights"/> found both normalization stats — false means
     /// <c>Denormalize</c> is a no-op. See <see cref="LtxVideoVaeEncoder.HasLatentStats"/> for why this matters:
     /// a missing-stats encoder/decoder pair round-trips losslessly (the missing scale cancels on both sides)
@@ -84,7 +84,7 @@ public sealed unsafe class LtxVideoVaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         int output = _blockOutRev[0];
-        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
+        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         _midResnets = new LtxVaeResnetBlock3d[_layersRev[0]];
@@ -145,13 +145,13 @@ public sealed unsafe class LtxVideoVaeDecoder
             _normOutTimeEmbedder = LtxVaeTimeEmbedder.Load(w, "decoder.time_embedder", output * 2);
             _normOutScaleShift = LoadF32(w, "decoder.scale_shift_table");
         }
-        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
+        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         // Latent normalization stats (optional — absent on synthetic tests). LTX names them
         // per_channel_statistics.mean-of-means / std-of-means; the converter renames to latents_mean/std.
-        if (w.TryGetValue("latents_mean", out Tensor? lm)) _latentsMean = lm.DType == DType.F32 ? lm : lm.CastTo(DType.F32);
-        if (w.TryGetValue("latents_std", out Tensor? ls)) _latentsStd = ls.DType == DType.F32 ? ls : ls.CastTo(DType.F32);
+        if (w.TryGetValue("latents_mean", out Tensor? lm)) _latentsMean = ToFloatArray(lm);
+        if (w.TryGetValue("latents_std", out Tensor? ls)) _latentsStd = ToFloatArray(ls);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -187,9 +187,10 @@ public sealed unsafe class LtxVideoVaeDecoder
 
         // Un-normalize: the diffusion model works in normalized latent space (raw−mean)/std, so
         // raw = latent·std + mean per channel. In-place on the caller's latent (disposed right after decode).
-        Denormalize(latent);
+        Tensor denormed = Denormalize(latent);
 
-        Tensor h = _convIn!.Forward(backend, latent);
+        Tensor h = _convIn!.Forward(backend, denormed);
+        denormed.Dispose();
 
         Tensor? midTemb = _midTimeEmbedder?.Embed(backend, scaledTimestep);
         foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, midTemb); h.Dispose(); h = n; }
@@ -240,24 +241,18 @@ public sealed unsafe class LtxVideoVaeDecoder
         return rgb;
     }
 
-    /// <summary>Per-channel latent un-normalization (in-place): <c>latent[c] = latent[c]·std[c] + mean[c]</c>
-    /// over <c>[1, C, T, H, W]</c>. No-op when the checkpoint carries no stats (identity normalization).</summary>
-    private void Denormalize(Tensor latent)
+    /// <summary>Per-channel latent un-normalization via the shared affine — OUT-OF-PLACE. The old in-place
+    /// version silently double-denormalized any latent decoded twice; diffusers returns a new tensor.</summary>
+    private Tensor Denormalize(Tensor latent) =>
+        LtxVideo2VaeDecoder.PerChannelAffine(latent, _latentsMean, _latentsStd, denormalize: true);
+
+    private static float[] ToFloatArray(Tensor t)
     {
-        if (_latentsMean is null || _latentsStd is null) return;
-        int b = (int)latent.Shape[0];
-        int c = (int)latent.Shape[1];
-        long spatial = latent.Shape.ElementCount / ((long)b * c);
-        float* lp = (float*)latent.DataPointer;
-        float* mean = (float*)_latentsMean.DataPointer;
-        float* std = (float*)_latentsStd.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-            {
-                float m = mean[ci], s = std[ci];
-                long basePos = ((long)bi * c + ci) * spatial;
-                for (long i = 0; i < spatial; i++) lp[basePos + i] = lp[basePos + i] * s + m;
-            }
+        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        float[] values = new float[f32.ElementCount];
+        new ReadOnlySpan<float>((float*)f32.DataPointer, values.Length).CopyTo(values);
+        if (!ReferenceEquals(f32, t)) f32.Dispose();
+        return values;
     }
 
     /// <summary>norm_out (shift, scale) conditioning: <c>temb [2·C]</c> + <c>scale_shift_table [2, C]</c> → per-channel <c>x·(1+scale) + shift</c>.</summary>
@@ -281,6 +276,5 @@ public sealed unsafe class LtxVideoVaeDecoder
 
     private static int[] Reverse(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Reverse(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

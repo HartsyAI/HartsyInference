@@ -29,7 +29,7 @@ public sealed unsafe class LtxVaeUpsampler3d
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _conv = new CausalConv3d(w[$"{prefix}.conv.conv.weight"], Bias(w, $"{prefix}.conv.conv.bias"),
+        _conv = new CausalConv3d(w[$"{prefix}.conv.conv.weight"], LtxVaeResnetBlock3d.Bias(w, $"{prefix}.conv.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
     }
 
@@ -221,5 +221,4 @@ public sealed unsafe class LtxVaeUpsampler3d
         return outT;
     }
 
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
 }

@@ -47,8 +47,8 @@ public sealed unsafe class LtxVideo2Attention
                 $"'{p}' attention weights are [{qIn}]/[{kvIn}] wide; the block declared q={_qInDim} kv={_kvInDim}.");
         _vW = w[$"{p}.to_v.weight"]; w.TryGetValue($"{p}.to_v.bias", out _vB);
         _oW = w[$"{p}.to_out.0.weight"]; w.TryGetValue($"{p}.to_out.0.bias", out _oB);
-        _nq = LoadF32(w, $"{p}.q_norm.weight");
-        _nk = LoadF32(w, $"{p}.k_norm.weight");
+        _nq = DiTUtils.LoadF32(w, $"{p}.q_norm.weight");
+        _nk = DiTUtils.LoadF32(w, $"{p}.k_norm.weight");
         // Per-head output gating is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it (ungated attention).
         if (w.TryGetValue($"{p}.to_gate_logits.weight", out Tensor? gw)) { _gateW = gw; w.TryGetValue($"{p}.to_gate_logits.bias", out _gateB); }
     }
@@ -227,9 +227,4 @@ public sealed unsafe class LtxVideo2Attention
         return o;
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
 }

@@ -233,7 +233,6 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
     private sealed class Resampler : IDisposable
     {
         private readonly int _ratio;
-        private readonly int _kernel;
         private readonly int _pad, _cropLeft, _cropRight;
         private readonly Tensor _weight;   // [channels, 1, kernel]
 
@@ -241,28 +240,11 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         {
             _ratio = ratio;
             float[] filter = LtxVocoderDsp.HannSincFilter(ratio, out _pad, out _cropLeft, out _cropRight);
-            _kernel = filter.Length;
-            _weight = new Tensor(new TensorShape(channels, 1, _kernel), DType.F32);
-            float* wp = (float*)_weight.DataPointer;
-            for (int c = 0; c < channels; c++)
-                for (int k = 0; k < _kernel; k++)
-                    wp[(long)c * _kernel + k] = filter[k];
+            _weight = LtxVocoderDsp.DepthwiseFilter(filter, channels);
         }
 
-        public Tensor Forward(IBackend backend, Tensor x)
-        {
-            int c = (int)x.Shape[1];
-            Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, _pad, _pad);
-            int tp = (int)padded.Shape[2];
-            int tOut = (tp - 1) * _ratio + (_kernel - 1) + 1;
-            Tensor convt = new(new TensorShape(1, c, tOut), DType.F32);
-            backend.ConvTranspose1d(convt, padded, _weight, null, _ratio, 0, 0, 1, c);
-            padded.Dispose();
-            backend.Scale(convt, convt, _ratio);
-            Tensor o = LtxAudioDeviceOps.CropTime(backend, convt, _cropLeft, _cropRight);
-            convt.Dispose();
-            return o;
-        }
+        public Tensor Forward(IBackend backend, Tensor x) =>
+            LtxVocoderDsp.DepthwiseUpsample(backend, x, _weight, _ratio, _pad, _cropLeft, _cropRight);
 
         public void Dispose() => _weight.Dispose();
     }

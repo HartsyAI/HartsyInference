@@ -144,8 +144,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             {
                 // Pinning the budget pins the chunk PLAN, and decode time is a function of the plan — so an A/B or a
                 // reproducible benchmark row needs this, and so does proving a plan change leaves the pixels alone.
-                long chunkMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX25_VAE_CHUNK_MB"),
-                    out long cm) && cm > 0 ? cm : 0;
+                long chunkMb = Math.Max(0, EnvSwitch.GetLong("HARTSY_LTX25_VAE_CHUNK_MB", 0));
                 diffusionVae = chunkMb > 0
                     ? new LtxVideo25DiffusionDecoder(new LtxVideo25DiffusionDecoderConfig { ChunkWorkspaceBytes = chunkMb << 20 })
                     : new LtxVideo25DiffusionDecoder();

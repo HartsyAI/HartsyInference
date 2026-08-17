@@ -1,11 +1,18 @@
+using System.Collections.Generic;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Diffusion.Models.Music;
 
-/// <summary>Deterministic low-pass kernels for the LTX-2 vocoder's anti-aliasing and band-extension resampling.
-/// These mirror the reference <c>kaiser_sinc_filter1d</c> and the Hann-windowed sinc of <c>UpSample1d</c>; the
-/// vocoder checkpoint also stores (identical) Kaiser buffers, but the Hann resampler filter is non-persistent and
-/// must be computed regardless, so all filters are generated here for parity and simplicity.</summary>
-internal static class LtxVocoderDsp
+/// <summary>Shared DSP for the LTX-2 vocoder: deterministic low-pass kernels for the anti-aliasing and
+/// band-extension resampling, plus the depthwise filter-broadcast and transposed-conv upsample helpers built on
+/// them. The kernels mirror the reference <c>kaiser_sinc_filter1d</c> and the Hann-windowed sinc of
+/// <c>UpSample1d</c>; the vocoder checkpoint also stores (identical) Kaiser buffers, but the Hann resampler filter
+/// is non-persistent and must be computed regardless, so all filters are generated here for parity and
+/// simplicity.</summary>
+internal static unsafe class LtxVocoderDsp
 {
+    // Twin of NeuCodecEncoder.cs:631 + Audio/Io/Resampler.cs BesselI0 — Diffusion cannot reference Audio, and moving DSP into Core would be scope creep.
     /// <summary>Kaiser-windowed sinc low-pass, length <paramref name="kernelSize"/>, summing to 1. Matches the
     /// reference <c>kaiser_sinc_filter1d(cutoff, half_width, kernel_size)</c> (window-method FIR design: the Kaiser
     /// β is derived from the transition <c>delta_f = 4 · half_width</c> via the Kaiser formula).</summary>
@@ -66,6 +73,42 @@ internal static class LtxVocoderDsp
         }
         return filter;
     }
+
+    /// <summary>Broadcasts a shared 1-D lowpass filter into depthwise conv weights <c>[channels, 1, K]</c> (every
+    /// channel gets the one kernel). Caller owns the returned tensor.</summary>
+    public static Tensor DepthwiseFilter(float[] filter, int channels)
+    {
+        int kernel = filter.Length;
+        Tensor t = new(new TensorShape(channels, 1, kernel), DType.F32);
+        float* tp = (float*)t.DataPointer;
+        for (int c = 0; c < channels; c++)
+            for (int k = 0; k < kernel; k++)
+                tp[(long)c * kernel + k] = filter[k];
+        return t;
+    }
+
+    /// <summary>Sinc-interpolation upsample ×<paramref name="ratio"/> (reference <c>UpSample1d</c>): replicate-pad
+    /// the time axis, depthwise transposed conv with the <c>[C, 1, K]</c> lowpass <paramref name="weight"/>, scale
+    /// by the ratio, crop. The weight is borrowed, never disposed. Caller owns the returned tensor.</summary>
+    public static Tensor DepthwiseUpsample(IBackend backend, Tensor x, Tensor weight, int ratio, int pad, int cropLeft, int cropRight)
+    {
+        int c = (int)x.Shape[1];
+        int kernel = (int)weight.Shape[2];
+        Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, pad, pad);
+        int tp = (int)padded.Shape[2];
+        int tOut = (tp - 1) * ratio + (kernel - 1) + 1;
+        Tensor convt = new(new TensorShape(1, c, tOut), DType.F32);
+        backend.ConvTranspose1d(convt, padded, weight, null, ratio, 0, 0, 1, c);
+        padded.Dispose();
+        backend.Scale(convt, convt, ratio);
+        Tensor o = LtxAudioDeviceOps.CropTime(backend, convt, cropLeft, cropRight);
+        convt.Dispose();
+        return o;
+    }
+
+    /// <summary>Optional checkpoint tensor: the value when present, else null (biases and other optional weights).</summary>
+    public static Tensor? OptionalWeight(IReadOnlyDictionary<string, Tensor> w, string key) =>
+        w.TryGetValue(key, out Tensor? t) ? t : null;
 
     /// <summary>Symmetric (non-periodic) Kaiser window of length <paramref name="n"/> with shape parameter
     /// <paramref name="beta"/>, matching <c>torch.kaiser_window(n, beta, periodic=False)</c>.</summary>

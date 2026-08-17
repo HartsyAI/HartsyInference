@@ -192,6 +192,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
     }
 
     private static void Silu(IBackend backend, Tensor t) => backend.Silu(t, t);
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
+    /// <summary>Optional bias lookup shared by the LTX VAE family (one copy, per the shared-primitive rule).</summary>
+    internal static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

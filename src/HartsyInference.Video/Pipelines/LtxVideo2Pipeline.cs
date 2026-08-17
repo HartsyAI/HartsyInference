@@ -167,20 +167,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         // The reference carries a separate audio CFG scale; unset follows the video scale.
         float audioGuidance = _config.AudioGuidanceScale ?? guidance;
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_CFG") is { Length: > 0 } audioCfgOverride
-            && float.TryParse(audioCfgOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedAudioCfg))
-        {
-            audioGuidance = parsedAudioCfg;
-        }
         // Both scales must be 1 to skip the unconditional branch: the single-branch path has no unconditional
         // velocity to give the audio Euler step, so a guided audio stream still needs the pair.
         bool unguided = guidance == 1f && audioGuidance == 1f;
         float audioRescale = _config.AudioGuidanceRescale;
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_RESCALE") is { Length: > 0 } rescaleOverride
-            && float.TryParse(rescaleOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedRescale))
-        {
-            audioRescale = parsedRescale;
-        }
 
         // Stage 1 is what the sampler actually denoises, so it owns the schedule's token count.
         int svStage1 = twoStage ? tLat * hLatStage1 * wLatStage1 : sv;
@@ -303,7 +293,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // 3072 MB default headroom fits all 48 fp8 blocks (~18 GB) resident at 512×320 (freeing the connectors
             // above reclaimed the ~4 GB that used to force streaming) while leaving room for activations + the VAE
             // decode; the sizing auto-shrinks the resident count at larger geometries.
-            long headroomMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX2_HEADROOM_MB"), out long hm) ? hm : 3072;
+            long headroomMb = EnvSwitch.GetLong("HARTSY_LTX2_HEADROOM_MB", 3072);
             long tokenLoad = (long)sv + audioFrames;
             IEnumerable<Tensor> BlockRangeWeights(int from, int to)
             {
@@ -846,12 +836,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// cref="LtxVideo2Config.ShiftMaxTokens"/> (or <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>, which wins) caps it.</summary>
     internal static int ShiftTokens(int videoTokens, LtxVideo2Config config)
     {
-        int cap = config.ShiftMaxTokens;
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS") is { Length: > 0 } capOverride
-            && int.TryParse(capOverride, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedCap))
-        {
-            cap = parsedCap;
-        }
+        int cap = EnvSwitch.GetInt("HARTSY_LTX2_SHIFT_MAX_TOKENS", config.ShiftMaxTokens);
         return cap > 0 && videoTokens > cap ? cap : videoTokens;
     }
 
@@ -863,12 +848,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// count fed here (4096 reproduces diffusers' constant 7.768).</summary>
     internal static float ComputeShift(int videoTokens, LtxVideo2Config config)
     {
-        float direct = config.ShiftOverride;
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_SHIFT") is { Length: > 0 } shiftOverride
-            && float.TryParse(shiftOverride, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedShift))
-        {
-            direct = parsedShift;
-        }
+        float direct = EnvSwitch.GetFloat("HARTSY_LTX2_SHIFT", config.ShiftOverride);
         return direct > 0f ? direct : FormulaShift(ShiftTokens(videoTokens, config));
     }
 
@@ -887,10 +867,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <summary>Rescales a shifted flow-match schedule so its last non-zero sigma lands on the config's terminal
     /// value, matching LTX's own scheduler (<c>stretch=True, terminal=0.1</c> in the shipped templates). Without it
     /// the denoise stops early: the shift grows with token count, so at 1280x736x97f the schedule ends at sigma
-    /// 0.817 and drops to zero in one step. <c>HARTSY_LTX2_SIGMA_STRETCH=0</c> restores the un-stretched schedule.</summary>
+    /// 0.817 and drops to zero in one step. <see cref="LtxVideo2Config.SigmaStretch"/> = false restores the
+    /// un-stretched schedule (the =0-is-worse ablation is settled; the env kill-switch is gone).</summary>
     private static float[] StretchTerminal(float[] sigmas, LtxVideo2Config config, float shift)
     {
-        if (!config.SigmaStretch || Environment.GetEnvironmentVariable("HARTSY_LTX2_SIGMA_STRETCH") == "0")
+        if (!config.SigmaStretch)
         {
             return sigmas;
         }
@@ -949,7 +930,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         File.WriteAllText(Path.Combine(dir, name + ".json"),
             "{\"shape\":[" + string.Join(",", Enumerable.Range(0, f32.Shape.Rank).Select(i => f32.Shape[i])) + "]}");
         if (!ReferenceEquals(f32, tensor)) f32.Dispose();
-        Logs.Warning($"[ltx2-dump] wrote {name} {tensor.Shape} to {dir}");
+        Logs.Debug($"[ltx2-dump] wrote {name} {tensor.Shape} to {dir}");
     }
 
     /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>

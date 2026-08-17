@@ -158,7 +158,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         {
             _dim = dim; _heads = heads; _headDim = headDim; _normEps = normEps;
             _numBlocks = numBlocks; _numRegisters = numRegisters; _rope = rope;
-            _ones = Ones(dim);
+            _ones = DiTUtils.Ones(dim);
             _attn = new LtxVideo2Attention[numBlocks];
             for (int i = 0; i < numBlocks; i++) _attn[i] = new LtxVideo2Attention(dim, dim, heads, headDim, dim, qkEps);
             _ffW0 = new Tensor?[numBlocks]; _ffB0 = new Tensor?[numBlocks];
@@ -167,7 +167,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _registers = LoadF32(w, $"{p}.learnable_registers");
+            _registers = DiTUtils.LoadF32(w, $"{p}.learnable_registers");
             for (int i = 0; i < _numBlocks; i++)
             {
                 _attn[i].LoadWeights(w, $"{p}.transformer_1d_blocks.{i}.attn1");
@@ -271,20 +271,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             for (long e = 0; e < n; e++) ap[e] += dp[e];
         }
 
-        private static Tensor Ones(int n)
-        {
-            Tensor t = new(new TensorShape(n), DType.F32);
-            float* p = (float*)t.DataPointer;
-            for (int i = 0; i < n; i++) p[i] = 1f;
-            return t;
-        }
-
         public void Dispose() => _ones.Dispose();
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
 }

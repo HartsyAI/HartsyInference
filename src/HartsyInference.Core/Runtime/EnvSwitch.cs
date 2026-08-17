@@ -28,4 +28,32 @@ public static class EnvSwitch
         }
         return defaultOn;
     }
+
+    /// <summary>Resolves a numeric override from the environment; unset, empty, or unparsable → <paramref name="fallback"/>.
+    /// Invariant culture — an env var must not change meaning with the host locale.</summary>
+    public static float GetFloat(string name, float fallback)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+        return !string.IsNullOrEmpty(value)
+            && float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float parsed)
+            ? parsed : fallback;
+    }
+
+    /// <summary>Integer counterpart of <see cref="GetFloat"/>.</summary>
+    public static int GetInt(string name, int fallback)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+        return !string.IsNullOrEmpty(value)
+            && int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int parsed)
+            ? parsed : fallback;
+    }
+
+    /// <summary>64-bit counterpart of <see cref="GetInt"/>, for byte-size knobs.</summary>
+    public static long GetLong(string name, long fallback)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+        return !string.IsNullOrEmpty(value)
+            && long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long parsed)
+            ? parsed : fallback;
+    }
 }

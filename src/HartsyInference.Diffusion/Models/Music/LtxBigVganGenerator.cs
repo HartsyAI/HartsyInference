@@ -111,7 +111,7 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _convInW = w[$"{prefix}.conv_pre.weight"];
-        _convInB = Get(w, $"{prefix}.conv_pre.bias");
+        _convInB = LtxVocoderDsp.OptionalWeight(w, $"{prefix}.conv_pre.bias");
 
         int numUps = _upsampleFactors.Length;
         int resPerUp = _resnetKernels.Length;
@@ -120,7 +120,7 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         int channels = _hiddenChannels;
         for (int i = 0; i < numUps; i++)
         {
-            _ups[i] = (w[$"{prefix}.ups.{i}.weight"], Get(w, $"{prefix}.ups.{i}.bias"));
+            _ups[i] = (w[$"{prefix}.ups.{i}.weight"], LtxVocoderDsp.OptionalWeight(w, $"{prefix}.ups.{i}.bias"));
             int outC = channels / 2;
             for (int j = 0; j < resPerUp; j++)
             {
@@ -138,7 +138,7 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             _actOut.LoadWeights(w, $"{prefix}.act_post", _owned);
         }
         _convOutW = w[$"{prefix}.conv_post.weight"];
-        _convOutB = Get(w, $"{prefix}.conv_post.bias");
+        _convOutB = LtxVocoderDsp.OptionalWeight(w, $"{prefix}.conv_post.bias");
     }
 
     /// <summary>Decode flattened input frames <c>[1, inChannels, T]</c> → waveform <c>[1, outChannels,
@@ -203,9 +203,6 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         return o;
     }
 
-    private static Tensor? Get(IReadOnlyDictionary<string, Tensor> w, string k) =>
-        w.TryGetValue(k, out Tensor? t) ? t : null;
-
     public void Dispose()
     {
         foreach (IDisposable d in _owned) d.Dispose();
@@ -244,8 +241,8 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             _convs2 = new (Tensor, Tensor?)[n];
             for (int j = 0; j < n; j++)
             {
-                _convs1[j] = (w[$"{p}.convs1.{j}.weight"], Get(w, $"{p}.convs1.{j}.bias"));
-                _convs2[j] = (w[$"{p}.convs2.{j}.weight"], Get(w, $"{p}.convs2.{j}.bias"));
+                _convs1[j] = (w[$"{p}.convs1.{j}.weight"], LtxVocoderDsp.OptionalWeight(w, $"{p}.convs1.{j}.bias"));
+                _convs2[j] = (w[$"{p}.convs2.{j}.weight"], LtxVocoderDsp.OptionalWeight(w, $"{p}.convs2.{j}.bias"));
             }
             // Leaky-ReLU activations are parameter-free; only SnakeBeta has loadable alpha/beta (+ antialias filters).
             if (_activation != LtxVocoderActivation.SnakeBeta) return;
@@ -391,29 +388,14 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         private Tensor Depthwise(int channels)
         {
             if (_depthwise.TryGetValue(channels, out Tensor? cached)) return cached;
-            Tensor t = new(new TensorShape(channels, 1, _kernel), DType.F32);
-            float* tp = (float*)t.DataPointer;
-            for (int c = 0; c < channels; c++)
-                for (int k = 0; k < _kernel; k++)
-                    tp[(long)c * _kernel + k] = _filter[k];
+            Tensor t = LtxVocoderDsp.DepthwiseFilter(_filter, channels);
             _depthwise[channels] = t;
             return t;
         }
 
-        public Tensor Up(IBackend backend, Tensor x)
-        {
-            int c = (int)x.Shape[1];
-            Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, _upPad, _upPad);
-            int tp = (int)padded.Shape[2];
-            int tOut = (tp - 1) * _ratio + (_kernel - 1) + 1;
-            Tensor convt = new(new TensorShape(1, c, tOut), DType.F32);
-            backend.ConvTranspose1d(convt, padded, Depthwise(c), null, _ratio, 0, 0, 1, c);
-            padded.Dispose();
-            backend.Scale(convt, convt, _ratio);
-            Tensor cropped = LtxAudioDeviceOps.CropTime(backend, convt, _upCropL, _upCropR);
-            convt.Dispose();
-            return cropped;
-        }
+        public Tensor Up(IBackend backend, Tensor x) =>
+            LtxVocoderDsp.DepthwiseUpsample(
+                backend, x, Depthwise((int)x.Shape[1]), _ratio, _upPad, _upCropL, _upCropR);
 
         public Tensor Down(IBackend backend, Tensor x)
         {

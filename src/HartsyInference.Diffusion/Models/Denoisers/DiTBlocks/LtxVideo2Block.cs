@@ -64,8 +64,8 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         _vDim = c.InnerDim;
         _aDim = c.AudioInnerDim;
         _normEps = c.NormEps;
-        _onesV = Ones(_vDim);
-        _onesA = Ones(_aDim);
+        _onesV = DiTUtils.Ones(_vDim);
+        _onesA = DiTUtils.Ones(_aDim);
 
         int vH = c.NumHeads, vHd = c.HeadDim, aH = c.AudioNumHeads, aHd = c.AudioHeadDim;
         float qk = c.QkNormEps;
@@ -88,14 +88,14 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         _a2v.LoadWeights(w, $"{p}.audio_to_video_attn");
         _v2a.LoadWeights(w, $"{p}.video_to_audio_attn");
 
-        _ssVideo = LoadF32(w, $"{p}.scale_shift_table");
-        _ssAudio = LoadF32(w, $"{p}.audio_scale_shift_table");
+        _ssVideo = DiTUtils.LoadF32(w, $"{p}.scale_shift_table");
+        _ssAudio = DiTUtils.LoadF32(w, $"{p}.audio_scale_shift_table");
         // Prompt (text cross-attn KV) modulation is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it — the
         // text features are then used unmodulated. Load only if present.
-        _promptVideo = w.ContainsKey($"{p}.prompt_scale_shift_table") ? LoadF32(w, $"{p}.prompt_scale_shift_table") : null;
-        _promptAudio = w.ContainsKey($"{p}.audio_prompt_scale_shift_table") ? LoadF32(w, $"{p}.audio_prompt_scale_shift_table") : null;
-        _caVideo = LoadF32(w, $"{p}.scale_shift_table_a2v_ca_video");
-        _caAudio = LoadF32(w, $"{p}.scale_shift_table_a2v_ca_audio");
+        _promptVideo = w.ContainsKey($"{p}.prompt_scale_shift_table") ? DiTUtils.LoadF32(w, $"{p}.prompt_scale_shift_table") : null;
+        _promptAudio = w.ContainsKey($"{p}.audio_prompt_scale_shift_table") ? DiTUtils.LoadF32(w, $"{p}.audio_prompt_scale_shift_table") : null;
+        _caVideo = DiTUtils.LoadF32(w, $"{p}.scale_shift_table_a2v_ca_video");
+        _caAudio = DiTUtils.LoadF32(w, $"{p}.scale_shift_table_a2v_ca_audio");
 
         _ffW0 = w[$"{p}.ff.net.0.proj.weight"]; w.TryGetValue($"{p}.ff.net.0.proj.bias", out _ffB0);
         _ffW2 = w[$"{p}.ff.net.2.weight"]; w.TryGetValue($"{p}.ff.net.2.bias", out _ffB2);
@@ -287,17 +287,4 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         return o;
     }
 
-    private static Tensor Ones(int n)
-    {
-        Tensor t = new(new TensorShape(n), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (int i = 0; i < n; i++) p[i] = 1f;
-        return t;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
 }

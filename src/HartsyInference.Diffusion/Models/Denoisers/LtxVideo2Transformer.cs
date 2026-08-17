@@ -147,8 +147,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         _audioProjInW = w["audio_proj_in.weight"]; w.TryGetValue("audio_proj_in.bias", out _audioProjInB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
         _audioProjOutW = w["audio_proj_out.weight"]; w.TryGetValue("audio_proj_out.bias", out _audioProjOutB);
-        _scaleShift = LoadF32(w, "scale_shift_table");
-        _audioScaleShift = LoadF32(w, "audio_scale_shift_table");
+        _scaleShift = DiTUtils.LoadF32(w, "scale_shift_table");
+        _audioScaleShift = DiTUtils.LoadF32(w, "audio_scale_shift_table");
 
         _timeEmbed.LoadWeights(w, "time_embed");
         _audioTimeEmbed.LoadWeights(w, "audio_time_embed");
@@ -715,11 +715,6 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         _ropeKey = (-1, -1, -1, 0, -1);
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
 
     public void Dispose()
     {

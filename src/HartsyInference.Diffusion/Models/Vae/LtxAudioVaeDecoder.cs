@@ -56,7 +56,8 @@ public sealed class LtxAudioVaeDecoder
         int numResolutions = _chMult.Length;
         int baseBlockChannels = _baseChannels * _chMult[^1];   // 128*4 = 512
 
-        _convIn = new LtxAudioCausalConv2d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"));
+        _convIn = new LtxAudioCausalConv2d(
+            w["decoder.conv_in.conv.weight"], LtxVocoderDsp.OptionalWeight(w, "decoder.conv_in.conv.bias"));
 
         _midResnets = new LtxAudioResnetBlock[2];
         _midResnets[0] = new LtxAudioResnetBlock(baseBlockChannels, baseBlockChannels);
@@ -85,7 +86,8 @@ public sealed class LtxAudioVaeDecoder
             _upLevels[level] = stage;
         }
 
-        _convOut = new LtxAudioCausalConv2d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"));
+        _convOut = new LtxAudioCausalConv2d(
+            w["decoder.conv_out.conv.weight"], LtxVocoderDsp.OptionalWeight(w, "decoder.conv_out.conv.bias"));
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -124,9 +126,6 @@ public sealed class LtxAudioVaeDecoder
         normed.Dispose();
         return outT;
     }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : null;
 }
 
 /// <summary>Time-causal 2-D conv for the LTX-2 audio VAE (<c>LTX2AudioCausalConv2d</c>, causality_axis="height").
@@ -204,11 +203,14 @@ public sealed class LtxAudioResnetBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _conv1 = new LtxAudioCausalConv2d(w[$"{prefix}.conv1.conv.weight"], Bias(w, $"{prefix}.conv1.conv.bias"));
-        _conv2 = new LtxAudioCausalConv2d(w[$"{prefix}.conv2.conv.weight"], Bias(w, $"{prefix}.conv2.conv.bias"));
+        _conv1 = new LtxAudioCausalConv2d(
+            w[$"{prefix}.conv1.conv.weight"], LtxVocoderDsp.OptionalWeight(w, $"{prefix}.conv1.conv.bias"));
+        _conv2 = new LtxAudioCausalConv2d(
+            w[$"{prefix}.conv2.conv.weight"], LtxVocoderDsp.OptionalWeight(w, $"{prefix}.conv2.conv.bias"));
         if (_inC != _outC)
         {
-            _ninShortcut = new LtxAudioCausalConv2d(w[$"{prefix}.nin_shortcut.conv.weight"], Bias(w, $"{prefix}.nin_shortcut.conv.bias"));
+            _ninShortcut = new LtxAudioCausalConv2d(
+                w[$"{prefix}.nin_shortcut.conv.weight"], LtxVocoderDsp.OptionalWeight(w, $"{prefix}.nin_shortcut.conv.bias"));
         }
     }
 
@@ -238,9 +240,6 @@ public sealed class LtxAudioResnetBlock
         if (_conv2 is not null) foreach (Tensor t in _conv2.EnumerateWeights()) yield return t;
         if (_ninShortcut is not null) foreach (Tensor t in _ninShortcut.EnumerateWeights()) yield return t;
     }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : null;
 }
 
 /// <summary>LTX-2 audio VAE upsample (<c>LTX2AudioUpsample</c>, causality_axis="height"): nearest-×2 on both
@@ -251,7 +250,8 @@ public sealed class LtxAudioUpsample
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _conv = new LtxAudioCausalConv2d(w[$"{prefix}.conv.conv.weight"], Bias(w, $"{prefix}.conv.conv.bias"));
+        _conv = new LtxAudioCausalConv2d(
+            w[$"{prefix}.conv.conv.weight"], LtxVocoderDsp.OptionalWeight(w, $"{prefix}.conv.conv.bias"));
     }
 
     public Tensor Forward(IBackend backend, Tensor x)
@@ -272,7 +272,4 @@ public sealed class LtxAudioUpsample
     {
         if (_conv is not null) foreach (Tensor t in _conv.EnumerateWeights()) yield return t;
     }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : null;
 }
