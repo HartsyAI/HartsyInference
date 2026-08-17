@@ -124,8 +124,9 @@ public sealed unsafe class LtxVaeResnetBlock3d
         return outT;
     }
 
-    /// <summary>Channel-wise RMS norm (no affine): per spatial-temporal position, <c>x / sqrt(mean_C(x²) + eps)</c>.</summary>
-    private static Tensor ChannelRms(Tensor x, int c)
+    /// <summary>Channel-wise RMS norm (no affine): per spatial-temporal position, <c>x / sqrt(mean_C(x²) + eps)</c>.
+    /// Shared with <see cref="LtxVideoVaeDecoder"/>'s norm_out — one host copy, per the shared-primitive rule.</summary>
+    internal static Tensor ChannelRms(Tensor x, int c)
     {
         int b = (int)x.Shape[0];
         long spatial = x.Shape.ElementCount / ((long)b * c);

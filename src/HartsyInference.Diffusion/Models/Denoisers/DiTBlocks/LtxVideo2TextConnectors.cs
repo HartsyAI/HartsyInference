@@ -198,12 +198,14 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
                 Tensor n1 = RmsNoAffine(backend, hidden, seq);
                 Tensor attn = _attn[i].Forward(backend, n1, n1, _rope, cos, sin, _rope, cos, sin, null);
                 n1.Dispose();
-                AddInPlace(hidden, attn); attn.Dispose();
+                // Residual adds via the device op — a host loop here reads DataPointer between device ops, which
+                // is a D2H drain of the hidden state on every block of every prompt encode.
+                backend.Add(hidden, hidden, attn); attn.Dispose();
 
                 Tensor n2 = RmsNoAffine(backend, hidden, seq);
                 Tensor ff = Ffn(backend, n2, i);
                 n2.Dispose();
-                AddInPlace(hidden, ff); ff.Dispose();
+                backend.Add(hidden, hidden, ff); ff.Dispose();
             }
 
             cos.Dispose(); sin.Dispose();

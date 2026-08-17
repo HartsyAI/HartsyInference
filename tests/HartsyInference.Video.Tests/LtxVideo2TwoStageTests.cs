@@ -1,3 +1,4 @@
+using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -42,7 +43,8 @@ public sealed unsafe class LtxVideo2TwoStageTests
         float* xp = (float*)x.DataPointer, np = (float*)noise.DataPointer;
         for (int i = 0; i < 4; i++) { xp[i] = 4f; np[i] = -2f; }
 
-        using Tensor mixed = LtxVideo2Pipeline.Renoise(x, noise, 0.85f);
+        using CpuBackend backend = new CpuBackend();
+        using Tensor mixed = LtxVideo2Pipeline.Renoise(backend, x, noise, 0.85f);
         float* mp = (float*)mixed.DataPointer;
         for (int i = 0; i < 4; i++)
             Assert.Equal(0.85f * -2f + 0.15f * 4f, mp[i], 5);
@@ -61,7 +63,8 @@ public sealed unsafe class LtxVideo2TwoStageTests
         using Tensor noise = new Tensor(new TensorShape(1, 1), DType.F32);
         *(float*)x.DataPointer = 4f;
         *(float*)noise.DataPointer = -2f;
-        using Tensor mixed = LtxVideo2Pipeline.Renoise(x, noise, sigma);
+        using CpuBackend backend = new CpuBackend();
+        using Tensor mixed = LtxVideo2Pipeline.Renoise(backend, x, noise, sigma);
         Assert.Equal(expected, *(float*)mixed.DataPointer, 5);
     }
 

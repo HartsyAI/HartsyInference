@@ -204,7 +204,18 @@ public sealed unsafe class LtxVideoVaeDecoder
             upTemb?.Dispose();
         }
 
-        Tensor normed = ChannelRms(h, _lastChannel);
+        // Same split as LtxVaeResnetBlock3d: the device op when nothing mutates host-side afterwards; the shared
+        // host loop when the norm_out modulation below writes the buffer in place (a device copy would go stale).
+        Tensor normed;
+        if (_normOutTimeEmbedder is null)
+        {
+            normed = new Tensor(h.Shape, h.DType);
+            backend.WanRmsNormChannel(normed, h, null, 1e-8f);
+        }
+        else
+        {
+            normed = LtxVaeResnetBlock3d.ChannelRms(h, _lastChannel);
+        }
         h.Dispose();
         if (_normOutTimeEmbedder is not null)
         {
@@ -218,7 +229,13 @@ public sealed unsafe class LtxVideoVaeDecoder
         Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
 
-        Tensor rgb = PixelUnshuffle(patched);
+        // UnpatchifyVae's channel unpack (ci·p² + r·p + q, r→W q→H) is exactly this decoder's
+        // (c·p + pa)·p + pb layout — the same op the LTX-2 decoder already decodes through.
+        int srcC = (int)patched.Shape[1];
+        int f2 = (int)patched.Shape[2], h2 = (int)patched.Shape[3], w2 = (int)patched.Shape[4];
+        int ocOut = srcC / (_patch * _patch);
+        Tensor rgb = new Tensor(new TensorShape([1L, ocOut, f2, (long)h2 * _patch, (long)w2 * _patch]), DType.F32);
+        backend.UnpatchifyVae(rgb, patched, _patch);
         patched.Dispose();
         return rgb;
     }
@@ -260,54 +277,6 @@ public sealed unsafe class LtxVideoVaeDecoder
                 float sc = 1f + scale;
                 for (long s = 0; s < spatial; s++) xp[basePos + s] = xp[basePos + s] * sc + shift;
             }
-    }
-
-    /// <summary>Spatial pixel-unshuffle (patch p): <c>[1, oc·p², F, H, W] → [1, oc, F, H·p, W·p]</c>, matching the upstream reshape/permute (channel = <c>oc·p² + p_a·p + p_b</c>, with p_b→H, p_a→W).</summary>
-    private Tensor PixelUnshuffle(Tensor x)
-    {
-        int b = (int)x.Shape[0], srcC = (int)x.Shape[1], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        int p = _patch;
-        int oc = srcC / (p * p);
-        int outH = h * p, outW = w * p;
-        Tensor outT = new Tensor(new TensorShape([(long)b, oc, f, outH, outW]), DType.F32);
-        float* sp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        long srcFrame = (long)h * w, dstFrame = (long)outH * outW;
-        for (int bi = 0; bi < b; bi++)
-            for (int c = 0; c < oc; c++)
-                for (int fi = 0; fi < f; fi++)
-                    for (int ho = 0; ho < outH; ho++)
-                    {
-                        int hi = ho / p, pb = ho % p;
-                        for (int wo = 0; wo < outW; wo++)
-                        {
-                            int wi = wo / p, pa = wo % p;
-                            int ch = (c * p + pa) * p + pb;
-                            long srcOff = (((long)bi * srcC + ch) * f + fi) * srcFrame + (long)hi * w + wi;
-                            long dstOff = (((long)bi * oc + c) * f + fi) * dstFrame + (long)ho * outW + wo;
-                            op[dstOff] = sp[srcOff];
-                        }
-                    }
-        return outT;
-    }
-
-    private static Tensor ChannelRms(Tensor x, int c)
-    {
-        int b = (int)x.Shape[0];
-        long spatial = x.Shape.ElementCount / ((long)b * c);
-        Tensor outT = new Tensor(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (long s = 0; s < spatial; s++)
-            {
-                long basePos = (long)bi * c * spatial + s;
-                double sum = 0;
-                for (int ci = 0; ci < c; ci++) { float v = xp[basePos + (long)ci * spatial]; sum += (double)v * v; }
-                float inv = 1f / MathF.Sqrt((float)(sum / c) + 1e-8f);
-                for (int ci = 0; ci < c; ci++) { long off = basePos + (long)ci * spatial; op[off] = xp[off] * inv; }
-            }
-        return outT;
     }
 
     private static int[] Reverse(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }

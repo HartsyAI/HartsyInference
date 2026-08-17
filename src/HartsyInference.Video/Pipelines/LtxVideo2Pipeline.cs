@@ -733,21 +733,20 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Backend.Sync();
         using Tensor videoNoise = SeedGenerator.CreateNoise(videoTokens.Shape, seed ^ 0x6C41);
         using Tensor audioNoise = SeedGenerator.CreateNoise(audioLat.Shape, seed ^ 0x6C42);
-        Tensor renoisedVideo = Renoise(videoTokens, videoNoise, sigma);
+        Tensor renoisedVideo = Renoise(Backend, videoTokens, videoNoise, sigma);
         videoTokens.Dispose();
-        Tensor renoisedAudio = Renoise(audioLat, audioNoise, sigma);
+        Tensor renoisedAudio = Renoise(Backend, audioLat, audioNoise, sigma);
         return (renoisedVideo, renoisedAudio);
     }
 
     /// <summary>Flow-match re-noise into a FRESH tensor: <c>sigma·noise + (1−sigma)·x</c> (ComfyUI
-    /// <c>ModelSamplingDiscreteFlow.noise_scaling</c>). Out-of-place because writing a device-resident latent
-    /// host-side leaves its GPU cache stale.</summary>
-    internal static Tensor Renoise(Tensor x, Tensor noise, float sigma)
+    /// <c>ModelSamplingDiscreteFlow.noise_scaling</c>) via <see cref="IBackend.AffineMix"/> — the same op
+    /// <see cref="AncestralRenoise"/> uses. Out-of-place because writing a device-resident latent host-side
+    /// leaves its GPU cache stale.</summary>
+    internal static Tensor Renoise(IBackend backend, Tensor x, Tensor noise, float sigma)
     {
         Tensor outT = new Tensor(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer, np = (float*)noise.DataPointer, op = (float*)outT.DataPointer;
-        long n = x.ElementCount;
-        for (long i = 0; i < n; i++) op[i] = sigma * np[i] + (1f - sigma) * xp[i];
+        backend.AffineMix(outT, noise, x, sigma, 1f - sigma);
         return outT;
     }
 

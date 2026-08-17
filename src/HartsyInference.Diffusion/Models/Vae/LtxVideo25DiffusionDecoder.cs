@@ -188,8 +188,9 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
 
         long channels = x.Shape[1];
         Tensor cropped = new Tensor(new TensorShape((long)keep * currentH * currentW, channels), DType.F32);
-        long bytes = cropped.ElementCount * sizeof(float);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)cropped.DataPointer, bytes, bytes);
+        // Leading-row slice via the device op — reading x.DataPointer here drags the device-resident stage-5
+        // context to the host right before the (GPU) decode consumes the crop.
+        backend.SliceRowsGeneric(cropped, x, 0);
         x.Dispose();
         return cropped;
     }
