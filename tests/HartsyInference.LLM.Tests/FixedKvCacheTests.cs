@@ -53,6 +53,48 @@ public sealed unsafe class FixedKvCacheTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
+    /// <summary>A cache grown chunk by chunk must be indistinguishable from one allocated at the cap: the growth
+    /// copy runs mid-sequence and a prefix it drops or misplaces produces plausible-looking output, not a crash.</summary>
+    [Fact]
+    public void GrownCache_MatchesPreallocatedCache()
+    {
+        TransformerConfig cfg = new()
+        {
+            HiddenSize = 16, NumLayers = 2, NumHeads = 4, NumKvHeads = 2, HeadDim = 4,
+            IntermediateSize = 32, VocabSize = 32, MaxPositionEmbeddings = 64, AttentionBias = true, QkNorm = false,
+        };
+        Dictionary<string, Tensor> w = Weights(cfg);
+
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+
+        const int cap = 32;
+        using FixedKvCache prealloc = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxSequenceLength: cap);
+        using FixedKvCache grown = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxSequenceLength: cap, kvDtype: null, growthChunk: 3);
+
+        using (Tensor e = Embeds(4, cfg.HiddenSize))
+        using (Tensor a = model.ForwardEmbeds(backend, e, 4, 0, prealloc))
+        using (Tensor b = model.ForwardEmbeds(backend, e, 4, 0, grown))
+            AssertExact(a, b, "prefill");
+
+        for (int step = 0; step < 12; step++)
+        {
+            using Tensor e = Embeds(1, cfg.HiddenSize);
+            using Tensor a = model.ForwardEmbeds(backend, e, 1, prealloc.CurrentLength, prealloc);
+            using Tensor b = model.ForwardEmbeds(backend, e, 1, grown.CurrentLength, grown);
+            AssertExact(a, b, $"decode-{step}");
+            Assert.Equal(prealloc.CurrentLength, grown.CurrentLength);
+        }
+
+        Assert.Equal(cap, prealloc.LayerCapacity(0));
+        Assert.Equal(0, prealloc.GrowthEpoch);
+        Assert.Equal(18, grown.LayerCapacity(0));
+        Assert.True(grown.GrowthEpoch > 1, $"expected several reallocations, saw {grown.GrowthEpoch}.");
+
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
     private static Dictionary<string, Tensor> Weights(TransformerConfig c)
     {
         int h = c.HiddenSize, qDim = c.QDim, kvDim = c.KvDim;
@@ -74,6 +116,15 @@ public sealed unsafe class FixedKvCacheTests
             w[$"{p}.mlp.down_proj.weight"] = F2(h, c.IntermediateSize);
         }
         return w;
+    }
+
+    private static void AssertExact(Tensor a, Tensor b, string label)
+    {
+        Assert.Equal(a.Shape, b.Shape);
+        float* pa = (float*)a.DataPointer;
+        float* pb = (float*)b.DataPointer;
+        for (long i = 0; i < a.ElementCount; i++)
+            Assert.True(pa[i] == pb[i], $"{label}: mismatch at {i} ({pa[i]} vs {pb[i]})");
     }
 
     private static void AssertClose(Tensor a, Tensor b, string label)

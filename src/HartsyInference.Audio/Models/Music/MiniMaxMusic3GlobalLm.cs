@@ -84,10 +84,22 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     ///
     /// <para>The graph-captured step used to force F32 storage because its device-position attention had no F16
     /// variant; both halves have one now, so the quantized variants keep their half-width cache either way —
-    /// 288 KB per frame across the guided pair rather than 576.</para></summary>
+    /// 288 KB per frame across the guided pair rather than 576.</para>
+    ///
+    /// <para>The eager cache grows in <see cref="KvGrowthChunk"/>-token steps instead of allocating the whole
+    /// requested duration, because the duration is a cap and not a target: a song that reaches end-of-audio after
+    /// ninety seconds otherwise pays for six minutes. Growth stays off under <c>HARTSY_MM3_LM_GRAPH</c> — the
+    /// captured step writes K/V through the caches' baked device addresses without ever calling
+    /// <c>AppendStep</c>, so a reallocation would neither be triggered nor observed by the replay.</para></summary>
     public IKvCache CreateCache(int maxSeqLen) => _halfPrecisionKv
-        ? new FixedKvCache(_backbone.NumLayers, batch: 1, _backbone.KvHeads, _backbone.HeadDim, Math.Max(1, maxSeqLen), DType.F16)
+        ? new FixedKvCache(_backbone.NumLayers, batch: 1, _backbone.KvHeads, _backbone.HeadDim, Math.Max(1, maxSeqLen),
+            DType.F16, _graphDecode ? 0 : KvGrowthChunk)
         : _backbone.CreateDecodeCache(maxSeqLen);
+
+    /// <summary>Tokens the decode cache grows by. <c>HARTSY_MM3_KV_GROW=0</c> restores the full-cap
+    /// preallocation; another positive value overrides the chunk.</summary>
+    private static int KvGrowthChunk { get; } =
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_MM3_KV_GROW"), out int chunk) && chunk >= 0 ? chunk : 512;
 
     /// <summary>Embeds <paramref name="tokenIds"/> into <c>[1, count, 4096]</c>. Caller owns the result.</summary>
     public Tensor Embed(ReadOnlySpan<int> tokenIds)
