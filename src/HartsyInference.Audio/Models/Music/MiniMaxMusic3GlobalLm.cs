@@ -96,10 +96,17 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
             DType.F16, _graphDecode ? 0 : KvGrowthChunk)
         : _backbone.CreateDecodeCache(maxSeqLen);
 
-    /// <summary>Tokens the decode cache grows by. <c>HARTSY_MM3_KV_GROW=0</c> restores the full-cap
-    /// preallocation; another positive value overrides the chunk.</summary>
+    /// <summary>Tokens the decode cache grows by; 0 preallocates the full cap, which is the default because
+    /// growing measured WORSE on both axes. Set <c>HARTSY_MM3_KV_GROW</c> to a positive chunk to re-enable.
+    ///
+    /// <para>Measured on a 4090 at <c>:q4</c>, same seed, a song that ends far short of its cap — the case growth
+    /// exists to win. Peak VRAM 22,544 MB grown against 18,397 preallocated at a 360 s cap, and 20,528 against
+    /// 17,248 at 150 s; the autoregressive stage also ran 18-21% slower. The device mempool's release threshold is
+    /// keep-everything, so each grow's discarded buffer stays in the pool: across 36 layers and repeated chunk
+    /// crossings the pool ends up holding every intermediate size as well as the final one. Growing only starts
+    /// paying once that retention is bounded.</para></summary>
     private static int KvGrowthChunk { get; } =
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_MM3_KV_GROW"), out int chunk) && chunk >= 0 ? chunk : 512;
+        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_MM3_KV_GROW"), out int chunk) && chunk >= 0 ? chunk : 0;
 
     /// <summary>Embeds <paramref name="tokenIds"/> into <c>[1, count, 4096]</c>. Caller owns the result.</summary>
     public Tensor Embed(ReadOnlySpan<int> tokenIds)
