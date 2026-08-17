@@ -9396,7 +9396,10 @@ public sealed class CudaBackend : IBackend
     /// <summary>KV-cache append with the write slot read from <paramref name="devicePos"/> (graph-replayable).</summary>
     public unsafe void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos)
     {
-        if (devicePos == 0 || buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        // F16 buffers scatter through lm_kv_append_f16, which takes the same device position. The source stays
+        // F32 — the projection output is F32 and the kernel narrows on write, exactly as the eager path does.
+        bool appendF16 = buffer.DType == DType.F16 && newKv.DType == DType.F32;
+        if (devicePos == 0 || (!appendF16 && (buffer.DType != DType.F32 || newKv.DType != DType.F32)))
         {
             KvCacheAppend(buffer, newKv, offset);
             return;
@@ -9411,7 +9414,14 @@ public sealed class CudaBackend : IBackend
         {
             pBuf = GpuTransferHelper.CopyToDevice(buffer);
             pNew = GpuTransferHelper.CopyToDevice(newKv);
-            _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle, devicePos);
+            if (appendF16)
+            {
+                _kernels!.LaunchKvAppendF16(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle, devicePos);
+            }
+            else
+            {
+                _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle, devicePos);
+            }
             buffer._gpuSyncCallback = null;
             buffer._gpuDisposeCallback = null;
             GpuTransferHelper.CacheActivation(buffer, pBuf, GpuTransferHelper.ByteSize(buffer));
@@ -9432,8 +9442,9 @@ public sealed class CudaBackend : IBackend
         // Graph decode can keep kvLen/qOffset exclusively on-device. Unsupported storage modes fall back to
         // eager attention, whose validator requires meaningful host positions; the device path validates the
         // same buffer/layout/GQA contract without pretending the zero host placeholders are current positions.
-        if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32
-            || value.DType != DType.F32 || output.DType != DType.F32)
+        bool devF16Kv = key.DType == DType.F16 && value.DType == DType.F16;
+        if (devicePos == 0 || query.DType != DType.F32 || output.DType != DType.F32
+            || (!devF16Kv && (key.DType != DType.F32 || value.DType != DType.F32)))
         {
             FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
             return;
@@ -9445,10 +9456,10 @@ public sealed class CudaBackend : IBackend
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
-        // key/value != F32 also catches F16-storage KV (v1 scope: graph-decode has no F16-KV variant) — falls
-        // through to the eager FlashAttention above, which DOES handle F16 KV (monolithic kernel only, split
-        // forced off there too). Intentional, not a gap: same "disable the fast path, not extend it" precedent
-        // as Phase 6 disabling CUDA-graph decode when LLM layers are staged across devices.
+        // F16-storage KV is served here now that both device-position kernels have an F16 twin: the monolithic
+        // lm_flash_attn_f16kv_f32 and the split lm_flash_attn_f16kv_f32_split. Q, out and the partials stay F32.
+        // Without this the graph path had to force F32 storage, doubling the cache to ~576 KB/frame across the
+        // guided pair and capping a 12 GB card near four minutes of song.
         if (!kernelOk)
         {
             throw new NotSupportedException("Device-position FlashAttention supports head dimensions up to 1024.");
@@ -9501,7 +9512,8 @@ public sealed class CudaBackend : IBackend
                     pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
-                        grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow);
+                        grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow,
+                        f16Kv: devF16Kv);
                     _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
                 }
                 finally
@@ -9511,8 +9523,16 @@ public sealed class CudaBackend : IBackend
             }
             else
             {
-                _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
-                    causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
+                if (devF16Kv)
+                {
+                    _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
+                        causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
+                }
+                else
+                {
+                    _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
+                        causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
+                }
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

@@ -137,9 +137,9 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
             throw new ArgumentOutOfRangeException(nameof(frames), frames, "frames must be positive.");
         }
         int stepCount = Math.Max(1, steps);
-        // Opt-in until the flow-parity gate runs against it: that gate needs a 24 GB card, and the two-forward shape
-        // is what it was recorded against. Worth 3.7% of the flow stage.
-        bool batched = EnvSwitch.IsEnabled(CfgBatchSwitch, defaultOn: false);
+        // HARTSY_MM3_FLOW_CFG_BATCH=0 restores the two-forward shape. Worth 3.7% of the flow stage, and the
+        // diffusers flow-parity gate passes against the batched path.
+        bool batched = EnvSwitch.IsEnabled(CfgBatchSwitch, defaultOn: true);
         int[] starts = ChunkStarts(frames);
         Tensor[] chunks = new Tensor[starts.Length];
         int totalSteps = starts.Length * stepCount;
