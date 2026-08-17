@@ -195,6 +195,16 @@ public static class TestPaths
         /// Override with LTX25_LATENT_UPSAMPLER_PATH.</summary>
         public static string LatentUpsampler25 => Resolve("LTX25_LATENT_UPSAMPLER_PATH",
             Path.Combine(ModelsDir, "latent_upscale_models", "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"));
+        /// <summary>LTX-2.5 distilled transformer (transformer-only int8-convrot repack). Override with
+        /// LTX25_DISTILLED_PATH.</summary>
+        public static string Distilled25 => Resolve("LTX25_DISTILLED_PATH",
+            Path.Combine(ModelsDir, "diffusion_models", "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"));
+        /// <summary>LTX-2.5 Gemma-4 text tower (int8-convrot, tokenizer embedded). Override with LTX25_GEMMA4_INT8.</summary>
+        public static string Gemma4Int8 => Resolve("LTX25_GEMMA4_INT8",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "LTX-2.5", "gemma4-12b-with-proj-ltx-2.5-int8_lean_convrot.safetensors"));
+        /// <summary>LTX-2.5 audio VAE (with vocoder). Override with LTX25_AUDIO_VAE_PATH.</summary>
+        public static string AudioVae25 => Resolve("LTX25_AUDIO_VAE_PATH",
+            Path.Combine(ModelsDir, "Stable-Diffusion", "LTX-2.5", "ltx-2.5-audio-vae-bf16.safetensors"));
     }
 
     /// <summary>HunyuanVideo (Tencent 13B T2V) paths. The DiT single-file is the Comfy-Org repacked bf16 (original
