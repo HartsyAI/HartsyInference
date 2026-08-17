@@ -64,6 +64,7 @@ public sealed class WakeWorker : IDisposable
                 foreach (WakeSession session in _sessions.Values)
                 {
                     if (session.State == WakeSessionState.Handshake) continue;
+                    if (!session.PendingWords.IsEmpty) session.ApplyPendingWords();
                     if (session.RequestReset)
                     {
                         session.Pipeline.Reset();

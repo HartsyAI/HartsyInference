@@ -67,6 +67,13 @@ public sealed class HartsyInferenceServerOptions
 
     /// <summary>Whether a detection also transcribes the command that follows it.</summary>
     public bool WakeTranscribeOnDetection { get; set; } = true;
+
+    /// <summary>Exposes this engine's ASR/TTS to Home Assistant over the Wyoming protocol. Off by default: it
+    /// binds a third port and only matters to a Home Assistant install.</summary>
+    public bool WyomingEnabled { get; set; }
+
+    /// <summary>TCP port Home Assistant connects to for Wyoming.</summary>
+    public int WyomingPort { get; set; } = 10_600;
 }
 
 /// <summary>One entry in <see cref="HartsyInferenceServerOptions.ApiKeys"/> — a secret plus the identity/limits

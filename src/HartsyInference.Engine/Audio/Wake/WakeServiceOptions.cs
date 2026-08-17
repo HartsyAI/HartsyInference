@@ -35,6 +35,10 @@ public sealed record WakeServiceOptions
     /// <summary>Model id used for that transcription.</summary>
     public string TranscribeModel { get; init; } = "whisper";
 
+    /// <summary>Whether to identify who spoke and enforce per-word speaker restrictions. Requires CAM++
+    /// weights; when they are missing the service logs and runs ungated.</summary>
+    public bool IdentifySpeakers { get; init; } = true;
+
     /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to
     /// one engine's wake events without being in-process — the same detection can drive several agents.</summary>
     public IReadOnlyList<string> Webhooks { get; init; } = [];

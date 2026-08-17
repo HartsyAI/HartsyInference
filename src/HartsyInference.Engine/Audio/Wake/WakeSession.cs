@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Logging;
@@ -88,6 +90,22 @@ public sealed class WakeSession : IDisposable
 
     /// <summary>Set when the stream became discontinuous; the worker clears it after resetting the pipeline.</summary>
     public bool RequestReset { get; set; }
+
+    /// <summary>Word changes waiting to be applied. A pipeline is single-threaded by contract and is owned by
+    /// the worker, so configuration changes are queued from whatever thread requests them and applied by the
+    /// worker between drains rather than mutating a pipeline mid-push.</summary>
+    public ConcurrentQueue<(string Name, WakeHead? Head, WakeWordSettings? Settings)> PendingWords { get; } = new();
+
+    /// <summary>Applies queued word changes. Called only by the wake worker.</summary>
+    public void ApplyPendingWords()
+    {
+        while (PendingWords.TryDequeue(out (string Name, WakeHead? Head, WakeWordSettings? Settings) change))
+        {
+            Pipeline.RemoveWord(change.Name);
+            if (change.Head is not null && change.Settings is not null)
+                Pipeline.AddWord(change.Head, change.Settings);
+        }
+    }
 
     /// <summary>Drains queued audio for the worker. Returns the sample count written to <paramref name="destination"/>.</summary>
     public int Drain(Span<float> destination) => _ring.Read(destination);

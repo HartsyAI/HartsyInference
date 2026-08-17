@@ -4,6 +4,7 @@ using HartsyInference.API.Endpoints;
 using HartsyInference.Engine;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio.Wake;
+using HartsyInference.Engine.Audio.Wake.Wyoming;
 using HartsyInference.Engine.Services;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.RateLimiting;
@@ -67,6 +68,22 @@ public static class HartsyInferenceServiceExtensions
 
         // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
         // ApiMetrics adds on top of ASP.NET Core's own request instrumentation (see WithMetrics below).
+        if (options.WyomingEnabled)
+        {
+            services.AddSingleton(sp =>
+            {
+                InferenceQueue queue = sp.GetRequiredService<InferenceQueue>();
+                return new WyomingListener(sp.GetRequiredService<IInferenceEngine>(), new WyomingOptions
+                {
+                    Port = options.WyomingPort,
+                    // Same reasoning as the wake path: ASR and TTS run on the shared backend, which is not
+                    // re-entrant, so they queue behind the same gate as every HTTP route.
+                    TranscribeGate = work => queue.EnqueueAsync(work, CancellationToken.None),
+                    SynthesizeGate = work => queue.EnqueueAsync(work, CancellationToken.None),
+                });
+            });
+        }
+
         services.AddSingleton(new ApiKeyStore(options));
         services.AddSingleton<UsageTracker>();
         services.AddSingleton<ApiMetrics>();
@@ -137,6 +154,17 @@ public static class HartsyInferenceServiceExtensions
                 catch (Exception ex) { Logs.Error("[Audio][Wake] Listener failed to start; satellites cannot connect.", ex); }
             });
             app.Lifetime.ApplicationStopping.Register(wake.Dispose);
+        }
+
+        if (options.WyomingEnabled)
+        {
+            WyomingListener wyoming = app.Services.GetRequiredService<WyomingListener>();
+            app.Lifetime.ApplicationStarted.Register(() =>
+            {
+                try { wyoming.Start(); }
+                catch (Exception ex) { Logs.Error("[Audio][Wyoming] Listener failed to start; Home Assistant cannot discover this engine.", ex); }
+            });
+            app.Lifetime.ApplicationStopping.Register(wyoming.Dispose);
         }
 
         // Last-resort safety net: catches any exception a route handler doesn't already handle itself and turns

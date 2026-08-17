@@ -14,10 +14,16 @@ and microWakeWord depends on ESP32-S3 vector instructions — so all detection i
 tier Home Assistant's M5 ATOM Echo occupies, and it is why the protocol carries continuous audio rather than
 post-wake utterances.
 
-Framing is Wyoming's (Home Assistant / Rhasspy): one JSON line, then an optional binary payload. That choice is
-about the client, not the server — on a microcontroller it is roughly fifty lines with no handshake, no
-RFC 6455 frame masking, and no varint protobuf decoder, and it leaves a Home Assistant compatibility endpoint
-as mostly a mapping of event names.
+Framing is Wyoming-*shaped* (Home Assistant / Rhasspy): one JSON line, then an optional binary payload. That
+choice is about the client, not the server — on a microcontroller it is roughly fifty lines with no handshake,
+no RFC 6455 frame masking, and no varint protobuf decoder.
+
+> **This is not wire-compatible with Home Assistant, and deliberately so.** Real Wyoming *pops* `data` out of
+> the header and writes it as a separate `data_length`-prefixed block ahead of the payload; the header carries
+> only `type`/`version`/`data_length`/`payload_length`. This protocol keeps `data` inline, which is simpler for
+> a microcontroller to emit. Home Assistant compatibility is a **separate endpoint** with its own codec —
+> `src/HartsyInference.Engine/Audio/Wake/Wyoming/` on port 10600 — so neither side has to compromise. Do not
+> point HA at the satellite port.
 
 ## Transport
 

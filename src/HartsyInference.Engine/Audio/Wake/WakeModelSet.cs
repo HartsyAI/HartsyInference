@@ -15,6 +15,9 @@ namespace HartsyInference.Engine.Audio.Wake;
 public sealed class WakeModelSet : IDisposable
 {
     private readonly Dictionary<string, (WakeHead Head, WakeWordConfig Config)> _heads = [];
+    // Heads replaced by a reload. Live pipelines still borrow the old instance until the worker swaps them,
+    // so disposing on replace would free tensors the worker is about to read.
+    private readonly List<WakeHead> _retired = [];
     private readonly object _lock = new();
     private WakeMelFrontend? _mel;
     private SpeechEmbeddingModel? _embedding;
@@ -112,7 +115,7 @@ public sealed class WakeModelSet : IDisposable
             }
             lock (_lock)
             {
-                if (_heads.Remove(name, out (WakeHead Head, WakeWordConfig Config) old)) old.Head.Dispose();
+                if (_heads.Remove(name, out (WakeHead Head, WakeWordConfig Config) old)) _retired.Add(old.Head);
                 _heads[name] = (head, config);
             }
             return true;
@@ -137,6 +140,15 @@ public sealed class WakeModelSet : IDisposable
         return pipeline;
     }
 
+    /// <summary>The head and settings for one word, for a caller applying it to a live pipeline.</summary>
+    public (WakeHead Head, WakeWordConfig Config)? Entry(string word)
+    {
+        lock (_lock) return _heads.TryGetValue(word, out (WakeHead Head, WakeWordConfig Config) entry) ? entry : null;
+    }
+
+    /// <summary>Settings converted for the pipeline.</summary>
+    public static WakeWordSettings Settings(WakeWordConfig config) => ToSettings(config);
+
     /// <summary>The configuration a word fired under, for annotating its detection event.</summary>
     public WakeWordConfig? ConfigFor(string word)
     {
@@ -157,6 +169,8 @@ public sealed class WakeModelSet : IDisposable
         {
             foreach ((WakeHead head, _) in _heads.Values) head.Dispose();
             _heads.Clear();
+            foreach (WakeHead head in _retired) head.Dispose();
+            _retired.Clear();
         }
         _mel?.Dispose();
         _embedding?.Dispose();
