@@ -39,8 +39,9 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         ArgumentNullException.ThrowIfNull(config);
         Validate(config);
         _config = config;
-        _onesByHeadDim[config.HeadDim] = Ones(config.HeadDim);
-        if (config.GlobalHeadDim != config.HeadDim) _onesByHeadDim[config.GlobalHeadDim] = Ones(config.GlobalHeadDim);
+        _onesByHeadDim[config.HeadDim] = TextEncoderTensorHelpers.Ones(config.HeadDim);
+        if (config.GlobalHeadDim != config.HeadDim)
+            _onesByHeadDim[config.GlobalHeadDim] = TextEncoderTensorHelpers.Ones(config.GlobalHeadDim);
         _blocks = new Gemma4Block[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
             _blocks[i] = new Gemma4Block(config, i, this);
@@ -59,8 +60,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         weights = TextEncoderQuantNormalizer.Normalize(weights);
 
         string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
-        _embedWeight = CastToF32IfNeeded(weights[$"{prefix}embed_tokens.weight"]);
-        _finalNormWeight = CastToF32IfNeeded(weights[$"{prefix}norm.weight"]);
+        _embedWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}embed_tokens.weight"]);
+        _finalNormWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}norm.weight"]);
 
         for (int i = 0; i < _config.NumLayers; i++)
             _blocks[i].LoadWeights(weights, $"{prefix}layers.{i}");
@@ -111,7 +112,7 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         if (_embedWeight is null || _finalNormWeight is null)
             throw new InvalidOperationException("Gemma4TextEncoder.LoadWeights must run before encoding.");
 
-        (int batch, int seqLen) = ValidateTokenBatch(tokenIds);
+        (int batch, int seqLen) = TextEncoderTensorHelpers.ValidateTokenBatch(tokenIds, _config.VocabSize);
         if (seqLen > _config.MaxPositionEmbeddings)
             throw new InvalidOperationException(
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
@@ -127,16 +128,20 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         using ForwardConstants constants = PrepareForwardConstants(backend, batch, seqLen);
         try
         {
-            hidden = EmbeddingLookup(backend, tokenIds, batch, seqLen);
+            hidden = TextEncoderTensorHelpers.EmbeddingLookup(backend, tokenIds, batch, seqLen,
+                _embedWeight, _config.HiddenSize, _config.VocabSize, _config.EmbeddingScale);
             for (int i = 0; i < _config.NumLayers; i++)
             {
                 if (requested[i])
                 {
                     captures.Add(hidden);
                     hiddenIsCaptured = true;
+                    // Later blocks cannot change already-captured states, so stop the forward pass once the
+                    // last requested state is in hand (only reachable when the final state is not requested).
+                    if (captures.Count == stateCount) break;
                 }
                 Tensor next = _blocks[i].Forward(backend, hidden, constants, seqLen);
-                if (!hiddenIsCaptured) DisposeBestEffort(hidden, "previous hidden activation");
+                if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(hidden, "previous hidden activation");
                 hiddenIsCaptured = false;
                 hidden = next;
             }
@@ -163,7 +168,7 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
             {
                 Tensor only = captures[0];
                 captures.Clear();
-                if (!ReferenceEquals(only, hidden)) DisposeBestEffort(hidden, "hidden activation after single capture");
+                if (!ReferenceEquals(only, hidden)) TextEncoderTensorHelpers.DisposeBestEffort(hidden, "hidden activation after single capture");
                 hidden = null;
                 hiddenIsCaptured = false;
                 return only;
@@ -183,23 +188,23 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
                 }
                 catch
                 {
-                    DisposeBestEffort(output, "interleaved multi-layer output");
+                    TextEncoderTensorHelpers.DisposeBestEffort(output, "interleaved multi-layer output");
                     throw;
                 }
-                DisposeBestEffort(layerMajor, "layer-major staging output");
+                TextEncoderTensorHelpers.DisposeBestEffort(layerMajor, "layer-major staging output");
                 return output;
             }
             catch
             {
-                DisposeBestEffort(layerMajor, "layer-major output after pack failure");
+                TextEncoderTensorHelpers.DisposeBestEffort(layerMajor, "layer-major output after pack failure");
                 throw;
             }
         }
         finally
         {
-            if (!hiddenIsCaptured) DisposeBestEffort(hidden, "trailing hidden activation");
+            if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(hidden, "trailing hidden activation");
             foreach (Tensor capture in captures)
-                DisposeBestEffort(capture, "captured hidden activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(capture, "captured hidden activation");
         }
     }
 
@@ -251,31 +256,29 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
     /// <summary>Shared all-ones RMS scale for the weightless V norm, one per head dimension.</summary>
     internal Tensor OnesFor(int headDim) => _onesByHeadDim[headDim];
 
-    private static Tensor Ones(int length)
-    {
-        Tensor ones = new(new TensorShape(length), DType.F32);
-        float* p = (float*)ones.DataPointer;
-        for (int i = 0; i < length; i++) p[i] = 1f;
-        return ones;
-    }
-
     private ForwardConstants PrepareForwardConstants(IBackend backend, int batch, int seqLen)
     {
         Tensor? causal = null, sliding = null, sCos = null, sSin = null, gCos = null, gSin = null;
         try
         {
-            causal = MakeResidentCopy(backend, BuildCausalMask(seqLen, int.MaxValue));
+            causal = TextEncoderTensorHelpers.MakeResidentCopy(
+                backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue));
             if (seqLen > _config.SlidingWindow)
-                sliding = MakeResidentCopy(backend, BuildCausalMask(seqLen, _config.SlidingWindow));
+                sliding = TextEncoderTensorHelpers.MakeResidentCopy(
+                    backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, _config.SlidingWindow));
 
             int slidingLayer = 0;
             int globalLayer = _config.GlobalLayerPeriod - 1;
             RopeTable slidingTable = EnsureRopeTable(slidingLayer, seqLen);
             RopeTable globalTable = EnsureRopeTable(globalLayer, seqLen);
-            sCos = MakeResidentCopy(backend, BuildFullWidthTable(slidingTable.Cos, batch, seqLen, _config.HeadDim));
-            sSin = MakeResidentCopy(backend, BuildFullWidthTable(slidingTable.Sin, batch, seqLen, _config.HeadDim));
-            gCos = MakeResidentCopy(backend, BuildFullWidthTable(globalTable.Cos, batch, seqLen, _config.GlobalHeadDim));
-            gSin = MakeResidentCopy(backend, BuildFullWidthTable(globalTable.Sin, batch, seqLen, _config.GlobalHeadDim));
+            sCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(slidingTable.Cos, batch, seqLen, _config.HeadDim));
+            sSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(slidingTable.Sin, batch, seqLen, _config.HeadDim));
+            gCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalTable.Cos, batch, seqLen, _config.GlobalHeadDim));
+            gSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalTable.Sin, batch, seqLen, _config.GlobalHeadDim));
             return new ForwardConstants(causal, sliding, sCos, sSin, gCos, gSin);
         }
         catch
@@ -298,176 +301,12 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         if (_ropeTables.TryGetValue(global, out RopeTable cached) && cached.BuiltForLength >= seqLen)
             return cached;
 
-        int target = Math.Max(seqLen, cached.BuiltForLength);
-        int rounded = 1;
-        while (rounded < target) rounded <<= 1;
-        target = Math.Min(rounded, _config.MaxPositionEmbeddings);
-
+        int target = TextEncoderTensorHelpers.GrowRopeTableLength(seqLen, cached.BuiltForLength, _config.MaxPositionEmbeddings);
         double[] inv = _config.BuildInverseFrequencies(layerIndex);
-        int half = inv.Length;
-        float[] cos = new float[(long)target * half];
-        float[] sin = new float[(long)target * half];
-        for (int p = 0; p < target; p++)
-        {
-            for (int k = 0; k < half; k++)
-            {
-                double angle = p * inv[k];
-                cos[p * half + k] = (float)Math.Cos(angle);
-                sin[p * half + k] = (float)Math.Sin(angle);
-            }
-        }
+        (float[] cos, float[] sin) = TextEncoderTensorHelpers.BuildHalfRopeTable(inv, target);
         RopeTable table = new(cos, sin, target);
         _ropeTables[global] = table;
         return table;
-    }
-
-    /// <summary>Expands a half-width table <c>[S, D/2]</c> to the backend RoPE contract <c>[B, S, D]</c>,
-    /// duplicating each frequency into both halves of the vector and across batch rows.</summary>
-    private static Tensor BuildFullWidthTable(float[] halfTable, int batch, int seqLen, int headDim)
-    {
-        int half = headDim / 2;
-        Tensor full = new(new TensorShape(batch, seqLen, headDim), DType.F32);
-        float* output = (float*)full.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int sourceBase = s * half;
-                long destinationBase = ((long)b * seqLen + s) * headDim;
-                for (int i = 0; i < half; i++)
-                {
-                    float value = halfTable[sourceBase + i];
-                    output[destinationBase + i] = value;
-                    output[destinationBase + half + i] = value;
-                }
-            }
-        }
-        return full;
-    }
-
-    /// <summary>Additive attention mask: query <c>i</c> may attend key <c>j</c> when <c>i - window &lt; j &lt;= i</c>.
-    /// Pass <see cref="int.MaxValue"/> for plain causal attention.</summary>
-    private static Tensor BuildCausalMask(int seqLen, int window)
-    {
-        const float negInf = -1e30f;
-        Tensor mask = new(new TensorShape(seqLen, seqLen), DType.F32);
-        float* p = (float*)mask.DataPointer;
-        for (int i = 0; i < seqLen; i++)
-        {
-            for (int j = 0; j < seqLen; j++)
-            {
-                bool blocked = j > i || (window != int.MaxValue && j <= i - window);
-                p[(long)i * seqLen + j] = blocked ? negInf : 0f;
-            }
-        }
-        return mask;
-    }
-
-    private static Tensor MakeResidentCopy(IBackend backend, Tensor host)
-    {
-        Tensor resident = new(host.Shape, host.DType);
-        try
-        {
-            backend.SliceRowsGeneric(resident, host, rowOffset: 0);
-            return resident;
-        }
-        catch
-        {
-            DisposeBestEffort(resident, "request constant after copy failure");
-            throw;
-        }
-        finally
-        {
-            DisposeBestEffort(host, "host request constant");
-        }
-    }
-
-    private Tensor EmbeddingLookup(IBackend backend, int[][] tokenIds, int batch, int seqLen)
-    {
-        int hiddenSize = _config.HiddenSize;
-        int rowCount = checked(batch * seqLen);
-        int[] rows = new int[rowCount];
-        int rowIndex = 0;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                rows[rowIndex++] = tokenIds[b][s];
-
-        TensorShape shape = new(batch, seqLen, hiddenSize);
-        Tensor gathered = new(shape, DType.F32);
-        try
-        {
-            // Uploading the 262k-row Gemma vocabulary purely to collect one prompt costs multiple GB; only use
-            // the device gather when the table is already resident.
-            if (!backend.TryGatherRowsResident(gathered, _embedWeight!, rows))
-            {
-                DisposeBestEffort(gathered, "unused resident-gather output");
-                return EmbeddingLookupHost(tokenIds, batch, seqLen);
-            }
-            Tensor scaled = new(shape, DType.F32);
-            try
-            {
-                backend.Scale(scaled, gathered, _config.EmbeddingScale);
-            }
-            catch
-            {
-                DisposeBestEffort(scaled, "scaled embedding output after failure");
-                throw;
-            }
-            DisposeBestEffort(gathered, "unscaled gathered embedding");
-            return scaled;
-        }
-        catch
-        {
-            DisposeBestEffort(gathered, "gathered embedding after failure");
-            throw;
-        }
-    }
-
-    private Tensor EmbeddingLookupHost(int[][] tokenIds, int batch, int seqLen)
-    {
-        int hiddenSize = _config.HiddenSize;
-        Tensor output = new(new TensorShape(batch, seqLen, hiddenSize), DType.F32);
-        float* embedPtr = (float*)_embedWeight!.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long src = (long)tokenIds[b][s] * hiddenSize;
-                long dst = ((long)b * seqLen + s) * hiddenSize;
-                Buffer.MemoryCopy(embedPtr + src, outPtr + dst, hiddenSize * sizeof(float), hiddenSize * sizeof(float));
-            }
-        }
-        float scale = _config.EmbeddingScale;
-        long total = (long)batch * seqLen * hiddenSize;
-        for (long i = 0; i < total; i++) outPtr[i] *= scale;
-        return output;
-    }
-
-    private (int Batch, int Sequence) ValidateTokenBatch(int[][] tokenIds)
-    {
-        ArgumentNullException.ThrowIfNull(tokenIds);
-        if (tokenIds.Length == 0)
-            throw new ArgumentException("Token batch must contain at least one row.", nameof(tokenIds));
-        if (tokenIds[0] is null || tokenIds[0].Length == 0)
-            throw new ArgumentException("Token rows must be non-null and non-empty.", nameof(tokenIds));
-
-        int seqLen = tokenIds[0].Length;
-        for (int b = 0; b < tokenIds.Length; b++)
-        {
-            int[]? row = tokenIds[b];
-            if (row is null || row.Length != seqLen)
-                throw new ArgumentException(
-                    $"Token batch must be rectangular with sequence length {seqLen}; row {b} has length {row?.Length ?? 0}.",
-                    nameof(tokenIds));
-            for (int s = 0; s < row.Length; s++)
-            {
-                if ((uint)row[s] >= (uint)_config.VocabSize)
-                    throw new ArgumentOutOfRangeException(
-                        nameof(tokenIds), row[s], $"Token id at [{b},{s}] is outside vocabulary size {_config.VocabSize}.");
-            }
-        }
-        return (tokenIds.Length, seqLen);
     }
 
     private static void Validate(Gemma4TextEncoderConfig config)
@@ -494,22 +333,13 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
             throw new ArgumentException($"SlidingWindow must be positive; got {config.SlidingWindow}.", nameof(config));
     }
 
-    internal static Tensor CastToF32IfNeeded(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-
-    internal static void DisposeBestEffort(Tensor? tensor, string description)
-    {
-        if (tensor is null) return;
-        try { tensor.Dispose(); }
-        catch (Exception error) { Logs.Error($"Failed to release Gemma 4 encoder {description}.", error); }
-    }
-
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Tensor ones in _onesByHeadDim.Values)
-            DisposeBestEffort(ones, "weightless V norm scale");
+            TextEncoderTensorHelpers.DisposeBestEffort(ones, "weightless V norm scale");
         _onesByHeadDim.Clear();
         _ropeTables.Clear();
         _embedWeight = null;
@@ -547,10 +377,10 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
-            _preFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
-            _postFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
+            _inputNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _preFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
+            _postFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
 
             _qProj = weights[$"{prefix}.self_attn.q_proj.weight"];
             _kProj = weights[$"{prefix}.self_attn.k_proj.weight"];
@@ -560,8 +390,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
                 throw new InvalidOperationException(
                     $"Layer {_index} is a k_eq_v global layer but the checkpoint carries {prefix}.self_attn.v_proj.weight.");
 
-            _qHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
-            _kHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
+            _qHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
+            _kHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
 
             _gateProj = weights[$"{prefix}.mlp.gate_proj.weight"];
             _upProj = weights[$"{prefix}.mlp.up_proj.weight"];

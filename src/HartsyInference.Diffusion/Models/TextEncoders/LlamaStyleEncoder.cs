@@ -111,12 +111,12 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
 
         Tensor rawEmbed = weights[$"{prefix}embed_tokens.weight"];
-        _embedWeight = CastToF32IfNeeded(rawEmbed);
+        _embedWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(rawEmbed);
 
         if (_config.HasFinalNorm)
         {
             Tensor rawFinalNorm = weights[$"{prefix}norm.weight"];
-            _finalNormWeight = CastToF32IfNeeded(rawFinalNorm);
+            _finalNormWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(rawFinalNorm);
             if (_config.RmsNormScalePlusOne) AddOneInPlace(_finalNormWeight);
         }
 
@@ -157,7 +157,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             // 1. Gather token embeddings on the selected backend. This used to be a scalar host loop whose
             // result had to be uploaded before the first RMSNorm, despite the embedding table already being
             // resident on CUDA.
-            hidden = EmbeddingLookup(backend, tokenIds, batch, seqLen);
+            hidden = TextEncoderTensorHelpers.EmbeddingLookup(backend, tokenIds, batch, seqLen,
+                _embedWeight!, _config.HiddenSize, _config.VocabSize, _config.EmbeddingScale);
 
             // 2. Layer loop — each block reads `hidden`, allocates a new tensor, returns it. Old hidden disposed.
             for (int i = 0; i < _config.NumLayers; i++)
@@ -166,7 +167,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
-                DisposeBestEffort(previous, "previous layer activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous layer activation");
             }
 
             // 3. Final RMSNorm (skipped for checkpoints that don't ship one — e.g. Mistral-Small-3
@@ -180,12 +181,12 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 }
                 catch
                 {
-                    DisposeBestEffort(output, "final norm output after failure");
+                    TextEncoderTensorHelpers.DisposeBestEffort(output, "final norm output after failure");
                     throw;
                 }
                 Tensor previous = hidden;
                 hidden = null;
-                DisposeBestEffort(previous, "pre-final-norm activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(previous, "pre-final-norm activation");
                 return output;
             }
 
@@ -195,7 +196,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
         finally
         {
-            DisposeBestEffort(hidden, "hidden activation");
+            TextEncoderTensorHelpers.DisposeBestEffort(hidden, "hidden activation");
         }
     }
 
@@ -208,7 +209,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         if (tokenIds.Length > _config.MaxPositionEmbeddings)
             throw new ArgumentOutOfRangeException(
                 nameof(tokenIds), tokenIds.Length, $"Prompt exceeds maximum position {_config.MaxPositionEmbeddings}.");
-        return EmbeddingLookupHost([tokenIds], 1, tokenIds.Length);
+        return TextEncoderTensorHelpers.EmbeddingLookupHost([tokenIds], 1, tokenIds.Length,
+            _embedWeight!, _config.HiddenSize, _config.VocabSize, _config.EmbeddingScale);
     }
 
     /// <summary>Runs the decoder over caller-supplied <c>inputsEmbeds [1, seqLen, hidden]</c> with a precomputed
@@ -255,7 +257,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                     backend, hidden, constants.CausalMask, constants.GlobalCos, constants.GlobalSin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
-                DisposeBestEffort(previous, "previous M-RoPE layer activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous M-RoPE layer activation");
                 if (deepstackFeatures is not null && i < deepstackFeatures.Count)
                     backend.ScatterAddWeightedRows(hidden, deepstackFeatures[i], visualRows, visualScales);
             }
@@ -264,10 +266,10 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             {
                 Tensor output = new(new TensorShape(1, seqLen, H), DType.F32);
                 try { backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps); }
-                catch { DisposeBestEffort(output, "M-RoPE final norm output after failure"); throw; }
+                catch { TextEncoderTensorHelpers.DisposeBestEffort(output, "M-RoPE final norm output after failure"); throw; }
                 Tensor previous = hidden;
                 hidden = null;
-                DisposeBestEffort(previous, "M-RoPE pre-final-norm activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(previous, "M-RoPE pre-final-norm activation");
                 return output;
             }
 
@@ -277,7 +279,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
         finally
         {
-            DisposeBestEffort(hidden, "M-RoPE hidden activation");
+            TextEncoderTensorHelpers.DisposeBestEffort(hidden, "M-RoPE hidden activation");
         }
     }
 
@@ -353,7 +355,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal);
         try
         {
-            hidden = EmbeddingLookup(backend, tokenIds, batch, seqLen);
+            hidden = TextEncoderTensorHelpers.EmbeddingLookup(backend, tokenIds, batch, seqLen,
+                _embedWeight!, _config.HiddenSize, _config.VocabSize, _config.EmbeddingScale);
             if (TeProbe) ProbeAbsmax("embed", hidden);
             int requestIdx = 0;
 
@@ -372,7 +375,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
-                if (!hiddenIsCaptured) DisposeBestEffort(previous, "previous multi-layer activation");
+                if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer activation");
                 hiddenIsCaptured = false;
                 if (TeProbe) ProbeAbsmax($"layer {i + 1}", hidden);
 
@@ -418,144 +421,33 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 }
                 catch
                 {
-                    DisposeBestEffort(output, "interleaved tap output");
+                    TextEncoderTensorHelpers.DisposeBestEffort(output, "interleaved tap output");
                     throw;
                 }
-                DisposeBestEffort(tapMajor, "tap-major staging output");
+                TextEncoderTensorHelpers.DisposeBestEffort(tapMajor, "tap-major staging output");
                 hidden = null;
                 hiddenIsCaptured = false;
                 return output;
             }
             catch
             {
-                DisposeBestEffort(tapMajor, "tap-major output after pack failure");
+                TextEncoderTensorHelpers.DisposeBestEffort(tapMajor, "tap-major output after pack failure");
                 throw;
             }
         }
         finally
         {
-            if (!hiddenIsCaptured) DisposeBestEffort(hidden, "multi-layer hidden activation");
+            if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(hidden, "multi-layer hidden activation");
             foreach (Tensor capture in captures)
-                DisposeBestEffort(capture, "captured hidden activation");
+                TextEncoderTensorHelpers.DisposeBestEffort(capture, "captured hidden activation");
         }
-    }
-
-    private static void DisposeBestEffort(Tensor? tensor, string description)
-    {
-        if (tensor is null) return;
-        try { tensor.Dispose(); }
-        catch (Exception error) { Logs.Error($"Failed to release Llama encoder {description}.", error); }
-    }
-
-    private Tensor EmbeddingLookup(IBackend backend, int[][] tokenIds, int batch, int seqLen)
-    {
-        int rowCount = checked(batch * seqLen);
-        int[] rows = new int[rowCount];
-        int rowIndex = 0;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                rows[rowIndex++] = tokenIds[b][s];
-
-        TensorShape shape = new(batch, seqLen, _config.HiddenSize);
-        Tensor gathered = new(shape, DType.F32);
-        try
-        {
-            // Uploading a Qwen/Gemma vocabulary table solely to collect a short prompt can cost 1.5–3.2 GB.
-            // Use the kernel only when the recipe/streamer has already made that table resident; otherwise the
-            // old host gather is both faster and dramatically cheaper in peak VRAM.
-            if (!backend.TryGatherRowsResident(gathered, _embedWeight!, rows))
-            {
-                DisposeBestEffort(gathered, "unused resident-gather output");
-                return EmbeddingLookupHost(tokenIds, batch, seqLen);
-            }
-            if (_config.EmbeddingScale == 1.0f)
-                return gathered;
-
-            Tensor scaled = new(shape, DType.F32);
-            try
-            {
-                backend.Scale(scaled, gathered, _config.EmbeddingScale);
-            }
-            catch
-            {
-                DisposeBestEffort(scaled, "scaled embedding output after failure");
-                throw;
-            }
-            DisposeBestEffort(gathered, "unscaled gathered embedding");
-            return scaled;
-        }
-        catch
-        {
-            DisposeBestEffort(gathered, "gathered embedding after failure");
-            throw;
-        }
-    }
-
-    /// <summary>Host lookup retained for multimodal/audio callers that immediately splice or slice the returned
-    /// buffer on the CPU. Moving those callers to the backend requires porting that adjacent host operation too;
-    /// uploading here only to read straight back would be strictly worse.</summary>
-    private Tensor EmbeddingLookupHost(int[][] tokenIds, int batch, int seqLen)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, _config.HiddenSize);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        float* embedPtr = (float*)_embedWeight!.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int H = _config.HiddenSize;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int tokenId = tokenIds[b][s];
-                if ((uint)tokenId >= (uint)_config.VocabSize)
-                    throw new ArgumentOutOfRangeException(nameof(tokenIds),
-                        $"Token id {tokenId} at [{b},{s}] out of vocab (size {_config.VocabSize}).");
-
-                long src = (long)tokenId * H;
-                long dst = ((long)b * seqLen + s) * H;
-                Buffer.MemoryCopy(embedPtr + src, outPtr + dst, H * sizeof(float), H * sizeof(float));
-            }
-        }
-
-        // Gemma-family "normalizer": scale embeddings by sqrt(HiddenSize). No-op for Llama/Qwen/Mistral
-        // (EmbeddingScale defaults to 1.0).
-        if (_config.EmbeddingScale != 1.0f)
-        {
-            float scale = _config.EmbeddingScale;
-            long total = (long)batch * seqLen * H;
-            for (long i = 0; i < total; i++) outPtr[i] *= scale;
-        }
-        return output;
     }
 
     private (int Batch, int Sequence) ValidateTokenBatch(int[][] tokenIds)
     {
-        ArgumentNullException.ThrowIfNull(tokenIds);
-        if (tokenIds.Length == 0)
-            throw new ArgumentException("Token batch must contain at least one row.", nameof(tokenIds));
-        if (tokenIds[0] is null || tokenIds[0].Length == 0)
-            throw new ArgumentException("Token rows must be non-null and non-empty.", nameof(tokenIds));
-
-        int seqLen = tokenIds[0].Length;
-        for (int b = 0; b < tokenIds.Length; b++)
-        {
-            int[]? row = tokenIds[b];
-            if (row is null || row.Length != seqLen)
-                throw new ArgumentException(
-                    $"Token batch must be rectangular with sequence length {seqLen}; row {b} has length {row?.Length ?? 0}.",
-                    nameof(tokenIds));
-            for (int s = 0; s < row.Length; s++)
-            {
-                if ((uint)row[s] >= (uint)_config.VocabSize)
-                    throw new ArgumentOutOfRangeException(
-                        nameof(tokenIds), row[s], $"Token id at [{b},{s}] is outside vocabulary size {_config.VocabSize}.");
-            }
-        }
-
+        (int batch, int seqLen) = TextEncoderTensorHelpers.ValidateTokenBatch(tokenIds, _config.VocabSize);
         ValidateAttentionGeometry();
-
-        return (tokenIds.Length, seqLen);
+        return (batch, seqLen);
     }
 
     private void ValidateAttentionGeometry()
@@ -568,80 +460,6 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
         if (_config.HeadDim <= 0 || (_config.HeadDim & 1) != 0)
             throw new InvalidOperationException($"Split-half RoPE requires a positive even head dimension; got {_config.HeadDim}.");
-    }
-
-    private static Tensor BuildCausalMask(int seqLen)
-    {
-        // Mask shape [seqLen, seqLen] (broadcast across batch, heads inside SDPA).
-        // Use a large negative number rather than -inf to avoid NaN in mixed-precision softmax.
-        const float negInf = -1e30f;
-        TensorShape shape = new TensorShape(seqLen, seqLen);
-        Tensor mask = new Tensor(shape, DType.F32);
-        float* p = (float*)mask.DataPointer;
-        for (int i = 0; i < seqLen; i++)
-        {
-            for (int j = 0; j < seqLen; j++)
-                p[i * seqLen + j] = j > i ? negInf : 0f;
-        }
-        return mask;
-    }
-
-    /// <summary>Copies a small request constant through the backend once so every layer reuses its device-resident
-    /// activation. A reshape/view is deliberately not used: views have a different tensor identity and therefore
-    /// cannot find the producer's activation-cache entry.</summary>
-    private static Tensor MakeResidentCopy(IBackend backend, Tensor host)
-    {
-        Tensor resident = new(host.Shape, host.DType);
-        try
-        {
-            backend.SliceRowsGeneric(resident, host, rowOffset: 0);
-            return resident;
-        }
-        catch
-        {
-            DisposeBestEffort(resident, "resident request constant after copy failure");
-            throw;
-        }
-        finally
-        {
-            DisposeBestEffort(host, "host request constant");
-        }
-    }
-
-    /// <summary>Expands the cached split-half table <c>[S,D/2]</c> to the backend RoPE contract
-    /// <c>[B,S,D]</c>, duplicating each frequency into both vector halves and each batch row.</summary>
-    private static Tensor BuildFullWidthRopeTable(float[] halfTable, int batch, int seqLen, int headDim)
-    {
-        ArgumentNullException.ThrowIfNull(halfTable);
-        if (batch <= 0) throw new ArgumentOutOfRangeException(nameof(batch), "Batch must be positive.");
-        if (seqLen <= 0) throw new ArgumentOutOfRangeException(nameof(seqLen), "Sequence length must be positive.");
-        if (headDim <= 0 || (headDim & 1) != 0)
-            throw new ArgumentOutOfRangeException(nameof(headDim), "Split-half RoPE requires a positive even head dimension.");
-
-        int half = headDim / 2;
-        int required = checked(seqLen * half);
-        if (halfTable.Length < required)
-            throw new ArgumentException(
-                $"RoPE table has {halfTable.Length} values, but sequence {seqLen} and head dimension {headDim} require at least {required}.",
-                nameof(halfTable));
-
-        Tensor full = new(new TensorShape(batch, seqLen, headDim), DType.F32);
-        float* output = (float*)full.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int sourceBase = s * half;
-                long destinationBase = ((long)b * seqLen + s) * headDim;
-                for (int i = 0; i < half; i++)
-                {
-                    float value = halfTable[sourceBase + i];
-                    output[destinationBase + i] = value;
-                    output[destinationBase + half + i] = value;
-                }
-            }
-        }
-        return full;
     }
 
     private ForwardConstants PrepareForwardConstants(
@@ -660,15 +478,20 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         Tensor? lSin = null;
         try
         {
-            mask = MakeResidentCopy(backend, BuildCausalMask(seqLen));
-            gCos = MakeResidentCopy(backend, BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
-            gSin = MakeResidentCopy(backend, BuildFullWidthRopeTable(globalSin, batch, seqLen, _config.HeadDim));
+            mask = TextEncoderTensorHelpers.MakeResidentCopy(
+                backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue));
+            gCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
+            gSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalSin, batch, seqLen, _config.HeadDim));
             if (localCos is not null || localSin is not null)
             {
                 if (localCos is null || localSin is null)
                     throw new ArgumentException("Local RoPE cosine and sine tables must either both be supplied or both be absent.");
-                lCos = MakeResidentCopy(backend, BuildFullWidthRopeTable(localCos, batch, seqLen, _config.HeadDim));
-                lSin = MakeResidentCopy(backend, BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim));
+                lCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localCos, batch, seqLen, _config.HeadDim));
+                lSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
+                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim));
             }
             return new ForwardConstants(mask, gCos, gSin, lCos, lSin);
         }
@@ -704,11 +527,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             return;
 
         int halfDim = _config.HeadDim / 2;
-        int targetLen = Math.Max(seqLen, _ropeBuiltForMaxLen);
-        // Round up to a power of 2 for fewer rebuilds when prompts grow incrementally.
-        int rounded = 1;
-        while (rounded < targetLen) rounded <<= 1;
-        targetLen = Math.Min(rounded, _config.MaxPositionEmbeddings);
+        int targetLen = TextEncoderTensorHelpers.GrowRopeTableLength(seqLen, _ropeBuiltForMaxLen, _config.MaxPositionEmbeddings);
 
         (_ropeCos, _ropeSin) = BuildRopeTable(targetLen, halfDim, _config.RopeTheta);
         // Gemma 3 interleaves LOCAL (sliding) layers that use a smaller rope base frequency than the
@@ -722,23 +541,11 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
     /// <summary>Precomputes a RoPE cos/sin table for a given base frequency. freqs[k] = 1 / theta^(2k/headDim).</summary>
     private (float[] Cos, float[] Sin) BuildRopeTable(int targetLen, int halfDim, float theta)
     {
-        float[] cos = new float[targetLen * halfDim];
-        float[] sin = new float[targetLen * halfDim];
-        for (int p = 0; p < targetLen; p++)
-        {
-            for (int k = 0; k < halfDim; k++)
-            {
-                double freq = 1.0 / Math.Pow(theta, (double)(2 * k) / _config.HeadDim);
-                double angle = p * freq;
-                cos[p * halfDim + k] = (float)Math.Cos(angle);
-                sin[p * halfDim + k] = (float)Math.Sin(angle);
-            }
-        }
-        return (cos, sin);
+        double[] inverseFrequencies = new double[halfDim];
+        for (int k = 0; k < halfDim; k++)
+            inverseFrequencies[k] = 1.0 / Math.Pow(theta, (double)(2 * k) / _config.HeadDim);
+        return TextEncoderTensorHelpers.BuildHalfRopeTable(inverseFrequencies, targetLen);
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     /// <summary>Pre-adds 1.0 to every element of an F32 RMSNorm scale tensor in place. Gemma 2 stores
     /// scales as offsets from 1.0; folding the +1 at load time keeps the runtime <c>RmsNorm</c> path
@@ -810,8 +617,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _inputNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
             if (_config.RmsNormScalePlusOne)
             {
                 AddOneInPlace(_inputNorm);
@@ -819,8 +626,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             }
             if (_config.HasFfnSandwichNorms)
             {
-                _preFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
-                _postFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
+                _preFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
+                _postFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
                 if (_config.RmsNormScalePlusOne)
                 {
                     AddOneInPlace(_preFfnNorm);
@@ -843,8 +650,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
             if (_config.QkHeadNorm)
             {
-                _qHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
-                _kHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
+                _qHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
+                _kHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
                 // Gemma 3's per-head q/k norms are Gemma RMSNorms (scale stored as offset from 1). Qwen3
                 // (RmsNormScalePlusOne=false) stores them directly, so this only fires for the Gemma path.
                 if (_config.RmsNormScalePlusOne)
