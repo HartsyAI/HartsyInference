@@ -26,6 +26,12 @@ no RFC 6455 frame masking, and no varint protobuf decoder.
 > point HA at the satellite port.
 
 ## Transport
+> **Through an HTTPS reverse proxy or tunnel (Cloudflare, nginx, Caddy).** Raw TCP does not survive those —
+> Cloudflare Tunnel in particular cannot carry arbitrary TCP to a public hostname. Connect instead to the
+> **WebSocket ingest** at `wss://<host>/API/AudioLabWakeIngest`, send `{"session_id":"..."}` as the first
+> message (SwarmUI's own auth), then send **exactly these same frames as binary WebSocket messages**. The wire
+> format inside the socket is identical, so only the transport changes. Requires TLS on the device.
+
 
 - **TCP**, default port **10800**, plaintext on the LAN.
 - The **device dials the server**. (Wyoming and ESPHome satellites invert this — Home Assistant dials *them*,
