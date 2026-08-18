@@ -103,8 +103,17 @@ public sealed class WakeService : IDisposable
         _worker = new WakeWorker(_sessions, OnDetectionAsync);
         _worker.Start();
 
+        // The listener object is always created — it owns the protocol loop that ServeConnectionAsync reuses —
+        // but the TCP socket is only bound when asked for.
         _listener = new WakeListener(_sessions, CreateSession, _options);
-        _listener.Start();
+        if (_options.EnableTcpListener)
+        {
+            _listener.Start();
+        }
+        else
+        {
+            Logs.Info("[Audio][Wake] TCP listener disabled; satellites must connect through a host-supplied transport.");
+        }
     }
 
     private WakeSession CreateSession(string deviceId) => new(deviceId, _models!.CreatePipeline());
@@ -199,6 +208,19 @@ public sealed class WakeService : IDisposable
             Audio = new AudioClip { Data = ms.ToArray(), Format = "wav" },
         }).ConfigureAwait(false);
         return result.Text;
+    }
+
+    /// <summary>Runs the satellite protocol over a caller-supplied stream, joining the same session machinery the
+    /// TCP listener uses.
+    ///
+    /// <para>This exists so a host can accept satellites over a transport the engine does not own — a WebSocket
+    /// behind TLS, for instance, which is what makes the listener reachable through an HTTP reverse proxy or
+    /// tunnel that cannot carry raw TCP.</para></summary>
+    public Task ServeConnectionAsync(Stream stream, string remoteLabel, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (_listener is null) throw new InvalidOperationException("Start the wake service before serving a connection.");
+        return _listener.ServeStreamAsync(stream, remoteLabel, cancel);
     }
 
     /// <summary>Identifies who spoke, and decides whether a word restricted to one speaker may fire.

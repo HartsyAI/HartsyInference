@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio.Wake;
@@ -67,15 +69,33 @@ public sealed class WakeListener : IDisposable
     private async Task ServeAsync(TcpClient client, CancellationToken cancel)
     {
         string remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
-        WakeSession? session = null;
         try
         {
             // Small writes must go out immediately; Nagle would coalesce 80 ms audio frames into
             // bursts and add latency for nothing on a LAN.
             client.NoDelay = true;
             ConfigureKeepAlive(client.Client);
-
             using NetworkStream stream = client.GetStream();
+            await ServeStreamAsync(stream, remote, cancel).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Audio][Wake] Connection from {remote} ended: {ex.Message}");
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    /// <summary>Runs the satellite protocol over any duplex stream, so the same session handling serves both the
+    /// raw TCP listener and a WebSocket-tunnelled connection. The transport only has to deliver bytes in order.</summary>
+    public async Task ServeStreamAsync(Stream stream, string remote, CancellationToken cancel)
+    {
+        WakeSession? session = null;
+        try
+        {
             WakeFrameCodec codec = new(stream, _options.MaxPayloadBytes);
             using CancellationTokenSource connectionCancel = CancellationTokenSource.CreateLinkedTokenSource(cancel);
 
@@ -95,6 +115,14 @@ public sealed class WakeListener : IDisposable
                     case "hello":
                     {
                         string deviceId = frame.Data.DeviceId ?? throw new InvalidOperationException($"hello from {remote} has no device_id.");
+                        if (!IsTokenValid(frame.Data.Token))
+                        {
+                            // Deliberately vague to the peer, specific in the log: a client that can distinguish
+                            // "wrong token" from "no such device" learns which device ids exist.
+                            Logs.Warning($"[Audio][Wake] Rejected '{deviceId}' from {remote}: bad or missing auth token.");
+                            await codec.WriteAsync("error", "{\"text\":\"unauthorized\"}", connectionCancel.Token).ConfigureAwait(false);
+                            return;
+                        }
                         ValidateFormat(frame.Data, remote);
                         session = _sessions.GetOrAdd(deviceId, _sessionFactory);
                         if (session.Codec is not null)
@@ -133,11 +161,6 @@ public sealed class WakeListener : IDisposable
                 }
             }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Logs.Warning($"[Audio][Wake] Connection from {remote} ended: {ex.Message}");
-        }
         finally
         {
             // The session object stays registered so the device keeps its words and config across the gap;
@@ -147,8 +170,18 @@ public sealed class WakeListener : IDisposable
                 session.Codec = null;
                 session.State = WakeSessionState.Handshake;
             }
-            client.Dispose();
         }
+    }
+
+    /// <summary>Constant-time comparison of the presented token against the configured one. No token configured
+    /// means the check is disabled, which is the LAN default.</summary>
+    private bool IsTokenValid(string? presented)
+    {
+        if (string.IsNullOrEmpty(_options.AuthToken)) return true;
+        if (string.IsNullOrEmpty(presented)) return false;
+        // Fixed-time so a timing side channel cannot be used to recover the token byte by byte.
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(_options.AuthToken));
     }
 
     private void ValidateFormat(WakeFrameData data, string remote)

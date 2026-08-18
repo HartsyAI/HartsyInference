@@ -18,6 +18,16 @@ public sealed record WakeServiceOptions
     /// socket that still looks writable, so the absence of pongs is what actually surfaces the loss.</summary>
     public TimeSpan PingInterval { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>Whether to bind the raw TCP port. Turn it off to accept satellites only over a transport the
+    /// host supplies (a WebSocket behind TLS, say) — then nothing is listening on the LAN at all.</summary>
+    public bool EnableTcpListener { get; init; } = true;
+
+    /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the
+    /// check, which is the sane default on a trusted LAN; set it before this endpoint is reachable from anywhere
+    /// less trusted, because without it any device that can open the port can stream audio in and receive every
+    /// detection — including the transcripts of what was said.</summary>
+    public string? AuthToken { get; init; }
+
     /// <summary>Audio captured around a detection and handed to transcription.</summary>
     public double UtteranceSeconds { get; init; } = 8.0;
 

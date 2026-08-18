@@ -39,7 +39,7 @@ public readonly record struct WakeFrame(string Type, WakeFrameData Data, byte[]?
 
 /// <summary>The header fields the engine reads. Everything is optional: which ones are meaningful depends on
 /// <see cref="WakeFrame.Type"/>.</summary>
-public readonly record struct WakeFrameData(string? DeviceId, long Sequence, int Rate, int Width, int Channels, string? Text, string? Name);
+public readonly record struct WakeFrameData(string? DeviceId, long Sequence, int Rate, int Width, int Channels, string? Text, string? Name, string? Token);
 
 /// <summary>Reads and writes <see cref="WakeFrame"/>s on a stream. One instance per connection; not thread-safe
 /// for concurrent reads, and writes are serialized internally so the worker thread and the connection loop can
@@ -114,7 +114,7 @@ public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
     {
         string type = "";
         int payloadLength = 0;
-        string? deviceId = null, text = null, name = null;
+        string? deviceId = null, text = null, name = null, token = null;
         long sequence = 0;
         int rate = 0, width = 0, channels = 0;
 
@@ -144,6 +144,7 @@ public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
                         if (property is "device_id") deviceId = reader.GetString();
                         else if (property == "text") text = reader.GetString();
                         else if (property == "name") name = reader.GetString();
+                        else if (property == "token") token = reader.GetString();
                     }
                     break;
                 case JsonTokenType.Number:
@@ -161,7 +162,7 @@ public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
 
         if (type.Length == 0)
             throw new HartsyInferenceException("Wake frame header has no 'type'.");
-        return (type, new WakeFrameData(deviceId, sequence, rate, width, channels, text, name), payloadLength);
+        return (type, new WakeFrameData(deviceId, sequence, rate, width, channels, text, name, token), payloadLength);
     }
 
     /// <summary>Writes a header-only frame whose <c>data</c> object is <paramref name="dataJson"/> (already
