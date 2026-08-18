@@ -63,18 +63,24 @@ public sealed class WakeModelSet : IDisposable
         if (!Directory.Exists(headDir))
             throw new HartsyInferenceException($"Wake head directory '{headDir}' does not exist.");
 
-        if (words.Count == 0)
+        // Every head on disk is loaded; configuration adjusts a word's settings, it does not decide which words
+        // exist. Treating the config file as an allowlist meant that setting one word's threshold silently
+        // stopped every unconfigured word from loading at all.
+        HashSet<string> loaded = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in Directory.EnumerateFiles(headDir, "*.onnx").Concat(Directory.EnumerateFiles(headDir, "*.safetensors")))
         {
-            foreach (string file in Directory.EnumerateFiles(headDir, "*.onnx").Concat(Directory.EnumerateFiles(headDir, "*.safetensors")))
+            string name = Path.GetFileNameWithoutExtension(file);
+            if (TryLoadHead(name, words.TryGetValue(name, out WakeWordConfig? existing) ? existing : new WakeWordConfig()))
             {
-                string name = Path.GetFileNameWithoutExtension(file);
-                TryLoadHead(name, new WakeWordConfig());
+                loaded.Add(name);
             }
         }
-        else
+
+        // A configured word may name a head file that differs from the word itself, so pick up anything the
+        // directory sweep did not already cover.
+        foreach ((string name, WakeWordConfig config) in words)
         {
-            foreach ((string name, WakeWordConfig config) in words)
-                TryLoadHead(name, config);
+            if (!loaded.Contains(name)) TryLoadHead(name, config);
         }
 
         if (_heads.Count == 0)
