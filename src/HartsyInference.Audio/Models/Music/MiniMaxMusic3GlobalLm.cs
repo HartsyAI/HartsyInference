@@ -33,18 +33,10 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     /// <summary>Classifier-free branches decoded together: conditional, then unconditional.</summary>
     public const int CfgRows = 2;
 
-    /// <summary>Frames run eagerly through the fixed buffers before the step is captured, so every weight cast,
-    /// activation buffer and KV page is already resident and nothing allocates inside the capture.</summary>
-    private const int GraphWarmupFrames = 2;
 
     private readonly Qwen3Model _backbone;
     private readonly bool _halfPrecisionKv;
     // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
-    // 3060, fails on a 4090 by 1e-3) — see MINIMAX_MUSIC3_PERF.md. The old F32-KV reason is gone.
-    private readonly bool _graphDecode = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH", defaultOn: false);
-    // Diagnostic: keeps the dual step and its F32 cache but never captures, which is the only way to A/B the
-    // capture itself against the identical kernel sequence run eagerly.
-    private readonly bool _graphCapture = EnvSwitch.IsEnabled("HARTSY_MM3_LM_GRAPH_CAPTURE", defaultOn: true);
     private Tensor? _embedTokens;
     private Tensor? _semanticHead;
     private int _disposed;
@@ -167,8 +159,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     /// branches as separate batch-1 forwards reads all 8.6 GB twice per frame. One batch-2 forward reads it once.
     /// The branches stay position-aligned by construction (identical prompt length, one frame appended to each per
     /// step), which is what lets them share a step at all. Caller owns the result.</para></summary>
-    public Tensor ForwardCfgStep(IBackend backend, Tensor embeds, IKvCache conditional, IKvCache unconditional,
-        CfgGraphSession? graph = null)
+    public Tensor ForwardCfgStep(IBackend backend, Tensor embeds, IKvCache conditional, IKvCache unconditional)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(embeds);
@@ -179,13 +170,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         {
             throw new ArgumentException($"the classifier-free step takes [1, {CfgRows}, {HiddenSize}] embeds, got {embeds.Shape}.", nameof(embeds));
         }
-        // One shared device position serves both rows' RoPE, both KV scatters and both attention calls, so the
-        // captured step is only valid while the branches stay aligned. They are by construction; a drift falls
-        // back to the eager batched step rather than producing wrong positions.
-        if (graph is not null && conditional.CurrentLength == unconditional.CurrentLength)
-        {
-            return ForwardCfgGraphStep(backend, embeds, conditional, unconditional, graph);
-        }
         Span<int> positions = [conditional.CurrentLength, unconditional.CurrentLength];
         using Tensor both = _backbone.ForwardBatchDecode(backend, embeds, positions, [conditional, unconditional]);
         Tensor rows = new Tensor(new TensorShape(CfgRows, HiddenSize), DType.F32);
@@ -195,69 +179,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         return rows;
     }
 
-    /// <summary>Allocates the per-generation state the graph-captured classifier-free step needs, or null when the
-    /// backend or the architecture cannot replay it (the caller then gets the eager batched step). The capture bakes
-    /// the KV caches' device addresses, so the session belongs to exactly the caches it was created against and must
-    /// be disposed with them.</summary>
-    public CfgGraphSession? CreateCfgGraph(IBackend backend, int maxSeqLen)
-    {
-        ArgumentNullException.ThrowIfNull(backend);
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (!_graphDecode || !_backbone.SupportsDualGraphDecode(backend))
-        {
-            return null;
-        }
-        return new CfgGraphSession(backend, maxSeqLen);
-    }
 
-    /// <summary>The classifier-free step as one graph replay. The whole batch-2 forward is ~36 layers of kernel
-    /// launches whose host cost is paid on every frame; captured once, it replays as a single launch. Positions,
-    /// the input embedding and the output hidden all live in fixed device buffers refreshed OUTSIDE the capture,
-    /// so one capture is valid for every later frame.</summary>
-    private Tensor ForwardCfgGraphStep(IBackend backend, Tensor embeds, IKvCache conditional, IKvCache unconditional,
-        CfgGraphSession session)
-    {
-        GraphStream stream = session.Stream;
-        int position = conditional.CurrentLength;
-        backend.CopyInto(stream.InEmbed, embeds);
-        backend.WriteDevicePos(stream.DevicePos, position + 1, position);
-        (Tensor cos, Tensor sin) = _backbone.EnsureRopeTableForGraphDecode(backend, session.MaxSequenceLength);
-        if (stream.Graph is not null)
-        {
-            backend.LaunchGraph(stream.Graph);
-        }
-        else if (_graphCapture && !session.CaptureDeclined && stream.Warmed >= GraphWarmupFrames)
-        {
-            // Capture records the step without executing it, so the capturing frame still has to be launched.
-            stream.Graph = backend.CaptureGraph(() => _backbone.ForwardGraphDecodeStepDualEmbeds(
-                backend, stream.InEmbed, conditional, unconditional, cos, sin, stream.DevicePos, stream.OutHidden));
-            if (stream.Graph is not null)
-            {
-                backend.LaunchGraph(stream.Graph);
-            }
-            else
-            {
-                // Backend declined to capture: run eagerly for the rest of the song rather than retrying the
-                // (not free) capture on every frame.
-                session.CaptureDeclined = true;
-                _backbone.ForwardGraphDecodeStepDualEmbeds(backend, stream.InEmbed, conditional, unconditional,
-                    cos, sin, stream.DevicePos, stream.OutHidden);
-            }
-        }
-        else
-        {
-            _backbone.ForwardGraphDecodeStepDualEmbeds(backend, stream.InEmbed, conditional, unconditional,
-                cos, sin, stream.DevicePos, stream.OutHidden);
-            stream.Warmed++;
-        }
-        conditional.AdvanceLength(1);
-        unconditional.AdvanceLength(1);
-        Tensor rows = new Tensor(new TensorShape(CfgRows, HiddenSize), DType.F32);
-        backend.ReadResidentInto(stream.OutHidden, session.Scratch);
-        session.Scratch.AsSpan(0, CfgRows * HiddenSize)
-            .CopyTo(new Span<float>((float*)rows.DataPointer, CfgRows * HiddenSize));
-        return rows;
-    }
 
     /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> onto the reachable vocabulary:
     /// <c>[rows, 16385]</c>, where column <c>c</c> is semantic code <c>c</c> and the final column is end-of-audio.
@@ -293,28 +215,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         _backbone.Dispose();
     }
 
-    /// <summary>Per-generation state for the graph-captured classifier-free step: the fixed input/output buffers and
-    /// device position the capture bakes in, plus the host landing buffer the step's hidden states are read into.</summary>
-    public sealed class CfgGraphSession : IDisposable
-    {
-        internal GraphStream Stream { get; }
-
-        internal float[] Scratch { get; }
-
-        internal int MaxSequenceLength { get; }
-
-        /// <summary>Set once the backend refuses to capture, so the step stops paying for doomed capture attempts.</summary>
-        internal bool CaptureDeclined { get; set; }
-
-        internal CfgGraphSession(IBackend backend, int maxSeqLen)
-        {
-            Stream = new GraphStream(backend, HiddenSize, CfgRows);
-            Scratch = new float[CfgRows * HiddenSize];
-            MaxSequenceLength = Math.Max(1, maxSeqLen);
-        }
-
-        public void Dispose() => Stream.Dispose();
-    }
 
     /// <summary>Copies the 16384 semantic rows plus the end-of-audio row out of the full head, widened to F32 row by
     /// row — casting the whole 200000-row head first would transiently cost 3.2 GB to keep 268 MB.</summary>

@@ -43,12 +43,19 @@ working. Reconcile that: either it silently falls back to a non-graph path, or t
 evidence either way; if broken, apply the same byte-identical shape fix (at Tq=1 the layouts are identical, so
 concatenating along dim 0 changes nothing downstream). **This gates all graph work below.**
 
-### 2. CUDA-graph capture of the batch-2 language-model step — the big one
-Measured: ~8.7 ms per forward is eager overhead (kernel launches across 36 layers), paid twice per frame no matter
-how the branches are batched. That is why batching alone bottomed out at 9.9 s. Infrastructure already exists —
-`ForwardGraphDecodeStepDualEmbeds` and the `HARTSY_CSM_GRAPH` precedent. Expect LM 9.9 → ~6–7 s.
-**Landmine:** graph-decode output is only deterministic on an otherwise-idle GPU (learned on H3). Do not chase
-phantom hash differences while the other agent is working.
+### 2. CUDA-graph capture of the batch-2 language-model step — BUILT, MEASURED, REMOVED
+Removed 2026-08-17. Capture in isolation was worth **1.1 ms/frame** on a 3060 — 0.4 s on a 15 s song, ~10 s on a
+six-minute one, about 1%. The −4.6 s this phase was sold on decomposed as −4.0 s from the F32 KV cache (which was
+only dodging the split-K-with-F16 bug, now fixed properly in `c81c42a4` and free), −0.3 s from the dual step, and
+−0.4 s from capture itself.
+
+Worse, it could not run anywhere on this hardware. Quantized variants use an F16 cache and the graph's fused
+`lm_qkv_rope_scatter_f32` / `lm_qknorm_rope_scatter_f32` are F32-only, so it threw; the un-quantized variant OOMs
+both cards (17.2 GB of BF16 weights plus the cast cache exceeds 24 GB, even at a 15 s song). Collecting the 1%
+would have meant writing a third pair of F16 kernels *before* being able to measure whether it paid.
+
+The shared machinery stays: `GenericTransformer.ForwardGraphDecodeStepDualEmbeds`, `GraphStream`, and the
+`98b3f54c` shape fix that made the dual path work for the first time. CSM and Qwen2 use them.
 
 ### 2b. F16 KV lost split-K attention — FIXED, `c81c42a4`, on by default
 Confirmed end to end on a 3060 at `:q4`, 15 s of audio, n=2 per arm, one build:
@@ -122,8 +129,8 @@ win is launch count and weight amortization rather than 2× — expect 9.5 → ~
 semantic head: there is **no sampling in the flow stage**, so last-bit GEMM drift cannot fork the output. It stays
 inside the 5e-3 flow-parity tolerance. Same-seed WAV bytes may shift once — document it, do not treat it as a bug.
 
-### 5. Depth-decoder graph capture
-After 1 and 2 prove the infrastructure. 3.8 → ~2 s, hopeful.
+### 5. Depth-decoder graph capture — DROPPED
+It was gated on phase 2's infrastructure, which measured at ~1% and was removed. Same arithmetic would apply.
 
 ### 6. Profiling gate — before ANY kernel writing
 `libnvToolsExt.so.1` is missing, so every `NvtxRange.Push` in `CudaBackend` is a no-op and an nsys timeline would be
@@ -281,9 +288,6 @@ on a 12 GB card, not because anything is known wrong with them. When a window op
 whichever pass:
 
 - `HARTSY_MM3_FLOW_CFG_BATCH` — flow guidance batching, −3.7% (`fc163303`).
-- `HARTSY_MM3_LM_GRAPH` — graph-captured guided decode, −4.6 s but forces F32 KV (`7bbe4b24`). Do **not** flip
-  this one on the strength of parity alone — it also needs the four-minute cache ceiling resolved, which is
-  what phase 2b is really about.
 
 Also un-run for want of the card: the Python reference baseline, and a HeartMuLa CFG smoke test to confirm
 `98b3f54c` un-broke that model on CUDA.
