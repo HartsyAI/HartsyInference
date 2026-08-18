@@ -136,6 +136,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         IReadOnlyList<Tensor>? editRefVisionImages = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a QwenImageVaeEncoder. Construct the pipeline with the overload that accepts one.");

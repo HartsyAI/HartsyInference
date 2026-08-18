@@ -47,9 +47,13 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     /// <paramref name="uncondTokens"/>=null (or cfgScale ≤ 1) for the guidance-free / Turbo path. Returns the decoded
     /// image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop,
-        int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null)
+        int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null,
+        string? seamlessTiling = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
+        // explicitly rather than read off a request — this pipeline takes primitives, not a TextToImageRequest.
+        using IDisposable seamlessScope = BeginSeamlessTiling(seamlessTiling);
         bool useCfg = cfgScale > 1f && uncondTokens is not null;
 
         // 1. Text conditioning: Qwen3-VL-4B last_hidden_state, system prefix dropped.

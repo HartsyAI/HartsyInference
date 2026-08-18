@@ -121,6 +121,69 @@ public abstract class DiffusionPipelineBase : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
+    /// <summary>Switches every conv-running backend this pipeline owns to wrap (circular) padding for the duration of
+    /// one generation, so the output tiles seamlessly. <paramref name="mode"/> takes SwarmUI's vocabulary:
+    /// null/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis.
+    /// <para>Backends are cached per architecture and persist across generations, so leaving a flag set would
+    /// silently wrap-pad an unrelated request. Dispose restores each backend's PREVIOUS value rather than forcing
+    /// false, so nesting and re-entrancy are safe. Always use with <c>using</c>.</para>
+    /// <para>Covers the multi-GPU backends too (CFG-parallel, DiT shards, context-parallel): a sharded run whose
+    /// second card kept square padding would seam exactly at the shard boundary. Backends are de-duplicated by
+    /// reference because the same instance is usually shared across several of these slots.</para>
+    /// <para>Only <c>CudaBackend</c> implements the flags; CPU and Vulkan inherit <see cref="IBackend"/>'s no-op
+    /// setter, so this is a safe no-op there rather than an error.</para></summary>
+    protected IDisposable BeginSeamlessTiling(string? mode)
+    {
+        bool x = mode is "true" or "X-Only";
+        bool y = mode is "true" or "Y-Only";
+        List<IBackend> targets = [];
+        void add(IBackend? backend)
+        {
+            if (backend is not null && !targets.Any(t => ReferenceEquals(t, backend)))
+            {
+                targets.Add(backend);
+            }
+        }
+        add(Backend);
+        add(VaeBackend);
+        add(CfgParallelBackend);
+        add(DitShardBackend);
+        foreach (IBackend cp in CpBackends ?? [])
+        {
+            add(cp);
+        }
+        foreach (DitShardStage stage in DitShardStages ?? [])
+        {
+            add(stage.Backend);
+        }
+        return new SeamlessTilingScope(targets, x, y);
+    }
+
+    /// <summary>Restores each backend's prior tiling flags on dispose. See <see cref="BeginSeamlessTiling"/>.</summary>
+    private sealed class SeamlessTilingScope : IDisposable
+    {
+        private readonly (IBackend Backend, bool X, bool Y)[] _prior;
+
+        internal SeamlessTilingScope(List<IBackend> targets, bool x, bool y)
+        {
+            _prior = [.. targets.Select(t => (t, t.SeamlessTilingX, t.SeamlessTilingY))];
+            foreach (IBackend target in targets)
+            {
+                target.SeamlessTilingX = x;
+                target.SeamlessTilingY = y;
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach ((IBackend backend, bool x, bool y) in _prior)
+            {
+                backend.SeamlessTilingX = x;
+                backend.SeamlessTilingY = y;
+            }
+        }
+    }
+
     /// <summary>Override in subclasses that hold pipeline-internal disposable state (caches, lazy buffers). The base call is idempotent and thread-safe; override is invoked exactly once even under concurrent <see cref="Dispose"/> calls. Do NOT dispose injected components (text encoders, UNet, VAE) here — those are shared resources owned by the caller.</summary>
     protected virtual void DisposeCore() { }
 

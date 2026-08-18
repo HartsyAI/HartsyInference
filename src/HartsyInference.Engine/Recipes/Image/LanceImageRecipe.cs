@@ -19,7 +19,7 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Img2img only, deliberately: LanceImagePipeline throws on a mask because the Wan2.2 VAE's 16x
     /// downscale leaves one mask cell per 16x16-pixel block, too coarse for the blend-on-vanilla inpaint.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-image", StringComparison.OrdinalIgnoreCase);
 

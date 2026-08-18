@@ -88,6 +88,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (_textEncoder is null)
             throw new InvalidOperationException(
                 "GenerateFromTokens requires a LensGptOssEncoder; the pipeline was constructed without one. " +
@@ -136,6 +138,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         ValidateEmbeddings(positiveLayers, negativeLayers);
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();

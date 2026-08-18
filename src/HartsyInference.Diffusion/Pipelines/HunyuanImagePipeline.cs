@@ -109,6 +109,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (_qwenEncoder is null)
             throw new InvalidOperationException(
                 "This pipeline was constructed with the legacy CLIP+T5 encoders — use the CLIP/T5 GenerateFromTokens overload.");
@@ -194,6 +196,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (_t5Encoder is null)
             throw new InvalidOperationException(
                 "This pipeline was constructed with the Qwen2.5-VL encoder — use the Qwen GenerateFromTokens overload.");

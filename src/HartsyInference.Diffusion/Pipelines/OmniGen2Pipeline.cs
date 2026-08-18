@@ -73,6 +73,8 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
         // VALIDATION-PENDING: verify vs diffusers OmniGen2Pipeline.
         // Resolve the effective text guidance. textGuidanceScale (default 4.0) is the OmniGen 2 default and

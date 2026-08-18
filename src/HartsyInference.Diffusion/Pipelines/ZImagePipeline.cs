@@ -72,6 +72,8 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         ValidateRequest(captionEmbeddings, request, cfgScale, negativeCaptionEmbeddings);
         try
         {

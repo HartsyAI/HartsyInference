@@ -123,6 +123,8 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         preset ??= Ideogram4SamplerPreset.Default20;
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)

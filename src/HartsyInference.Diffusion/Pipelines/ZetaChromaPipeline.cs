@@ -56,6 +56,8 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
         if (cfgScale > 1.0f && negativeCaptionEmbeddings is null)
             throw new ArgumentException(

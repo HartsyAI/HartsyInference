@@ -25,7 +25,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Reference editing at text-only guidance. Steerable image guidance needs the Qwen3-VL vision
     /// tower for the text-and-image-dropped embedding, which is still deferred.</remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit;
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
 

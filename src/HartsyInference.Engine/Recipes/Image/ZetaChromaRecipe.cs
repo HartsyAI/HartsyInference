@@ -17,7 +17,7 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Zeta-Chroma is pixel-space — the source image IS the clean sample, so no VAE encoder is involved.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zeta-chroma", StringComparison.OrdinalIgnoreCase);

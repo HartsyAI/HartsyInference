@@ -97,11 +97,6 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
         float cfgRescale = Math.Clamp(request.CfgRescale ?? 0f, 0f, 1f);
         bool tcfg = request.Tcfg ?? false;
-        // "false"/null = off, "true" = both axes, "X-Only"/"Y-Only" = one axis — same vocabulary as SwarmUI
-        // core's SeamlessTileable param (see TextToImageRequest.SeamlessTiling's doc comment).
-        string seamlessMode = request.SeamlessTiling ?? "false";
-        bool seamlessX = seamlessMode is "true" or "X-Only";
-        bool seamlessY = seamlessMode is "true" or "Y-Only";
         int latentH = height / 8;
         int latentW = width / 8;
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
@@ -113,15 +108,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
 
-        // Tier 3.6: scoped to this call only — Backend/VaeBackend persist across generations (InferenceEngine
-        // caches one instance per architecture), so a stray "left on" flag would silently wrap-pad an unrelated
-        // request's convs. The try/finally below is the only thing preventing that; every exit path (including
-        // exceptions) must go through the reset.
-        Backend.SeamlessTilingX = seamlessX;
-        Backend.SeamlessTilingY = seamlessY;
-        VaeBackend.SeamlessTilingX = seamlessX;
-        VaeBackend.SeamlessTilingY = seamlessY;
-        try
+        using IDisposable seamless = BeginSeamlessTiling(request.SeamlessTiling);
         {
         int startStep = plan.StartStep;
         Tensor? maskPixel = plan.MaskPixel;
@@ -377,13 +364,6 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Logs.Info($"SDXL {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
-        }
-        finally
-        {
-            Backend.SeamlessTilingX = false;
-            Backend.SeamlessTilingY = false;
-            VaeBackend.SeamlessTilingX = false;
-            VaeBackend.SeamlessTilingY = false;
         }
     }
 

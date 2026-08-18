@@ -61,6 +61,9 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. The refiner
+        // stage has to match the base stage or the refine pass would re-introduce the seam the base avoided.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);

@@ -70,6 +70,8 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (textGuidanceScale > 1.0f && negativeInstructionEmbeddings is null)
             throw new ArgumentException("negativeInstructionEmbeddings is required when textGuidanceScale > 1.0.",
                 nameof(negativeInstructionEmbeddings));
@@ -186,6 +188,8 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
+        using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (_vaeEncoder is null)
             throw new InvalidOperationException("Edit requires a VAE encoder; construct the pipeline with vaeEncoder != null.");
         if (referenceImages.Count == 0)
