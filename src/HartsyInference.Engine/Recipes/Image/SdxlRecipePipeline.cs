@@ -125,7 +125,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
 
         if (postApply && refinerSpec is not null)
         {
-            (rgb, width, height) = ApplyPostRefiner(refinerSpec, rgb, width, height, strippedPrompt, strippedNegative, tokensG, negG, eosG, negEosG, usedSeed);
+            (rgb, width, height) = ApplyPostRefiner(refinerSpec, rgb, width, height, strippedPrompt, strippedNegative, tokensG, negG, eosG, negEosG, usedSeed, request.SeamlessTiling);
             meta["refiner_post_apply"] = refinerSpec.Model;
             meta["size"] = $"{width}x{height}";
         }
@@ -184,7 +184,8 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     /// <see cref="RefinerSwapConfig.RefinerConditioning"/> override has no PostApply equivalent yet).</summary>
     private (byte[] rgb, int width, int height) ApplyPostRefiner(
         RefinerResolver.RefinerSpec spec, byte[] baseRgb, int baseWidth, int baseHeight,
-        string strippedPrompt, string strippedNegative, int[] tokensG, int[] negG, int eosG, int negEosG, int seed)
+        string strippedPrompt, string strippedNegative, int[] tokensG, int[] negG, int eosG, int negEosG, int seed,
+        string? seamlessTiling)
     {
         SdxlRefinerEntry entry = LoadRefinerEntry(spec.Model);
         int newWidth = spec.Upscale is > 0f and not 1f ? RoundToMultipleOf8(baseWidth * spec.Upscale) : baseWidth;
@@ -206,6 +207,9 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             Width = newWidth,
             Height = newHeight,
             Seed = seed,
+            // Must match the base stage: the refiner denoises over the base output, and square padding here
+            // would re-introduce exactly the seam the base pass avoided.
+            SeamlessTiling = seamlessTiling,
         };
         Logs.Info($"[SdxlRecipePipeline] PostApply refiner: {baseWidth}x{baseHeight} -> {newWidth}x{newHeight}, strength={spec.Strength:F2}.");
         (byte[] rgb, int width, int height, int _) = refinerPipeline.RefineFromTokens(tokensG, negG, eosG, negEosG, refinerRequest);
