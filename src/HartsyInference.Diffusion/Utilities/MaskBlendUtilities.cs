@@ -117,6 +117,48 @@ public static unsafe class MaskBlendUtilities
         return packed;
     }
 
+
+    /// <summary>In-place per-token mask blend for sequence-form latents where one token corresponds to one spatial
+    /// cell of <paramref name="tokenMask"/> in row-major order — Lens's <c>[1, seq, C]</c> spatial-outer packing,
+    /// Lance's <c>[seq, C]</c> token grid, and any patch-1 layout: <c>target = target*m + source*(1-m)</c> with the
+    /// token's single mask value broadcast across its whole feature vector. <paramref name="tokenMask"/> is the
+    /// <c>[1, 1, h, w]</c> grid from <see cref="DownsampleMaskAreaAverage"/> with <c>h·w == seqLen</c> — the caller
+    /// downsamples straight to the TOKEN grid, which is what keeps this layout-agnostic (a 2×2-patchified family
+    /// just downsamples to the packed dims instead of the latent dims, trading the 4-per-token sub-mask of
+    /// <see cref="BlendPackedInPlace"/> for one value per token).</summary>
+    public static void BlendTokensInPlace(Tensor target, Tensor source, Tensor tokenMask)
+    {
+        long seqLen = target.Shape.Rank == 3 ? target.Shape[1] : target.Shape[0];
+        long featDim = target.Shape.Rank == 3 ? target.Shape[2] : target.Shape[1];
+        if (target.Shape.Rank == 3 && target.Shape[0] != 1)
+        {
+            throw new ArgumentException($"BlendTokensInPlace requires batch size 1; got {target.Shape}.");
+        }
+        if (!source.Shape.Equals(target.Shape))
+        {
+            throw new ArgumentException($"Source shape {source.Shape} must match target shape {target.Shape}.");
+        }
+        if (tokenMask.Shape.ElementCount != seqLen)
+        {
+            throw new ArgumentException(
+                $"Token mask has {tokenMask.Shape.ElementCount} cells but the latent has {seqLen} tokens — "
+                + "downsample the mask to the token grid, not the unpacked latent grid.");
+        }
+        float* tp = (float*)target.DataPointer;
+        float* sp = (float*)source.DataPointer;
+        float* mp = (float*)tokenMask.DataPointer;
+        for (long s = 0; s < seqLen; s++)
+        {
+            float m = mp[s];
+            float inv = 1f - m;
+            long baseOff = s * featDim;
+            for (long f = 0; f < featDim; f++)
+            {
+                tp[baseOff + f] = tp[baseOff + f] * m + sp[baseOff + f] * inv;
+            }
+        }
+    }
+
     /// <summary>In-place mask blend for the CHANNEL-INNER packed latent layout <c>[1, seqLen, 4·channels]</c> where a
     /// token's feature <c>f</c> decomposes as sub-patch-outer / channel-inner (<c>p = f / channels</c>,
     /// <c>c = f % channels</c> — Ideogram 4's <c>(p1, p2, ae)</c> token packing), against a same-shape source:

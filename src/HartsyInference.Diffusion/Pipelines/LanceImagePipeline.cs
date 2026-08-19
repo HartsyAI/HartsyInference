@@ -61,8 +61,9 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a Wan22VaeEncoder. Construct the pipeline with the overload that accepts one.");
-        if (isImg2Img && ((ImageToImageRequest)request).Mask is not null)
-            throw new NotSupportedException("Lance masked inpaint is not supported: the 16x VAE downscale leaves one mask cell per 16x16-pixel block, too coarse for blend-on-vanilla.");
+        // Masked inpaint runs at token granularity — one mask cell per 16x16-pixel block from the 16x VAE
+        // downscale. Coarser than Flux's 8x, but the final pixel recomposite makes everything outside the mask
+        // byte-exact source, so the coarseness only widens the transition band at the mask boundary.
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? GenerationDefaults.Generic.Width;
@@ -98,7 +99,13 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         int[] latentPosIds = LancePipelineCommon.BuildLatentPositionIds(gridT, gridH, gridW, _config.MaxLatentSize);
 
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
-        Tensor latents = BuildInitialTokenLatents(request, tsteps, nVae, seed, startStep);
+        Tensor latents = BuildInitialTokenLatents(request, tsteps, nVae, seed, startStep, out Tensor? sourceTokensKeep);
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null && sourceTokensKeep is not null;
+        // Token grid is row-major (t, h, w) with T=1, so the mask downsampled to gridHxgridW lines up 1:1.
+        Tensor? tokenMask = isMaskedInpaint
+            ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, gridH, gridW)
+            : null;
 
         for (int k = startStep; k < steps; k++)
         {
@@ -121,6 +128,18 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
                     Backend.CfgEulerStep(latents, vCond, vCond, 1f, -dt);
                 }
             }
+
+            // Masked-inpaint blend: unmasked tokens back on the source's flow trajectory at the NEXT step's
+            // sigma (tsteps has steps+1 entries and tsteps[steps] = 0, so the final step blends clean source).
+            if (isMaskedInpaint)
+            {
+                Tensor fresh = SeedGenerator.CreateNoise(latents.Shape, seed + k + 1);
+                Tensor noisedSource = new Tensor(latents.Shape, DType.F32);
+                Img2ImgSetup.MixAtSigma(noisedSource, sourceTokensKeep!, fresh, tsteps[k + 1]);
+                fresh.Dispose();
+                MaskBlendUtilities.BlendTokensInPlace(latents, noisedSource, tokenMask!);
+                noisedSource.Dispose();
+            }
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
@@ -140,6 +159,15 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         vaeLatent.Dispose();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
+        // Pixel recomposite: rgb is [1,3,1,H,W]; a zero-copy [1,3,H,W] view lets the shared 4D blend run.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            Tensor rgb4d = rgb.Reshape(new TensorShape([1L, 3, rgb.Shape[3], rgb.Shape[4]]));
+            MaskBlendUtilities.BlendChannelsInPlace(rgb4d, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+        sourceTokensKeep?.Dispose();
+        tokenMask?.Dispose();
+
         byte[] bytes = Rgb5dToBytes(rgb);
         rgb.Dispose();
 
@@ -153,8 +181,9 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
     /// the same space the T2I loop denoises and the decoder consumes) → channel-last → token flatten →
     /// <c>Img2ImgSetup.MixAtSigma</c> with the fresh noise at <c>t = tsteps[startStep]</c>.</summary>
     private Tensor BuildInitialTokenLatents(TextToImageRequest request, float[] tsteps,
-        int nVae, int seed, int startStep)
+        int nVae, int seed, int startStep, out Tensor? sourceTokensKeep)
     {
+        sourceTokensKeep = null;
         Tensor noise = TakeOrCreateNoise(request, new TensorShape(nVae, _config.PatchFeatureDim), seed);
         if (request is not ImageToImageRequest img2img) return noise;
 
@@ -177,7 +206,14 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 
         Tensor latents = new Tensor(new TensorShape(nVae, _config.PatchFeatureDim), DType.F32);
         Img2ImgSetup.MixAtSigma(latents, sourceTokens, noise, tsteps[startStep]);
-        sourceTokens.Dispose();
+        if (img2img.Mask is not null)
+        {
+            sourceTokensKeep = sourceTokens;
+        }
+        else
+        {
+            sourceTokens.Dispose();
+        }
         noise.Dispose();
         return latents;
     }

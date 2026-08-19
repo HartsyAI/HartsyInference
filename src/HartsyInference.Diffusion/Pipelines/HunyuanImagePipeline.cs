@@ -37,6 +37,10 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     /// Set through an initializer rather than a fourth constructor overload, matching how the backends are supplied.</summary>
     public VaeEncoder? VaeEncoder { get; init; }
 
+    /// <summary>The bespoke 2.1 pixel-shuffle encoder — the img2img/inpaint unlock. Takes priority over
+    /// <see cref="VaeEncoder"/> (which the generic loader cannot build for this VAE anyway).</summary>
+    public HunyuanImageVaeEncoder? HyVaeEncoder { get; init; }
+
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
@@ -253,8 +257,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         int wPacked = latentW / patch;
 
         bool isImg2Img = request is ImageToImageRequest;
-        if (isImg2Img && VaeEncoder is null)
-            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Set the VaeEncoder initializer property (VaeConfig.HunyuanImage).");
+        if (isImg2Img && VaeEncoder is null && HyVaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VAE encoder. Set the HyVaeEncoder initializer property (VaeConfig.HunyuanImage).");
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)
@@ -278,15 +282,34 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SamplingShift);
         scheduler.SetTimesteps(steps);
 
+        // Masked inpaint (Chroma's blend-on-vanilla pattern): keep the source in TOKEN space plus a token-layout
+        // mask, blend after every step so the unmasked region stays on the source's flow trajectory, and
+        // recomposite in pixel space at the end. The blend utilities are host ops — touching the latent's
+        // DataPointer syncs the device copy down and demotes it, and the next forward re-uploads, so this works
+        // against the in-place device CfgEulerStep at a per-step D2H/H2D cost only masked requests pay.
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+        Tensor? sourceTokens = null;
+        Tensor? tokenMask = null;
+
         Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
         Tensor initialLatent;
         if (request is ImageToImageRequest img2img)
         {
             // Combine in latent space, then patchify once — the same order the text-to-image path uses, so the
             // token layout the loop integrates in is identical either way.
-            Tensor sourceLatent = VaeEncoder!.Encode(Backend, img2img.SourceImage);
+            Tensor sourceLatent = HyVaeEncoder is not null
+                ? HyVaeEncoder.Encode(VaeBackend, img2img.SourceImage)
+                : VaeEncoder!.Encode(Backend, img2img.SourceImage);
             initialLatent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(initialLatent, sourceLatent, noise, startStep);
+            if (isMaskedInpaint)
+            {
+                sourceTokens = PatchifyLatent(sourceLatent, inChannels, latentH, latentW, patch);
+                // One mask value per TOKEN (the packed grid, latent dims / patch): full precision at patch 1,
+                // and at patch 2 the same granularity the token itself has.
+                tokenMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH / patch, latentW / patch);
+            }
             sourceLatent.Dispose();
         }
         else
@@ -392,9 +415,34 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             }
             condVel.Dispose();
 
+            // Masked-inpaint blend: re-noise the source tokens at the next step's sigma and paste them over the
+            // unmasked region. Final step blends the clean source (no denoising follows it).
+            if (isMaskedInpaint && sourceTokens is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNchw = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    Tensor freshTokens = PatchifyLatent(freshNchw, inChannels, latentH, latentW, patch);
+                    freshNchw.Dispose();
+                    noisedSource = new Tensor(sourceTokens.Shape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceTokens, freshTokens, nextStep);
+                    freshTokens.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceTokens;
+                }
+                MaskBlendUtilities.BlendTokensInPlace(latentTokens, noisedSource, tokenMask!);
+                if (!ReferenceEquals(noisedSource, sourceTokens)) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
+        sourceTokens?.Dispose();
+        tokenMask?.Dispose();
 
         if (textOwned)
         {
@@ -442,6 +490,13 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             : _vaeDecoder.Decode(VaeBackend, latent);
         latent.Dispose();
         vaeSw.Stop();
+
+        // Pixel-space recomposite for masked inpaint: paste decoded over the source where mask=1, so the
+        // unmasked region is byte-exact source rather than a VAE roundtrip of it.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(decoded, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();

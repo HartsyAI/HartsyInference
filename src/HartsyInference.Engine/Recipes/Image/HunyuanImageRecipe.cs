@@ -26,7 +26,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared
     /// mask-blend helpers have no variant for that packing — a masked path would need a token-space blend that
     /// does not exist yet, so Inpaint is deliberately not declared.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 
@@ -120,27 +120,15 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> vaeWeights = RemapVaeKeys(vaeLoader.GetAllTensors());
             HunyuanImageVaeDecoder vaeDecoder = new HunyuanImageVaeDecoder(VaeConfig.HunyuanImage);
             vaeDecoder.LoadWeights(vaeWeights);
-            // This VAE's ENCODER half doesn't fit the generic VaeEncoder: it changes channels in the
-            // downsample convs BETWEEN levels (every resnet is same-channel, zero conv_shortcut keys in the
-            // file), while the generic encoder assumes diffusers-style channel-changing first-resnets — so
-            // the load throws on a key that architecturally cannot exist. Degrade to encoder-null (img2img
-            // refused by name, the TryBuildEncoder contract) instead of failing t2i construction for a
-            // component t2i never runs. A bespoke 2.1 encoder is the img2img unlock, not this call.
-            VaeEncoder? vaeEncoder;
-            try
-            {
-                vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.HunyuanImage, vaeWeights, "HunyuanImageRecipe");
-            }
-            catch (KeyNotFoundException)
-            {
-                Logs.Warning("[HunyuanImageRecipe] The 2.1 VAE's encoder half uses a between-level channel scheme "
-                    + "the generic VaeEncoder can't model — img2img/inpaint disabled for this family; t2i unaffected.");
-                vaeEncoder = null;
-            }
+            // The 2.1 VAE's encoder half doesn't fit the generic VaeEncoder (channel changes live in the
+            // downsamplers, not the resnets) — HunyuanImageVaeEncoder is its bespoke mirror of the decoder,
+            // and is what makes img2img/inpaint real for this family.
+            HunyuanImageVaeEncoder hyVaeEncoder = new HunyuanImageVaeEncoder(VaeConfig.HunyuanImage);
+            hyVaeEncoder.LoadWeights(vaeWeights);
 
             HunyuanImagePipeline pipeline = new HunyuanImagePipeline(context.Backend, qwenEncoder, transformer, vaeDecoder, config)
             {
-                VaeEncoder = vaeEncoder,
+                HyVaeEncoder = hyVaeEncoder,
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
                 DitShardBackend = context.DitShardBackend,

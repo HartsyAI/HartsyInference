@@ -191,6 +191,13 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // cond and uncond into one batch-of-2 forward. We run two separate forwards, each at its
         // prompt's natural S_txt — mathematically identical to the masked reference.)
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
+        // Masked inpaint (Chroma's blend-on-vanilla pattern, one mask value per token — Lens tokens are
+        // spatial-outer, one per /16 cell). Host blend against the in-place device step works because touching
+        // the latent's DataPointer syncs the device copy down and the next forward re-uploads.
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+        Tensor? sourcePackedKeep = null;
+        Tensor? tokenMask = null;
         Tensor packedLatent = TakeOrCreateNoise(request, packedShape, seed);
         if (request is ImageToImageRequest img2imgReq)
         {
@@ -206,9 +213,17 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
             Tensor noised = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(noised, sourcePacked, packedLatent, startStep);
-            sourcePacked.Dispose();
             packedLatent.Dispose();
             packedLatent = noised;
+            if (isMaskedInpaint)
+            {
+                sourcePackedKeep = sourcePacked;
+                tokenMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, patH, patW);
+            }
+            else
+            {
+                sourcePacked.Dispose();
+            }
         }
         Logs.Verbose($"Initial latent: shape={packedLatent.Shape}, init_sigma={scheduler.InitialNoiseSigma:F4}");
 
@@ -247,6 +262,27 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             Backend.CfgEulerStep(packedLatent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
             noisePred.Dispose();
 
+            // Masked-inpaint blend: unmasked tokens go back on the source's flow trajectory (re-noised at the
+            // next step's sigma); final step blends the clean source.
+            if (isMaskedInpaint && sourcePackedKeep is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor fresh = SeedGenerator.CreateNoise(packedShape, seed + nextStep);
+                    noisedSource = new Tensor(packedShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourcePackedKeep, fresh, nextStep);
+                    fresh.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourcePackedKeep;
+                }
+                MaskBlendUtilities.BlendTokensInPlace(packedLatent, noisedSource, tokenMask!);
+                if (!ReferenceEquals(noisedSource, sourcePackedKeep)) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             if (DiagnosticStats)
                 Logs.Info($"[Lens] step {i + 1}/{steps} sigma={sigma:F4} {stepSw.ElapsedMilliseconds}ms | " +
@@ -282,6 +318,15 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         latent32.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+
+        // Pixel-space recomposite for masked inpaint: the unmasked region becomes byte-exact source rather
+        // than a VAE roundtrip of it.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+        sourcePackedKeep?.Dispose();
+        tokenMask?.Dispose();
 
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
