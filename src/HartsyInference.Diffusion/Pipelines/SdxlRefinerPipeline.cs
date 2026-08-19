@@ -52,6 +52,23 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
     /// <param name="negativeEosPositionG">Position of EOS token in negative prompt.</param>
     /// <param name="request">Refiner request with source image, strength, and aesthetic scores.</param>
     /// <param name="onProgress">Optional progress callback.</param>
+    /// <summary>One-line stage-boundary stats — the cheap black-output diagnostic (NaN latents and dead
+    /// conditioning both show up here long before an image is visible).</summary>
+    private static unsafe void DumpStats(string label, Tensor t)
+    {
+        float* p = (float*)t.DataPointer;
+        long n = t.Shape.ElementCount;
+        double sum = 0, sumSq = 0; float mn = float.MaxValue, mx = float.MinValue; long nan = 0;
+        for (long i = 0; i < n; i++)
+        {
+            float v = p[i];
+            if (float.IsNaN(v) || float.IsInfinity(v)) { nan++; continue; }
+            sum += v; sumSq += (double)v * v; if (v < mn) mn = v; if (v > mx) mx = v;
+        }
+        double mean = sum / Math.Max(1, n - nan);
+        Logs.Info($"[SdxlRefiner] {label}: mean {mean:0.####} std {Math.Sqrt(Math.Max(0, sumSq / Math.Max(1, n - nan) - mean * mean)):0.####} min {mn:0.###} max {mx:0.###} nan/inf {nan}/{n}");
+    }
+
     public (byte[] rgbData, int width, int height, int seed) RefineFromTokens(
         int[] promptTokenIdsG,
         int[] negativePromptTokenIdsG,
@@ -205,6 +222,7 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
 
         textEmbeddings.Dispose();
         pooledOutput.Dispose();
+        DumpStats("post-loop latent", latent);
 
         // 7. VAE decode
         Backend.Sync();

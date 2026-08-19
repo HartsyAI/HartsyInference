@@ -200,6 +200,35 @@ public sealed class SdxlCheckpointConverter
     }
 
 
+    /// <summary>The refiner checkpoint's auxiliary halves: the refiner carries ONE text encoder — CLIP-G at
+    /// <c>conditioner.embedders.0</c> (base SDXL keeps CLIP-G at index 1, CLIP-L at 0) — plus the standard SDXL
+    /// VAE. The UNet half loads separately via <c>SdxlRefinerLoader</c> (its block layout needs its own table).
+    /// Caller owns the loader.</summary>
+    public static (Dictionary<string, Tensor> ClipG, Dictionary<string, Tensor> Vae, SafeTensorsLoader Loader)
+        LoadRefinerAuxiliary(string path)
+    {
+        SafeTensorsLoader loader = new SafeTensorsLoader();
+        loader.Load(path);
+        Dictionary<string, Tensor> clipG = new Dictionary<string, Tensor>();
+        Dictionary<string, Tensor> vae = new Dictionary<string, Tensor>();
+        foreach (string key in loader.Descriptors.Keys)
+        {
+            Tensor tensor = loader.GetTensor(key);
+            if (key.StartsWith("conditioner.embedders.0.model.", StringComparison.Ordinal))
+            {
+                ConvertClipGKeyAt(key, tensor, clipG, "conditioner.embedders.0.model.");
+            }
+            else if (key.StartsWith("first_stage_model.", StringComparison.Ordinal))
+            {
+                string ldmKey = key["first_stage_model.".Length..];
+                string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(ldmKey);
+                if (diffusersKey is not null)
+                    vae[diffusersKey] = tensor;
+            }
+        }
+        return (clipG, vae, loader);
+    }
+
     // ── CLIP-L Key Conversion ──────────────────────────────────────────
 
     private static void ConvertClipLKey(string key, Tensor tensor, Dictionary<string, Tensor> clipL)
@@ -217,10 +246,12 @@ public sealed class SdxlCheckpointConverter
 
     // ── CLIP-G Key Conversion ──────────────────────────────────────────
 
-    private static void ConvertClipGKey(string key, Tensor tensor, Dictionary<string, Tensor> clipG)
+    private static void ConvertClipGKey(string key, Tensor tensor, Dictionary<string, Tensor> clipG) =>
+        ConvertClipGKeyAt(key, tensor, clipG, "conditioner.embedders.1.model.");
+
+    private static void ConvertClipGKeyAt(string key, Tensor tensor, Dictionary<string, Tensor> clipG, string modelPrefix)
     {
         // OpenCLIP format → HuggingFace diffusers format
-        string modelPrefix = "conditioner.embedders.1.model.";
         if (!key.StartsWith(modelPrefix)) return;
 
         string rest = key[modelPrefix.Length..];

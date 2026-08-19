@@ -27,6 +27,7 @@ public static class RecipeRegistry
     private static List<IArchitectureRecipe> BuildDefaults() => new List<IArchitectureRecipe>
     {
         new Image.SdxlRecipe(),
+        new Image.SdxlRefinerRecipe(),
         new Image.ZImageRecipe(),
         new Image.ChromaRecipe(),
         new Image.Sd15Recipe(),
