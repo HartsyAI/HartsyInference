@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -30,7 +31,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <para><see cref="ImageFeatures.Regional"/> added 2026-08-11 (Tier 3.7): <see cref="Flux2Transformer"/>'s double/single blocks
     /// gained an <c>attnBias</c> slot (mirroring <see cref="FluxTransformer"/>'s), wired through <see cref="Flux2Pipeline.GenerateFromTokens"/>
     /// and <see cref="Flux2RecipePipeline.BuildRegionalPlan"/> — real-weight verified with a two-region prompt.</para></remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 
@@ -87,6 +88,10 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             castWeights.Clear();
 
             Flux2Transformer transformer = new Flux2Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted);
             transformer.LoadWeights(converted);
             converted.Clear();
 
@@ -152,7 +157,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 hiddenLayers: null,
                 bnEps: 1e-5f);
             Logs.Info($"[Flux2Recipe] Flux.2 ready ({DescribeConfig(config)}).");
-            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, ggufHandle);
+            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, ggufHandle, loraStack);
         }
         catch (Exception ex)
         {

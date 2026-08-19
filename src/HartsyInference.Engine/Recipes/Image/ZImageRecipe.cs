@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -20,7 +21,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Z-Image shares the Flux VAE; the encoder is constructed alongside the decoder and ZImagePipeline implements the masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zimage", StringComparison.OrdinalIgnoreCase);
@@ -84,6 +85,10 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             Logs.Info($"[ZImageRecipe] Building {zConv.Variant} transformer " +
                 $"(SchedulerShift={zConfig.SchedulerShift}).");
             transformer = new ZImageTransformer(zConfig);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: zConv.Transformer);
             transformer.LoadWeights(zConv.Transformer);
             transformerWeightTensors = SnapshotWeights(transformer.EnumerateWeights());
 
@@ -150,7 +155,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
                 transformerWeightTensors, qwenWeightTensors, ownedVaeWeights,
                 context.Backend, context.TextEncoderBackendOrDefault,
                 isBase ? BaseDefaults : FamilyDefaults,
-                zLoader, qwenLoader, vaeLoader);
+                zLoader, qwenLoader, vaeLoader, loraStack);
         }
         catch
         {

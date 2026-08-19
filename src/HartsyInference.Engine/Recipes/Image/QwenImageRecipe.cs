@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -27,7 +28,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     /// packed-latent masked path, and Qwen-Image-Edit reference conditioning. <c>Img2Img.Mode</c> selects; Auto prefers
     /// classic. Edit fidelity is below the reference implementation until <c>editRefVisionImages</c> is wired — the VL
     /// branch cannot see the image without it.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
@@ -79,6 +80,10 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             QwenImageTransformer transformer = new QwenImageTransformer(config);
             // Weights load as-is (fp8/fp16 kept for the quantized GEMM path) — the reference does NOT upcast the
             // transformer to F32.
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(converted.Transformer);
 
             // fp8 single-file checkpoints (the Edit-2511 fp8mixed) on hardware without native FP8 GEMM cast each
@@ -204,7 +209,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
-            return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, loaders, ggufHandle);
+            return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, loaders, ggufHandle, loraStack);
         }
         catch (Exception ex)
         {

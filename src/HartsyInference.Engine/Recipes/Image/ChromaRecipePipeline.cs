@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
@@ -20,8 +21,11 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _vaeLoader;
 
     /// <summary>Wraps the constructed Chroma pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, SafeTensorsLoader vaeLoader)
+    private readonly MergedLoraStack? _loraStack;
+
+    public ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _checkpointLoader = checkpointLoader;
@@ -96,5 +100,7 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
         _checkpointLoader.Dispose();
         _t5Loader.Dispose();
         _vaeLoader.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

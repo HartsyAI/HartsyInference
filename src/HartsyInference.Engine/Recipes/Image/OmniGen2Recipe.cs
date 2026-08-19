@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -21,7 +22,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Reference editing only: OmniGen2 conditions on VAE-encoded reference latents with dual
     /// text/image guidance, so there is no denoise-strength knob to honour.</remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
 
@@ -52,6 +53,10 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             // footprint to ~16 GB. BF16 keeps 8 GB with F32's exponent range — the validated e2e recipe.
             OmniGen2Config config = OmniGen2Config.V1;
             OmniGen2Transformer transformer = new OmniGen2Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(CastWeightsToBf16(converted.Transformer));
 
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
@@ -76,7 +81,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             OmniGen2Pipeline pipeline = new OmniGen2Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[OmniGen2Recipe] OmniGen 2 ready (Qwen2.5-VL-3B live encode, FLUX.1 VAE).");
-            return new OmniGen2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders);
+            return new OmniGen2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack);
         }
         catch (Exception ex)
         {

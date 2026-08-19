@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -34,8 +35,11 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
     private Tensor? _cachedNegEmbeds;
 
     /// <summary>Wraps the constructed Lumina-2 pipeline plus its text encoder + tokenizer, taking ownership of every disposable. The backend is retained because the caption encode runs outside the pipeline.</summary>
-    public Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend backend, LlamaStyleEncoder textEncoder, GemmaTokenizer tokenizer, Lumina2Transformer transformer, string systemPrompt, List<SafeTensorsLoader> loaders)
+    private readonly MergedLoraStack? _loraStack;
+
+    public Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend backend, LlamaStyleEncoder textEncoder, GemmaTokenizer tokenizer, Lumina2Transformer transformer, string systemPrompt, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _backend = backend;
         _textEncoder = textEncoder;
@@ -160,5 +164,7 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -37,8 +38,11 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
     private Tensor? _cachedNegEmbeds;
 
     /// <summary>Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders)
+    private readonly MergedLoraStack? _loraStack;
+
+    public OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _textEncoder = textEncoder;
@@ -195,5 +199,7 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

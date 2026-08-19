@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -25,8 +26,11 @@ public sealed class HiDreamRecipePipeline : IRecipePipeline
     private readonly List<SafeTensorsLoader> _loaders;
 
     /// <summary>Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
-    public HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer, List<SafeTensorsLoader> loaders)
+    private readonly MergedLoraStack? _loraStack;
+
+    public HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _clipTokenizer = clipTokenizer;
         _t5Tokenizer = t5Tokenizer;
@@ -128,5 +132,7 @@ public sealed class HiDreamRecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -32,7 +33,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Lumina 2 reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lumina2", StringComparison.OrdinalIgnoreCase);
 
@@ -61,6 +62,10 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             Lumina2Config config = Lumina2Config.FromWeights(transformerWeights);
             Logs.Info($"[Lumina2Recipe] Building transformer (2B NextDiT).");
             Lumina2Transformer transformer = new Lumina2Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
             transformer.LoadWeights(transformerWeights);
 
             SafeTensorsLoader teLoader = new SafeTensorsLoader();
@@ -108,7 +113,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[Lumina2Recipe] Lumina-2 ready.");
-            return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, loaders);
+            return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, loaders, loraStack);
         }
         catch (Exception ex)
         {

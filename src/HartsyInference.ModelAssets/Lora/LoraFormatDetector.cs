@@ -16,6 +16,7 @@ public static class LoraFormatDetector
         bool hasDiffusersWan = false;
         bool hasTe2 = false;
         bool hasBareDit = false;
+        bool hasComfyBfl = false;
 
         foreach (string key in descriptors.Keys)
         {
@@ -25,9 +26,16 @@ public static class LoraFormatDetector
             // must never win over a file that also carries a real prefix.
             if ((key.StartsWith("blocks.", StringComparison.Ordinal)
                     || key.StartsWith("token_refiner.", StringComparison.Ordinal)
-                    || key.StartsWith("final_layer.", StringComparison.Ordinal))
+                    || key.StartsWith("final_layer.", StringComparison.Ordinal)
+                    // Bare diffusers block roots with NO transformer. wrapper (lightx2v Lightning LoRAs for
+                    // Qwen-Image: `transformer_blocks.0.attn.to_q.lora_down.weight`) — the root already IS the
+                    // converted dict's canonical key for those families.
+                    || key.StartsWith("transformer_blocks.", StringComparison.Ordinal)
+                    || key.StartsWith("single_transformer_blocks.", StringComparison.Ordinal))
                 && (key.EndsWith(".lora_A.weight", StringComparison.Ordinal)
-                    || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)))
+                    || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)
+                    || key.EndsWith(".lora_down.weight", StringComparison.Ordinal)
+                    || key.EndsWith(".lora_up.weight", StringComparison.Ordinal)))
             {
                 hasBareDit = true;
             }
@@ -44,6 +52,11 @@ public static class LoraFormatDetector
             }
             // ComfyUI-style Wan repacks: dotted original-Wan naming under a diffusion_model. prefix
             // (e.g. lightx2v distill LoRAs, Kijai's WanVideo conversions).
+            else if (key.StartsWith("diffusion_model.double_blocks.", StringComparison.Ordinal)
+                || key.StartsWith("diffusion_model.single_blocks.", StringComparison.Ordinal))
+            {
+                hasComfyBfl = true;
+            }
             else if (key.StartsWith("diffusion_model.blocks.", StringComparison.Ordinal))
             {
                 hasDiffusersWan = true;
@@ -78,6 +91,7 @@ public static class LoraFormatDetector
         }
 
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
+        if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasDiffusersWan) return LoraFormat.DiffusersWan;
         if (hasKohyaWan) return LoraFormat.KohyaWan;
         if (hasAiToolkitFlux) return LoraFormat.AiToolkitFlux;

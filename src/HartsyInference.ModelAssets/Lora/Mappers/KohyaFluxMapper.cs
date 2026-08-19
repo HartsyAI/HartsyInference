@@ -17,13 +17,27 @@ public static class KohyaFluxMapper
     private static readonly Regex _singleBlock = new(@"^single_blocks_(\d+)_(linear1|linear2|modulation_lin)$", RegexOptions.Compiled);
 
     /// <summary>Parses every LoRA layer in the file.</summary>
-    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader)
+    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader) => ParseLayers(loader, dottedBflRoots: false);
+
+    /// <summary>Same parse, but <paramref name="dottedBflRoots"/> accepts ComfyUI-style roots: DOTTED original BFL
+    /// module names under a <c>diffusion_model.</c> prefix (e.g. <c>diffusion_model.double_blocks.0.img_attn.qkv</c>,
+    /// how Chroma/Flux LoRAs trained against ComfyUI checkpoints ship). The dotted body underscore-normalizes to
+    /// exactly the kohya body this mapper already translates — fused-QKV splits included — so the whole BFL→diffusers
+    /// mapping table is shared rather than duplicated.</summary>
+    public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool dottedBflRoots)
     {
         Dictionary<(LoraTarget, string), GroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
             if (!TryClassifyRoleAndRoot(key, out LoraRole role, out string root))
             {
+                continue;
+            }
+
+            if (dottedBflRoots && root.StartsWith("diffusion_model.", StringComparison.Ordinal))
+            {
+                string dottedBody = root["diffusion_model.".Length..];
+                ProcessUnetKey(loader, key, role, dottedBody.Replace('.', '_'), groups);
                 continue;
             }
 
@@ -267,6 +281,9 @@ public static class KohyaFluxMapper
     {
         if (key.EndsWith(DownSuffix, StringComparison.Ordinal)) { role = LoraRole.Down; root = key[..^DownSuffix.Length]; return true; }
         if (key.EndsWith(UpSuffix, StringComparison.Ordinal)) { role = LoraRole.Up; root = key[..^UpSuffix.Length]; return true; }
+        // PEFT spellings of the same two roles (ComfyUI-style BFL LoRAs pair diffusion_model. roots with .lora_A/.lora_B).
+        if (key.EndsWith(".lora_A.weight", StringComparison.Ordinal)) { role = LoraRole.Down; root = key[..^".lora_A.weight".Length]; return true; }
+        if (key.EndsWith(".lora_B.weight", StringComparison.Ordinal)) { role = LoraRole.Up; root = key[..^".lora_B.weight".Length]; return true; }
         if (key.EndsWith(AlphaSuffix, StringComparison.Ordinal)) { role = LoraRole.Alpha; root = key[..^AlphaSuffix.Length]; return true; }
         role = default; root = string.Empty; return false;
     }

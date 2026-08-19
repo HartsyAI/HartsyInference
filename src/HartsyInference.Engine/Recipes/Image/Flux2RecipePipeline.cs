@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -27,8 +28,11 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
     private readonly IDisposable? _ggufHandle;
 
     /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
-    public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null)
+    private readonly MergedLoraStack? _loraStack;
+
+    public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _config = config;
         _qwenTokenizer = qwenTokenizer;
@@ -159,5 +163,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
             loader.Dispose();
         }
         _ggufHandle?.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

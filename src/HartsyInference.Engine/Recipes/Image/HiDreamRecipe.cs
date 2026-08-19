@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -22,7 +23,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>HiDream shares the Flux.1 VAE, so its encoder half rides the encode-parity gate that already
     /// covers that config; the img2img path in HiDreamPipeline was built for this.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
 
@@ -61,6 +62,10 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
 
             HiDreamConfig config = HiDreamConfig.AutoDetect(converted.Transformer);
             HiDreamTransformer transformer = new HiDreamTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(CastToF32(converted.Transformer));
 
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
@@ -162,7 +167,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
-            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders);
+            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders, loraStack);
         }
         catch (Exception ex)
         {

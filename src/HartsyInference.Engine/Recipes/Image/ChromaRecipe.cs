@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -21,7 +22,7 @@ public sealed class ChromaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Chroma reuses the Flux.1 VAE; the encoder half is built alongside the decoder and ChromaPipeline implements the packed-latent masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma", StringComparison.OrdinalIgnoreCase);
 
@@ -50,6 +51,10 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         ChromaConfig config = ChromaConfig.V1;
         Logs.Info($"[ChromaRecipe] Building transformer ({config.HiddenSize} hidden, {config.Depth} double / {config.DepthSingleBlocks} single).");
         ChromaTransformer transformer = new ChromaTransformer(config);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: zConv.Transformer);
         transformer.LoadWeights(zConv.Transformer);
 
         // DiT sharding split point — byte-weighted: Chroma's 19 double blocks are ~2× its 38 single blocks,
@@ -116,7 +121,7 @@ public sealed class ChromaRecipe : IArchitectureRecipe
             DitShardSplitBlock = ditShardSplitBlock,
         };
         Logs.Info("[ChromaRecipe] Chroma ready.");
-        return new ChromaRecipePipeline(pipeline, tokenizer, zLoader, t5Loader, vaeLoader);
+        return new ChromaRecipePipeline(pipeline, tokenizer, zLoader, t5Loader, vaeLoader, loraStack);
     }
 
     /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file (keys are otherwise stored as-is), so the encoder finds them.</summary>

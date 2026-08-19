@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -29,8 +30,11 @@ public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _qwenLoader;
 
     /// <summary>Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader)
+    private readonly MergedLoraStack? _loraStack;
+
+    public ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _config = config;
         _qwen = qwen;
@@ -180,5 +184,7 @@ public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
         _tokenizer.Dispose();
         _checkpointLoader.Dispose();
         _qwenLoader.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

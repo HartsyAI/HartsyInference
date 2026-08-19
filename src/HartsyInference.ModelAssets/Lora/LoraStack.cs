@@ -70,10 +70,27 @@ public sealed class LoraStack : IDisposable
         }
 
         int merged = 0, skippedShape = 0;
+        Dictionary<string, List<(int SliceIndex, int SliceCount, LoraLayer Layer, float Strength)>> fusedPending = [];
         foreach ((string canonicalKey, List<(LoraLayer layer, float strength)> deltas) in grouped)
         {
             if (!weights.TryGetValue(canonicalKey, out Tensor? baseW))
             {
+                // Fused-QKV fallback: fp8 builds of Flux-lineage checkpoints keep attention fused
+                // (attn.qkv / attn.add_qkv) while LoRA canonical keys are the split names. Without this, every
+                // attention delta silently missed on those builds and the LoRA came out visibly weakened.
+                if (TryResolveFusedSlice(canonicalKey, weights, out string fusedKey, out int sliceIndex, out int sliceCount))
+                {
+                    if (!fusedPending.TryGetValue(fusedKey, out List<(int, int, LoraLayer, float)>? slices))
+                    {
+                        slices = [];
+                        fusedPending[fusedKey] = slices;
+                    }
+                    foreach ((LoraLayer layer, float strength) in deltas)
+                    {
+                        slices.Add((sliceIndex, sliceCount, layer, strength));
+                    }
+                    continue;
+                }
                 Logs.Warning($"LoRA target '{canonicalKey}' not present in {target} weights; skipping.");
                 continue;
             }
@@ -97,6 +114,17 @@ public sealed class LoraStack : IDisposable
                     + "skipping this weight.");
                 skippedShape++;
                 continue;
+            }
+
+            if (baseW.DType.IsQuantized && !baseW.DType.IsFp8)
+            {
+                // GGUF K-quant blocks: dequantizing is possible but requantizing a merged result back into
+                // block form is not implemented, so the merge would silently change the model's size/precision.
+                // Refuse with the fix named rather than surfacing the internal dequantizer error.
+                throw new NotSupportedException(
+                    $"LoRA weights can't be merged into a GGUF-quantized checkpoint (weight '{canonicalKey}' is "
+                    + $"{baseW.DType.Name}). Use a safetensors build of this model (fp16/bf16/fp8) with LoRAs, or "
+                    + "remove the LoRA.");
             }
 
             // CastTo folds Fp8ScaleFactor into the values and returns factor 1.0, so the merge below stays quant-unaware.
@@ -134,6 +162,54 @@ public sealed class LoraStack : IDisposable
             }
         }
 
+        foreach ((string fusedKey, List<(int SliceIndex, int SliceCount, LoraLayer Layer, float Strength)> slices) in fusedPending)
+        {
+            Tensor fusedBase = weights[fusedKey];
+            DType fusedDtype = fusedBase.DType;
+            long sliceRows = fusedBase.Shape[0] / slices[0].SliceCount;
+            bool anyBad = slices.Exists(sl =>
+                fusedBase.Shape.Rank != 2
+                || fusedBase.Shape[0] % sl.SliceCount != 0
+                || sl.Layer.LoraUp.Shape[0] != sliceRows
+                || sl.Layer.LoraDown.Shape[1] != fusedBase.Shape[1]);
+            if (anyBad)
+            {
+                Logs.Warning($"LoRA fused-slice merge into '{fusedKey}' skipped: delta shapes do not tile the fused weight {fusedBase.Shape}.");
+                skippedShape++;
+                continue;
+            }
+            Tensor accumF32 = fusedBase.CastTo(DType.F32);
+            try
+            {
+                foreach ((int sliceIndex, int _, LoraLayer layer, float strength) in slices)
+                {
+                    AccumulateDeltaIntoRows(backend, accumF32, layer, strength, sliceIndex * sliceRows);
+                }
+                Tensor finalTensor;
+                if (fusedDtype.IsFp8)
+                {
+                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, fusedKey);
+                    finalTensor.Fp8InputScaleFactor = fusedBase.Fp8InputScaleFactor;
+                }
+                else
+                {
+                    finalTensor = fusedDtype == DType.F32 ? accumF32 : accumF32.CastTo(fusedDtype);
+                }
+                if (!ReferenceEquals(finalTensor, accumF32))
+                {
+                    accumF32.Dispose();
+                }
+                _ownedMerged.Add(finalTensor);
+                weights[fusedKey] = finalTensor;
+                merged++;
+            }
+            catch
+            {
+                accumF32.Dispose();
+                throw;
+            }
+        }
+
         if (merged > 0 || skippedShape > 0)
         {
             // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
@@ -161,6 +237,75 @@ public sealed class LoraStack : IDisposable
             float scale = strength * (layer.Alpha / layer.Rank);
             backend.Scale(delta, delta, scale);
             backend.Add(accumF32, accumF32, delta);
+        }
+        finally
+        {
+            delta.Dispose();
+            upF32.Dispose();
+            downF32.Dispose();
+        }
+    }
+
+    /// <summary>Maps a split attention canonical key onto its FUSED sibling when the dictionary carries the fused
+    /// form: <c>…attn.to_q/k/v.weight → …attn.qkv.weight</c> rows [q;k;v], and
+    /// <c>…attn.add_{q,k,v}_proj.weight → …attn.add_qkv.weight</c> — the layout ChromaCheckpointConverter (and the
+    /// other Flux-lineage converters) keep for fp8 builds.</summary>
+    private static bool TryResolveFusedSlice(string canonicalKey, IDictionary<string, Tensor> weights,
+        out string fusedKey, out int sliceIndex, out int sliceCount)
+    {
+        fusedKey = string.Empty;
+        sliceCount = 3;
+        (string Suffix, string FusedSuffix, int Index)[] table =
+        [
+            (".attn.to_q.weight", ".attn.qkv.weight", 0),
+            (".attn.to_k.weight", ".attn.qkv.weight", 1),
+            (".attn.to_v.weight", ".attn.qkv.weight", 2),
+            (".attn.add_q_proj.weight", ".attn.add_qkv.weight", 0),
+            (".attn.add_k_proj.weight", ".attn.add_qkv.weight", 1),
+            (".attn.add_v_proj.weight", ".attn.add_qkv.weight", 2),
+        ];
+        foreach ((string suffix, string fusedSuffix, int index) in table)
+        {
+            if (canonicalKey.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                string candidate = canonicalKey[..^suffix.Length] + fusedSuffix;
+                if (weights.ContainsKey(candidate))
+                {
+                    fusedKey = candidate;
+                    sliceIndex = index;
+                    return true;
+                }
+            }
+        }
+        sliceIndex = 0;
+        return false;
+    }
+
+    /// <summary>Like <see cref="AccumulateDelta"/> but adds the <c>up @ down</c> delta into the row window
+    /// [<paramref name="rowOffset"/>, rowOffset + up.rows) of <paramref name="accumF32"/> — the fused-QKV slice merge.
+    /// Host math: F32 tensors are host-resident at this point and the add is a one-time load-path cost.</summary>
+    private static unsafe void AccumulateDeltaIntoRows(IBackend backend, Tensor accumF32, LoraLayer layer, float strength, long rowOffset)
+    {
+        Tensor upF32 = layer.LoraUp.CastTo(DType.F32);
+        Tensor downF32 = layer.LoraDown.CastTo(DType.F32);
+        Tensor delta = new Tensor(new TensorShape(upF32.Shape[0], downF32.Shape[1]), DType.F32);
+        try
+        {
+            backend.MatMul(delta, upF32, downF32);
+            float scale = strength * (layer.Alpha / layer.Rank);
+            long rows = delta.Shape[0];
+            long cols = delta.Shape[1];
+            float* dp = (float*)delta.DataPointer;
+            float* ap = (float*)accumF32.DataPointer;
+            for (long r = 0; r < rows; r++)
+            {
+                long srcBase = r * cols;
+                long dstBase = (rowOffset + r) * cols;
+                for (long c = 0; c < cols; c++)
+                {
+                    ap[dstBase + c] += dp[srcBase + c] * scale;
+                }
+            }
         }
         finally
         {

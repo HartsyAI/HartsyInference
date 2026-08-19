@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -46,13 +47,16 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     private Tensor? _cachedNegative;
 
     /// <summary>Wraps the constructed Z-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
+    private readonly MergedLoraStack? _loraStack;
+
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
         ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder,
         Tensor[] transformerWeightTensors, Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights,
         IBackend backend, IBackend textBackend,
         ImageDefaults variantDefaults,
-        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader)
+        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _qwen = qwen;
         _tokenizer = tokenizer;
@@ -374,5 +378,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         TryDispose("checkpoint loader", _checkpointLoader.Dispose);
         TryDispose("text-encoder loader", _qwenLoader.Dispose);
         TryDispose("VAE loader", _vaeLoader.Dispose);
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -45,6 +45,7 @@ public sealed class LoraFile : IDisposable
                 LoraFormat.AiToolkitFlux => AiToolkitFluxMapper.ParseLayers(loader),
                 LoraFormat.DiffusersFlux => DiffusersFluxMapper.ParseLayers(loader),
                 LoraFormat.DiffusersBareDit => DiffusersFluxMapper.ParseLayers(loader, bareRoots: true),
+                LoraFormat.ComfyBflDit => KohyaFluxMapper.ParseLayers(loader, dottedBflRoots: true),
                 LoraFormat.KohyaWan or LoraFormat.DiffusersWan => WanLoraMapper.ParseLayers(loader, format),
                 _ => throw new NotSupportedException($"LoRA format {format} parsing not implemented."),
             };

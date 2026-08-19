@@ -47,9 +47,13 @@ public static class LoraApplier
                 clipGWeights: clipGWeights);
             if (merged == 0)
             {
-                Logs.Warning(
-                    "[Features][LoRA] Stack matched 0 weights. The LoRA's target keys may not align with this architecture, "
-                    + "or the format may not be supported. Generation will proceed without LoRA effect.");
+                // A zero-match LoRA used to warn and proceed — a generation that succeeds and looks unaffected,
+                // which is the worst failure mode there is: the user thinks the LoRA is weak, not broken. Refuse
+                // with the files named instead; SwarmUI surfaces this message directly.
+                throw new NotSupportedException(
+                    $"LoRA {string.Join(", ", loras.Select(l => $"'{l.ModelId ?? Path.GetFileName(l.FilePath)}'"))} matched 0 weights "
+                    + "on this model — its key format doesn't align with this architecture (wrong family's LoRA, or an "
+                    + "unrecognized training-tool format). Remove it, or pick a LoRA trained for this model family.");
             }
             else
             {

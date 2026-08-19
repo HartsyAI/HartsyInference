@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -27,7 +28,7 @@ public sealed class AnimaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and
     /// <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "anima", StringComparison.OrdinalIgnoreCase);
@@ -65,6 +66,10 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
         AnimaConfig animaConfig = AnimaConfig.AnimaPreview3;
         AnimaTransformer transformer = new AnimaTransformer(animaConfig);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
         transformer.LoadWeights(converted.Transformer);
         AnimaLlmAdapter llmAdapter = new AnimaLlmAdapter(animaConfig.LlmAdapter);
         llmAdapter.LoadWeights(converted.LlmAdapter);
@@ -106,6 +111,6 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
         AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, vaeEncoder, animaConfig);
         Logs.Info("[AnimaRecipe] Anima ready (scheduler=FlowMatchEuler shift=3.0).");
-        return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, animaLoader, qwenLoader, vaeLoader);
+        return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, animaLoader, qwenLoader, vaeLoader, loraStack);
     }
 }

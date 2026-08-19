@@ -10,6 +10,10 @@ public static class DiffusersFluxMapper
     private const string DownSuffix = ".lora_A.weight";
     private const string UpSuffix = ".lora_B.weight";
     private const string AlphaSuffix = ".alpha";
+    // Kohya spellings of the same two roles — lightx2v's Lightning LoRAs ship bare diffusers roots with
+    // .lora_down/.lora_up suffixes, so both suffix families are accepted on every root this parser takes.
+    private const string KohyaDownSuffix = ".lora_down.weight";
+    private const string KohyaUpSuffix = ".lora_up.weight";
 
     /// <summary>Parses every LoRA layer in the file.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader) => ParseLayers(loader, bareRoots: false);
@@ -34,6 +38,16 @@ public static class DiffusersFluxMapper
             {
                 role = LoraRole.Up;
                 root = key[..^UpSuffix.Length];
+            }
+            else if (key.EndsWith(KohyaDownSuffix, StringComparison.Ordinal))
+            {
+                role = LoraRole.Down;
+                root = key[..^KohyaDownSuffix.Length];
+            }
+            else if (key.EndsWith(KohyaUpSuffix, StringComparison.Ordinal))
+            {
+                role = LoraRole.Up;
+                root = key[..^KohyaUpSuffix.Length];
             }
             else if (key.EndsWith(AlphaSuffix, StringComparison.Ordinal))
             {

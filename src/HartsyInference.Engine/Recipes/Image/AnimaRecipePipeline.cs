@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -33,10 +34,13 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _vaeLoader;
 
     /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
+    private readonly MergedLoraStack? _loraStack;
+
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
         AnimaTransformer transformer, AnimaLlmAdapter llmAdapter, IBackend backend,
-        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader)
+        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _qwen = qwen;
         _tokenizer = tokenizer;
@@ -208,5 +212,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         _checkpointLoader.Dispose();
         _qwenLoader.Dispose();
         _vaeLoader.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

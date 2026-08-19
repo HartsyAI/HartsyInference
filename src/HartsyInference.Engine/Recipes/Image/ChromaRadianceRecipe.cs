@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -7,6 +8,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Chroma Radiance recipe (<c>lodestones/Chroma-Radiance</c>) — the pixel-space, VAE-free Chroma variant: same T5-XXL conditioning and checkpoint converter as <see cref="ChromaRecipe"/>, but the transformer carries a NeRF-style pixel decoder head (<c>nerf_image_embedder.*</c>) and outputs RGB directly, so there is NO VAE to resolve. Lifted from the SwarmUI backend's <c>ChromaRadianceLoader</c> and driven through <see cref="ChromaRadianceRecipePipeline"/>.</summary>
@@ -17,7 +19,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Chroma Radiance is pixel-space (NeRF decode head), so img2img noises the source pixels directly with no VAE.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma-radiance", StringComparison.OrdinalIgnoreCase);
@@ -52,6 +54,10 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
         ChromaRadianceConfig config = ChromaRadianceConfig.FromWeights(conv.Transformer);
         Logs.Info($"[ChromaRadianceRecipe] Architecture: pixel-space, patch={config.PatchSize}, nerf hidden={config.NerfHidden}.");
         ChromaRadianceTransformer transformer = new ChromaRadianceTransformer(config);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
         transformer.LoadWeights(conv.Transformer);
 
         // 2. T5-XXL + its embedded tokenizer. No VAE — Radiance is pixel-space.
@@ -70,7 +76,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
 
         ChromaRadiancePipeline pipeline = new ChromaRadiancePipeline(context.Backend, t5, transformer, config);
         Logs.Info("[ChromaRadianceRecipe] Chroma Radiance ready (mid-pretraining checkpoint — output is validation-gated).");
-        return new ChromaRadianceRecipePipeline(pipeline, config, tokenizer, loader, t5Loader);
+        return new ChromaRadianceRecipePipeline(pipeline, config, tokenizer, loader, t5Loader, loraStack);
     }
 
     /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file so the encoder finds its keys.</summary>

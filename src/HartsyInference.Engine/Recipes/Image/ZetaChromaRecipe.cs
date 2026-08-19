@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -7,6 +8,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Zeta-Chroma recipe (<c>lodestones/Zeta-Chroma</c>) — the pixel-space, VAE-free Chroma variant that swaps T5 for Qwen3-4B caption conditioning (<see cref="SideModels.Qwen3_4B"/>, the same encoder path as <see cref="ZImageRecipe"/>) and predicts x0 directly in pixel space. No CLIP, no VAE. Lifted from the SwarmUI backend's <c>ZetaChromaLoader</c> and driven through <see cref="ZetaChromaRecipePipeline"/>.</summary>
@@ -17,7 +19,7 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Zeta-Chroma is pixel-space — the source image IS the clean sample, so no VAE encoder is involved.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zeta-chroma", StringComparison.OrdinalIgnoreCase);
@@ -45,6 +47,10 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
         ZetaChromaConfig config = ZetaChromaConfig.FromWeights(conv.Transformer);
         Logs.Info($"[ZetaChromaRecipe] Architecture: pixel-space, patch={config.PatchSize}, x0-prediction.");
         ZetaChromaTransformer transformer = new ZetaChromaTransformer(config);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
         transformer.LoadWeights(conv.Transformer);
 
         // 2. Qwen3-4B caption encoder — its weights are uploaded and freed per generation, like Z-Image.
@@ -63,6 +69,6 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
 
         ZetaChromaPipeline pipeline = new ZetaChromaPipeline(context.Backend, transformer, config);
         Logs.Info("[ZetaChromaRecipe] Zeta-Chroma ready (mid-pretraining checkpoint — output is validation-gated).");
-        return new ZetaChromaRecipePipeline(pipeline, config, qwen, tokenizer, context.Backend, loader, qwenLoader);
+        return new ZetaChromaRecipePipeline(pipeline, config, qwen, tokenizer, context.Backend, loader, qwenLoader, loraStack);
     }
 }
