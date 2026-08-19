@@ -28,7 +28,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     /// checkpoint (<c>ipadapter.model</c>) stays SD15/SDXL-only and is refused in the recipe pipeline.</remarks>
     public ImageFeatures Supports =>
         ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.VariationSeed
-        | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.IpAdapter | ImageFeatures.Regional | ImageFeatures.SeamlessTiling;
+        | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.IpAdapter | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.Refiner;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);

@@ -100,8 +100,14 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         // share one in-flight latent, same resolution throughout); anything else — "PostApply" is the resolver's
         // own default — runs the base pass alone here, then ApplyPostRefiner does a full pixel-space roundtrip
         // afterward, which is what lets it change resolution (Tier 3.1 hires-fix).
-        RefinerResolver.RefinerSpec? refinerSpec = RefinerResolver.Resolve(
-            request.Refiner, request.Steps ?? SdxlRecipe.FamilyDefaults.Steps, request.CfgScale ?? SdxlRecipe.FamilyDefaults.CfgScale);
+        // Internal handling covers ONLY the classic SDXL / SDXL-refiner pair (this is what carries the
+        // aesthetic-score conditioning and true mid-loop StepSwap). Any other refiner model — Flux over SDXL,
+        // whatever — is the generic RefinerStage's job after this pipeline returns; consuming it here would try
+        // to load that checkpoint as an SDXL refiner UNet. RefinerStage.IsSdxlInternalPair is the shared decision.
+        RefinerResolver.RefinerSpec? refinerSpec = RefinerStage.IsSdxlInternalPair(request, "sdxl")
+            ? RefinerResolver.Resolve(
+                request.Refiner, request.Steps ?? SdxlRecipe.FamilyDefaults.Steps, request.CfgScale ?? SdxlRecipe.FamilyDefaults.CfgScale)
+            : null;
         bool postApply = refinerSpec is not null && !string.Equals(refinerSpec.Method, "StepSwap", StringComparison.OrdinalIgnoreCase);
         RefinerSwapConfig? stepSwapRefiner = postApply ? null : BuildStepSwapConfig(refinerSpec);
         TextToImageRequest inner = BuildInner(request, negative, plan);

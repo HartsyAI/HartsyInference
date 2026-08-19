@@ -17,7 +17,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Chroma Radiance is pixel-space (NeRF decode head), so img2img noises the source pixels directly with no VAE.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma-radiance", StringComparison.OrdinalIgnoreCase);

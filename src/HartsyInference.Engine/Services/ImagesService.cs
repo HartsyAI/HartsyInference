@@ -51,6 +51,12 @@ public sealed class ImagesService : IImagesService
                         _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(basePass, cropPlan), progress, cancel)),
                         cropPlan);
 
+                // Generic refiner (any model over any base, PostApply semantics): pixels from the base pass become
+                // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.
+                // The classic SDXL-on-SDXL pair is skipped here — SdxlRecipePipeline keeps that internally, with
+                // RefinerStage.IsSdxlInternalPair as the single routing decision both sides consult.
+                result = RefinerStage.Apply(_engine, spec, basePass, result, progress, cancel);
+
                 // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
                 // composes on top of whatever the ordinary inpaint-only-masked path above already produced —
                 // a request can combine a top-level Inpaint.ShrinkGrow crop with segment refinement. Passes the

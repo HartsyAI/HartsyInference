@@ -26,7 +26,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared
     /// mask-blend helpers have no variant for that packing — a masked path would need a token-space blend that
     /// does not exist yet, so Inpaint is deliberately not declared.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 

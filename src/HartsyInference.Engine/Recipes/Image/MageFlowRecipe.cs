@@ -30,7 +30,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
     /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.</remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
 
     /// <summary>Base Mage-Flow: 30 steps at CFG 5.0, 1024×1024 (model card).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 5.0f, Width = 1024, Height = 1024 };

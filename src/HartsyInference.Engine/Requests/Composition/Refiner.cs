@@ -7,6 +7,11 @@ public sealed record Refiner
     /// <summary>Refiner model id or local path.</summary>
     public required string Model { get; init; }
 
+    /// <summary>The refiner model's engine family id (e.g. <c>"flux1"</c>, <c>"sdxl-refiner"</c>), when the host
+    /// already knows it — SwarmUI resolves it from the model's compat class, which covers every family. Null falls
+    /// back to the engine's own header sniffing, which recognizes only the classic single-file architectures.</summary>
+    public string? FamilyId { get; init; }
+
     /// <summary>Refiner VAE override; null reuses the base VAE.</summary>
     public string? Vae { get; init; }
 
