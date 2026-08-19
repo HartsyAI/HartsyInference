@@ -25,6 +25,9 @@ public static class ControlNetLoader
             FluxControlNetConfig? fluxConfig = baseModel == ControlNetBaseModel.Flux
                 ? FluxControlNetConfig.FromDescriptors(loader.Descriptors)
                 : null;
+            QwenImageControlNetConfig? qwenConfig = baseModel == ControlNetBaseModel.QwenImage
+                ? QwenImageControlNetConfig.FromDescriptors(loader.Descriptors)
+                : null;
             int unionControlTypes = DetectUnionControlTypes(loader.Descriptors, baseModel, isLdmLayout);
             ControlNetConfig config = baseModel switch
             {
@@ -37,6 +40,13 @@ public static class ControlNetLoader
                     BlockOutChannels = [fluxConfig!.HiddenSize, fluxConfig.HiddenSize, fluxConfig.HiddenSize],
                     CrossAttentionDim = fluxConfig.ContextInDim,
                 },
+                ControlNetBaseModel.QwenImage => new ControlNetConfig
+                {
+                    BaseModel = ControlNetBaseModel.QwenImage,
+                    Mode = mode,
+                    BlockOutChannels = [qwenConfig!.HiddenSize, qwenConfig.HiddenSize, qwenConfig.HiddenSize],
+                    CrossAttentionDim = qwenConfig.ContextDim,
+                },
                 _ => throw new HartsyInferenceException($"Unsupported ControlNet base model {baseModel} for '{filePath}'."),
             };
 
@@ -44,9 +54,11 @@ public static class ControlNetLoader
             if (isLdmLayout)
                 weights = ControlNetCheckpointConverter.Convert(weights, isSdxl: baseModel == ControlNetBaseModel.Sdxl);
 
-            string arch = fluxConfig is null
-                ? (unionControlTypes > 0 ? $", union={unionControlTypes} control types" : "")
-                : $", flux depth={fluxConfig.Depth}+{fluxConfig.DepthSingleBlocks}, union={(fluxConfig.IsUnion ? $"yes({fluxConfig.NumMode})" : "no")}";
+            string arch = fluxConfig is not null
+                ? $", flux depth={fluxConfig.Depth}+{fluxConfig.DepthSingleBlocks}, union={(fluxConfig.IsUnion ? $"yes({fluxConfig.NumMode})" : "no")}"
+                : qwenConfig is not null
+                    ? $", qwen depth={qwenConfig.Depth}, hidden={qwenConfig.HiddenSize}"
+                    : (unionControlTypes > 0 ? $", union={unionControlTypes} control types" : "");
             Logs.Info($"Loaded ControlNet '{Path.GetFileName(filePath)}' (base={baseModel}, mode={mode}, layout={(isLdmLayout ? "ldm→diffusers" : "diffusers")}, tensors={weights.Count}{arch}).");
 
             ControlNetFile file = new()
@@ -56,6 +68,7 @@ public static class ControlNetLoader
                 Mode = mode,
                 Config = config,
                 FluxConfig = fluxConfig,
+                QwenConfig = qwenConfig,
                 Weights = weights,
             };
             file.AttachLoader(loader);
@@ -116,6 +129,13 @@ public static class ControlNetLoader
 
     private static ControlNetBaseModel DetectBaseModel(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
     {
+        // Qwen before Flux: both DiT families carry controlnet_x_embedder/controlnet_blocks/transformer_blocks
+        // keys, but only Qwen has the base transformer's img_in/txt_norm embed pair (Flux uses
+        // x_embedder/context_embedder).
+        if (descriptors.ContainsKey("img_in.weight") && descriptors.ContainsKey("txt_norm.weight")
+            && descriptors.ContainsKey("controlnet_x_embedder.weight"))
+            return ControlNetBaseModel.QwenImage;
+
         if (descriptors.ContainsKey("controlnet_x_embedder.weight")
             || descriptors.ContainsKey("controlnet_mode_embedder.weight")
             || descriptors.ContainsKey("controlnet_blocks.0.weight")

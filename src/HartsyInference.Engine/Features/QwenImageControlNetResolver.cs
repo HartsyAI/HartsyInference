@@ -5,20 +5,20 @@ using RequestConditioning = HartsyInference.Engine.Requests.ControlNetConditioni
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Flux DiT counterpart of <see cref="ControlNetResolver"/>: resolves the request's ControlNet layers into
-/// <see cref="FluxControlNetConditioning"/>s. Per-slot checkpoint load, hint packing to <c>[1, 3, H, W]</c> in
-/// <c>[-1, 1]</c> (the Flux control convention), strength + start/end wiring. Hint preprocessing is host-side, so the
-/// image arrives as the finished control map — union checkpoints therefore take it as-is.</summary>
-public static class FluxControlNetResolver
+/// <summary>Qwen-Image DiT counterpart of <see cref="FluxControlNetResolver"/>: resolves the request's
+/// ControlNet layers into <see cref="QwenImageControlNetConditioning"/>s. Per-slot checkpoint load, hint
+/// packing to <c>[1, 3, H, W]</c> in <c>[-1, 1]</c>, strength + start/end wiring. Hint preprocessing is
+/// host-side, so the image arrives as the finished control map — the union checkpoint takes it as-is.</summary>
+public static class QwenImageControlNetResolver
 {
-    /// <summary>One generation's resolved Flux ControlNet state: owns the adapters and the control tensors.</summary>
+    /// <summary>One generation's resolved Qwen ControlNet state: owns the adapters and the control tensors.</summary>
     public sealed class ResolvedSpec : IDisposable
     {
-        /// <summary>The per-layer conditionings to hand to the Flux pipeline.</summary>
-        public required List<FluxControlNetConditioning> Conditionings { get; init; }
+        /// <summary>The per-layer conditionings to hand to the Qwen-Image pipeline.</summary>
+        public required List<QwenImageControlNetConditioning> Conditionings { get; init; }
 
         /// <summary>The loaded adapters backing <see cref="Conditionings"/>.</summary>
-        public required List<FluxControlNetCacheEntry> Adapters { get; init; }
+        public required List<QwenImageControlNetCacheEntry> Adapters { get; init; }
 
         /// <summary>The packed control tensors backing <see cref="Conditionings"/>.</summary>
         public required List<Tensor> ControlImages { get; init; }
@@ -30,14 +30,15 @@ public static class FluxControlNetResolver
             {
                 img.Dispose();
             }
-            foreach (FluxControlNetCacheEntry a in Adapters)
+            foreach (QwenImageControlNetCacheEntry a in Adapters)
             {
                 a.Dispose();
             }
         }
     }
 
-    /// <summary>Resolves every layer, or null when there are none. Throws when a slot names a UNet-family ControlNet.</summary>
+    /// <summary>Resolves every layer, or null when there are none. Throws when a slot names a ControlNet for a
+    /// different base family.</summary>
     public static ResolvedSpec? Resolve(
         IReadOnlyList<RequestConditioning>? controlNets, int targetW, int targetH, Action<string> log)
     {
@@ -46,8 +47,8 @@ public static class FluxControlNetResolver
         {
             return null;
         }
-        List<FluxControlNetConditioning> conditionings = [];
-        List<FluxControlNetCacheEntry> adapters = [];
+        List<QwenImageControlNetConditioning> conditionings = [];
+        List<QwenImageControlNetCacheEntry> adapters = [];
         List<Tensor> images = [];
         try
         {
@@ -58,26 +59,26 @@ public static class FluxControlNetResolver
                 {
                     throw new InvalidOperationException($"ControlNet[{i}] '{slot.Model}' is selected but carries no hint image.");
                 }
-                log($"Loading Flux ControlNet[{i}]: {slot.Model}");
+                log($"Loading Qwen-Image ControlNet[{i}]: {slot.Model}");
                 string path = ModelFileLocator.Require(slot.Model, "ControlNet model", ControlNetWeightLoader.Folders);
                 ControlNetFile file = ControlNetLoader.Load(path);
-                if (file.FluxConfig is null)
+                if (file.QwenConfig is null)
                 {
                     string family = file.BaseModel.ToString();
                     file.Dispose();
                     throw new InvalidOperationException(
-                        $"ControlNet '{slot.Model}' is a {family} ControlNet, but the current generation uses a Flux model. "
-                        + "Pick a Flux DiT ControlNet.");
+                        $"ControlNet '{slot.Model}' is a {family} ControlNet, but the current generation uses a Qwen-Image model. "
+                        + "Pick a Qwen-Image DiT ControlNet.");
                 }
-                FluxControlNet adapter = new FluxControlNet(file.FluxConfig);
+                QwenImageControlNet adapter = new QwenImageControlNet(file.QwenConfig);
                 adapter.LoadWeights(file.Weights);
-                adapters.Add(new FluxControlNetCacheEntry { File = file, Adapter = adapter });
+                adapters.Add(new QwenImageControlNetCacheEntry { File = file, Adapter = adapter });
 
                 byte[] rgb = FeatureImaging.ResizeRgb24(slot.Image, targetW, targetH);
                 Tensor control = FeatureImaging.RgbToTensorMinusOneOne(rgb, targetW, targetH);
                 images.Add(control);
 
-                conditionings.Add(new FluxControlNetConditioning
+                conditionings.Add(new QwenImageControlNetConditioning
                 {
                     Adapter = adapter,
                     ControlImage = control,
@@ -89,18 +90,18 @@ public static class FluxControlNetResolver
         }
         catch (Exception ex)
         {
-            Logs.Error("[Features][FluxControlNet] Resolution failed; rolling back partial state.", ex);
+            Logs.Error("[Features][QwenControlNet] Resolution failed; rolling back partial state.", ex);
             foreach (Tensor img in images)
             {
                 img.Dispose();
             }
-            foreach (FluxControlNetCacheEntry a in adapters)
+            foreach (QwenImageControlNetCacheEntry a in adapters)
             {
                 a.Dispose();
             }
             throw;
         }
-        log($"Flux ControlNet enabled: {conditionings.Count} adapter(s).");
+        log($"Qwen-Image ControlNet enabled: {conditionings.Count} adapter(s).");
         return new ResolvedSpec { Conditionings = conditionings, Adapters = adapters, ControlImages = images };
     }
 }

@@ -60,6 +60,9 @@ public enum ControlNetBaseModel
 
     /// <summary>Flux DiT transformer.</summary>
     Flux,
+
+    /// <summary>Qwen-Image MMDiT transformer.</summary>
+    QwenImage,
 }
 
 /// <summary>ControlNet conditioning mode.</summary>

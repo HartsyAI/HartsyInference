@@ -1,3 +1,4 @@
+using HartsyInference.Core.Logging;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -63,9 +64,9 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         float cfg = request.CfgScale ?? QwenImageRecipe.FamilyDefaults.CfgScale;
 
         // TODO(E-IMG-4/5): Qwen-Image-Edit reference images (editRefImages / editRefVisionImages /
-        // editRefTimestepZero), LoRA, ControlNet and regional prompting are deferred — the SwarmUI loader resolved
-        // those from T2IParamInput too. Classic strength-based img2img/inpaint is wired below; the edit path is a
-        // distinct conditioning mode and stays deferred.
+        // editRefTimestepZero) and regional prompting are deferred — the SwarmUI loader resolved those from
+        // T2IParamInput too. Classic strength-based img2img/inpaint is wired below; the edit path is a distinct
+        // conditioning mode and stays deferred.
         (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
         (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
@@ -75,6 +76,10 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? initImage = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         Img2ImgResolver.Img2ImgSpec? img2img = refEdit ? null : initImage;
+
+        using QwenImageControlNetResolver.ResolvedSpec? controlNets = QwenImageControlNetResolver.Resolve(
+            request.ControlNets, reqWidth, reqHeight,
+            static message => Logs.Info($"[Features][ControlNet] {message}"));
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
@@ -100,7 +105,8 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokens, negTokens, inner, bridge,
             promptDropIndex: promptDrop, negativeDropIndex: negDrop,
-            editRefImages: refEdit && initImage is not null ? [initImage.SourceTensor] : null);
+            editRefImages: refEdit && initImage is not null ? [initImage.SourceTensor] : null,
+            controlNets: controlNets?.Conditionings);
 
         return new ImageResult
         {

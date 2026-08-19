@@ -173,8 +173,21 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// single-backend path byte-identical.</param>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor encoderHidden, float timestep,
         int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false,
-        DeviceFeatureCache? stepCache = null, CpForwardContext? cp = null)
+        DeviceFeatureCache? stepCache = null, CpForwardContext? cp = null,
+        Adapters.QwenImageControlNetResiduals? controlNetResiduals = null)
     {
+        if (controlNetResiduals is not null)
+        {
+            // The pipeline gates these off when ControlNet is active (Flux parity): the step cache's
+            // block-0-indicator/residual reconstruction skips the per-block adds, CP splits the img rows the
+            // residuals cover, and edit-ref tokens change the img sequence the residuals were computed for.
+            if (stepCache is not null)
+                throw new InvalidOperationException("ControlNet residuals and the step cache don't compose — the pipeline must gate the cache off.");
+            if (cp is not null)
+                throw new InvalidOperationException("ControlNet residuals and context parallelism don't compose — the pipeline must gate CP off.");
+            if (refGrids is { Length: > 0 })
+                throw new InvalidOperationException("ControlNet residuals and edit-reference tokens don't compose — the pipeline must reject the combination.");
+        }
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderHidden.Shape[1];
@@ -271,7 +284,8 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
         // resumes from there — residency is per-block state, not a position in a sequence.
         ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, tembZero,
-            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor, cp);
+            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor, cp,
+            controlNetResiduals?.BlockResiduals);
 
         if (cacheAnchor is not null)
         {
@@ -446,8 +460,11 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     private void ForwardBlocksRange(IBackend backend, ref Tensor currentImg, ref Tensor currentTxt,
         Tensor temb, Tensor? tembZero, int hPacked, int wPacked, int txtPositionStart,
         (int H, int W)[] refGrids, int mainSeqLen, int startBlock, int endBlock, Tensor? cacheAnchor = null,
-        CpForwardContext? cp = null)
+        CpForwardContext? cp = null, Tensor[]? cnResiduals = null)
     {
+        int cnInterval = cnResiduals is { Length: > 0 }
+            ? (int)Math.Ceiling((double)_config.Depth / cnResiduals.Length)
+            : 0;
         for (int i = startBlock; i < endBlock; i++)
         {
             BeforeBlockForward?.Invoke(i);
@@ -460,6 +477,16 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
             currentImg = newImg;
             currentTxt = newTxt;
+
+            // ControlNet residual (diffusers interval mapping: base block i ← residual i / ceil(depth/count)).
+            if (cnInterval > 0)
+            {
+                Tensor res = cnResiduals![Math.Min(i / cnInterval, cnResiduals.Length - 1)];
+                Tensor injected = new Tensor(currentImg.Shape, currentImg.DType);
+                backend.Add(injected, currentImg, res);
+                currentImg.Dispose();
+                currentImg = injected;
+            }
 
             QwenImageDebugDump.Dump($"block_{i}_image", currentImg);
             QwenImageDebugDump.Dump($"block_{i}_text", currentTxt);

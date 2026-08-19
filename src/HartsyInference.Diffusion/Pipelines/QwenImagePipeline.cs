@@ -133,7 +133,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         int negativeDropIndex = 0,
         IReadOnlyList<Tensor>? editRefImages = null,
         bool editRefTimestepZero = false,
-        IReadOnlyList<Tensor>? editRefVisionImages = null)
+        IReadOnlyList<Tensor>? editRefVisionImages = null,
+        IReadOnlyList<Adapters.QwenImageControlNetConditioning>? controlNets = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -142,6 +143,14 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a QwenImageVaeEncoder. Construct the pipeline with the overload that accepts one.");
         bool hasEditRefs = editRefImages is { Count: > 0 };
+        bool hasCn = controlNets is { Count: > 0 };
+        if (hasCn)
+        {
+            if (_vaeEncoder is null)
+                throw new InvalidOperationException("Qwen-Image ControlNet conditioning requires a QwenImageVaeEncoder (the control image is VAE-encoded). Construct the pipeline with the overload that accepts one.");
+            if (hasEditRefs)
+                throw new InvalidOperationException("Qwen-Image ControlNet conditioning cannot be combined with Qwen-Image-Edit reference images.");
+        }
         if (hasEditRefs)
         {
             if (_vaeEncoder is null)
@@ -179,13 +188,22 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
             StepCacheEnv.Resolve(CalibratedStepCache);
         bool cpConfigured = CpBackends is { Count: >= 2 };
-        if (stepCacheThreshold > 0f && (IsDitSharded || cpConfigured))
+        if (stepCacheThreshold > 0f && (IsDitSharded || cpConfigured || hasCn))
         {
             // Same exclusion as Krea2: the step cache's block-0-as-indicator + variable per-step topology
             // doesn't compose with a fixed block-range boundary — nor with CP's split sequence (the residual is
-            // per-rank rows and the gate indicator would differ per rank).
-            Logs.Warning($"Step cache requested but {(IsDitSharded ? "DiT sharding" : "context parallelism")} is configured — running uncached.");
+            // per-rank rows and the gate indicator would differ per rank) — nor with ControlNet's per-block
+            // residual adds (the cached residual would bake in one step's control contribution).
+            Logs.Warning($"Step cache requested but {(IsDitSharded ? "DiT sharding" : cpConfigured ? "context parallelism" : "ControlNet")} is configured — running uncached.");
             stepCacheThreshold = 0f;
+        }
+        // ControlNet residuals inject into the plain single-backend forward only (Flux parity): the sharded
+        // per-stage loop doesn't thread them, so a CN generation on a sharded config runs unsharded.
+        bool ditSharded = IsDitSharded;
+        if (ditSharded && hasCn)
+        {
+            Logs.Warning("QwenImage: ControlNet conditioning doesn't compose with DiT sharding — running unsharded on the primary backend.");
+            ditSharded = false;
         }
         DeviceFeatureCache? condCache = null;
         DeviceFeatureCache? uncondCache = null;
@@ -468,6 +486,35 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
         }
 
+        // Qwen DiT ControlNets: VAE-encode + 2×2-pack each control image ONCE (fixed across the loop). The
+        // encode lands in denoise-loop space ((mean − latents_mean)/latents_std, the exact normalization the
+        // reference pipeline applies to controlnet_cond), and PackLatent is a host loop, so the packed controls
+        // sit host-resident until the denoise-phase pin below.
+        Tensor[]? cnPackedControls = null;
+        if (hasCn)
+        {
+            if (ReferenceEquals(VaeBackend, Backend))
+                EvictResidentTransformer("ControlNet hint VAE encode");
+            VaeBackend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
+            cnPackedControls = new Tensor[controlNets!.Count];
+            for (int c = 0; c < controlNets.Count; c++)
+            {
+                Tensor cnImage = controlNets[c].ControlImage;
+                if (cnImage.Shape.Rank != 4 || cnImage.Shape[0] != 1 || cnImage.Shape[1] != 3
+                    || cnImage.Shape[2] != height || cnImage.Shape[3] != width)
+                {
+                    throw new ArgumentException(
+                        $"Qwen ControlNet image {c} shape must be [1, 3, {height}, {width}] (matching request); got {cnImage.Shape}.",
+                        nameof(controlNets));
+                }
+                Tensor cnLatent = _vaeEncoder.Encode(VaeBackend, cnImage);
+                cnPackedControls[c] = PackLatent(cnLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
+                cnLatent.Dispose();
+            }
+            VaeBackend.FreeWeights(_vaeEncoder.EnumerateWeights());
+            Logs.Info($"Qwen ControlNet: encoded {cnPackedControls.Length} control image(s) to packed latents.");
+        }
+
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
         // packing intermediates BEFORE the DiT re-upload below — the fp8 DiT does not fit beside a 1MP encode's
         // conv workspace on 24 GB cards. The per-step FreeActivations below frees device buffers WITHOUT a D2H
@@ -494,6 +541,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             else if (IsDitSharded) RecordCpDecision("fell-back(dit-sharding-configured)");
             else if (CfgParallelBackend is not null) RecordCpDecision("fell-back(cfg-parallel-configured)");
             else if (hasEditRefs) RecordCpDecision("fell-back(edit-reference-conditioning)");
+            else if (hasCn) RecordCpDecision("fell-back(controlnet-conditioning)");
             else if (hPacked < 2) RecordCpDecision("fell-back(single-packed-row)");
             else cpEnabled = true;
         }
@@ -562,7 +610,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // CP already preloaded both ranks above; the chain below must not re-plan (streaming would detach
             // the full-DiT residency CP depends on).
         }
-        else if (IsDitSharded)
+        else if (ditSharded)
         {
             // Sharding beats streaming: the pooled multi-card VRAM makes every stage's range resident, which is
             // strictly better than sliding-window re-uploads. Asymmetric preload — shared weights on stage 0's
@@ -627,12 +675,22 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedEditRef is not null)
             Backend.PreloadWeights(new List<Tensor> { packedEditRef });
 
+        // ControlNet adapter weights ride beside the DiT for the whole loop (they run every step), and the
+        // step-invariant packed controls pin the same way as the edit-ref tokens above.
+        if (hasCn)
+        {
+            foreach (Adapters.QwenImageControlNetConditioning cn in controlNets!)
+                Backend.PreloadWeights(cn.Adapter.EnumerateWeights());
+            Backend.PreloadWeights(cnPackedControls!);
+        }
+
         // CP dispatch: the loop body below stays identical either way — a CP step forks rank 1 onto a worker
         // (CfgBranchRunner), runs rank 0 here, and gathers both ranks' packed velocity rows in global order.
-        Tensor Predict(Tensor input, Tensor hidden, Tensor? hiddenRank1, float normalizedT, DeviceFeatureCache? cache) =>
+        Tensor Predict(Tensor input, Tensor hidden, Tensor? hiddenRank1, float normalizedT, DeviceFeatureCache? cache,
+            Adapters.QwenImageControlNetResiduals? cnResiduals = null) =>
             cpEnabled
                 ? RunForwardContextParallel(input, hidden, hiddenRank1!, normalizedT, hPacked, wPacked, cpPlan!, cpExchange!)
-                : RunForward(input, hidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, cache);
+                : RunForward(input, hidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero, cache, ditSharded, cnResiduals);
 
         Logs.Info("Starting Qwen-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -683,12 +741,29 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
             DeviceFeatureCache? stepUncondCache = cacheEligible ? uncondCache : null;
 
+            // Qwen DiT ControlNets: run every active adapter ONCE against the current latent + its packed
+            // control and sum the residual stacks. Reference-pipeline parity: the ControlNet consumes the
+            // CONDITIONAL text stream and the same residuals feed both the cond and uncond transformer pass.
+            Adapters.QwenImageControlNetResiduals? cnResiduals = null;
+            if (hasCn)
+            {
+                for (int c = 0; c < controlNets!.Count; c++)
+                {
+                    Adapters.QwenImageControlNetConditioning cn = controlNets[c];
+                    if (!cn.IsActiveAtStep(i, steps)) continue;
+                    Adapters.QwenImageControlNetResiduals next = cn.Adapter.Forward(
+                        Backend, packedLatent, cnPackedControls![c], condHidden, normalizedT,
+                        hPacked, wPacked, cn.Scale);
+                    cnResiduals = cnResiduals is null ? next : SumControlNetResiduals(cnResiduals, next);
+                }
+            }
+
             if (drainFree)
             {
-                Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
+                Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache, cnResiduals);
                 if (cfgThisStep)
                 {
-                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache);
+                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache, cnResiduals);
                     Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
                     uncondPred.Dispose();
                 }
@@ -698,23 +773,25 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 }
                 condPred.Dispose();
                 if (transformerInput != packedLatent) transformerInput.Dispose();
+                cnResiduals?.DisposeAll();
             }
             else
             {
                 Tensor noisePred;
                 if (cfgThisStep)
                 {
-                    Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
-                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache);
+                    Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache, cnResiduals);
+                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache, cnResiduals);
                     noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                     uncondPred.Dispose();
                     condPred.Dispose();
                 }
                 else
                 {
-                    noisePred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache);
+                    noisePred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache, cnResiduals);
                 }
                 if (transformerInput != packedLatent) transformerInput.Dispose();
+                cnResiduals?.DisposeAll();
 
                 Tensor newLatent = new Tensor(packedShape, DType.F32);
                 scheduler.Step(newLatent, noisePred, packedLatent, i);
@@ -768,6 +845,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // caches — not disposed here; DisposeCore / cache replacement release them.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
+        if (hasCn)
+        {
+            // ControlNet weights + packed controls always evict after the loop (per-request conditioning, not a
+            // resident model) — frees room for the VAE decode.
+            foreach (Adapters.QwenImageControlNetConditioning cn in controlNets!)
+                Backend.FreeWeights(cn.Adapter.EnumerateWeights());
+            Backend.FreeWeights(cnPackedControls!);
+            foreach (Tensor cnPacked in cnPackedControls!) cnPacked.Dispose();
+        }
 
         // Perf-knob accounting for benchmark records: forwards actually run vs the uncached/ungated baseline.
         if (condCache is not null)
@@ -875,11 +961,37 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     /// when N-way DiT sharding is configured (which never takes a step cache — the pipeline already suppressed it)
     /// and the plain <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical
     /// either way.</summary>
+    /// <summary>Sums two stacked ControlNets' residual stacks into one (diffusers multi-ControlNet stacking).
+    /// Consumes both inputs' tensors.</summary>
+    private Adapters.QwenImageControlNetResiduals SumControlNetResiduals(
+        Adapters.QwenImageControlNetResiduals acc, Adapters.QwenImageControlNetResiduals next)
+    {
+        if (acc.BlockResiduals.Length != next.BlockResiduals.Length)
+        {
+            acc.DisposeAll();
+            next.DisposeAll();
+            throw new InvalidOperationException(
+                "Stacked Qwen ControlNets produced mismatched residual counts " +
+                $"({acc.BlockResiduals.Length} vs {next.BlockResiduals.Length}) — all stacked adapters must share the same block depth.");
+        }
+        for (int i = 0; i < acc.BlockResiduals.Length; i++)
+        {
+            Tensor sum = new Tensor(acc.BlockResiduals[i].Shape, acc.BlockResiduals[i].DType);
+            Backend.Add(sum, acc.BlockResiduals[i], next.BlockResiduals[i]);
+            acc.BlockResiduals[i].Dispose();
+            next.BlockResiduals[i].Dispose();
+            acc.BlockResiduals[i] = sum;
+        }
+        return acc;
+    }
+
     private Tensor RunForward(Tensor input, Tensor hidden, float normalizedT, int hPacked, int wPacked,
-        (int H, int W)[]? refGrids, bool refTimestepZero, DeviceFeatureCache? stepCache) =>
-        IsDitSharded
+        (int H, int W)[]? refGrids, bool refTimestepZero, DeviceFeatureCache? stepCache, bool sharded,
+        Adapters.QwenImageControlNetResiduals? cnResiduals = null) =>
+        sharded
             ? _transformer.ForwardSharded(DitShardStages!, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero)
-            : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache);
+            : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache,
+                cp: null, controlNetResiduals: cnResiduals);
 
     /// <summary>One context-parallel forward: fork rank 1 onto a worker (CfgBranchRunner's dedicated-thread
     /// ambient-binding shape), run rank 0 on the calling thread, then gather both ranks' packed velocity rows in
