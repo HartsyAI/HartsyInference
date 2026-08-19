@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
@@ -665,6 +666,9 @@ public sealed class InferenceEngine : IInferenceEngine
                 Logs.Warning($"[Engine] Placement-backend release after model-switch eviction failed: {ex.Message}");
             }
         }
+        // Host side: the victims' weight buffers are freed by now, but glibc keeps their arena heaps resident,
+        // so family rotation ratchets anon RSS into the cgroup cap. See HostMemory.Trim.
+        HostMemory.TrimAndLog("model-switch eviction");
         Logs.Info($"[Engine] Model switch: evicted {imageVictims.Count + videoVictims.Count} resident pipeline(s) for other checkpoints.");
     }
 
@@ -754,6 +758,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
             }
         }
+        HostMemory.TrimAndLog("free-memory sweep");
     }
 
     /// <inheritdoc/>
