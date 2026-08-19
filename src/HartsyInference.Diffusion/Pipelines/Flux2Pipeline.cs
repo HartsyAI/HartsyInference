@@ -659,7 +659,7 @@ _transformer.InvalidateStepGraph(Backend);
         int seed, int startStep,
         bool keepSourceLatent)
     {
-        Tensor unpackedNoise = SeedGenerator.CreateNoise(noiseShape, seed);
+        Tensor unpackedNoise = TakeOrCreateNoise(request, noiseShape, seed);
         Tensor packedNoise = PackLatent(unpackedNoise);
         unpackedNoise.Dispose();
 

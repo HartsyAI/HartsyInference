@@ -207,7 +207,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         if (isImg2Img)
         {
             Tensor encodedSource = _vaeEncoder!.Encode(Backend, ((ImageToImageRequest)request).SourceImage);  // [1, 16, latentH, latentW]
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             latent = new Tensor(latentShape, DType.F32);
             AddNoiseFlowMatch(latent, encodedSource, noise, sigmas[startStep]);   // x = (1-σ)·source + σ·noise
             noise.Dispose();
@@ -224,7 +224,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
         else
         {
-            latent = SeedGenerator.CreateNoise(latentShape, seed);
+            latent = TakeOrCreateNoise(request, latentShape, seed);
         }
         if (DiagnosticStats) LogStats("initial latent", latent);
 

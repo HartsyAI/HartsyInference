@@ -278,7 +278,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SamplingShift);
         scheduler.SetTimesteps(steps);
 
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
         Tensor initialLatent;
         if (request is ImageToImageRequest img2img)
         {

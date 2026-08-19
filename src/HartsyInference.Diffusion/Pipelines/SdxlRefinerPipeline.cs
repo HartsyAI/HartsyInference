@@ -126,7 +126,7 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
 
         // 4. Generate fresh noise + scheduler setup
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
         IScheduler scheduler = SchedulerFactory.Create(request.Scheduler);
         scheduler.SetTimesteps(steps);
 

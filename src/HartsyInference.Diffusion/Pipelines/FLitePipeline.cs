@@ -183,7 +183,7 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             float tStart = ShiftedTime(startStep, steps, alpha);
             latent = new Tensor(latentShape, DType.F32);
             Img2ImgSetup.MixAtSigma(latent, encoded, noise, tStart);
@@ -200,7 +200,7 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         }
         else
         {
-            latent = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
+            latent = TakeOrCreateNoise(request, latentShape, seed);
             if (!latent.Shape.Equals(latentShape) || latent.DType != DType.F32)
                 throw new ArgumentException($"InitialNoise must be F32 with shape {latentShape}; got {latent.Shape} {latent.DType}.", nameof(request));
         }

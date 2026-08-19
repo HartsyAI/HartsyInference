@@ -105,27 +105,20 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
 
             using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
 
-            // Variation noise only applies to the text-to-image path — an init latent replaces the seeded noise
-            // outright, and building it anyway would hand the pipeline a tensor it never disposes.
-            Tensor? variationNoise = img2img is null
-                ? VariationSeedResolver.Resolve(
-                    request.VariationSeed, reqWidth, reqHeight, request.Seed, VariationSeedResolver.FluxLatentChannels)
-                : null;
-            if (img2img is not null && request.VariationSeed is not null)
-            {
-                Logs.Warning("[Flux1RecipePipeline] Variation seed is ignored on the img2img path — the init latent replaces the seeded noise.");
-            }
-
+            // Variation blending happens inside the pipeline's own TakeOrCreateNoise now (from the two request
+            // fields below) — on img2img too, matching ComfyUI, where var_seed applies to the sampler noise
+            // regardless of the latent's source.
             TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
                 new TextToImageRequest
                 {
                     SeamlessTiling = request.SeamlessTiling,
+                    VariationSeed = request.VariationSeed?.Seed ?? -1,
+                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                     Prompt = prompt,
                     Width = request.Width,
                     Height = request.Height,
                     Steps = steps,
                     Seed = RecipeRequestMapper.MapSeed(request.Seed),
-                    InitialNoise = variationNoise,
                 },
                 img2img);
 

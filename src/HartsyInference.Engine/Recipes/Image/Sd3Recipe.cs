@@ -21,7 +21,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>SD3's VAE encoder is constructed alongside the decoder, and Sd3Pipeline implements the blend-on-vanilla masked path.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora | ImageFeatures.SeamlessTiling;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd3", StringComparison.OrdinalIgnoreCase);

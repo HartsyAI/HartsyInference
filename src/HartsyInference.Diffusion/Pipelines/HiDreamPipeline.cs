@@ -94,7 +94,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         if (request is ImageToImageRequest img2img)
         {
             Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             Tensor noised = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(noised, sourceLatent, noise, startStep);
             noise.Dispose();
@@ -106,7 +106,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             return (noised, null);
         }
 
-        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor t2iNoise = TakeOrCreateNoise(request, latentShape, seed);
         float initSigma = scheduler.InitialNoiseSigma;
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {

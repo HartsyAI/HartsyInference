@@ -10,7 +10,7 @@ using HartsyInference.Engine.Requests;
 namespace HartsyInference.Engine.Features;
 
 /// <summary>Everything the UNet-family pipelines (SD 1.5, SDXL) need resolved for one generation: ControlNet layers,
-/// IP-Adapter conditioning, the img2img/inpaint init, the variation-seed noise, and any weighted-prompt conditioning
+/// IP-Adapter conditioning, the img2img/inpaint init, and any weighted-prompt conditioning
 /// schedule. Built once per request and disposed after the pipeline call — every tensor here is owned by the plan.</summary>
 public sealed class UnetCompositionPlan : IDisposable
 {
@@ -22,24 +22,6 @@ public sealed class UnetCompositionPlan : IDisposable
 
     /// <summary>Resolved img2img/inpaint init, or null for pure text-to-image.</summary>
     public Img2ImgResolver.Img2ImgSpec? Img2Img { get; private init; }
-
-    private Tensor? _variationNoise;
-
-    /// <summary>Pre-blended variation-seed noise for the text-to-image path, or null to seed normally.</summary>
-    public Tensor? VariationNoise
-    {
-        get => _variationNoise;
-        private init => _variationNoise = value;
-    }
-
-    /// <summary>Hands the variation noise to the pipeline, which takes ownership and disposes it; the plan stops
-    /// tracking it so it is not double-freed.</summary>
-    public Tensor? TakeVariationNoise()
-    {
-        Tensor? noise = _variationNoise;
-        _variationNoise = null;
-        return noise;
-    }
 
     /// <summary>Weighted-prompt conditioning schedule, or null when the prompts carry no weighting syntax.</summary>
     public ConditioningSchedule? Conditioning { get; private init; }
@@ -63,7 +45,6 @@ public sealed class UnetCompositionPlan : IDisposable
         ControlNetResolver.ResolvedSpec? controlNets = null;
         IpAdapterResolver.ResolvedSpec? ipAdapters = null;
         Img2ImgResolver.Img2ImgSpec? img2img = null;
-        Tensor? variationNoise = null;
         ConditioningSchedule? conditioning = null;
         try
         {
@@ -102,49 +83,36 @@ public sealed class UnetCompositionPlan : IDisposable
                     + "at model construction, so add it to the request's LoRA stack for full FaceID fidelity.");
             }
 
-            if (img2img is null)
-            {
-                variationNoise = VariationSeedResolver.Resolve(
-                    request.VariationSeed, width, height, request.Seed, VariationSeedResolver.SdLatentChannels);
-            }
-            else if (request.VariationSeed is not null)
-            {
-                Logs.Warning("[Features][Variation] Variation seed is ignored on the img2img path — the init latent replaces the seeded noise.");
-            }
-
             conditioning = conditioningFactory();
             return new UnetCompositionPlan
             {
                 ControlNets = controlNets,
                 IpAdapters = ipAdapters,
                 Img2Img = img2img,
-                VariationNoise = variationNoise,
                 Conditioning = conditioning,
             };
         }
         catch (Exception ex)
         {
             Logs.Error("[Features] Composition resolution failed; rolling back partial state.", ex);
-            DisposeParts(controlNets, ipAdapters, img2img, variationNoise, conditioning);
+            DisposeParts(controlNets, ipAdapters, img2img, conditioning);
             throw;
         }
     }
 
     /// <inheritdoc/>
-    public void Dispose() => DisposeParts(ControlNets, IpAdapters, Img2Img, TakeVariationNoise(), Conditioning);
+    public void Dispose() => DisposeParts(ControlNets, IpAdapters, Img2Img, Conditioning);
 
     /// <summary>Disposes whichever parts were built; safe on a partially-constructed plan.</summary>
     private static void DisposeParts(
         ControlNetResolver.ResolvedSpec? controlNets,
         IpAdapterResolver.ResolvedSpec? ipAdapters,
         Img2ImgResolver.Img2ImgSpec? img2img,
-        Tensor? variationNoise,
         ConditioningSchedule? conditioning)
     {
         controlNets?.Dispose();
         ipAdapters?.Dispose();
         img2img?.Dispose();
-        variationNoise?.Dispose();
         if (conditioning is not null)
         {
             foreach (Tensor variant in conditioning.Variants)

@@ -53,4 +53,17 @@ public record TextToImageRequest
 
     /// <summary>Optional pre-built initial noise tensor. When non-null, overrides the seed-based noise generator — used for cross-runtime parity tests where the same noise tensor must flow into both PyTorch and HartsyInference (PyTorch's <c>torch.Generator.manual_seed</c> and HartsyInference's <c>SeedGenerator</c> use different RNGs and don't agree bit-for-bit on the same seed). Pipeline takes ownership and disposes after use. Shape must match the pipeline's expected initial latent shape (txt2img path; for img2img use <see cref="ImageToImageRequest.SourceImage"/>).</summary>
     public Tensor? InitialNoise { get; init; }
+
+    /// <summary>Second seed for variation-seed blending (ComfyUI's SwarmKSampler semantics): the starting noise
+    /// becomes <c>slerp(noise(Seed), noise(VariationSeed), VariationSeedStrength)</c>. Negative = draw a random
+    /// variation seed. Only consulted when <see cref="VariationSeedStrength"/> &gt; 0. Blended inside
+    /// <c>DiffusionPipelineBase.TakeOrCreateNoise</c>, in whatever space the pipeline seeds its own initial noise —
+    /// which is what makes this architecture-agnostic (SD's 4×H/8 latents, DiT 16-channel latents,
+    /// Chroma-Radiance pixels, Lens/Flux2 packed sequences alike). Ignored when <see cref="InitialNoise"/> is
+    /// injected (that tensor is taken as final) and on img2img (the encoded source replaces seeded noise).</summary>
+    public long VariationSeed { get; init; } = -1;
+
+    /// <summary>Blend factor for <see cref="VariationSeed"/>: 0 (default) = off, base seed exactly; 1 = the
+    /// variation seed's noise entirely. Slerp keeps unit-Gaussian variance at every intermediate value.</summary>
+    public double VariationSeedStrength { get; init; }
 }

@@ -93,7 +93,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         // the latent in [1, imgLen, p²·C] token space across the whole loop (ForwardPacked skips the
         // per-forward host PatchifyNCHW — a full D2H drain of the latent every forward), unpatchify ONCE
         // on-device before the VAE. Seed-compatible: noise is seeded in NCHW exactly as before.
-        Tensor noiseNchw = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor noiseNchw = TakeOrCreateNoise(request, latentShape, seed);
         Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
         noiseNchw.Dispose();
 
@@ -213,7 +213,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             refLatents[j] = _vaeEncoder.Encode(Backend, referenceImages[j]);
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor latent = TakeOrCreateNoise(request, latentShape, seed);
 
         BooguFlowMatchScheduler scheduler = new(seqLen);
         scheduler.SetTimesteps(steps);

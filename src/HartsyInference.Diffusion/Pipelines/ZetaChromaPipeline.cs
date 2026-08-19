@@ -108,7 +108,7 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         // ── 2. Initial pixel sample ──
         // T2I: pure noise scaled by initSigma. Img2img: AddNoise(source, noise) at sigma[startStep]
         // directly on the pixels (no VAE encode). Masked inpaint keeps the source for per-step blending.
-        Tensor pixels = request.InitialNoise ?? SeedGenerator.CreateNoise(pixelShape, seed);
+        Tensor pixels = TakeOrCreateNoise(request, pixelShape, seed);
         if (!pixels.Shape.Equals(pixelShape))
             throw new ArgumentException($"InitialNoise shape {pixels.Shape} != expected {pixelShape}.");
         Tensor? sourcePixels = null;

@@ -113,7 +113,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         // per-forward host patchify/unpatchify D2H drains (also the cpu-glue-async-race crash source) and returns
         // the negated packed velocity; CfgEulerStep does the CFG combine + flow-match Euler step in one in-place
         // device op (x += (g·cond + (1-g)·uncond)·dt, dt = σ_next − σ). One device unpatchify feeds the VAE.
-        Tensor noiseNchw = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor noiseNchw = TakeOrCreateNoise(request, latentShape, seed);
         Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
         noiseNchw.Dispose();
 
@@ -228,7 +228,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         Tensor[] refLatents = GetOrEncodeRefLatents(referenceImages);
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor latent = TakeOrCreateNoise(request, latentShape, seed);
 
         // Reference dynamic_time_shift (m = sqrt(latent_h·latent_w)/40) ≡ sigma shift m — see method docs.
         float dynamicShift = MathF.Sqrt((float)latentH * latentW) / 40.0f;

@@ -34,7 +34,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     /// DiT sharding (<see cref="Krea2Transformer.ForwardPatchedSharded"/>) has no bias parameter, so a regional
     /// request forces the unsharded path for that generation with a logged warning, same precedent as Flux.1's
     /// own DiT-sharding exclusion for regional plans.</para></remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);

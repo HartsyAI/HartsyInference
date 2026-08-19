@@ -106,7 +106,6 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
             Scheduler = request.Sampler ?? request.Scheduler,
             ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
-            InitialNoise = plan.TakeVariationNoise(),
         };
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }

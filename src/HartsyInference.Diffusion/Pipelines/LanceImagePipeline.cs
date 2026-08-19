@@ -155,7 +155,7 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
     private Tensor BuildInitialTokenLatents(TextToImageRequest request, float[] tsteps,
         int nVae, int seed, int startStep)
     {
-        Tensor noise = SeedGenerator.CreateNoise(new TensorShape(nVae, _config.PatchFeatureDim), seed);
+        Tensor noise = TakeOrCreateNoise(request, new TensorShape(nVae, _config.PatchFeatureDim), seed);
         if (request is not ImageToImageRequest img2img) return noise;
 
         Stopwatch vaeEncSw = Stopwatch.StartNew();

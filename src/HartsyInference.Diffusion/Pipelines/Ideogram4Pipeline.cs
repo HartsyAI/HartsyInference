@@ -550,7 +550,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         bool keepSourceLatent)
     {
         TensorShape tokenShape = new TensorShape(1, numImageTokens, latentDim);
-        Tensor noise = SeedGenerator.CreateNoise(tokenShape, seed);
+        Tensor noise = TakeOrCreateNoise(request, tokenShape, seed);
         if (request is not ImageToImageRequest img2img) return (noise, null);
 
         Stopwatch vaeEncSw = Stopwatch.StartNew();

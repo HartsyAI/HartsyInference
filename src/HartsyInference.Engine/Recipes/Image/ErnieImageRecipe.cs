@@ -29,7 +29,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ernie-image", StringComparison.OrdinalIgnoreCase);
 

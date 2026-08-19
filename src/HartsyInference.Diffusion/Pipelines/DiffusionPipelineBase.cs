@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Pipelines;
@@ -119,6 +120,39 @@ public abstract class DiffusionPipelineBase : IDisposable
     protected void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    }
+
+    /// <summary>The single noise entry point for every pipeline's text-to-image path: the injected
+    /// <c>InitialNoise</c> when the request carries one (validated against <paramref name="latentShape"/>, throws
+    /// naming both shapes on mismatch), else fresh seeded noise — with the request's variation seed slerp-blended
+    /// in when set. Blending here, at whatever shape the pipeline seeds in, is what makes variation seed
+    /// architecture-agnostic: SD's 4-channel latents, 16-channel DiT latents, Chroma-Radiance's pixels and
+    /// Lens/Flux2's packed sequences all pass through this one site. Per-step re-noise and img2img draws stay on
+    /// <c>SeedGenerator.CreateNoise</c> directly — variation only ever replaces the STARTING noise.</summary>
+    protected static Tensor TakeOrCreateNoise(Requests.TextToImageRequest request, TensorShape latentShape, int seed)
+    {
+        if (request.InitialNoise is not null)
+        {
+            Tensor injected = request.InitialNoise;
+            if (!injected.Shape.Equals(latentShape))
+            {
+                throw new ArgumentException(
+                    $"InitialNoise shape {injected.Shape} does not match this pipeline's expected initial-latent shape {latentShape}.",
+                    nameof(request));
+            }
+            if (injected.DType != DType.F32)
+            {
+                throw new ArgumentException($"InitialNoise must be F32; got {injected.DType}.", nameof(request));
+            }
+            Logs.Verbose($"Using injected initial noise (shape={injected.Shape}); seed-based generator skipped.");
+            return injected;
+        }
+        Tensor noise = Utilities.SeedGenerator.CreateNoise(latentShape, seed);
+        if (request.VariationSeedStrength > 0)
+        {
+            Utilities.VariationNoise.BlendInPlace(noise, latentShape, request.VariationSeed, request.VariationSeedStrength);
+        }
+        return noise;
     }
 
     /// <summary>Switches every conv-running backend this pipeline owns to wrap (circular) padding for the duration of

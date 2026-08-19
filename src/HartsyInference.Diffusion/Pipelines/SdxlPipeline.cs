@@ -403,21 +403,6 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         return (t2iNoise, null);
     }
 
-    private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
-    {
-        if (request.InitialNoise is not null)
-        {
-            Tensor injected = request.InitialNoise;
-            if (!injected.Shape.Equals(latentShape))
-                throw new ArgumentException($"InitialNoise shape {injected.Shape} does not match expected latent shape {latentShape}.", nameof(request));
-            if (injected.DType != DType.F32)
-                throw new ArgumentException($"InitialNoise must be F32; got {injected.DType}.", nameof(request));
-            Logs.Info($"SDXL: using injected initial noise tensor (shape={injected.Shape}); seed-based generator skipped.");
-            return injected;
-        }
-        return SeedGenerator.CreateNoise(latentShape, seed);
-    }
-
     /// <summary>Runs the SDXL denoising loop from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1. Handles input-scale, F16 cast, dual-conditioning UNet, CFG, and scheduler step. Returns the final denoised F32 latent. Disposes intermediate latents along the way.
     /// <para>When <paramref name="latentMask"/> is supplied (masked inpaint), after each scheduler step the loop blends in <c>scheduler.AddNoise(sourceLatent, freshNoise, nextStep)</c> on the unmasked region, keeping it on the source's noise trajectory while the masked region is freely denoised. This matches diffusers' <c>StableDiffusionInpaintPipelineLegacy</c> formulation.</para></summary>
     private Tensor RunDenoiseLoop(

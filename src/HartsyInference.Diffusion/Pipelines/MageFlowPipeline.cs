@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.Mage;
 using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
@@ -48,7 +49,7 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     /// image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop,
         int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null,
-        string? seamlessTiling = null)
+        string? seamlessTiling = null, long variationSeed = -1, double variationSeedStrength = 0)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
@@ -78,6 +79,13 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         // 2. Noisy latent [1, 128, h, w]; patch-1 packing → [1, h*w, 128].
         int h = height / VaeScale, w = width / VaeScale;
         Tensor latent = GaussianLatent(1, LatentChannels, h, w, seed);
+        if (variationSeedStrength > 0)
+        {
+            // Same slerp blend every request-driven pipeline gets from TakeOrCreateNoise; passed explicitly here
+            // because this pipeline takes primitives. The variation noise comes from SeedGenerator rather than
+            // GaussianLatent's own RNG — both are unit-Gaussian Box-Muller, so the blend stays unit-variance.
+            VariationNoise.BlendInPlace(latent, latent.Shape, variationSeed, variationSeedStrength);
+        }
         Tensor packed = PackPatch1(latent, LatentChannels);
         latent.Dispose();
 

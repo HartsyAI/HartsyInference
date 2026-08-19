@@ -86,6 +86,8 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             new TextToImageRequest
             {
                 SeamlessTiling = request.SeamlessTiling,
+                    VariationSeed = request.VariationSeed?.Seed ?? -1,
+                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
                 Width = request.Width,

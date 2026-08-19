@@ -559,7 +559,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Honor a caller-supplied initial noise tensor (fixed-seed reproduction) when present; otherwise
         // sample fresh noise from the seed. The tensor is in unpacked latent layout [1, 16, latentH, latentW];
         // PackLatent takes ownership and disposes it.
-        Tensor initialNoise = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor initialNoise = TakeOrCreateNoise(request, latentShape, seed);
         if (!initialNoise.Shape.Equals(latentShape))
             throw new ArgumentException($"InitialNoise shape {initialNoise.Shape} != expected {latentShape}.");
         Tensor packedNoise = PackLatent(initialNoise, latentH, latentW);

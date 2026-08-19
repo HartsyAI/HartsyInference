@@ -1013,7 +1013,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         int latentH, int latentW, int seed, int startStep,
         bool keepSourceLatent)
     {
-        Tensor unpackedNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor unpackedNoise = TakeOrCreateNoise(request, latentShape, seed);
         Tensor packedNoise = PackLatent(unpackedNoise, latentH, latentW, _config.InChannels, _config.PatchSize);
         unpackedNoise.Dispose();
 

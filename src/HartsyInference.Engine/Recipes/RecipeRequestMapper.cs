@@ -34,6 +34,8 @@ internal static class RecipeRequestMapper
             CfgRescale = request.CfgRescale,
             Tcfg = request.Tcfg,
             SeamlessTiling = request.SeamlessTiling,
+            VariationSeed = request.VariationSeed?.Seed ?? -1,
+            VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
             Seed = MapSeed(request.Seed),
         };
     }

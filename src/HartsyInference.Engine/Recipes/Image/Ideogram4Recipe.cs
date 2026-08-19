@@ -26,7 +26,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Ideogram 4 shares the Flux.2 VAE; its packed-latent mask blend uses the channel-inner variant.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ideogram4", StringComparison.OrdinalIgnoreCase);
 

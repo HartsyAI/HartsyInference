@@ -99,6 +99,8 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
             new TextToImageRequest
             {
                 SeamlessTiling = request.SeamlessTiling,
+                    VariationSeed = request.VariationSeed?.Seed ?? -1,
+                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = "",
                 Width = snappedW,

@@ -174,7 +174,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            using Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            using Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             latent = new Tensor(latentShape, DType.F32);
             AddFlowMatchNoise(Backend, scheduler, latent, sourceLatent, noise, startStep);
 
@@ -195,7 +195,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         }
         else
         {
-            latent = SeedGenerator.CreateNoise(latentShape, seed);
+            latent = TakeOrCreateNoise(request, latentShape, seed);
             float initSigma = scheduler.InitialNoiseSigma;
             if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
             {

@@ -22,7 +22,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>HiDream shares the Flux.1 VAE, so its encoder half rides the encode-parity gate that already
     /// covers that config; the img2img path in HiDreamPipeline was built for this.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
 

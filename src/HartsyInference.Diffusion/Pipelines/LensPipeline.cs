@@ -191,7 +191,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // cond and uncond into one batch-of-2 forward. We run two separate forwards, each at its
         // prompt's natural S_txt — mathematically identical to the masked reference.)
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
-        Tensor packedLatent = SeedGenerator.CreateNoise(packedShape, seed);
+        Tensor packedLatent = TakeOrCreateNoise(request, packedShape, seed);
         if (request is ImageToImageRequest img2imgReq)
         {
             // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the

@@ -78,6 +78,8 @@ public sealed class HunyuanImageRecipePipeline : IRecipePipeline
             new TextToImageRequest
             {
                 SeamlessTiling = request.SeamlessTiling,
+                    VariationSeed = request.VariationSeed?.Seed ?? -1,
+                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 Width = width,
                 Height = height,

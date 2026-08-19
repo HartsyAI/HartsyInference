@@ -195,7 +195,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         // sigma[startStep] — no VAE encode, the pixels themselves are the clean sample. Masked inpaint
         // keeps the padded source + padded mask alive for per-step blending (pad fill 1.0 lets the
         // padded border denoise freely; it's cropped away at the end either way).
-        Tensor pixels = request.InitialNoise ?? SeedGenerator.CreateNoise(pixelShape, seed);
+        Tensor pixels = TakeOrCreateNoise(request, pixelShape, seed);
         if (!pixels.Shape.Equals(pixelShape))
             throw new ArgumentException($"InitialNoise shape {pixels.Shape} != expected {pixelShape}.");
         Tensor? sourcePadded = null;

@@ -623,7 +623,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 vaeEncSw.Stop();
                 Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-                Tensor noise = tensors.Own(SeedGenerator.CreateNoise(latentShape, seed), "img2img noise");
+                Tensor noise = tensors.Own(TakeOrCreateNoise(request, latentShape, seed), "img2img noise");
                 Tensor latent = tensors.Own(new Tensor(latentShape, DType.F32), "initial img2img latent");
                 scheduler.AddNoise(latent, sourceLatent!, noise, startStep);
                 tensors.DisposeOwned(noise);
@@ -635,7 +635,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 return (tensors.Transfer(latent), null);
             }
 
-            Tensor t2iNoise = tensors.Own(SeedGenerator.CreateNoise(latentShape, seed), "txt2img noise");
+            Tensor t2iNoise = tensors.Own(TakeOrCreateNoise(request, latentShape, seed), "txt2img noise");
             float initSigma = scheduler.InitialNoiseSigma;
             if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
             {

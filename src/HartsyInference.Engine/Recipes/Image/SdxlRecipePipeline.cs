@@ -152,7 +152,6 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             // unrelated "tcd" dropdown fix.
             Scheduler = request.Sampler ?? request.Scheduler,
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
-            InitialNoise = plan.TakeVariationNoise(),
         };
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
