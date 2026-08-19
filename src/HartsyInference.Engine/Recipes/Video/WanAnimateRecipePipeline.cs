@@ -41,11 +41,14 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly ClipVisionEncoder? _clipVision;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly ModelAssets.Lora.LoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Animate pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanAnimateRecipePipeline(IBackend backend, WanAnimatePipeline pipeline, WanVideoConfig config, T5Tokenizer tokenizer,
-        T5TextEncoder umt5, WanAnimateTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders)
+        T5TextEncoder umt5, WanAnimateTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders,
+        ModelAssets.Lora.LoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _backend = backend;
         _pipeline = pipeline;
         _config = config;
@@ -191,5 +194,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

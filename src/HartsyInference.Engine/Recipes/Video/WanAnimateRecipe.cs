@@ -27,7 +27,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>Wan-Animate drives from the init image as the pose/motion reference.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingVideo;
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingVideo | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 
@@ -37,12 +37,13 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): LoRA and VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
+        // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
         (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ditLoader };
+        ModelAssets.Lora.LoraStack? loraStack = null;
         try
         {
             if (!conv.Transformer.ContainsKey("pose_patch_embedding.weight"))
@@ -54,6 +55,13 @@ public sealed class WanAnimateRecipe : IVideoRecipe
             WanVideoConfig config = WanConfigDetector.Detect(conv.Transformer);
             bool hasClipEmbedder = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
             Logs.Info($"[WanAnimateRecipe] Converted {conv.Transformer.Count} transformer keys (Animate: pose + face/motion pathway, inner {config.InnerDim}{(hasClipEmbedder ? ", i2v CLIP" : "")}).");
+
+            // Merge BEFORE LoadWeights (identity-keyed device caches — same ordering as WanVideoRecipe). The
+            // published relighting LoRA rides this path.
+            loraStack = Features.LoraApplier.BuildAndApply(
+                Features.LoraResolver.Resolve(context.Loras),
+                context.Backend,
+                transformerWeights: conv.Transformer);
 
             WanAnimateTransformer transformer = new WanAnimateTransformer(config);
             transformer.LoadWeights(conv.Transformer);
@@ -87,7 +95,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
 
             WanAnimatePipeline pipeline = new WanAnimatePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanAnimateRecipe] Wan-Animate ready (driving-video).");
-            return new WanAnimateRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders);
+            return new WanAnimateRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, vaeEncoder, clipVision, loaders, loraStack);
         }
         catch (Exception ex)
         {
@@ -96,6 +104,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
             {
                 loader.Dispose();
             }
+            loraStack?.Dispose();
             throw;
         }
     }
