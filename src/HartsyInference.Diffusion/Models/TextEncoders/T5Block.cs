@@ -83,7 +83,7 @@ public sealed unsafe class T5Block
     }
 
     /// <summary>Forward pass: input [B, seqLen, dModel] + positionBias [1, numHeads, seqLen, seqLen] + optional attentionMask → output [B, seqLen, dModel].</summary>
-    public Tensor Forward(IBackend backend, Tensor input, Tensor positionBias, Tensor? attentionMask)
+    public unsafe Tensor Forward(IBackend backend, Tensor input, Tensor positionBias, Tensor? attentionMask, float qTau = 1f)
     {
         int batch = (int)input.Shape[0];
         int seqLen = (int)input.Shape[1];
@@ -98,6 +98,13 @@ public sealed unsafe class T5Block
         // Q, K, V projections (no bias) — weight shape: [dModel, dModel]
         Tensor query = new Tensor(hidShape, DType.F32);
         backend.Linear(query, normed, _qWeight!, null);
+        if (qTau != 1f)
+        {
+            // ERG weakened pass (upstream SelfAttention.q forward hook, τ=0.01).
+            float* qp = (float*)query.DataPointer;
+            long qn = query.Shape.ElementCount;
+            for (long qi = 0; qi < qn; qi++) qp[qi] *= qTau;
+        }
         Tensor key = new Tensor(hidShape, DType.F32);
         backend.Linear(key, normed, _kWeight!, null);
         Tensor value = new Tensor(hidShape, DType.F32);

@@ -51,7 +51,10 @@ public sealed unsafe class AceStepLyricEncoder
     }
 
     /// <summary>Encodes lyric embeddings <c>[T, dim]</c> → contextual states <c>[T, dim]</c> (full attention).</summary>
-    public Tensor Forward(IBackend backend, Tensor lyricEmbeds)
+    /// <param name="qScale">Optional ERG "weakened" pass: scale the self-attention Q-projection output by
+    /// <c>Tau</c> in layers <c>[Min, Max)</c> (upstream <c>forward_encoder_with_temperature</c>, layers 4..6 at
+    /// τ=0.01). Null = the byte-identical normal forward.</param>
+    public Tensor Forward(IBackend backend, Tensor lyricEmbeds, (int Min, int Max, float Tau)? qScale = null)
     {
         int t = (int)lyricEmbeds.Shape[0];
         Tensor x = new Tensor(new TensorShape(t, _dim), DType.F32);
@@ -60,11 +63,14 @@ public sealed unsafe class AceStepLyricEncoder
         Scale(x, MathF.Sqrt(_dim));   // xscale convention of the ESPnet positional encoding
 
         Tensor posProjBase = BuildRelPositions(t);   // raw sinusoid [2T−1, dim]
+        int layerIndex = 0;
         foreach (Layer layer in _layers)
         {
-            Tensor next = layer.Forward(backend, x, posProjBase, t);
+            float qTau = qScale is { } s && layerIndex >= s.Min && layerIndex < s.Max ? s.Tau : 1f;
+            Tensor next = layer.Forward(backend, x, posProjBase, t, qTau);
             x.Dispose();
             x = next;
+            layerIndex++;
         }
         posProjBase.Dispose();
         LayerNormRows(x, _afterNormW!, _afterNormB, t, _dim);
@@ -206,7 +212,7 @@ public sealed unsafe class AceStepLyricEncoder
                 if (t is not null) yield return t;
         }
 
-        public Tensor Forward(IBackend backend, Tensor x, Tensor relPos, int t)
+        public Tensor Forward(IBackend backend, Tensor x, Tensor relPos, int t, float qTau = 1f)
         {
             int dim = _enc._dim;
             Tensor cur = Clone(x);
@@ -217,7 +223,7 @@ public sealed unsafe class AceStepLyricEncoder
             // Relative-position MHSA.
             Tensor n = Clone(cur);
             LayerNormRows(n, _normMhaW!, _normMhaB, t, dim);
-            Tensor attn = RelPosAttention(backend, n, relPos, t);
+            Tensor attn = RelPosAttention(backend, n, relPos, t, qTau);
             n.Dispose();
             AddInPlace(cur, attn, 1f);
             attn.Dispose();
@@ -259,10 +265,11 @@ public sealed unsafe class AceStepLyricEncoder
 
         /// <summary>Transformer-XL relative attention: <c>score = ((q+u)·kᵀ + (q+v)·pᵀ_rel)/√d</c>, where the p term
         /// is indexed directly by relative distance (no shift trick needed).</summary>
-        private Tensor RelPosAttention(IBackend backend, Tensor n, Tensor relPos, int t)
+        private Tensor RelPosAttention(IBackend backend, Tensor n, Tensor relPos, int t, float qTau = 1f)
         {
             int dim = _enc._dim, heads = _enc._heads, hd = _enc._headDim;
             Tensor q = Proj(backend, n, _qW!, _qB, t, dim);
+            if (qTau != 1f) Scale(q, qTau);   // ERG weakened pass (upstream linear_q forward hook, τ=0.01)
             Tensor k = Proj(backend, n, _kW!, _kB, t, dim);
             Tensor v = Proj(backend, n, _vW!, _vB, t, dim);
             int posLen = (int)relPos.Shape[0];

@@ -70,7 +70,8 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         SamplerMode sampler = SamplerMode.Euler, int? seed = null, float[]? speakerVec = null,
         float? guidanceInterval = null, float? guidanceIntervalDecay = null, float? minGuidanceScale = null,
         float? omegaScale = null, float? guidanceScaleText = null, float? guidanceScaleLyric = null,
-        int[]? ossSteps = null, Action<GenerationProgress>? onProgress = null)
+        int[]? ossSteps = null, Action<GenerationProgress>? onProgress = null,
+        Tensor? ergTextEmbeds = null, bool useErgLyric = false, bool useErgDiffusion = false)
     {
         ThrowIfDisposed();
         if (durationSeconds < 1 || durationSeconds > 600)
@@ -105,14 +106,30 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
             $"interval [{startIdx},{endIdx}) decay={gIntervalDecay} minG={minG} omega={omega}, " +
             (doDualCondition ? $"dualCFG(text={gText},lyric={gLyric}), " : "") +
             $"{sampler}, {lyricIds.Length} lyric tokens, seed={actualSeed}");
-        Logs.Warning("ACE-Step pipeline is first-run-validation pending — numerics unverified vs the reference.");
 
         Backend.PreloadWeights(_dit.EnumerateWeights());
 
         Tensor ctx = _dit.BuildContext(Backend, textEmbeds, lyricIds, speakerVec);
-        Tensor uncondCtx = new Tensor(ctx.Shape, DType.F32);   // zeroed conditioning (matches the reference)
-        // Double-condition needs a "text-only" branch: full context with the lyric rows zeroed.
-        Tensor? onlyTextCtx = doDualCondition ? BuildOnlyTextContext(ctx, (int)textEmbeds.Shape[0]) : null;
+        // ERG (upstream use_erg_lyric, default ON there): the uncond context is a real encode with weakened
+        // text (use_erg_tag's τ-scaled UMT5 pass, else zeros) and the lyric encoder's Q τ-scaled in layers
+        // 4..6 — NOT the zeroed context of the plain-CFG branch.
+        Tensor uncondCtx;
+        if (useErgLyric)
+        {
+            Tensor nullText = ergTextEmbeds ?? new Tensor(textEmbeds.Shape, DType.F32);
+            uncondCtx = _dit.BuildContext(Backend, nullText, lyricIds, null, lyricQScale: (4, 6, 0.01f));
+            if (!ReferenceEquals(nullText, ergTextEmbeds)) nullText.Dispose();
+        }
+        else
+        {
+            uncondCtx = new Tensor(ctx.Shape, DType.F32);   // zeroed conditioning (upstream non-ERG branch)
+        }
+        // Double-condition needs a "text-only" branch: real text + weakened lyric under ERG, else the full
+        // context with the lyric rows zeroed.
+        Tensor? onlyTextCtx = !doDualCondition ? null
+            : useErgLyric
+                ? _dit.BuildContext(Backend, textEmbeds, lyricIds, null, lyricQScale: (4, 6, 0.01f))
+                : BuildOnlyTextContext(ctx, (int)textEmbeds.Shape[0]);
 
         Tensor z = SeedGenerator.CreateNoise(new TensorShape([1L, _config.InChannels, _config.LatentHeight, fLat]), actualSeed);
         using AceStepGuidance.MomentumBuffer momentum = new();
@@ -132,7 +149,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
                 }
                 Tensor v = inInterval
                     ? GuidedVelocity(z, ctx, uncondCtx, onlyTextCtx, t, curG, gText, gLyric, doDualCondition,
-                        guidanceMode, momentum, zeroInit: i == startIdx)
+                        guidanceMode, momentum, zeroInit: i == startIdx, useErgDiffusion)
                     : _dit.Forward(Backend, z, ctx, t);
                 float dt = sigmas[i + 1] - sigmas[i];
                 switch (sampler)
@@ -147,7 +164,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
                         bool nextInInterval = doCfg && (i + 1) >= startIdx && (i + 1) < endIdx;
                         Tensor v2 = nextInInterval
                             ? GuidedVelocity(mid, ctx, uncondCtx, onlyTextCtx, sigmas[i + 1] * 1000f, curG, gText, gLyric,
-                                doDualCondition, guidanceMode, momentum, zeroInit: false)
+                                doDualCondition, guidanceMode, momentum, zeroInit: false, useErgDiffusion)
                             : _dit.Forward(Backend, mid, ctx, sigmas[i + 1] * 1000f);
                         mid.Dispose();
                         float* vp = (float*)v.DataPointer;
@@ -213,15 +230,18 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
 
     private Tensor GuidedVelocity(Tensor z, Tensor ctx, Tensor uncondCtx, Tensor? onlyTextCtx, float t, float g,
         float gText, float gLyric, bool doDualCondition, GuidanceMode mode,
-        AceStepGuidance.MomentumBuffer momentum, bool zeroInit)
+        AceStepGuidance.MomentumBuffer momentum, bool zeroInit, bool useErgDiffusion = false)
     {
+        // ERG diffusion (upstream use_erg_diffusion): the UNCOND forwards run with blocks 15..20's self+cross
+        // attention Q τ-scaled; the cond forward is untouched.
+        (int, int, float)? uncondQScale = useErgDiffusion ? (15, 20, 0.01f) : null;
         Tensor vCond = _dit.Forward(Backend, z, ctx, t);
 
         // Double-condition CFG: uncond → text-only → full, blended (upstream cfg_double_condition_forward).
         if (doDualCondition && onlyTextCtx is not null)
         {
-            Tensor vText = _dit.Forward(Backend, z, onlyTextCtx, t);
-            Tensor vUncondD = _dit.Forward(Backend, z, uncondCtx, t);
+            Tensor vText = _dit.Forward(Backend, z, onlyTextCtx, t, uncondQScale);
+            Tensor vUncondD = _dit.Forward(Backend, z, uncondCtx, t, uncondQScale);
             float* c = (float*)vCond.DataPointer;
             float* tx = (float*)vText.DataPointer;
             float* un = (float*)vUncondD.DataPointer;
@@ -232,7 +252,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
             return vCond;
         }
 
-        Tensor vUncond = _dit.Forward(Backend, z, uncondCtx, t);
+        Tensor vUncond = _dit.Forward(Backend, z, uncondCtx, t, uncondQScale);
         switch (mode)
         {
             case GuidanceMode.Cfg:

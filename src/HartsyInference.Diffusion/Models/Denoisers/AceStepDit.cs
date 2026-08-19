@@ -84,7 +84,7 @@ public sealed unsafe class AceStepDit : IDisposable
     /// <summary>Builds the cross-attention context <c>[1 + T_text + T_lyric, 2560]</c>: projected speaker token (zero
     /// vector when absent), projected UMT5 features <c>[T_text, 768]</c>, and the Conformer-encoded projected lyric
     /// token ids. Pass an empty <paramref name="lyricIds"/> for instrumental-only via tags in the prompt.</summary>
-    public Tensor BuildContext(IBackend backend, Tensor textEmbeds, ReadOnlySpan<int> lyricIds, float[]? speakerVec)
+    public Tensor BuildContext(IBackend backend, Tensor textEmbeds, ReadOnlySpan<int> lyricIds, float[]? speakerVec, (int Min, int Max, float Tau)? lyricQScale = null)
     {
         int dim = _config.InnerDim;
         int tText = (int)textEmbeds.Shape[0];
@@ -130,7 +130,7 @@ public sealed unsafe class AceStepDit : IDisposable
                     throw new ArgumentException($"lyric token {id} out of range.", nameof(lyricIds));
                 Buffer.MemoryCopy(tablePtr + (long)id * lh, ep + (long)i * lh, lh * 4, lh * 4);
             }
-            Tensor encoded = _lyricEncoder.Forward(backend, emb);
+            Tensor encoded = _lyricEncoder.Forward(backend, emb, lyricQScale);
             emb.Dispose();
             Tensor projected = new Tensor(new TensorShape(tLyric, dim), DType.F32);
             backend.Linear(projected, encoded, _lyricProjW!, _lyricProjB);
@@ -144,7 +144,8 @@ public sealed unsafe class AceStepDit : IDisposable
 
     /// <summary>Velocity prediction: latent <c>[1, 8, 16, F]</c> + context (from <see cref="BuildContext"/>) +
     /// timestep (σ·1000) → <c>[1, 8, 16, F]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor context, float timestep)
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor context, float timestep,
+        (int Min, int Max, float Tau)? blockQScale = null)
     {
         int f = (int)latent.Shape[3];
         int dim = _config.InnerDim;
@@ -162,7 +163,8 @@ public sealed unsafe class AceStepDit : IDisposable
         int li = 0;
         foreach (Block b in _blocks)
         {
-            Tensor next = b.Forward(backend, cur, context, tBlock, cos, sin, cosCross, sinCross, f);
+            float qTau = blockQScale is { } bs && li >= bs.Min && li < bs.Max ? bs.Tau : 1f;
+            Tensor next = b.Forward(backend, cur, context, tBlock, cos, sin, cosCross, sinCross, f, qTau);
             cur.Dispose();
             cur = next;
             AceStepDebugDump.Dump($"layers.{li++}", cur);
@@ -359,7 +361,7 @@ public sealed unsafe class AceStepDit : IDisposable
         }
 
         public Tensor Forward(IBackend backend, Tensor x, Tensor ctx, Tensor tBlock,
-            float[] cos, float[] sin, float[] cosCross, float[] sinCross, int f)
+            float[] cos, float[] sin, float[] cosCross, float[] sinCross, int f, float qTau = 1f)
         {
             int dim = _c.InnerDim;
             float* ssp = (float*)_scaleShift!.DataPointer;
@@ -370,13 +372,13 @@ public sealed unsafe class AceStepDit : IDisposable
             // Self-attention with AdaLN modulation + gate.
             Tensor n1 = RmsNormNoAffine(cur, f, dim);
             ModulateInPlace(n1, ssp, tbp, dim, shiftIdx: 0, scaleIdx: 1, f);
-            Tensor attn = LiteLaSelfAttention(backend, n1, cos, sin, f);
+            Tensor attn = LiteLaSelfAttention(backend, n1, cos, sin, f, qTau);
             n1.Dispose();
             GatedAdd(cur, attn, ssp, tbp, dim, gateIdx: 2, f);
             attn.Dispose();
 
             // Cross-attention (no modulation, no gate).
-            Tensor cross = CrossAttention(backend, cur, ctx, cos, sin, cosCross, sinCross, f);
+            Tensor cross = CrossAttention(backend, cur, ctx, cos, sin, cosCross, sinCross, f, qTau);
             AddInPlace(cur, cross);
             cross.Dispose();
 
@@ -390,11 +392,19 @@ public sealed unsafe class AceStepDit : IDisposable
             return cur;
         }
 
+        private static void ScaleAll(Tensor t, float s)
+        {
+            float* p = (float*)t.DataPointer;
+            long n = t.Shape.ElementCount;
+            for (long i = 0; i < n; i++) p[i] *= s;
+        }
+
         /// <summary>Sana LiteLA: per head, relu(q)/relu(k) linear attention with the ones-row normalizer.</summary>
-        private Tensor LiteLaSelfAttention(IBackend backend, Tensor n, float[] cos, float[] sin, int f)
+        private Tensor LiteLaSelfAttention(IBackend backend, Tensor n, float[] cos, float[] sin, int f, float qTau = 1f)
         {
             int dim = _c.InnerDim, heads = _c.NumHeads, hd = _c.HeadDim;
             Tensor q = Proj(backend, n, _qW!, _qB, f, dim);
+            if (qTau != 1f) ScaleAll(q, qTau);   // ERG uncond pass (upstream attn.to_q forward hook, τ=0.01)
             Tensor k = Proj(backend, n, _kW!, _kB, f, dim);
             Tensor v = Proj(backend, n, _vW!, _vB, f, dim);
             if (_normQ is not null) RmsNormHeads(q, _normQ, f, heads, hd);
@@ -448,11 +458,12 @@ public sealed unsafe class AceStepDit : IDisposable
         }
 
         private Tensor CrossAttention(IBackend backend, Tensor x, Tensor ctx,
-            float[] cos, float[] sin, float[] cosCross, float[] sinCross, int f)
+            float[] cos, float[] sin, float[] cosCross, float[] sinCross, int f, float qTau = 1f)
         {
             int dim = _c.InnerDim, heads = _c.NumHeads, hd = _c.HeadDim;
             int l = (int)ctx.Shape[0];
             Tensor q = Proj(backend, x, _cqW!, _cqB, f, dim);
+            if (qTau != 1f) ScaleAll(q, qTau);   // ERG uncond pass (upstream cross_attn.to_q forward hook, τ=0.01)
             Tensor k = Proj(backend, ctx, _ckW!, _ckB, l, dim);
             Tensor v = Proj(backend, ctx, _cvW!, _cvB, l, dim);
             if (_cNormQ is not null) RmsNormHeads(q, _cNormQ, f, heads, hd);

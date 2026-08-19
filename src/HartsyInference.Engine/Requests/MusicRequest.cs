@@ -62,6 +62,16 @@ public sealed record MusicRequest
     /// back to <see cref="UseAdg"/> for callers that predate this field.</summary>
     public string GuidanceType { get; init; } = "";
 
+    /// <summary>ACE-Step v1 ERG: weaken (rather than zero) the null TEXT embedding for the uncond branch.
+    /// Null = the model default (upstream defaults true). ACE-Step 1.5 has no ERG and refuses explicit values.</summary>
+    public bool? UseErgTag { get; init; }
+
+    /// <summary>ACE-Step v1 ERG: the uncond context keeps the lyrics with a weakened lyric encoder. Null = default (true).</summary>
+    public bool? UseErgLyric { get; init; }
+
+    /// <summary>ACE-Step v1 ERG: run the uncond DiT forwards with weakened attention queries. Null = default (true).</summary>
+    public bool? UseErgDiffusion { get; init; }
+
     /// <summary>CFG active-interval start over t (ACE-Step base/sft).</summary>
     public double CfgIntervalStart { get; init; }
 

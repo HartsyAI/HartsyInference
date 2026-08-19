@@ -160,6 +160,11 @@ internal static class AceStepMusicModel
         MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (request.UseErgTag is not null || request.UseErgLyric is not null || request.UseErgDiffusion is not null)
+            {
+                throw new NotSupportedException(
+                    "The ERG toggles are ACE-Step v1 only — 1.5's guidance stack has no ERG stage. Unset them or pick a v1 checkpoint.");
+            }
             EditInputs? edit = ResolveEdit(request, config);
             // Continuation re-generates the source AND the appended tail in one pass, so the DiT duration is the sum;
             // repaint/cover run at the source's own length and ignore the requested duration.
@@ -548,6 +553,10 @@ internal static class AceStepMusicModel
             };
 
             // Upstream v1 conditions on the raw tag string via UMT5 (no SFT prompt template — that is 1.5's).
+            // ERG defaults ON, matching upstream pipeline_ace_step.py.
+            bool ergTag = request.UseErgTag ?? true;
+            bool ergLyric = request.UseErgLyric ?? true;
+            bool ergDiffusion = request.UseErgDiffusion ?? true;
             string tags = string.IsNullOrWhiteSpace(request.Genre) ? "pop" : request.Genre;
             IReadOnlyList<int> rawIds = textTokenizer.EncodeRaw(tags);
             int[] tokens = new int[rawIds.Count + 1];
@@ -557,12 +566,20 @@ internal static class AceStepMusicModel
             }
             tokens[^1] = T5Tokenizer.EosTokenId;
             Tensor textEmbeds;
+            Tensor? ergTextEmbeds = null;
             try
             {
                 device.PreloadWeights(textEncoder.EnumerateWeights());
                 Tensor batch = textEncoder.Encode(device, [tokens], [T5Tokenizer.CreateAttentionMask(tokens)]);
                 textEmbeds = CfgHelper.SliceBatchElement(batch, 0, tokens.Length, 768);
                 batch.Dispose();
+                if (ergTag)
+                {
+                    Tensor weak = textEncoder.EncodeWithQScale(device, [tokens], (8, 10, 0.01f),
+                        [T5Tokenizer.CreateAttentionMask(tokens)]);
+                    ergTextEmbeds = CfgHelper.SliceBatchElement(weak, 0, tokens.Length, 768);
+                    weak.Dispose();
+                }
             }
             finally
             {
@@ -581,12 +598,16 @@ internal static class AceStepMusicModel
                     guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Value : null,
                     guidanceMode: guidanceMode,
                     sampler: sampler,
-                    seed: request.Seed);
+                    seed: request.Seed,
+                    ergTextEmbeds: ergTextEmbeds,
+                    useErgLyric: ergLyric,
+                    useErgDiffusion: ergDiffusion);
                 return MusicAudio.Stereo(left, right);
             }
             finally
             {
                 textEmbeds.Dispose();
+                ergTextEmbeds?.Dispose();
             }
         }
 

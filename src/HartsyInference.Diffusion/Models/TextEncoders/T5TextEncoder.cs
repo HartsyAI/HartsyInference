@@ -123,8 +123,16 @@ public sealed unsafe class T5TextEncoder : IDisposable
     public Tensor Encode(IBackend backend, int[][] tokenIds, int[][]? attentionMasks = null) =>
         EncodeAtLayer(backend, tokenIds, _config.NumLayers, applyFinalNorm: true, attentionMasks);
 
+    /// <summary>ERG "weakened" encode (ACE-Step v1 <c>get_text_embeddings_null</c>): the self-attention
+    /// Q-projection output is scaled by <c>Tau</c> in blocks <c>[Min, Max)</c> (upstream layers 8..10, τ=0.01).
+    /// Identical to <see cref="Encode"/> when <paramref name="qScale"/> is null.</summary>
+    public Tensor EncodeWithQScale(IBackend backend, int[][] tokenIds, (int Min, int Max, float Tau)? qScale,
+        int[][]? attentionMasks = null) =>
+        EncodeAtLayer(backend, tokenIds, _config.NumLayers, applyFinalNorm: true, attentionMasks, qScale);
+
     /// <summary>Runs the encoder for the first <paramref name="layerCount"/> blocks (1-indexed; pass <see cref="T5TextEncoderConfig.NumLayers"/> for the full encoder), optionally re-applying the final RMSNorm. Used by F-Lite, which conditions on <c>hidden_states[17]</c> with the final norm + dropout reapplied (dropout is a no-op in eval mode, so we skip it). Pass <paramref name="layerCount"/> = 17 to replicate F-Lite's <c>return_index = -8</c> on a 24-layer T5-XXL.</summary>
-    public Tensor EncodeAtLayer(IBackend backend, int[][] tokenIds, int layerCount, bool applyFinalNorm, int[][]? attentionMasks = null)
+    public Tensor EncodeAtLayer(IBackend backend, int[][] tokenIds, int layerCount, bool applyFinalNorm, int[][]? attentionMasks = null,
+        (int Min, int Max, float Tau)? qScale = null)
     {
         ThrowIfDisposed();
         if (layerCount <= 0 || layerCount > _config.NumLayers)
@@ -147,7 +155,8 @@ public sealed unsafe class T5TextEncoder : IDisposable
         for (int i = 0; i < layerCount; i++)
         {
             Tensor layerBias = sharedBias ?? _perLayerPositionBias![i].ComputeBias(seqLen);
-            Tensor blockOutput = _blocks[i].Forward(backend, hidden, layerBias, maskTensor);
+            float qTau = qScale is { } qs && i >= qs.Min && i < qs.Max ? qs.Tau : 1f;
+            Tensor blockOutput = _blocks[i].Forward(backend, hidden, layerBias, maskTensor, qTau);
             hidden.Dispose();
             hidden = blockOutput;
         }
