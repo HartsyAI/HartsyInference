@@ -237,6 +237,16 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         int maskH = characterMaskClip is null ? 0 : (int)characterMaskClip.Shape[3];
         int maskW = characterMaskClip is null ? 0 : (int)characterMaskClip.Shape[4];
         float* mp = characterMaskClip is null ? null : (float*)characterMaskClip.DataPointer;
+        if (characterMaskClip is not null)
+        {
+            // Coverage log = the cheap sanity check that the mask decoded as intended (a mask that decodes
+            // black silently degenerates to "keep everything" and looks like a model bug).
+            long total = (long)maskFrames * maskH * maskW;
+            double sum = 0; float mn = float.MaxValue, mx = float.MinValue;
+            for (long i = 0; i < total; i++) { float v = mp[i]; sum += v; if (v < mn) mn = v; if (v > mx) mx = v; }
+            Logs.Info($"[WanAnimate] character mask stats (clip [-1,1] space): min {mn:0.###} max {mx:0.###} " +
+                $"mean {sum / total:0.###} over {maskFrames} frame(s) — white(1)=generate character, black(-1)=keep background.");
+        }
         for (int m = 0; m < maskCh; m++)
             for (int t = 0; t < tTotal; t++)
             {
