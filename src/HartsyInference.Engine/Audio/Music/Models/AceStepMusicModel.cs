@@ -68,6 +68,20 @@ internal static class AceStepMusicModel
         {
             mainPath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15TurboFile, category: "music", ct: cancel).ConfigureAwait(false);
         }
+        // v1 all-in-one (Comfy repackage) routes to its own arm — BEFORE the 1.5 companion downloads.
+        {
+            bool isV1;
+            using (SafeTensorsLoader sniff = new SafeTensorsLoader())
+            {
+                sniff.Load(mainPath);
+                isV1 = AceStepCheckpointConverter.IsV1AllInOne(sniff.Descriptors);
+            }
+            if (isV1)
+            {
+                return await LoadV1Async(context, mainPath, cancel).ConfigureAwait(false);
+            }
+        }
+
         string vaePath = await AudioModelCache.GetAsync(AceStep15Repo, AceStep15VaeFile, category: "music", ct: cancel).ConfigureAwait(false);
         string qwenPath = await AudioModelCache.GetAsync(QwenEmbeddingRepo, QwenEmbeddingFile, category: "music", ct: cancel).ConfigureAwait(false);
 
@@ -468,6 +482,117 @@ internal static class AceStepMusicModel
         }
         rows.Dispose();
         return fitted;
+    }
+
+    private const string V1LyricVocabUrl =
+        "https://raw.githubusercontent.com/ace-step/ACE-Step/main/acestep/models/lyrics_utils/vocab.json";
+
+    /// <summary>ACE-Step v1 (3.5B) from the Comfy all-in-one single file: DiT + Music-DCAE + ADaMoS vocoder +
+    /// UMT5-base all come from the selected checkpoint; only the tiny lyric-tokenizer vocab self-heals from the
+    /// upstream repo. The v1 pipeline has no audio-edit or LM-planner path — those requests refuse loudly.</summary>
+    private static async Task<IMusicRunner> LoadV1Async(MusicLoadContext context, string mainPath, CancellationToken cancel)
+    {
+        string lyricVocabPath = AudioModelRoot.SharedFile("acestep_v1_lyric_tokenizer.json");
+        await AudioFileFetcher.EnsureAsync(V1LyricVocabUrl, lyricVocabPath, cancel).ConfigureAwait(false);
+
+        (Dictionary<string, Tensor> ditWeights, Dictionary<string, Tensor> dcaeWeights,
+            Dictionary<string, Tensor> vocoderWeights, Dictionary<string, Tensor> textWeights,
+            SafeTensorsLoader loader) = AceStepCheckpointConverter.LoadV1AllInOne(mainPath);
+
+        AceStepConfig config = new AceStepConfig();
+        AceStepDit dit = new AceStepDit(config);
+        dit.LoadWeights(ditWeights);
+        MusicDcaeDecoder dcae = new MusicDcaeDecoder();
+        dcae.LoadWeights(dcaeWeights);
+        AdaMosHiFiGanV1 vocoder = new AdaMosHiFiGanV1();
+        vocoder.LoadWeights(vocoderWeights);
+        T5TextEncoder textEncoder = new T5TextEncoder(T5TextEncoderConfig.Umt5Base);
+        textEncoder.LoadWeights(textWeights);
+        T5Tokenizer textTokenizer = T5Tokenizer.CreateUmt5(maxLength: 256);
+        AceStepLyricTokenizer lyricTokenizer = AceStepLyricTokenizer.FromTokenizerJson(lyricVocabPath);
+
+        AceStepPipeline pipeline = new AceStepPipeline(context.Backend, dit, dcae, vocoder, config);
+        Logs.Info($"[Audio][ACE-Step] Loaded v1 3.5B all-in-one '{Path.GetFileName(mainPath)}' "
+            + "(44.1 kHz stereo; DiT, DCAE, vocoder and UMT5 all from the selected checkpoint).");
+
+        MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (request.Continuation is not null || request.Repaint is not null || request.Cover is not null)
+            {
+                throw new NotSupportedException(
+                    "ACE-Step v1 has no audio-conditioned edit path — continuation/repaint/cover are ACE-Step 1.5 features. "
+                    + "Pick a 1.5 checkpoint or remove the Source Audio.");
+            }
+            if (!string.IsNullOrEmpty(request.LmModel) && request.LmModel != "none")
+            {
+                throw new NotSupportedException("The 5 Hz LM planner is ACE-Step 1.5 only — set ACE-Step LM Planner to none for v1 checkpoints.");
+            }
+            string guidanceType = string.IsNullOrEmpty(request.GuidanceType)
+                ? (request.UseAdg ? "adg" : "apg")
+                : request.GuidanceType.ToLowerInvariant();
+            AceStepPipeline.GuidanceMode guidanceMode = guidanceType switch
+            {
+                "apg" => AceStepPipeline.GuidanceMode.Apg,
+                "cfg" => AceStepPipeline.GuidanceMode.Cfg,
+                _ => throw new NotSupportedException(
+                    $"ACE-Step v1 guidance types are apg and cfg; '{guidanceType}' is ACE-Step 1.5 only."),
+            };
+            AceStepPipeline.SamplerMode sampler = (request.InferMethod ?? string.Empty).Trim().ToLowerInvariant() switch
+            {
+                "" or "ode" or "euler" => AceStepPipeline.SamplerMode.Euler,
+                "heun" => AceStepPipeline.SamplerMode.Heun,
+                "sde" or "pingpong" => AceStepPipeline.SamplerMode.PingPong,
+                string other => throw new NotSupportedException(
+                    $"Unknown ACE-Step v1 solver '{other}' — expected ode (Euler), heun, or sde (ping-pong)."),
+            };
+
+            // Upstream v1 conditions on the raw tag string via UMT5 (no SFT prompt template — that is 1.5's).
+            string tags = string.IsNullOrWhiteSpace(request.Genre) ? "pop" : request.Genre;
+            IReadOnlyList<int> rawIds = textTokenizer.EncodeRaw(tags);
+            int[] tokens = new int[rawIds.Count + 1];
+            for (int i = 0; i < rawIds.Count; i++)
+            {
+                tokens[i] = rawIds[i];
+            }
+            tokens[^1] = T5Tokenizer.EosTokenId;
+            Tensor textEmbeds;
+            try
+            {
+                device.PreloadWeights(textEncoder.EnumerateWeights());
+                Tensor batch = textEncoder.Encode(device, [tokens], [T5Tokenizer.CreateAttentionMask(tokens)]);
+                textEmbeds = CfgHelper.SliceBatchElement(batch, 0, tokens.Length, 768);
+                batch.Dispose();
+            }
+            finally
+            {
+                device.Sync();
+                device.FreeWeights(textEncoder.EnumerateWeights());
+            }
+            try
+            {
+                int[] lyricIds = string.IsNullOrWhiteSpace(request.Prompt)
+                    ? []
+                    : lyricTokenizer.TokenizeLyrics(request.Prompt,
+                        string.IsNullOrWhiteSpace(request.VocalLanguage) ? null : request.VocalLanguage);
+                (float[] left, float[] right, int _, int _) = pipeline.Generate(
+                    textEmbeds, lyricIds, Math.Clamp(request.Duration, 1d, 240d),
+                    steps: request.InferSteps is > 0 ? request.InferSteps : null,
+                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Value : null,
+                    guidanceMode: guidanceMode,
+                    sampler: sampler,
+                    seed: request.Seed);
+                return MusicAudio.Stereo(left, right);
+            }
+            finally
+            {
+                textEmbeds.Dispose();
+            }
+        }
+
+        // MusicDcaeDecoder / AdaMosHiFiGanV1 are not IDisposable — their tensors belong to the loader.
+        return new MusicRunner(44100, Synth,
+            pipeline as IDisposable, dit as IDisposable, textEncoder as IDisposable, loader);
     }
 
     /// <summary>Per-variant inference defaults, mirroring upstream <c>get_ui_control_config</c>: the turbo family is

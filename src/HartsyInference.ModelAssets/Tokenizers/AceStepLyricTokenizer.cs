@@ -31,13 +31,18 @@ public sealed partial class AceStepLyricTokenizer
     private readonly List<string> _specialTokens;
 
     public AceStepLyricTokenizer(string vocabJsonPath, string mergesPath)
+        : this(JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllBytes(vocabJsonPath))
+                ?? throw new InvalidDataException($"empty vocab at {vocabJsonPath}"),
+            File.ReadLines(mergesPath))
     {
-        using FileStream fs = File.OpenRead(vocabJsonPath);
-        _vocab = JsonSerializer.Deserialize<Dictionary<string, int>>(fs)
-            ?? throw new InvalidDataException($"empty vocab at {vocabJsonPath}");
+    }
+
+    private AceStepLyricTokenizer(Dictionary<string, int> vocab, IEnumerable<string> mergeLines)
+    {
+        _vocab = vocab;
         _mergeRanks = new Dictionary<(string, string), int>();
         int rank = 0;
-        foreach (string line in File.ReadLines(mergesPath))
+        foreach (string line in mergeLines)
         {
             if (line.Length == 0 || line.StartsWith('#')) continue;
             int space = line.IndexOf(' ');
@@ -47,6 +52,29 @@ public sealed partial class AceStepLyricTokenizer
         // Specials = bracketed vocab entries ([SPACE], [en], [zh], …), longest-first for greedy matching.
         _specialTokens = [.. _vocab.Keys.Where(k => k.Length > 2 && k[0] == '[' && k[^1] == ']')
             .OrderByDescending(k => k.Length)];
+    }
+
+    /// <summary>Builds the tokenizer straight from an HF-tokenizers <c>tokenizer.json</c> (the upstream repo's
+    /// <c>lyrics_utils/vocab.json</c> is one): <c>model.vocab</c> + <c>model.merges</c> ("a b" pair strings) —
+    /// no vocab/merges export step.</summary>
+    public static AceStepLyricTokenizer FromTokenizerJson(string tokenizerJsonPath)
+    {
+        using FileStream fs = File.OpenRead(tokenizerJsonPath);
+        using JsonDocument doc = JsonDocument.Parse(fs);
+        JsonElement model = doc.RootElement.GetProperty("model");
+        Dictionary<string, int> vocab = new Dictionary<string, int>();
+        foreach (JsonProperty p in model.GetProperty("vocab").EnumerateObject())
+        {
+            vocab[p.Name] = p.Value.GetInt32();
+        }
+        List<string> merges = [];
+        foreach (JsonElement m in model.GetProperty("merges").EnumerateArray())
+        {
+            merges.Add(m.ValueKind == JsonValueKind.Array
+                ? $"{m[0].GetString()} {m[1].GetString()}"
+                : m.GetString() ?? "");
+        }
+        return new AceStepLyricTokenizer(vocab, merges);
     }
 
     /// <summary>Vocabulary size.</summary>

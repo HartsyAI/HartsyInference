@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -70,6 +71,62 @@ public sealed class AceStepCheckpointConverter
         foreach (string key in loader.Descriptors.Keys)
             weights[Strip(key, "model.")] = MaybeCast(loader.GetTensor(key), castToF32);
         return (weights, loader);
+    }
+
+    /// <summary>True when the header is a Comfy-repackaged ACE-Step v1 all-in-one
+    /// (<c>Comfy-Org/ACE-Step_ComfyUI_repackaged</c> <c>all_in_one/ace_step_v1_3.5b.safetensors</c>).</summary>
+    public static bool IsV1AllInOne(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors) =>
+        descriptors.ContainsKey("model.diffusion_model.lyric_embs.weight");
+
+    /// <summary>Splits the v1 all-in-one file into the four component dictionaries the existing classes consume:
+    /// the DiT (bare keys, same as <see cref="LoadTransformer"/>, <c>projectors.*</c> skipped), the Music-DCAE,
+    /// the ADaMoS vocoder (weight-norm fused only when the file still ships <c>_g/_v</c> pairs), and the UMT5-base
+    /// text encoder (<c>encoder.block…</c>/<c>shared.weight</c>; <c>logit_scale</c> dropped). Caller owns the loader.</summary>
+    public static (Dictionary<string, Tensor> Transformer, Dictionary<string, Tensor> Dcae,
+        Dictionary<string, Tensor> Vocoder, Dictionary<string, Tensor> TextEncoder, SafeTensorsLoader Loader)
+        LoadV1AllInOne(string path, bool castToF32 = false)
+    {
+        SafeTensorsLoader loader = new();
+        loader.Load(path);
+        Dictionary<string, Tensor> transformer = new();
+        Dictionary<string, Tensor> dcae = new();
+        Dictionary<string, Tensor> vocoder = new();
+        Dictionary<string, Tensor> text = new();
+        foreach (string key in loader.Descriptors.Keys)
+        {
+            if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
+            {
+                string bare = key["model.diffusion_model.".Length..];
+                if (bare.StartsWith("projectors.", StringComparison.Ordinal)) continue;   // SSL heads (training only)
+                transformer[bare] = MaybeCast(loader.GetTensor(key), castToF32);
+            }
+            else if (key.StartsWith("vae.dcae.", StringComparison.Ordinal))
+            {
+                dcae[key["vae.dcae.".Length..]] = MaybeCast(loader.GetTensor(key), castToF32);
+            }
+            else if (key.StartsWith("vae.vocoder.", StringComparison.Ordinal))
+            {
+                vocoder[key["vae.vocoder.".Length..]] = MaybeCast(loader.GetTensor(key), castToF32);
+            }
+            else if (key.StartsWith("text_encoders.umt5base.transformer.", StringComparison.Ordinal))
+            {
+                text[key["text_encoders.umt5base.transformer.".Length..]] = MaybeCast(loader.GetTensor(key), castToF32);
+            }
+            else if (key == "text_encoders.umt5base.logit_scale" || key == "text_encoders.spiece_model")
+            {
+                // logit_scale: CLAP-style scale the encoder never uses. spiece_model: Comfy's embedded
+                // SentencePiece blob — the engine ships its own umT5 spiece resource.
+            }
+            else
+            {
+                throw new HartsyInferenceException($"Unrecognized ACE-Step v1 all-in-one key '{key}' — refusing a partial load.");
+            }
+        }
+        if (vocoder.Keys.Any(k => k.EndsWith(".weight_g", StringComparison.Ordinal)))
+        {
+            vocoder = FuseWeightNorm(vocoder);
+        }
+        return (transformer, dcae, vocoder, text, loader);
     }
 
     private static Tensor MaybeCast(Tensor t, bool castToF32) =>
