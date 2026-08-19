@@ -61,6 +61,14 @@ public static class LoraFormatDetector
             {
                 hasDiffusersWan = true;
             }
+            // Bare original-Wan naming (no wrapper prefix): the osantinello Wan-Animate relight conversion.
+            // self_attn/cross_attn segments distinguish it from the generic bare-DiT fallback, whose
+            // roots-are-canonical rule would derive keys the converted (diffusers-named) dict never has.
+            else if (key.StartsWith("blocks.", StringComparison.Ordinal)
+                && (key.Contains(".self_attn.", StringComparison.Ordinal) || key.Contains(".cross_attn.", StringComparison.Ordinal)))
+            {
+                hasDiffusersWan = true;
+            }
             else if (key.StartsWith("lora_transformer_", StringComparison.Ordinal))
             {
                 hasAiToolkitFlux = true;

@@ -45,6 +45,8 @@ public static class WanLoraMapper
                     LoraKeyTransformer.UnderscoreToDot(root[KohyaPrefix.Length..]),
                 LoraFormat.DiffusersWan when root.StartsWith(ComfyPrefix, StringComparison.Ordinal) =>
                     root[ComfyPrefix.Length..],
+                // Bare original naming (no wrapper prefix) — e.g. the Wan-Animate relight conversion.
+                LoraFormat.DiffusersWan when root.StartsWith("blocks.", StringComparison.Ordinal) => root,
                 _ => null,
             };
             if (body is null)
