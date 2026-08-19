@@ -29,7 +29,10 @@ public static class RefinerStage
             return false;
         }
         string family = ResolveRefinerFamily(request.Refiner);
-        return family is "sdxl" or "sdxl-refiner";
+        // ONLY the true refiner-class checkpoint (CLIP-G-only, aesthetic-score ADM). A base-architecture SDXL
+        // model used as the refiner goes through the generic stage as plain img2img — which is also what closes
+        // the old ROADMAP limitation where SdxlRefinerLoader threw on exactly that case.
+        return family is "sdxl-refiner";
     }
 
     /// <summary>The refiner model's family id: the host-provided <see cref="Refiner.FamilyId"/> when present, else
