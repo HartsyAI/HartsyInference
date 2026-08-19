@@ -163,7 +163,7 @@ public static class RefinerStage
 
         Logs.Info($"[Features][Refiner] Generic refine: base '{baseFamily}' {baseResult.Width}x{baseResult.Height} → "
             + $"'{refinerFamily}' at {width}x{height}, strength={spec.Strength:F2}, steps={spec.Steps}, cfg={spec.CfgScale}.");
-        IRecipePipeline refinerPipeline = engine.GetOrConstructRecipe(refinerSpec, refineRequest);
+        IRecipePipeline refinerPipeline = engine.GetOrConstructRecipe(refinerSpec, refineRequest, alsoKeepPath: baseSpec.LocalPath);
         ImageRequest resolvedRefine = engine.DefaultsFor(refinerSpec, refinerPipeline).Apply(refineRequest) with
         {
             // Apply() may re-fill from family defaults; the refine geometry and budget are already decided above.

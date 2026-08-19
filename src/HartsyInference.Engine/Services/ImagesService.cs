@@ -30,7 +30,10 @@ public sealed class ImagesService : IImagesService
         return Task.Run(
             () =>
             {
-                IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request);
+                // A generic-refiner request keeps the refiner checkpoint cached across generations too — see
+                // EvictOtherCheckpointPipelines' alsoKeepPath doc for the ping-pong this prevents.
+                string? keepRefiner = request.Refiner?.Model;
+                IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
                 // Base-prompt tag-leak fix: <segment:>/<clear:> text must not reach the BASE (full-canvas) pass's

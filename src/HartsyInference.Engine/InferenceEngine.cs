@@ -174,7 +174,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Detects the checkpoint architecture for <paramref name="spec"/>, resolves its recipe, and constructs
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
-    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null)
+    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null)
     {
         if (spec.LocalPath is null)
         {
@@ -191,7 +191,7 @@ public sealed class InferenceEngine : IInferenceEngine
         // (HARTSY_KEEP_MODELS) and cannot share the card with the incoming model at fleet sizes — a
         // Krea2(13 GB)→Z-Image switch measured 74 MB free on 24 GB before this existed
         // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
-        EvictOtherCheckpointPipelines(spec.LocalPath);
+        EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
 
         IArchitectureRecipe recipe = ResolveRecipe(spec);
         IBackend backend = EnsureBackend();
@@ -589,14 +589,23 @@ public sealed class InferenceEngine : IInferenceEngine
     /// the card OOMs (and poisons the session with cuDNN/VAE fallbacks). Pipelines for the SAME checkpoint
     /// (LoRA/component variants) are kept. Deliberately does NOT touch the other services (Text/Audio/…)
     /// — their memory is managed by their own slots, and <see cref="FreeMemory"/> remains the full sweep.</summary>
-    private void EvictOtherCheckpointPipelines(string keepPath)
+    /// <param name="keepPath">The incoming checkpoint — never evicted.</param>
+    /// <param name="alsoKeepPath">Optional second survivor. The generic refiner sets this in both directions
+    /// (base keeps refiner, refiner keeps base): without it every refined generation ping-pongs two full
+    /// pipeline loads — the base's construct evicts the refiner, the refine evicts the base — which besides the
+    /// load time churns a fresh host-side weight copy per swap.</param>
+    private void EvictOtherCheckpointPipelines(string keepPath, string? alsoKeepPath = null)
     {
         string keepImagePrefix = $"recipe:{keepPath}|";
         string keepVideoPrefix = $"video-recipe:{keepPath}|";
+        string? keepImagePrefix2 = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
+        string? keepVideoPrefix2 = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
         List<string> imageVictims = _recipePipelines.Keys
-            .Where(k => !k.StartsWith(keepImagePrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            .Where(k => !k.StartsWith(keepImagePrefix, StringComparison.OrdinalIgnoreCase)
+                && (keepImagePrefix2 is null || !k.StartsWith(keepImagePrefix2, StringComparison.OrdinalIgnoreCase))).ToList();
         List<string> videoVictims = _videoRecipePipelines.Keys
-            .Where(k => !k.StartsWith(keepVideoPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            .Where(k => !k.StartsWith(keepVideoPrefix, StringComparison.OrdinalIgnoreCase)
+                && (keepVideoPrefix2 is null || !k.StartsWith(keepVideoPrefix2, StringComparison.OrdinalIgnoreCase))).ToList();
         if (imageVictims.Count == 0 && videoVictims.Count == 0)
         {
             return;
