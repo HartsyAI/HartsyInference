@@ -32,8 +32,11 @@ public sealed record AceStep15GenerateOptions
     public int? InferSteps { get; init; }
     /// <summary>CFG strength; ≤1 (or a turbo config) disables the uncond pass.</summary>
     public float GuidanceScale { get; init; } = 1f;
-    /// <summary>ADG instead of the default APG blend.</summary>
+    /// <summary>ADG instead of the default APG blend. Deprecated: honored only when <see cref="GuidanceType"/> is empty.</summary>
     public bool UseAdg { get; init; }
+
+    /// <summary>Guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg".</summary>
+    public string GuidanceType { get; init; } = "";
     /// <summary>Guidance applies only when <c>cfgIntervalStart ≤ t ≤ cfgIntervalEnd</c> (momentum skips too).</summary>
     public float CfgIntervalStart { get; init; } = 0f;
     public float CfgIntervalEnd { get; init; } = 1f;
@@ -176,11 +179,17 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
             Logs.Warning("ACE-Step 1.5: guidance requested but null_condition_emb not loaded — running uncond-free.");
         }
         bool sde = string.Equals(opts.InferMethod, "sde", StringComparison.OrdinalIgnoreCase);
+        // "apg" | "cfg" | "adg"; empty honors the deprecated UseAdg bool.
+        string guidanceType = string.IsNullOrEmpty(opts.GuidanceType)
+            ? (opts.UseAdg ? "adg" : "apg")
+            : opts.GuidanceType.ToLowerInvariant();
+        if (guidanceType is not ("apg" or "cfg" or "adg"))
+            throw new ArgumentException($"Unknown ACE-Step guidance type '{opts.GuidanceType}' — expected apg, cfg, or adg.");
         AceStep15Guidance.DcwCorrector dcw = new(opts.DcwEnabled ?? _config.IsTurbo, opts.DcwMode, opts.DcwScaler, opts.DcwHighScaler);
         AceStep15Guidance.MomentumBuffer momentum = new();
 
         Logs.Info($"ACE-Step 1.5 {(_config.IsTurbo ? "turbo" : "base/sft")}: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
-            $"shift={opts.Shift ?? _config.FlowShift}, cfg={(useCfg ? guidance : 1f)}{(useCfg && opts.UseAdg ? " (ADG)" : useCfg ? " (APG)" : "")}, " +
+            $"shift={opts.Shift ?? _config.FlowShift}, cfg={(useCfg ? guidance : 1f)}{(useCfg ? $" ({guidanceType.ToUpperInvariant()})" : "")}, " +
             $"method={(sde ? "sde" : "ode")}, dcw={dcw.IsActive}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[lyricHidden.Shape.Rank - 2])} tokens, " +
             $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}" +
             $"{(editPlan is null ? "" : $", edit=[start step {startIndex}/{steps}, sigma {timesteps[startIndex]:0.000}]")}");
@@ -236,9 +245,12 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
                     if (applyCfg)
                     {
                         Tensor vu = _dit.Forward(Backend, z, context, nullConditions!, sigma, sigma);
-                        Tensor guided = opts.UseAdg
-                            ? AceStep15Guidance.AdgForward(z, vt, vu, sigma, guidance)
-                            : AceStep15Guidance.ApgForward(vt, vu, guidance, momentum);
+                        Tensor guided = guidanceType switch
+                        {
+                            "adg" => AceStep15Guidance.AdgForward(z, vt, vu, sigma, guidance),
+                            "cfg" => AceStep15Guidance.CfgForward(vt, vu, guidance),
+                            _ => AceStep15Guidance.ApgForward(vt, vu, guidance, momentum),
+                        };
                         vu.Dispose();
                         vt.Dispose();
                         vt = guided;

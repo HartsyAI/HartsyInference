@@ -213,6 +213,7 @@ internal static class AceStepMusicModel
                     // The pipeline clamps guidance to 1.0 on turbo configs itself (upstream behavior).
                     GuidanceScale = request.CfgScale.HasValue ? (float)request.CfgScale.Value : 7f,
                     UseAdg = request.UseAdg,
+                    GuidanceType = request.GuidanceType,
                     CfgIntervalStart = (float)request.CfgIntervalStart,
                     CfgIntervalEnd = (float)request.CfgIntervalEnd,
                     InferMethod = string.IsNullOrWhiteSpace(request.InferMethod) ? "ode" : request.InferMethod,

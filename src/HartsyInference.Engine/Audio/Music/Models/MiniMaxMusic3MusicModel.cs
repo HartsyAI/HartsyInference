@@ -10,6 +10,8 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Requests;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
@@ -29,13 +31,17 @@ internal static class MiniMaxMusic3MusicModel
     private const string DefaultRepo = "MiniMaxAI/MiniMax-Music3";
     private const string Category = "music";
 
-    /// <summary>The MiniMax Music 3 descriptor.</summary>
+    /// <summary>The MiniMax Music 3 descriptor. A user-selected checkpoint (<see cref="AudioModelSelector.LocalPath"/>,
+    /// the Comfy-Org single-file DiT) is honored for the flow transformer + condition encoder — it participates in
+    /// the cache key so switching checkpoints never serves the previous file's runner. The language model, depth
+    /// decoder, vocoder, and tokenizer always come from the official repo (the DiT file does not carry them).</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = true,
-        CacheKey = selector => $"{ResolveRepo(selector.Variant)}|{ResolveQuant(selector.Variant) ?? "bf16"}",
+        CacheKey = selector =>
+            $"{ResolveRepo(selector.Variant)}|{ResolveQuant(selector.Variant) ?? "bf16"}|{selector.LocalPath ?? ""}",
         LoadAsync = (context, selector, cancel) =>
-            LoadAsync(context, ResolveRepo(selector.Variant), ResolveQuant(selector.Variant), cancel),
+            LoadAsync(context, ResolveRepo(selector.Variant), ResolveQuant(selector.Variant), selector.LocalPath, cancel),
     };
 
     /// <summary>A bare id is the released checkpoint; an <c>org/repo</c> variant passes through so a future official
@@ -58,17 +64,56 @@ internal static class MiniMaxMusic3MusicModel
         return lower.EndsWith("q4", StringComparison.Ordinal) || lower.EndsWith("q4_k", StringComparison.Ordinal) ? "q4_k" : null;
     }
 
-    private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, CancellationToken cancel)
+    private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, string? localPath, CancellationToken cancel)
     {
         string tokenizerPath = await AudioModelCache.GetAsync(repo, "tokenizer/tokenizer.json", Category, ct: cancel).ConfigureAwait(false);
         (IReadOnlyDictionary<string, Tensor> languageWeights, IDisposable[] languageLoaders) =
             await AudioCheckpoints.LoadSubfolderAsync(repo, "language_model", Category, cancel).ConfigureAwait(false);
         (IReadOnlyDictionary<string, Tensor> depthWeights, IDisposable[] depthLoaders) =
             await AudioCheckpoints.LoadSubfolderAsync(repo, "rvq_depth_decoder", Category, cancel).ConfigureAwait(false);
-        (IReadOnlyDictionary<string, Tensor> conditionWeights, IDisposable[] conditionLoaders) =
-            await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
-        (IReadOnlyDictionary<string, Tensor> ditWeights, IDisposable[] ditLoaders) =
-            await AudioCheckpoints.LoadSubfolderAsync(repo, "transformer", Category, cancel).ConfigureAwait(false);
+
+        // A user-selected checkpoint carries the flow DiT + condition encoder (the Comfy-Org single-file
+        // layout); anything else it might carry is not usable, so refuse loudly rather than silently
+        // generating with substituted weights.
+        IReadOnlyDictionary<string, Tensor> conditionWeights;
+        IReadOnlyDictionary<string, Tensor> ditWeights;
+        IDisposable[] conditionLoaders;
+        IDisposable[] ditLoaders;
+        if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
+        {
+            SafeTensorsLoader ditFile = new SafeTensorsLoader();
+            try
+            {
+                ditFile.Load(localPath);
+                if (!MiniMaxMusic3CheckpointConverter.IsComfyDit(ditFile.Descriptors))
+                {
+                    throw new NotSupportedException(
+                        $"'{Path.GetFileName(localPath)}' is not a MiniMax-Music-3 DiT checkpoint the engine can load. "
+                        + "Supported: the Comfy-Org single-file DiT (diffusion_models/minimax_music3_dit_*.safetensors). "
+                        + "Remove the file to use the official MiniMaxAI/MiniMax-Music3 weights instead.");
+                }
+                (Dictionary<string, Tensor> convertedDit, Dictionary<string, Tensor> convertedCondition) =
+                    MiniMaxMusic3CheckpointConverter.ConvertComfyDit(ditFile.GetAllTensors());
+                ditWeights = convertedDit;
+                conditionWeights = convertedCondition;
+                ditLoaders = [ditFile];
+                conditionLoaders = [];
+                Logs.Info($"[Audio][MiniMaxMusic3] Flow DiT + condition encoder from selected checkpoint "
+                    + $"'{Path.GetFileName(localPath)}'; language model, depth decoder, vocoder from {repo}.");
+            }
+            catch
+            {
+                ditFile.Dispose();
+                throw;
+            }
+        }
+        else
+        {
+            (conditionWeights, conditionLoaders) =
+                await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
+            (ditWeights, ditLoaders) =
+                await AudioCheckpoints.LoadSubfolderAsync(repo, "transformer", Category, cancel).ConfigureAwait(false);
+        }
         (IReadOnlyDictionary<string, Tensor> vocoderWeights, IDisposable[] vocoderLoaders) =
             await AudioCheckpoints.LoadSubfolderAsync(repo, "vocoder", Category, cancel).ConfigureAwait(false);
 
@@ -123,12 +168,14 @@ internal static class MiniMaxMusic3MusicModel
                 : MiniMaxMusic3FlowPipeline.DefaultCfgScale;
 
             long autoregressiveStart = Environment.TickCount64;
-            backend.PreloadWeights(languageModel.EnumerateWeights());
-            backend.PreloadWeights(depthDecoder.EnumerateWeights());
             float[] frameHiddens;
             int produced;
+            // Preloads INSIDE the guarded region: an OOM mid-preload otherwise leaks every already-uploaded
+            // batch (the finally would never run), leaving the card full for all later generations.
             try
             {
+                backend.PreloadWeights(languageModel.EnumerateWeights());
+                backend.PreloadWeights(depthDecoder.EnumerateWeights());
                 (frameHiddens, produced) = autoregressive.Generate(backend, conditional, unconditional, frames,
                     request.Seed, OnFrame, ct);
             }
@@ -144,11 +191,11 @@ internal static class MiniMaxMusic3MusicModel
                 + $"({autoregressiveMs / (double)Math.Max(1, produced):0.0} ms/frame); flow-matching {steps} steps per window.");
             long flowStart = Environment.TickCount64;
 
-            backend.PreloadWeights(conditionEncoder.EnumerateWeights());
-            backend.PreloadWeights(dit.EnumerateWeights());
             Tensor[] chunks;
             try
             {
+                backend.PreloadWeights(conditionEncoder.EnumerateWeights());
+                backend.PreloadWeights(dit.EnumerateWeights());
                 chunks = flow.Denoise(frameHiddens, produced, steps, cfgScale, request.Seed, OnStep, ct);
             }
             finally
@@ -160,10 +207,10 @@ internal static class MiniMaxMusic3MusicModel
 
             long flowMs = Environment.TickCount64 - flowStart;
             long vocodeStart = Environment.TickCount64;
-            backend.PreloadWeights(vocoder.EnumerateWeights());
             Tensor[] waveforms = new Tensor[chunks.Length];
             try
             {
+                backend.PreloadWeights(vocoder.EnumerateWeights());
                 for (int i = 0; i < chunks.Length; i++)
                 {
                     ct.ThrowIfCancellationRequested();

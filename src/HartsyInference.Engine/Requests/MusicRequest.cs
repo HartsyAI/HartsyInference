@@ -54,8 +54,13 @@ public sealed record MusicRequest
     /// <summary>ODE (default) or SDE diffusion solver (ACE-Step base/sft).</summary>
     public string InferMethod { get; init; } = "";
 
-    /// <summary>Use ADG guidance instead of the default APG (ACE-Step base/sft CFG).</summary>
+    /// <summary>Use ADG guidance instead of the default APG (ACE-Step base/sft CFG). Deprecated in favor of
+    /// <see cref="GuidanceType"/>; honored only when that is empty.</summary>
     public bool UseAdg { get; init; }
+
+    /// <summary>ACE-Step guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg". Empty falls
+    /// back to <see cref="UseAdg"/> for callers that predate this field.</summary>
+    public string GuidanceType { get; init; } = "";
 
     /// <summary>CFG active-interval start over t (ACE-Step base/sft).</summary>
     public double CfgIntervalStart { get; init; }
