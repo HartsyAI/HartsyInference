@@ -78,6 +78,7 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
             TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
                 new TextToImageRequest
                 {
+                    SeamlessTiling = request.SeamlessTiling,
                     Prompt = prompt,
                     NegativePrompt = negative,
                     Width = request.Width,

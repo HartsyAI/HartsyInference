@@ -69,6 +69,7 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
 
         TextToImageRequest inner = new TextToImageRequest
         {
+            SeamlessTiling = request.SeamlessTiling,
             Prompt = prompt,
             NegativePrompt = negative,
             Width = request.Width,

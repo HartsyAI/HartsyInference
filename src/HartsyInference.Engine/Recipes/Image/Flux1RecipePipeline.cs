@@ -119,6 +119,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
             TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
                 new TextToImageRequest
                 {
+                    SeamlessTiling = request.SeamlessTiling,
                     Prompt = prompt,
                     Width = request.Width,
                     Height = request.Height,

@@ -47,6 +47,7 @@ public sealed class LensRecipePipeline : IRecipePipeline
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
+                SeamlessTiling = request.SeamlessTiling,
                 Prompt = prompt,
                 NegativePrompt = negative,
                 Width = request.Width,

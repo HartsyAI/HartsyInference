@@ -74,6 +74,7 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
 
         TextToImageRequest inner = new TextToImageRequest
         {
+            SeamlessTiling = request.SeamlessTiling,
             Prompt = prompt,
             NegativePrompt = negative,
             Width = snappedW,

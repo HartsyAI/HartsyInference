@@ -98,6 +98,7 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
+                SeamlessTiling = request.SeamlessTiling,
                 Prompt = prompt,
                 NegativePrompt = "",
                 Width = snappedW,
