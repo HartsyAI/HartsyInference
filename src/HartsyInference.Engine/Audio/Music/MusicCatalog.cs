@@ -179,8 +179,14 @@ internal static class MusicCatalog
             backend.FreeWeights(textEncoder.EnumerateWeights());
             try
             {
-                // MusicGen/AudioGen are trained on windows of at most 30 s.
-                float[] samples = pipeline.Synthesize(backend, textStates, seconds: (float)Math.Clamp(request.Duration, 1d, 30d), seed: request.Seed);
+                // MusicGen/AudioGen are trained on windows of at most 30 s. Sampling knobs ride the request
+                // (null = the model's own defaults: cfg_coef 3.0, temperature 1.0, top-k 250, top-p off).
+                float[] samples = pipeline.Synthesize(backend, textStates,
+                    seconds: (float)Math.Clamp(request.Duration, 1d, 30d), seed: request.Seed,
+                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Value : null,
+                    temperature: request.Temperature is > 0 ? (float)request.Temperature.Value : null,
+                    topK: request.TopK is > 0 ? request.TopK.Value : null,
+                    topP: request.TopP is > 0 ? (float)request.TopP.Value : null);
                 return MusicAudio.Mono(samples);
             }
             finally
