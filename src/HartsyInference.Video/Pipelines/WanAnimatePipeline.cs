@@ -91,8 +91,9 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 
         Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}, seed={seed} " +
             $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent}{(haveCached ? ", cond CACHED" : "")})");
-        Logs.Warning("Wan-Animate pipeline is first-run-validation pending — continue-motion and background/mask " +
-            "replace conditioning not modeled.");
+        // Animation mode validated end-to-end 2026-08-19 (real driving video, YOLO-pose auto-preprocess,
+        // identity + motion both confirmed visually against the reference inputs).
+        Logs.Warning("Wan-Animate: continue-motion and background/mask replace conditioning are not modeled yet.");
 
         WanAnimateConditioning conditioning;
         if (haveCached)
