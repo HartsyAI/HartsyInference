@@ -19,7 +19,8 @@ internal static class WanAnimateDrivingResolver
     private static int _poseWeightsWarned;
 
     /// <summary>The built driving clips plus the frame count they settled on and the driving video's decoded rate.</summary>
-    internal sealed record ResolvedClips(Tensor PoseClip, Tensor FaceClip, int FrameCount, int? DrivingFps);
+    internal sealed record ResolvedClips(Tensor PoseClip, Tensor FaceClip, int FrameCount, int? DrivingFps,
+        Tensor? BackgroundClip = null, Tensor? MaskClip = null);
 
     /// <summary>Builds both driving clips; <paramref name="requestedFrames"/> is the grid-resolved request count, which a
     /// shorter driving video shrinks per <see cref="ResolveDrivingFrames"/>. The caller owns disposal of both tensors.</summary>
@@ -48,7 +49,35 @@ internal static class WanAnimateDrivingResolver
             try
             {
                 Tensor faceClip = BuildFaceClip(backend, request, pose, drivingFrames, width, height, motionSize, frameCount, cancel);
-                return new ResolvedClips(poseClip, faceClip, frameCount, drivingFps);
+                // Replacement-mode extras: background clip in pose-clip form; the character mask decodes as RGB
+                // (channel 0 is read pipeline-side) and a single-frame mask is legal (it repeats there).
+                Tensor? backgroundClip = null;
+                Tensor? maskClip = null;
+                try
+                {
+                    if (request.DrivingBackgroundVideo is not null)
+                    {
+                        backgroundClip = DecodeToClip(request.DrivingBackgroundVideo, width, height, frameCount, cancel);
+                        Logs.Info($"[WanAnimate] background video decoded to {frameCount} frame(s) at {width}x{height}.");
+                    }
+                    if (request.DrivingMaskVideo is not null)
+                    {
+                        FfmpegProcessDecoder.Result decodedMask = DecodeClip(request.DrivingMaskVideo, width, height, frameCount, cancel);
+                        List<byte[]> maskFrames = decodedMask.Frames.Count >= frameCount
+                            ? FitFrames(decodedMask.Frames, frameCount)
+                            : decodedMask.Frames;   // short (e.g. single-frame) masks repeat pipeline-side
+                        maskClip = VideoRecipeUtils.PackRgbFramesToClip(maskFrames, width, height);
+                        Logs.Info($"[WanAnimate] character mask decoded: {maskFrames.Count} frame(s) at {width}x{height}.");
+                    }
+                }
+                catch
+                {
+                    backgroundClip?.Dispose();
+                    maskClip?.Dispose();
+                    faceClip.Dispose();
+                    throw;
+                }
+                return new ResolvedClips(poseClip, faceClip, frameCount, drivingFps, backgroundClip, maskClip);
             }
             catch
             {

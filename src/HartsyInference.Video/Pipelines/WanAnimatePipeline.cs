@@ -48,6 +48,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
     public (byte[][] frames, int width, int height, int seed, WanAnimateConditioning conditioning) GenerateAnimation(
         Tensor promptEmbeds, Tensor negativeEmbeds, Tensor? referenceRgb, Tensor? poseRgbClip, Tensor? faceRgbClip,
         TextToImageRequest request, Tensor? clipImageEmbeds = null, WanAnimateConditioning? cachedConditioning = null,
+        Tensor? backgroundRgbClip = null, Tensor? characterMaskClip = null,
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
@@ -93,7 +94,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent}{(haveCached ? ", cond CACHED" : "")})");
         // Animation mode validated end-to-end 2026-08-19 (real driving video, YOLO-pose auto-preprocess,
         // identity + motion both confirmed visually against the reference inputs).
-        Logs.Warning("Wan-Animate: continue-motion and background/mask replace conditioning are not modeled yet.");
+        Logs.Warning("Wan-Animate: continue-motion (chunked extension) is not modeled yet.");
 
         WanAnimateConditioning conditioning;
         if (haveCached)
@@ -109,6 +110,12 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             Tensor poseLatentDev = _encoder.Encode(Backend, poseRgbClip!);   // [1, z, tLat, hLat, wLat]
             Tensor gray = new Tensor(new TensorShape([1L, 3, pixT, pixH, pixW]), DType.F32);   // 0 in [-1,1] = mid gray
             new Span<float>((float*)gray.DataPointer, (int)gray.Shape.ElementCount).Clear();
+            // Replacement mode: the generated-frames conditioning carries the background video instead of
+            // mid-gray (ComfyUI background_video — frames past the clip's end stay gray).
+            if (backgroundRgbClip is not null)
+            {
+                OverlayClipFrames(gray, backgroundRgbClip, pixT, pixH, pixW);
+            }
             Tensor grayLatent = _encoder.Encode(Backend, gray);             // [1, z, tLat, hLat, wLat]
             gray.Dispose();
             Backend.Sync();
@@ -117,7 +124,8 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             // Concat conditioning [1, 4+z, tTotal, hLat, wLat]: the node emits concat_mask 0 on the ref frame / 1 on
             // generated frames, and WAN21.concat_cond INVERTS it (mask = 1.0 - mask) before cat((mask, image)) — so the
             // model sees 1 on the known ref frame, 0 elsewhere. Cond-latent = [ref frame, gray frames].
-            Tensor conditionDev = BuildAnimateCondition(refLatent, grayLatent, latentCh, tp, trimLatent, tTotal, hLat, wLat);
+            Tensor conditionDev = BuildAnimateCondition(refLatent, grayLatent, latentCh, tp, trimLatent, tTotal, hLat, wLat,
+                characterMaskClip);
             refLatent.Dispose();
             grayLatent.Dispose();
 
@@ -213,19 +221,51 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 
     /// <summary>Builds the <c>[1, tp+z, tTotal, H, W]</c> concat conditioning in model space (post the WAN21
     /// <c>1 − mask</c> inversion): mask channels 1 on the leading reference frame(s) / 0 on generated frames,
-    /// cond-latent = reference latent then gray-clip latent.</summary>
+    /// cond-latent = reference latent then gray-clip latent. A character mask (replacement mode) writes
+    /// <c>1 − mask</c> per pixel over the generated frames — background regions become "known" (kept from the
+    /// background conditioning) and only the character region generates. Mask channel <c>m</c> of latent frame
+    /// <c>t</c> carries pixel frame <c>(t − trim)·4 + m</c>, upstream's straight <c>view(L,4).transpose</c>
+    /// packing; a shorter mask clip clamps to its last frame (single-frame masks repeat).</summary>
     private static Tensor BuildAnimateCondition(Tensor refLatent, Tensor grayLatent, int latentCh, int maskCh,
-        int trimLatent, int tTotal, int hLat, int wLat)
+        int trimLatent, int tTotal, int hLat, int wLat, Tensor? characterMaskClip = null)
     {
         Tensor o = new Tensor(new TensorShape([1L, maskCh + latentCh, tTotal, hLat, wLat]), DType.F32);
         float* op = (float*)o.DataPointer;
         long frame = (long)hLat * wLat;
         long perChannel = (long)tTotal * frame;
+        int maskFrames = characterMaskClip is null ? 0 : (int)characterMaskClip.Shape[2];
+        int maskH = characterMaskClip is null ? 0 : (int)characterMaskClip.Shape[3];
+        int maskW = characterMaskClip is null ? 0 : (int)characterMaskClip.Shape[4];
+        float* mp = characterMaskClip is null ? null : (float*)characterMaskClip.DataPointer;
         for (int m = 0; m < maskCh; m++)
             for (int t = 0; t < tTotal; t++)
             {
-                float v = t < trimLatent ? 1f : 0f;
-                for (long p = 0; p < frame; p++) op[(long)m * perChannel + t * frame + p] = v;
+                long baseOff = (long)m * perChannel + t * frame;
+                if (t < trimLatent)
+                {
+                    for (long p = 0; p < frame; p++) op[baseOff + p] = 1f;
+                }
+                else if (characterMaskClip is null)
+                {
+                    for (long p = 0; p < frame; p++) op[baseOff + p] = 0f;
+                }
+                else
+                {
+                    // Channel 0 of the RGB-decoded mask clip; nearest-neighbor down to the latent grid.
+                    int pixFrame = Math.Min((t - trimLatent) * 4 + m, maskFrames - 1);
+                    float* mf = mp + (long)pixFrame * maskH * maskW;   // clip layout [1,3,T,H,W], channel 0
+                    for (int y = 0; y < hLat; y++)
+                    {
+                        int sy = Math.Min(maskH - 1, y * maskH / hLat);
+                        for (int x = 0; x < wLat; x++)
+                        {
+                            int sx = Math.Min(maskW - 1, x * maskW / wLat);
+                            // Clip pixels are [-1,1]; mask semantics want 0..1 (white=1=character).
+                            float maskVal = Math.Clamp((mf[(long)sy * maskW + sx] + 1f) * 0.5f, 0f, 1f);
+                            op[baseOff + (long)y * wLat + x] = 1f - maskVal;
+                        }
+                    }
+                }
             }
         float* rp = (float*)refLatent.DataPointer;    // [1, z, trimLatent, h, w]
         float* gp = (float*)grayLatent.DataPointer;   // [1, z, tTotal-trimLatent, h, w]
@@ -239,6 +279,24 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 (long)tGen * frame * 4, (long)tGen * frame * 4);
         }
         return o;
+    }
+
+    /// <summary>Writes <paramref name="source"/>'s frames over <paramref name="target"/> (both
+    /// <c>[1, 3, T, H, W]</c>, same H/W); frames past the source's end keep the target's values.</summary>
+    private static void OverlayClipFrames(Tensor target, Tensor source, int pixT, int pixH, int pixW)
+    {
+        int srcT = (int)source.Shape[2];
+        if ((int)source.Shape[3] != pixH || (int)source.Shape[4] != pixW)
+            throw new ArgumentException($"background clip must be {pixW}x{pixH}; got {source.Shape[4]}x{source.Shape[3]}.");
+        int copyT = Math.Min(srcT, pixT);
+        float* tp = (float*)target.DataPointer;
+        float* sp = (float*)source.DataPointer;
+        long frame = (long)pixH * pixW;
+        for (int c = 0; c < 3; c++)
+        {
+            Buffer.MemoryCopy(sp + (long)c * srcT * frame, tp + (long)c * pixT * frame,
+                copyT * frame * 4, copyT * frame * 4);
+        }
     }
 
     /// <summary>Channel-concatenates two <c>[1, C, T, H, W]</c> tensors → <c>[1, Ca+Cb, T, H, W]</c>.</summary>

@@ -98,6 +98,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 
         Tensor? clipEmbeds = null;
         Tensor? poseClip = null;
+        Tensor? backgroundClip = null;
+        Tensor? maskClip = null;
         Tensor? faceClip = null;
         Tensor? referenceRgb = null;
         int? drivingFps = null;
@@ -123,6 +125,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 _backend, request, width, height, numFrames, _config.VaeTemporalCompression, MotionEncoderSize, cancel);
             poseClip = clips.PoseClip;
             faceClip = clips.FaceClip;
+            backgroundClip = clips.BackgroundClip;
+            maskClip = clips.MaskClip;
             numFrames = clips.FrameCount;
             drivingFps = clips.DrivingFps;
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.ResizeRgb24(reference, width, height), width, height);
@@ -146,7 +150,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
             };
 
             (byte[][] frames, int outW, int outH, int _, WanAnimateConditioning used) = _pipeline.GenerateAnimation(
-                promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null, onProgress: bridge);
+                promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null,
+                backgroundRgbClip: backgroundClip, characterMaskClip: maskClip, onProgress: bridge);
             conditioning = used;
             Logs.Info($"[WanAnimateRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({numFrames}f pose / {numFrames - 1}f face).");
             return VideoRecipeUtils.ToResult(frames, outW, outH, request, fps: drivingFps);
@@ -161,6 +166,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
             conditioning?.Dispose();
             poseClip?.Dispose();
             faceClip?.Dispose();
+            backgroundClip?.Dispose();
+            maskClip?.Dispose();
             referenceRgb?.Dispose();
             clipEmbeds?.Dispose();
             promptEmbeds.Dispose();

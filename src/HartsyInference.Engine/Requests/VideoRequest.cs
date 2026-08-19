@@ -78,6 +78,16 @@ public sealed record VideoRequest
     /// <summary>Pre-cropped face-square driving video; overrides auto-preprocessing for the face branch.</summary>
     public VideoClip? DrivingFaceVideo { get; init; }
 
+    /// <summary>Wan-Animate replacement mode: the background clip the character is composited into. The concat
+    /// conditioning's generated frames carry this video instead of the mid-gray placeholder (ComfyUI
+    /// <c>WanAnimateToVideo.background_video</c>).</summary>
+    public VideoClip? DrivingBackgroundVideo { get; init; }
+
+    /// <summary>Wan-Animate replacement mode: per-frame character mask (white = generate the character there,
+    /// black = keep the background). A single-frame clip repeats over the whole video (ComfyUI
+    /// <c>WanAnimateToVideo.character_mask</c>).</summary>
+    public VideoClip? DrivingMaskVideo { get; init; }
+
     /// <summary>Auto-derive the pose skeleton and face crop from <see cref="DrivingVideo"/> (the format the
     /// checkpoint was trained on); off passes the raw clip to both branches.</summary>
     public bool DrivingAutoPreprocess { get; init; } = true;
