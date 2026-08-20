@@ -22,6 +22,9 @@ public sealed record VideoRequest
     /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale.</summary>
     public float? CfgScale { get; init; }
 
+    /// <summary>Flow-match sigma shift; null uses the family's officially recommended shift.</summary>
+    public float? FlowShift { get; init; }
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 

@@ -31,8 +31,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     /// <summary>Wan-Animate motion-encoder input resolution (the face crop is square at this size).</summary>
     private const int MotionEncoderSize = 512;
 
-    /// <summary>ComfyUI's Wan sampling shift — <c>WAN22_Animate</c> inherits <c>WAN21_T2V</c>'s sampling settings.</summary>
-    private const float DefaultFlowShift = 8f;
+    /// <summary>Upstream's <c>animate_14B.sample_shift</c>.</summary>
+    private const float DefaultFlowShift = 5f;
 
     private readonly IBackend _backend;
     private readonly WanAnimatePipeline _pipeline;
@@ -136,7 +136,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 Steps = steps,
                 CfgScale = cfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed(),
-                FlowShift = DefaultFlowShift,
+                FlowShift = request.FlowShift ?? DefaultFlowShift,
             };
 
             List<byte[]> assembled = new List<byte[]>();
