@@ -46,15 +46,13 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     /// <summary>The current block's cached driving V, <c>[refSeq, dim]</c> (values are never rotated).</summary>
     public Tensor? DrivingV { get; set; }
 
+    /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving K/V are all
+    /// owned by longer-lived caches and are borrowed here for the duration of one forward.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        RefCos.Dispose();
-        RefSin.Dispose();
         KeyBuffer.Dispose();
         ValueBuffer.Dispose();
-        LogScaleBiasGen?.Dispose();
-        LogScaleBiasSpliced?.Dispose();
     }
 }
 

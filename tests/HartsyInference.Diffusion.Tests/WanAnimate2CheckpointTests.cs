@@ -105,6 +105,16 @@ public sealed class WanAnimate2CheckpointTests
         Assert.Equal(480, quantized);
         Assert.Equal(480, convRot);
         Assert.Equal(80, nonSquare);
+
+        // The transformer must consume every converted tensor: EnumerateWeights is what the placement/streaming
+        // planners size a run from, so a weight the DiT never wired up is a weight nothing would ever notice.
+        using WanAnimate2Transformer dit = new WanAnimate2Transformer(config);
+        dit.LoadWeights(w);
+        Assert.Equal(40, dit.BlockCount);
+        int enumerated = dit.EnumerateWeights().Count();
+        _output.WriteLine($"transformer weights enumerated: {enumerated}");
+        Assert.Equal(w.Count, enumerated);
+        for (int i = 0; i < dit.BlockCount; i++) Assert.NotNull(dit.GetBlock(i));
     }
 
     /// <summary>Every diffusers-named key a Wan2.1 I2V-14B DiT carries, by name only — <see cref="WanSyntheticWeights"/>
