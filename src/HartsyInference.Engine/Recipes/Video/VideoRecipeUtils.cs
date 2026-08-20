@@ -19,6 +19,11 @@ internal static class VideoRecipeUtils
         return Math.Max(multiple, snapped);
     }
 
+    /// <summary>Pixel-size multiple a patchified latent DiT needs: an odd latent grid makes <c>Unpatchify</c> emit one
+    /// fewer row/column than the scheduler's step expects.</summary>
+    internal static int PatchAlignedMultiple(int vaeSpatialCompression, (int T, int H, int W) patchSize) =>
+        vaeSpatialCompression * Math.Max(patchSize.H, patchSize.W);
+
     /// <summary>Snaps the request's width/height to <paramref name="multiple"/>, logging when the geometry moved.</summary>
     internal static (int Width, int Height) ResolveResolution(VideoRequest request, int multiple)
     {

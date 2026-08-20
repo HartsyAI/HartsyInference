@@ -89,7 +89,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
             throw new InvalidOperationException("Wan-Animate needs at least 5 frames (the face pathway downsamples 4x).");
         }
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(request,
+            VideoRecipeUtils.PatchAlignedMultiple(_config.VaeSpatialCompression, _config.PatchSize));
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
