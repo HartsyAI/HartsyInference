@@ -168,8 +168,9 @@ public sealed class BlockStreamingScope : IDisposable
             backend.TrimMemoryPool();
             pin.Resident = false;
             pin.PinnedBlocks = -1;
-            Logs.Info($"[VRAM] {options.ModelName}/denoise: resident prefix released for re-size " +
-                $"(token load {options.TokenLoad} > sized {pin.SizedTokens}{(forceStream ? ", or forced streaming" : "")}).");
+            Logs.Info($"[VRAM] {options.ModelName}/denoise: resident prefix released " + (forceStream
+                ? $"({LowVramPolicy.EnvironmentVariable}=on forces streaming)."
+                : $"for re-size (token load {options.TokenLoad} > sized {pin.SizedTokens})."));
         }
         // FreeMemoryBytes counts pool-retained blocks as USED, so an untrimmed read carries the previous phase's
         // transients and sizes the prefix against pressure that is not there.
@@ -177,6 +178,12 @@ public sealed class BlockStreamingScope : IDisposable
         {
             backend.TrimMemoryPool();
             if (pin is not null) pin.TailEvicted = false;
+        }
+        // Return before the sizing, not after it: a prefix sized here is never uploaded, so recording it on the pin
+        // would leave a later Auto generation squeezing against a count that describes VRAM nobody parked in.
+        if (forceStream)
+        {
+            return 0;
         }
 
         int prefix;
@@ -205,7 +212,7 @@ public sealed class BlockStreamingScope : IDisposable
                 }
             }
         }
-        return forceStream ? 0 : prefix;
+        return prefix;
     }
 
     /// <summary>The <see cref="BlockStreamingPolicy.AllOrNothing"/> split, straight off <see cref="VramPlanner"/>.</summary>

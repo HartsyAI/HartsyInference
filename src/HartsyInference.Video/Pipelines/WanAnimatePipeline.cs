@@ -279,8 +279,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         }
         finally
         {
-            Backend.Sync();
+            // Before the sync, not after: a forward that OOM'd mid-step surfaces on the next Sync, and a throw there
+            // would leave the hook attached on a transformer the recipe cache keeps alive.
             stream.Dispose();
+            Backend.Sync();
         }
         Backend.FreeWeights(_transformer.EnumerateWeights());
         // conditioning (condition/poseLatent/motionCond/motionUncond) is owned by the caller's cross-generation

@@ -52,7 +52,9 @@ public sealed class BlockStreamingScopeTests
 
         public long QueryAvailableWeightCacheBytes(long activationReserve) => Available;
 
-        public void DrainAndReleasePool() { }
+        public int Drains { get; private set; }
+
+        public void DrainAndReleasePool() => Drains++;
     }
 
     private static BlockStreamingOptions Options(RecordingStreamingBackend backend, FakeDenoiser denoiser,
@@ -119,6 +121,42 @@ public sealed class BlockStreamingScopeTests
         Assert.Equal(8, scope.ResidentPrefixBlocks);
         Assert.False(scope.Streaming);
         Assert.Equal(new[] { "preload:shared,b0,b1,b2,b3,b4,b5,b6,b7" }, backend.Calls);
+    }
+
+    [Fact]
+    public void LowVram_On_Leaves_The_Pin_Untouched_So_The_Next_Auto_Generation_Sizes_From_Scratch()
+    {
+        ResidentPrefixPin pin = new ResidentPrefixPin();
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        RecordingStreamingBackend forced = new RecordingStreamingBackend(new StubCache(), 6 * BlockBytes);
+        using (BlockStreamingScope.Open(Options(forced, denoiser, 0, tokenLoad: 1000, pin: pin, mode: LowVramMode.ForceOn))) { }
+
+        // A prefix sized under forced streaming is never uploaded, so recording it would make the next generation
+        // squeeze against a count describing VRAM nobody parked in.
+        Assert.Equal(-1, pin.PinnedBlocks);
+        Assert.Equal(-1, pin.SizedTokens);
+        Assert.False(pin.Resident);
+
+        RecordingStreamingBackend auto = new RecordingStreamingBackend(new StubCache(), 3 * BlockBytes);
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(auto, denoiser, 0, tokenLoad: 1000, pin: pin));
+
+        Assert.Equal(3, scope.ResidentPrefixBlocks);
+        Assert.Equal(3, pin.PinnedBlocks);
+    }
+
+    [Fact]
+    public void LowVram_On_Releases_A_Resident_Prefix_And_Drops_Its_Pin()
+    {
+        ResidentPrefixPin pin = new ResidentPrefixPin { PinnedBlocks = 6, SizedTokens = 1000, Resident = true };
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), 6 * BlockBytes);
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        using BlockStreamingScope scope = BlockStreamingScope.Open(
+            Options(backend, denoiser, 0, tokenLoad: 1000, pin: pin, mode: LowVramMode.ForceOn));
+
+        Assert.Equal(0, scope.ResidentPrefixBlocks);
+        Assert.Contains("free:b0,b1,b2,b3,b4,b5", backend.Calls);
+        Assert.Equal(-1, pin.PinnedBlocks);
+        Assert.False(pin.Resident);
     }
 
     [Fact]
@@ -299,6 +337,34 @@ public sealed class BlockStreamingScopeTests
 
         Assert.True(scope.Streaming);
         Assert.Equal(0, scope.StepsEnded);
+    }
+
+    [Fact]
+    public void Dispose_Drains_The_Cache_Once_On_The_Streamed_Path()
+    {
+        StubCache cache = new StubCache();
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(cache, 0);
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0));
+
+        scope.Dispose();
+        scope.Dispose();
+
+        Assert.Equal(1, cache.Drains);
+    }
+
+    [Fact]
+    public void Dispose_Never_Drains_When_Nothing_Was_Streamed()
+    {
+        StubCache cache = new StubCache();
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(cache, 100L * BlockBytes);
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0));
+        Assert.False(scope.Streaming);
+
+        scope.Dispose();
+
+        Assert.Equal(0, cache.Drains);
     }
 
     [Fact]
