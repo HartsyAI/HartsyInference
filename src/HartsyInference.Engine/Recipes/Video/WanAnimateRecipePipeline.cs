@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -47,6 +50,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     private readonly ClipVisionEncoder? _clipVision;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly ModelAssets.Lora.LoraStack? _loraStack;
+    private WanAnimateConditioning? _conditioningCache;
+    private string? _conditioningCacheKey;
 
     /// <summary>Wraps the constructed Animate pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanAnimateRecipePipeline(IBackend backend, WanAnimatePipeline pipeline, WanVideoConfig config, T5Tokenizer tokenizer,
@@ -101,6 +106,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request,
             VideoRecipeUtils.PatchAlignedMultiple(_config.VaeSpatialCompression, _config.PatchSize));
+
+        string cacheKey = BuildConditioningKey(request, reference, width, height, numFrames);
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
@@ -206,12 +213,17 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                         progress?.Report(new StepPreview { Step = stepsBefore + p.Step, TotalSteps = stepsTotal });
                     };
 
+                    // Only chunk 0 is cacheable: a continuation chunk's conditioning carries that chunk's motion
+                    // prefix and its own driving slice.
+                    bool cacheable = chunkIndex == 0;
+                    WanAnimateConditioning? cached = cacheable && string.Equals(cacheKey, _conditioningCacheKey, StringComparison.Ordinal)
+                        ? _conditioningCache : null;
                     (byte[][] frames, int chunkW, int chunkH, int _, WanAnimateConditioning used, int trimImage) =
                         _pipeline.GenerateAnimation(promptEmbeds, negEmbeds, referenceRgb, clips.PoseClip, clips.FaceClip,
-                            inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null,
+                            inner, clipImageEmbeds: clipEmbeds, cachedConditioning: cached,
                             backgroundRgbClip: clips.BackgroundClip, characterMaskClip: clips.MaskClip,
                             continueMotionRgbClip: continueClip, onProgress: bridge);
-                    used.Dispose();
+                    StoreConditioning(cacheable, cacheKey, used);
                     outW = chunkW;
                     outH = chunkH;
                     for (int i = trimImage; i < frames.Length; i++)
@@ -256,6 +268,82 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         }
     }
 
+    /// <summary>Keeps a chunk-0 conditioning for the next generation with identical inputs, disposing whatever it
+    /// replaces; anything else (a continuation chunk) is disposed outright.</summary>
+    private void StoreConditioning(bool cacheable, string key, WanAnimateConditioning conditioning)
+    {
+        if (!cacheable)
+        {
+            conditioning.Dispose();
+            return;
+        }
+        if (ReferenceEquals(_conditioningCache, conditioning))
+        {
+            return;
+        }
+        _conditioningCache?.Dispose();
+        _conditioningCache = conditioning;
+        _conditioningCacheKey = key;
+    }
+
+    /// <summary>Content key for the cross-generation conditioning cache — every input the VAE + motion encode reads.
+    /// A hit derives its geometry from the cached pose latent, so anything that can move the geometry or the encoded
+    /// pixels must be in here or a stale entry would silently generate at the wrong size.</summary>
+    private static string BuildConditioningKey(VideoRequest request, ImageData reference, int width, int height, int frames)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> header = stackalloc byte[24];
+        BinaryPrimitives.WriteInt32LittleEndian(header, width);
+        BinaryPrimitives.WriteInt32LittleEndian(header[4..], height);
+        BinaryPrimitives.WriteInt32LittleEndian(header[8..], frames);
+        BinaryPrimitives.WriteInt32LittleEndian(header[12..], reference.Width);
+        BinaryPrimitives.WriteInt32LittleEndian(header[16..], reference.Height);
+        BinaryPrimitives.WriteInt32LittleEndian(header[20..], request.DrivingAutoPreprocess ? 1 : 0);
+        hash.AppendData(header);
+        hash.AppendData(reference.Rgb);
+        AppendImage(hash, request.InitImage);   // the driving fallback when there is no driving video
+        AppendClip(hash, request.DrivingVideo);
+        AppendClip(hash, request.DrivingPoseVideo);
+        AppendClip(hash, request.DrivingFaceVideo);
+        AppendClip(hash, request.DrivingBackgroundVideo);
+        AppendClip(hash, request.DrivingMaskVideo);
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    /// <summary>Marks an optional input present or absent, so an absent slot can never alias onto the next slot's bytes.</summary>
+    private static void AppendPresence(IncrementalHash hash, bool present)
+    {
+        Span<byte> marker = stackalloc byte[1];
+        marker[0] = present ? (byte)1 : (byte)0;
+        hash.AppendData(marker);
+    }
+
+    private static void AppendImage(IncrementalHash hash, ImageData? image)
+    {
+        AppendPresence(hash, image is not null);
+        if (image is null)
+        {
+            return;
+        }
+        Span<byte> size = stackalloc byte[8];
+        BinaryPrimitives.WriteInt32LittleEndian(size, image.Width);
+        BinaryPrimitives.WriteInt32LittleEndian(size[4..], image.Height);
+        hash.AppendData(size);
+        hash.AppendData(image.Rgb);
+    }
+
+    private static void AppendClip(IncrementalHash hash, VideoClip? clip)
+    {
+        AppendPresence(hash, clip is not null);
+        if (clip is null)
+        {
+            return;
+        }
+        hash.AppendData(Encoding.UTF8.GetBytes(clip.Format ?? ""));
+        AppendPresence(hash, false);
+        hash.AppendData(clip.Data);
+    }
+
     /// <summary>Pulls the character identity image out of the request's arch-specific bag, or null when absent.</summary>
     private static ImageData? ResolveReference(VideoRequest request) =>
         request.Extra.TryGetValue(ReferenceImageKey, out object? value) ? value as ImageData : null;
@@ -263,6 +351,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
+        _conditioningCache?.Dispose();
         _pipeline.Dispose();
         _tokenizer.Dispose();
         _umt5.Dispose();
