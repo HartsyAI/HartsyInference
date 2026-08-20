@@ -17,6 +17,12 @@ internal static class WanAnimatePoseClipBuilder
         int width, int height, CancellationToken cancel)
     {
         int numFrames = frames.Count;
+        // Wan2.2's renderer, not controlnet_aux's: line width is canvas-relative, limbs overwrite, one subject,
+        // and joints below 0.5 are dropped. The detector stays at 0.25 — upstream's person detector is lower still.
+        OpenPoseRenderer.Profile profile = OpenPoseRenderer.Profile.Wan22Animate with
+        {
+            LineWidth = OpenPoseRenderer.Wan22LineWidth(width, height),
+        };
         byte[][] skeletons = new byte[numFrames][];
         backend.PreloadWeights(pose.EnumerateWeights());
         int rendered = 0;
@@ -27,7 +33,7 @@ internal static class WanAnimatePoseClipBuilder
                 cancel.ThrowIfCancellationRequested();
                 IReadOnlyList<PoseDetection> people = pose.Detect(frames[f], width, height, confidenceThreshold: 0.25f, iouThreshold: 0.45f);
                 backend.FreeActivations();
-                skeletons[f] = OpenPoseRenderer.RenderBodyPose(people, width, height);
+                skeletons[f] = OpenPoseRenderer.RenderBodyPose(people, width, height, 1f, 1f, profile);
                 if (people.Count > 0)
                 {
                     rendered++;
