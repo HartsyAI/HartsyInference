@@ -105,6 +105,33 @@ public sealed class WanVideoRecipe : IVideoRecipe
             return Supports;
         }
     }
+
+    /// <summary>The sampling defaults for a CONCRETE checkpoint. Same reason as <see cref="SupportsFor"/>: the
+    /// variants share Wan's compat classes, so a VACE/Animate/S2V checkpoint resolves under <c>wan-21-14b</c> and
+    /// would otherwise be handed the plain-Wan defaults — Animate's 20 steps at guidance 1.0 never applied, and the
+    /// request fell through to <c>WanVideoConfig</c>'s 50/5.0 instead.</summary>
+    public VideoDefaults DefaultsFor(string? checkpointPath)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            return Defaults;
+        }
+        try
+        {
+            return DetectVariant(checkpointPath) switch
+            {
+                WanVariant.Vace => new WanVaceRecipe(_familyId).Defaults,
+                WanVariant.Animate => new WanAnimateRecipe().Defaults,
+                WanVariant.S2V => new WanS2VRecipe().Defaults,
+                _ => Defaults,
+            };
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware defaults; using family defaults. {ex.Message}");
+            return Defaults;
+        }
+    }
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 

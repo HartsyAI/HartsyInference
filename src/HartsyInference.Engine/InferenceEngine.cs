@@ -311,7 +311,16 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The officially recommended video defaults for <paramref name="spec"/>, resolved through the same
     /// family-id + registry lookup <see cref="GetOrConstructVideoRecipe"/> uses.</summary>
     internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
-        => VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec))?.Defaults ?? VideoDefaults.Standard;
+    {
+        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
+        return recipe switch
+        {
+            null => VideoDefaults.Standard,
+            // Checkpoint-aware for the same reason SupportsFor is — see WanVideoRecipe.DefaultsFor.
+            Recipes.Video.WanVideoRecipe wan => wan.DefaultsFor(spec.LocalPath),
+            _ => recipe.Defaults,
+        };
+    }
 
     /// <summary>Video-path family id: <see cref="ResolveFamilyId"/> plus checkpoint-aware remaps (currently only
     /// LTX-2.5 distilled-by-filename). Video-only — image recipes carry no per-checkpoint contracts by name.</summary>
