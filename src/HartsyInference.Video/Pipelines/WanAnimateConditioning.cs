@@ -18,8 +18,9 @@ public sealed class WanAnimateConditioning : IDisposable
     /// <summary>Positive-branch face-motion features <c>[gt, N+1, dim]</c>.</summary>
     public required Tensor MotionCond { get; init; }
 
-    /// <summary>Negative-branch (black-face) face-motion features <c>[gt, N+1, dim]</c>.</summary>
-    public required Tensor MotionUncond { get; init; }
+    /// <summary>Negative-branch (black-face) face-motion features <c>[gt, N+1, dim]</c>; null when the entry was built
+    /// for a single-forward (guidance ≤ 1) denoise, which makes it un-reusable for a CFG one.</summary>
+    public Tensor? MotionUncond { get; init; }
 
     /// <summary>Latent frames the chunked extension's motion prefix occupied when this was built; 0 for a normal
     /// (first/only) chunk. Non-zero makes the entry un-reusable — the prefix differs on every chunk.</summary>

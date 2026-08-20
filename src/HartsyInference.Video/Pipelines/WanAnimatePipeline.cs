@@ -18,7 +18,8 @@ namespace HartsyInference.Video.Pipelines;
 /// model space, after the WAN21 <c>1 − mask</c> inversion) is 1 on the reference frame and 0 on generated frames.
 /// The pose video is VAE-encoded and passed to the DiT (added
 /// in-DiT to latent frames 1..); the face video ([-1,1], 512×512 pixels) drives the motion-encoder → face-encoder →
-/// face-adapter pathway — the negative CFG branch gets black face frames (<c>face·0 − 1</c>), per the node.
+/// face-adapter pathway — the negative CFG branch gets black face frames (<c>face·0 − 1</c>), per the node, and runs
+/// only above guidance 1.0 (upstream <c>wan/animate.py</c> takes a single forward at or below it).
 ///
 /// <c>continue_motion</c> (the chunked extension) writes the previous chunk's last frames over the head of that gray
 /// clip before the single VAE encode and marks the matching latent frames known in the mask; the chunk re-renders them
@@ -43,6 +44,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         _config = config;
     }
 
+    /// <summary>True when the denoise must run the negative branch at all: upstream (<c>wan/animate.py</c>) folds CFG
+    /// only above guidance 1.0, and at exactly 1.0 the fold is the identity.</summary>
+    public static bool UsesCfgBranch(float guidance) => guidance > 1f;
+
     /// <summary>Generates an animated clip. <paramref name="referenceRgb"/> is the character reference image
     /// <c>[1, 3, 1, H, W]</c> in [-1, 1]; <paramref name="poseRgbClip"/> is the driving pose/skeleton video
     /// <c>[1, 3, T, H, W]</c>; <paramref name="faceRgbClip"/> is the driving face video <c>[1, 3, Tface, 512, 512]</c>
@@ -64,11 +69,15 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             throw new InvalidOperationException(
                 $"Wan-Animate expects InChannels == 2·z + tp ({2 * latentCh + tp}); got {_config.InChannels}.");
 
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        bool useCfg = UsesCfgBranch(guidance);
+
         // Geometry: from the cached pose latent on a conditioning-cache hit, else from the pose pixel clip.
         // A continuation chunk's conditioning is prefix-specific: never reuse a cache entry for one, and never serve
-        // an entry that was built with a prefix.
+        // an entry that was built with a prefix, nor a single-pass entry when CFG needs the black-face features.
         bool haveCached = cachedConditioning is not null && continueMotionRgbClip is null
-            && cachedConditioning.RefMotionLatentLength == 0;
+            && cachedConditioning.RefMotionLatentLength == 0
+            && (!useCfg || cachedConditioning.MotionUncond is not null);
         int pixT, pixH, pixW, tLat, hLat, wLat;
         const int trimLatent = 1;   // the reference latent frame, removed before decode
         if (haveCached)
@@ -116,10 +125,9 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tTotal = tLat + trimLatent;
         int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
-        Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}, seed={seed} " +
+        Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, seed={seed} " +
             $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent}{(haveCached ? ", cond CACHED" : "")}"
             + $"{(motionFrames > 0 ? $", continue-motion {motionFrames}f → {refMotionLatentLength} latent frame(s), trim {trimImage}f" : "")})");
         // Animation mode validated end-to-end 2026-08-19 (real driving video, YOLO-pose auto-preprocess,
@@ -166,18 +174,21 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             refLatent.Dispose();
             grayLatent.Dispose();
 
-            // Negative CFG branch drives the face pathway with black frames (face·0 − 1), per the node.
-            Tensor faceNeg = new Tensor(faceRgbClip!.Shape, DType.F32);
-            float* fnp = (float*)faceNeg.DataPointer;
-            long fn = faceNeg.Shape.ElementCount;
-            for (long i = 0; i < fn; i++) fnp[i] = -1f;
-
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             // The face clip is constant across the denoise: encode motion ONCE per CFG branch (the StyleGAN motion
             // encoder is host-side; running it inside every forward made a 20-step 14B run take >30 min).
             Tensor motionCondDev = _transformer.EncodeMotion(Backend, faceRgbClip!, tTotal);
-            Tensor motionUncondDev = _transformer.EncodeMotion(Backend, faceNeg, tTotal);
-            faceNeg.Dispose();
+            Tensor? motionUncondDev = null;
+            if (useCfg)
+            {
+                // Negative CFG branch drives the face pathway with black frames (face·0 − 1), per the node.
+                Tensor faceNeg = new Tensor(faceRgbClip!.Shape, DType.F32);
+                float* fnp = (float*)faceNeg.DataPointer;
+                long fn = faceNeg.Shape.ElementCount;
+                for (long i = 0; i < fn; i++) fnp[i] = -1f;
+                motionUncondDev = _transformer.EncodeMotion(Backend, faceNeg, tTotal);
+                faceNeg.Dispose();
+            }
             Backend.Sync();
 
             // Host-materialize the whole conditioning for cross-generation caching (small tensors — a few MB; they
@@ -188,19 +199,24 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 Condition = HostCopy(conditionDev),
                 PoseLatent = HostCopy(poseLatentDev),
                 MotionCond = HostCopy(motionCondDev),
-                MotionUncond = HostCopy(motionUncondDev),
+                MotionUncond = motionUncondDev is null ? null : HostCopy(motionUncondDev),
                 RefMotionLatentLength = refMotionLatentLength,
             };
             conditionDev.Dispose();
             poseLatentDev.Dispose();
             motionCondDev.Dispose();
-            motionUncondDev.Dispose();
+            motionUncondDev?.Dispose();
         }
 
         Tensor condition = conditioning.Condition;
         Tensor poseLatent = conditioning.PoseLatent;
         Tensor motionCond = conditioning.MotionCond;
-        Tensor motionUncond = conditioning.MotionUncond;
+        Tensor? motionUncond = conditioning.MotionUncond;
+        if (useCfg && motionUncond is null)
+        {
+            throw new InvalidOperationException(
+                "Wan-Animate CFG needs the black-face motion features, but this conditioning was built single-pass.");
+        }
 
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
@@ -214,11 +230,15 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             float tEmb = scheduler.Timesteps[k];
             Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
             Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, null, promptEmbeds, tEmb, clipImageEmbeds, motion: motionCond);
-            Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, null, negativeEmbeds, tEmb, clipImageEmbeds, motion: motionUncond);
+            if (useCfg)
+            {
+                Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, null, negativeEmbeds, tEmb, clipImageEmbeds, motion: motionUncond);
+                LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
+                vUncond.Dispose();
+            }
             modelInput.Dispose();
-            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
-            vCond.Dispose(); vUncond.Dispose();
+            vCond.Dispose();
             sw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
             {
