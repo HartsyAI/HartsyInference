@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -14,7 +15,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <c>x = x + face_adapter.fuser_blocks[i/5](x, motion)</c> after every block where <c>i % 5 == 0</c>. Optional
 /// <c>ref_conv</c> (Conv2d) reference-latent tokens are PREPENDED to the sequence (RoPE spans gt+1 frames; the rows
 /// are trimmed after the head). Reuses <see cref="WanDitOps"/> + <see cref="WanVideoBlock"/>; B=1.</summary>
-public sealed unsafe class WanAnimateTransformer : IDisposable
+public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposable
 {
     /// <summary>Face-adapter fusion interval: a fuser block runs after every DiT block where <c>i % 5 == 0</c>.</summary>
     public const int FuseEvery = 5;
@@ -104,16 +105,42 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
+        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+        foreach (Tensor t in EnumerateMotionEncoderWeights()) yield return t;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>The 8 face-adapter fusers are here rather than folded into the block they follow: each is ~105 MB and
+    /// they run on only every fifth block, so travelling with a streamed block would re-upload 840 MB per forward to
+    /// save the same 840 MB of residency — and fuser <c>i/5</c> reads the hidden state block <c>i</c> just produced,
+    /// so its residency is not co-terminous with that block's window.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _posePatchW2d, _posePatchB, _refConvW2d, _refConvB,
             _projOutW, _projOutB, _finalScaleShift, _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB,
             _textW1, _textB1, _textW2, _textB2 })
             if (t is not null) yield return t;
         foreach (Tensor t in _imgEmbedder.EnumerateWeights()) yield return t;
-        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
         for (int i = 0; i < _faceAdapter.Length; i++) foreach (Tensor t in _faceAdapter[i].EnumerateWeights()) yield return t;
+    }
+
+    /// <summary>The motion + face encoders, which run once in <see cref="EncodeMotion"/> and are dead for the rest of
+    /// the generation — preload them, encode, free them, and only then place the DiT.</summary>
+    public IEnumerable<Tensor> EnumerateMotionEncoderWeights()
+    {
         foreach (Tensor t in _motionEncoder.EnumerateWeights()) yield return t;
         foreach (Tensor t in _faceEncoder.EnumerateWeights()) yield return t;
     }
+
+    /// <inheritdoc/>
+    public int BlockCount => _blocks.Length;
+
+    /// <inheritdoc/>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <inheritdoc/>
+    public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c> (noise + concat
     /// conditioning); <paramref name="pose"/> is the pose-video latent <c>[1, poseC, Tpose, H, W]</c> (added to
@@ -201,6 +228,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
         Tensor cur = hidden;
         for (int i = 0; i < _blocks.Length; i++)
         {
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, s,
                 imageContextLen: imageContextLen);
             cur.Dispose();

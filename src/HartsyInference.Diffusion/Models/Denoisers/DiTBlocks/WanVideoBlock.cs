@@ -1,10 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Wan-Video DiT block (<c>WanTransformerBlock</c>), ported from diffusers. B=1 over <c>[S, dim]</c>: self-attention + per-head 3D RoPE → cross-attention to umT5 → gelu-approx FFN. AdaLN is 6-param (self-attn shift/scale/gate + FFN shift/scale/gate; cross-attn ungated). Pre-norms are FP32 LayerNorm (norm1/norm3 no-affine, norm2 affine when cross_attn_norm); QK-norm is RMSNorm-across-heads. Reuses backend <c>LayerNorm</c>/<c>RmsNorm</c>/<c>ScaledDotProductAttention</c> + <see cref="WanRope"/>.</summary>
-public sealed unsafe class WanVideoBlock
+public sealed unsafe class WanVideoBlock : IStreamingBlock
 {
     private readonly int _dim;
     private readonly int _heads;
@@ -47,7 +48,15 @@ public sealed unsafe class WanVideoBlock
         if (_crossAttnNorm) { _norm2W = LoadF32(w, $"{prefix}.norm2.weight"); _norm2B = w.TryGetValue($"{prefix}.norm2.bias", out Tensor? n2b) ? (n2b.DType == DType.F32 ? n2b : n2b.CastTo(DType.F32)) : null; }
         _ffProjW = w[$"{prefix}.ffn.net.0.proj.weight"]; w.TryGetValue($"{prefix}.ffn.net.0.proj.bias", out _ffProjB);
         _ffOutW = w[$"{prefix}.ffn.net.2.weight"]; w.TryGetValue($"{prefix}.ffn.net.2.bias", out _ffOutB);
+        long bytes = 0;
+        foreach (Tensor t in EnumerateWeights()) bytes += t.DType.ComputeByteCount(t.ElementCount);
+        EstimatedWeightBytes = bytes;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c> — the latter reports
+    /// 0 for block-quantized dtypes, which would size a streaming window at zero.</remarks>
+    public long EstimatedWeightBytes { get; private set; }
 
     private void LoadAttn(IReadOnlyDictionary<string, Tensor> w, string p, int i)
     {

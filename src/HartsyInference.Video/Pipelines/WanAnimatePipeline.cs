@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -33,6 +35,15 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
     private readonly IWanVaeDecoder _vae;
     private readonly IWanVaeEncoder _encoder;
     private readonly WanVideoConfig _config;
+
+    /// <summary>Measured per-token activation slope of the Animate denoise loop (~0.64 MB/token). The binding
+    /// constraint here is activations, not weights, so the streaming headroom has to scale with the geometry —
+    /// a flat margin lets the resident prefix eat the VRAM the forward needs at exactly the sizes streaming exists
+    /// for.</summary>
+    private const long ActivationBytesPerToken = 671_089;
+
+    /// <summary>Allowance for cuBLAS workspace, the prefetch window and pool slack, on top of the token-scaled term.</summary>
+    private const long FixedHeadroomBytes = 1L << 30;
 
     public WanAnimatePipeline(IBackend backend, WanAnimateTransformer transformer, IWanVaeDecoder vae,
         IWanVaeEncoder encoder, WanVideoConfig config)
@@ -137,7 +148,6 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         if (haveCached)
         {
             conditioning = cachedConditioning!;
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
         else
         {
@@ -174,7 +184,9 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             refLatent.Dispose();
             grayLatent.Dispose();
 
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            // Only the motion/face encoders — the DiT itself is placed after this, and preloading it here would
+            // hold ~15 GB of block weights across an encode that never touches them.
+            Backend.PreloadWeights(_transformer.EnumerateMotionEncoderWeights());
             // The face clip is constant across the denoise: encode motion ONCE per CFG branch (the StyleGAN motion
             // encoder is host-side; running it inside every forward made a 20-step 14B run take >30 min).
             Tensor motionCondDev = _transformer.EncodeMotion(Backend, faceRgbClip!, tTotal);
@@ -190,6 +202,8 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 faceNeg.Dispose();
             }
             Backend.Sync();
+            Backend.FreeWeights(_transformer.EnumerateMotionEncoderWeights());
+            Backend.TrimMemoryPool();
 
             // Host-materialize the whole conditioning for cross-generation caching (small tensors — a few MB; they
             // re-fault to device inside the loop, exactly like the S2V reference-latent cache). Bit-identical to the
@@ -224,31 +238,50 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
         scheduler.SetTimesteps(steps, shift);
 
-        for (int k = 0; k < steps; k++)
+        (int pt2, int ph2, int pw2) = _config.PatchSize;
+        long tokenLoad = (long)(tTotal / pt2) * (hLat / ph2) * (wLat / pw2);
+        long headroomBytes = Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE_HEADROOM_MB", 3072) * 1024 * 1024,
+            tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
+        BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
         {
-            Stopwatch sw = Stopwatch.StartNew();
-            float tEmb = scheduler.Timesteps[k];
-            Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
-            Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, null, promptEmbeds, tEmb, clipImageEmbeds, motion: motionCond);
-            if (useCfg)
+            Backend = Backend,
+            Denoiser = _transformer,
+            ModelName = "Wan-Animate",
+            HeadroomBytes = headroomBytes,
+            TokenLoad = tokenLoad,
+        });
+        try
+        {
+            for (int k = 0; k < steps; k++)
             {
-                Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, null, negativeEmbeds, tEmb, clipImageEmbeds, motion: motionUncond);
-                LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
-                vUncond.Dispose();
+                Stopwatch sw = Stopwatch.StartNew();
+                float tEmb = scheduler.Timesteps[k];
+                Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
+                Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, null, promptEmbeds, tEmb, clipImageEmbeds, motion: motionCond);
+                if (useCfg)
+                {
+                    Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, null, negativeEmbeds, tEmb, clipImageEmbeds, motion: motionUncond);
+                    LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
+                    vUncond.Dispose();
+                }
+                modelInput.Dispose();
+                scheduler.Step(latents, vCond);
+                vCond.Dispose();
+                sw.Stop();
+                onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = latents,
+                    LatentArch = LatentArchitecture.Wan,
+                });
+                Backend.FreeActivations();
+                stream.EndStep();
             }
-            modelInput.Dispose();
-            scheduler.Step(latents, vCond);
-            vCond.Dispose();
-            sw.Stop();
-            onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
-            {
-                Latent = latents,
-                LatentArch = LatentArchitecture.Wan,
-            });
-            Backend.FreeActivations();
         }
-
-        Backend.Sync();
+        finally
+        {
+            Backend.Sync();
+            stream.Dispose();
+        }
         Backend.FreeWeights(_transformer.EnumerateWeights());
         // conditioning (condition/poseLatent/motionCond/motionUncond) is owned by the caller's cross-generation
         // cache — never disposed here.
