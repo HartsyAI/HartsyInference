@@ -161,6 +161,8 @@ public static class TestPaths
             Lance.VaePath,
             Path.Combine(ModelsDir, "VAE", "Wan", "wan2.2_vae.safetensors"));
         public static string Umt5Xxl       => Resolve("UMT5_XXL_PATH",        Path.Combine(ModelsDir, "text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"));
+        /// <summary>Wan-Animate-2 14B DiT (ComfyUI int8-convrot repack). Override with WAN_ANIMATE2_PATH.</summary>
+        public static string Animate2      => Resolve("WAN_ANIMATE2_PATH",    Path.Combine(ModelsDir, "Stable-Diffusion", "Wan", "Animate2", "wan_animate_2_int8_convrot.safetensors"));
         public static string Umt5XxlSpiece => Tokenizers.Umt5XxlSpiece;
         /// <summary>Optional Wan LoRA applied by the generation test when present (kohya/musubi, Comfy diffusion_model, or diffusers-PEFT format).</summary>
         public static string LoraPath      => Resolve("WAN_LORA_PATH",        Path.Combine(ModelsDir, "Lora", "wan_lora.safetensors"));

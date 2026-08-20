@@ -111,6 +111,16 @@ public sealed record WanVideoConfig
     /// face-encoder → face-adapter pathway. Drives <c>WanAnimateTransformer</c> instead of <c>WanVideoTransformer</c>.</summary>
     public bool IsAnimate { get; init; }
 
+    /// <summary>True for Wan-Animate-2: the same Wan2.1 I2V-14B blocks driven by a second (driving-video) token
+    /// stream whose per-block self-attention K/V splice into the generation stream. Drives
+    /// <c>WanAnimate2Transformer</c>. Not a weight fact — the checkpoint is key-for-key a plain I2V-14B one, so it
+    /// comes from the file's <c>__metadata__</c> via <c>WanVideoCheckpointConverter.IsAnimate2Metadata</c>.</summary>
+    public bool IsAnimate2 { get; init; }
+
+    /// <summary>Animate-2 attention-score bias added to the keys of generation latent frame 1 (the <c>[hw, 2hw)</c>
+    /// band). The one config value that differs between the base build (0) and the distillation build (-1.3).</summary>
+    public float Animate2LogScale { get; init; }
+
     /// <summary>True when this variant carries CLIP image conditioning (Wan2.1 I2V).</summary>
     public bool HasImageConditioning => ImageDim > 0;
 

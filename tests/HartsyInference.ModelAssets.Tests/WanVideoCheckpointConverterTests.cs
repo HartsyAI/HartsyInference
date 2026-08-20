@@ -102,6 +102,34 @@ public class WanVideoCheckpointConverterTests
         Assert.Null(WanVideoCheckpointConverter.MapKey("blocks.0.self_attn.q.scaled_fp8", fromOriginalNaming: true));
     }
 
+    /// <summary>Animate-2's key set is identical to a plain Wan2.1 I2V-14B one, so the metadata declaration is the
+    /// only classifier — a structural fallback would convert every I2V-14B checkpoint as Animate-2.</summary>
+    [Fact]
+    public void IsAnimate2Metadata_ReadsTheTransformerModelType()
+    {
+        Assert.True(WanVideoCheckpointConverter.IsAnimate2Metadata(
+            new Dictionary<string, string> { ["config"] = "{\"transformer\": {\"model_type\": \"animate2\"}}" }));
+        Assert.False(WanVideoCheckpointConverter.IsAnimate2Metadata(
+            new Dictionary<string, string> { ["config"] = "{\"transformer\": {\"model_type\": \"i2v\"}}" }));
+        Assert.False(WanVideoCheckpointConverter.IsAnimate2Metadata(
+            new Dictionary<string, string> { ["config"] = "not json at all" }));
+        Assert.False(WanVideoCheckpointConverter.IsAnimate2Metadata(new Dictionary<string, string>()));
+        Assert.False(WanVideoCheckpointConverter.IsAnimate2Metadata(null));
+    }
+
+    [Fact]
+    public void HasAnimate2Structure_RejectsTheAnimateV1ConditioningSurface()
+    {
+        string[] animate2 = ["blocks.0.self_attn.q.weight", "img_emb.proj.0.weight", "patch_embedding.weight"];
+        Assert.True(WanVideoCheckpointConverter.HasAnimate2Structure(animate2));
+        Assert.False(WanVideoCheckpointConverter.HasAnimate2Structure([.. animate2, "pose_patch_embedding.weight"]));
+        Assert.False(WanVideoCheckpointConverter.HasAnimate2Structure([.. animate2, "face_adapter.fuser_blocks.0.linear1_kv.weight"]));
+        Assert.False(WanVideoCheckpointConverter.HasAnimate2Structure([.. animate2, "motion_encoder.enc.fc.0.weight"]));
+        Assert.False(WanVideoCheckpointConverter.HasAnimate2Structure([.. animate2, "face_encoder.out_proj.weight"]));
+        // T2V has no img_emb, so it can never satisfy the Animate-2 shape check.
+        Assert.False(WanVideoCheckpointConverter.HasAnimate2Structure(["blocks.0.self_attn.q.weight", "patch_embedding.weight"]));
+    }
+
     [Fact]
     public void IsOriginalNaming_DetectsBothFormats()
     {

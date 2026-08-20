@@ -15,7 +15,9 @@ public static class WanConfigDetector
 {
     /// <summary>Builds a <see cref="WanVideoConfig"/> from converted transformer weights
     /// (the <c>WanVideoCheckpointConverter.Convert</c> output). Throws if the dict is not a Wan DiT.</summary>
-    public static WanVideoConfig Detect(IReadOnlyDictionary<string, Tensor> w)
+    /// <param name="isAnimate2">Wan-Animate-2, which is indistinguishable from Wan2.1 I2V-14B by weights alone —
+    /// pass <c>WanVideoCheckpointConverter.ConvertedWeights.IsAnimate2</c>, read from the file's metadata.</param>
+    public static WanVideoConfig Detect(IReadOnlyDictionary<string, Tensor> w, bool isAnimate2 = false)
     {
         ArgumentNullException.ThrowIfNull(w);
         if (!w.TryGetValue("patch_embedding.weight", out Tensor? patch))
@@ -114,6 +116,7 @@ public static class WanConfigDetector
         {
             GuidanceScale = guidance,
             IsAnimate = isAnimate,
+            IsAnimate2 = isAnimate2,
             VaceLayers = vaceLayers,
             VaceInChannels = vaceInChannels,
             CfgRescale = cfgRescale,
@@ -145,5 +148,6 @@ public static class WanConfigDetector
         (c.VaceLayers.Length > 0 ? $"VACE(in={c.VaceInChannels},blocks={c.VaceLayers.Length}) " : "") +
         (c.HasAudioConditioning ? $"S2V(audio={c.AudioDim}×{c.AudioLayers},inject={c.AudioInjectLayers.Length}) " : "") +
         (c.IsAnimate ? "Animate(pose+face) " : "") +
+        (c.IsAnimate2 ? $"Animate2(log_scale={c.Animate2LogScale}) " : "") +
         (c.IsMixtureOfExperts ? $"MoE(boundary={c.BoundaryRatio}) " : "");
 }

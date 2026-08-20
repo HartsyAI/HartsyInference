@@ -1,3 +1,4 @@
+using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -25,7 +26,12 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <c>WanAnimateTransformer.LoadWeights</c> expects them under their original names (pinned by
 /// <c>WanVideoCheckpointConverterTests.MapKey_AnimateKeys_PassThroughUnchanged</c>). The base i2v keys
 /// (<c>img_emb.proj.*</c>, <c>cross_attn.k_img</c>/<c>v_img</c>/<c>norm_k_img</c>) convert to the diffusers names as
-/// usual.</para></summary>
+/// usual.</para>
+///
+/// <para><b>Wan-Animate-2:</b> the checkpoint IS a Wan2.1 I2V-14B one — same 40 blocks, same <c>img_emb</c>, none of
+/// the V1 pose/face surface — so it renames through the same rules and is recognised only by its <c>__metadata__</c>
+/// (<see cref="IsAnimate2Metadata"/>). Its int8-convrot quantization needs no arm of its own: the <c>.weight_scale</c>
+/// / <c>.comfy_quant</c> companions ride the shared <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> pass.</para></summary>
 public sealed class WanVideoCheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];
@@ -78,6 +84,55 @@ public sealed class WanVideoCheckpointConverter
     {
         /// <summary>DiT weights in diffusers naming for <c>WanVideoTransformer.LoadWeights</c>.</summary>
         public required Dictionary<string, Tensor> Transformer { get; init; }
+
+        /// <summary>True when the file's <c>__metadata__</c> declared Wan-Animate-2 (<c>WanAnimate2Transformer</c>).</summary>
+        public bool IsAnimate2 { get; init; }
+    }
+
+    /// <summary><c>__metadata__</c> entry whose JSON value carries the ComfyUI model type.</summary>
+    private const string ConfigMetadataKey = "config";
+
+    /// <summary>Reads <c>__metadata__["config"] = {"transformer": {"model_type": "animate2"}}</c>. This is the ONLY
+    /// reliable Animate-2 discriminator: its key set is byte-for-byte a Wan2.1 I2V-14B one, so
+    /// <see cref="HasAnimate2Structure"/> can validate the claim but can never make it.</summary>
+    public static bool IsAnimate2Metadata(IReadOnlyDictionary<string, string>? metadata)
+    {
+        if (metadata is null || !metadata.TryGetValue(ConfigMetadataKey, out string? config))
+            return false;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(config);
+            return doc.RootElement.TryGetProperty("transformer", out JsonElement transformer)
+                && transformer.TryGetProperty("model_type", out JsonElement modelType)
+                && modelType.ValueKind == JsonValueKind.String
+                && modelType.GetString() == "animate2";
+        }
+        catch (JsonException) { return false; }
+    }
+
+    /// <summary>True when a (prefix-stripped, original-naming) key set is shaped like Animate-2: the i2v CLIP
+    /// <c>img_emb</c> is present and none of the Animate-V1 conditioning surface is. Never a classifier on its own —
+    /// a plain Wan2.1 I2V-14B checkpoint satisfies it too; it only rejects a file that claims to be Animate-2 and
+    /// carries the V1 pose/face modules (which <c>WanAnimate2Transformer</c> would silently drop).</summary>
+    public static bool HasAnimate2Structure(IEnumerable<string> keys)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        bool imgEmb = false, blocks = false;
+        foreach (string raw in keys)
+        {
+            string key = StripPrefix(raw);
+            if (key.StartsWith("pose_patch_embedding.", StringComparison.Ordinal)
+                || key.StartsWith("motion_encoder.", StringComparison.Ordinal)
+                || key.StartsWith("face_encoder.", StringComparison.Ordinal)
+                || key.StartsWith("face_adapter.", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            imgEmb |= key.StartsWith("img_emb.proj.", StringComparison.Ordinal)
+                || key.StartsWith("condition_embedder.image_embedder.", StringComparison.Ordinal);
+            blocks |= key.StartsWith("blocks.0.", StringComparison.Ordinal);
+        }
+        return imgEmb && blocks;
     }
 
     /// <summary>True when the (prefix-stripped) key set uses the original Wan naming rather than diffusers naming.</summary>
@@ -110,9 +165,19 @@ public sealed class WanVideoCheckpointConverter
         return mapped;
     }
 
-    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer bucket.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer
+    /// bucket. <paramref name="metadata"/> is the file's <c>__metadata__</c>, read only for the Animate-2 declaration.</summary>
+    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, IReadOnlyDictionary<string, string>? metadata = null)
     {
+        bool animate2 = IsAnimate2Metadata(metadata);
+        if (animate2 && !HasAnimate2Structure(allWeights.Keys))
+        {
+            throw new NotSupportedException(
+                "Checkpoint declares model_type 'animate2' but carries the Animate-V1 pose/face conditioning modules "
+                + "(or no img_emb). Wan-Animate-2 has neither pose_patch_embedding nor motion_encoder/face_encoder/face_adapter.");
+        }
+        // int8_tensorwise/fp8 companions move onto QuantInfo here, BEFORE the rename pass, so `.weight_scale` and
+        // `.comfy_quant` never reach MapKey.
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
         bool original = IsOriginalNaming(allWeights.Keys);
 
@@ -122,7 +187,7 @@ public sealed class WanVideoCheckpointConverter
             string? mapped = MapKey(kvp.Key, original);
             if (mapped is not null) transformer[mapped] = kvp.Value;
         }
-        return new ConvertedWeights { Transformer = transformer };
+        return new ConvertedWeights { Transformer = transformer, IsAnimate2 = animate2 };
     }
 
     /// <summary>Loads a single safetensors file and converts. The caller owns the loader and disposes it once the
@@ -133,7 +198,7 @@ public sealed class WanVideoCheckpointConverter
             throw new FileNotFoundException($"Wan-Video checkpoint not found: {checkpointPath}");
         SafeTensorsLoader loader = new();
         loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
+        ConvertedWeights converted = Convert(loader.GetAllTensors(), loader.Metadata);
         return (converted, loader);
     }
 
