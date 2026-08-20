@@ -31,8 +31,9 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Wan Animate's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f };
+    /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at
+    /// guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 1.0f, Frames = 77, Fps = 30 };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)

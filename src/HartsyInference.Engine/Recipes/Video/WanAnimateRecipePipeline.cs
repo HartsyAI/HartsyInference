@@ -80,7 +80,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
         int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
+        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 77, step: _config.VaeTemporalCompression);
         if (numFrames < 5)
         {
             throw new InvalidOperationException("Wan-Animate needs at least 5 frames (the face pathway downsamples 4x).");
