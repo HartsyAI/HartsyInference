@@ -20,6 +20,14 @@ namespace HartsyInference.Engine.Audio;
 /// per-stem Vocos vocoders raise the output from the 16 kHz x-codec draft to 44.1 kHz.</summary>
 internal static class YueMusicModel
 {
+    /// <summary>Holds a loader created after the runner's disposable set was snapshotted (the lazily loaded x-codec
+    /// encode branch), so it still gets disposed with the model.</summary>
+    private sealed class LoaderBox : IDisposable
+    {
+        public IDisposable? Inner;
+        public void Dispose() => Inner?.Dispose();
+    }
+
     /// <summary>The YuE descriptor.</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
@@ -98,6 +106,81 @@ internal static class YueMusicModel
             + $"{(stage2 is not null ? " + Stage-2 (full 8-codebook)" : " (vocal-cb0 only — no s2 folder)")}"
             + $"{(vocalVocoder is not null ? " + Vocos vocoders (44.1 kHz)" : " (16 kHz x-codec draft — no vocoders)")} from '{folder}'.");
 
+        // Reference-audio ICL loads the codec's ~95M-param encode branch on first use only, so the ordinary
+        // text-to-music path never pays for it. The extra loader lives in a box the runner disposes.
+        LoaderBox encodeLoader = new();
+        object encodeGate = new();
+
+        bool EnsureEncodeBranch()
+        {
+            if (xcodec.CanEncode) return true;
+            lock (encodeGate)
+            {
+                if (xcodec.CanEncode) return true;
+                (Dictionary<string, Tensor> encodeWeights, SafeTensorsLoader loader) =
+                    YueCheckpointConverter.LoadXCodec(xcodecPath, castToF32: true, forEncode: true);
+                if (!xcodec.TryLoadEncodeWeights(encodeWeights))
+                {
+                    loader.Dispose();
+                    return false;
+                }
+                encodeLoader.Inner = loader;
+                Logs.Info("[Audio][YuE] Loaded the x-codec encode branch for reference-audio prompting.");
+                return true;
+            }
+        }
+
+        int[] EncodeReferenceCb0(IBackend backend, AudioClip clip, string what)
+        {
+            float[] mono = AudioClipCodec.DecodeMono(clip, XCodecConfig.XCodec16kHz.SampleRate);
+            if (mono.Length < 320)
+            {
+                throw new InvalidOperationException(
+                    $"YuE reference {what}audio decoded to {mono.Length} samples — too short to encode (needs at least "
+                    + "one 320-sample codec frame). Supply a longer WAV clip.");
+            }
+            using Tensor pcm = new(new TensorShape(1, 1, mono.Length), DType.F32);
+            mono.CopyTo(pcm.AsSpan<float>());
+            using Tensor codes = xcodec.Encode(backend, pcm, mono.Length, nQ: 1);
+            return codes.AsReadOnlySpan<int>().ToArray();
+        }
+
+        // infer.py: dual-track wins over the single-track prompt when both are supplied.
+        int[] BuildReferenceBlock(IBackend backend, MusicRequest request)
+        {
+            bool dual = request.ReferenceVocal is not null && request.ReferenceInstrumental is not null;
+            if (!dual && (request.ReferenceVocal is not null || request.ReferenceInstrumental is not null))
+            {
+                throw new InvalidOperationException(
+                    "YuE dual-track reference audio needs BOTH the vocal and instrumental stems. Supply both, or use "
+                    + "the single-track reference audio input instead.");
+            }
+            if (!dual && request.ReferenceAudio is null) return [];
+            if (!EnsureEncodeBranch())
+            {
+                throw new InvalidOperationException(
+                    $"YuE reference audio was supplied but '{xcodecPath}' carries no encode branch, so it cannot be "
+                    + "converted to codec tokens. Restore the x-codec 'ckpt_00360000.pth' beside the checkpoint and "
+                    + "reload so the export can be rebuilt.");
+            }
+
+            int[] vocal = EncodeReferenceCb0(backend, dual ? request.ReferenceVocal! : request.ReferenceAudio!,
+                dual ? "vocal " : "");
+            int[] instrumental = dual ? EncodeReferenceCb0(backend, request.ReferenceInstrumental!, "instrumental ") : [];
+            int[] promptCodec = YueTokenizer.BuildAudioPromptCodec(vocal, instrumental,
+                request.ReferenceStartSeconds, request.ReferenceEndSeconds);
+            if (promptCodec.Length == 0)
+            {
+                Logs.Warning($"[Audio][YuE] Reference audio window [{request.ReferenceStartSeconds}s, "
+                    + $"{request.ReferenceEndSeconds}s] selected no frames of a {vocal.Length / (double)config.FrameRateHz:0.##}s "
+                    + "clip — generating without a reference.");
+                return [];
+            }
+            Logs.Info($"[Audio][YuE] Reference audio: {promptCodec.Length} codec tokens "
+                + $"({(dual ? "dual-track" : "single-track")}, {request.ReferenceStartSeconds}-{request.ReferenceEndSeconds}s).");
+            return tokenizer.EncodeReferenceBlock(promptCodec);
+        }
+
         MusicAudio Synth(IBackend backend, MusicRequest request, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
@@ -105,6 +188,14 @@ internal static class YueMusicModel
             // Segment-by-segment Stage-1 (infer.py): a head prompt plus one prompt per [label] section, each injecting
             // its own lyrics. Falls back to a single unstructured segment when the lyrics carry no [label] markers.
             int[] headIds = tokenizer.EncodeStage1Head(genre, request.Prompt);
+            // infer.py appends the reference block AFTER the head text, so only segment 0 carries it; later segments
+            // inherit it through the running context. The pipeline collects only generated tokens, so the reference
+            // codes are never decoded as output (upstream's `range_begin = 1` skip has no analogue here).
+            int[] referenceBlock = BuildReferenceBlock(backend, request);
+            if (referenceBlock.Length > 0)
+            {
+                headIds = [.. headIds, .. referenceBlock];
+            }
             IReadOnlyList<string> segments = tokenizer.Stage1Segments(request.Prompt);
             List<int[]> segmentPrompts = new List<int[]>(Math.Max(segments.Count, 1));
             for (int i = 0; i < segments.Count; i++)
@@ -127,7 +218,7 @@ internal static class YueMusicModel
                 guidanceScale: (float?)request.CfgScale));
         }
 
-        List<IDisposable?> disposables = [pipeline, stage1Loader, codecLoader, tokenizer];
+        List<IDisposable?> disposables = [pipeline, stage1Loader, codecLoader, tokenizer, encodeLoader];
         if (stage2Loader is not null)
         {
             disposables.Add(stage2Loader);
@@ -190,10 +281,6 @@ internal static class YueMusicModel
     private static string? EnsureXCodec(string folder)
     {
         string? existing = FindSibling(folder, "xcodec.safetensors");
-        if (existing is not null)
-        {
-            return existing;
-        }
         string parent = Directory.GetParent(folder)?.FullName ?? folder;
         string[] candidates =
         [
@@ -203,18 +290,74 @@ internal static class YueMusicModel
             Path.Combine(folder, "ckpt_00360000.pth"),
         ];
         string? checkpoint = candidates.FirstOrDefault(File.Exists);
+
+        if (existing is not null)
+        {
+            // Exports written before the encode roots were kept are decode-only, and returning early on their mere
+            // existence would strand every installed copy encode-less forever. Re-repack in place (the stale file may
+            // sit in `folder` while a fresh one would land in `parent`, where it would stay shadowed).
+            if (XCodecExportCanEncode(existing))
+            {
+                return existing;
+            }
+            if (checkpoint is null)
+            {
+                Logs.Warning($"[Audio][YuE] '{existing}' predates the x-codec encode branch and the source "
+                    + "'ckpt_00360000.pth' is gone, so it cannot be rebuilt — reference-audio (ICL) prompting will be "
+                    + "refused. Restore the checkpoint from m-a-p/xcodec_mini_infer to enable it.");
+                return existing;
+            }
+            Logs.Info($"[Audio][YuE] '{Path.GetFileName(existing)}' lacks the x-codec encode branch — rebuilding it "
+                + $"from '{Path.GetFileName(checkpoint)}' (one-time)...");
+            RepackXCodec(checkpoint, existing);
+            return existing;
+        }
+
         if (checkpoint is null)
         {
             return null;
         }
         string outputPath = Path.Combine(parent, "xcodec.safetensors");
         Logs.Info($"[Audio][YuE] Converting X-Codec '{Path.GetFileName(checkpoint)}' → xcodec.safetensors (one-time)...");
-        // Keeps only the tensors the X-Codec loader maps, under their original keys, so the normal load path
-        // re-maps them identically.
-        PickleCheckpointRepacker.Repack(checkpoint, outputPath,
-            key => YueCheckpointConverter.MapXCodecKey(key) is not null ? key : null,
-            recursiveFlatten: true);
+        RepackXCodec(checkpoint, outputPath);
         return outputPath;
+    }
+
+    /// <summary>Repacks the torch x-codec checkpoint keeping every tensor the loader maps in EITHER direction, under
+    /// its original key, so the decode load path re-maps it identically and the ICL encode path finds its roots.
+    /// Writes via a temp file so a failure cannot leave a truncated export shadowing a good one.</summary>
+    private static void RepackXCodec(string checkpoint, string outputPath)
+    {
+        string temp = outputPath + ".tmp";
+        try
+        {
+            PickleCheckpointRepacker.Repack(checkpoint, temp,
+                key => YueCheckpointConverter.MapXCodecKey(key, forEncode: true) is not null ? key : null,
+                recursiveFlatten: true);
+            File.Move(temp, outputPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temp)) File.Delete(temp);
+        }
+    }
+
+    /// <summary>Whether an existing export carries the encode roots. Reads only the safetensors header.</summary>
+    private static bool XCodecExportCanEncode(string path)
+    {
+        try
+        {
+            using SafeTensorsLoader loader = new();
+            loader.Load(path);
+            return YueCheckpointConverter.XCodecExportHasEncodeRoots(loader.Descriptors.Keys);
+        }
+        catch (Exception ex)
+        {
+            // Treat an unreadable header as "good enough" — the real load right after will surface the true error,
+            // and answering false here would rewrite the file on every single load.
+            Logs.Error($"[Audio][YuE] Could not inspect '{path}' for the x-codec encode branch", ex);
+            return true;
+        }
     }
 
     /// <summary>Converts the upstream xcodec_mini_infer Vocos vocoder checkpoints (<c>decoder_131000.pth</c> =

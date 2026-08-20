@@ -136,6 +136,17 @@ public sealed unsafe class XCodec
         return pcm;
     }
 
+    /// <summary>Adds the encode branch to an already-loaded decode-only codec, so the ~95M-param HuBERT/RepCodec/DAC
+    /// encoder stack is paid for only by callers that actually supply reference audio. No-op once
+    /// <see cref="CanEncode"/>. <paramref name="w"/> must come from a converter load with <c>forEncode: true</c>; if it
+    /// still lacks the encode roots the codec stays decode-only and this returns false.</summary>
+    public bool TryLoadEncodeWeights(IReadOnlyDictionary<string, Tensor> w)
+    {
+        if (CanEncode) return true;
+        LoadEncodeWeights(w);
+        return CanEncode;
+    }
+
     /// <summary>Builds the encode branch when the weights carry it. Absent <c>fc_prior.weight</c> the codec stays
     /// decode-only and none of the ~95M-param semantic branch is constructed.</summary>
     private void LoadEncodeWeights(IReadOnlyDictionary<string, Tensor> w)

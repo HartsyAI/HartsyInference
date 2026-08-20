@@ -156,5 +156,68 @@ public sealed class YueTokenizer : IDisposable
     /// <summary>Encodes arbitrary text to SentencePiece ids (no special-token wrapping).</summary>
     public IReadOnlyList<int> EncodeRaw(string text) => _sp.EncodeToIds(text ?? "");
 
+    // ── Reference-audio in-context learning (infer.py --use_audio_prompt / --use_dual_tracks_prompt) ──
+
+    /// <summary>CodecManipulator("xcodec") global token offset: LM id = 45334 + k*1024 + code. The ICL path runs the
+    /// codec at target_bw=0.5 ⇒ codebook 0 only ⇒ k = 0.</summary>
+    public const int XcodecGlobalOffset = 45_334;
+
+    /// <summary>x-codec frame rate (tokens per second per track).</summary>
+    public const int XcodecFps = 50;
+
+    /// <summary>Builds infer.py's <c>audio_prompt_codec</c>: offsets raw codebook-0 indices into the LM's audio-token
+    /// range, interleaves the two tracks when a dual-track reference is supplied, then slices the requested
+    /// second-window. Pure arithmetic — no tokenizer state.
+    ///
+    /// <para>Single-track slices at <c>fps</c> tokens/second; dual-track interleaves <c>v0,i0,v1,i1,…</c> and slices at
+    /// <c>2·fps</c>, so the window means the same wall-clock span either way. An odd dual-track start index flips the
+    /// vocal/instrumental parity of the prompt — upstream does not correct this, so neither does this.</para></summary>
+    /// <param name="vocalCb0">Codebook-0 indices of the single/vocal reference track.</param>
+    /// <param name="instrumentalCb0">Codebook-0 indices of the instrumental track; empty selects the single-track path.</param>
+    public static int[] BuildAudioPromptCodec(ReadOnlySpan<int> vocalCb0, ReadOnlySpan<int> instrumentalCb0,
+        double startSeconds, double endSeconds, int globalOffset = XcodecGlobalOffset, int fps = XcodecFps)
+    {
+        bool dual = instrumentalCb0.Length > 0;
+        if (dual && vocalCb0.Length != instrumentalCb0.Length)
+        {
+            throw new ArgumentException(
+                $"Dual-track reference audio must encode to equal lengths (vocal {vocalCb0.Length} frames, "
+                + $"instrumental {instrumentalCb0.Length}). Trim the two clips to the same duration.",
+                nameof(instrumentalCb0));
+        }
+
+        int perSecond = dual ? fps * 2 : fps;
+        int total = dual ? vocalCb0.Length * 2 : vocalCb0.Length;
+        // Python's int() truncates toward zero, as does the C# cast; Python slicing tolerates an overrunning stop.
+        int lo = Math.Clamp((int)(startSeconds * perSecond), 0, total);
+        int hi = Math.Clamp((int)(endSeconds * perSecond), lo, total);
+
+        int[] window = new int[hi - lo];
+        for (int i = lo; i < hi; i++)
+        {
+            window[i - lo] = globalOffset + (dual
+                ? ((i & 1) == 0 ? vocalCb0[i >> 1] : instrumentalCb0[i >> 1])
+                : vocalCb0[i]);
+        }
+        return window;
+    }
+
+    /// <summary>Wraps offset reference codes in infer.py's <c>sentence_ids</c>:
+    /// <c>tokenize("[start_of_reference]") + [SOA] + [&lt;xcodec&gt;] + codes + [EOA] + tokenize("[end_of_reference]")</c>.
+    /// The markers are plain SentencePiece text, not control symbols. Append this to the head prompt (NOT before it) —
+    /// infer.py builds <c>head_id = tokenize(prompt_texts[0]) + sentence_ids</c>, so only segment 0 carries it and
+    /// later segments inherit it through the running context.</summary>
+    public int[] EncodeReferenceBlock(IReadOnlyList<int> audioPromptCodec)
+    {
+        List<int> ids = new(audioPromptCodec.Count + 16);
+        ids.AddRange(EncodeRaw("[start_of_reference]"));
+        ids.Add(Soa);
+        ids.Add(Xcodec);
+        ids.AddRange(audioPromptCodec);
+        ids.Add(Eoa);
+        ids.AddRange(EncodeRaw("[end_of_reference]"));
+        return [.. ids];
+    }
+
     public void Dispose() { } // SentencePieceTokenizer holds no unmanaged handles.
 }

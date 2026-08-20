@@ -122,4 +122,27 @@ public sealed record MusicRequest
 
     /// <summary>Cover conditioning strength (0 keeps the source, 1 fully re-renders).</summary>
     public double CoverStrength { get; init; } = 0.5;
+
+    /// <summary>Reference audio for in-context learning: the generation continues this clip's style/voice rather than
+    /// starting cold (YuE's <c>--use_audio_prompt</c>). Encoded to codec tokens and spliced into the first segment's
+    /// prompt. Ignored when <see cref="ReferenceVocal"/> and <see cref="ReferenceInstrumental"/> are both set — a
+    /// dual-track reference wins, matching upstream's branch order. Null for none.</summary>
+    public AudioClip? ReferenceAudio { get; init; }
+
+    /// <summary>Isolated vocal stem of a dual-track reference (YuE's <c>--vocal_track_prompt_path</c>). Must be paired
+    /// with <see cref="ReferenceInstrumental"/> and cover the same span; the two are interleaved into the prompt so the
+    /// model reads them as its own two output tracks. Null for none.</summary>
+    public AudioClip? ReferenceVocal { get; init; }
+
+    /// <summary>Isolated instrumental stem of a dual-track reference (YuE's <c>--instrumental_track_prompt_path</c>).
+    /// Pairs with <see cref="ReferenceVocal"/>. Null for none.</summary>
+    public AudioClip? ReferenceInstrumental { get; init; }
+
+    /// <summary>Start second of the span taken from the reference audio (YuE's <c>--prompt_start_time</c>).</summary>
+    public double ReferenceStartSeconds { get; init; }
+
+    /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream
+    /// default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every
+    /// generated segment.</summary>
+    public double ReferenceEndSeconds { get; init; } = 30;
 }

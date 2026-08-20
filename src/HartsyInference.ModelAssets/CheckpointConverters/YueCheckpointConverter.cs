@@ -150,6 +150,24 @@ public sealed class YueCheckpointConverter
         return (weights, loader);
     }
 
+    /// <summary>The mapped key that proves an x-codec export carries the encode branch. <c>fc_prior</c> is the fusion
+    /// projection every encode call needs and nothing on the decode path touches, so its presence is exactly the
+    /// engine <c>XCodec.CanEncode</c> condition.</summary>
+    public const string XCodecEncodeProbeKey = "fc_prior.weight";
+
+    /// <summary>Whether a repacked x-codec export carries the encode roots. Keys are routed through
+    /// <see cref="MapXCodecKey"/> rather than compared literally because a repack preserves the source spelling,
+    /// which may still carry the <c>codec_model.</c> wrapper prefix. An export written before the encode branch was
+    /// kept answers false — the caller must re-repack rather than serve a silently encode-less codec.</summary>
+    public static bool XCodecExportHasEncodeRoots(IEnumerable<string> keys)
+    {
+        foreach (string key in keys)
+        {
+            if (MapXCodecKey(key, forEncode: true) == XCodecEncodeProbeKey) return true;
+        }
+        return false;
+    }
+
     /// <summary>Pure X-Codec key mapping (testable without files): strips wrapper prefixes, drops the semantic branch,
     /// renames the acoustic <c>decoder_2.*</c> root to <c>decoder.*</c>, and normalizes weight-norm key spellings.
     /// Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>
