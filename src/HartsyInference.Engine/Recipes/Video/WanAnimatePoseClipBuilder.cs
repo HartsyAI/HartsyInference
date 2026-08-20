@@ -40,6 +40,32 @@ internal static class WanAnimatePoseClipBuilder
             backend.FreeWeights(pose.EnumerateWeights());
         }
         Logs.Info($"[WanAnimate] pose preprocess: {rendered}/{numFrames} frames skeleton-rendered → {width}x{height} pose clip.");
+        DumpSkeletons(skeletons, width, height);
         return VideoRecipeUtils.PackRgbFramesToClip(skeletons, width, height);
+    }
+
+    /// <summary>Writes the rendered skeletons as PPMs under <c>HARTSY_ANIMATE_POSE_DUMP</c>. The pose clip is the one
+    /// driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as
+    /// a model failure.</summary>
+    private static void DumpSkeletons(byte[][] skeletons, int width, int height)
+    {
+        string? dir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_POSE_DUMP");
+        if (string.IsNullOrEmpty(dir)) return;
+        try
+        {
+            Directory.CreateDirectory(dir);
+            for (int f = 0; f < skeletons.Length; f++)
+            {
+                using FileStream fs = File.Create(Path.Combine(dir, $"pose_{f:D4}.ppm"));
+                byte[] header = System.Text.Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n");
+                fs.Write(header, 0, header.Length);
+                fs.Write(skeletons[f], 0, skeletons[f].Length);
+            }
+            Logs.Info($"[WanAnimate] pose dump: {skeletons.Length} skeleton frame(s) → '{dir}'.");
+        }
+        catch (Exception error)
+        {
+            Logs.Warning($"[WanAnimate] pose dump failed: {error.Message}");
+        }
     }
 }
