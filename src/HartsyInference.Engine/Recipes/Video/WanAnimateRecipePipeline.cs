@@ -34,6 +34,9 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     /// <summary>Upstream's <c>animate_14B.sample_shift</c>.</summary>
     private const float DefaultFlowShift = 5f;
 
+    /// <summary>The only solver <see cref="WanAnimatePipeline"/> runs; upstream's other choice (<c>dpm++</c>) is not ported.</summary>
+    private const string SupportedSampler = "unipc";
+
     private readonly IBackend _backend;
     private readonly WanAnimatePipeline _pipeline;
     private readonly WanVideoConfig _config;
@@ -71,6 +74,13 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
             throw new InvalidOperationException(
                 "Wan-Animate needs a driving motion input: set VideoRequest.DrivingVideo (a driving video whose pose "
                 + "skeleton and face crop are auto-derived) or VideoRequest.InitImage (a still tiled across frames).");
+        }
+        if (!string.IsNullOrWhiteSpace(request.Sampler)
+            && !string.Equals(request.Sampler, SupportedSampler, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new NotSupportedException(
+                $"Wan-Animate samples with UniPC and has no '{request.Sampler}' implementation — upstream's other "
+                + "choice, dpm++ (FlowDPMSolverMultistep), isn't ported. Clear the sampler or set it to 'unipc'.");
         }
         ImageData reference = ResolveReference(request)
             ?? throw new InvalidOperationException(

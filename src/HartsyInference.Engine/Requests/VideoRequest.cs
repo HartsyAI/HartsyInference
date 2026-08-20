@@ -25,6 +25,10 @@ public sealed record VideoRequest
     /// <summary>Flow-match sigma shift; null uses the family's officially recommended shift.</summary>
     public float? FlowShift { get; init; }
 
+    /// <summary>Sampler name; null uses the family's canonical solver. A family that cannot honor the named sampler
+    /// refuses rather than silently substituting its own.</summary>
+    public string? Sampler { get; init; }
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 
