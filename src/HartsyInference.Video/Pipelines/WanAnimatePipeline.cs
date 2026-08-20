@@ -20,9 +20,12 @@ namespace HartsyInference.Video.Pipelines;
 /// in-DiT to latent frames 1..); the face video ([-1,1], 512×512 pixels) drives the motion-encoder → face-encoder →
 /// face-adapter pathway — the negative CFG branch gets black face frames (<c>face·0 − 1</c>), per the node.
 ///
-/// <para><b>Not modeled (structural gaps, flagged):</b> <c>continue_motion</c> chunked extension,
-/// <c>background_video</c>/<c>character_mask</c> replace-mode conditioning. Numerics validation-pending vs the real
-/// Wan22Animate checkpoint (fp8-scaled, Kijai/WanVideo_comfy_fp8_scaled).</para></summary>
+/// <c>continue_motion</c> (the chunked extension) writes the previous chunk's last frames over the head of that gray
+/// clip before the single VAE encode and marks the matching latent frames known in the mask; the chunk re-renders them
+/// and the caller drops <c>trimImage</c> leading frames.
+///
+/// <para><b>Numerics validation-pending</b> vs the real Wan22Animate checkpoint (fp8-scaled,
+/// Kijai/WanVideo_comfy_fp8_scaled).</para></summary>
 public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 {
     private readonly WanAnimateTransformer _transformer;
@@ -44,11 +47,14 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
     /// <c>[1, 3, 1, H, W]</c> in [-1, 1]; <paramref name="poseRgbClip"/> is the driving pose/skeleton video
     /// <c>[1, 3, T, H, W]</c>; <paramref name="faceRgbClip"/> is the driving face video <c>[1, 3, Tface, 512, 512]</c>
     /// in [-1, 1] (already cropped/resized to the motion-encoder resolution); <paramref name="clipImageEmbeds"/> is
-    /// the optional CLIP-ViT-H penultimate hidden state of the reference image. Output length follows the pose clip.</summary>
-    public (byte[][] frames, int width, int height, int seed, WanAnimateConditioning conditioning) GenerateAnimation(
+    /// the optional CLIP-ViT-H penultimate hidden state of the reference image. Output length follows the pose clip.
+    /// <paramref name="continueMotionRgbClip"/> is the previous chunk's last <c>N</c> decoded frames <c>[1,3,N,H,W]</c>
+    /// in [-1, 1] (<c>N</c> on the <c>4n+1</c> grid and shorter than the clip); the returned <c>trimImage</c> is how
+    /// many leading decoded frames the caller must discard because the chunk re-rendered them.</summary>
+    public (byte[][] frames, int width, int height, int seed, WanAnimateConditioning conditioning, int trimImage) GenerateAnimation(
         Tensor promptEmbeds, Tensor negativeEmbeds, Tensor? referenceRgb, Tensor? poseRgbClip, Tensor? faceRgbClip,
         TextToImageRequest request, Tensor? clipImageEmbeds = null, WanAnimateConditioning? cachedConditioning = null,
-        Tensor? backgroundRgbClip = null, Tensor? characterMaskClip = null,
+        Tensor? backgroundRgbClip = null, Tensor? characterMaskClip = null, Tensor? continueMotionRgbClip = null,
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
@@ -59,7 +65,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 $"Wan-Animate expects InChannels == 2·z + tp ({2 * latentCh + tp}); got {_config.InChannels}.");
 
         // Geometry: from the cached pose latent on a conditioning-cache hit, else from the pose pixel clip.
-        bool haveCached = cachedConditioning is not null;
+        // A continuation chunk's conditioning is prefix-specific: never reuse a cache entry for one, and never serve
+        // an entry that was built with a prefix.
+        bool haveCached = cachedConditioning is not null && continueMotionRgbClip is null
+            && cachedConditioning.RefMotionLatentLength == 0;
         int pixT, pixH, pixW, tLat, hLat, wLat;
         const int trimLatent = 1;   // the reference latent frame, removed before decode
         if (haveCached)
@@ -84,6 +93,26 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             tLat = (pixT - 1) / tp + 1; hLat = pixH / sp; wLat = pixW / sp;
         }
 
+        int motionFrames = 0;
+        if (continueMotionRgbClip is not null)
+        {
+            if (continueMotionRgbClip.Shape.Rank != 5 || continueMotionRgbClip.Shape[1] != 3)
+                throw new ArgumentException($"continueMotionRgbClip must be [1,3,N,H,W]; got {continueMotionRgbClip.Shape}.",
+                    nameof(continueMotionRgbClip));
+            if (continueMotionRgbClip.Shape[3] != pixH || continueMotionRgbClip.Shape[4] != pixW)
+                throw new ArgumentException($"the continue-motion prefix must be {pixW}x{pixH}; got "
+                    + $"{continueMotionRgbClip.Shape[4]}x{continueMotionRgbClip.Shape[3]}.", nameof(continueMotionRgbClip));
+            motionFrames = (int)continueMotionRgbClip.Shape[2];
+            if (motionFrames >= pixT)
+                throw new ArgumentException($"the continue-motion prefix ({motionFrames}f) must be shorter than the chunk "
+                    + $"({pixT}f), else the chunk produces no new frames.", nameof(continueMotionRgbClip));
+            if (motionFrames % WanAnimateChunkMath.TemporalStep != 1)
+                throw new ArgumentException("the continue-motion prefix must be on the 4n+1 grid, else the trim under-drops "
+                    + $"and the background overwrites part of it; got {motionFrames}f.", nameof(continueMotionRgbClip));
+        }
+        int refMotionLatentLength = WanAnimateChunkMath.RefMotionLatentLength(motionFrames);
+        int trimImage = WanAnimateChunkMath.TrimImageFrames(refMotionLatentLength);
+
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tTotal = tLat + trimLatent;
         int steps = request.Steps ?? _config.NumInferenceSteps;
@@ -91,10 +120,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}, seed={seed} " +
-            $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent}{(haveCached ? ", cond CACHED" : "")})");
+            $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent}{(haveCached ? ", cond CACHED" : "")}"
+            + $"{(motionFrames > 0 ? $", continue-motion {motionFrames}f → {refMotionLatentLength} latent frame(s), trim {trimImage}f" : "")})");
         // Animation mode validated end-to-end 2026-08-19 (real driving video, YOLO-pose auto-preprocess,
         // identity + motion both confirmed visually against the reference inputs).
-        Logs.Warning("Wan-Animate: continue-motion (chunked extension) is not modeled yet.");
 
         WanAnimateConditioning conditioning;
         if (haveCached)
@@ -110,11 +139,19 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             Tensor poseLatentDev = _encoder.Encode(Backend, poseRgbClip!);   // [1, z, tLat, hLat, wLat]
             Tensor gray = new Tensor(new TensorShape([1L, 3, pixT, pixH, pixW]), DType.F32);   // 0 in [-1,1] = mid gray
             new Span<float>((float*)gray.DataPointer, (int)gray.Shape.ElementCount).Clear();
+            // Chunked extension: the previous chunk's tail goes over the HEAD of the gray clip, before the background,
+            // and both are encoded in the SAME vae call — the Wan VAE is temporally causal, so encoding the prefix
+            // separately and splicing latents is not equivalent.
+            if (continueMotionRgbClip is not null)
+            {
+                OverlayClipFrames(gray, continueMotionRgbClip, pixT, pixH, pixW);
+            }
             // Replacement mode: the generated-frames conditioning carries the background video instead of
-            // mid-gray (ComfyUI background_video — frames past the clip's end stay gray).
+            // mid-gray (ComfyUI background_video — frames past the clip's end stay gray). It starts at the first
+            // non-prefix frame so the motion prefix survives.
             if (backgroundRgbClip is not null)
             {
-                OverlayClipFrames(gray, backgroundRgbClip, pixT, pixH, pixW);
+                OverlayClipFrames(gray, backgroundRgbClip, pixT, pixH, pixW, startFrame: trimImage);
             }
             Tensor grayLatent = _encoder.Encode(Backend, gray);             // [1, z, tLat, hLat, wLat]
             gray.Dispose();
@@ -125,7 +162,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             // generated frames, and WAN21.concat_cond INVERTS it (mask = 1.0 - mask) before cat((mask, image)) — so the
             // model sees 1 on the known ref frame, 0 elsewhere. Cond-latent = [ref frame, gray frames].
             Tensor conditionDev = BuildAnimateCondition(refLatent, grayLatent, latentCh, tp, trimLatent, tTotal, hLat, wLat,
-                characterMaskClip);
+                characterMaskClip, refMotionLatentLength);
             refLatent.Dispose();
             grayLatent.Dispose();
 
@@ -152,6 +189,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 PoseLatent = HostCopy(poseLatentDev),
                 MotionCond = HostCopy(motionCondDev),
                 MotionUncond = HostCopy(motionUncondDev),
+                RefMotionLatentLength = refMotionLatentLength,
             };
             conditionDev.Dispose();
             poseLatentDev.Dispose();
@@ -205,8 +243,9 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
         rgb.Dispose();
-        Logs.Info($"Wan-Animate complete ({frames.Length} frames, seed={seed})");
-        return (frames, pixW, pixH, seed, conditioning);
+        Logs.Info($"Wan-Animate complete ({frames.Length} frames, seed={seed}"
+            + $"{(trimImage > 0 ? $", {trimImage} re-rendered prefix frame(s) for the caller to trim" : "")})");
+        return (frames, pixW, pixH, seed, conditioning, trimImage);
     }
 
     /// <summary>Fresh host-materialized copy of a (possibly device-resident) tensor, preserving shape and dtype —
@@ -225,9 +264,11 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
     /// <c>1 − mask</c> per pixel over the generated frames — background regions become "known" (kept from the
     /// background conditioning) and only the character region generates. Mask channel <c>m</c> of latent frame
     /// <c>t</c> carries pixel frame <c>(t − trim)·4 + m</c>, upstream's straight <c>view(L,4).transpose</c>
-    /// packing; a shorter mask clip clamps to its last frame (single-frame masks repeat).</summary>
+    /// packing; a shorter mask clip clamps to its last frame (single-frame masks repeat). A non-zero
+    /// <paramref name="refMotionLatentLength"/> additionally marks the chunked extension's motion prefix known over
+    /// <see cref="WanAnimateChunkMath.MaskPrefixEnd"/> pixel frames.</summary>
     private static Tensor BuildAnimateCondition(Tensor refLatent, Tensor grayLatent, int latentCh, int maskCh,
-        int trimLatent, int tTotal, int hLat, int wLat, Tensor? characterMaskClip = null)
+        int trimLatent, int tTotal, int hLat, int wLat, Tensor? characterMaskClip = null, int refMotionLatentLength = 0)
     {
         Tensor o = new Tensor(new TensorShape([1L, maskCh + latentCh, tTotal, hLat, wLat]), DType.F32);
         float* op = (float*)o.DataPointer;
@@ -247,11 +288,15 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             Logs.Info($"[WanAnimate] character mask stats (clip [-1,1] space): min {mn:0.###} max {mx:0.###} " +
                 $"mean {sum / total:0.###} over {maskFrames} frame(s) — white(1)=generate character, black(-1)=keep background.");
         }
+        // Chunked extension: flat pixel-frame indices j < prefixEnd are "known" (the motion prefix). Upstream zeroes
+        // [0, ref·4) and THEN overwrites [ref_images_num, …) with the character mask, so a mask shortens the known run
+        // to ref_images_num — replicated rather than tidied, because this tensor is what the layer-diff compares.
+        int prefixEnd = WanAnimateChunkMath.MaskPrefixEnd(refMotionLatentLength, characterMaskClip is not null);
         for (int m = 0; m < maskCh; m++)
             for (int t = 0; t < tTotal; t++)
             {
                 long baseOff = (long)m * perChannel + t * frame;
-                if (t < trimLatent)
+                if (WanAnimateChunkMath.IsKnownMaskCell(t, m, trimLatent, prefixEnd))
                 {
                     for (long p = 0; p < frame; p++) op[baseOff + p] = 1f;
                 }
@@ -291,20 +336,25 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         return o;
     }
 
-    /// <summary>Writes <paramref name="source"/>'s frames over <paramref name="target"/> (both
-    /// <c>[1, 3, T, H, W]</c>, same H/W); frames past the source's end keep the target's values.</summary>
-    private static void OverlayClipFrames(Tensor target, Tensor source, int pixT, int pixH, int pixW)
+    /// <summary>Writes <paramref name="source"/>'s frames from <paramref name="startFrame"/> onward over
+    /// <paramref name="target"/> at the same indices (both <c>[1, 3, T, H, W]</c>, same H/W); frames outside
+    /// <c>[startFrame, min(srcT, pixT))</c> keep the target's values.</summary>
+    private static void OverlayClipFrames(Tensor target, Tensor source, int pixT, int pixH, int pixW, int startFrame = 0)
     {
         int srcT = (int)source.Shape[2];
         if ((int)source.Shape[3] != pixH || (int)source.Shape[4] != pixW)
-            throw new ArgumentException($"background clip must be {pixW}x{pixH}; got {source.Shape[4]}x{source.Shape[3]}.");
-        int copyT = Math.Min(srcT, pixT);
+            throw new ArgumentException($"overlay clip must be {pixW}x{pixH}; got {source.Shape[4]}x{source.Shape[3]}.");
+        int copyT = Math.Min(srcT, pixT) - startFrame;
+        if (copyT <= 0)
+        {
+            return;
+        }
         float* tp = (float*)target.DataPointer;
         float* sp = (float*)source.DataPointer;
         long frame = (long)pixH * pixW;
         for (int c = 0; c < 3; c++)
         {
-            Buffer.MemoryCopy(sp + (long)c * srcT * frame, tp + (long)c * pixT * frame,
+            Buffer.MemoryCopy(sp + ((long)c * srcT + startFrame) * frame, tp + ((long)c * pixT + startFrame) * frame,
                 copyT * frame * 4, copyT * frame * 4);
         }
     }

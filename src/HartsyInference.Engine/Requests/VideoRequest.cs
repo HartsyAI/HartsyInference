@@ -92,6 +92,16 @@ public sealed record VideoRequest
     /// checkpoint was trained on); off passes the raw clip to both branches.</summary>
     public bool DrivingAutoPreprocess { get; init; } = true;
 
+    /// <summary>Wan-Animate chunked extension: total output frames, generated as successive <see cref="Frames"/>-long
+    /// chunks each conditioned on the previous chunk's tail. Null (or ≤ <see cref="Frames"/>) generates one chunk.
+    /// The driving video should be at least this long — a short one freezes on its last frame.</summary>
+    public int? AnimateTotalFrames { get; init; }
+
+    /// <summary>Frames of the previous chunk carried into the next as motion context (ComfyUI
+    /// <c>continue_motion_max_frames</c>); snapped down onto the <c>4n+1</c> grid. Longer holds continuity better and
+    /// costs that many re-rendered frames per chunk.</summary>
+    public int AnimateContinueMotionFrames { get; init; } = 5;
+
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }
 

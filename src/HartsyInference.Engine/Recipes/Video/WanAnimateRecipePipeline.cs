@@ -20,7 +20,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and
 /// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference
 /// latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's
-/// <c>WanAnimateLoader.Generate</c>.</summary>
+/// <c>WanAnimateLoader.Generate</c>. <see cref="VideoRequest.AnimateTotalFrames"/> turns the single generation into a
+/// chunk loop, each chunk conditioned on the tail of the previous one (ComfyUI <c>continue_motion</c>) and assembled
+/// here so trim/boomerang still apply once, to the whole video.</summary>
 public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image.</summary>
@@ -64,7 +66,6 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        // TODO(E-IMG-4/5): background/replace conditioning and continue_motion chunked extension are not modeled.
         if (request.DrivingVideo is null && request.InitImage is null)
         {
             throw new InvalidOperationException(
@@ -100,13 +101,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         _backend.FreeWeights(_umt5.EnumerateWeights());
 
         Tensor? clipEmbeds = null;
-        Tensor? poseClip = null;
-        Tensor? backgroundClip = null;
-        Tensor? maskClip = null;
-        Tensor? faceClip = null;
         Tensor? referenceRgb = null;
         int? drivingFps = null;
-        WanAnimateConditioning? conditioning = null;
         try
         {
             if (_clipVision is not null)
@@ -124,16 +120,10 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 dropped.Dispose();
             }
 
-            WanAnimateDrivingResolver.ResolvedClips clips = WanAnimateDrivingResolver.Resolve(
-                _backend, request, width, height, numFrames, _config.VaeTemporalCompression, MotionEncoderSize, cancel);
-            poseClip = clips.PoseClip;
-            faceClip = clips.FaceClip;
-            backgroundClip = clips.BackgroundClip;
-            maskClip = clips.MaskClip;
-            numFrames = clips.FrameCount;
-            drivingFps = clips.DrivingFps;
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.ResizeRgb24(reference, width, height), width, height);
 
+            // One seed for every chunk: the chunks are separate denoises, so leaving it null would re-roll per chunk
+            // and make a run unreproducible. The motion prefix pins continuity regardless of the noise.
             VideoGenerationRequest inner = new VideoGenerationRequest
             {
                 Prompt = prompt,
@@ -142,22 +132,101 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 Height = height,
                 Steps = steps,
                 CfgScale = cfgScale,
-                Seed = RecipeRequestMapper.MapSeed(request.Seed),
+                Seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed(),
                 FlowShift = DefaultFlowShift,
             };
 
-            Action<GenerationProgress> bridge = p =>
+            List<byte[]> assembled = new List<byte[]>();
+            int chunkLen = numFrames;
+            int totalFrames = numFrames;
+            int motionFrames = WanAnimateChunkMath.SnapMotionFrames(request.AnimateContinueMotionFrames);
+            if (motionFrames != request.AnimateContinueMotionFrames)
+            {
+                Logs.Info($"[WanAnimateRecipePipeline] Motion-context frames {request.AnimateContinueMotionFrames} snapped down to "
+                    + $"{motionFrames} (the prefix must be 4n+1, else the trim under-drops and the background clobbers it).");
+            }
+            int carriedOffset = 0, chunkIndex = 0, plannedChunks = 1;
+            int outW = width, outH = height;
+            while (true)
             {
                 cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-            };
+                // Rewind BEFORE the driving slice, not after: the prefix must be re-driven by the very frames that
+                // produced it, which is the whole point of carrying it (ComfyUI decrements video_frame_offset at the
+                // top of the node, above every pose/face/background/mask slice).
+                int prefix = chunkIndex == 0 ? 0
+                    : WanAnimateChunkMath.MotionPrefixFrames(motionFrames, assembled.Count, chunkLen);
+                int sliceOffset = WanAnimateChunkMath.SliceOffset(carriedOffset, prefix);
+                WanAnimateDrivingResolver.ResolvedClips clips = WanAnimateDrivingResolver.Resolve(
+                    _backend, request, width, height, chunkLen, _config.VaeTemporalCompression, MotionEncoderSize, cancel,
+                    frameOffset: sliceOffset, pinFrameCount: chunkIndex > 0);
+                Tensor? continueClip = null;
+                try
+                {
+                    if (chunkIndex == 0)
+                    {
+                        chunkLen = clips.FrameCount;
+                        drivingFps = clips.DrivingFps;
+                        totalFrames = Math.Max(chunkLen, request.AnimateTotalFrames ?? 0);
+                        if (totalFrames > chunkLen)
+                        {
+                            if (motionFrames < 1 || motionFrames >= chunkLen)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Wan-Animate motion-context frames ({motionFrames} after the 4n+1 snap) must be at least 1 and "
+                                    + $"shorter than the {chunkLen}-frame chunk, else a continuation chunk adds no new frames.");
+                            }
+                            plannedChunks = WanAnimateChunkMath.ChunkCount(totalFrames, chunkLen, motionFrames);
+                            Logs.Info($"[WanAnimateRecipePipeline] Chunked extension: {totalFrames} frames as {plannedChunks} chunk(s) "
+                                + $"of {chunkLen}f with {motionFrames}f motion context.");
+                        }
+                    }
+                    if (prefix > 0)
+                    {
+                        continueClip = VideoRecipeUtils.PackRgbFramesToClip(
+                            assembled.GetRange(assembled.Count - prefix, prefix), width, height);
+                    }
+                    int stepsBefore = chunkIndex * steps, stepsTotal = plannedChunks * steps;
+                    Action<GenerationProgress> bridge = p =>
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        progress?.Report(new StepPreview { Step = stepsBefore + p.Step, TotalSteps = stepsTotal });
+                    };
 
-            (byte[][] frames, int outW, int outH, int _, WanAnimateConditioning used) = _pipeline.GenerateAnimation(
-                promptEmbeds, negEmbeds, referenceRgb, poseClip, faceClip, inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null,
-                backgroundRgbClip: backgroundClip, characterMaskClip: maskClip, onProgress: bridge);
-            conditioning = used;
-            Logs.Info($"[WanAnimateRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH} ({numFrames}f pose / {numFrames - 1}f face).");
-            return VideoRecipeUtils.ToResult(frames, outW, outH, request, fps: drivingFps);
+                    (byte[][] frames, int chunkW, int chunkH, int _, WanAnimateConditioning used, int trimImage) =
+                        _pipeline.GenerateAnimation(promptEmbeds, negEmbeds, referenceRgb, clips.PoseClip, clips.FaceClip,
+                            inner, clipImageEmbeds: clipEmbeds, cachedConditioning: null,
+                            backgroundRgbClip: clips.BackgroundClip, characterMaskClip: clips.MaskClip,
+                            continueMotionRgbClip: continueClip, onProgress: bridge);
+                    used.Dispose();
+                    outW = chunkW;
+                    outH = chunkH;
+                    for (int i = trimImage; i < frames.Length; i++)
+                    {
+                        assembled.Add(frames[i]);
+                    }
+                    Logs.Info($"[WanAnimateRecipePipeline] Chunk {chunkIndex + 1}/{plannedChunks} returned {frames.Length} frames "
+                        + $"{chunkW}x{chunkH} (offset {sliceOffset}, {prefix}f context, {trimImage}f trimmed) → {assembled.Count}/{totalFrames}.");
+                }
+                finally
+                {
+                    continueClip?.Dispose();
+                    clips.PoseClip.Dispose();
+                    clips.FaceClip.Dispose();
+                    clips.BackgroundClip?.Dispose();
+                    clips.MaskClip?.Dispose();
+                }
+                carriedOffset = WanAnimateChunkMath.NextCarriedOffset(sliceOffset, chunkLen);
+                chunkIndex++;
+                if (assembled.Count >= totalFrames)
+                {
+                    break;
+                }
+            }
+            // Frame edits (trim/boomerang) run once over the assembled video, not per chunk.
+            byte[][] output = assembled.Count > totalFrames
+                ? [.. assembled.GetRange(0, totalFrames)]
+                : [.. assembled];
+            return VideoRecipeUtils.ToResult(output, outW, outH, request, fps: drivingFps);
         }
         catch (Exception ex)
         {
@@ -166,11 +235,6 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         }
         finally
         {
-            conditioning?.Dispose();
-            poseClip?.Dispose();
-            faceClip?.Dispose();
-            backgroundClip?.Dispose();
-            maskClip?.Dispose();
             referenceRgb?.Dispose();
             clipEmbeds?.Dispose();
             promptEmbeds.Dispose();

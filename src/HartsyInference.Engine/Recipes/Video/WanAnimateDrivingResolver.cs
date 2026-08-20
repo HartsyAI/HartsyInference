@@ -23,21 +23,37 @@ internal static class WanAnimateDrivingResolver
         Tensor? BackgroundClip = null, Tensor? MaskClip = null);
 
     /// <summary>Builds both driving clips; <paramref name="requestedFrames"/> is the grid-resolved request count, which a
-    /// shorter driving video shrinks per <see cref="ResolveDrivingFrames"/>. The caller owns disposal of both tensors.</summary>
+    /// shorter driving video shrinks per <see cref="ResolveDrivingFrames"/> unless <paramref name="pinFrameCount"/>.
+    /// <paramref name="frameOffset"/> seeks every driving input (the chunked extension's <c>video_frame_offset</c>).
+    /// The caller owns disposal of both tensors.</summary>
     internal static ResolvedClips Resolve(IBackend backend, VideoRequest request, int width, int height,
-        int requestedFrames, int temporalStep, int motionSize, CancellationToken cancel)
+        int requestedFrames, int temporalStep, int motionSize, CancellationToken cancel,
+        int frameOffset = 0, bool pinFrameCount = false)
     {
         List<byte[]>? drivingFrames = null;
         int frameCount = requestedFrames;
         int? drivingFps = null;
         if (request.DrivingVideo is not null)
         {
-            FfmpegProcessDecoder.Result decoded = DecodeClip(request.DrivingVideo, width, height, requestedFrames, cancel);
-            frameCount = ResolveDrivingFrames(requestedFrames, decoded.Frames.Count, temporalStep);
-            drivingFrames = FitFrames(decoded.Frames, frameCount);
+            FfmpegProcessDecoder.Result decoded = DecodeClip(request.DrivingVideo, width, height, frameOffset + requestedFrames, cancel);
+            int decodedCount = decoded.Frames.Count;
+            List<byte[]> available = DropLeadingFrames(decoded.Frames, frameOffset);
+            if (available.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"The Wan-Animate driving video ran out at frame {frameOffset} (only {decodedCount} frame(s) decoded) — "
+                    + "lower AnimateTotalFrames or supply a longer driving video.");
+            }
+            frameCount = ResolveChunkFrames(requestedFrames, available.Count, temporalStep, pinFrameCount);
+            if (pinFrameCount && available.Count < frameCount)
+            {
+                Logs.Warning($"[WanAnimate] The driving video is short: {available.Count} frame(s) left at offset {frameOffset} "
+                    + $"for a {frameCount}-frame chunk — the tail of this chunk repeats the last driving frame.");
+            }
+            drivingFrames = FitFrames(available, frameCount);
             drivingFps = decoded.Fps > 0.5 ? (int)Math.Round(decoded.Fps) : null;
-            Logs.Info($"[WanAnimate] driving video decoded: {decoded.Frames.Count} frame(s) @ {decoded.Fps:0.##} fps → "
-                + $"{frameCount} frame(s) at {width}x{height}.");
+            Logs.Info($"[WanAnimate] driving video decoded: {decodedCount} frame(s) @ {decoded.Fps:0.##} fps → "
+                + $"{frameCount} frame(s) at {width}x{height}{(frameOffset > 0 ? $" from offset {frameOffset}" : "")}.");
         }
 
         bool needsAuto = request.DrivingAutoPreprocess && drivingFrames is not null
@@ -45,10 +61,10 @@ internal static class WanAnimateDrivingResolver
         YoloPosePipeline? pose = needsAuto ? TryCreatePosePipeline(backend) : null;
         try
         {
-            Tensor poseClip = BuildPoseClip(backend, request, pose, drivingFrames, width, height, frameCount, cancel);
+            Tensor poseClip = BuildPoseClip(backend, request, pose, drivingFrames, width, height, frameCount, frameOffset, cancel);
             try
             {
-                Tensor faceClip = BuildFaceClip(backend, request, pose, drivingFrames, width, height, motionSize, frameCount, cancel);
+                Tensor faceClip = BuildFaceClip(backend, request, pose, drivingFrames, width, height, motionSize, frameCount, frameOffset, cancel);
                 // Replacement-mode extras: background clip in pose-clip form; the character mask decodes as RGB
                 // (channel 0 is read pipeline-side) and a single-frame mask is legal (it repeats there).
                 Tensor? backgroundClip = null;
@@ -57,17 +73,32 @@ internal static class WanAnimateDrivingResolver
                 {
                     if (request.DrivingBackgroundVideo is not null)
                     {
-                        backgroundClip = DecodeToClip(request.DrivingBackgroundVideo, width, height, frameCount, cancel);
-                        Logs.Info($"[WanAnimate] background video decoded to {frameCount} frame(s) at {width}x{height}.");
+                        backgroundClip = DecodeBackgroundClip(request.DrivingBackgroundVideo, width, height, frameCount, frameOffset, cancel);
+                        Logs.Info(backgroundClip is null
+                            ? $"[WanAnimate] background video is exhausted at offset {frameOffset} — this chunk's conditioning stays mid-gray."
+                            : $"[WanAnimate] background video decoded to {backgroundClip.Shape[2]} frame(s) at {width}x{height}.");
                     }
                     if (request.DrivingMaskVideo is not null)
                     {
-                        FfmpegProcessDecoder.Result decodedMask = DecodeClip(request.DrivingMaskVideo, width, height, frameCount, cancel);
-                        List<byte[]> maskFrames = decodedMask.Frames.Count >= frameCount
-                            ? FitFrames(decodedMask.Frames, frameCount)
-                            : decodedMask.Frames;   // short (e.g. single-frame) masks repeat pipeline-side
-                        maskClip = VideoRecipeUtils.PackRgbFramesToClip(maskFrames, width, height);
-                        Logs.Info($"[WanAnimate] character mask decoded: {maskFrames.Count} frame(s) at {width}x{height}.");
+                        FfmpegProcessDecoder.Result decodedMask = DecodeClip(request.DrivingMaskVideo, width, height, frameOffset + frameCount, cancel);
+                        // A single-frame mask bypasses the offset entirely (it repeats over every chunk); a multi-frame
+                        // one is seeked, and a seek past its end drops the mask for this chunk.
+                        List<byte[]> maskFrames = decodedMask.Frames.Count == 1
+                            ? decodedMask.Frames
+                            : DropLeadingFrames(decodedMask.Frames, frameOffset);
+                        if (maskFrames.Count == 0)
+                        {
+                            Logs.Info($"[WanAnimate] character mask is exhausted at offset {frameOffset} — this chunk generates unmasked.");
+                        }
+                        else
+                        {
+                            if (maskFrames.Count >= frameCount)
+                            {
+                                FitFrames(maskFrames, frameCount);   // short (e.g. single-frame) masks repeat pipeline-side
+                            }
+                            maskClip = VideoRecipeUtils.PackRgbFramesToClip(maskFrames, width, height);
+                            Logs.Info($"[WanAnimate] character mask decoded: {maskFrames.Count} frame(s) at {width}x{height}.");
+                        }
                     }
                 }
                 catch
@@ -100,6 +131,26 @@ internal static class WanAnimateDrivingResolver
         return Math.Max(frames, 5);
     }
 
+    /// <summary>Per-chunk frame count. A continuation chunk PINS the request's count: the latent geometry, noise shape
+    /// and motion-prefix arithmetic were all fixed against it, so shrinking a late chunk because the seeked driving
+    /// video ran short would break the sequence — upstream never shrinks either, it repeat-pads the pose's last
+    /// frame. Chunk 0 keeps the shrink rule so single-chunk generation is unchanged.</summary>
+    internal static int ResolveChunkFrames(int requestedFrames, int availableFrames, int temporalStep, bool pinFrameCount) =>
+        pinFrameCount ? requestedFrames : ResolveDrivingFrames(requestedFrames, availableFrames, temporalStep);
+
+    /// <summary>Drops the leading <paramref name="frameOffset"/> frames in place (ffmpeg is decoded from frame 0 —
+    /// <see cref="FfmpegProcessDecoder"/> has no seek), leaving an empty list when the clip is shorter.</summary>
+    internal static List<byte[]> DropLeadingFrames(List<byte[]> frames, int frameOffset)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        if (frameOffset <= 0)
+        {
+            return frames;
+        }
+        frames.RemoveRange(0, Math.Min(frameOffset, frames.Count));
+        return frames;
+    }
+
     /// <summary>Truncates (longer) or repeat-pads the last frame (shorter) to exactly <paramref name="count"/> frames.</summary>
     internal static List<byte[]> FitFrames(List<byte[]> frames, int count)
     {
@@ -120,12 +171,12 @@ internal static class WanAnimateDrivingResolver
     }
 
     private static Tensor BuildPoseClip(IBackend backend, VideoRequest request, YoloPosePipeline? pose,
-        List<byte[]>? drivingFrames, int width, int height, int frameCount, CancellationToken cancel)
+        List<byte[]>? drivingFrames, int width, int height, int frameCount, int frameOffset, CancellationToken cancel)
     {
         if (request.DrivingPoseVideo is not null)
         {
             Logs.Info("[WanAnimate] pose branch: using the supplied pre-rendered pose video.");
-            return DecodeToClip(request.DrivingPoseVideo, width, height, frameCount, cancel);
+            return DecodeToClip(request.DrivingPoseVideo, width, height, frameCount, frameOffset, "pose", cancel);
         }
         if (drivingFrames is not null)
         {
@@ -138,13 +189,14 @@ internal static class WanAnimateDrivingResolver
     }
 
     private static Tensor BuildFaceClip(IBackend backend, VideoRequest request, YoloPosePipeline? pose,
-        List<byte[]>? drivingFrames, int width, int height, int motionSize, int frameCount, CancellationToken cancel)
+        List<byte[]>? drivingFrames, int width, int height, int motionSize, int frameCount, int frameOffset,
+        CancellationToken cancel)
     {
         int faceFrames = frameCount - 1;
         if (request.DrivingFaceVideo is not null)
         {
             Logs.Info("[WanAnimate] face branch: using the supplied pre-cropped face video.");
-            return DecodeToClip(request.DrivingFaceVideo, motionSize, motionSize, faceFrames, cancel);
+            return DecodeToClip(request.DrivingFaceVideo, motionSize, motionSize, faceFrames, frameOffset, "face", cancel);
         }
         if (drivingFrames is not null)
         {
@@ -162,12 +214,41 @@ internal static class WanAnimateDrivingResolver
             "Wan-Animate needs a driving motion input: set VideoRequest.DrivingVideo (a driving video) "
             + "or VideoRequest.InitImage (a still tiled across frames).");
 
-    /// <summary>Decodes an override clip at the exact target geometry and packs it, truncated/repeat-padded to
-    /// <paramref name="numFrames"/> (the extension's <c>DecodeControlClip</c> semantics).</summary>
-    private static Tensor DecodeToClip(VideoClip clip, int width, int height, int numFrames, CancellationToken cancel)
+    /// <summary>Decodes an override clip at the exact target geometry from <paramref name="frameOffset"/> onward and
+    /// packs it, truncated/repeat-padded to <paramref name="numFrames"/> (the extension's <c>DecodeControlClip</c>
+    /// semantics).</summary>
+    private static Tensor DecodeToClip(VideoClip clip, int width, int height, int numFrames, int frameOffset,
+        string branch, CancellationToken cancel)
     {
-        FfmpegProcessDecoder.Result decoded = DecodeClip(clip, width, height, numFrames, cancel);
-        return VideoRecipeUtils.PackRgbFramesToClip(FitFrames(decoded.Frames, numFrames), width, height);
+        FfmpegProcessDecoder.Result decoded = DecodeClip(clip, width, height, frameOffset + numFrames, cancel);
+        int decodedCount = decoded.Frames.Count;
+        List<byte[]> frames = DropLeadingFrames(decoded.Frames, frameOffset);
+        if (frames.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"The Wan-Animate {branch} clip ran out at frame {frameOffset} (only {decodedCount} frame(s) decoded) — "
+                + "lower AnimateTotalFrames or supply a longer clip.");
+        }
+        return VideoRecipeUtils.PackRgbFramesToClip(FitFrames(frames, numFrames), width, height);
+    }
+
+    /// <summary>Background clip for one chunk, seeked and truncated but NEVER repeat-padded: upstream writes background
+    /// only up to the decoded length and leaves the rest of the conditioning mid-gray, and a seek past its end drops
+    /// the background for that chunk entirely (null).</summary>
+    private static Tensor? DecodeBackgroundClip(VideoClip clip, int width, int height, int numFrames, int frameOffset,
+        CancellationToken cancel)
+    {
+        FfmpegProcessDecoder.Result decoded = DecodeClip(clip, width, height, frameOffset + numFrames, cancel);
+        List<byte[]> frames = DropLeadingFrames(decoded.Frames, frameOffset);
+        if (frames.Count == 0)
+        {
+            return null;
+        }
+        if (frames.Count > numFrames)
+        {
+            frames.RemoveRange(numFrames, frames.Count - numFrames);
+        }
+        return VideoRecipeUtils.PackRgbFramesToClip(frames, width, height);
     }
 
     private static FfmpegProcessDecoder.Result DecodeClip(VideoClip clip, int width, int height, int maxFrames, CancellationToken cancel)
