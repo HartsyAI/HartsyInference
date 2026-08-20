@@ -75,6 +75,9 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     private readonly WanImageEmbedder _imgEmbedder;
     private readonly WanRope _rope;
     private readonly WanForwardCaches _caches = new();
+    // A cache of its own for the driving table: one shared cache holds both tables, and its cap-eviction disposes
+    // EVERY entry — so a second fetch inside one forward could free the generation table still in use.
+    private readonly WanForwardCaches _refRopeCache = new();
     private readonly int _patchVec;
     private int _disposed;
 
@@ -272,7 +275,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     private (Tensor Cos, Tensor Sin) RefRopeCosSin(int frames, int gh, int gw, int genGridW)
     {
         (int offT, int offH, int offW) = RefRopeOffsets(genGridW);
-        return _caches.RopeCosSin((frames, gh, gw, offW),
+        return _refRopeCache.RopeCosSin((frames, gh, gw, offW),
             () => _rope.BuildCosSin(frames, gh, gw, offT, offH, offW));
     }
 
