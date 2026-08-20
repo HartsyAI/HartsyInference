@@ -200,16 +200,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             Logs.Warning("[MiniMaxH3Recipe] CFG-parallel is configured but structurally inapplicable to MiniMax-H3 — "
                 + "it runs CfgScale=1.0 as a single forward pass with no unconditional branch to parallelize.");
         }
-        if (context.TextEncoderBackend is not null && !ReferenceEquals(context.TextEncoderBackend, context.Backend))
-        {
-            Logs.Info("[MiniMaxH3Recipe] Text encoder placed off the primary backend — its weights stay resident "
-                + "between generations, since nothing on that device competes with the DiT for the space.");
-        }
-        if (context.VaeBackend is not null && !ReferenceEquals(context.VaeBackend, context.Backend))
-        {
-            Logs.Info("[MiniMaxH3Recipe] VAE encode/decode placed off the primary backend — its weights stay "
-                + "resident between generations, since nothing on that device competes with the DiT for the space.");
-        }
+        PlacementSupport.WarnIfComponentsSplit("MiniMaxH3Recipe", context);
     }
 
     /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can
