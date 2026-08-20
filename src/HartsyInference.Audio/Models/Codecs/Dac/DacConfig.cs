@@ -88,10 +88,15 @@ public sealed record DacConfig
     /// dim 0 with <c>weight_g</c> sized <c>[C_in, 1, 1]</c>.</summary>
     public bool TransposeWeightNormDim0 { get; init; } = false;
 
+    /// <summary>Explicit encoder-output width, overriding the doubling-derived default. The YuE x-codec's
+    /// acoustic <c>encoder</c> is <c>dac2.Encoder(d_model=64, strides=[8,5,4,2], d_latent=256)</c> — its final
+    /// projection narrows 1024 -> 256, which the derived formula cannot express.</summary>
+    public int? EncoderLatentDim { get; init; } = null;
+
     /// <summary>Convenience — the latent dimension at the encoder output (= bottleneck
     /// channels = <c>EncoderDim * 2^len(EncoderRates)</c>). 64 * 16 = 1024 for the
     /// published configs.</summary>
-    public int LatentDim => EncoderDim * (1 << EncoderRates.Count);
+    public int LatentDim => EncoderLatentDim ?? EncoderDim * (1 << EncoderRates.Count);
 
     /// <summary>Convenience — the latent frame rate (Hz).</summary>
     public int FrameRate

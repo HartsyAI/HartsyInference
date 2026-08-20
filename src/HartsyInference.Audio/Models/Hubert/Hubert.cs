@@ -97,8 +97,17 @@ public sealed unsafe class Hubert : IDisposable
         return outT;
     }
 
+    /// <summary>Encodes 16 kHz mono PCM <c>[1, 1, T_pcm]</c> → the MEAN over all 13 hidden states (the encoder
+    /// input after pos-conv + LayerNorm, plus each of the 12 layer outputs), channels-first <c>[1, hidden, T]</c>.
+    /// This is <c>SoundStream.get_regress_target</c> — x-codec averages every state, NOT the layer-9 feature the
+    /// usual RepCodec/HuBERT-tokenizer convention uses. The caller supplies the 160-sample zero pad per side.</summary>
+    public Tensor ForwardMeanHiddenStates(IBackend backend, Tensor pcm, int tPcm)
+        => Forward(backend, pcm, tPcm, meanHiddenStates: true);
+
     /// <summary>Encodes 16 kHz mono PCM <c>[1, 1, T_pcm]</c> → content features <c>[1, hidden, T]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor pcm, int tPcm)
+    public Tensor Forward(IBackend backend, Tensor pcm, int tPcm) => Forward(backend, pcm, tPcm, meanHiddenStates: false);
+
+    private Tensor Forward(IBackend backend, Tensor pcm, int tPcm, bool meanHiddenStates)
     {
         // Conv feature extractor → [1, 512, T'].
         Tensor x = ConvExtractor(backend, pcm, tPcm, out int tFrames);
@@ -131,10 +140,29 @@ public sealed unsafe class Hubert : IDisposable
         // Encoder pre-stack LayerNorm (post-norm variant applies it here), then 12 layers.
         Tensor enc = new(h.Shape, DType.F32);
         backend.LayerNorm(enc, h, _encNormW!, _encNormB!, _cfg.NormEps); h.Dispose();
+
+        Tensor? acc = null;
+        if (meanHiddenStates)
+        {
+            acc = new Tensor(enc.Shape, DType.F32);
+            long n = enc.ElementCount;
+            Buffer.MemoryCopy((void*)enc.DataPointer, (void*)acc.DataPointer, n * sizeof(float), n * sizeof(float));
+        }
         for (int i = 0; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, enc, tFrames);
             enc.Dispose(); enc = next;
+            if (acc is null) continue;
+            float* ap = (float*)acc.DataPointer;
+            float* np = (float*)enc.DataPointer;
+            for (long j = 0; j < acc.ElementCount; j++) ap[j] += np[j];
+        }
+        if (acc is not null)
+        {
+            float scale = 1f / (_layers.Length + 1);
+            float* ap = (float*)acc.DataPointer;
+            for (long j = 0; j < acc.ElementCount; j++) ap[j] *= scale;
+            enc.Dispose(); enc = acc;
         }
 
         // Return channels-first [1, hidden, T] (get_content transpose).

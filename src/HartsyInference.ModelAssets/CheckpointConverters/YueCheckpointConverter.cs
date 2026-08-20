@@ -19,8 +19,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <c>quantizer.quantizers.{q}.{in_proj,out_proj,codebook}.*</c>, <c>decoder.model.*</c>) with RAW weight-norm pairs
 /// (the engine fuses via <c>WeightNormFusion</c>, so the converter must NOT pre-fuse). The xcodec_mini_infer original
 /// is a torch <c>.pth</c> — this loader takes a safetensors export of its <c>codec_model</c> state dict. The acoustic
-/// path maps through; the training-only semantic branch (HuBERT extractor + semantic encoder/decoder + the
-/// <c>fc_prior</c>/<c>fc_post*</c> projections) is dropped.</para></summary>
+/// decode path maps through and the semantic-reconstruction head (<c>decoder_semantic</c> + <c>fc_post1</c>) is always
+/// dropped; the encode branch (HuBERT <c>semantic_model</c> + <c>encoder_semantic</c> + acoustic <c>encoder</c> +
+/// <c>fc_prior</c>, ~95M extra params) is dropped unless <c>forEncode</c> is set.</para></summary>
 public sealed class YueCheckpointConverter
 {
     // VALIDATION-GATED (pending a real xcodec_mini_infer key dump): the upstream SoundStream class names its
@@ -33,6 +34,13 @@ public sealed class YueCheckpointConverter
     [
         "semantic_model.", "encoder_semantic.", "decoder_semantic.", "decoder_semantic_2.", "encoder.",
         "fc_prior.", "fc_post1.", "fc_post_a.", "fc_post_s.", "discriminator.",
+    ];
+    // Encode (YuE ICL audio prompt) additionally needs the four roots the decode path drops: the HuBERT semantic
+    // model, the RepCodec `encoder_semantic`, the acoustic `encoder` (note the dot — it does NOT match
+    // `encoder_semantic.`), and the `fc_prior` fusion projection.
+    private static readonly string[] _xCodecEncodeDropPrefixes =
+    [
+        "decoder_semantic.", "decoder_semantic_2.", "fc_post1.", "fc_post_a.", "fc_post_s.", "discriminator.",
     ];
 
     /// <summary>Loads a Stage-1 LM checkpoint (<c>m-a-p/YuE-s1-7B-anneal-en-cot</c> and siblings). <paramref name="path"/>
@@ -112,15 +120,18 @@ public sealed class YueCheckpointConverter
         }
     }
 
-    /// <summary>Loads an X-Codec safetensors export for the engine <c>XCodec</c> class. Caller owns the loader.</summary>
-    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadXCodec(string path, bool castToF32 = false)
+    /// <summary>Loads an X-Codec safetensors export for the engine <c>XCodec</c> class. Caller owns the loader.
+    /// <paramref name="forEncode"/> additionally keeps the encode branch (HuBERT semantic model, RepCodec
+    /// <c>encoder_semantic</c>, acoustic <c>encoder</c>, <c>fc_prior</c>) — ~95M extra params, so leave it off for
+    /// the pure-generation path.</summary>
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadXCodec(string path, bool castToF32 = false, bool forEncode = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
         Dictionary<string, Tensor> weights = new();
         foreach (string key in loader.Descriptors.Keys)
         {
-            string? mapped = MapXCodecKey(key);
+            string? mapped = MapXCodecKey(key, forEncode);
             if (mapped is not null) weights[mapped] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
         }
         return (weights, loader);
@@ -142,7 +153,7 @@ public sealed class YueCheckpointConverter
     /// <summary>Pure X-Codec key mapping (testable without files): strips wrapper prefixes, drops the semantic branch,
     /// renames the acoustic <c>decoder_2.*</c> root to <c>decoder.*</c>, and normalizes weight-norm key spellings.
     /// Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>
-    public static string? MapXCodecKey(string key)
+    public static string? MapXCodecKey(string key, bool forEncode = false)
     {
         foreach (string prefix in _xCodecWrapperPrefixes)
         {
@@ -152,7 +163,7 @@ public sealed class YueCheckpointConverter
                 break;
             }
         }
-        foreach (string prefix in _xCodecDropPrefixes)
+        foreach (string prefix in forEncode ? _xCodecEncodeDropPrefixes : _xCodecDropPrefixes)
         {
             if (key.StartsWith(prefix, StringComparison.Ordinal))
                 return null;
