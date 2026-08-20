@@ -78,7 +78,10 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 + "the InitImage slot carries the driving pose/motion input.");
 
         string prompt = request.Prompt;
-        string negative = request.NegativePrompt ?? "";
+        // Swarm sends an unset negative as "", not null, so upstream's falsy check is the one to mirror.
+        string negative = string.IsNullOrWhiteSpace(request.NegativePrompt)
+            ? WanVideoRecipe.DefaultNegativePrompt
+            : request.NegativePrompt;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 77, step: _config.VaeTemporalCompression);
         if (numFrames < 5)

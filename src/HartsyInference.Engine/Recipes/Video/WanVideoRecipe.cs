@@ -36,6 +36,12 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <summary>Wan's umT5 context length (matches diffusers' 512-token encode).</summary>
     internal const int TokenLength = 512;
 
+    /// <summary>Upstream's <c>wan_shared_cfg.sample_neg_prompt</c> (<c>wan/configs/shared_config.py</c>), used by every
+    /// Wan family when the caller gives no negative prompt.</summary>
+    internal const string DefaultNegativePrompt =
+        "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，"
+        + "多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
     private readonly string _familyId;
 
     /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights;
