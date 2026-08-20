@@ -16,13 +16,19 @@ public static class OpenPoseRenderer
     /// <param name="OverwriteLimbs">Wan2.2 assigns the 0.6-scaled colour; controlnet_aux alpha-blends it, which
     /// leaves off-palette values where limbs cross.</param>
     /// <param name="LargestPersonOnly">Wan2.2 renders one subject; controlnet_aux renders every detection.</param>
-    public sealed record Profile(int? LineWidth, bool OverwriteLimbs, bool LargestPersonOnly, float VisThreshold)
+    /// <param name="AverageNeckConfidence">The neck is synthesized from the two shoulders. Wan2.2 averages their
+    /// confidences; requiring both to clear the threshold instead drops the neck whenever one shoulder is weak —
+    /// and the neck is an endpoint of 5 of the 20 limbs, so losing it guts the skeleton.</param>
+    public sealed record Profile(int? LineWidth, bool OverwriteLimbs, bool LargestPersonOnly, float VisThreshold,
+        bool AverageNeckConfidence)
     {
         /// <summary>controlnet_aux <c>draw_bodypose</c> — the ControlNet/DWPose convention.</summary>
-        public static Profile ControlNetAux { get; } = new(null, OverwriteLimbs: false, LargestPersonOnly: false, VisThreshold: 0.3f);
+        public static Profile ControlNetAux { get; } = new(null, OverwriteLimbs: false, LargestPersonOnly: false,
+            VisThreshold: 0.3f, AverageNeckConfidence: false);
 
         /// <summary>Wan2.2's <c>preprocess/</c> renderer, which <c>pose_patch_embedding</c> was trained on.</summary>
-        public static Profile Wan22Animate { get; } = new(null, OverwriteLimbs: true, LargestPersonOnly: true, VisThreshold: 0.5f);
+        public static Profile Wan22Animate { get; } = new(null, OverwriteLimbs: true, LargestPersonOnly: true,
+            VisThreshold: 0.5f, AverageNeckConfidence: true);
     }
 
     /// <summary>Wan2.2's canvas-relative line width: <c>max(int(min(H,W)/200) - 1, 1)</c> — 1 at 512, 2 at 720p,
@@ -87,7 +93,9 @@ public static class OpenPoseRenderer
                 if (op == 1)   // neck = shoulder midpoint (COCO 5 = L-shoulder, 6 = R-shoulder)
                 {
                     Keypoint ls = person.Keypoints[5], rs = person.Keypoints[6];
-                    vis[1] = ls.Confidence >= visThreshold && rs.Confidence >= visThreshold;
+                    vis[1] = profile.AverageNeckConfidence
+                        ? (ls.Confidence + rs.Confidence) * 0.5f >= visThreshold
+                        : ls.Confidence >= visThreshold && rs.Confidence >= visThreshold;
                     px[1] = (ls.X + rs.X) * 0.5f * scaleX; py[1] = (ls.Y + rs.Y) * 0.5f * scaleY;
                     continue;
                 }

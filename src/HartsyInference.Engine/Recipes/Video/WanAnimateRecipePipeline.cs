@@ -141,7 +141,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 dropped.Dispose();
             }
 
-            referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.ResizeRgb24(reference, width, height), width, height);
+            referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.LetterboxRgb24(reference, width, height), width, height);
 
             // One seed for every chunk: the chunks are separate denoises, so leaving it null would re-roll per chunk
             // and make a run unreproducible. The motion prefix pins continuity regardless of the noise.

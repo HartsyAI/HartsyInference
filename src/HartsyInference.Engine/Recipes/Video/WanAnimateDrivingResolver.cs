@@ -259,8 +259,10 @@ internal static class WanAnimateDrivingResolver
     {
         try
         {
+            // Letterbox, never stretch: every Wan-Animate clip (driving, pose, face, background, mask) goes through
+            // here, so they all land in the same geometry and the skeleton stays registered to the body.
             return new FfmpegProcessDecoder()
-                .DecodeAsync(clip.Data, clip.Format, maxFrames, width, height, cancel).GetAwaiter().GetResult();
+                .DecodeAsync(clip.Data, clip.Format, maxFrames, width, height, cancel, letterbox: true).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {

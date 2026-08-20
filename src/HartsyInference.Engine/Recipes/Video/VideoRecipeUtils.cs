@@ -116,6 +116,29 @@ internal static class VideoRecipeUtils
 
     /// <summary>Bilinear-resamples an <see cref="ImageData"/> to interleaved HWC RGB24 at the target size (the
     /// extension's <c>RgbToImage.ToHwcRgbResized</c>).</summary>
+    /// <summary>Aspect-preserving resize onto a black <paramref name="width"/>×<paramref name="height"/> canvas —
+    /// Wan2.2's <c>padding_resize</c>. The stretching <see cref="ResizeRgb24"/> squashes a portrait reference into a
+    /// square job, so the identity conditioning sees a distorted face.</summary>
+    internal static byte[] LetterboxRgb24(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        float scale = MathF.Min(width / (float)image.Width, height / (float)image.Height);
+        int innerW = Math.Max(1, (int)MathF.Round(image.Width * scale));
+        int innerH = Math.Max(1, (int)MathF.Round(image.Height * scale));
+        if (innerW == width && innerH == height)
+        {
+            return ResizeRgb24(image, width, height);
+        }
+        byte[] inner = ResizeRgb24(image, innerW, innerH);
+        byte[] canvas = new byte[(long)width * height * 3];   // zero = black pad
+        int offX = (width - innerW) / 2, offY = (height - innerH) / 2;
+        for (int y = 0; y < innerH; y++)
+        {
+            Array.Copy(inner, (long)y * innerW * 3, canvas, ((long)(y + offY) * width + offX) * 3, (long)innerW * 3);
+        }
+        return canvas;
+    }
+
     internal static byte[] ResizeRgb24(ImageData image, int width, int height)
     {
         ArgumentNullException.ThrowIfNull(image);

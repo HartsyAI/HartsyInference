@@ -28,13 +28,13 @@ public sealed class FfmpegProcessDecoder
     /// <summary>Container-bytes variant of <see cref="DecodeFileAsync(string, int?, int?, int?, CancellationToken)"/>:
     /// the frame cap and ffmpeg-side scale run before frames cross the pipe, so a long HD clip never materializes.</summary>
     public async Task<Result> DecodeAsync(byte[] container, string? formatHint, int? maxFrames, int? scaleWidth,
-        int? scaleHeight, CancellationToken cancel = default)
+        int? scaleHeight, CancellationToken cancel = default, bool letterbox = false)
     {
         string temp = Path.Combine(Path.GetTempPath(), $"hartsy-dec-{Guid.NewGuid():N}.{formatHint ?? "bin"}");
         await File.WriteAllBytesAsync(temp, container, cancel).ConfigureAwait(false);
         try
         {
-            return await DecodeFileAsync(temp, maxFrames, scaleWidth, scaleHeight, cancel).ConfigureAwait(false);
+            return await DecodeFileAsync(temp, maxFrames, scaleWidth, scaleHeight, cancel, letterbox).ConfigureAwait(false);
         }
         finally
         {
@@ -50,7 +50,7 @@ public sealed class FfmpegProcessDecoder
     /// resampled ffmpeg-side to <paramref name="scaleWidth"/>×<paramref name="scaleHeight"/> (<c>-vf scale</c>); a null
     /// scale dimension keeps the probed source size.</summary>
     public async Task<Result> DecodeFileAsync(string path, int? maxFrames, int? scaleWidth, int? scaleHeight,
-        CancellationToken cancel = default)
+        CancellationToken cancel = default, bool letterbox = false)
     {
         if (maxFrames is <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxFrames), $"maxFrames must be positive; got {maxFrames}.");
@@ -59,7 +59,13 @@ public sealed class FfmpegProcessDecoder
         (int width, int height, double fps) = await ProbeAsync(path, cancel).ConfigureAwait(false);
         int outWidth = scaleWidth ?? width;
         int outHeight = scaleHeight ?? height;
-        string scaleArg = scaleWidth is null && scaleHeight is null ? "" : $" -vf \"scale={outWidth}:{outHeight}\"";
+        // A bare scale=W:H shears the source when the aspects differ. Letterboxing (fit inside, centre on black) is
+        // what Wan2.2's padding_resize does, and the pose skeleton it produces has to land on the body.
+        string filter = letterbox
+            ? $"scale={outWidth}:{outHeight}:force_original_aspect_ratio=decrease,"
+                + $"pad={outWidth}:{outHeight}:(ow-iw)/2:(oh-ih)/2:black"
+            : $"scale={outWidth}:{outHeight}";
+        string scaleArg = scaleWidth is null && scaleHeight is null ? "" : $" -vf \"{filter}\"";
         string capArg = maxFrames is null ? "" : $" -frames:v {maxFrames.Value}";
 
         ProcessStartInfo psi = new()
