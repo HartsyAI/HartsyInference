@@ -192,7 +192,11 @@ internal static class WanAnimateDrivingResolver
         List<byte[]>? drivingFrames, int width, int height, int motionSize, int frameCount, int frameOffset,
         CancellationToken cancel)
     {
-        int faceFrames = frameCount - 1;
+        // One face crop per pose frame, as upstream (nodes_wan.py face_video[:length], and the reference
+        // preprocessor emits a crop per driving frame). Taking frameCount-1 left the last latent frame's
+        // motion vector zeroed; CausalConv1d replicate-pads on the left, so indices still line up and only
+        // the tail was affected -- which is why it survived earlier validation.
+        int faceFrames = frameCount;
         if (request.DrivingFaceVideo is not null)
         {
             Logs.Info("[WanAnimate] face branch: using the supplied pre-cropped face video.");
