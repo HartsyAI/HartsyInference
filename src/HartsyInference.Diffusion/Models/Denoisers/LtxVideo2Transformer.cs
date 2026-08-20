@@ -22,7 +22,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para>RoPE: four flavors built per call from the latent grid — video self (3-axis, 4096), audio self (1-axis,
 /// 2048), video-cross (temporal-only, 2048) and audio-cross (identical to audio self). See
 /// <see cref="LtxVideo2Rope"/>. Numerics vs the real checkpoint are validation-pending.</para></summary>
-public sealed unsafe class LtxVideo2Transformer : IDisposable
+public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposable
 {
     private readonly LtxVideo2Config _config;
     private readonly LtxVideo2Block[] _blocks;
