@@ -86,10 +86,14 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// (tokens are in (t,h,w) order, so each frame's tokens are contiguous). <paramref name="postCrossAttnHook"/>
     /// runs between the cross-attention residual and the FFN — Matrix-Game attaches its ActionModule there (the hook
     /// mutates the hidden state in place). <paramref name="selfAttnMask"/> is an optional additive mask broadcastable
-    /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.</summary>
+    /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.
+    /// <paramref name="animate2"/> replaces self-attention with Wan-Animate-2's frame-local splice against the
+    /// driving stream's cached K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's pre-RoPE
+    /// self-attention K/V (the Animate-2 driving prepass, which is otherwise an ordinary block forward).</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
-        Action<Tensor>? postSelfAttnHook = null, Func<Tensor, Tensor, (Tensor K, Tensor V)>? selfAttnKvExchange = null)
+        Action<Tensor>? postSelfAttnHook = null, Func<Tensor, Tensor, (Tensor K, Tensor V)>? selfAttnKvExchange = null,
+        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null)
     {
         int s = (int)hidden.Shape[0];
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb);
@@ -98,7 +102,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         // 1. self-attn
         Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
-        Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask, selfAttnKvExchange);
+        Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask, selfAttnKvExchange,
+            animate2, selfAttnKvCapture);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
         n1.Dispose();
         Tensor h1 = GatedAdd(backend, hidden, attn1, gateMsa, s, tokensPerGroup);
@@ -137,7 +142,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
     private Tensor Attention(IBackend backend, Tensor qInput, Tensor kvInput, int idx, bool applyRope,
         WanRope rope, Tensor cos, Tensor sin, int sq, int sk, Tensor? mask = null,
-        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange = null)
+        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange = null,
+        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? kvCapture = null)
     {
         Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[idx]!, _qB[idx]);
         Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvInput, _k[idx]!, _kB[idx]);
@@ -145,6 +151,12 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
         Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[idx]!, _eps); q.Dispose();
         Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, _nk[idx]!, _eps); k.Dispose();
+
+        if (kvCapture is not null)   // pre-RoPE, so the generation stream can re-rotate with the driving table
+        {
+            kvCapture.K = CloneRows(backend, kn, sk);
+            kvCapture.V = CloneRows(backend, v, sk);
+        }
 
         if (applyRope)   // per-head; [S,dim] is contiguous as [S,heads,headDim]
         {
@@ -162,6 +174,16 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
                 backend.WanRopeInterleavedPerHead(qn, cos, sin, sq, _heads, _headDim);
                 backend.WanRopeInterleavedPerHead(kn, cos, sin, sk, _heads, _headDim);
             }
+        }
+
+        if (animate2 is not null)
+        {
+            Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, sq, animate2);
+            qn.Dispose(); kn.Dispose(); v.Dispose();
+            Tensor outA2 = new Tensor(new TensorShape(sq, _dim), DType.F32);
+            backend.Linear(outA2, spliced, _o[idx]!, _oB[idx]);
+            spliced.Dispose();
+            return outA2;
         }
 
         if (kvExchange is not null)   // context parallel: trade local post-RoPE K/V for the full sequence's
@@ -185,6 +207,77 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[idx]!, _oB[idx]);
         flat.Dispose();
         return outT;
+    }
+
+    /// <summary>Wan-Animate-2 frame-local self-attention: one attention call per generation latent frame, over all
+    /// generation tokens plus (for frames &gt; 0) the single aligned driving frame. Ported from ComfyUI's loop form
+    /// rather than the official flex-attention kernel, whose <c>ceil(/128)·128</c> and <c>sp_size</c> padding are
+    /// kernel artifacts. The driving keys are rotated HERE, with the driving RoPE table, because the cache holds them
+    /// pre-RoPE. <paramref name="qn"/>/<paramref name="kn"/> are already rotated with the generation table.</summary>
+    private Tensor Animate2FrameLocalAttention(IBackend backend, Tensor qn, Tensor kn, Tensor v, int s,
+        WanAnimate2SelfAttnContext ctx)
+    {
+        int hw = ctx.TokensPerFrame, frames = ctx.GenFrames;
+        int refSeq = (frames - 1) * hw;
+        if (s != frames * hw)
+            throw new ArgumentException($"Animate-2 sequence {s} != {frames} frames × {hw} tokens.", nameof(s));
+        Tensor drivingK = ctx.DrivingK ?? throw new InvalidOperationException("Animate-2 block has no cached driving K.");
+        Tensor drivingV = ctx.DrivingV ?? throw new InvalidOperationException("Animate-2 block has no cached driving V.");
+        if (drivingK.Shape[0] != refSeq)
+            throw new ArgumentException($"Driving cache holds {drivingK.Shape[0]} tokens; expected {refSeq} ({frames - 1} frames × {hw}).");
+
+        Tensor kRef = CloneRows(backend, drivingK, refSeq);
+        backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
+
+        Tensor kGen = ToBhsd(backend, kn, s);
+        Tensor vGen = ToBhsd(backend, v, s);
+        backend.ScatterSeqHeadMajor(ctx.KeyBuffer, kGen, 0);
+        backend.ScatterSeqHeadMajor(ctx.ValueBuffer, vGen, 0);
+
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor outMh = new Tensor(new TensorShape(1, _heads, s, _headDim), DType.F32);
+        for (int j = 0; j < frames; j++)
+        {
+            using Tensor qRows = new Tensor(new TensorShape(hw, _dim), DType.F32);
+            backend.SliceRows(qRows, qn, j * hw);
+            Tensor qMh = ToBhsd(backend, qRows, hw);
+
+            Tensor keys = kGen, values = vGen;
+            Tensor? bias = ctx.LogScaleBiasGen;
+            if (j > 0)
+            {
+                ScatterDrivingFrame(backend, ctx.KeyBuffer, kRef, j - 1, hw, s);
+                ScatterDrivingFrame(backend, ctx.ValueBuffer, drivingV, j - 1, hw, s);
+                keys = ctx.KeyBuffer; values = ctx.ValueBuffer;
+                bias = ctx.LogScaleBiasSpliced;
+            }
+            Tensor attn = new Tensor(new TensorShape(1, _heads, hw, _headDim), DType.F32);
+            backend.ScaledDotProductAttention(attn, qMh, keys, values, bias, scale, allowF16: true);
+            qMh.Dispose();
+            backend.ScatterSeqHeadMajor(outMh, attn, j * hw);
+            attn.Dispose();
+        }
+        kRef.Dispose(); kGen.Dispose(); vGen.Dispose();
+        Tensor flat = FromBhsd(backend, outMh, s);
+        outMh.Dispose();
+        return flat;
+    }
+
+    /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>
+    private void ScatterDrivingFrame(IBackend backend, Tensor buffer, Tensor source, int frame, int hw, int tailOffset)
+    {
+        using Tensor rows = new Tensor(new TensorShape(hw, _dim), DType.F32);
+        backend.SliceRows(rows, source, frame * hw);
+        using Tensor mh = ToBhsd(backend, rows, hw);
+        backend.ScatterSeqHeadMajor(buffer, mh, tailOffset);
+    }
+
+    /// <summary>Device-resident row copy — a host <c>Buffer.MemoryCopy</c> here would drag the tensor off the GPU.</summary>
+    private Tensor CloneRows(IBackend backend, Tensor x, int rows)
+    {
+        Tensor o = new Tensor(new TensorShape(rows, _dim), DType.F32);
+        backend.SliceRows(o, x, 0);
+        return o;
     }
 
     /// <summary>Cross-attention to the umT5 text context, with an optional CLIP image branch (I2V): the first

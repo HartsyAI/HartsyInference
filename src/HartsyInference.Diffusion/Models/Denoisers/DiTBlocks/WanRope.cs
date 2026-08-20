@@ -64,21 +64,24 @@ public sealed unsafe class WanRope
     }
 
     /// <summary>Builds cos/sin <c>[S, headDim]</c> for a token grid <c>gridT × gridH × gridW</c> in <c>(f,h,w)</c> order. Each value is duplicated across its interleaved pair (so the pair shares one angle).</summary>
-    public (Tensor Cos, Tensor Sin) BuildCosSin(int gridT, int gridH, int gridW)
+    /// <param name="offsetT">Per-axis position offsets added to every token's index. Wan-Animate-2's driving stream
+    /// uses <c>(1, 0, genGridW)</c>: <c>+1</c> lines driving frame <c>j</c> up with generation frame <c>j+1</c> past
+    /// the reference slot, and the horizontal shift parks the driving tokens in their own strip of RoPE space.</param>
+    public (Tensor Cos, Tensor Sin) BuildCosSin(int gridT, int gridH, int gridW, int offsetT = 0, int offsetH = 0, int offsetW = 0)
     {
         int[] frames = new int[gridT];
-        for (int i = 0; i < gridT; i++) frames[i] = i;
-        return BuildCosSin(frames, gridH, gridW);
+        for (int i = 0; i < gridT; i++) frames[i] = i + offsetT;
+        return BuildCosSin(frames, gridH, gridW, offsetH, offsetW);
     }
 
     /// <summary>Builds cos/sin <c>[S, headDim]</c> with an explicit temporal index per frame slot — Matrix-Game's
     /// memory-augmented sequence assigns retrieved memory slots their <b>original historical</b> t-indices
     /// (non-contiguous gaps are fine; the model is trained for them).</summary>
-    public (Tensor Cos, Tensor Sin) BuildCosSin(ReadOnlySpan<int> frameIndices, int gridH, int gridW)
+    public (Tensor Cos, Tensor Sin) BuildCosSin(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH = 0, int offsetW = 0)
     {
         int gridT = frameIndices.Length;
         int seq = gridT * gridH * gridW;
-        if (_phFreqT is not null) return BuildCosSinPerHead(frameIndices, gridH, gridW, gridT, seq);
+        if (_phFreqT is not null) return BuildCosSinPerHead(frameIndices, gridH, gridW, gridT, seq, offsetH, offsetW);
 
         Tensor cos = new Tensor(new TensorShape(seq, _headDim), DType.F32);
         Tensor sin = new Tensor(new TensorShape(seq, _headDim), DType.F32);
@@ -93,15 +96,16 @@ public sealed unsafe class WanRope
                     long off = token * _headDim;
                     int d = 0;
                     FillAxis(cp, sp, off, ref d, _freqT, frameIndices[fi]);
-                    FillAxis(cp, sp, off, ref d, _freqH, hi);
-                    FillAxis(cp, sp, off, ref d, _freqW, wi);
+                    FillAxis(cp, sp, off, ref d, _freqH, hi + offsetH);
+                    FillAxis(cp, sp, off, ref d, _freqW, wi + offsetW);
                 }
         return (cos, sin);
     }
 
     /// <summary>Per-head (sigma_theta) cos/sin <c>[numHeads, S, headDim]</c>: token order matches the shared path, but
     /// each head uses its own θ_h frequencies. Consumed by <see cref="ApplyRotary"/>'s rank-3 branch.</summary>
-    private (Tensor Cos, Tensor Sin) BuildCosSinPerHead(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int gridT, int seq)
+    private (Tensor Cos, Tensor Sin) BuildCosSinPerHead(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int gridT, int seq,
+        int offsetH, int offsetW)
     {
         Tensor cos = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
         Tensor sin = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
@@ -119,8 +123,8 @@ public sealed unsafe class WanRope
                         long off = headBase + token * _headDim;
                         int d = 0;
                         FillAxis(cp, sp, off, ref d, _phFreqT![h], frames[fi]);
-                        FillAxis(cp, sp, off, ref d, _phFreqH![h], hi);
-                        FillAxis(cp, sp, off, ref d, _phFreqW![h], wi);
+                        FillAxis(cp, sp, off, ref d, _phFreqH![h], hi + offsetH);
+                        FillAxis(cp, sp, off, ref d, _phFreqW![h], wi + offsetW);
                     }
         }
         return (cos, sin);
