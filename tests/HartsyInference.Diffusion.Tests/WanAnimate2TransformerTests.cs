@@ -156,8 +156,9 @@ public unsafe class WanAnimate2TransformerTests
         AssertFinite(wide);
         using Tensor got = Run(backend, reused, narrowLatent, narrowDriving, encoder, clip, (GenFrames, GridH, GridW));
 
-        for (int j = 0; j < GenFrames; j++)
-            Assert.Equal(0f, FrameDelta(expected, got, j));
+        float worst = 0f;
+        for (int j = 0; j < GenFrames; j++) worst = MathF.Max(worst, FrameDelta(expected, got, j));
+        Assert.True(worst == 0f, $"the narrow-grid output changed after a wide-grid forward (max delta {worst}) — the driving RoPE offset outlived its resolution.");
     }
 
     /// <summary>Block 9 is skipped entirely on the unconditional pass, so the negative branch runs one block fewer
