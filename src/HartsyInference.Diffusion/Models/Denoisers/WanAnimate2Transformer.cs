@@ -14,11 +14,14 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 public sealed class WanAnimate2DrivingCache : IDisposable
 {
     private readonly Tensor[] _input;
+    private readonly IBackend? _backend;
     private int _disposed;
 
-    internal WanAnimate2DrivingCache(Tensor[] input, int frames, int tokensPerFrame, (int T, int H, int W) genGrid)
+    internal WanAnimate2DrivingCache(Tensor[] input, int frames, int tokensPerFrame, (int T, int H, int W) genGrid,
+        IBackend? backend = null)
     {
         _input = input;
+        _backend = backend;
         Frames = frames;
         TokensPerFrame = tokensPerFrame;
         GenGrid = genGrid;
@@ -57,7 +60,11 @@ public sealed class WanAnimate2DrivingCache : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        foreach (Tensor t in _input) t.Dispose();
+        foreach (Tensor t in _input)
+        {
+            _backend?.UnpinActivation(t);
+            t.Dispose();
+        }
     }
 }
 
@@ -229,7 +236,12 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             timestepProj.Dispose();
             if (ownsContext) context.Dispose();
         }
-        return new WanAnimate2DrivingCache(inputs, frames, gh * gw, genGrid);
+        // The cache is built once per chunk and read by every denoise step, but it is allocated inside this
+        // prepass like any other activation — so the pipeline's post-prepass FreeActivations() sweep reclaimed
+        // its device buffers and the loop spliced whatever landed in the reused memory. That is content-
+        // independent, which is why two completely different driving videos produced identical output.
+        foreach (Tensor t in inputs) backend.PinActivation(t);
+        return new WanAnimate2DrivingCache(inputs, frames, gh * gw, genGrid, backend);
     }
 
     /// <summary>Velocity prediction for one CFG branch. <paramref name="latent"/> is the assembled
