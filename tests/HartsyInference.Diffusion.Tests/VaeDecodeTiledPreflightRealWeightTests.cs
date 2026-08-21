@@ -21,7 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// most heavily-proven code path in this whole session (every earlier real-weight test in this backlog already
 /// exercises the decode side successfully), so this specifically isolates whether the NEW per-tile check itself
 /// regresses anything, deliberately avoiding the still-unresolved encoder-side cuDNN crash (see
-/// <see cref="SdxlTiledEncoderRealWeightTests"/> — not applicable here since this is pure T2I, no img2img encode).</summary>
+/// the removed SDXL tiled-encoder test used to cover — not applicable here since this is pure T2I, no img2img encode).</summary>
 [Trait("Category", "Integration")]
 public sealed class VaeDecodeTiledPreflightRealWeightTests
 {

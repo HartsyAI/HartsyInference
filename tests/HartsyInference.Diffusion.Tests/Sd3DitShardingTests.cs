@@ -15,7 +15,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// do NOT reproduce bit-exact here — the JointBlock's SDPA/GEMM sequence picks a different cuDNN/cuBLAS kernel
 /// per SM generation, diverging in the last 1-2 ULPs and compounding across 4 blocks; that is a hardware/library
 /// rounding artifact, not a sharding defect (same-GPU passing bit-exact proves the split logic itself is
-/// correct). Real cross-device verification uses SSIM, not bit-parity — see <c>Sd3DitShardingEngineTests</c>.
+/// correct). Real cross-device verification uses SSIM, not bit-parity — see <c>DitShardingEngineTests</c>.
 /// The tiny config's last block (index 3) is <c>context_pre_only</c> — exactly like the real 24/38-block
 /// configs — so this also exercises the context-stream identity-passthrough hand-off (see
 /// <see cref="Sd3Transformer"/>'s <c>ForwardBlocksRange</c> doc).</summary>
@@ -55,7 +55,7 @@ public sealed class Sd3DitShardingTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         // Same-GPU by design (see class doc): a second CudaBackend instance on the SAME ordinal, not a second
         // physical card — cross-architecture pairs introduce real last-ULP rounding differences unrelated to
-        // the split logic (verified separately; see Sd3DitShardingEngineTests for the real cross-device path).
+        // the split logic (verified separately; see DitShardingEngineTests for the real cross-device path).
         const int secondOrdinal = 0;
         _output.WriteLine($"Devices: {CudaContext.GetDeviceCount()}; sharded backend B on ordinal {secondOrdinal} (same-GPU split).");
 

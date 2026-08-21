@@ -45,6 +45,13 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     /// the halved cache. Reassigned by the transformer before each block.</summary>
     public Tensor? DrivingInput { get; set; }
 
+    /// <summary>Scales the driving stream's V before it is spliced. 1.0 is the trained behaviour. The driving band
+    /// is one frame against the generation stream's whole sequence, so its share of the softmax mass falls as
+    /// 1/(T+1) — 20% at 4 latent frames, 4.5% at 21 — and long clips stop following the driver. Raising this
+    /// restores the contribution without touching the attention weights. Mirrors ComfyUI's <c>pose_strength</c>;
+    /// like it, 0.0 does NOT mute the branch, because K still occupies the softmax denominator.</summary>
+    public float PoseStrength { get; set; } = 1.0f;
+
     /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving input are all
     /// owned by longer-lived caches and are borrowed here for the duration of one forward.</summary>
     public void Dispose()

@@ -204,6 +204,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 
             // The driving stream sits outside the guidance loop entirely — it never sees the negative prompt, and it
             // is built once per chunk rather than once per step.
+            _transformer.PoseStrength = (float)EnvSwitch.GetLong("HARTSY_ANIMATE2_POSE_STRENGTH_X100", 100) / 100f;
             driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid,
                 bf16Cache: bf16Cache);
             long drivingTokens = (long)driving.Frames * driving.TokensPerFrame;

@@ -89,6 +89,10 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// <summary>Timestep the driving stream is anchored to, independent of the denoise loop's.</summary>
     public const float DrivingTimestep = 1.0f;
 
+    /// <summary>Scales the driving V at splice time; see <see cref="WanAnimate2SelfAttnContext.PoseStrength"/>.
+    /// 1.0 reproduces the reference.</summary>
+    public float PoseStrength { get; set; } = 1.0f;
+
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
     private readonly WanImageEmbedder _imgEmbedder;
@@ -276,6 +280,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             TokensPerFrame = hw,
             LogScaleBiasGen = biasGen,
             LogScaleBiasSpliced = biasSpliced,
+            PoseStrength = PoseStrength,
             KeyBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
             ValueBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
         };

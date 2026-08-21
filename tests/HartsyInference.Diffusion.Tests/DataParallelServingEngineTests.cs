@@ -119,7 +119,7 @@ public sealed class DataParallelServingEngineTests
         _output.WriteLine($"Post-run free VRAM — ordinal 0: {endFree0:F2} GB, ordinal 1: {endFree1:F2} GB");
     }
 
-    /// <summary>Throwaway per-ordinal probes, same pattern as <c>Krea2DitShardingEngineTests</c> — per-backend
+    /// <summary>Throwaway per-ordinal probes, same pattern as <c>DitShardingEngineTests</c> — per-backend
     /// State makes these safe to construct beside the engines' own backends.</summary>
     private static (double FreeGb0, double FreeGb1) ProbeFreeGb(string ptxDir)
     {

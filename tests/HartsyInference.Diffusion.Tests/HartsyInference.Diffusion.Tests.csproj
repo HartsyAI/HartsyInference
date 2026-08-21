@@ -32,4 +32,13 @@
     </Content>
   </ItemGroup>
 
+  <!-- Dozens of *RealWeight*/*Vram*/*ShardingEngine* classes here load full-size checkpoints (13-21 GB
+       each: Flux-dev fp8, Krea2, Flux2 GGUF, ...). Only 17 of them opt into the "CudaSerial" collection;
+       under xunit's default cross-collection parallelism (one thread per core) enough of the rest can load
+       simultaneously to OOM-kill the whole host process within seconds, even run alone with the box
+       otherwise idle. Same fix as Audio.Tests/World.Tests: force single-threaded execution. -->
+  <ItemGroup>
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

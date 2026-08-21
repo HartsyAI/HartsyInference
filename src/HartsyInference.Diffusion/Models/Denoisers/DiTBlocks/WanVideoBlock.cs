@@ -238,6 +238,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         }
         (Tensor kRef, Tensor drivingV) = ProjectDrivingKv(backend, drivingInput, refSeq, idx);
         if (!ReferenceEquals(drivingInput, stored)) drivingInput.Dispose();
+        if (ctx.PoseStrength != 1.0f) backend.Scale(drivingV, drivingV, ctx.PoseStrength);
         backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
 
         Tensor kGen = ToBhsd(backend, kn, s);

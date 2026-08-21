@@ -79,6 +79,7 @@ public sealed unsafe class Int8GemmEpilogueProbeTests
     /// <see cref="Int8GemmExecutor"/> at the same shape. Without this split it is impossible to tell whether
     /// to attack the GEMM kernel or the surrounding passes.</summary>
     [Theory]
+    [Trait("Category", "GpuIntegration")]
     [InlineData(4992, 16384, 4096, "ffn_up")]
     [InlineData(4992, 4096, 16384, "ffn_down")]
     [InlineData(4992, 4096, 4096, "attn_qkvo")]
@@ -119,6 +120,7 @@ public sealed unsafe class Int8GemmEpilogueProbeTests
     }
 
     [Fact]
+    [Trait("Category", "GpuIntegration")]
     public void WhichInt8OutputConfigsDoesCublasLtAccept()
     {
         using CudaBackend _ = new CudaBackend(0, Path.Combine(AppContext.BaseDirectory, "Ptx"));
