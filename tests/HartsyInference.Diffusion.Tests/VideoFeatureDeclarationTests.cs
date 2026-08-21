@@ -17,7 +17,7 @@ public sealed class VideoFeatureDeclarationTests
     [
         // WanVideoRecipe registers once per checkpoint variant, so it appears under several family ids.
         "wan", "wan-22-5b", "wan-21-14b", "wan-21-1_3b",
-        "wan-vace", "wan-animate", "wan-s2v",   // already wired before this phase
+        "wan-vace", "wan-animate", "wan-animate-2", "wan-s2v",   // already wired before this phase
         "kandinsky5-video",                     // Phase 5b — EncodeFirstFrame now reached
         "minimax-h3",                           // keyframe conditioning
     ];
@@ -33,7 +33,7 @@ public sealed class VideoFeatureDeclarationTests
     private static readonly string[] ExpectedReferences = ["minimax-h3"];
 
     /// <summary>A driving motion video is Wan-Animate's core conditioning.</summary>
-    private static readonly string[] ExpectedDrivingVideo = ["wan-animate"];
+    private static readonly string[] ExpectedDrivingVideo = ["wan-animate", "wan-animate-2"];
 
     private readonly ITestOutputHelper _output;
 
