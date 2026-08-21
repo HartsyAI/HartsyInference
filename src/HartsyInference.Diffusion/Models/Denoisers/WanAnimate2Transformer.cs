@@ -170,7 +170,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
 
         int dim = _config.InnerDim;
         int seq = frames * gh * gw;
-        using Tensor conditioned = BuildDrivingChannels(drivingLatent);
+        using Tensor conditioned = BuildDrivingChannels(drivingLatent, _config.InChannels);
         Tensor hidden = WanDitOps.Patchify(backend, conditioned, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
 
         (Tensor cos, Tensor sin) = RefRopeCosSin(frames, gh, gw, genGrid.W);
@@ -307,16 +307,18 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         return bias;
     }
 
-    /// <summary>Assembles the driving stream's 36 channels: <c>[latent(16) | ones(4) | latent(16)]</c>.</summary>
-    private Tensor BuildDrivingChannels(Tensor drivingLatent)
+    /// <summary>Assembles the driving stream's 36 channels: <c>[latent(16) | ones(4) | latent(16)]</c> — the same
+    /// latent in both slots, and an all-ones mask because every driving frame is known.</summary>
+    public static Tensor BuildDrivingChannels(Tensor drivingLatent, int inChannels)
     {
+        ArgumentNullException.ThrowIfNull(drivingLatent);
         int z = (int)drivingLatent.Shape[1], t = (int)drivingLatent.Shape[2];
         int h = (int)drivingLatent.Shape[3], w = (int)drivingLatent.Shape[4];
         const int maskChannels = 4;
-        if (2 * z + maskChannels != _config.InChannels)
-            throw new ArgumentException($"Driving latent has {z} channels; {_config.InChannels} in-channels needs {(_config.InChannels - maskChannels) / 2}.", nameof(drivingLatent));
+        if (2 * z + maskChannels != inChannels)
+            throw new ArgumentException($"Driving latent has {z} channels; {inChannels} in-channels needs {(inChannels - maskChannels) / 2}.", nameof(drivingLatent));
         Tensor source = drivingLatent.DType == DType.F32 ? drivingLatent : drivingLatent.CastTo(DType.F32);
-        Tensor outT = new Tensor(new TensorShape([1L, _config.InChannels, t, h, w]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([1L, inChannels, t, h, w]), DType.F32);
         long plane = (long)t * h * w;
         long latentBytes = z * plane * 4;
         float* src = (float*)source.DataPointer, dst = (float*)outT.DataPointer;
