@@ -68,6 +68,12 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>Whether a detection also transcribes the command that follows it.</summary>
     public bool WakeTranscribeOnDetection { get; set; } = true;
 
+    /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the
+    /// check (the <see cref="WakeServiceOptions.AuthToken"/> default) — fine on a fully trusted LAN, not once
+    /// this port is reachable from anywhere less trusted. Set before exposing <see cref="WakePort"/> beyond a
+    /// trusted LAN.</summary>
+    public string? WakeAuthToken { get; set; }
+
     /// <summary>Exposes this engine's ASR/TTS to Home Assistant over the Wyoming protocol. Off by default: it
     /// binds a third port and only matters to a Home Assistant install.</summary>
     public bool WyomingEnabled { get; set; }

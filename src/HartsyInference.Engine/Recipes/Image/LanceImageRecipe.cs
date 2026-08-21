@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -18,8 +19,9 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Img2img only, deliberately: LanceImagePipeline throws on a mask because the Wan2.2 VAE's 16x
-    /// downscale leaves one mask cell per 16x16-pixel block, too coarse for the blend-on-vanilla inpaint.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner;
+    /// downscale leaves one mask cell per 16x16-pixel block, too coarse for the blend-on-vanilla inpaint.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.LanceTransformer"/> names its blocks <c>layers.{i}</c>, a root the bare-root LoRA detector only started recognizing in the same change.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-image", StringComparison.OrdinalIgnoreCase);
 
@@ -50,6 +52,10 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
             Logs.Info($"[LanceImageRecipe] Converted {conv.Transformer.Count} transformer keys ({conv.Vit.Count} ViT keys ignored).");
             LanceConfig config = LanceConfig.Image;
             LanceTransformer transformer = new LanceTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
 
             // 2. Wan2.2 VAE decoder — computes in F32 (the Wan VAE resnets overflow at F16).
@@ -88,7 +94,7 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
             LancePromptTemplate template = LancePromptTemplate.Create(tokenizer.EncodeOrdinary, config, video: false);
             LanceImagePipeline pipeline = new LanceImagePipeline(context.Backend, transformer, vae, vaeEncoder, config, template);
             Logs.Info("[LanceImageRecipe] Lance ready (text-to-image).");
-            return new LanceImageRecipePipeline(pipeline, config, transformer, tokenizer, owned);
+            return new LanceImageRecipePipeline(pipeline, config, transformer, tokenizer, owned, loraStack);
         }
         catch (Exception ex)
         {

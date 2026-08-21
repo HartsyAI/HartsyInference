@@ -32,7 +32,8 @@ public enum BetaScheduleType : byte
     ScaledLinear = 1,
 }
 
-/// <summary>Model prediction output type.</summary>
+/// <summary>Model prediction output type — what a denoiser's raw output <em>means</em>, which every sampler beyond
+/// plain Euler has to convert to a denoised (x0) estimate before its own math applies.</summary>
 public enum PredictionType : byte
 {
     /// <summary>Model predicts the noise (epsilon). Used by SD1.5, SDXL.</summary>
@@ -40,6 +41,14 @@ public enum PredictionType : byte
 
     /// <summary>Model predicts the velocity (v). Used by some fine-tuned models.</summary>
     VPrediction = 1,
+
+    /// <summary>Model predicts the flow-matching velocity <c>v = noise − x0</c> on a rectified path, with sigma running
+    /// over [0,1] rather than the VP noise scale. Flux, SD3, Qwen-Image, Krea2, Z-Image and the rest of the DiT fleet.
+    /// <para>Shares Epsilon's denoised formula (<c>x0 = x − sigma·pred</c>) — the reason one Euler step serves both, and
+    /// why <see cref="Core.Backends.IBackend.CfgEulerStep"/> is the single seam every family already funnels through.
+    /// It is a distinct member anyway because the sigma domain differs, so anything reading sigma as a VP noise level
+    /// (the alphas-cumprod round trip, <c>ScaleModelInput</c>) must not treat the two alike.</para></summary>
+    FlowVelocity = 2,
 }
 
 /// <summary>Strategy for selecting timesteps during inference.</summary>

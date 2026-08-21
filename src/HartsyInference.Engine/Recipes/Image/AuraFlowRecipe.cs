@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -19,8 +20,9 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>AuraFlow reuses the SDXL VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <remarks>AuraFlow reuses the SDXL VAE; the encoder half is built alongside the decoder.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.AuraFlowTransformer"/> names its blocks <c>joint_transformer_blocks.{i}</c> / <c>single_transformer_blocks.{i}</c>; the first of those is a root the bare-root LoRA detector only started recognizing in the same change.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "auraflow", StringComparison.OrdinalIgnoreCase);
 
@@ -44,6 +46,10 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         AuraFlowConfig config = AuraFlowConfig.V03;
         Logs.Info($"[AuraFlowRecipe] Building transformer ({config.NumDoubleBlocks} double + {config.NumSingleBlocks} single, V03 preset).");
         AuraFlowTransformer transformer = new AuraFlowTransformer(config);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
         transformer.LoadWeights(converted.Transformer);
 
         T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.PileT5Xl);
@@ -65,6 +71,6 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
 
         AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
         Logs.Info("[AuraFlowRecipe] AuraFlow ready.");
-        return new AuraFlowRecipePipeline(pipeline, tokenizer, mainLoader);
+        return new AuraFlowRecipePipeline(pipeline, tokenizer, mainLoader, loraStack);
     }
 }

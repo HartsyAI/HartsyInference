@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -36,12 +37,14 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
     private readonly bool _isTurbo;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly IDisposable? _ggufHandle;
+    private readonly MergedLoraStack? _loraStack;
     private int _disposed;
 
     public MageFlowRecipePipeline(MageFlowPipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, MageVaeDecoder vae, MageVaeEncoder? vaeEncoder, bool isTurbo,
-        List<SafeTensorsLoader> loaders, IDisposable? ggufHandle)
+        List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline; _tokenizer = tokenizer; _textEncoder = textEncoder; _transformer = transformer;
         _vae = vae; _vaeEncoder = vaeEncoder; _isTurbo = isTurbo; _loaders = loaders; _ggufHandle = ggufHandle;
     }
@@ -152,5 +155,7 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         _transformer.Dispose();
         foreach (SafeTensorsLoader loader in _loaders) loader.Dispose();
         _ggufHandle?.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

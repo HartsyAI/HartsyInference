@@ -103,7 +103,9 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
             // Same fix as SdxlRecipePipeline: request.Sampler (euler/ddim/dpm++2m/lcm/tcd) is what the
             // "HartsyInference Sampler" param actually populates; request.Scheduler is always null from the
             // extension today. Reading only Scheduler made the Sampler param silently inert.
-            Scheduler = request.Sampler ?? request.Scheduler,
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name
+            // here — before the checkpoint loads — instead of deep inside SchedulerFactory.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
         };

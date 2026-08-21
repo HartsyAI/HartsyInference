@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -31,11 +32,13 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
     private readonly WanVaceTransformer _transformer;
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed VACE pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanVaceRecipePipeline(IBackend backend, WanVacePipeline pipeline, WanVideoConfig config, T5Tokenizer tokenizer,
-        T5TextEncoder umt5, WanVaceTransformer transformer, IWanVaeEncoder vaeEncoder, List<SafeTensorsLoader> loaders)
+        T5TextEncoder umt5, WanVaceTransformer transformer, IWanVaeEncoder vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _backend = backend;
         _pipeline = pipeline;
         _config = config;
@@ -127,5 +130,7 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

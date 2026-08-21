@@ -59,6 +59,7 @@ public static class HartsyInferenceServiceExtensions
                     Port = options.WakePort,
                     ModelRoot = options.WakeModelRoot,
                     TranscribeOnDetection = options.WakeTranscribeOnDetection,
+                    AuthToken = options.WakeAuthToken,
                     // Detection itself runs off-queue on its own backend, but the transcription it triggers
                     // shares the engine backend with every HTTP route, and the engine is not re-entrant there.
                     TranscribeGate = work => queue.EnqueueAsync(work, CancellationToken.None),

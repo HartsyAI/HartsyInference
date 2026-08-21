@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -74,6 +75,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
 
     /// <inheritdoc/>
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). NOTE: when the backend reports <c>SupportsQuantized</c> this recipe keeps the DiT resident as PACKED nvfp4, and <c>LoraStack</c> dequant-merges fp8 only — a non-fp8 quantized weight refuses by name with the "use a safetensors build" message, the same boundary HunyuanImage's Q4_K GGUF hits. A LoRA on a resident-nvfp4 LTX-2 build therefore refuses rather than merging; that is intended, not a regression. Image-to-video is still absent and tracked separately: only <c>LtxVideo2VaeDecoder</c> is ported, so there is no encoder to turn an init image into latents.</remarks>
+    public VideoFeatures Supports => VideoFeatures.Lora;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components Gemma/VAE override are deferred.
@@ -126,6 +131,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                         + "guidance 1, single-pass (the x2 latent upsampler is a 2.5 model; no two-stage here).");
             }
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
             connectors.LoadWeights(conv.Connectors);
@@ -271,7 +280,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 LatentUpsampler = latentUpsampler,
             };
             Logs.Info($"[LtxVideo2Recipe] LTX-2 ready (text-to-video{(vocoder is not null ? "+audio" : "")}).");
-            return new LtxVideo2RecipePipeline(pipeline, config, tokenizer, gemma, transformer, connectors, vocoder, loaders);
+            return new LtxVideo2RecipePipeline(pipeline, config, tokenizer, gemma, transformer, connectors, vocoder, loaders, loraStack);
         }
         catch (Exception ex)
         {

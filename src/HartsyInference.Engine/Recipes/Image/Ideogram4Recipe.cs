@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
@@ -7,6 +8,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -25,8 +27,13 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>Ideogram 4 shares the Flux.2 VAE; its packed-latent mask blend uses the channel-inner variant.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <remarks>Ideogram 4 shares the Flux.2 VAE; its packed-latent mask blend uses the channel-inner variant.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="Ideogram4Transformer"/> names its blocks
+    /// <c>layers.{i}</c>, a root the bare-root LoRA detector only started recognizing in the same change. The merge
+    /// covers BOTH DiTs — see the reasoning (and the recorded assumption) at the merge site in
+    /// <see cref="Construct"/>.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ideogram4", StringComparison.OrdinalIgnoreCase);
 
@@ -101,6 +108,22 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             Ideogram4Config config = Ideogram4Config.V4;
             Logs.Info($"[Ideogram4Recipe] Building models (dim={config.LlmFeaturesDim} LLM features, {config.MaxTextTokens} max text tokens).");
 
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            //
+            // BOTH DiTs get the merge, which is the one place Ideogram 4 differs from every other family here.
+            // The pair is one model split by role, not a cond/uncond conditioning switch: both are built from the
+            // same `Ideogram4Config`, so a LoRA's keys match both identically. Merging only the conditional would
+            // leave the negative pass predicting the BASE model's unconditional score, and Ideogram's asymmetric
+            // combine (v = gw·pos + (1−gw)·neg, gw≈7) would then amplify the delta ~7× rather than apply it — a
+            // silently over-cooked LoRA, which is the same class of failure as the Chroma fused-QKV bug.
+            // ASSUMPTION, not verified against upstream: no reference for how `pipeline_ideogram4.py` applies a
+            // LoRA to the pair exists (the checkpoint is non-commercial and has no community LoRA ecosystem yet).
+            // Confirm against a real LoRA before treating this as settled.
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: condWeights);
+            loraStack?.ApplyTo(uncondWeights, LoraTarget.Transformer, context.Backend);
+
             Ideogram4Transformer conditional = new Ideogram4Transformer(config);
             conditional.LoadWeights(condWeights);
             Ideogram4Transformer unconditional = new Ideogram4Transformer(config);
@@ -116,7 +139,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: config.MaxTextTokens);
             Ideogram4Pipeline pipeline = new Ideogram4Pipeline(context.Backend, textEncoder, conditional, unconditional, vae, vaeEncoder, config);
             Logs.Info("[Ideogram4Recipe] Ideogram 4 ready.");
-            return new Ideogram4RecipePipeline(pipeline, tokenizer, textEncoder, conditional, unconditional, loaders);
+            return new Ideogram4RecipePipeline(pipeline, tokenizer, textEncoder, conditional, unconditional, loaders, loraStack);
         }
         catch (Exception ex)
         {

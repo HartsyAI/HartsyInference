@@ -22,11 +22,31 @@ public sealed class VideoFeatureDeclarationTests
         "minimax-h3",                           // keyframe conditioning
     ];
 
-    /// <summary>End-frame conditioning is rarer: most i2v families generate forward from a start frame only.</summary>
+    /// <summary>End-frame conditioning is rarer: most i2v families generate forward from a start frame only.
+    /// <para><c>wan-21-1_3b</c> is absent deliberately. It shares the identical non-concat code path with
+    /// <c>wan-22-5b</c>, so the symmetric per-frame-timestep-pin mechanism should cover it — but no local 1.3B
+    /// checkpoint exists to run and look at, and this backlog's rule is real-checkpoint verification, not "works by
+    /// symmetry". <c>WanVideoRecipe.Supports</c> narrows it explicitly; see the remarks there.</para></summary>
     private static readonly string[] ExpectedEndFrame =
     [
-        "wan", "wan-22-5b", "wan-21-14b", "wan-21-1_3b",
+        "wan", "wan-22-5b", "wan-21-14b",
         "minimax-h3",
+    ];
+
+    /// <summary>Every video family whose recipe calls <c>LoraApplier.BuildAndApply</c> before its transformer's
+    /// <c>LoadWeights</c> — as of 2026-08-20 that is all of them.
+    /// <para>Same reasoning as the image-side pin: declaring the bit without wiring the merge passes the feature gate,
+    /// never merges, and yields a normal clip the user reads as a weak LoRA. No runtime check can catch it, because
+    /// nothing ever asks.</para></summary>
+    private static readonly string[] ExpectedLora =
+    [
+        "wan", "wan-22-5b", "wan-21-14b", "wan-21-1_3b",
+        "wan-vace", "wan-animate", "wan-s2v",
+        "minimax-h3",
+        // 2026-08-20 sweep. hunyuan-video, ltx-video-2 and lance-video declared NO conditioning at all before this
+        // (they inherited IVideoRecipe's None); LoRA is the first bit each of them carries. LtxVideo2Recipe
+        // registers under both its dev and distilled family ids, so it appears twice.
+        "hunyuan-video", "ltx-video", "ltx-video-2", "ltx-2.5-distilled", "lance-video", "kandinsky5-video",
     ];
 
     /// <summary>Reference images / videos / audios are consumed only by MiniMax-H3's ref2va path.</summary>
@@ -45,6 +65,14 @@ public sealed class VideoFeatureDeclarationTests
         string[] actual = DeclaringFamilies(VideoFeatures.InitImage);
         _output.WriteLine($"init-image: {string.Join(", ", actual)}");
         Assert.Equal([.. ExpectedInitImage.Order(StringComparer.Ordinal)], actual);
+    }
+
+    [Fact]
+    public void LoraIsDeclaredByExactlyTheVideoFamiliesThatMergeIt()
+    {
+        string[] actual = DeclaringFamilies(VideoFeatures.Lora);
+        _output.WriteLine($"lora: {string.Join(", ", actual)}");
+        Assert.Equal([.. ExpectedLora.Order(StringComparer.Ordinal)], actual);
     }
 
     [Fact]

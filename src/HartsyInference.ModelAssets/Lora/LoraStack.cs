@@ -249,7 +249,15 @@ public sealed class LoraStack : IDisposable
     /// <summary>Maps a split attention canonical key onto its FUSED sibling when the dictionary carries the fused
     /// form: <c>…attn.to_q/k/v.weight → …attn.qkv.weight</c> rows [q;k;v], and
     /// <c>…attn.add_{q,k,v}_proj.weight → …attn.add_qkv.weight</c> — the layout ChromaCheckpointConverter (and the
-    /// other Flux-lineage converters) keep for fp8 builds.</summary>
+    /// other Flux-lineage converters) keep for fp8 builds.
+    /// <para>The <c>attention.qkv</c> and bare <c>qkv</c> spellings cover two families that keep attention fused in
+    /// their ordinary (not just fp8) layout: Ideogram 4 reads <c>layers.{i}.attention.qkv.weight</c> and F-Lite reads
+    /// <c>blocks.{i}.qkv.weight</c>. A LoRA trained directly against either names the fused module and matches without
+    /// this path; one converted to split form would otherwise miss EVERY attention delta and still merge its non-
+    /// attention weights, so the stack would report a successful merge and the image would come out subtly
+    /// under-LoRA'd — the Chroma failure mode this whole fallback exists for, with no error to point at it.</para>
+    /// <para>A miss here is safe by construction: the fallback only fires when the split key is absent from the dict
+    /// AND the fused candidate is present, so it cannot capture a key the direct lookup would have served.</para></summary>
     private static bool TryResolveFusedSlice(string canonicalKey, IDictionary<string, Tensor> weights,
         out string fusedKey, out int sliceIndex, out int sliceCount)
     {
@@ -263,6 +271,14 @@ public sealed class LoraStack : IDisposable
             (".attn.add_q_proj.weight", ".attn.add_qkv.weight", 0),
             (".attn.add_k_proj.weight", ".attn.add_qkv.weight", 1),
             (".attn.add_v_proj.weight", ".attn.add_qkv.weight", 2),
+            // Ideogram 4: layers.{i}.attention.qkv.weight
+            (".attention.to_q.weight", ".attention.qkv.weight", 0),
+            (".attention.to_k.weight", ".attention.qkv.weight", 1),
+            (".attention.to_v.weight", ".attention.qkv.weight", 2),
+            // F-Lite: blocks.{i}.qkv.weight — no attention segment at all.
+            (".to_q.weight", ".qkv.weight", 0),
+            (".to_k.weight", ".qkv.weight", 1),
+            (".to_v.weight", ".qkv.weight", 2),
         ];
         foreach ((string suffix, string fusedSuffix, int index) in table)
         {

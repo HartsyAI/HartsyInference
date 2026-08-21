@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -21,10 +22,12 @@ public sealed class ErnieImageRecipePipeline : IRecipePipeline
     private readonly LlamaStyleEncoder _llama;
     private readonly ErnieImageTransformer _transformer;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed ERNIE-Image pipeline plus its tokenizer and text stack, taking ownership of every disposable.</summary>
-    public ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieTokenizer tokenizer, ErnieImageLlamaTextEncoder textEncoder, LlamaStyleEncoder llama, ErnieImageTransformer transformer, List<SafeTensorsLoader> loaders)
+    public ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieTokenizer tokenizer, ErnieImageLlamaTextEncoder textEncoder, LlamaStyleEncoder llama, ErnieImageTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _textEncoder = textEncoder;
@@ -104,5 +107,7 @@ public sealed class ErnieImageRecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

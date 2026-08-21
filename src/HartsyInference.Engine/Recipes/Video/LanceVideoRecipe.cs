@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -31,6 +32,10 @@ public sealed class LanceVideoRecipe : IVideoRecipe
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 30, CfgScale = 4.0f, Width = 512, Height = 512, Frames = 25 };
 
     /// <inheritdoc/>
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). Image-to-video is tracked separately: the Wan 2.2 VAE this family loads already has a verified encoder half, so it is wiring rather than a port.</remarks>
+    public VideoFeatures Supports => VideoFeatures.Lora;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): a user-picked VAE override from VideoRequest.Components (the SwarmUI loader read
@@ -50,6 +55,10 @@ public sealed class LanceVideoRecipe : IVideoRecipe
             Logs.Info($"[LanceVideoRecipe] Converted {conv.Transformer.Count} transformer keys ({conv.Vit.Count} ViT keys ignored).");
             LanceConfig config = LanceConfig.Video;
             LanceTransformer transformer = new LanceTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
 
             // Wan2.2 VAE decoder — computes in F32 (the Wan VAE resnets overflow at F16).
@@ -76,7 +85,7 @@ public sealed class LanceVideoRecipe : IVideoRecipe
             LancePromptTemplate template = LancePromptTemplate.Create(tokenizer.EncodeOrdinary, config, video: true);
             LanceVideoPipeline pipeline = new LanceVideoPipeline(context.Backend, transformer, vae, config, template);
             Logs.Info("[LanceVideoRecipe] Lance ready (text-to-video).");
-            return new LanceVideoRecipePipeline(pipeline, config, transformer, tokenizer, owned);
+            return new LanceVideoRecipePipeline(pipeline, config, transformer, tokenizer, owned, loraStack);
         }
         catch (Exception ex)
         {

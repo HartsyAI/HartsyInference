@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
@@ -16,10 +17,12 @@ public sealed class LensRecipePipeline : IRecipePipeline
     private readonly LensPipelineBundle _bundle;
     private readonly LensConfig _config;
     private readonly GptOssTokenizer _tokenizer;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the factory-built Lens bundle plus its tokenizer, taking ownership of both.</summary>
-    public LensRecipePipeline(LensPipelineBundle bundle, LensConfig config, GptOssTokenizer tokenizer)
+    public LensRecipePipeline(LensPipelineBundle bundle, LensConfig config, GptOssTokenizer tokenizer, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _bundle = bundle;
         _config = config;
         _tokenizer = tokenizer;
@@ -90,5 +93,7 @@ public sealed class LensRecipePipeline : IRecipePipeline
     {
         _bundle.Dispose();
         _tokenizer.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

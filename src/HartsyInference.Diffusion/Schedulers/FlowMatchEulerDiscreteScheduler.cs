@@ -95,6 +95,14 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         return _sigmas[stepIndex];
     }
 
+    /// <summary>The full sigma array (length <c>steps + 1</c>, descending, terminal zero) — what
+    /// <c>Sampling.SigmaSchedule</c> re-spaces and what an <c>ISampler</c> integrates over. A copy, so a sampler
+    /// holding it cannot perturb the scheduler's own state.
+    /// <para>Note that a flow-match family's conditioning timestep IS its sigma (the public <see cref="Timesteps"/>
+    /// scale is just <c>sigma x 1000</c>), so a pipeline's predictor can map sigma to its timestep directly instead of
+    /// indexing a table — which is what lets second-order samplers evaluate at intermediate sigmas here.</para></summary>
+    public float[] Sigmas() => (float[])_sigmas.Clone();
+
     /// <summary>Performs one flow-match Euler step: x_next = x + model_output * (sigma_next - sigma).</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {

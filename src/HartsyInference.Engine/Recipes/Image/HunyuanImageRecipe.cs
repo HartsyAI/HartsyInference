@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -25,8 +26,9 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared
     /// mask-blend helpers have no variant for that packing — a masked path would need a token-space blend that
-    /// does not exist yet, so Inpaint is deliberately not declared.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner;
+    /// does not exist yet, so Inpaint is deliberately not declared.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.HunyuanImageTransformer"/> names its blocks <c>transformer_blocks.{i}</c> / <c>single_transformer_blocks.{i}</c>, both already-recognized canonical diffusers roots. NOTE: this family's production config is a Q4_K_M GGUF, and a K-quant weight cannot take a LoRA merge (requantizing a merged result back into block form is not implemented) — such a request refuses by name, telling the user to pick a safetensors/fp8 build. That refusal is the intended behaviour, not a regression.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 
@@ -77,6 +79,10 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
 
             HunyuanImageConfig config = HunyuanImageConfig.V21;
             HunyuanImageTransformer transformer = new HunyuanImageTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(converted.Transformer);
 
             // DiT sharding split point — byte-weighted: HunyuanImage's 20 double blocks are ~2× its 40 single
@@ -136,7 +142,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
-            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, ggufHandle);
+            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, ggufHandle, loraStack);
         }
         catch (Exception ex)
         {

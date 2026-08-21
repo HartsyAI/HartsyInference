@@ -1,5 +1,7 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Features;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.Mage;
@@ -29,8 +31,9 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     /// in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
-    /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.</remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. Mage-Flow drives <see cref="HartsyInference.Diffusion.Models.Denoisers.QwenImageTransformer"/> (<c>QwenImageConfig.MageFlow</c>), so its blocks are the canonical <c>transformer_blocks.{i}</c> and Qwen-Image LoRA files map identically. A K-quant GGUF build refuses the merge by name, same boundary as every other family.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <summary>Base Mage-Flow: 30 steps at CFG 5.0, 1024×1024 (model card).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 5.0f, Width = 1024, Height = 1024 };
@@ -69,6 +72,10 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             QwenImageConfig config = QwenImageConfig.MageFlow;
             QwenImageTransformer transformer = new QwenImageTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: ditWeights);
             transformer.LoadWeights(ditWeights);
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
@@ -92,7 +99,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             MageFlowPipeline pipeline = new MageFlowPipeline(context.Backend, textEncoder, transformer, vae, config, vaeEncoder);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info($"[MageFlowRecipe] Mage-Flow ready (Qwen3-VL-4B; static shift 6.0; VAE dec={decW.Count}/enc={encW.Count}{(vaeEncoder is not null ? ", edit-capable" : "")}).");
-            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, ggufHandle);
+            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, ggufHandle, loraStack);
         }
         catch (Exception ex)
         {

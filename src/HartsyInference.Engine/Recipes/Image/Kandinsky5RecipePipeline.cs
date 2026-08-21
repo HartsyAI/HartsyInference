@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -25,10 +26,12 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
     private readonly IBackend _backend;
     private readonly Kandinsky5Transformer _transformer;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Kandinsky 5 pipeline plus its dual text stack, taking ownership of every disposable.</summary>
-    public Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline, LlamaStyleEncoder qwen, ClipTextEncoder clipL, Qwen2Tokenizer qwenTokenizer, ClipTokenizer clipTokenizer, IBackend backend, Kandinsky5Transformer transformer, List<SafeTensorsLoader> loaders)
+    public Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline, LlamaStyleEncoder qwen, ClipTextEncoder clipL, Qwen2Tokenizer qwenTokenizer, ClipTokenizer clipTokenizer, IBackend backend, Kandinsky5Transformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _qwen = qwen;
         _clipL = clipL;
@@ -137,5 +140,7 @@ public sealed unsafe class Kandinsky5RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -26,11 +27,13 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
     private readonly LtxVideo2TextConnectors _connectors;
     private readonly LtxAudioVocoder? _vocoder;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed LTX-2 pipeline plus its text tower, taking ownership of every disposable.</summary>
     public LtxVideo2RecipePipeline(LtxVideo2Pipeline pipeline, LtxVideo2Config config, ILtx2PromptTokenizer tokenizer, ILtx2TextTower gemma,
-        LtxVideo2Transformer transformer, LtxVideo2TextConnectors connectors, LtxAudioVocoder? vocoder, List<SafeTensorsLoader> loaders)
+        LtxVideo2Transformer transformer, LtxVideo2TextConnectors connectors, LtxAudioVocoder? vocoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _config = config;
         _tokenizer = tokenizer;
@@ -103,5 +106,7 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }
