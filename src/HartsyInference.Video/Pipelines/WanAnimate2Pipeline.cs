@@ -210,6 +210,12 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 stream.EndStep();
             }
         }
+        catch
+        {
+            latents?.Dispose();
+            latents = null;
+            throw;
+        }
         finally
         {
             // Before the sync: a forward that OOM'd mid-step surfaces on the next Sync, and a throw there would
