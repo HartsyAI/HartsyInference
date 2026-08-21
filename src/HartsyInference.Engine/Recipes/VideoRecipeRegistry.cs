@@ -33,6 +33,7 @@ public static class VideoRecipeRegistry
         new Video.WanVideoRecipe(Video.WanVideoRecipe.Wan21_14BCompatClassId),
         new Video.WanVaceRecipe(),
         new Video.WanAnimateRecipe(),
+        new Video.WanAnimate2Recipe(),
         new Video.WanS2VRecipe(),
         new Video.LtxVideoRecipe(),
         new Video.LtxVideo2Recipe(),

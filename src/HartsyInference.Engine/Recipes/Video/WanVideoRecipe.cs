@@ -95,6 +95,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             {
                 WanVariant.Vace => new WanVaceRecipe(_familyId).Supports,
                 WanVariant.Animate => new WanAnimateRecipe().Supports,
+                WanVariant.Animate2 => new WanAnimate2Recipe().Supports,
                 WanVariant.S2V => new WanS2VRecipe().Supports,
                 _ => Supports,
             };
@@ -122,6 +123,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             {
                 WanVariant.Vace => new WanVaceRecipe(_familyId).Defaults,
                 WanVariant.Animate => new WanAnimateRecipe().Defaults,
+                WanVariant.Animate2 => new WanAnimate2Recipe().Defaults,
                 WanVariant.S2V => new WanS2VRecipe().Defaults,
                 _ => Defaults,
             };
@@ -157,6 +159,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             {
                 WanVariant.Vace => new WanVaceRecipe(_familyId).Construct(context),
                 WanVariant.Animate => new WanAnimateRecipe().Construct(context),
+                WanVariant.Animate2 => new WanAnimate2Recipe().Construct(context),
                 WanVariant.S2V => new WanS2VRecipe().Construct(context),
                 _ => throw new InvalidOperationException($"Unhandled Wan variant '{variant}'."),
             };
@@ -213,10 +216,11 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 string swapPath = File.Exists(context.VideoSwapModelPath)
                     ? context.VideoSwapModelPath
                     : ModelFileLocator.Require(context.VideoSwapModelPath, "Video swap model", "Stable-Diffusion", "diffusion_models", "unet");
-                if (DetectVariant(swapPath) != WanVariant.Base)
+                WanVariant swapVariant = DetectVariant(swapPath);
+                if (swapVariant != WanVariant.Base)
                 {
                     throw new NotSupportedException(
-                        $"Wan low-noise expert '{swapPath}' is a VACE/Animate/S2V variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
+                        $"Wan low-noise expert '{swapPath}' is a Wan '{swapVariant}' variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
                 }
                 Logs.Info($"[WanVideoRecipe] Loading Wan low-noise expert: {swapPath} (boundary {config.BoundaryRatio:0.###}).");
                 (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader lowLoader) = WanVideoCheckpointConverter.LoadAndConvert(swapPath);
@@ -358,6 +362,10 @@ public sealed class WanVideoRecipe : IVideoRecipe
         /// <summary>Wan-Animate pose + face pathway.</summary>
         Animate,
 
+        /// <summary>Wan-Animate-2 driving-video stream. Carries no module of its own, so it is detectable only from
+        /// the file's <c>__metadata__</c>.</summary>
+        Animate2,
+
         /// <summary>Wan2.2-S2V audio injector.</summary>
         S2V,
     }
@@ -368,6 +376,12 @@ public sealed class WanVideoRecipe : IVideoRecipe
     internal static WanVariant DetectVariant(string checkpointPath)
     {
         IReadOnlySet<string> keys = VideoRecipeUtils.PeekSafeTensorKeys(checkpointPath);
+        // First, and by metadata: Animate-2's weights are indistinguishable from a plain I2V-14B's, so every
+        // key-based arm below would classify it as Base.
+        if (WanVideoCheckpointConverter.IsAnimate2Metadata(VideoRecipeUtils.PeekSafeTensorMetadata(checkpointPath)))
+        {
+            return WanVariant.Animate2;
+        }
         foreach (string key in keys)
         {
             if (key.Contains("vace_patch_embedding", StringComparison.Ordinal) || key.Contains("vace_blocks", StringComparison.Ordinal))

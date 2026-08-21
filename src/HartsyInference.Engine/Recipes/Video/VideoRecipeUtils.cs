@@ -341,4 +341,47 @@ internal static class VideoRecipeUtils
             return keys;
         }
     }
+
+    /// <summary>Reads the <c>__metadata__</c> string map from a safetensors header without loading tensor data.
+    /// Wan-Animate-2 is key-for-key a Wan2.1 I2V-14B checkpoint, so <see cref="PeekSafeTensorKeys"/> cannot tell them
+    /// apart and the metadata is the only signal. Returns an empty map on any read error.</summary>
+    internal static IReadOnlyDictionary<string, string> PeekSafeTensorMetadata(string path)
+    {
+        Dictionary<string, string> metadata = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return metadata;
+            }
+            using FileStream fs = File.OpenRead(path);
+            Span<byte> lenBuf = stackalloc byte[8];
+            fs.ReadExactly(lenBuf);
+            long headerLen = BinaryPrimitives.ReadInt64LittleEndian(lenBuf);
+            if (headerLen is <= 0 or > 64 * 1024 * 1024)
+            {
+                return metadata;
+            }
+            byte[] json = new byte[headerLen];
+            fs.ReadExactly(json, 0, (int)headerLen);
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("__metadata__", out JsonElement meta) || meta.ValueKind != JsonValueKind.Object)
+            {
+                return metadata;
+            }
+            foreach (JsonProperty prop in meta.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    metadata[prop.Name] = prop.Value.GetString()!;
+                }
+            }
+            return metadata;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[VideoRecipe] Safetensors metadata peek failed for '{path}': {ex.Message}");
+            return metadata;
+        }
+    }
 }
