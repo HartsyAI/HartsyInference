@@ -78,6 +78,20 @@ public sealed unsafe class Wan22Resample
         if (_mode is Wan22ResampleMode.Downsample2d or Wan22ResampleMode.Downsample3d)
         {
             Tensor spatial = DownsampleSpatial(backend, x);
+            // Streaming encode: the previous chunk's last frame supplies the left context by concatenation, so the
+            // constructed causal pad must be overridden to 0 for this call. Chunk 0 bypasses the conv entirely,
+            // which is what the whole-clip path emulates with its CopyFrame0 fixup below.
+            if (_mode == Wan22ResampleMode.Downsample3d && cache is not null && _downTimeConv is not null)
+            {
+                (bool skipDown, Tensor? prevLast) = cache.StepDownTimeConv(backend, spatial);
+                if (skipDown) return spatial;
+                Tensor joined = Vae3dLayout.ConcatFrames([prevLast!, spatial]);
+                prevLast!.Dispose();
+                spatial.Dispose();
+                Tensor strided = _downTimeConv.Forward(backend, joined, null, padTLeftOverride: 0);
+                joined.Dispose();
+                return strided;
+            }
             // Whole-clip encode: apply the causal stride-2 temporal conv to halve T (skipped on the single-frame
             // / first-chunk path, where it leaves T unchanged).
             if (_mode == Wan22ResampleMode.Downsample3d && applyTemporal && _downTimeConv is not null && (int)spatial.Shape[2] > 1)

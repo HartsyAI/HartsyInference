@@ -139,35 +139,78 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
         if (rgb.Shape[3] % 8 != 0 || rgb.Shape[4] % 8 != 0)
             throw new ArgumentException("H and W must be divisible by 8.", nameof(rgb));
 
-        Tensor h = _convIn!.Forward(backend, rgb);
+        // Whole-clip encode peaks on ONE contiguous conv workspace over all T frames — 5.8 GB for a 41-frame 480x800
+        // driving clip, which is what made the official Wan-Animate buckets unreachable beside a resident DiT.
+        // Stream instead, on the reference's chunking: frame 0 alone, then groups of 4, one latent frame each.
+        int tin = (int)rgb.Shape[2];
+        if (tin > 1 && !ForceWholeClipEncode)
+        {
+            int chunks = 1 + (tin - 1) / 4;
+            List<Tensor> parts = new();
+            using Wan22StreamCache cache = new();
+            for (int i = 0; i < chunks; i++)
+            {
+                cache.NewFrame();
+                int start = i == 0 ? 0 : 1 + 4 * (i - 1);
+                int count = i == 0 ? 1 : Math.Min(4, tin - start);
+                Tensor chunk = Vae3dLayout.SliceFrames(rgb, start, count);
+                parts.Add(EncodeChunk(backend, chunk, cache));
+                chunk.Dispose();
+            }
+            Tensor joined = parts.Count == 1 ? parts[0] : Vae3dLayout.ConcatFrames(parts);
+            if (parts.Count != 1) foreach (Tensor part in parts) part.Dispose();
+            return FinishEncode(backend, joined);
+        }
+
+        return FinishEncode(backend, EncodeChunk(backend, rgb, cache: null));
+    }
+
+    /// <summary>Test seam: run the pre-streaming whole-clip path, which allocates one conv workspace over all T
+    /// frames. Only a regression test that pins the streamed path to it should ever set this.</summary>
+    internal static bool ForceWholeClipEncode { get; set; }
+
+    /// <summary>Everything the reference's <c>encoder(...)</c> covers: conv_in through head_conv, leaving the
+    /// <c>quant_conv</c> for <see cref="FinishEncode"/> so it runs ONCE over the joined clip, as upstream does.</summary>
+    private Tensor EncodeChunk(IBackend backend, Tensor rgb, Wan22StreamCache? cache)
+    {
+        Tensor? cc = cache?.StepConv(backend, rgb);
+        Tensor h = _convIn!.Forward(backend, rgb, cc);
+        cc?.Dispose();
         foreach (DownStage s in _stages)
         {
             foreach (Wan22ResidualBlock r in s.Res)
             {
-                Tensor next = r.Forward(backend, h);
+                Tensor next = r.Forward(backend, h, cache);
                 h.Dispose();
                 h = next;
             }
             if (s.Resample is not null)
             {
-                Tensor down = s.Resample.Forward(backend, h, applyTemporal: true);
+                Tensor down = s.Resample.Forward(backend, h, cache, applyTemporal: true);
                 h.Dispose();
                 h = down;
             }
         }
 
-        Tensor m0 = _midRes0!.Forward(backend, h); h.Dispose();
+        Tensor m0 = _midRes0!.Forward(backend, h, cache); h.Dispose();
         Tensor m1 = _midAttn!.Forward(backend, m0); m0.Dispose();
-        Tensor cur = _midRes2!.Forward(backend, m1); m1.Dispose();
+        Tensor cur = _midRes2!.Forward(backend, m1, cache); m1.Dispose();
 
         Tensor hn = _headNorm!.Forward(cur);
         cur.Dispose();
         backend.Silu(hn, hn);
-        Tensor doubled = _headConv!.Forward(backend, hn);
+        Tensor? hcc = cache?.StepConv(backend, hn);
+        Tensor doubled = _headConv!.Forward(backend, hn, hcc);
+        hcc?.Dispose();
         hn.Dispose();
+        return doubled;
+    }
+
+    /// <summary>quant_conv + posterior-mean slice + latent normalization, over the whole (joined) clip.</summary>
+    private Tensor FinishEncode(IBackend backend, Tensor doubled)
+    {
         Tensor quant = _quantConv!.Forward(backend, doubled);
         doubled.Dispose();
-
         Tensor mu = SliceChannels(quant, 0, _zDim);
         quant.Dispose();
         Wan21VaeLatentNorm.Normalize(mu);

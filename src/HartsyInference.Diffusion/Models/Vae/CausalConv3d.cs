@@ -113,8 +113,12 @@ public sealed unsafe class CausalConv3d
         if (_bias is not null) yield return _bias;
     }
 
-    /// <summary>Runs the causal 3D conv. <paramref name="input"/> is <c>[B, cIn, Tin, H, W]</c>; <paramref name="cacheFrames"/> (optional <c>[B, cIn, C, H, W]</c>) prepends streaming context, replacing that many zero-pad frames. Returns <c>[B, cOut, Tout, H', W']</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor input, Tensor? cacheFrames = null)
+    /// <summary>Runs the causal 3D conv. <paramref name="input"/> is <c>[B, cIn, Tin, H, W]</c>; <paramref name="cacheFrames"/> (optional <c>[B, cIn, C, H, W]</c>) prepends streaming context, replacing that many zero-pad frames. Returns <c>[B, cOut, Tout, H', W']</c>.
+    /// <para><paramref name="padTLeftOverride"/> replaces the constructed left temporal pad for this call. A strided
+    /// streaming caller that supplies its own left context by CONCATENATION needs 0 here: the stride grid is anchored
+    /// at the start of the padded input, so leaving the pad in place shifts every window and silently mis-phases the
+    /// output rather than failing.</para></summary>
+    public Tensor Forward(IBackend backend, Tensor input, Tensor? cacheFrames = null, int? padTLeftOverride = null)
     {
         if (input.DType != _computeDtype)
             throw new ArgumentException($"CausalConv3d compute dtype is {_computeDtype} but input is {input.DType}.", nameof(input));
@@ -124,13 +128,14 @@ public sealed unsafe class CausalConv3d
         int w = (int)input.Shape[4];
         int cacheLen = cacheFrames is null ? 0 : (int)cacheFrames.Shape[2];
 
-        int paddedT = _padTLeft + tin + _padTRight;             // cache occupies first cacheLen of the left pad
+        int padTLeft = padTLeftOverride ?? _padTLeft;
+        int paddedT = padTLeft + tin + _padTRight;               // cache occupies first cacheLen of the left pad
         int tout = (paddedT - _kt) / _strideT + 1;
         if (tout < 1)
-            throw new ArgumentException($"CausalConv3d produced Tout={tout} (Tin={tin}, kt={_kt}, padTLeft={_padTLeft}).");
+            throw new ArgumentException($"CausalConv3d produced Tout={tout} (Tin={tin}, kt={_kt}, padTLeft={padTLeft}).");
         int hOut = (h + 2 * _padH - _kh) / _strideH + 1;
         int wOut = (w + 2 * _padW - _kw) / _strideW + 1;
-        int zeroPad = _padTLeft - cacheLen;                      // leading all-zero frames
+        int zeroPad = padTLeft - cacheLen;                       // leading all-zero frames
 
         // FAST PATH — batched convolution (B=1: every video-VAE decode). The per-frame loop below fires tout·kt tiny
         // Conv2D+glue ops per layer (plus HOST replicate-pad loops on the HunyuanVideo/LTX path), leaving the GPU

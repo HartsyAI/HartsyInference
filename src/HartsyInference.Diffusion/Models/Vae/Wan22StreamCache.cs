@@ -42,6 +42,21 @@ public sealed unsafe class Wan22StreamCache : IDisposable
         return prev;
     }
 
+    /// <summary>Downsample3d temporal <c>time_conv</c> (the ENCODE direction). Returns <c>skip:true</c> on the first
+    /// chunk, where the reference stores the chunk and returns it untouched rather than convolving it; afterwards
+    /// returns the previous chunk's LAST frame, which the caller concatenates in front of this chunk before the
+    /// stride-2 conv. That concatenation — not a left pad — is what keeps the stride grid phased on the reference's
+    /// windows.</summary>
+    public (bool Skip, Tensor? PrevLast) StepDownTimeConv(IBackend backend, Tensor convInput)
+    {
+        int idx = Next();
+        Tensor? prev = _slots[idx] as Tensor;
+        Tensor last = Vae3dLayout.SliceFrames(backend, convInput, FramesOf(convInput) - 1, 1);
+        _slots[idx] = last;
+        if (prev is null) return (true, null);
+        return (false, prev);   // caller disposes
+    }
+
     /// <summary>Resample temporal <c>time_conv</c>: on the first frame, marks the slot "Rep" and returns <c>(skip:true)</c> so the caller skips the temporal conv entirely (image / first chunk). Afterwards returns the cache (or null when transitioning from "Rep") to feed <c>time_conv.Forward(x, cache)</c>.</summary>
     public (bool Skip, Tensor? Cache) StepTimeConv(IBackend backend, Tensor convInput)
     {
