@@ -88,8 +88,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// mutates the hidden state in place). <paramref name="selfAttnMask"/> is an optional additive mask broadcastable
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.
     /// <paramref name="animate2"/> replaces self-attention with Wan-Animate-2's frame-local splice against the
-    /// driving stream's cached K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's pre-RoPE
-    /// self-attention K/V (the Animate-2 driving prepass, which is otherwise an ordinary block forward).</summary>
+    /// driving stream's re-projected K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's
+    /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
         Action<Tensor>? postSelfAttnHook = null, Func<Tensor, Tensor, (Tensor K, Tensor V)>? selfAttnKvExchange = null,
@@ -152,10 +152,14 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[idx]!, _eps); q.Dispose();
         Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, _nk[idx]!, _eps); k.Dispose();
 
-        if (kvCapture is not null)   // pre-RoPE, so the generation stream can re-rotate with the driving table
+        if (kvCapture is not null)   // pre-projection, so the generation stream re-projects and rotates on read
         {
-            kvCapture.K = CloneRows(backend, kn, sk);
-            kvCapture.V = CloneRows(backend, v, sk);
+            kvCapture.Input = CloneRows(backend, kvInput, sk);
+            if (kvCapture.CaptureProjected)
+            {
+                kvCapture.K = CloneRows(backend, kn, sk);
+                kvCapture.V = CloneRows(backend, v, sk);
+            }
         }
 
         if (applyRope)   // per-head; [S,dim] is contiguous as [S,heads,headDim]
@@ -178,7 +182,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
         if (animate2 is not null)
         {
-            Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, sq, animate2);
+            Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, sq, idx, animate2);
             qn.Dispose(); kn.Dispose(); v.Dispose();
             Tensor outA2 = new Tensor(new TensorShape(sq, _dim), DType.F32);
             backend.Linear(outA2, spliced, _o[idx]!, _oB[idx]);
@@ -212,21 +216,28 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// <summary>Wan-Animate-2 frame-local self-attention: one attention call per generation latent frame, over all
     /// generation tokens plus (for frames &gt; 0) the single aligned driving frame. Ported from ComfyUI's loop form
     /// rather than the official flex-attention kernel, whose <c>ceil(/128)·128</c> and <c>sp_size</c> padding are
-    /// kernel artifacts. The driving keys are rotated HERE, with the driving RoPE table, because the cache holds them
-    /// pre-RoPE. <paramref name="qn"/>/<paramref name="kn"/> are already rotated with the generation table.</summary>
-    private Tensor Animate2FrameLocalAttention(IBackend backend, Tensor qn, Tensor kn, Tensor v, int s,
+    /// kernel artifacts. The cache holds the driving stream's block INPUT, so K and V are re-projected here and the
+    /// keys are rotated with the driving RoPE table afterwards — still pre-RoPE storage, still per-call offsets.
+    /// <paramref name="qn"/>/<paramref name="kn"/> are already rotated with the generation table.</summary>
+    private Tensor Animate2FrameLocalAttention(IBackend backend, Tensor qn, Tensor kn, Tensor v, int s, int idx,
         WanAnimate2SelfAttnContext ctx)
     {
         int hw = ctx.TokensPerFrame, frames = ctx.GenFrames;
         int refSeq = (frames - 1) * hw;
         if (s != frames * hw)
             throw new ArgumentException($"Animate-2 sequence {s} != {frames} frames × {hw} tokens.", nameof(s));
-        Tensor drivingK = ctx.DrivingK ?? throw new InvalidOperationException("Animate-2 block has no cached driving K.");
-        Tensor drivingV = ctx.DrivingV ?? throw new InvalidOperationException("Animate-2 block has no cached driving V.");
-        if (drivingK.Shape[0] != refSeq)
-            throw new ArgumentException($"Driving cache holds {drivingK.Shape[0]} tokens; expected {refSeq} ({frames - 1} frames × {hw}).");
+        Tensor stored = ctx.DrivingInput ?? throw new InvalidOperationException("Animate-2 block has no cached driving input.");
+        if (stored.Shape[0] != refSeq)
+            throw new ArgumentException($"Driving cache holds {stored.Shape[0]} tokens; expected {refSeq} ({frames - 1} frames × {hw}).");
 
-        Tensor kRef = CloneRows(backend, drivingK, refSeq);
+        Tensor drivingInput = stored;
+        if (stored.DType != DType.F32)
+        {
+            drivingInput = new Tensor(stored.Shape, DType.F32);
+            backend.CastToF32(drivingInput, stored);
+        }
+        (Tensor kRef, Tensor drivingV) = ProjectDrivingKv(backend, drivingInput, refSeq, idx);
+        if (!ReferenceEquals(drivingInput, stored)) drivingInput.Dispose();
         backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
 
         Tensor kGen = ToBhsd(backend, kn, s);
@@ -257,10 +268,25 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             backend.ScatterSeqHeadMajor(outMh, attn, j * hw);
             attn.Dispose();
         }
-        kRef.Dispose(); kGen.Dispose(); vGen.Dispose();
+        kRef.Dispose(); drivingV.Dispose(); kGen.Dispose(); vGen.Dispose();
         Tensor flat = FromBhsd(backend, outMh, s);
         outMh.Dispose();
         return flat;
+    }
+
+    /// <summary>Re-derives the driving stream's pre-RoPE K and V from its cached block input — the same
+    /// <c>Linear → RmsNorm</c> for K and <c>Linear</c> for V the prepass ran, so the pair is numerically the pair the
+    /// prepass would have stored.</summary>
+    internal (Tensor K, Tensor V) ProjectDrivingKv(IBackend backend, Tensor input, int refSeq, int idx)
+    {
+        Tensor k = new Tensor(new TensorShape(refSeq, _dim), DType.F32);
+        backend.Linear(k, input, _k[idx]!, _kB[idx]);
+        Tensor kn = new Tensor(k.Shape, DType.F32);
+        backend.RmsNorm(kn, k, _nk[idx]!, _eps);
+        k.Dispose();
+        Tensor v = new Tensor(new TensorShape(refSeq, _dim), DType.F32);
+        backend.Linear(v, input, _v[idx]!, _vB[idx]);
+        return (kn, v);
     }
 
     /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>

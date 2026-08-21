@@ -5,20 +5,20 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Per-block driving-stream self-attention K/V for one chunk, built once by
-/// <see cref="WanAnimate2Transformer.EncodeDriving"/> and read by every denoise step of both CFG branches. Stored
-/// <b>pre-RoPE</b>: the driving RoPE table is applied on read, so the table can never outlive the resolution it was
-/// derived from. This is the port's dominant memory cost — 2 × blocks × refSeq × dim floats.</summary>
+/// <summary>Per-block driving-stream self-attention <b>input</b> for one chunk, built once by
+/// <see cref="WanAnimate2Transformer.EncodeDriving"/> and read by every denoise step of both CFG branches. K and V
+/// are re-projected from it per forward rather than stored, which halves the port's dominant memory cost to
+/// <c>blocks × refSeq × dim</c> elements for roughly one extra projection pair per block. Storage is still
+/// <b>pre-RoPE</b> — the driving table is applied after the re-projection, so it can never outlive the resolution it
+/// was derived from.</summary>
 public sealed class WanAnimate2DrivingCache : IDisposable
 {
-    private readonly Tensor[] _k;
-    private readonly Tensor[] _v;
+    private readonly Tensor[] _input;
     private int _disposed;
 
-    internal WanAnimate2DrivingCache(Tensor[] k, Tensor[] v, int frames, int tokensPerFrame, (int T, int H, int W) genGrid)
+    internal WanAnimate2DrivingCache(Tensor[] input, int frames, int tokensPerFrame, (int T, int H, int W) genGrid)
     {
-        _k = k;
-        _v = v;
+        _input = input;
         Frames = frames;
         TokensPerFrame = tokensPerFrame;
         GenGrid = genGrid;
@@ -35,17 +35,29 @@ public sealed class WanAnimate2DrivingCache : IDisposable
     public (int T, int H, int W) GenGrid { get; }
 
     /// <summary>Blocks covered — must equal the DiT's layer count.</summary>
-    public int BlockCount => _k.Length;
+    public int BlockCount => _input.Length;
 
-    internal Tensor K(int block) => _k[block];
+    /// <summary>Element type of the stored inputs: F32, or BF16 when the caller took the halved cache.</summary>
+    public DType StorageDType => _input[0].DType;
 
-    internal Tensor V(int block) => _v[block];
+    /// <summary>Bytes the cache actually holds. Divide by <c>Frames · TokensPerFrame</c> for the per-driving-token
+    /// figure a run has to be sized against.</summary>
+    public long StoredBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor t in _input) total += t.DType.ComputeByteCount(t.ElementCount);
+            return total;
+        }
+    }
+
+    internal Tensor Input(int block) => _input[block];
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        foreach (Tensor t in _k) t.Dispose();
-        foreach (Tensor t in _v) t.Dispose();
+        foreach (Tensor t in _input) t.Dispose();
     }
 }
 
@@ -150,14 +162,17 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Runs the driving video's latents through all blocks once, at <see cref="DrivingTimestep"/>, caching
-    /// each block's pre-RoPE self-attention K/V. Rebuilt per chunk (and never per CFG branch — the driving stream is
+    /// each block's self-attention input. Rebuilt per chunk (and never per CFG branch — the driving stream is
     /// outside the guidance loop, so it never sees a negative prompt).</summary>
     /// <param name="drivingLatent"><c>[1, z, Tref, H, W]</c> VAE latents of the driving video. The 36 input channels
     /// are assembled here as <c>[latent | ones(4) | latent]</c> — the same latent twice, with an all-ones mask
     /// because every driving frame is known.</param>
     /// <param name="genGrid">The generation stream's token grid, which fixes the driving RoPE offsets.</param>
+    /// <param name="bf16Cache">Store the cache in BF16, halving it again. Off by default and unvalidated: the rest of
+    /// this forward is F32, so downcasting here is a divergence from the reference AND from ComfyUI (whose cache is
+    /// BF16 only because its whole forward is), and it lands on values that become attention scores.</param>
     public WanAnimate2DrivingCache EncodeDriving(IBackend backend, Tensor drivingLatent, Tensor encoder,
-        Tensor? clipImageEmbeds, (int T, int H, int W) genGrid)
+        Tensor? clipImageEmbeds, (int T, int H, int W) genGrid, bool bf16Cache = false)
     {
         ArgumentNullException.ThrowIfNull(drivingLatent);
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -179,8 +194,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         temb.Dispose();   // the driving stream has no head; only the per-block modulation is used
         (Tensor context, int imageContextLen, bool ownsContext) = BuildContext(backend, encoder, clipImageEmbeds, dim);
 
-        Tensor[] keys = new Tensor[_blocks.Length];
-        Tensor[] values = new Tensor[_blocks.Length];
+        Tensor[] inputs = new Tensor[_blocks.Length];
         Tensor cur = hidden;
         try
         {
@@ -192,14 +206,12 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
                     imageContextLen: imageContextLen, selfAttnKvCapture: capture);
                 cur.Dispose();
                 cur = next;
-                keys[i] = capture.K!;
-                values[i] = capture.V!;
+                inputs[i] = bf16Cache ? Downcast(backend, capture.Input!) : capture.Input!;
             }
         }
         catch
         {
-            foreach (Tensor? t in keys) t?.Dispose();
-            foreach (Tensor? t in values) t?.Dispose();
+            foreach (Tensor? t in inputs) t?.Dispose();
             throw;
         }
         finally
@@ -208,7 +220,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             timestepProj.Dispose();
             if (ownsContext) context.Dispose();
         }
-        return new WanAnimate2DrivingCache(keys, values, frames, gh * gw, genGrid);
+        return new WanAnimate2DrivingCache(inputs, frames, gh * gw, genGrid);
     }
 
     /// <summary>Velocity prediction for one CFG branch. <paramref name="latent"/> is the assembled
@@ -252,8 +264,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         {
             if (unconditional && i == UncondSkipBlockIndex) continue;
             BeforeBlockForward?.Invoke(i);
-            ctx.DrivingK = driving.K(i);
-            ctx.DrivingV = driving.V(i);
+            ctx.DrivingInput = driving.Input(i);
             Tensor next = _blocks[i].Forward(backend, cur, context, timestepProj, _rope, cos, sin, s,
                 imageContextLen: imageContextLen, animate2: ctx);
             cur.Dispose();
@@ -340,6 +351,17 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         Tensor context = WanDitOps.ConcatRows(imgProj, textProj, dim);
         imgProj.Dispose();
         return (context, imageContextLen, true);
+    }
+
+    /// <summary>Halves a cached block input to BF16, disposing the F32 original.</summary>
+    private static Tensor Downcast(IBackend backend, Tensor input)
+    {
+        using (input)
+        {
+            Tensor half = new Tensor(input.Shape, DType.BF16);
+            backend.CastToBf16(half, input);
+            return half;
+        }
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }

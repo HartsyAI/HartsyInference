@@ -15,7 +15,7 @@ namespace HartsyInference.Video.Pipelines;
 
 /// <summary>Wan-Animate-2 (character animation driven by a raw video) pipeline. One chunk per call: the reference
 /// image becomes latent frame 0 of the generation stream, the driving video's latents run through the DiT once at a
-/// fixed timestep to fill the per-block K/V cache, and the denoise loop splices that cache in frame-aligned.
+/// fixed timestep to fill the per-block driving cache, and the denoise loop splices its K/V in frame-aligned.
 /// There is no pose render, no face crop, no motion encoder and no retargeting — every V1 conditioning surface is
 /// gone, and the driving pixels go straight to the VAE.
 ///
@@ -49,6 +49,10 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     private readonly IWanVaeDecoder _vae;
     private readonly IWanVaeEncoder _encoder;
     private readonly WanVideoConfig _config;
+
+    /// <summary>Opt-in halving of the driving cache to BF16. Off because the rest of the forward is F32, so it is a
+    /// divergence from the reference and from ComfyUI alike, and it has had no real-weight quality run.</summary>
+    public const string Bf16DrivingCacheSwitch = "HARTSY_ANIMATE2_BF16_DRIVING_CACHE";
 
     /// <summary>Measured per-token activation slope of the Animate denoise loop, reused here — the block internals
     /// are the same Wan i2v ones, and the binding constraint is activations rather than weights.</summary>
@@ -195,7 +199,12 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 
             // The driving stream sits outside the guidance loop entirely — it never sees the negative prompt, and it
             // is built once per chunk rather than once per step.
-            driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid);
+            driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid,
+                bf16Cache: EnvSwitch.IsEnabled(Bf16DrivingCacheSwitch, false));
+            long drivingTokens = (long)driving.Frames * driving.TokensPerFrame;
+            Logs.Info($"Wan-Animate-2 driving cache: {driving.StoredBytes / (1024.0 * 1024.0 * 1024.0):F2} GiB "
+                + $"({driving.StoredBytes / (double)drivingTokens / (1024.0 * 1024.0):F4} MiB per driving token, "
+                + $"{drivingTokens} tokens, {driving.StorageDType.Name}).");
             stream.EndStep();
             Backend.FreeActivations();
 

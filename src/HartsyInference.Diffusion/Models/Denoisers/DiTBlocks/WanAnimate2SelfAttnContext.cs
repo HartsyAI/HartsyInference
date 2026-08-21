@@ -38,15 +38,14 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     /// <inheritdoc cref="KeyBuffer"/>
     public required Tensor ValueBuffer { get; init; }
 
-    /// <summary>The current block's cached driving K, <c>[refSeq, dim]</c>, stored <b>pre-RoPE</b> — the driving
-    /// RoPE table is applied on read, so a resolution change can never re-use a stale offset. Reassigned by the
-    /// transformer before each block.</summary>
-    public Tensor? DrivingK { get; set; }
+    /// <summary>The current block's cached driving <b>self-attention input</b> <c>[refSeq, dim]</c> — the normed,
+    /// modulated hidden state the <c>k</c>/<c>v</c> projections consume. K and V are re-projected from it on read
+    /// (half the memory of caching both, for one extra projection pair per block), and the driving RoPE table is
+    /// still applied after that projection, so the cache remains pre-RoPE. F32, or BF16 when the caller opted into
+    /// the halved cache. Reassigned by the transformer before each block.</summary>
+    public Tensor? DrivingInput { get; set; }
 
-    /// <summary>The current block's cached driving V, <c>[refSeq, dim]</c> (values are never rotated).</summary>
-    public Tensor? DrivingV { get; set; }
-
-    /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving K/V are all
+    /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving input are all
     /// owned by longer-lived caches and are borrowed here for the duration of one forward.</summary>
     public void Dispose()
     {
@@ -56,13 +55,20 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     }
 }
 
-/// <summary>Receives a block's self-attention K/V <b>before</b> RoPE, for the Animate-2 driving prepass. Caller-owned
-/// (so CFG branch threads can't collide) and caller-disposed.</summary>
+/// <summary>Receives a block's self-attention input <b>before</b> the k/v projections, for the Animate-2 driving
+/// prepass. Caller-owned (so CFG branch threads can't collide) and caller-disposed.</summary>
 public sealed class WanAnimate2KvCapture
 {
-    /// <summary>Post-QK-norm, pre-RoPE self-attention keys <c>[S, dim]</c>.</summary>
+    /// <summary>The normed, modulated self-attention input <c>[S, dim]</c> — what the driving cache actually stores.</summary>
+    public Tensor? Input { get; internal set; }
+
+    /// <summary>Also hand back the projected K/V, which the cache no longer stores. Off by default: this exists so a
+    /// test can compare the re-projected pair against the pair computed inline by the prepass.</summary>
+    public bool CaptureProjected { get; init; }
+
+    /// <summary>Post-QK-norm, pre-RoPE self-attention keys <c>[S, dim]</c>; null unless <see cref="CaptureProjected"/>.</summary>
     public Tensor? K { get; internal set; }
 
-    /// <summary>Self-attention values <c>[S, dim]</c>.</summary>
+    /// <summary>Self-attention values <c>[S, dim]</c>; null unless <see cref="CaptureProjected"/>.</summary>
     public Tensor? V { get; internal set; }
 }
