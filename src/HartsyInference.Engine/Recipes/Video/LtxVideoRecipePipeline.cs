@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -38,12 +39,14 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     /// via <c>VideoService.RejectUnsupported</c> before this pipeline is even reached.</summary>
     private readonly LtxVideoVaeEncoder? _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable.
     /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, LtxVideoPipeline pipeline, LtxVideoConfig config,
-        T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders)
+        T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _backend = backend;
         _textBackend = textBackend;
         _vaeBackend = vaeBackend;
@@ -152,5 +155,7 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

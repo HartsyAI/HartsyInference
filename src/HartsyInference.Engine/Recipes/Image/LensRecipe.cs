@@ -1,7 +1,9 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.HuggingFace;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -20,8 +22,9 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Lens reuses the Flux.2 VAE, so its encoder rides that config's encode-parity gate. Img2img only:
     /// the loop integrates in packed token space and the shared mask-blend helpers have no variant for Lens's
-    /// packing, so a masked path would need a blend that does not exist yet.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner;
+    /// packing, so a masked path would need a blend that does not exist yet.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.LensTransformer"/> names its blocks <c>transformer_blocks.{i}</c>, an already-recognized canonical diffusers root. The merge runs through <see cref="LensPipelineFactory.LoadFromComfyFiles"/>'s <c>onTransformerWeights</c> hook rather than beside a LoadWeights call — Lens is the only family whose transformer weights are loaded inside the Diffusion package.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
 
@@ -48,13 +51,20 @@ public sealed class LensRecipe : IArchitectureRecipe
             : LensConfig.Default;
         Logs.Info($"[LensRecipe] Loading Lens ({(config.DefaultCfgScale > 1 ? "standard" : "turbo")}): {Path.GetFileName(context.CheckpointPath)}.");
 
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging after
+        // would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule). Lens is the one family
+        // whose transformer weights are loaded inside the Diffusion-package factory rather than here, so the
+        // merge rides the factory's onTransformerWeights hook instead of sitting next to a LoadWeights call.
+        MergedLoraStack? loraStack = null;
         LensPipelineBundle bundle = LensPipelineFactory.LoadFromComfyFiles(
-            context.Backend, context.CheckpointPath, textEncoderPath, vaePath, config);
+            context.Backend, context.CheckpointPath, textEncoderPath, vaePath, config,
+            onTransformerWeights: transformerWeights => loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights));
         try
         {
             GptOssTokenizer tokenizer = new GptOssTokenizer(vocabPath, mergesPath);
             Logs.Info("[LensRecipe] Lens ready.");
-            return new LensRecipePipeline(bundle, config, tokenizer);
+            return new LensRecipePipeline(bundle, config, tokenizer, loraStack);
         }
         catch (Exception ex)
         {

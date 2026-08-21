@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -35,9 +36,11 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     /// <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97 };
 
-    /// <summary>Family-level default: no conditioning declared. Narrowed per-checkpoint by <see cref="SupportsFor"/> —
-    /// only the base 0.9 (non-timestep-VAE, non-13B) variant gets <see cref="VideoFeatures.InitImage"/>.</summary>
-    public VideoFeatures Supports => VideoFeatures.None;
+    /// <summary>Family-level default. <see cref="VideoFeatures.Lora"/> (added 2026-08-20) is checkpoint-independent —
+    /// it merges into the DiT, which every variant has — so unlike <see cref="VideoFeatures.InitImage"/> it is NOT
+    /// narrowed by <see cref="SupportsFor"/>. InitImage stays variant-gated there: only the base 0.9
+    /// (non-timestep-VAE, non-13B) checkpoint has a VAE encoder built for its config.</summary>
+    public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY
     /// against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width
@@ -65,7 +68,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             bool is13B = maxBlock >= 28 || nameLc.Contains("13b", StringComparison.Ordinal)
                 || nameLc.Contains("0.9.7", StringComparison.Ordinal) || nameLc.Contains("0.9.8", StringComparison.Ordinal);
             bool timestepVae = is13B || LtxVideoCheckpointConverter.IsTimestepVae(keys) || nameLc.Contains("0.9.5", StringComparison.Ordinal);
-            return !is13B && !timestepVae ? VideoFeatures.InitImage : Supports;
+            return !is13B && !timestepVae ? VideoFeatures.InitImage | Supports : Supports;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
         {
@@ -104,6 +107,10 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             Logs.Info($"[LtxVideoRecipe] Variant: {(is13B ? "0.9.7/13B" : timestepVae ? "0.9.5" : "0.9")} ({maxBlock + 1} DiT layers, {(timestepVae ? "timestep-conditioned" : "base")} VAE).");
 
             LtxVideoTransformer transformer = new LtxVideoTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
             Dictionary<string, Tensor> vaeWeightsF32 = VaePrecisionHelper.CastVaeWeights(conv.Vae, DType.F32);
             LtxVideoVaeDecoder vae = timestepVae
@@ -148,7 +155,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             };
             Logs.Info($"[LtxVideoRecipe] LTX-Video ready ({(vaeEncoder is null ? "text-to-video only" : "text-to-video + image-to-video")}).");
             return new LtxVideoRecipePipeline(context.Backend, context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault,
-                pipeline, config, tokenizer, t5, transformer, vaeEncoder, loaders);
+                pipeline, config, tokenizer, t5, transformer, vaeEncoder, loaders, loraStack);
         }
         catch (Exception ex)
         {

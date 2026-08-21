@@ -1,6 +1,6 @@
 namespace HartsyInference.ModelAssets.Lora;
 
-/// <summary>LoRA file naming format detected from key prefixes. See docs/Design/LORA_KEY_MAPPING.md for the detection rules.</summary>
+/// <summary>LoRA file naming format detected from key prefixes. The detection rules live in <see cref="LoraFormatDetector.Detect"/>.</summary>
 public enum LoraFormat
 {
     /// <summary>Format could not be detected — file rejected at load.</summary>

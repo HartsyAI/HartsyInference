@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -28,6 +29,7 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
     private readonly BooguImageTransformer _transformer;
     private readonly IBackend _backend;
     private readonly IReadOnlyList<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     // Prompt-embedding cache: repeat prompts skip the whole Qwen3-VL-8B encode (and the DiT eviction it forces —
     // the ~10 GB encoder and the ~10 GB fp8 DiT cannot coexist beside activations on 24 GB). Reusing the SAME
@@ -38,8 +40,9 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
     private Tensor? _cachedNeg;
 
     /// <summary>Wraps the constructed Boogu-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, BooguImageTransformer transformer, IBackend backend, IReadOnlyList<SafeTensorsLoader> loaders)
+    public BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, BooguImageTransformer transformer, IBackend backend, IReadOnlyList<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _textEncoder = textEncoder;
@@ -193,5 +196,7 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

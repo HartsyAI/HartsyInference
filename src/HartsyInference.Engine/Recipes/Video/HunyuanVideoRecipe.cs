@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -49,6 +50,10 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 6.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). Image-to-video remains unwired and is tracked separately: HunyuanVideo-I2V is a distinct upstream checkpoint with a different input-channel count, not a flag on this T2V one.</remarks>
+    public VideoFeatures Supports => VideoFeatures.Lora;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): image-to-video conditioning and a VideoRequest.Components LLaVA/CLIP/VAE override are
@@ -74,6 +79,10 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
             }
             HunyuanVideoConfig config = HunyuanVideoConfig.T2V;
             HunyuanVideoDit dit = new HunyuanVideoDit(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: ditWeights);
             dit.LoadWeights(ditWeights);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanVideoVae3D, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
@@ -93,7 +102,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
 
             HunyuanVideoPipeline pipeline = new HunyuanVideoPipeline(context.Backend, dit, vae, config);
             Logs.Info("[HunyuanVideoRecipe] HunyuanVideo ready (text-to-video).");
-            return new HunyuanVideoRecipePipeline(context.Backend, pipeline, llava, clipL, new ClipTokenizer(), dit, loaders);
+            return new HunyuanVideoRecipePipeline(context.Backend, pipeline, llava, clipL, new ClipTokenizer(), dit, loaders, loraStack);
         }
         catch (Exception ex)
         {

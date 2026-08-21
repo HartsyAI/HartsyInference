@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -29,7 +30,8 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     /// <remarks>Start-frame image-to-video: the first frame is VAE-encoded and pinned as latent frame 0, with
     /// only frames 1.. denoising. No end-frame conditioning in this family.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage;
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20. Shares <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> with the T2I family, so its <c>text_transformer_blocks.{i}</c> / <c>visual_transformer_blocks.{i}</c> roots need the same widened bare-root LoRA detection.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5-video", StringComparison.OrdinalIgnoreCase);
 
@@ -63,6 +65,10 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
                 transformerWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
             }
             Kandinsky5Transformer transformer = new Kandinsky5Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
             transformer.LoadWeights(transformerWeights);
 
             Logs.Info($"[Kandinsky5VideoRecipe] Loading HunyuanVideo VAE (diffusers naming): {vaeDir}.");
@@ -104,7 +110,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
 
             Kandinsky5VideoPipeline pipeline = new Kandinsky5VideoPipeline(context.Backend, transformer, vae, config, vaeEncoder);
             Logs.Info("[Kandinsky5VideoRecipe] Kandinsky 5 T2V-Lite ready (Qwen2.5-VL + CLIP-L live encode).");
-            return new Kandinsky5VideoRecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders);
+            return new Kandinsky5VideoRecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders, loraStack);
         }
         catch (Exception ex)
         {

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -19,8 +20,9 @@ public sealed class FLiteRecipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>F-Lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <remarks>F-Lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.FLiteTransformer"/> names its blocks <c>blocks.{i}</c>, already a recognized bare root.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "f-lite", StringComparison.OrdinalIgnoreCase);
 
@@ -47,6 +49,10 @@ public sealed class FLiteRecipe : IArchitectureRecipe
         FLiteConfig config = FLiteConfig.V1;
         Logs.Info($"[FLiteRecipe] Building transformer (hidden={config.HiddenSize}, depth={config.Depth}).");
         FLiteTransformer transformer = new FLiteTransformer(config);
+        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
         transformer.LoadWeights(converted.Transformer);
 
         T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
@@ -58,7 +64,7 @@ public sealed class FLiteRecipe : IArchitectureRecipe
                 VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, converted.Vae, "FLiteRecipe");
         FLitePipeline pipeline = new FLitePipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
         Logs.Info("[FLiteRecipe] F-Lite ready.");
-        return new FLiteRecipePipeline(pipeline, new T5Tokenizer(maxLength: 512), handle);
+        return new FLiteRecipePipeline(pipeline, new T5Tokenizer(maxLength: 512), handle, loraStack);
     }
 
     /// <summary>Resolves the F-Lite diffusers-folder root from the checkpoint path: if it is already a directory containing one of the expected subfolders it is used directly, otherwise the loader walks up to 3 parent levels from the picked file (mirrors the SwarmUI loader's <c>ResolveFolderRoot</c>).</summary>

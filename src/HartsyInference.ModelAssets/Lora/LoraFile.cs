@@ -14,7 +14,7 @@ public sealed class LoraFile : IDisposable
     /// <summary>Path of the loaded safetensors file.</summary>
     public required string FilePath { get; init; }
 
-    /// <summary>Detected LoRA naming format. See docs/Design/LORA_KEY_MAPPING.md for the rules.</summary>
+    /// <summary>Detected LoRA naming format. The rules live in <see cref="LoraFormatDetector.Detect"/>.</summary>
     public required LoraFormat Format { get; init; }
 
     /// <summary>Parsed LoRA layers, each pairing a canonical target weight key with its down/up matrices.</summary>

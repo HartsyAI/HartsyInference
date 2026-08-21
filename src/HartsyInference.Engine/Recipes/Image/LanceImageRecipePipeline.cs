@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
@@ -22,10 +23,12 @@ public sealed class LanceImageRecipePipeline : IRecipePipeline
     private readonly LanceTransformer _transformer;
     private readonly ILlmTokenizer _tokenizer;
     private readonly IReadOnlyList<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Lance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceConfig config, LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<SafeTensorsLoader> loaders)
+    public LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceConfig config, LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _config = config;
         _transformer = transformer;
@@ -110,5 +113,7 @@ public sealed class LanceImageRecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -29,6 +29,14 @@ public sealed class SdxlRefinerRecipe : IArchitectureRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "sdxl-refiner", StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
+    /// <remarks><see cref="ImageFeatures.Lora"/> is deliberately NOT declared, and this is the one image family
+    /// left out of the 2026-08-20 LoRA sweep — recorded here so it reads as a decision rather than an oversight.
+    /// The refiner UNet is <c>UNetConfig.SdxlRefiner</c>: four down-levels and a 1280-dim trunk against base
+    /// SDXL's three, so a Kohya SDXL LoRA's <c>lora_unet_down_blocks_*</c> keys do not name anything in it. It
+    /// would detect as <see cref="ModelAssets.Lora.LoraFormat.KohyaSdxl"/>, match zero weights, and hit
+    /// <c>LoraApplier</c>'s zero-match refusal — trading the feature gate's accurate "this family does not
+    /// support LoRA" for a merge-time error that reads like a broken file. Refiner-targeted LoRAs are not a
+    /// thing the community trains. Declare it only alongside a real refiner LoRA to test against.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling;
 
     /// <summary>The refiner's recommended settings mirror base SDXL's (diffusers img2img defaults).</summary>

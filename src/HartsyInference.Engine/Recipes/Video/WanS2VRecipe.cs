@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -29,7 +30,8 @@ public sealed class WanS2VRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>Wan-S2V turns the init image into appended identity reference tokens.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage;
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20, matching the plain Wan family. The merge runs against the shared <c>weights</c> dict before BOTH the transformer and the audio encoder load from it, so an S2V LoRA touching either lands.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);
 
@@ -60,6 +62,10 @@ public sealed class WanS2VRecipe : IVideoRecipe
                 + $"{config.AudioLayers} harvested layers, {config.AudioTokens} tok/frame, cfg {config.GuidanceScale}).");
 
             WanS2VTransformer transformer = new WanS2VTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: weights);
             transformer.LoadWeights(weights);
             WanS2VAudioEncoder audioEncoder = new WanS2VAudioEncoder(config.AudioLayers, config.AudioDim, config.InnerDim, config.AudioTokens);
             audioEncoder.LoadWeights(weights);
@@ -104,7 +110,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
 
             WanS2VPipeline pipeline = new WanS2VPipeline(context.Backend, transformer, audioEncoder, vaeDecoder, config, encoder: vaeEncoder);
             Logs.Info("[WanS2VRecipe] Wan S2V ready (audio+text, reference-identity capable).");
-            return new WanS2VRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, audioEncoder, wav2vec2, vaeEncoder, loaders);
+            return new WanS2VRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, audioEncoder, wav2vec2, vaeEncoder, loaders, loraStack);
         }
         catch (Exception ex)
         {

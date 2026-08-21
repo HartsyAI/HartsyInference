@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -25,10 +26,12 @@ public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
     private readonly ClipTokenizer _clipTokenizer;
     private readonly HunyuanVideoDit _dit;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed HunyuanVideo pipeline plus its dual text stack, taking ownership of every disposable.</summary>
-    public HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPipeline pipeline, LlamaStyleEncoder llava, ClipTextEncoder clipL, ClipTokenizer clipTokenizer, HunyuanVideoDit dit, List<SafeTensorsLoader> loaders)
+    public HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPipeline pipeline, LlamaStyleEncoder llava, ClipTextEncoder clipL, ClipTokenizer clipTokenizer, HunyuanVideoDit dit, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _backend = backend;
         _pipeline = pipeline;
         _llava = llava;
@@ -128,5 +131,7 @@ public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

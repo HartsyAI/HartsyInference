@@ -10,6 +10,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -225,8 +226,31 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             height, width,
         ];
 
-        // 3. Set up scheduler
-        IScheduler scheduler = SchedulerFactory.Create(request.Scheduler);
+        // 3. Set up scheduler + sampler.
+        //
+        // One request string carries both halves of ComfyUI's selection, so a pasted `dpmpp_2m_sde_karras` splits
+        // into a sampler and a sigma schedule instead of being rejected whole. The scheduler is still what owns the
+        // family's sigma range (SDXL's alphas-cumprod table); the schedule name only re-spaces those sigmas, and the
+        // sampler integrates over the result.
+        (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(request.Scheduler);
+        // Refuse an unknown name rather than silently substituting Euler. A workflow asking for a sampler the engine
+        // lacks used to get a DIFFERENT IMAGE plus a log line nobody reads, which reads as "this engine is broken"
+        // rather than "that sampler isn't implemented yet".
+        if (!SamplerRegistry.IsKnown(samplerName) && !SchedulerFactory.IsKnown(samplerName))
+        {
+            throw new NotSupportedException(
+                $"Unknown sampler '{samplerName}'. Available: "
+                + $"{string.Join(", ", SamplerRegistry.Names.Concat(SchedulerFactory.Names).Distinct(StringComparer.Ordinal))}. "
+                + $"Sigma schedules: {string.Join(", ", SigmaSchedule.Names)}.");
+        }
+        if (!SigmaSchedule.IsKnown(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Unknown sigma schedule '{scheduleName}'. Available: {string.Join(", ", SigmaSchedule.Names)}.");
+        }
+        // A SamplerRegistry sampler supplies its own integrator, so the scheduler is only here for the sigma range —
+        // pass null for the Euler base rather than the sampler's name, which the factory would (correctly) refuse.
+        IScheduler scheduler = SchedulerFactory.Create(SamplerRegistry.IsKnown(samplerName) ? null : samplerName);
         scheduler.SetTimesteps(steps);
 
         // 4. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
@@ -298,11 +322,40 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             }
         }
 
+        // The sampler integrates over the scheduler's OWN sigmas, optionally re-spaced by the requested schedule.
+        // Building it here (not inside the loop) keeps the loop free of name resolution, and means an unusable
+        // combination fails before any GPU work happens.
+        // Both halves of the selection only reach the sampler-driven fused loop. Refuse the combination rather than
+        // dropping it: silently running plain Euler when the user asked for euler_ancestral (or ignoring `karras`) is
+        // the exact fallback this whole change exists to remove, and it is INVISIBLE — the image is fine, just not the
+        // one that was requested.
+        //
+        // Non-obvious case worth spelling out: a bare `euler_ancestral` with, say, an inpaint mask has no schedule
+        // suffix, so a schedule-only check passes it straight through to the reference loop and plain Euler. The
+        // sampler half has to be checked too.
+        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName)
+            && samplerName.Length > 0
+            && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
+        if (!fusedLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
+        {
+            string asked = nonDefaultSampler
+                ? $"Sampler '{samplerName}'" + (scheduleName is null ? "" : $" with schedule '{scheduleName}'")
+                : $"Sigma schedule '{scheduleName}'";
+            throw new NotSupportedException(
+                $"{asked} runs only on the fused Euler path, and this generation fell back to the reference loop. "
+                + "Masked inpaint, ControlNet, IP-Adapter, refiner step-swap, a per-step conditioning schedule, "
+                + "cfg-rescale and tcfg each force that fallback. Drop the sampler/schedule selection, or drop the "
+                + "feature that forced the fallback.");
+        }
+        ISampler? sampler = fusedLoop
+            ? SamplerRegistry.Create(samplerName, SigmaSchedule.Apply(scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas()), seed)
+            : null;
+
         Stopwatch denoiseSw = Stopwatch.StartNew();
         latent = cfgParallelEligible
             ? RunDenoiseLoopCfgParallel(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
             : fusedLoop
-                ? RunDenoiseLoopFused(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, onProgress)
+                ? RunDenoiseLoopFused(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, (EulerDiscreteScheduler)scheduler, useF16, startStep, steps, cfgScale, sampler!, onProgress)
                 : RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, cfgRescale, tcfg, sourceLatent, latentMask, seed, controlNets,
                     refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress, conditioningSchedule);
         Logs.Verbose($"[sdxl-phase] denoise {denoiseSw.ElapsedMilliseconds}ms "
@@ -646,6 +699,95 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Drain-free denoise loop: cond+uncond run as ONE batch-2 UNet forward per step (halving host op-dispatch), the CFG combine + Euler update run in-place on the device-resident latent (<c>IBackend.CfgEulerStep</c>, dt = σ[i+1]−σ[i]), and the step-invariant conditioning (batched text embedding in the UNet dtype, ADM micro-conditioning embedding) is built once before the loop. Zero host round-trips per step — the host CFG/scheduler loops and the per-step conditioning re-slices of the reference path each forced a full GPU pipeline drain. Latent previews are throttled to every 4th step + final (each preview is a deliberate D2H sync). At <c>cfgScale ≤ 1</c> the uncond branch is skipped entirely (batch 1, guidance 1 ⇒ pure cond Euler step). The final latent is host-materialized before returning because the tiled VAE fallback slices it on the host.</summary>
+    /// <summary>The fused loop's step body as an <see cref="IDenoisePredictor"/>: scale the latent for the noise level,
+    /// run ONE batch-2 UNet forward carrying cond and uncond together, and slice the two halves back out.
+    ///
+    /// <para>Everything step-invariant (the batched text embedding already in the UNet dtype, the ADM
+    /// micro-conditioning embedding) was built once by the caller and is borrowed here, not owned — this type disposes
+    /// nothing it did not allocate.</para>
+    ///
+    /// <para>Both derived quantities come from <paramref name="sigma"/> rather than the step index, because a
+    /// second-order sampler evaluates at intermediate sigmas that appear nowhere in the schedule. The input scale is
+    /// the same <c>1/sqrt(sigma²+1)</c> expression <see cref="EulerDiscreteScheduler.ScaleModelInput"/> computes, and
+    /// <see cref="EulerDiscreteScheduler.TimestepForSigma"/> returns the precomputed timestep unchanged for an
+    /// on-schedule sigma — together that keeps the default path bit-identical while still admitting sub-steps.</para></summary>
+    private sealed class FusedPredictor : IDenoisePredictor
+    {
+        private readonly SdxlPipeline _owner;
+        private readonly EulerDiscreteScheduler _scheduler;
+        private readonly TensorShape _latentShape;
+        private readonly TensorShape _batchedShape;
+        private readonly Tensor _textForUnet;
+        private readonly Tensor? _admEmb;
+        private readonly DType _unetDtype;
+        private readonly bool _useCfg;
+        private readonly float _cfgScale;
+        private readonly int _condRowOffset;
+
+        public FusedPredictor(SdxlPipeline owner, EulerDiscreteScheduler scheduler, TensorShape latentShape,
+            TensorShape batchedShape, Tensor textForUnet, Tensor? admEmb, DType unetDtype, bool useCfg,
+            float cfgScale, int condRowOffset)
+        {
+            _owner = owner;
+            _scheduler = scheduler;
+            _latentShape = latentShape;
+            _batchedShape = batchedShape;
+            _textForUnet = textForUnet;
+            _admEmb = admEmb;
+            _unetDtype = unetDtype;
+            _useCfg = useCfg;
+            _cfgScale = cfgScale;
+            _condRowOffset = condRowOffset;
+        }
+
+        /// <inheritdoc/>
+        public PredictionType Prediction => PredictionType.Epsilon;
+
+        /// <inheritdoc/>
+        public float GuidanceScale => _useCfg ? _cfgScale : 1.0f;
+
+        /// <inheritdoc/>
+        public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
+        {
+            IBackend backend = _owner.Backend;
+            float t = _scheduler.TimestepForSigma(sigma, stepIndex);
+            float inputScale = 1.0f / MathF.Sqrt((sigma * sigma) + 1.0f);
+
+            Tensor scaled = new Tensor(_latentShape, DType.F32);
+            backend.Scale(scaled, x, inputScale);
+            Tensor unetInput;
+            if (_useCfg)
+            {
+                Tensor batched = new Tensor(_batchedShape, DType.F32);
+                backend.Concat(batched, [scaled, scaled], 0);
+                scaled.Dispose();
+                unetInput = batched;
+            }
+            else
+            {
+                unetInput = scaled;
+            }
+            unetInput = DtypeCastHelper.EnsureDtype(backend, unetInput, _unetDtype);
+
+            Tensor noisePred = _owner._unet.Forward(backend, unetInput, t, _textForUnet, null, default, null, null,
+                null, null, null, null, _admEmb);
+            unetInput.Dispose();
+            Tensor predF32 = DtypeCastHelper.EnsureF32(backend, noisePred);
+
+            if (!_useCfg)
+            {
+                // Guidance-free: one tensor serves both halves, which CfgEulerStep explicitly allows.
+                return new DenoisePrediction(predF32, predF32);
+            }
+            Tensor uncond = new Tensor(_latentShape, DType.F32);
+            backend.SliceRows(uncond, predF32, 0);
+            Tensor cond = new Tensor(_latentShape, DType.F32);
+            backend.SliceRows(cond, predF32, _condRowOffset);
+            predF32.Dispose();
+            return new DenoisePrediction(cond, uncond);
+        }
+    }
+
     private Tensor RunDenoiseLoopFused(
         Tensor latent,
         TensorShape latentShape,
@@ -657,8 +799,10 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         int startStep,
         int totalSteps,
         float cfgScale,
+        ISampler sampler,
         Action<GenerationProgress>? onProgress)
     {
+        ArgumentNullException.ThrowIfNull(sampler);
         bool useCfg = CfgHelper.IsGuidanceActive(cfgScale);
         int batch = useCfg ? 2 : 1;
         int latentC = (int)latentShape[1];
@@ -683,48 +827,21 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         Logs.Info($"Starting SDXL fused denoising loop (batch={batch}, {unetDtype} activations)...");
 
+        FusedPredictor predictor = new FusedPredictor(this, scheduler, latentShape, batchedShape, textForUnet,
+            admEmb, unetDtype, useCfg, cfgScale, condRowOffset);
+        sampler.Reset(latentShape);
+        Logs.Info($"[Sampling] sampler={sampler.Name}, {sampler.StepCount} steps.");
+
         for (int i = startStep; i < totalSteps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            float inputScale = scheduler.ScaleModelInput(i);
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            Backend.Scale(scaled, latent, inputScale);
-            Tensor unetInput;
-            if (useCfg)
-            {
-                Tensor batched = new Tensor(batchedShape, DType.F32);
-                Backend.Concat(batched, [scaled, scaled], 0);
-                scaled.Dispose();
-                unetInput = batched;
-            }
-            else
-            {
-                unetInput = scaled;
-            }
-            unetInput = DtypeCastHelper.EnsureDtype(Backend, unetInput, unetDtype);
-
-            Tensor noisePred = _unet.Forward(Backend, unetInput, t, textForUnet, null, default, null, null, null, null, null, null, admEmb);
-            unetInput.Dispose();
-            Tensor predF32 = DtypeCastHelper.EnsureF32(Backend, noisePred);
-
-            if (useCfg)
-            {
-                Tensor uncond = new Tensor(latentShape, DType.F32);
-                Backend.SliceRows(uncond, predF32, 0);
-                Tensor cond = new Tensor(latentShape, DType.F32);
-                Backend.SliceRows(cond, predF32, condRowOffset);
-                predF32.Dispose();
-                Backend.CfgEulerStep(latent, cond, uncond, cfgScale, scheduler.StepDelta(i));
-                cond.Dispose();
-                uncond.Dispose();
-            }
-            else
-            {
-                Backend.CfgEulerStep(latent, predF32, predF32, 1.0f, scheduler.StepDelta(i));
-                predF32.Dispose();
-            }
+            // The whole step body now lives behind IDenoisePredictor, and the update behind ISampler. For the default
+            // EulerSampler this is exactly the previous instruction sequence — one batched UNet forward, one slice
+            // pair, one in-place CfgEulerStep on the device-resident latent — which is what makes the conversion
+            // bit-identical rather than merely equivalent.
+            sampler.Step(Backend, latent, predictor, i);
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");

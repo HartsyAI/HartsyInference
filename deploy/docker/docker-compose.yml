@@ -1,0 +1,49 @@
+services:
+  hartsy-wake:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: hartsy-wake
+    container_name: hartsy-wake
+    # unless-stopped, not always: restarts on crash and on host/Docker-daemon reboot (the two
+    # cases we actually want self-healing for), but respects an explicit `docker stop` instead
+    # of fighting it — matters on a multi-app VPS where someone may deliberately stop this one
+    # service without wanting it to spring back up mid-maintenance.
+    restart: unless-stopped
+    environment:
+      HartsyInference__Backend: Cpu
+      HartsyInference__WakeEnabled: "true"
+      HartsyInference__WakePort: "10800"
+      HartsyInference__WakeModelRoot: /models/audio/wake
+      HartsyInference__WakeAuthToken: ${WAKE_AUTH_TOKEN:?set WAKE_AUTH_TOKEN in .env}
+      HartsyInference__WakeTranscribeOnDetection: "true"
+    volumes:
+      # Bind mount, not a named volume: makes it trivial to seed with the pre-downloaded
+      # backbone/head .onnx files (just rsync into ./models on the host) and to drop in a
+      # trained hey_hartsy head later without going through the container. WakeWordConfigStore
+      # also persists per-word threshold/route overrides here, so this needs to survive
+      # container recreation, not just restarts.
+      - ./models:/models
+    ports:
+      # Only the wake port goes to the host — this is what the Pico satellite connects to.
+      # /health (5099) deliberately stays off the host network; the autoheal sidecar reaches it
+      # over the compose network instead, so it doesn't compete for a host port with whatever
+      # else is already running on this VPS.
+      - "10800:10800"
+    labels:
+      - "autoheal=true"
+
+  # HEALTHCHECK alone doesn't restart anything — Docker just marks the container 'unhealthy' and
+  # waits. This sidecar is the missing half: it watches for containers labeled autoheal=true and
+  # restarts them on repeated health-check failure, the Docker-native equivalent of the
+  # systemd-timer approach used in the non-Docker deploy path. Well-established image, does one
+  # thing. Reusable for the other apps on this VPS too — just add the same label to their
+  # compose services.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

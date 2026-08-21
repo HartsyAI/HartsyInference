@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -24,8 +25,9 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Reference editing at text-only guidance. Steerable image guidance needs the Qwen3-VL vision
-    /// tower for the text-and-image-dropped embedding, which is still deferred.</remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// tower for the text-and-image-dropped embedding, which is still deferred.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.BooguImageTransformer"/> names its stacks <c>double_stream_layers.{i}</c>, <c>noise_refiner.{i}</c>, <c>context_refiner.{i}</c> and <c>ref_image_refiner.{i}</c> — none of which the bare-root LoRA detector recognized before the same change.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
 
@@ -82,6 +84,10 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
             BooguImageConfig config = BooguImageConfig.V01;
             BooguImageTransformer transformer = new BooguImageTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerW);
             transformer.LoadWeights(transformerW);
 
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_8B);
@@ -94,7 +100,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 4096);
             BooguImagePipeline pipeline = new BooguImagePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[BooguImageRecipe] Boogu-Image ready (text-to-image).");
-            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders);
+            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack);
         }
         catch (Exception ex)
         {

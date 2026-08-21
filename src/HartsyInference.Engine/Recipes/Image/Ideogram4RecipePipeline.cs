@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -25,9 +26,10 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
     private readonly Ideogram4Transformer _conditional;
     private readonly Ideogram4Transformer _unconditional;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Ideogram 4 pipeline plus its tokenizer and both transformers, taking ownership of every disposable.</summary>
-    public Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Ideogram4Transformer conditional, Ideogram4Transformer unconditional, List<SafeTensorsLoader> loaders)
+    public Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Ideogram4Transformer conditional, Ideogram4Transformer unconditional, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
         _pipeline = pipeline;
         _tokenizer = tokenizer;
@@ -35,6 +37,7 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         _conditional = conditional;
         _unconditional = unconditional;
         _loaders = loaders;
+        _loraStack = loraStack;
     }
 
     /// <inheritdoc/>
@@ -167,5 +170,7 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors both transformers were serving.
+        _loraStack?.Dispose();
     }
 }

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -35,10 +36,12 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly bool _isTurbo;
     private readonly List<SafeTensorsLoader> _loaders;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
-    public Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders)
+    public Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _textEncoder = textEncoder;
@@ -189,5 +192,7 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
         {
             loader.Dispose();
         }
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

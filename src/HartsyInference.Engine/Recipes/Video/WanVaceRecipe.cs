@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -31,7 +32,8 @@ public sealed class WanVaceRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>VACE requires a control image/video — it throws without one, so the init image is mandatory rather than optional.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage;
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20, matching the plain Wan family that already had it — same original-Wan module naming, so the existing <c>KohyaWan</c> / <c>DiffusersWan</c> mappers cover it unchanged.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
@@ -66,6 +68,10 @@ public sealed class WanVaceRecipe : IVideoRecipe
             Logs.Info($"[WanVaceRecipe] Converted {conv.Transformer.Count} transformer keys (VACE, {config.VaceLayers.Length} control layers, inner {config.InnerDim}).");
 
             WanVaceTransformer transformer = new WanVaceTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
 
             (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
@@ -86,7 +92,7 @@ public sealed class WanVaceRecipe : IVideoRecipe
 
             WanVacePipeline pipeline = new WanVacePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanVaceRecipe] Wan VACE ready (control-video).");
-            return new WanVaceRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, vaeEncoder, loaders);
+            return new WanVaceRecipePipeline(context.Backend, pipeline, config, tokenizer, umt5, transformer, vaeEncoder, loaders, loraStack);
         }
         catch (Exception ex)
         {

@@ -42,14 +42,21 @@ public static class LensPipelineFactory
     /// <summary>Loads + converts the three ComfyUI Lens files (<c>Comfy-Org/Lens</c>: DiT, GPT-OSS text
     /// encoder, Flux.2 VAE) and wires them into a pipeline. The bundle keeps the loaders alive — the
     /// passthrough VAE tensors are memory-mapped views into <paramref name="vaePath"/>.</summary>
+    /// <param name="onTransformerWeights">Invoked with the converted transformer dict after conversion and
+    /// BEFORE <c>LoadWeights</c> runs, so a caller can mutate it in place. This exists for the Engine's LoRA
+    /// merge, which must land before the weights reach the model (device caches are identity-keyed, so a
+    /// post-load merge would leave layers serving the pre-merge tensors) — and which cannot be done here,
+    /// because the merge machinery lives in the Engine package and this one must not depend on it.</param>
     public static LensPipelineBundle LoadFromComfyFiles(IBackend backend,
         string ditPath, string textEncoderPath, string vaePath, LensConfig config,
-        bool withTextEncoder = true, float bnEps = 1e-5f)
+        bool withTextEncoder = true, float bnEps = 1e-5f,
+        Action<IDictionary<string, Tensor>>? onTransformerWeights = null)
     {
         (LensCheckpointConverter.ConvertedWeights weights, SafeTensorsLoader[] loaders) =
             LensCheckpointConverter.LoadAndConvertComfy(ditPath, textEncoderPath, vaePath);
         try
         {
+            onTransformerWeights?.Invoke(weights.Transformer);
             return Wire(backend, weights.Transformer, weights.TextEncoder, weights.Vae, config,
                 withTextEncoder, bnEps, loaders);
         }

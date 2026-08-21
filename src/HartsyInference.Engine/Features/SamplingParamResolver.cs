@@ -1,3 +1,5 @@
+using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 
@@ -30,24 +32,53 @@ public static class SamplingParamResolver
         return steps;
     }
 
-    /// <summary>Maps the request's sampler/scheduler choice onto a <c>SchedulerFactory</c> name (<c>"ddim"</c> /
-    /// <c>"dpm++2m"</c> / <c>"lcm"</c>), or null for the default Euler. Only meaningful for the sigma-domain SD-family
-    /// pipelines; flow-match architectures use their canonical scheduler and ignore it. Unmappable names (euler_ancestral,
-    /// SDE variants, uni_pc, …) fall back to Euler with a log rather than a refusal — sampler choice is a preference,
-    /// not a correctness contract.</summary>
+    /// <summary>Resolves the request's sampler/scheduler choice into the string a pipeline consumes — a
+    /// <c>SchedulerFactory</c> name, a <c>Sampling.SamplerRegistry</c> name, or a compound
+    /// <c>sampler_schedule</c> selection, passed through for the pipeline to split.
+    ///
+    /// <para><b>An unrecognized name now throws.</b> This method used to map anything it did not know onto Euler and
+    /// write a <c>Logs.Verbose</c> line, on the reasoning that "sampler choice is a preference, not a correctness
+    /// contract". For someone migrating a ComfyUI workflow it IS a correctness contract: they ask for
+    /// <c>dpmpp_2m_sde_karras</c>, silently receive a Euler image, and conclude the engine is broken rather than that
+    /// the sampler is missing. The refusal names the value and lists what exists, matching the trade
+    /// <c>LoraApplier</c> already makes for a zero-match LoRA.</para></summary>
+    /// <exception cref="NotSupportedException">The requested sampler or sigma schedule is not available.</exception>
     public static string? ResolveSchedulerName(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!string.IsNullOrWhiteSpace(request.Sampler))
+        string? requested = !string.IsNullOrWhiteSpace(request.Sampler) ? request.Sampler
+            : !string.IsNullOrWhiteSpace(request.Scheduler) ? request.Scheduler
+            : null;
+        if (requested is null)
         {
-            return MapSamplerName(request.Sampler);
+            return null;
         }
-        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+
+        (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(requested);
+        if (!SamplerRegistry.IsKnown(samplerName) && !SchedulerFactory.IsKnown(samplerName)
+            && MapSamplerName(samplerName) is null && !IsLegacyEuler(samplerName))
         {
-            return MapSamplerName(request.Scheduler);
+            throw new NotSupportedException(
+                $"Sampler '{requested}' is not available. Samplers: "
+                + $"{string.Join(", ", SamplerRegistry.Names.Concat(SchedulerFactory.Names).Distinct(StringComparer.Ordinal))}. "
+                + $"Sigma schedules: {string.Join(", ", SigmaSchedule.Names)}.");
         }
-        return null;
+        if (!SigmaSchedule.IsKnown(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{scheduleName}' is not available. Schedules: {string.Join(", ", SigmaSchedule.Names)}.");
+        }
+
+        // Pass the selection through as given. Pipelines carrying the sampler seam split it themselves via
+        // SamplerRegistry.SplitCompound; the legacy SD-family path maps the sampler half onto a SchedulerFactory name.
+        return SamplerRegistry.IsKnown(samplerName) || scheduleName is not null
+            ? requested.Trim().ToLowerInvariant()
+            : MapSamplerName(samplerName);
     }
+
+    /// <summary><c>euler</c> maps to null (the factory default), which is indistinguishable from "unmapped" in
+    /// <see cref="MapSamplerName"/>'s return — so the validation above has to ask about it separately.</summary>
+    private static bool IsLegacyEuler(string name) => string.Equals(name, "euler", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Converts the request's CLIP-skip into the layers-from-end convention (1 = final layer, 2 = penultimate).
     /// Hosts using the negative-from-end convention (-1 = final) are accepted too. Returns null when unset or default.

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -27,10 +28,12 @@ public sealed class HunyuanImageRecipePipeline : IRecipePipeline
     private readonly HunyuanImageVaeDecoder _vae;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly IDisposable? _ggufHandle;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed HunyuanImage pipeline plus its components, taking ownership of every disposable.</summary>
-    public HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qwen2Tokenizer tokenizer, LlamaStyleEncoder llama, HunyuanImageQwenTextEncoder qwenEncoder, HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vae, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle)
+    public HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qwen2Tokenizer tokenizer, LlamaStyleEncoder llama, HunyuanImageQwenTextEncoder qwenEncoder, HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vae, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _llama = llama;
@@ -142,5 +145,7 @@ public sealed class HunyuanImageRecipePipeline : IRecipePipeline
             loader.Dispose();
         }
         _ggufHandle?.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

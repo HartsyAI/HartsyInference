@@ -156,7 +156,9 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             // always null from the extension today ("the Engine resolves the family's canonical schedule").
             // Reading only Scheduler here made the Sampler param silently inert — found 2026-08-10 chasing an
             // unrelated "tcd" dropdown fix.
-            Scheduler = request.Sampler ?? request.Scheduler,
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name
+            // here — before the checkpoint loads — instead of deep inside SchedulerFactory.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             // The plan only resolves variation noise on the text-to-image path, so this is null under img2img.
         };
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);

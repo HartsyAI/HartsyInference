@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
@@ -16,10 +17,12 @@ public sealed class FLiteRecipePipeline : IRecipePipeline
     private readonly FLitePipeline _pipeline;
     private readonly T5Tokenizer _tokenizer;
     private readonly FLiteCheckpointConverter.LoaderHandle _handle;
+    private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed F-Lite pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public FLiteRecipePipeline(FLitePipeline pipeline, T5Tokenizer tokenizer, FLiteCheckpointConverter.LoaderHandle handle)
+    public FLiteRecipePipeline(FLitePipeline pipeline, T5Tokenizer tokenizer, FLiteCheckpointConverter.LoaderHandle handle, MergedLoraStack? loraStack = null)
     {
+        _loraStack = loraStack;
         _pipeline = pipeline;
         _tokenizer = tokenizer;
         _handle = handle;
@@ -75,5 +78,7 @@ public sealed class FLiteRecipePipeline : IRecipePipeline
         _pipeline.Dispose();
         _tokenizer.Dispose();
         _handle.Dispose();
+        // Last: the stack owns the merged weight tensors the transformer was serving.
+        _loraStack?.Dispose();
     }
 }

@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -20,8 +21,9 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>Kandinsky 5 image-lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <remarks>Kandinsky 5 image-lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> names its two block stacks <c>text_transformer_blocks.{i}</c> and <c>visual_transformer_blocks.{i}</c> — neither was a root the bare-root LoRA detector recognized before the same change.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5", StringComparison.OrdinalIgnoreCase);
 
@@ -67,6 +69,10 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
                 transformerWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
             }
             Kandinsky5Transformer transformer = new Kandinsky5Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
             transformer.LoadWeights(transformerWeights);
 
             string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
@@ -96,7 +102,7 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
                         VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, vaeWeights, "Kandinsky5Recipe");
             Kandinsky5Pipeline pipeline = new Kandinsky5Pipeline(context.Backend, transformer, vae, vaeEncoder, config);
             Logs.Info("[Kandinsky5Recipe] Kandinsky 5 T2I-Lite ready (Qwen2.5-VL + CLIP-L live encode).");
-            return new Kandinsky5RecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders);
+            return new Kandinsky5RecipePipeline(pipeline, qwen, clipL, new Qwen2Tokenizer(), new ClipTokenizer(), context.Backend, transformer, loaders, loraStack);
         }
         catch (Exception ex)
         {

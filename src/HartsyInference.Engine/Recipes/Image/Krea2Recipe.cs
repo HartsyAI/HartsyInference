@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -33,8 +34,15 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     /// and <see cref="Krea2RecipePipeline.BuildRegionalPlan"/> — real-weight verified with a two-region prompt.
     /// DiT sharding (<see cref="Krea2Transformer.ForwardPatchedSharded"/>) has no bias parameter, so a regional
     /// request forces the unsharded path for that generation with a logged warning, same precedent as Flux.1's
-    /// own DiT-sharding exclusion for regional plans.</para></remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// own DiT-sharding exclusion for regional plans.</para>
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="Krea2Transformer"/> names its blocks
+    /// <c>transformer_blocks.{i}</c> after <see cref="Krea2CheckpointConverter.RemapTransformerKey"/>, which is the
+    /// canonical diffusers root, so both the <c>transformer.</c>-wrapped PEFT format and bare-root files map straight
+    /// through <c>DiffusersFluxMapper</c> with no Krea2-specific mapper. Attention is loaded SPLIT
+    /// (<see cref="Krea2Attention"/> reads <c>to_q</c>/<c>to_k</c>/<c>to_v</c>) even on the fp8-scaled production
+    /// checkpoint — <see cref="Krea2CheckpointConverter.RemapTransformerKey"/> splits Krea's raw <c>attn.wq</c> during
+    /// conversion — so <c>LoraStack</c>'s fused-sibling fallback is not on this family's path at all.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);
@@ -89,6 +97,10 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 
             Logs.Info("[Krea2Recipe] Building Krea 2 models (single-stream MMDiT, 28 blocks, text-fusion stage).");
             Krea2Transformer transformer = new Krea2Transformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: ditWeights);
             transformer.LoadWeights(ditWeights);
 
             // Phase 8 DiT sharding (VRAM pooling, not latency — see Krea2Pipeline's use of DitShardBackend): the
@@ -127,7 +139,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info("[Krea2Recipe] Krea 2 ready.");
-            return new Krea2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders);
+            return new Krea2RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, loraStack);
         }
         catch (Exception ex)
         {

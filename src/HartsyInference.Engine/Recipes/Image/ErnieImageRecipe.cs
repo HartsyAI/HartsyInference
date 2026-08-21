@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -28,8 +29,9 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
+    /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.
+    /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.ErnieImageTransformer"/> names its blocks <c>layers.{i}</c>, a root the bare-root LoRA detector only started recognizing in the same change.</para></remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ernie-image", StringComparison.OrdinalIgnoreCase);
 
@@ -64,6 +66,10 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
             ErnieImageConfig config = ErnieImageConfig.V1;
 
             ErnieImageTransformer transformer = new ErnieImageTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
             transformer.LoadWeights(transformerWeights);
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux2);
@@ -83,7 +89,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
             // element count must match the 128-channel PACKED latent, not the 32-channel one).
             ErnieImagePipeline pipeline = new ErnieImagePipeline(context.Backend, textEncoder, transformer, vae, config, vaeEncoder: vaeEncoder);
             Logs.Info("[ErnieImageRecipe] ERNIE-Image ready.");
-            return new ErnieImageRecipePipeline(pipeline, tokenizer, textEncoder, llama, transformer, loaders);
+            return new ErnieImageRecipePipeline(pipeline, tokenizer, textEncoder, llama, transformer, loaders, loraStack);
         }
         catch (Exception ex)
         {

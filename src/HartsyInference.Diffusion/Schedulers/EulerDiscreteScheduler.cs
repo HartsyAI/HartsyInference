@@ -105,6 +105,30 @@ public sealed class EulerDiscreteScheduler : IScheduler
     /// <summary>Euler dt for the fused device step: <c>sigma[i+1] − sigma[i]</c>.</summary>
     public float StepDelta(int stepIndex) => _sigmas[stepIndex + 1] - _sigmas[stepIndex];
 
+    /// <summary>The schedule's sigma at an inference-step boundary, including the terminal index
+    /// <see cref="NumInferenceSteps"/> whose value is zero. Lets the sampling layer own the sigma array without
+    /// round-tripping it through the public 0-1000 <see cref="Timesteps"/> scale.</summary>
+    public float Sigma(int stepIndex) => _sigmas[stepIndex];
+
+    /// <summary>The full sigma array (length <c>steps + 1</c>, descending, terminal zero) — what
+    /// <c>Sampling.SigmaSchedule</c> re-spaces and what an <c>ISampler</c> integrates over.</summary>
+    public float[] Sigmas() => (float[])_sigmas.Clone();
+
+    /// <summary>Conditioning timestep for a given noise level.
+    /// <para>Returns the PRECOMPUTED <see cref="Timesteps"/> entry when <paramref name="sigma"/> is exactly the schedule
+    /// sigma at <paramref name="stepIndexHint"/>, and only falls back to the log-space inverse for an off-schedule value.
+    /// That distinction is load-bearing for bit-identity: on the default (non-Karras) path the sigmas are interpolated
+    /// FROM the timesteps, so re-deriving a timestep from its own sigma is a lossy round trip that would perturb every
+    /// existing generation. Second-order samplers evaluating at an intermediate sigma legitimately take the fallback.</para></summary>
+    public float TimestepForSigma(float sigma, int stepIndexHint)
+    {
+        if (stepIndexHint >= 0 && stepIndexHint < _timesteps.Length && _sigmas[stepIndexHint] == sigma)
+        {
+            return _timesteps[stepIndexHint];
+        }
+        return SigmaToTimestep(sigma);
+    }
+
     /// <summary>Performs one Euler denoising step.</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {
