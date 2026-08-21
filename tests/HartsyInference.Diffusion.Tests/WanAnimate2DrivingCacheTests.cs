@@ -112,6 +112,30 @@ public unsafe class WanAnimate2DrivingCacheTests
         Assert.Equal((long)c.NumLayers * drivingTokens * c.InnerDim * bytesPerElement, cache.StoredBytes);
     }
 
+    /// <summary>The headroom a denoise placement reserves has to equal the cache that is actually built afterwards.
+    /// A drifting prediction is worse than none: it is what let the planner keep all 40 blocks resident and then
+    /// OOM on the cache with the card genuinely full.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DrivingCacheBytes_PredictsWhatEncodeDrivingActuallyAllocates(bool bf16)
+    {
+        WanVideoConfig c = Config(layers: 3);
+        Dictionary<string, Tensor> weights = WanSyntheticWeights.BuildTransformer(c);
+        using CpuBackend backend = new CpuBackend();
+        using WanAnimate2Transformer dit = new WanAnimate2Transformer(c);
+        dit.LoadWeights(weights);
+        using Tensor driving = Random(new TensorShape([1L, c.VaeLatentChannels, Frames, GridH * 2, GridW * 2]), 81);
+        using Tensor encoder = Random(new TensorShape(6, c.TextDim), 82);
+        using Tensor clip = Random(new TensorShape(5, c.ImageDim), 83);
+        (int T, int H, int W) genGrid = (Frames + 1, GridH, GridW);
+
+        long predicted = dit.DrivingCacheBytes(genGrid, bf16);
+        using WanAnimate2DrivingCache cache = dit.EncodeDriving(backend, driving, encoder, clip, genGrid, bf16Cache: bf16);
+
+        Assert.Equal(cache.StoredBytes, predicted);
+    }
+
     /// <summary>The reference geometry the port has to fit: 480×832, 81 pixel frames → 21 driving latent frames of
     /// 30×52 patches. Storing K and V was 1.6384 MiB per driving token (53.7 GiB); the block input is half that, and
     /// BF16 halves it again. Pinned here because the numbers are what a run gets sized against.</summary>

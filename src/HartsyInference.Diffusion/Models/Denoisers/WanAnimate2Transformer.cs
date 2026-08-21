@@ -161,6 +161,15 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// <inheritdoc/>
     public Action<int>? BeforeBlockForward { get; set; }
 
+    /// <summary>Bytes <see cref="EncodeDriving"/> will hold for a chunk at this grid. A denoise placement has to
+    /// reserve this up front: the cache is allocated <i>after</i> the resident-prefix decision, so a planner that
+    /// only sees free VRAM spends all of it on weights and then cannot fit the cache.</summary>
+    public long DrivingCacheBytes((int T, int H, int W) genGrid, bool bf16Cache)
+    {
+        long elements = (long)_blocks.Length * (genGrid.T - 1) * genGrid.H * genGrid.W * _config.InnerDim;
+        return (bf16Cache ? DType.BF16 : DType.F32).ComputeByteCount(elements);
+    }
+
     /// <summary>Runs the driving video's latents through all blocks once, at <see cref="DrivingTimestep"/>, caching
     /// each block's self-attention input. Rebuilt per chunk (and never per CFG branch — the driving stream is
     /// outside the guidance loop, so it never sees a negative prompt).</summary>

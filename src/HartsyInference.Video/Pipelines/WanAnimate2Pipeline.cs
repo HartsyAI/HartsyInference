@@ -184,8 +184,13 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             (int pt, int ph, int pw) = _config.PatchSize;
             (int T, int H, int W) genGrid = (tTotal / pt, hLat / ph, wLat / pw);
             long tokenLoad = (long)genGrid.T * genGrid.H * genGrid.W;
+            bool bf16Cache = EnvSwitch.IsEnabled(Bf16DrivingCacheSwitch, false);
+            // The driving cache is built after this placement is chosen but outlives every step of it, so it is
+            // headroom, not activation churn. Omitting it let the planner keep all 40 blocks resident and then OOM
+            // on the cache with the card genuinely full.
+            long drivingCacheBytes = _transformer.DrivingCacheBytes(genGrid, bf16Cache);
             long headroomBytes = Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
-                tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
+                tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes) + drivingCacheBytes;
             // Opened before the prepass, not just around the loop: EncodeDriving is a full 40-block forward and
             // needs the same streaming budget the denoise steps do.
             stream = BlockStreamingScope.Open(new BlockStreamingOptions
@@ -200,7 +205,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             // The driving stream sits outside the guidance loop entirely — it never sees the negative prompt, and it
             // is built once per chunk rather than once per step.
             driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid,
-                bf16Cache: EnvSwitch.IsEnabled(Bf16DrivingCacheSwitch, false));
+                bf16Cache: bf16Cache);
             long drivingTokens = (long)driving.Frames * driving.TokensPerFrame;
             Logs.Info($"Wan-Animate-2 driving cache: {driving.StoredBytes / (1024.0 * 1024.0 * 1024.0):F2} GiB "
                 + $"({driving.StoredBytes / (double)drivingTokens / (1024.0 * 1024.0):F4} MiB per driving token, "
