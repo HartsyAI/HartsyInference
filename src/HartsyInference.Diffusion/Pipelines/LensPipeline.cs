@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -233,34 +234,65 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
         // ── 3. Denoising loop ─────────────────────────────────────
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        // Sampler selection (2026-08-20). Lens is flow-matching, so it had no user-selectable sampler at all before
+        // this. The sampler owns the integrator and the sigma spacing; everything family-specific — the two forwards
+        // at their natural S_txt and the norm-rescaled CFG combine — stays in the predictor closure below.
+        //
+        // Lens applies its OWN CFG (ApplyNormRescaledCfg, which is not the linear uncond-anchored combine), so the
+        // already-combined velocity goes back as BOTH halves of the pair at guidance 1.0: the sampler's fused combine
+        // degenerates to identity, exactly as the direct CfgEulerStep(z, v, v, 1.0f, dt) call did. No step graph, no
+        // step cache and no host/reference loop here, so there is nothing else to narrow for a non-default sampler.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Lens",
+            startsFromNoisedInit: startStep > 0);
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             if (DiagnosticStats) Backend.ResetD2hSyncCount();
             float sigma = timesteps[i] / 1000.0f;
 
-            Tensor noisePred;
-            long forwardSyncs;
-            if (useCfg)
+            long forwardSyncs = 0;
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression rather than passing the
+                    // sampler's sigma straight through: the two are equal mathematically, but the F32 round trip
+                    // through x1000 is not exact — 1000 is not a power of two — so substituting one for the other
+                    // would shift every existing Lens generation by an ulp of conditioning. Only a genuine
+                    // off-schedule sub-step (what a second-order sampler evaluates at) takes the raw sigma, which is
+                    // right: there is no precomputed timestep for it.
+                    float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex] / 1000.0f
+                        : s;
+                    Tensor combined;
+                    if (useCfg)
+                    {
+                        Tensor condPred = _transformer.Forward(Backend, x, positiveLayers, t, patH, patW);
+                        Tensor uncondPred = _transformer.Forward(Backend, x, negativeLayers!, t, patH, patW);
+                        forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
+                        combined = ApplyNormRescaledCfg(condPred, uncondPred, cfgScale);
+                        condPred.Dispose();
+                        uncondPred.Dispose();
+                    }
+                    else
+                    {
+                        combined = _transformer.Forward(Backend, x, positiveLayers, t, patH, patW);
+                        forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
+                    }
+                    return new DenoisePrediction(combined, combined);
+                });
+            // Flow-match Euler stays ONE in-place device op (`v == pos == neg`, guidance 1 ⇒ z += v·dt), so the
+            // latent never leaves the GPU between steps — EulerSampler.Step IS that same fused CfgEulerStep call.
+            if (i == startStep)
             {
-                Tensor condPred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
-                Tensor uncondPred = _transformer.Forward(Backend, packedLatent, negativeLayers!, sigma, patH, patW);
-                forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
-                noisePred = ApplyNormRescaledCfg(condPred, uncondPred, cfgScale);
-                condPred.Dispose();
-                uncondPred.Dispose();
+                sampler.Reset(packedLatent.Shape);
             }
-            else
-            {
-                noisePred = _transformer.Forward(Backend, packedLatent, positiveLayers, sigma, patH, patW);
-                forwardSyncs = DiagnosticStats ? Backend.GetD2hSyncCount() : 0;
-            }
-
-            // Flow-match Euler as ONE in-place device op (`v == pos == neg`, guidance 1 ⇒ z += v·dt), so the
-            // latent never leaves the GPU between steps — same substitution Anima/Krea2 made for the host
-            // FlowMatchEulerDiscreteScheduler.Step loop.
-            Backend.CfgEulerStep(packedLatent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
-            noisePred.Dispose();
+            sampler.Step(Backend, packedLatent, predictor, i);
 
             // Masked-inpaint blend: unmasked tokens go back on the source's flow trajectory (re-noised at the
             // next step's sigma); final step blends the clean source.

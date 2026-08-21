@@ -28,18 +28,19 @@ public sealed class SamplerCoreTests
     {
         private readonly IBackend _backend;
         private readonly float _constant;
+        private readonly float _guidance;
 
-        public ConstantDenoiser(IBackend backend, float constant)
+        public ConstantDenoiser(IBackend backend, float constant, float guidance = 1.0f)
         {
             _backend = backend;
             _constant = constant;
+            _guidance = guidance;
         }
 
         public int Evaluations { get; private set; }
 
         public PredictionType Prediction => PredictionType.Epsilon;
 
-        public float GuidanceScale => 1.0f;
 
         /// <summary>Returns the epsilon that makes <c>x0 = x − σ·eps</c> equal the constant: <c>eps = (x − c)/σ</c>.</summary>
         public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
@@ -55,7 +56,7 @@ public sealed class SamplerCoreTests
                     dst[i] = (src[i] - _constant) / sigma;
                 }
             }
-            return new DenoisePrediction(eps, eps);
+            return new DenoisePrediction(eps, eps, _guidance);
         }
     }
 
@@ -72,7 +73,6 @@ public sealed class SamplerCoreTests
 
         public PredictionType Prediction => PredictionType.FlowVelocity;
 
-        public float GuidanceScale => 1.0f;
 
         public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
         {
@@ -87,6 +87,65 @@ public sealed class SamplerCoreTests
                 }
             }
             return new DenoisePrediction(velocity, velocity);
+        }
+    }
+
+    /// <summary>NextDiT's sign convention: the model predicts <c>−v</c>. Z-Image and Lumina-Image 2.0 fold diffusers'
+    /// mandatory <c>noise_pred = −noise_pred</c> into the step delta rather than negating the tensor, and the sampler
+    /// core mirrors that by flipping a scalar. If <see cref="PredictionType.NegatedFlowVelocity"/> were mishandled the
+    /// trajectory would run BACKWARDS — away from the denoised constant — so this test fails loudly rather than
+    /// subtly.</summary>
+    private sealed class ConstantNegatedFlowDenoiser : IDenoisePredictor
+    {
+        private readonly float _constant;
+
+        public ConstantNegatedFlowDenoiser(float constant) => _constant = constant;
+
+        public PredictionType Prediction => PredictionType.NegatedFlowVelocity;
+
+        public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
+        {
+            Tensor negVelocity = new Tensor(x.Shape, DType.F32);
+            unsafe
+            {
+                float* src = (float*)x.DataPointer;
+                float* dst = (float*)negVelocity.DataPointer;
+                for (long i = 0; i < x.ElementCount; i++)
+                {
+                    dst[i] = -(src[i] - _constant) / sigma;
+                }
+            }
+            return new DenoisePrediction(negVelocity, negVelocity);
+        }
+    }
+
+    /// <summary>The negated-flow domain must solve the same constant-denoiser trajectory exactly. Covers Z-Image and
+    /// Lumina-Image 2.0, whose <c>−v</c> convention the seam handles by flipping the Euler delta and the denoised
+    /// coefficient rather than by negating a latent-sized tensor per forward.</summary>
+    [Theory]
+    [InlineData("euler")]
+    [InlineData("heun")]
+    [InlineData("dpmpp_2m")]
+    public void NegatedFlowVelocity_SolvesTheConstantDenoiserExactly(string name)
+    {
+        IBackend backend = new CpuBackend();
+        float[] sigmas = FlowSigmas(16);
+        const float Constant = 0.4f;
+
+        using Tensor z = Filled(2.0f);
+        ConstantNegatedFlowDenoiser denoiser = new ConstantNegatedFlowDenoiser(Constant);
+        ISampler sampler = SamplerRegistry.Create(name, sigmas, seed: 11);
+        sampler.Reset(Shape);
+        for (int i = 0; i < sigmas.Length - 1; i++)
+        {
+            sampler.Step(backend, z, denoiser, i);
+        }
+
+        foreach (float value in Read(z))
+        {
+            Assert.True(MathF.Abs(value - Constant) < 1e-3f,
+                $"{name} on negated-flow sigmas landed on {value}, expected {Constant}. A sign-handling bug runs the "
+                + "trajectory backwards.");
         }
     }
 
@@ -132,15 +191,22 @@ public sealed class SamplerCoreTests
     /// <see cref="IBackend.CfgEulerStep"/> directly in a hand-written loop — the exact code every pipeline had before
     /// the sampler seam. Exact equality, not a tolerance: the sampler is supposed to be the same instructions, not
     /// merely equivalent arithmetic, and a tolerance here would hide a real reordering.</summary>
-    [Fact]
-    public void EulerSampler_IsBitIdenticalToDirectCfgEulerStep()
+    /// <param name="guidance">Both the guidance-free case and a real CFG scale. The scale matters since guidance moved
+    /// onto <see cref="DenoisePrediction"/>: the production pipelines pass their <c>cfgScale</c> through the pair, and
+    /// a version of this test that only ever used 1.0 would leave that path — the one every CFG generation takes —
+    /// exercised by nothing.</param>
+    [Theory]
+    [InlineData(1.0f)]
+    [InlineData(4.5f)]
+    [InlineData(7.0f)]
+    public void EulerSampler_IsBitIdenticalToDirectCfgEulerStep(float guidance)
     {
         IBackend backend = new CpuBackend();
         float[] sigmas = Sigmas(12);
         const float Constant = 0.25f;
 
         using Tensor viaSampler = Filled(3.0f);
-        ConstantDenoiser samplerDenoiser = new ConstantDenoiser(backend, Constant);
+        ConstantDenoiser samplerDenoiser = new ConstantDenoiser(backend, Constant, guidance);
         EulerSampler sampler = new EulerSampler(sigmas);
         sampler.Reset(Shape);
         for (int i = 0; i < sigmas.Length - 1; i++)
@@ -149,11 +215,11 @@ public sealed class SamplerCoreTests
         }
 
         using Tensor viaDirect = Filled(3.0f);
-        ConstantDenoiser directDenoiser = new ConstantDenoiser(backend, Constant);
+        ConstantDenoiser directDenoiser = new ConstantDenoiser(backend, Constant, guidance);
         for (int i = 0; i < sigmas.Length - 1; i++)
         {
             using DenoisePrediction prediction = directDenoiser.Predict(viaDirect, sigmas[i], i);
-            backend.CfgEulerStep(viaDirect, prediction.Cond, prediction.Uncond, 1.0f, sigmas[i + 1] - sigmas[i]);
+            backend.CfgEulerStep(viaDirect, prediction.Cond, prediction.Uncond, guidance, sigmas[i + 1] - sigmas[i]);
         }
 
         Assert.Equal(Read(viaDirect), Read(viaSampler));
@@ -298,7 +364,6 @@ public sealed class SamplerCoreTests
     {
         public PredictionType Prediction => PredictionType.VPrediction;
 
-        public float GuidanceScale => 1.0f;
 
         public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
         {

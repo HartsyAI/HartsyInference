@@ -70,7 +70,13 @@ public static class SamplerOps
     }
 
     /// <summary>Per-step noise seed. Mixed through the two SplitMix64 odd constants rather than incremented, so
-    /// neighbouring steps do not draw correlated streams and a repeated run reproduces step for step.</summary>
+    /// neighbouring steps do not draw correlated streams and a repeated run reproduces step for step.
+    ///
+    /// <para><b>Open for the next sampler author:</b> this is keyed on <paramref name="stepIndex"/> alone, so two draws
+    /// inside ONE step return the same noise. No shipped sampler does that today — <see cref="EulerAncestralSampler"/>,
+    /// <see cref="Dpm2Sampler"/> and <see cref="DpmPlusPlus2MSdeSampler"/> each draw at most once per
+    /// <see cref="ISampler.Step"/> — but the <c>dpmpp_sde</c> / <c>seeds_2</c> / <c>seeds_3</c> family draws twice, and
+    /// would silently get correlated injections. Add a sub-draw ordinal to the mix before implementing those.</para></summary>
     public static int StepSeed(int baseSeed, int stepIndex) =>
         unchecked((baseSeed * 6364136223846793005L) + (stepIndex * 1442695040888963407L)).GetHashCode();
 

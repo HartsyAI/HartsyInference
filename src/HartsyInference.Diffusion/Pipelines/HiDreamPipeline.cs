@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -312,51 +313,71 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         Logs.Info("Starting HiDream denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        // Sampler selection (2026-08-20). HiDream is flow-matching, so it had no user-selectable sampler at all before
+        // this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored CFG at
+        // the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the quad
+        // conditioning stack, the inter-forward Sync, the step-cache gates) stays inside the closure.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "HiDream",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
-            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
-            if (useCfg)
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // This transformer conditions on the 0-1000 scale (sigma x 1000), NOT the [0,1] sigma the packed
+                    // DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
+                    // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
+                    // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex]
+                        : s * 1000.0f;
+                    // The step cache is a first-block-cache calibrated on the drift between CONSECUTIVE steps. A
+                    // second-order sampler evaluates twice inside one step at different sigmas, which feeds it a drift
+                    // signature it was never calibrated for — the failure mode ROADMAP §6 records for HiDream was a
+                    // flat, textureless colour field, not a mild degradation. Narrowed for that generation only.
+                    bool eligible = !nonDefaultSampler
+                        && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+                    Tensor cond = RunForward(
+                        x, stepT, condT5, condLlama, condPooled,
+                        eligible ? stepCacheCond : null);
+                    if (!useCfg)
+                    {
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    try
+                    {
+                        // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
+                        // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
+                        // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
+                        // fits; serialize the pair.
+                        Backend.Sync();
+                        Tensor uncond = RunForward(
+                            x, stepT, uncondT5!, uncondLlama!, uncondPooled!,
+                            eligible ? stepCacheUncond : null);
+                        return new DenoisePrediction(cond, uncond, cfgScale);
+                    }
+                    catch
+                    {
+                        cond.Dispose();
+                        throw;
+                    }
+                });
+            if (i == startStep)
             {
-                Tensor? condNoise = null;
-                Tensor? uncondNoise = null;
-                try
-                {
-                    condNoise = RunForward(
-                        latent, t, condT5, condLlama, condPooled,
-                        cacheEligible ? stepCacheCond : null);
-                    // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
-                    // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
-                    // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
-                    // fits; serialize the pair.
-                    Backend.Sync();
-                    uncondNoise = RunForward(
-                        latent, t, uncondT5!, uncondLlama!, uncondPooled!,
-                        cacheEligible ? stepCacheUncond : null);
-                    Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
-                }
-                finally
-                {
-                    uncondNoise?.Dispose();
-                    condNoise?.Dispose();
-                }
+                sampler.Reset(latent.Shape);
             }
-            else
-            {
-                Tensor noisePred = RunForward(
-                    latent, t, condT5, condLlama, condPooled,
-                    cacheEligible ? stepCacheCond : null);
-                try
-                {
-                    Backend.CfgEulerStep(latent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
-                }
-                finally
-                {
-                    noisePred.Dispose();
-                }
-            }
+            sampler.Step(Backend, latent, predictor, i);
 
             // Masked-inpaint blend: hold the unmasked region on the source's own flow-matching trajectory by
             // re-noising the source latent at the next step's sigma; the final step blends the clean source.

@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -655,8 +656,27 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
         }
 
+        // Sampler selection (2026-08-20). Flux.1 is flow-matching, so it had no user-selectable sampler before
+        // this. A non-default sampler narrows the step graph for the same reason true-CFG, sharding and the step
+        // cache already do: the capture bakes one op sequence, and a second-order sampler adds a forward at an
+        // intermediate sigma plus scratch arithmetic between them.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Flux.1",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch (masked inpaint, ControlNet, Kontext, regional, Redux-mid-stream, stats)
+        // never consults the sampler, so a non-default selection there would be silently dropped.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Flux.1's drain-free path, and this generation "
+                + "fell back to the reference loop (masked inpaint, ControlNet, Kontext, regional prompting, "
+                + "Redux mid-stream, or stats). Drop the sampler selection, or drop the feature that forced the "
+                + "fallback.");
+        }
+
         bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null && !ditShardActive
-            && stepCacheCond is null
+            && stepCacheCond is null && !nonDefaultSampler
             && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
 
         // Mirrors the per-step dispatch condition (loop-invariant), recorded once per generation so operators
@@ -722,6 +742,70 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             packedLatent = fixedLatent;
         }
 
+        float[] timestepTable = timesteps.ToArray();
+
+        // The drain-free step body, lifted behind IDenoisePredictor. Everything Flux-specific stays here —
+        // CFG-branch parallelism across two backends, DiT sharding, the step cache — and the sampler sees only
+        // (x, sigma) -> prediction pair.
+        DenoisePrediction PredictDrainFree(Tensor x, float s, int stepIndex)
+        {
+            // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression. The two are equal
+            // mathematically but the F32 round trip through x1000 is not exact, so passing raw sigma would shift
+            // every existing Flux generation by an ulp of conditioning. A genuine sub-step takes the raw value.
+            float stepSigma = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                ? timestepTable[stepIndex] / 1000.0f
+                : s;
+            // Narrowed for a non-default sampler: the step cache is calibrated on drift between CONSECUTIVE
+            // steps, and a second-order method evaluates twice inside one step.
+            bool eligible = !nonDefaultSampler
+                && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+
+            // condTxtSeqLen != txtSeqLen (Redux tokens / regional conditioning extend the cond stream only)
+            // means cond and uncond would precompute DIFFERENT RoPE signatures on the SAME shared _rope
+            // object. FluxRope.Precompute is now lock-safe against concurrent calls, but a lock only stops
+            // torn writes — it cannot make one cached _cosCache serve two different signatures at once, so
+            // running cond/uncond concurrently here would still let one branch's tables get clobbered by the
+            // other's mid-step. Fall back to sequential (silent, matches the rest of this eligibility chain)
+            // whenever the signatures could actually differ.
+            if (doTrueCfg && cfgParallelEligible && condTxtSeqLen == txtSeqLen)
+            {
+                // CopyFromPeer, not .DataPointer, for BOTH hops — that's what keeps drainFree drain-free.
+                // The latent stays device-resident and cache-hit on Backend throughout (CopyFromPeer reads
+                // the raw device pointer via TryGetDevicePointer, never touching .DataPointer, so it can't
+                // trip the demote hook that would otherwise evict Backend's cached copy from under its own
+                // concurrent kernel launches — the same hazard CfgBranchRunner's doc comment calls out for
+                // shared weight tensors, but here for a per-step activation instead). uncondLatent is an
+                // independent tensor only the worker thread ever touches.
+                Tensor uncondLatent = new Tensor(x.Shape, x.DType);
+                CfgParallelBackend!.CopyFromPeer(uncondLatent, x, Backend);
+                try
+                {
+                    (Tensor cond, Tensor velocityNegRemote) = CfgBranchRunner.Run(
+                        () => _transformer.Forward(Backend, x, condStream, stepSigma,
+                            clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0),
+                        () => _transformer.Forward(CfgParallelBackend!, uncondLatent, negT5Embeddings!, stepSigma,
+                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0));
+                    Tensor velocityNegLocal = new Tensor(velocityNegRemote.Shape, velocityNegRemote.DType);
+                    Backend.CopyFromPeer(velocityNegLocal, velocityNegRemote, CfgParallelBackend!);
+                    velocityNegRemote.Dispose();
+                    return new DenoisePrediction(cond, velocityNegLocal, trueCfgScale);
+                }
+                finally { uncondLatent.Dispose(); }
+            }
+
+            Tensor velocityPred = RunPlainForward(ditShardActive, x, condStream, stepSigma,
+                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked,
+                eligible ? stepCacheCond : null);
+            if (!doTrueCfg)
+            {
+                return new DenoisePrediction(velocityPred, velocityPred);
+            }
+            Tensor velocityNeg = RunPlainForward(ditShardActive, x, negT5Embeddings!, stepSigma,
+                negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked,
+                eligible ? stepCacheUncond : null);
+            return new DenoisePrediction(velocityPred, velocityNeg, trueCfgScale);
+        }
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
@@ -739,60 +823,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
             else if (drainFree)
             {
-                Tensor velocityPred;
-                // condTxtSeqLen != txtSeqLen (Redux tokens / regional conditioning extend the cond stream only)
-                // means cond and uncond would precompute DIFFERENT RoPE signatures on the SAME shared _rope
-                // object. FluxRope.Precompute is now lock-safe against concurrent calls, but a lock only stops
-                // torn writes — it cannot make one cached _cosCache serve two different signatures at once, so
-                // running cond/uncond concurrently here would still let one branch's tables get clobbered by the
-                // other's mid-step. Fall back to sequential (silent, matches the rest of this eligibility chain)
-                // whenever the signatures could actually differ.
-                if (doTrueCfg && cfgParallelEligible && condTxtSeqLen == txtSeqLen)
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) => PredictDrainFree(x, s, stepIndex));
+                if (i == startStep)
                 {
-                    // CopyFromPeer, not .DataPointer, for BOTH hops — that's what keeps drainFree drain-free.
-                    // packedLatent stays device-resident and cache-hit on Backend throughout (CopyFromPeer reads
-                    // the raw device pointer via TryGetDevicePointer, never touching .DataPointer, so it can't
-                    // trip the demote hook that would otherwise evict Backend's cached copy from under its own
-                    // concurrent kernel launches — the same hazard CfgBranchRunner's doc comment calls out for
-                    // shared weight tensors, but here for a per-step activation instead). uncondLatent is an
-                    // independent tensor only the worker thread ever touches.
-                    Tensor uncondLatent = new Tensor(packedLatent.Shape, packedLatent.DType);
-                    CfgParallelBackend!.CopyFromPeer(uncondLatent, packedLatent, Backend);
-                    Tensor velocityNegLocal;
-                    try
-                    {
-                        (velocityPred, Tensor velocityNegRemote) = CfgBranchRunner.Run(
-                            () => _transformer.Forward(Backend, packedLatent, condStream, sigma,
-                                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0),
-                            () => _transformer.Forward(CfgParallelBackend!, uncondLatent, negT5Embeddings!, sigma,
-                                negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0));
-                        velocityNegLocal = new Tensor(velocityNegRemote.Shape, velocityNegRemote.DType);
-                        Backend.CopyFromPeer(velocityNegLocal, velocityNegRemote, CfgParallelBackend!);
-                        velocityNegRemote.Dispose();
-                    }
-                    finally { uncondLatent.Dispose(); }
-                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityNegLocal, trueCfgScale, scheduler.Dt(i));
-                    velocityNegLocal.Dispose();
+                    sampler.Reset(packedLatent.Shape);
                 }
-                else
-                {
-                    velocityPred = RunPlainForward(ditShardActive, packedLatent, condStream, sigma,
-                        clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked,
-                        cacheEligible ? stepCacheCond : null);
-                    if (doTrueCfg)
-                    {
-                        Tensor velocityNeg = RunPlainForward(ditShardActive, packedLatent, negT5Embeddings!, sigma,
-                            negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked,
-                            cacheEligible ? stepCacheUncond : null);
-                        Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
-                        velocityNeg.Dispose();
-                    }
-                    else
-                    {
-                        Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
-                    }
-                }
-                velocityPred.Dispose();
+                sampler.Step(Backend, packedLatent, predictor, i);
             }
             else
             {

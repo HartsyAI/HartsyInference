@@ -86,7 +86,11 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         progress?.Report(new StepPreview { Step = 0, TotalSteps = steps });
         Tensor image = _pipeline.GenerateFromTokens(promptTokens, promptDrop, useCfg ? negTokens : null, negDrop,
             width, height, steps, cfg, seed, editSpec?.SourceTensor, request.SeamlessTiling,
-            request.VariationSeed?.Seed ?? -1, request.VariationSeed?.Strength ?? 0);
+            request.VariationSeed?.Seed ?? -1, request.VariationSeed?.Strength ?? 0,
+            // Mage-Flow takes primitives rather than a TextToImageRequest, so the sampler selection is threaded
+            // explicitly. Validated by the resolver, which refuses an unavailable name instead of silently
+            // substituting Euler.
+            SamplingParamResolver.ResolveSchedulerName(request));
         progress?.Report(new StepPreview { Step = steps, TotalSteps = steps });
 
         byte[] rgb = ToRgbBytes(image, out int outW, out int outH);

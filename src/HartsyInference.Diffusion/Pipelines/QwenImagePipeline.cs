@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
@@ -704,6 +705,25 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // (per-step host blend must read the latent anyway).
         bool drainFree = !isMaskedInpaint;
 
+        // Sampler selection (2026-08-20). Qwen-Image is flow-matching, so it had no user-selectable sampler before
+        // this. Its guidance is NOT constant across the run — limited-interval CFG drops the unconditional branch
+        // outside a sigma band — which is why the scale rides on each DenoisePrediction rather than on the predictor.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Qwen-Image",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Qwen-Image's drain-free path, and this generation "
+                + "fell back to the reference loop (masked inpaint). Drop the sampler selection, or drop the feature that "
+                + "forced the fallback.");
+        }
+
+        float[] timestepTable = timesteps.ToArray();
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
@@ -737,7 +757,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // Late-window cache gate (HARTSY_STEP_CACHE_LATE): reuse eligible only in the last `late` fraction
             // of the schedule; earlier steps run uncached (byte-identical forward). See the Ideogram 4 results
             // doc — early-schedule residual drift is where reuse damage concentrates.
-            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+            // `!nonDefaultSampler`: the step cache is a first-block-cache calibrated on the drift between
+            // CONSECUTIVE steps, and a second-order sampler evaluates twice inside one step at different sigmas —
+            // a drift signature it was never calibrated for. ROADMAP §6 records that failure on HiDream as a flat,
+            // textureless colour field rather than a mild degradation. Narrowed for that generation, same as graphs.
+            bool cacheEligible = !nonDefaultSampler
+                && (stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate));
             DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
             DeviceFeatureCache? stepUncondCache = cacheEligible ? uncondCache : null;
 
@@ -760,18 +785,58 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                Tensor condPred = Predict(transformerInput, condHidden, condHiddenRank1, normalizedT, stepCondCache, cnResiduals);
-                if (cfgThisStep)
+                // The ControlNet residuals are a function of the STEP (built above against the step's latent), so a
+                // sub-step legitimately reuses them. The edit-ref concat is not: it must be rebuilt against whatever
+                // latent is being evaluated, or a second-order sampler would hand the transformer a sequence with no
+                // reference tokens and get a velocity for a different problem.
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // On-schedule sigmas reuse the loop's own timestep expression; the F32 round trip through
+                        // x1000 is not exact, so raw sigma would shift every existing generation by an ulp.
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex] / 1000.0f
+                            : s;
+                        Tensor input;
+                        bool ownsInput = false;
+                        if (packedEditRef is null)
+                        {
+                            input = x;
+                        }
+                        else if (ReferenceEquals(x, packedLatent))
+                        {
+                            input = transformerInput;   // already concatenated for this step by the loop above
+                        }
+                        else
+                        {
+                            input = new Tensor(
+                                new TensorShape(1, x.Shape[1] + packedEditRef.Shape[1], patchDim), DType.F32);
+                            Backend.Concat(input, new Tensor[] { x, packedEditRef }, 1);
+                            ownsInput = true;
+                        }
+                        try
+                        {
+                            Tensor cond = Predict(input, condHidden, condHiddenRank1, stepT, stepCondCache, cnResiduals);
+                            if (!cfgThisStep)
+                            {
+                                // Outside the guidance band the uncond forward is pure waste, so the pair degenerates
+                                // and the combine must be exactly 1.0 — reusing cfgScale would not cancel bit-exactly.
+                                return new DenoisePrediction(cond, cond);
+                            }
+                            Tensor uncond = Predict(input, uncondHidden!, uncondHiddenRank1, stepT, stepUncondCache, cnResiduals);
+                            return new DenoisePrediction(cond, uncond, cfgScale);
+                        }
+                        finally
+                        {
+                            if (ownsInput) input.Dispose();
+                        }
+                    });
+                if (i == startStep)
                 {
-                    Tensor uncondPred = Predict(transformerInput, uncondHidden!, uncondHiddenRank1, normalizedT, stepUncondCache, cnResiduals);
-                    Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
-                    uncondPred.Dispose();
+                    sampler.Reset(packedLatent.Shape);
                 }
-                else
-                {
-                    Backend.CfgEulerStep(packedLatent, condPred, condPred, 1.0f, scheduler.Dt(i));
-                }
-                condPred.Dispose();
+                sampler.Step(Backend, packedLatent, predictor, i);
                 if (transformerInput != packedLatent) transformerInput.Dispose();
                 cnResiduals?.DisposeAll();
             }

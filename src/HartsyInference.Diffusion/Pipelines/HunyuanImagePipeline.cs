@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -392,28 +393,57 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             _ditResident = true;
         }
 
+        // Sampler selection (2026-08-20). Hunyuan Image is flow-matching, so it had no user-selectable sampler at all
+        // before this. The sampler owns the integrator and the sigma spacing; everything family-specific — the
+        // distilled-guidance embedding, DiT sharding and block streaming, all of which live inside RunForward — stays
+        // in the predictor closure below. There is no step graph, no step cache and no host/reference loop on this
+        // path (masked inpaint blends against the same in-place device step), so nothing else needs narrowing for a
+        // non-default sampler.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Hunyuan Image",
+            startsFromNoisedInit: startStep > 0);
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         Logs.Info($"Starting denoise loop ({steps} steps, distilled guidance={distilledGuidance})...");
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
 
-            // CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt —
-            // for gw=cfgScale this IS uncond + cfg·(cond−uncond); gw=1 degenerates to the plain Euler step),
-            // keeping the latent tokens device-resident across the whole loop.
-            Tensor condVel = RunForward(latentTokens, condText, t, distilledGuidance, hPacked, wPacked);
-            if (useCfg && _config.GuidanceEmbed == false)
+            // CFG combine + Euler stay ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt — for
+            // gw=cfgScale this IS uncond + cfg·(cond−uncond); gw=1 degenerates to the plain Euler step), keeping the
+            // latent tokens device-resident across the whole loop: EulerSampler.Step IS that same fused call.
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // Unlike the rest of the DiT fleet, Hunyuan's transformer takes the timestep on the PUBLIC 0-1000
+                    // conditioning scale, not the [0,1] sigma. On-schedule steps therefore reuse the table entry
+                    // verbatim — `sigma·1000` is not an exact F32 round trip back to the value SetTimesteps stored, so
+                    // recomputing it would shift every existing Hunyuan generation by an ulp of conditioning. Only a
+                    // genuine off-schedule sub-step (what a second-order sampler evaluates at) scales the raw sigma,
+                    // which is right: there is no precomputed timestep for it.
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex]
+                        : s * 1000.0f;
+                    Tensor cond = RunForward(x, condText, stepT, distilledGuidance, hPacked, wPacked);
+                    if (!useCfg || _config.GuidanceEmbed)
+                    {
+                        // Distilled guidance rides in the embedding, so there is no unconditional branch and the
+                        // combine must be exactly 1.0 — substituting cfgScale would not cancel bit-exactly in F32.
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    // Standard CFG path (un-distilled variant): hand back the raw pair and let the fused device op
+                    // do the uncond-anchored combine, exactly as the direct call did.
+                    Tensor uncond = RunForward(x, uncondText!, stepT, 1.0f, hPacked, wPacked);
+                    return new DenoisePrediction(cond, uncond, cfgScale);
+                });
+            if (i == startStep)
             {
-                // Standard CFG path (un-distilled variant).
-                Tensor uncondVel = RunForward(latentTokens, uncondText!, t, 1.0f, hPacked, wPacked);
-                Backend.CfgEulerStep(latentTokens, condVel, uncondVel, cfgScale, scheduler.Dt(i));
-                uncondVel.Dispose();
+                sampler.Reset(latentTokens.Shape);
             }
-            else
-            {
-                Backend.CfgEulerStep(latentTokens, condVel, condVel, 1.0f, scheduler.Dt(i));
-            }
-            condVel.Dispose();
+            sampler.Step(Backend, latentTokens, predictor, i);
 
             // Masked-inpaint blend: re-noise the source tokens at the next step's sigma and paste them over the
             // unmasked region. Final step blends the clean source (no denoising follows it).

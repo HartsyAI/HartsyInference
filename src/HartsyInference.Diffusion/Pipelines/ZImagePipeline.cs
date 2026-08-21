@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -272,7 +273,23 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             // Step-graph mode (HARTSY_DIT_GRAPH, fast path only): route the latent through the transformer's FIXED
             // buffer so the captured graph's baked address stays valid across steps and gens. The fixed tensor is
             // transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
-            bool graphMode = fastPath && !useCfg && stepCacheInst is null
+            // Sampler selection (2026-08-20). Z-Image is NextDiT: it predicts −v and folds diffusers' mandatory
+            // noise_pred = −noise_pred into the step delta, which is why the predictor reports
+            // PredictionType.NegatedFlowVelocity — the sampler then flips a scalar coefficient instead of negating a
+            // latent-sized tensor on every forward.
+            ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Z-Image",
+                startsFromNoisedInit: startStep > 0);
+            bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+            if (!fastPath && nonDefaultSampler)
+            {
+                throw new NotSupportedException(
+                    $"Sampler/schedule '{request.Scheduler}' runs only on Z-Image's packed fast path, and this "
+                    + "generation fell back to the reference loop (masked inpaint or regional prompting). Drop the "
+                    + "sampler selection, or drop the feature that forced the fallback.");
+            }
+            float[] timestepTable = timesteps.ToArray();
+
+            bool graphMode = fastPath && !useCfg && stepCacheInst is null && !nonDefaultSampler
                 && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
             int fpH = latentH / _config.PatchSize;
             int fpW = latentW / _config.PatchSize;
@@ -308,37 +325,42 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 
                 if (fastPath)
                 {
-                    // Late-window gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
-                    bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
-                    Tensor condVelocity = _transformer.ForwardPacked(Backend, packed!, captionEmbeddings, invertedSigma, fpH, fpW,
-                        cacheEligible ? stepCacheInst : null);
-                    if (useCfg)
+                    DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                        PredictionType.NegatedFlowVelocity,
+                        (x, s, stepIndex) =>
+                        {
+                            // Diffusers' Z-Image pipeline inverts the timestep: the transformer is fed (1 − sigma).
+                            // On-schedule sigmas reuse the loop's own expression — the F32 round trip through x1000
+                            // is not exact, so raw sigma would shift every existing generation by an ulp.
+                            float stepSigma = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                                ? timestepTable[stepIndex] / 1000.0f
+                                : s;
+                            float inverted = 1.0f - stepSigma;
+                            // Narrowed for a non-default sampler: the step cache's drift calibration assumes one
+                            // forward per step, which a second-order method breaks.
+                            bool eligible = !nonDefaultSampler
+                                && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+                            Tensor cond = _transformer.ForwardPacked(Backend, x, captionEmbeddings, inverted, fpH, fpW,
+                                eligible ? stepCacheInst : null);
+                            if (PredictionStatsEnabled)
+                                ValidatePredictionFinite(cond, $"conditional step {stepIndex + 1}", logStats: true);
+                            if (!useCfg)
+                            {
+                                // Graph mode borrows the transformer's fixed velocity buffer, which must not be freed.
+                                return new DenoisePrediction(cond, cond, ownsTensors: !graphMode);
+                            }
+                            Tensor uncond = _transformer.ForwardPacked(Backend, x, negativeCaptionEmbeddings!, inverted, fpH, fpW);
+                            if (PredictionStatsEnabled)
+                                ValidatePredictionFinite(uncond, $"unconditional step {stepIndex + 1}", logStats: true);
+                            // CfgEulerStep computes g·cond + (1−g)·uncond. Z-Image requires
+                            // cond + cfg·(cond − uncond) = (1+cfg)·cond − cfg·uncond, hence g = cfg + 1.
+                            return new DenoisePrediction(cond, uncond, cfgScale + 1.0f);
+                        });
+                    if (i == startStep)
                     {
-                        tensors.Own(condVelocity, "packed conditional velocity");
-                        if (PredictionStatsEnabled)
-                            ValidatePredictionFinite(condVelocity, $"conditional step {i + 1}", logStats: true);
-                        Tensor uncondVelocity = tensors.Own(
-                            _transformer.ForwardPacked(Backend, packed!, negativeCaptionEmbeddings!, invertedSigma, fpH, fpW),
-                            "packed unconditional velocity");
-                        if (PredictionStatsEnabled)
-                            ValidatePredictionFinite(uncondVelocity, $"unconditional step {i + 1}", logStats: true);
-
-                        // CfgEulerStep computes g·cond + (1-g)·uncond. Z-Image requires
-                        // cond + cfg·(cond-uncond) = (1+cfg)·cond - cfg·uncond, hence g=cfg+1.
-                        // delta=-dt folds in diffusers' mandatory noise_pred = -noise_pred.
-                        Backend.CfgEulerStep(packed!, condVelocity, uncondVelocity, cfgScale + 1.0f, -scheduler.Dt(i));
-                        tensors.DisposeOwned(uncondVelocity);
-                        tensors.DisposeOwned(condVelocity);
+                        sampler.Reset(packed!.Shape);
                     }
-                    else
-                    {
-                        if (!graphMode)
-                            tensors.Own(condVelocity, "packed velocity");
-                        // packed += (−v)·dt — one in-place device op = diffusers' negate + Euler step combined.
-                        Backend.CfgEulerStep(packed!, condVelocity, condVelocity, 1.0f, -scheduler.Dt(i));
-                        if (!graphMode)
-                            tensors.DisposeOwned(condVelocity);   // graph mode: fixed velocity buffer, reused every step
-                    }
+                    sampler.Step(Backend, packed!, predictor, i);
                     stepSw.Stop();
                     Logs.Verbose($"[zimage-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
                     // No Latent in the progress event: the packed tokens must never be DataPointer-read mid-loop

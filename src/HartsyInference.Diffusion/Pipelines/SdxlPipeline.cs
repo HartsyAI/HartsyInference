@@ -744,9 +744,6 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         public PredictionType Prediction => PredictionType.Epsilon;
 
         /// <inheritdoc/>
-        public float GuidanceScale => _useCfg ? _cfgScale : 1.0f;
-
-        /// <inheritdoc/>
         public DenoisePrediction Predict(Tensor x, float sigma, int stepIndex)
         {
             IBackend backend = _owner.Backend;
@@ -784,7 +781,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             Tensor cond = new Tensor(_latentShape, DType.F32);
             backend.SliceRows(cond, predF32, _condRowOffset);
             predF32.Dispose();
-            return new DenoisePrediction(cond, uncond);
+            return new DenoisePrediction(cond, uncond, _cfgScale);
         }
     }
 

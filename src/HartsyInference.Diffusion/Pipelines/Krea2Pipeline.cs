@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
@@ -326,7 +327,33 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // NEVER on the streamed path: the transformer refuses to capture while BeforeBlockForward is hooked (a graph
         // bakes weight pointers that streaming re-points every forward), so it returns a fresh eager velocity — and
         // the graph-mode branch below skips disposing it, which would leak one velocity buffer per step.
+        // Sampler selection (2026-08-20). Krea 2 is flow-matching, so it had no user-selectable sampler at all before
+        // this — the whole DiT fleet was Euler-only. The sampler owns the integrator and the sigma spacing; everything
+        // family-specific (cond-anchored CFG, region bias, the step-cache gates) stays in the predictor closure below.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Krea 2");
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!fastPath && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Krea 2's drain-free path, and this generation "
+                + "fell back to the reference loop (img2img or masked inpaint). Drop the sampler selection, or drop the feature that "
+                + "forced the fallback.");
+        }
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
+        // A non-default sampler is excluded from step-graph capture, on the same grounds the gate already excludes
+        // CFG, step-cache, streaming, sharding and regions: a captured graph bakes one fixed sequence of ops at fixed
+        // addresses, and a second-order sampler runs an EXTRA forward at an intermediate sigma plus scratch-tensor
+        // arithmetic between them. Narrowing for that generation is the established precedent here; silently capturing
+        // the wrong sequence is not.
         bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null && !hasRegions
+            && !nonDefaultSampler
             && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
@@ -356,38 +383,76 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
             if (fastPath)
             {
-                Tensor? regionBias = null;
-                if (hasRegions)
+                if (graphMode)
                 {
-                    regionalPlan!.ResolveStep(i - startStep, regionWeights!);
-                    regionBias = RegionalAttentionBias.Build(
-                        condTxtSeqLen + imageSeqLen, condTxtSeqLen, imageSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
-                }
-
-                Tensor v;
-                if (useCfg)
-                {
-                    // The negative pass runs against the unextended uncondHidden, no bias — same convention
-                    // FluxPipeline uses (regions are a positive-conditioning-only concept).
-                    Tensor condV = RunForwardPatched(patchLatent!, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, regionBias);
-                    Tensor uncondV = RunForwardPatched(patchLatent!, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
-                    v = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
-                    uncondV.Dispose();
-                    condV.Dispose();
+                    // Step-graph capture keeps its own direct call. `v` here is the transformer's FIXED velocity
+                    // buffer, reused every step and never disposed, and the captured graph bakes that address — so
+                    // this path deliberately does NOT route through the sampler, whose scratch tensors and (for
+                    // second-order methods) extra forward would invalidate the capture. The gate above already
+                    // excludes every sampler but Euler from reaching here.
+                    Tensor graphV = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
+                    Backend.CfgEulerStep(patchLatent!, graphV, graphV, 1.0f, scheduler.Dt(i));
                 }
                 else
                 {
-                    v = RunForwardPatched(patchLatent!, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, regionBias);
+                    // Everything family-specific lives in the closure: Krea 2 applies its own cond-anchored CFG
+                    // (cond + scale·(cond − uncond), NOT the linear uncond-anchored combine), so the combined
+                    // velocity is returned as both halves of the pair with guidance 1.0 — making the sampler's own
+                    // combine an identity rather than double-applying guidance.
+                    DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                        PredictionType.FlowVelocity,
+                        (x, sigma, stepIndex) =>
+                        {
+                            // The transformer takes t ∈ [0,1], which for a flow-match family IS the sigma (the
+                            // scheduler's public Timesteps scale is just sigma·1000).
+                            //
+                            // On-schedule sigmas reuse the precomputed `timesteps[i]/1000` expression the loop used
+                            // before the sampler seam, rather than passing sigma straight through. Those are the same
+                            // number mathematically, but `(s·1000f)/1000f` is not an exact round trip in F32 — 1000 is
+                            // not a power of two — so substituting one for the other would perturb every existing
+                            // Krea 2 generation by an ulp of conditioning. Only an off-schedule sub-step (what a
+                            // second-order sampler evaluates at) takes the raw sigma, which is exactly right: there is
+                            // no precomputed timestep for it.
+                            float t = stepIndex < steps && sigma == scheduler.SigmaAt(stepIndex)
+                                ? timestepTable[stepIndex] / 1000.0f
+                                : sigma;
+                            Tensor? bias = null;
+                            if (hasRegions)
+                            {
+                                regionalPlan!.ResolveStep(stepIndex - startStep, regionWeights!);
+                                bias = RegionalAttentionBias.Build(
+                                    condTxtSeqLen + imageSeqLen, condTxtSeqLen, imageSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+                            }
+                            try
+                            {
+                                Tensor combined;
+                                if (useCfg)
+                                {
+                                    // The negative pass runs against the unextended uncondHidden, no bias — same
+                                    // convention FluxPipeline uses (regions are positive-conditioning-only).
+                                    Tensor condV = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, bias);
+                                    Tensor uncondV = RunForwardPatched(x, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
+                                    combined = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
+                                    uncondV.Dispose();
+                                    condV.Dispose();
+                                }
+                                else
+                                {
+                                    combined = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, bias);
+                                }
+                                return new DenoisePrediction(combined, combined);
+                            }
+                            finally
+                            {
+                                bias?.Dispose();
+                            }
+                        });
+                    if (i == startStep)
+                    {
+                        sampler.Reset(patchLatent!.Shape);
+                    }
+                    sampler.Step(Backend, patchLatent!, predictor, i);
                 }
-                regionBias?.Dispose();
-
-                // On-device IN-PLACE Euler step: patchLatent += v·dt via CfgEulerStep with pos=neg=v (the CFG
-                // combine degenerates to identity: g·v + (1−g)·v = v). In-place keeps the latent's device address
-                // fixed — required by the captured step graph, and one kernel instead of Scale+Add for eager too.
-                float dt = scheduler.Dt(i);
-                Backend.CfgEulerStep(patchLatent!, v, v, 1.0f, dt);
-                if (!graphMode)
-                    v.Dispose();   // graph mode: v is the transformer's fixed velocity buffer (reused every step)
 
                 stepSw.Stop();
                 Logs.Verbose($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");

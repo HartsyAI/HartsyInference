@@ -26,10 +26,24 @@ public static class FlowMatchSampling
     /// <see cref="Core.Backends.IBackend.CfgEulerStep"/> device op the pipeline called before — so a request that names
     /// no sampler is unchanged, which is the property the whole rollout rests on.</summary>
     /// <exception cref="NotSupportedException">The sampler or sigma schedule is not available.</exception>
-    public static ISampler Resolve(string? selection, FlowMatchEulerDiscreteScheduler scheduler, int seed, string family)
+    /// <param name="startsFromNoisedInit">True when the initial latent was already noised at the FAMILY's
+    /// <c>sigma[startStep]</c> — img2img and inpaint. A re-spaced schedule is refused in that case: the latent would
+    /// carry the family's noise level while the sampler integrates from the re-spaced one, and a mismatched starting
+    /// sigma yields coherent-but-wrong output with nothing to point at. Fixing it properly means handing the re-spaced
+    /// array to the init-latent builder, which is a larger change than this rollout.</param>
+    public static ISampler Resolve(string? selection, FlowMatchEulerDiscreteScheduler scheduler, int seed, string family,
+        bool startsFromNoisedInit = false)
     {
         ArgumentNullException.ThrowIfNull(scheduler);
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(selection);
+        if (startsFromNoisedInit && !string.IsNullOrEmpty(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{scheduleName}' cannot be combined with img2img or inpaint on {family} yet: the init "
+                + "latent is noised at the family's own sigma[startStep], so a re-spaced schedule would start the "
+                + "sampler from a different noise level than the latent actually carries. Use the schedule on a "
+                + "text-to-image generation, or drop the schedule suffix.");
+        }
         if (!SamplerRegistry.IsKnown(samplerName))
         {
             throw new NotSupportedException(

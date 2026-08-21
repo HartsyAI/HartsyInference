@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -125,31 +126,55 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
+        // Sampler selection (2026-08-20). OmniGen 2 is flow-matching, so it had no user-selectable sampler before
+        // this. Its guidance is NOT constant across the run — cfg_range drops the unconditional branch outside a
+        // schedule window — which is why the scale rides on each DenoisePrediction rather than on the predictor.
+        // The t2i path is drain-free end to end (no step graph, no step cache, no host fallback, always pure noise),
+        // so there is nothing here to narrow for a non-default sampler.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "OmniGen 2");
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+        // Triple-pass image guidance lives in EditFromEmbeddings; t2i uses only the text-guidance term.
+        _ = imageGuidanceScale;
+
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            // scheduler.Timesteps are sigma·1000; the transformer wants the raw flow-match sigma in [0,1].
-            float t = timesteps[i] / 1000.0f;
-            float dt = scheduler.Dt(i);
 
-            // cfg_range gating: CFG only when start <= i/steps <= end, otherwise the bare conditional (upstream).
-            float schedFraction = steps > 1 ? (float)i / steps : 0f;
-            bool inCfgRange = schedFraction >= rangeStart && schedFraction <= rangeEnd;
-
-            Tensor cond = _transformer.ForwardPacked(Backend, latent, t, captionEmbeddings, textSeqLen, hPacked, wPacked);
-            if (guidanceActive && inCfgRange)
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // scheduler.Timesteps are sigma·1000 and the transformer wants the raw flow-match sigma in
+                    // [0,1], so an on-schedule sigma reuses the loop's own `timesteps[i]/1000` expression rather
+                    // than the sampler's sigma: the two are equal mathematically, but the F32 round trip through
+                    // x1000 is not exact (1000 is not a power of two), so substituting one for the other would
+                    // shift every existing OmniGen 2 generation by an ulp of conditioning. Only a genuine sub-step
+                    // (what a second-order sampler evaluates at) takes the raw value — there is no table entry for it.
+                    float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex] / 1000.0f
+                        : s;
+                    // cfg_range gating: CFG only when start <= i/steps <= end, otherwise the bare conditional (upstream).
+                    float schedFraction = steps > 1 ? (float)stepIndex / steps : 0f;
+                    bool inCfgRange = schedFraction >= rangeStart && schedFraction <= rangeEnd;
+                    Tensor cond = _transformer.ForwardPacked(Backend, x, t, captionEmbeddings, textSeqLen, hPacked, wPacked);
+                    if (!guidanceActive || !inCfgRange)
+                    {
+                        // Bare conditional (pos=neg → v=cond). The combine must be exactly 1.0 here: reusing the
+                        // run's nominal scale would not cancel bit-exactly in F32 even though cond == uncond.
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    Tensor uncond = _transformer.ForwardPacked(Backend, x, t, negativeCaptionEmbeddings!, negSeqLen, hPacked, wPacked);
+                    // Raw pair: OmniGen 2 does not pre-combine on this path, so the fused device op applies the
+                    // uncond-anchored CFG at the real scale.
+                    return new DenoisePrediction(cond, uncond, effectiveTextGuidance);
+                });
+            if (i == 0)
             {
-                Tensor uncond = _transformer.ForwardPacked(Backend, latent, t, negativeCaptionEmbeddings!, negSeqLen, hPacked, wPacked);
-                Backend.CfgEulerStep(latent, cond, uncond, effectiveTextGuidance, dt);
-                uncond.Dispose();
-                // Triple-pass image guidance lives in EditFromEmbeddings; t2i uses only the text-guidance term.
-                _ = imageGuidanceScale;
+                sampler.Reset(latent.Shape);
             }
-            else
-            {
-                Backend.CfgEulerStep(latent, cond, cond, 1.0f, dt);   // bare conditional (pos=neg → v=cond)
-            }
-            cond.Dispose();
+            sampler.Step(Backend, latent, predictor, i);
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
@@ -212,6 +237,17 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         if (textGuidanceScale > 1.0f && negativeCaptionEmbeddings is null)
             throw new ArgumentException("negativeCaptionEmbeddings is required when textGuidanceScale > 1.0.",
                 nameof(negativeCaptionEmbeddings));
+        // The edit loop runs the host reference step (three-way dual guidance has no 2-tensor device fusion, so the
+        // combine + scheduler.Step stay on the host) and never consults a sampler — a selection here would be
+        // silently dropped, which is the exact failure the sampler seam removes. Refuse by name instead, and do it
+        // before the reference VAE encode below so a refused request does not burn an encode.
+        if (FlowMatchSampling.IsNonDefault(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not supported on OmniGen 2's edit path yet — it runs the "
+                + "host reference loop (dual text/image guidance), not the drain-free sampler path. Drop the sampler "
+                + "selection, or use text-to-image.");
+        }
 
         (float rangeStart, float rangeEnd) = cfgRange ?? (0f, 1f);
         int seed = request.Seed ?? SeedGenerator.RandomSeed();

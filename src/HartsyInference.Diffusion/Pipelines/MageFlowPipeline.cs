@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -49,7 +50,8 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     /// image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop,
         int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null,
-        string? seamlessTiling = null, long variationSeed = -1, double variationSeedStrength = 0)
+        string? seamlessTiling = null, long variationSeed = -1, double variationSeedStrength = 0,
+        string? samplerSelection = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
@@ -93,34 +95,55 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(SchedulerShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        // Sampler selection (2026-08-20). Mage-Flow takes primitives rather than a TextToImageRequest, so the
+        // selection arrives as its own parameter threaded from MageFlowRecipePipeline. No step graph and no step
+        // cache on this pipeline, so there is nothing to narrow.
+        ISampler sampler = FlowMatchSampling.Resolve(samplerSelection, scheduler, unchecked((int)seed), "Mage-Flow");
+        float[] timestepTable = timesteps.ToArray();
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         Logs.Info($"[MageFlow] Denoise {steps} steps, CFG {cfgScale}, {width}x{height} (latent {w}x{h})" +
             (refTokens is not null ? " [edit]" : "") + ".");
         int patchDim = LatentChannels;
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.FlowVelocity,
+            (x, s, stepIndex) =>
+            {
+                // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression — the F32 round trip
+                // through x1000 is not exact, so raw sigma would shift every existing generation by an ulp.
+                float normalizedT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                    ? timestepTable[stepIndex] / 1000f
+                    : s;
+                // Ref tokens are appended for this forward only (the DiT slices them off the velocity), and must
+                // be rebuilt against whatever latent is being evaluated — a second-order sampler's sub-step latent
+                // is not the loop's tensor.
+                Tensor input = x;
+                bool ownsInput = false;
+                if (refTokens is not null)
+                {
+                    input = new(new TensorShape(1, x.Shape[1] + refTokens.Shape[1], patchDim), DType.F32);
+                    Backend.Concat(input, new[] { x, refTokens }, 1);
+                    ownsInput = true;
+                }
+                try
+                {
+                    Tensor cond = _transformer.Forward(Backend, input, condHidden, normalizedT, h, w, refGrids, refTimestepZero: true);
+                    if (!useCfg)
+                    {
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    Tensor uncond = _transformer.Forward(Backend, input, uncondHidden!, normalizedT, h, w, refGrids, refTimestepZero: true);
+                    return new DenoisePrediction(cond, uncond, cfgScale);
+                }
+                finally
+                {
+                    if (ownsInput) input.Dispose();
+                }
+            });
+        sampler.Reset(packed.Shape);
         for (int i = 0; i < steps; i++)
         {
-            float normalizedT = timesteps[i] / 1000f;
-            // Append ref tokens for this forward only (the DiT slices them off the velocity).
-            Tensor input = packed;
-            if (refTokens is not null)
-            {
-                input = new(new TensorShape(1, packed.Shape[1] + refTokens.Shape[1], patchDim), DType.F32);
-                Backend.Concat(input, new[] { packed, refTokens }, 1);
-            }
-            Tensor condPred = _transformer.Forward(Backend, input, condHidden, normalizedT, h, w, refGrids, refTimestepZero: true);
-            if (useCfg)
-            {
-                Tensor uncondPred = _transformer.Forward(Backend, input, uncondHidden!, normalizedT, h, w, refGrids, refTimestepZero: true);
-                Backend.CfgEulerStep(packed, condPred, uncondPred, cfgScale, scheduler.Dt(i));
-                uncondPred.Dispose();
-            }
-            else
-            {
-                Backend.CfgEulerStep(packed, condPred, condPred, 1f, scheduler.Dt(i));
-            }
-            condPred.Dispose();
-            if (input != packed) input.Dispose();
+            sampler.Step(Backend, packed, predictor, i);
         }
         condHidden.Dispose();
         uncondHidden?.Dispose();

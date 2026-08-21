@@ -45,6 +45,10 @@ public sealed class WakeClientCommand : AsyncCommand<WakeClientCommand.Settings>
         [CommandOption("--loop")]
         [Description("Repeat the file forever — for false-accept soak tests.")]
         public bool Loop { get; init; }
+
+        [CommandOption("--token")]
+        [Description("Shared auth token, when the listener has WakeServiceOptions.AuthToken / HartsyInference__WakeAuthToken set — omit only against a listener with no token configured.")]
+        public string? Token { get; init; }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
@@ -67,7 +71,11 @@ public sealed class WakeClientCommand : AsyncCommand<WakeClientCommand.Settings>
         using CancellationTokenSource cancel = new();
         Task reader = Task.Run(() => ReadServerEventsAsync(stream, cancel.Token));
 
-        await SendAsync(stream, $"{{\"type\":\"hello\",\"data\":{{\"device_id\":\"{settings.DeviceId}\",\"rate\":16000,\"width\":2,\"channels\":1,\"firmware\":\"cli\"}}}}");
+        // Token field omitted entirely (not sent as empty/null) when unset, matching what a
+        // real satellite against a no-auth listener sends — WakeListener.IsTokenValid() only
+        // requires it when the listener actually has one configured.
+        string tokenField = string.IsNullOrEmpty(settings.Token) ? "" : $",\"token\":\"{settings.Token}\"";
+        await SendAsync(stream, $"{{\"type\":\"hello\",\"data\":{{\"device_id\":\"{settings.DeviceId}\",\"rate\":16000,\"width\":2,\"channels\":1,\"firmware\":\"cli\"{tokenField}}}}}");
 
         long sequence = 0;
         byte[] payload = new byte[frameSamples * 2];

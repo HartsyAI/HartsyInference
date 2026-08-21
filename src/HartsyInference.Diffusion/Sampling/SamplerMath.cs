@@ -17,10 +17,11 @@ public static class SamplerMath
     /// <summary>Combines a prediction pair by CFG into <paramref name="output"/>:
     /// <c>v = w·cond + (1−w)·uncond</c>. Skips the arithmetic entirely at <c>w == 1</c> or when the pair is the
     /// guidance-free aliased form.</summary>
-    public static void CombineCfg(IBackend backend, Tensor output, in DenoisePrediction prediction, float guidance)
+    public static void CombineCfg(IBackend backend, Tensor output, in DenoisePrediction prediction)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(output);
+        float guidance = prediction.Guidance;
         if (ReferenceEquals(prediction.Cond, prediction.Uncond) || guidance == 1.0f)
         {
             backend.Scale(output, prediction.Cond, 1.0f);
@@ -53,6 +54,10 @@ public static class SamplerMath
             case PredictionType.FlowVelocity:
                 backend.AffineMix(denoised, x, prediction, 1.0f, -sigma);
                 break;
+            case PredictionType.NegatedFlowVelocity:
+                // Same relation with the model's sign convention flipped: x0 = x + sigma·(−v).
+                backend.AffineMix(denoised, x, prediction, 1.0f, sigma);
+                break;
             case PredictionType.VPrediction:
                 float sigmaSqPlus1 = (sigma * sigma) + 1.0f;
                 backend.AffineMix(denoised, x, prediction, 1.0f / sigmaSqPlus1,
@@ -75,7 +80,7 @@ public static class SamplerMath
         try
         {
             using DenoisePrediction prediction = predictor.Predict(x, sigma, stepIndex);
-            CombineCfg(backend, combined, prediction, predictor.GuidanceScale);
+            CombineCfg(backend, combined, prediction);
             ToDenoised(backend, denoised, x, combined, sigma, predictor.Prediction);
             return denoised;
         }

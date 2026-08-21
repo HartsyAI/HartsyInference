@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -255,6 +256,18 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
+        // Sampler selection (2026-08-20). SD3 is flow-matching, so it had no user-selectable sampler at all before
+        // this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored CFG at
+        // the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the branch
+        // order, the step-cache gates) stays inside the closure.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "SD3",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         long denoiseD2hStart = Backend.GetD2hSyncCount();
         bool latentPinned = false;
         bool sourcePinned = false;
@@ -283,48 +296,56 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
                 Stopwatch stepSw = Stopwatch.StartNew();
                 float t = timesteps[i];
 
-                // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
-                bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
-
-                // Flow-match Euler is exactly z += dt * velocity. Fold standard CFG and the Euler update into
-                // one in-place backend op. Final modulation and unpatchify now keep both predictions and latent
-                // device-resident. A progress consumer may intentionally read the latent; otherwise both ordinary
-                // and masked-inpaint loops remain device-resident.
-                if (useCfg)
-                {
-                    Tensor? uncondNoise = null;
-                    Tensor? condNoise = null;
-                    try
+                // Flow-match Euler is exactly z += dt * velocity. The default (Euler) sampler still folds standard
+                // CFG and that update into the one in-place backend op this loop always used. Final modulation and
+                // unpatchify keep both predictions and latent device-resident. A progress consumer may intentionally
+                // read the latent; otherwise both ordinary and masked-inpaint loops remain device-resident.
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
                     {
+                        // The MMDiT conditions on the 0-1000 scale (sigma x 1000), NOT the [0,1] sigma the packed DiTs
+                        // take — so an on-schedule step reuses the scheduler's own table entry rather than recomputing
+                        // it, and only a genuine sub-step (what a second-order sampler evaluates at) scales the raw
+                        // sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex]
+                            : s * 1000.0f;
+                        // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
+                        // `!nonDefaultSampler`: the step cache is a first-block-cache calibrated on the drift between
+                        // CONSECUTIVE steps, and a second-order sampler evaluates twice inside one step at different
+                        // sigmas — a drift signature it was never calibrated for. Narrowed for that generation only.
+                        bool eligible = !nonDefaultSampler
+                            && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+                        if (!useCfg)
+                        {
+                            Tensor noisePred = RunForward(
+                                x, stepT, condProjected, condPooled,
+                                eligible ? stepCacheCond : null);
+                            return new DenoisePrediction(noisePred, noisePred);
+                        }
                         // Preserve the established branch order: the transformer can own request-local caches.
-                        uncondNoise = RunForward(
-                            latent, t, uncondProjected!, uncondPooled!,
-                            cacheEligible ? stepCacheUncond : null);
-                        condNoise = RunForward(
-                            latent, t, condProjected, condPooled,
-                            cacheEligible ? stepCacheCond : null);
-                        Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
-                    }
-                    finally
-                    {
-                        condNoise?.Dispose();
-                        uncondNoise?.Dispose();
-                    }
-                }
-                else
+                        Tensor uncondNoise = RunForward(
+                            x, stepT, uncondProjected!, uncondPooled!,
+                            eligible ? stepCacheUncond : null);
+                        try
+                        {
+                            Tensor condNoise = RunForward(
+                                x, stepT, condProjected, condPooled,
+                                eligible ? stepCacheCond : null);
+                            return new DenoisePrediction(condNoise, uncondNoise, cfgScale);
+                        }
+                        catch
+                        {
+                            uncondNoise.Dispose();
+                            throw;
+                        }
+                    });
+                if (i == startStep)
                 {
-                    Tensor noisePred = RunForward(
-                        latent, t, condProjected, condPooled,
-                        cacheEligible ? stepCacheCond : null);
-                    try
-                    {
-                        Backend.CfgEulerStep(latent, noisePred, noisePred, 1.0f, scheduler.Dt(i));
-                    }
-                    finally
-                    {
-                        noisePred.Dispose();
-                    }
+                    sampler.Reset(latent.Shape);
                 }
+                sampler.Step(Backend, latent, predictor, i);
 
                 // A preview consumer may intentionally read the latent and thereby remove its pin. Re-asserting
                 // the pin after every device update makes the ordinary no-preview path survive FreeActivations;
@@ -350,7 +371,18 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
 
                 // Deterministically reclaim dead MMDiT intermediates without discarding the pinned latent.
                 // Keep the async pool reservation hot across steps; the final phase sweep trims it once.
-                Backend.FreeActivations(trimPool: false);
+                //
+                // Skipped for a non-default sampler, and this is the one place SD3 differs from every other
+                // conversion: a multi-step sampler (dpmpp_2m, lms, …) carries its previous-denoised history in an
+                // UNPINNED device tensor across steps, and FreeActivations reclaims exactly those — without a D2H,
+                // clearing the tensor's GPU binding, so the next step would read stale host bytes as history. Only
+                // this pipeline reclaims mid-loop at all (Qwen-Image's fast path notes it explicitly does not), so
+                // there is nothing to mirror. Default Euler keeps the reclaim and is unchanged; a non-default sampler
+                // trades the per-step reclaim for correctness and leans on the step's own disposals plus the pool.
+                if (!nonDefaultSampler)
+                {
+                    Backend.FreeActivations(trimPool: false);
+                }
             }
         }
         finally

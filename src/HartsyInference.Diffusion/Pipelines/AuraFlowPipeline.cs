@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -190,6 +191,29 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
         // HARTSY_AURAFLOW_PACKED=0 is the kill-switch (A/B against the reference loop).
         bool fusedLoop = !isMaskedInpaint && EnvSwitch.IsEnabled("HARTSY_AURAFLOW_PACKED", defaultOn: true);
+
+        // Sampler selection (2026-08-20). AuraFlow is flow-matching, so it had no user-selectable sampler at all
+        // before this. The sampler owns the integrator and the sigma spacing; the family keeps owning its own sigma
+        // range (static shift), and the dual-pass CFG stays inside the predictor closure below.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "AuraFlow",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference loop below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead. Note this also
+        // covers HARTSY_AURAFLOW_PACKED=0, the packed-path kill-switch: an A/B run against the reference loop cannot
+        // honour a sampler either.
+        if (!fusedLoop && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on AuraFlow's packed drain-free path, and this "
+                + "generation fell back to the reference loop (masked inpaint, or HARTSY_AURAFLOW_PACKED=0). Drop the "
+                + "sampler selection, or drop the feature that forced the fallback.");
+        }
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
         if (fusedLoop)
         {
             int gridH = latentH / _config.PatchSize;
@@ -202,20 +226,37 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
                 Stopwatch stepSw = Stopwatch.StartNew();
                 float t = timesteps[i];
 
-                Tensor condVel = _transformer.ForwardTokens(Backend, latentTokens, t, condContext, gridH, gridW);
-                if (useCfg)
+                // AuraFlow does NOT pre-combine: the fused device op applies uncond-anchored CFG at the real scale,
+                // so the predictor hands back the raw pair and reports cfgScale rather than 1.0.
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // The transformer is conditioned on the 0-1000 timestep scale, which for a flow-match family
+                        // IS sigma·1000. On-schedule sigmas reuse the loop's own `timesteps[i]` entry rather than
+                        // recomputing `s·1000`: the two are equal mathematically, but the F32 round trip through
+                        // x1000 is not exact (1000 is not a power of two), so substituting one for the other would
+                        // shift every existing AuraFlow generation by an ulp of conditioning. Only a genuine
+                        // off-schedule sub-step — what a second-order sampler evaluates at — takes the scaled value;
+                        // there is no precomputed timestep for it.
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex]
+                            : s * 1000.0f;
+                        Tensor cond = _transformer.ForwardTokens(Backend, x, stepT, condContext, gridH, gridW);
+                        if (!useCfg)
+                        {
+                            return new DenoisePrediction(cond, cond);
+                        }
+                        // The transformer's two-slot text-token cache holds both branches' conditioning,
+                        // so each is projected once per generation, not once per step.
+                        Tensor uncond = _transformer.ForwardTokens(Backend, x, stepT, uncondContext!, gridH, gridW);
+                        return new DenoisePrediction(cond, uncond, cfgScale);
+                    });
+                if (i == startStep)
                 {
-                    // The transformer's two-slot text-token cache holds both branches' conditioning,
-                    // so each is projected once per generation, not once per step.
-                    Tensor uncondVel = _transformer.ForwardTokens(Backend, latentTokens, t, uncondContext!, gridH, gridW);
-                    Backend.CfgEulerStep(latentTokens, condVel, uncondVel, cfgScale, scheduler.Dt(i));
-                    uncondVel.Dispose();
+                    sampler.Reset(latentTokens.Shape);
                 }
-                else
-                {
-                    Backend.CfgEulerStep(latentTokens, condVel, condVel, 1.0f, scheduler.Dt(i));
-                }
-                condVel.Dispose();
+                sampler.Step(Backend, latentTokens, predictor, i);
 
                 stepSw.Stop();
                 Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");

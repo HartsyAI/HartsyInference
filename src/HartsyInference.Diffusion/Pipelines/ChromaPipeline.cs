@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
@@ -342,7 +343,27 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read directly —
         // previews and the final unpack go through SnapshotGraphLatent. DiT sharding excludes the graph:
         // ForwardSharded issues work on two backends and never goes through ForwardPaired's capture path.
-        bool graphMode = drainFree && DitShardBackend is null && stepCacheCond is null
+        // Sampler selection (2026-08-20). Chroma is flow-matching, so it had no user-selectable sampler before this.
+        // A non-default sampler excludes the step graph for the same reason DiT sharding and the step cache already
+        // do: the capture bakes one fixed op sequence at fixed addresses, and a second-order sampler runs an extra
+        // forward at an intermediate sigma plus scratch arithmetic between them.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Chroma",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Chroma's drain-free path, and this generation "
+                + "fell back to the reference loop (masked inpaint). Drop the sampler selection, or drop the feature that "
+                + "forced the fallback.");
+        }
+
+        float[] timestepTable = timesteps.ToArray();
+
+        bool graphMode = drainFree && DitShardBackend is null && stepCacheCond is null && !nonDefaultSampler
             && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
         if (DitShardBackend is not null
             && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported)
@@ -362,63 +383,76 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             float sigma = timesteps[i] / 1000.0f;
             bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
 
-            if (drainFree && DitShardBackend is not null)
+            if (drainFree)
             {
-                // Sharded: NEVER ForwardPaired (its step graph / fixed buffers assume one backend) — two
-                // sequential batch-1 ForwardSharded passes instead, each pooling both cards' VRAM.
-                Tensor condNoise = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
-                if (useCfg)
+                // Both drain-free branches (sharded two-pass, and the single-backend ForwardPaired) are the same
+                // thing from a sampler's point of view: evaluate at a sigma, hand back the raw cond/uncond pair.
+                // Unlike Krea 2, Chroma does NOT pre-combine — the fused device op applies uncond-anchored CFG at
+                // the real scale, so the predictor reports cfgScale rather than 1.0.
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression: the two are equal
+                        // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for
+                        // the other would shift every existing Chroma generation by an ulp of conditioning.
+                        float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex] / 1000.0f
+                            : s;
+                        // The step cache is a first-block-cache calibrated on the drift between CONSECUTIVE
+                        // steps. A second-order sampler evaluates twice inside one step at different sigmas, which
+                        // feeds it a drift signature it was never calibrated for — the failure mode ROADMAP §6
+                        // records for HiDream was a flat, textureless colour field, not a mild degradation. Narrowed
+                        // for that generation, same as the step graph above.
+                        bool eligible = !nonDefaultSampler
+                            && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+                        if (DitShardBackend is not null)
+                        {
+                            // Sharded: NEVER ForwardPaired (its step graph / fixed buffers assume one backend) — two
+                            // sequential batch-1 ForwardSharded passes instead, each pooling both cards' VRAM.
+                            Tensor cond = RunForward(x, condContext, t, hPacked, wPacked, condMask);
+                            if (!useCfg)
+                            {
+                                return new DenoisePrediction(cond, cond);
+                            }
+                            Tensor uncond = RunForward(x, uncondContext!, t, hPacked, wPacked, uncondMask);
+                            return new DenoisePrediction(cond, uncond, cfgScale);
+                        }
+                        (Tensor pairedCond, Tensor? pairedUncond, bool callerOwns) = _transformer.ForwardPaired(
+                            Backend, x, condContext, useCfg ? uncondContext : null, t,
+                            hPacked, wPacked, condMask, useCfg ? uncondMask : null,
+                            eligible ? stepCacheCond : null, eligible ? stepCacheUncond : null);
+                        // callerOwns:false means these are the transformer's FIXED step-graph buffers — borrowed,
+                        // never disposed here, which is what OwnsTensors carries through to the sampler.
+                        return new DenoisePrediction(pairedCond, pairedUncond ?? pairedCond,
+                            guidance: useCfg ? cfgScale : 1.0f, ownsTensors: callerOwns);
+                    });
+                if (i == startStep)
                 {
-                    Tensor uncondNoise = RunForward(packedLatent, uncondContext!, sigma, hPacked, wPacked, uncondMask);
-                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
-                    uncondNoise.Dispose();
+                    sampler.Reset(packedLatent.Shape);
                 }
-                else
-                {
-                    Backend.CfgEulerStep(packedLatent, condNoise, condNoise, 1.0f, scheduler.Dt(i));
-                }
-                condNoise.Dispose();
-            }
-            else if (drainFree)
-            {
-                (Tensor condNoise, Tensor? uncondNoise, bool callerOwns) = _transformer.ForwardPaired(
-                    Backend, packedLatent, condContext, useCfg ? uncondContext : null, sigma,
-                    hPacked, wPacked, condMask, useCfg ? uncondMask : null,
-                    cacheEligible ? stepCacheCond : null, cacheEligible ? stepCacheUncond : null);
-                if (useCfg)
-                {
-                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise!, cfgScale, scheduler.Dt(i));
-                }
-                else
-                {
-                    Backend.CfgEulerStep(packedLatent, condNoise, condNoise, 1.0f, scheduler.Dt(i));
-                }
-                if (callerOwns)
-                {
-                    condNoise.Dispose();
-                    uncondNoise?.Dispose();
-                }
+                sampler.Step(Backend, packedLatent, predictor, i);
             }
             else
             {
-            Tensor noisePred;
-            if (useCfg)
-            {
-                noisePred = ClassifierFreeGuidanceStep(packedLatent, sigma,
-                    condContext, condMask,
-                    uncondContext!, uncondMask,
-                    txtSeqLen, hPacked, wPacked, cfgScale);
-            }
-            else
-            {
-                noisePred = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
-            }
+                Tensor noisePred;
+                if (useCfg)
+                {
+                    noisePred = ClassifierFreeGuidanceStep(packedLatent, sigma,
+                        condContext, condMask,
+                        uncondContext!, uncondMask,
+                        txtSeqLen, hPacked, wPacked, cfgScale);
+                }
+                else
+                {
+                    noisePred = RunForward(packedLatent, condContext, sigma, hPacked, wPacked, condMask);
+                }
 
-            Tensor newLatent = new Tensor(packedShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, packedLatent, i);
-            noisePred.Dispose();
-            packedLatent.Dispose();
-            packedLatent = newLatent;
+                Tensor newLatent = new Tensor(packedShape, DType.F32);
+                scheduler.Step(newLatent, noisePred, packedLatent, i);
+                noisePred.Dispose();
+                packedLatent.Dispose();
+                packedLatent = newLatent;
             }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's

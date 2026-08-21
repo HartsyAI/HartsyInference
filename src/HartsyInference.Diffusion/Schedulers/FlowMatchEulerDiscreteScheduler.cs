@@ -85,9 +85,13 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     public float Dt(int stepIndex) => _sigmas[stepIndex + 1] - _sigmas[stepIndex];
 
     /// <summary>Exact schedule sigma at an inference-step boundary, including the terminal index
-    /// <c>NumInferenceSteps</c> whose value is zero. Internal pipeline glue uses this instead of round-tripping
-    /// <see cref="Timesteps"/> through the public 0-1000 conditioning scale.</summary>
-    internal float SigmaAt(int stepIndex)
+    /// <c>NumInferenceSteps</c> whose value is zero. Pipeline glue uses this instead of round-tripping
+    /// <see cref="Timesteps"/> through the public 0-1000 conditioning scale.
+    /// <para>Public rather than internal since 2026-08-20: the sampler seam's on-schedule timestep check
+    /// (<c>sigma == SigmaAt(stepIndex)</c>, which keeps a converted pipeline bit-identical on the default path) is
+    /// needed by pipelines in <c>HartsyInference.Video</c>, and this assembly grants <c>InternalsVisibleTo</c> only
+    /// to its own test projects.</para></summary>
+    public float SigmaAt(int stepIndex)
     {
         if ((uint)stepIndex >= (uint)_sigmas.Length)
             throw new ArgumentOutOfRangeException(nameof(stepIndex), stepIndex,

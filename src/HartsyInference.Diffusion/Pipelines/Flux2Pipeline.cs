@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -256,7 +257,31 @@ _transformer.InvalidateStepGraph(Backend);
             }
         }
 
+        // Sampler selection (2026-08-20). Flux.2 is flow-matching with DISTILLED guidance (no true CFG), so the
+        // predictor hands the same velocity back as both halves of the pair at guidance 1.0 — the sampler's combine
+        // degenerates to identity, exactly as the direct CfgEulerStep(z, v, v, 1.0f, dt) call did.
+        //
+        // A non-default sampler excludes the step graph on the same grounds the gate already excludes step-cache and
+        // regions: a capture bakes one fixed op sequence, and a second-order sampler adds a forward at an
+        // intermediate sigma plus scratch arithmetic between them.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Flux.2",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Flux.2's drain-free path, and this generation "
+                + "fell back to the reference loop (masked inpaint). Drop the sampler selection, or drop the feature that "
+                + "forced the fallback.");
+        }
+
+        float[] timestepTable = scheduler.Timesteps.ToArray();
+
         bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null && !hasRegions
+            && !nonDefaultSampler
             && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
         if (graphRoute)
         {
@@ -288,33 +313,68 @@ _transformer.InvalidateStepGraph(Backend);
                 continue;
             }
 
-            // Late-window cache gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
-            bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
-            Tensor? regionBias = null;
-            if (hasRegions)
-            {
-                regionalPlan!.ResolveStep(i - startStep, regionWeights!);
-                regionBias = RegionalAttentionBias.Build(
-                    condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
-            }
-            Tensor velocityPred = _transformer.Forward(
-                Backend, packedLatent, hasRegions ? extendedText! : textEmbeddings, sigma, guidanceScale, patH, patW,
-                cacheEligible ? stepCacheInst : null, regionBias);
-            regionBias?.Dispose();
-
             if (drainFree)
             {
-                Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
-                velocityPred.Dispose();
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression — the F32 round trip
+                        // through x1000 is not exact, so substituting raw sigma would shift every existing generation
+                        // by an ulp of conditioning. Only a genuine sub-step takes the raw value.
+                        float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex] / 1000.0f
+                            : s;
+                        // Narrowed for a non-default sampler: the step cache's drift calibration assumes one
+                        // forward per step, and a second-order method breaks that assumption (see ChromaPipeline).
+                        bool eligible = !nonDefaultSampler
+                            && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
+                        Tensor? bias = null;
+                        if (hasRegions)
+                        {
+                            regionalPlan!.ResolveStep(stepIndex - startStep, regionWeights!);
+                            bias = RegionalAttentionBias.Build(
+                                condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+                        }
+                        try
+                        {
+                            Tensor velocity = _transformer.Forward(
+                                Backend, x, hasRegions ? extendedText! : textEmbeddings, t, guidanceScale, patH, patW,
+                                eligible ? stepCacheInst : null, bias);
+                            return new DenoisePrediction(velocity, velocity);
+                        }
+                        finally
+                        {
+                            bias?.Dispose();
+                        }
+                    });
+                if (i == startStep)
+                {
+                    sampler.Reset(packedLatent.Shape);
+                }
+                sampler.Step(Backend, packedLatent, predictor, i);
             }
             else
             {
-            TensorShape packedStepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
-            Tensor newLatent = new Tensor(packedStepShape, DType.F32);
-            scheduler.Step(newLatent, velocityPred, packedLatent, i);
-            velocityPred.Dispose();
-            packedLatent.Dispose();
-            packedLatent = newLatent;
+                // Late-window cache gate: reuse eligible only in the schedule tail (Ideogram 4 results doc).
+                bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
+                Tensor? regionBias = null;
+                if (hasRegions)
+                {
+                    regionalPlan!.ResolveStep(i - startStep, regionWeights!);
+                    regionBias = RegionalAttentionBias.Build(
+                        condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+                }
+                Tensor velocityPred = _transformer.Forward(
+                    Backend, packedLatent, hasRegions ? extendedText! : textEmbeddings, sigma, guidanceScale, patH, patW,
+                    cacheEligible ? stepCacheInst : null, regionBias);
+                regionBias?.Dispose();
+                TensorShape packedStepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
+                Tensor newLatent = new Tensor(packedStepShape, DType.F32);
+                scheduler.Step(newLatent, velocityPred, packedLatent, i);
+                velocityPred.Dispose();
+                packedLatent.Dispose();
+                packedLatent = newLatent;
             }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's

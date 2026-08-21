@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -237,8 +238,29 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         // branch (its per-step blend reads/rebuilds the latent on the host).
         bool drainFree = !isMaskedInpaint;
 
+        // Sampler selection (2026-08-20). ERNIE-Image is flow-matching, so it had no user-selectable sampler at all
+        // before this. The sampler owns the integrator and the sigma spacing; the family keeps owning its sigma range
+        // (static shift=4.0), and everything family-specific — the batched-length conditioning, the CFG pair — stays
+        // inside the predictor closure below.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "ERNIE-Image",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on ERNIE-Image's drain-free path, and this generation "
+                + "fell back to the reference loop (masked inpaint). Drop the sampler selection, or drop the feature that "
+                + "forced the fallback.");
+        }
+
         Logs.Info("Starting ERNIE-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
@@ -246,20 +268,38 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                if (useCfg)
+                // ERNIE-Image does NOT pre-combine: the fused device op applies uncond-anchored CFG at the real
+                // scale, so the predictor hands back the raw pair and reports cfgScale rather than 1.0.
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // The transformer is conditioned on the 0-1000 timestep scale, which for a flow-match family
+                        // IS sigma·1000. On-schedule sigmas reuse the loop's own `timesteps[i]` entry instead of
+                        // recomputing `s·1000`: the two are equal mathematically, but the F32 round trip through
+                        // x1000 is not exact (1000 is not a power of two), so substituting one for the other would
+                        // shift every existing ERNIE-Image generation by an ulp of conditioning. Only a genuine
+                        // off-schedule sub-step — what a second-order sampler evaluates at — takes the scaled value,
+                        // which is right: there is no precomputed timestep for it.
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex]
+                            : s * 1000.0f;
+                        if (!useCfg)
+                        {
+                            Tensor only = _transformer.Forward(Backend, x, stepT, condEmb, condLens);
+                            return new DenoisePrediction(only, only);
+                        }
+                        // Negative branch first, matching the pre-seam call order (the transformer's per-branch
+                        // conditioning cache is keyed on the embedding, so the order is what it was).
+                        Tensor uncond = _transformer.Forward(Backend, x, stepT, uncondEmb!, uncondLens!);
+                        Tensor cond = _transformer.Forward(Backend, x, stepT, condEmb, condLens);
+                        return new DenoisePrediction(cond, uncond, cfgScale);
+                    });
+                if (i == startStep)
                 {
-                    Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondEmb!, uncondLens!);
-                    Tensor condNoise = _transformer.Forward(Backend, latent, t, condEmb, condLens);
-                    Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
-                    uncondNoise.Dispose();
-                    condNoise.Dispose();
+                    sampler.Reset(latent.Shape);
                 }
-                else
-                {
-                    Tensor noise = _transformer.Forward(Backend, latent, t, condEmb, condLens);
-                    Backend.CfgEulerStep(latent, noise, noise, 1.0f, scheduler.Dt(i));
-                    noise.Dispose();
-                }
+                sampler.Step(Backend, latent, predictor, i);
                 stepSw.Stop();
                 Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));

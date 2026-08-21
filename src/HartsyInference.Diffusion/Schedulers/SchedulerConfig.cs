@@ -49,6 +49,16 @@ public enum PredictionType : byte
     /// It is a distinct member anyway because the sigma domain differs, so anything reading sigma as a VP noise level
     /// (the alphas-cumprod round trip, <c>ScaleModelInput</c>) must not treat the two alike.</para></summary>
     FlowVelocity = 2,
+
+    /// <summary>Flow-matching velocity with the sign FLIPPED: the model predicts <c>−v</c>, so the Euler update is
+    /// <c>x += pred·(−dt)</c> and the denoised estimate is <c>x0 = x + sigma·pred</c>.
+    /// <para>This is the NextDiT convention (Z-Image, Lumina-Image 2.0), which folds diffusers' mandatory
+    /// <c>noise_pred = −noise_pred</c> into the step delta instead of negating the tensor — visible in those pipelines
+    /// as <c>CfgEulerStep(..., −scheduler.Dt(i))</c>. Modelling it as its own domain rather than negating the
+    /// prediction tensor keeps the default path free of an extra kernel and allocation per forward: flipping a scalar
+    /// coefficient is exact in F32 and costs nothing, whereas <c>Scale(−1)</c> on a latent-sized tensor is real work on
+    /// every step of every generation.</para></summary>
+    NegatedFlowVelocity = 3,
 }
 
 /// <summary>Strategy for selecting timesteps during inference.</summary>

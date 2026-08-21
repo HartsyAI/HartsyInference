@@ -110,6 +110,20 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     public Ltx2Result GenerateFromTokens(int[] promptTokens, int[] negativeTokens, TextToImageRequest request,
         int numFrames, double frameRate = 24.0, Action<GenerationProgress>? onProgress = null)
     {
+        // Sampler selection is NOT wired on this family (2026-08-20 audit): its denoise step is a host-side
+        // Euler in a different algebraic form than IBackend.CfgEulerStep, its schedule is a raw float[] rather
+        // than a FlowMatchEulerDiscreteScheduler, and one model evaluation drives TWO latents (video + audio) with separate guidance scales, which ISampler.Step cannot express. Converting it would change
+        // default-Euler output, so it was deliberately skipped. Refuse a named sampler rather than accepting the
+        // request and silently sampling with something else.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on LTX-2. This family has not been "
+                + "converted to the sampler seam yet, so it samples with its own Euler step only. Leave the "
+                + "sampler unset.");
+        }
+
+
         ThrowIfDisposed();
         int width = request.Width ?? 768, height = request.Height ?? 512;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;

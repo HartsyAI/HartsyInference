@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -107,23 +108,34 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         // Drain-free loop: CFG combine + Euler run as ONE in-place device op (CfgEulerStep:
         // z += (neg + gw·(pos−neg))·dt ≡ uncond + tg·(cond−uncond) Euler; gw=1 degenerates to the plain
         // step). The old host scheduler.Step + ApplyCfg forced a velocity D2H + latent re-upload per step.
+        // Sampler selection (2026-08-20). Boogu-Image is flow-matching, so it had no user-selectable sampler before
+        // this. The text-to-image loop has no step graph, no step cache and no host fallback, so there is nothing to
+        // narrow for a non-default sampler; the RefEdit path (EditFromEmbeddings) is refused separately.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Boogu-Image");
+        float[] timestepTable = timesteps.ToArray();
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.FlowVelocity,
+            (x, s, stepIndex) =>
+            {
+                // Boogu conditions on the RAW 0-1000 timestep, not sigma — so the on-schedule reuse takes the table
+                // entry unscaled, and only a genuine sub-step derives one (sigma x 1000), which has no table entry.
+                float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                    ? timestepTable[stepIndex]
+                    : s * 1000.0f;
+                Tensor cond = _transformer.ForwardPacked(Backend, x, t, instructionEmbeddings, hPacked, wPacked);
+                if (textGuidanceScale <= 1.0f)
+                {
+                    return new DenoisePrediction(cond, cond);
+                }
+                Tensor uncond = _transformer.ForwardPacked(Backend, x, t, negativeInstructionEmbeddings!, hPacked, wPacked);
+                return new DenoisePrediction(cond, uncond, textGuidanceScale);
+            });
+        sampler.Reset(latent.Shape);
+
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
-
-            Tensor velocity = _transformer.ForwardPacked(Backend, latent, t, instructionEmbeddings, hPacked, wPacked);
-            if (textGuidanceScale > 1.0f)
-            {
-                Tensor uncond = _transformer.ForwardPacked(Backend, latent, t, negativeInstructionEmbeddings!, hPacked, wPacked);
-                Backend.CfgEulerStep(latent, velocity, uncond, textGuidanceScale, scheduler.Dt(i));
-                uncond.Dispose();
-            }
-            else
-            {
-                Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, scheduler.Dt(i));
-            }
-            velocity.Dispose();
+            sampler.Step(Backend, latent, predictor, i);
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
@@ -195,6 +207,18 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         if (referenceImages.Count == 0)
             throw new ArgumentException("Edit requires at least one reference image.", nameof(referenceImages));
         bool doubleGuide = imageGuidanceScale > 1.0f;
+        // The edit path is NOT converted to the sampler seam. Its step alternates between a host combine
+        // (3-tensor dual guidance has no 2-tensor device fusion) and the fused device op depending on
+        // imageGuidanceScale, and the host branch rebinds the latent to a fresh tensor each step — neither fits
+        // ISampler.Step, which advances one stable tensor through one prediction pair. Refuse a named sampler
+        // rather than accepting it and sampling with something else.
+        if (FlowMatchSampling.IsNonDefault(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Boogu-Image's reference-edit path — it "
+                + "runs a dual text/image guidance loop that has not been converted to the sampler seam. Drop the "
+                + "sampler selection, or use text-to-image.");
+        }
         if (doubleGuide && dropAllEmbeddings is null)
             throw new ArgumentException("dropAllEmbeddings is required when imageGuidanceScale > 1.0.", nameof(dropAllEmbeddings));
 

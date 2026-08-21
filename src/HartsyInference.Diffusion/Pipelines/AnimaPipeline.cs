@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -188,14 +189,15 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         // The network outputs velocity (v ≈ noise - x_clean); we integrate via plain Euler:
         //   x_{i+1} = x_i + v * (sigma_next - sigma)
         // No EDM preconditioning, no sigma_max=80 scaling. Initial latent is unit-variance Gaussian.
+        //
+        // That schedule is EXACTLY what FlowMatchEulerDiscreteScheduler(shift) already builds — same
+        // `1 - i/N` linspace, same `shift·t / (1 + (shift-1)·t)` expression in the same F32 op order, and its
+        // index N is the terminal zero. The array is therefore bit-identical to the loop this replaces; going
+        // through the scheduler is what lets `FlowMatchSampling` re-space the sigmas for a named schedule.
         const float Shift = 3.0f;
-        float[] sigmas = new float[steps + 1];
-        for (int i = 0; i < steps; i++)
-        {
-            float lin = 1.0f - (float)i / steps;        // linspace(1, 0, N+1)[:-1]
-            sigmas[i] = Shift * lin / (1.0f + (Shift - 1.0f) * lin);
-        }
-        sigmas[steps] = 0.0f;                            // terminal sigma
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(Shift);
+        scheduler.SetTimesteps(steps);
+        float[] sigmas = scheduler.Sigmas();
         Logs.Info($"Anima sigmas (Z-Image flow-match, shift={Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
 
         // Initial latent: fresh noise (t2i) or the VAE-encoded source noised to sigma[startStep] (img2img).
@@ -228,37 +230,59 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
         if (DiagnosticStats) LogStats("initial latent", latent);
 
+        // Sampler selection (2026-08-20). Anima is flow-matching, so it had no user-selectable sampler at all before
+        // this — the schedule doc comment above still notes that Comfy's `er_sde + simple` parity needs a dedicated
+        // SDE scheduler, which the sampler registry is the place to add. The sampler owns the integrator and the
+        // sigma spacing; the two-forward CFG stays in the predictor closure below. There is no step graph, no step
+        // cache and no host/reference loop here (masked inpaint blends against the same in-place device step), so
+        // there is nothing to narrow for a non-default sampler.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Anima",
+            startsFromNoisedInit: startStep > 0);
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             Backend.ResetD2hSyncCount();
             float sigma = sigmas[i];
             float sigmaNext = sigmas[i + 1];
-            // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
-            // `timestep = timestep / 1000` then model receives the normalized t = sigma).
-            float t = sigma;
 
-            // CFG combine + flow-match Euler as ONE in-place device op: CfgEulerStep computes
+            // CFG combine + flow-match Euler stay ONE in-place device op: CfgEulerStep computes
             // v = g·pos + (1−g)·neg (identical to CfgHelper.ApplyCfg's uncond + g·(cond − uncond)) then
-            // latent += v·dt, keeping the latent device-resident across the whole loop. g = 1 with pos = neg
-            // degenerates to the plain conditional Euler step.
-            float dt = sigmaNext - sigma;
-            Tensor velocity = _transformer.Forward(Backend, latent, t, refinedText);
-            if (cfgScale > 1.0f)
+            // latent += v·dt, keeping the latent device-resident across the whole loop — EulerSampler.Step IS
+            // that same fused call, so a request naming no sampler runs the sequence it always did. Anima hands
+            // back the RAW cond/uncond pair (it never pre-combines), so the pair carries the real cfgScale.
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
+                    // `timestep = timestep / 1000` then the model receives the normalized t = sigma), so unlike the
+                    // rest of the DiT fleet there is no x1000 round trip to preserve here — the sampler's sigma IS
+                    // the conditioning value this loop passed before, on-schedule and at a sub-step alike.
+                    Tensor cond = _transformer.Forward(Backend, x, s, refinedText);
+                    bool logThisStep = DiagnosticStats
+                        && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1);
+                    if (cfgScale <= 1.0f)
+                    {
+                        if (logThisStep)
+                            LogStats($"velocity step={stepIndex} (t={s:F4}, sigma={sigma:F4}→{sigmaNext:F4})", cond);
+                        // Guidance-free: the combine must be exactly 1.0 — substituting the nominal scale would not
+                        // cancel bit-exactly in F32 even though cond == uncond makes it mathematically irrelevant.
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    // The uncond forward runs BEFORE the stats read, as it did before the seam: LogStats touches
+                    // DataPointer, which D2H-syncs and demotes the velocity, so reordering it would change what is
+                    // device-resident during the second forward.
+                    Tensor uncond = _transformer.Forward(Backend, x, s, refinedNegText!);
+                    if (logThisStep)
+                        LogStats($"velocity step={stepIndex} (t={s:F4}, sigma={sigma:F4}→{sigmaNext:F4})", cond);
+                    return new DenoisePrediction(cond, uncond, cfgScale);
+                });
+            if (i == startStep)
             {
-                Tensor velUncond = _transformer.Forward(Backend, latent, t, refinedNegText!);
-                if (DiagnosticStats && (i == 0 || i == steps / 2 || i == steps - 1))
-                    LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
-                Backend.CfgEulerStep(latent, velocity, velUncond, cfgScale, dt);
-                velUncond.Dispose();
+                sampler.Reset(latent.Shape);
             }
-            else
-            {
-                if (DiagnosticStats && (i == 0 || i == steps / 2 || i == steps - 1))
-                    LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
-                Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, dt);
-            }
-            velocity.Dispose();
+            sampler.Step(Backend, latent, predictor, i);
 
             // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory by
             // re-noising the source at the next step's sigma. Final step blends with the clean source

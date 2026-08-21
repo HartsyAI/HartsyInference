@@ -59,8 +59,14 @@ public sealed class EulerSampler : ISampler
                 "EulerSampler's fused update is the epsilon/flow expression z += v·dt; a v-prediction model needs the "
                 + "denoised conversion. Use a sampler built on SamplerMath, or the family's own v-prediction scheduler.");
         }
+        // NextDiT families predict −v, so the sign rides on the scalar delta. Exact in F32 and free, where negating
+        // the latent-sized prediction would cost a kernel and an allocation on every step of every generation.
+        float delta = _sigmas[stepIndex + 1] - _sigmas[stepIndex];
+        if (predictor.Prediction == Schedulers.PredictionType.NegatedFlowVelocity)
+        {
+            delta = -delta;
+        }
         using DenoisePrediction prediction = predictor.Predict(z, _sigmas[stepIndex], stepIndex);
-        backend.CfgEulerStep(z, prediction.Cond, prediction.Uncond, predictor.GuidanceScale,
-            _sigmas[stepIndex + 1] - _sigmas[stepIndex]);
+        backend.CfgEulerStep(z, prediction.Cond, prediction.Uncond, prediction.Guidance, delta);
     }
 }

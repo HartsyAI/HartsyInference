@@ -109,6 +109,20 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
     private Tensor RunDenoise(Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames, int frameRate,
         Action<GenerationProgress>? onProgress, out int seed, Tensor? firstFrameLatent = null)
     {
+        // Sampler selection is NOT wired on this family (2026-08-20 audit): its denoise step is a host-side
+        // Euler in a different algebraic form than IBackend.CfgEulerStep, its schedule is a raw float[] rather
+        // than a FlowMatchEulerDiscreteScheduler, and its I2V frame-0 re-pin is a post-step fixup a multi-evaluation sampler would skip. Converting it would change
+        // default-Euler output, so it was deliberately skipped. Refuse a named sampler rather than accepting the
+        // request and silently sampling with something else.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on LTX-Video. This family has not been "
+                + "converted to the sampler seam yet, so it samples with its own Euler step only. Leave the "
+                + "sampler unset.");
+        }
+
+
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? 768, height = request.Height ?? 512;

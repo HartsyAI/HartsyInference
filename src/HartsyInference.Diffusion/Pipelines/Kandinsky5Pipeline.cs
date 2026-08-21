@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -136,50 +137,81 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 
         Logs.Info("Kandinsky5: starting denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        // Sampler selection (2026-08-20). Kandinsky 5 is flow-matching, so it had no user-selectable sampler at all
+        // before this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored
+        // CFG at the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the
+        // dual-encoder conditioning, the diagnostic dump) stays inside the closure.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Kandinsky 5",
+            startsFromNoisedInit: startStep > 0);
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor? uncond = null;
-            Tensor? cond = null;
-            try
-            {
-                if (useCfg)
-                    uncond = _transformer.Forward(Backend, latent, t, negQwenEmbeds!, negClipPooled!);
-                cond = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
-
-                // Tensor statistics and raw dumps intentionally materialize device tensors. Keep those
-                // readbacks behind the existing debug-dump switch; production sampling must not run global
-                // host reductions or materialize device tensors merely to format informational log lines.
-                if (Kandinsky5DebugDump.Enabled && (i == 0 || i == steps / 2 || i == steps - 1))
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
                 {
-                    Tensor diagnosticPred = useCfg
-                        ? CfgHelper.ApplyCfg(uncond!, cond, cfgScale)
-                        : cond;
+                    // This transformer conditions on the 0-1000 scale (sigma x 1000), NOT the [0,1] sigma the other
+                    // flow-match DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
+                    // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
+                    // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex]
+                        : s * 1000.0f;
+                    Tensor? uncond = null;
+                    Tensor cond;
                     try
                     {
-                        Logs.Info($"[K5DIAG] step {i}: t={t:F2} sigma_idx noisePred.std={StdOf(diagnosticPred):F4} latent.std={StdOf(latent):F4}");
-                        if (i == 0)
+                        // Branch order preserved from the pre-sampler loop: uncond forward first, then cond.
+                        if (useCfg)
+                            uncond = _transformer.Forward(Backend, x, stepT, negQwenEmbeds!, negClipPooled!);
+                        cond = _transformer.Forward(Backend, x, stepT, qwenEmbeds, clipPooled);
+                    }
+                    catch
+                    {
+                        uncond?.Dispose();
+                        throw;
+                    }
+
+                    // Tensor statistics and raw dumps intentionally materialize device tensors. Keep those
+                    // readbacks behind the existing debug-dump switch; production sampling must not run global
+                    // host reductions or materialize device tensors merely to format informational log lines.
+                    if (Kandinsky5DebugDump.Enabled && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1))
+                    {
+                        Tensor diagnosticPred = useCfg
+                            ? CfgHelper.ApplyCfg(uncond!, cond, cfgScale)
+                            : cond;
+                        try
                         {
-                            Kandinsky5DebugDump.Dump("step0_latent", latent);
-                            Kandinsky5DebugDump.Dump("step0_velocity", diagnosticPred);
+                            Logs.Info($"[K5DIAG] step {stepIndex}: t={stepT:F2} sigma_idx noisePred.std={StdOf(diagnosticPred):F4} latent.std={StdOf(x):F4}");
+                            if (stepIndex == 0)
+                            {
+                                Kandinsky5DebugDump.Dump("step0_latent", x);
+                                Kandinsky5DebugDump.Dump("step0_velocity", diagnosticPred);
+                            }
+                        }
+                        finally
+                        {
+                            if (!ReferenceEquals(diagnosticPred, cond)) diagnosticPred.Dispose();
                         }
                     }
-                    finally
-                    {
-                        if (!ReferenceEquals(diagnosticPred, cond)) diagnosticPred.Dispose();
-                    }
-                }
 
-                Backend.CfgEulerStep(latent, cond, useCfg ? uncond! : cond,
-                    useCfg ? cfgScale : 1.0f, scheduler.Dt(i));
-            }
-            finally
+                    return useCfg
+                        ? new DenoisePrediction(cond, uncond!, cfgScale)
+                        : new DenoisePrediction(cond, cond);
+                });
+            if (i == startStep)
             {
-                cond?.Dispose();
-                uncond?.Dispose();
+                sampler.Reset(latent.Shape);
             }
+            sampler.Step(Backend, latent, predictor, i);
 
             // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
             // by re-noising the source latent at the next step's sigma. Final step blends with the

@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -295,6 +296,27 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         // inpaint keeps the host branch — it must read/rebuild the sample on the host every step.
         bool drainFree = !isMaskedInpaint;
 
+        // Sampler selection (2026-08-20). Chroma Radiance is flow-matching, so it had no user-selectable sampler at
+        // all before this. The predictor converts each x0 pass to velocity and hands the RAW pair back, so the
+        // sampler integrates in the same velocity domain the direct CfgEulerStep call used.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Chroma Radiance",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+
+        // The host/reference branch below does not consult the sampler at all, so a non-default selection there would
+        // be silently dropped — the exact failure this whole change removes. Refuse by name instead.
+        if (!drainFree && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Chroma Radiance's drain-free path, and this "
+                + "generation fell back to the reference loop (masked inpaint). Drop the sampler selection, or "
+                + "drop the feature that forced the fallback.");
+        }
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
@@ -302,24 +324,38 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                // Model predicts x0; convert each pass to velocity BEFORE the CFG combine (ComfyUI order).
-                (Tensor condX0, Tensor? uncondX0) = _transformer.ForwardPaired(
-                    Backend, pixels, condContext, useCfg ? uncondContext : null, sigma, null, null);
-                Tensor condV = X0Prediction.ToVelocityDevice(Backend, condX0, pixels, sigma);
-                condX0.Dispose();
-                if (useCfg)
+                DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                    PredictionType.FlowVelocity,
+                    (x, s, stepIndex) =>
+                    {
+                        // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression: the two are equal
+                        // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for
+                        // the other would shift every existing Radiance generation by an ulp of conditioning.
+                        float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                            ? timestepTable[stepIndex] / 1000.0f
+                            : s;
+                        // Model predicts x0; convert each pass to velocity BEFORE the CFG combine (ComfyUI order).
+                        // The conversion is a function of the sample being evaluated, so it runs against `x` and this
+                        // evaluation's own t — a sub-step's x0 residual belongs to ITS sample, not the step's.
+                        (Tensor condX0, Tensor? uncondX0) = _transformer.ForwardPaired(
+                            Backend, x, condContext, useCfg ? uncondContext : null, t, null, null);
+                        Tensor condV = X0Prediction.ToVelocityDevice(Backend, condX0, x, t);
+                        condX0.Dispose();
+                        if (!useCfg)
+                        {
+                            return new DenoisePrediction(condV, condV);
+                        }
+                        Tensor uncondV = X0Prediction.ToVelocityDevice(Backend, uncondX0!, x, t);
+                        uncondX0!.Dispose();
+                        // Cond-anchored CFG (cond + s·(cond − uncond)) == uncond-anchored combine at guidance s+1,
+                        // which is what both the fused kernel and SamplerMath.CombineCfg apply.
+                        return new DenoisePrediction(condV, uncondV, cfgScale + 1.0f);
+                    });
+                if (i == startStep)
                 {
-                    Tensor uncondV = X0Prediction.ToVelocityDevice(Backend, uncondX0!, pixels, sigma);
-                    uncondX0!.Dispose();
-                    // Cond-anchored CFG (cond + s·(cond − uncond)) == uncond-anchored kernel at guidance s+1.
-                    Backend.CfgEulerStep(pixels, condV, uncondV, cfgScale + 1.0f, scheduler.Dt(i));
-                    uncondV.Dispose();
+                    sampler.Reset(pixels.Shape);
                 }
-                else
-                {
-                    Backend.CfgEulerStep(pixels, condV, condV, 1.0f, scheduler.Dt(i));
-                }
-                condV.Dispose();
+                sampler.Step(Backend, pixels, predictor, i);
             }
             else
             {

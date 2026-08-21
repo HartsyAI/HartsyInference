@@ -20,10 +20,6 @@ public interface IDenoisePredictor
     /// estimate via <see cref="SamplerMath.ToDenoised"/> before applying their own math.</summary>
     PredictionType Prediction { get; }
 
-    /// <summary>CFG scale to combine the pair with: <c>v = w·cond + (1−w)·uncond</c>. 1.0 means guidance-free, and a
-    /// predictor running guidance-free is free to return the same tensor for both halves of the pair.</summary>
-    float GuidanceScale { get; }
-
     /// <summary>Evaluates the model at noise level <paramref name="sigma"/>. The caller owns the returned pair and must
     /// dispose it.</summary>
     /// <param name="x">Current latent. Implementations must NOT mutate it — samplers reuse it across the sub-evaluations
