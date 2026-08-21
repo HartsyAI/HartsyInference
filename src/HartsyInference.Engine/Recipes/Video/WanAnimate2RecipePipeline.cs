@@ -44,9 +44,6 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     /// the VAE stride times the patch size, so the token grid is exact.</summary>
     private const int SizeDivisor = 16;
 
-    /// <summary>The only solver this pipeline runs; the reference's FlowDPM++ 2M is not ported.</summary>
-    private const string SupportedSampler = WanAnimate2Pipeline.SubstitutedSampler;
-
     /// <summary>Source frames decoded per output frame requested, before fps resampling. Bounds the decode of a long
     /// driving video: a source above this multiple of the target rate is truncated rather than materialized.</summary>
     private const int MaxSourceFpsRatio = 6;
@@ -204,7 +201,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                     (byte[][] frames, int chunkW, int chunkH, int _) = _pipeline.GenerateChunk(
                         promptEmbeds, negEmbeds, drivingEmbeds, referenceRgb, drivingClip, inner,
                         referenceClipEmbeds: referenceClip, drivingClipEmbeds: drivingClipEmbeds,
-                        carriedRgbFrame: carriedTensor, onProgress: bridge);
+                        carriedRgbFrame: carriedTensor, sampler: request.Sampler, onProgress: bridge);
                     outW = chunkW;
                     outH = chunkH;
                     // Chunk > 0 re-renders the carried frame; upstream drops exactly first_num leading frames.
@@ -276,13 +273,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 $"Wan-Animate-2 has no pose, face, background or character-mask pathway — {string.Join(", ", unsupported)} "
                 + "cannot be applied. Those are Wan-Animate (V1) inputs; the driving video is consumed as raw RGB here.");
         }
-        if (!string.IsNullOrWhiteSpace(request.Sampler)
-            && !string.Equals(request.Sampler, SupportedSampler, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new NotSupportedException(
-                $"Wan-Animate-2 has no '{request.Sampler}' implementation. Upstream samples with FlowDPM++ 2M midpoint, "
-                + "which this engine does not implement; UniPC stands in. Clear the sampler or set it to 'unipc'.");
-        }
+        // Refuse an unrunnable sampler up front, not after the text encoder and VAE have already run.
+        WanAnimate2Pipeline.ResolveSampler(request.Sampler);
     }
 
     /// <summary>The driving stream's umT5 prompt, or upstream's boilerplate when the caller supplied none.</summary>

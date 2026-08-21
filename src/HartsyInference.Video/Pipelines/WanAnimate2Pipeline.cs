@@ -24,8 +24,7 @@ namespace HartsyInference.Video.Pipelines;
 /// pipeline never accepts a <see cref="DiffusionPipelineBase.CfgParallelBackend"/> and its recipe warns when one is
 /// configured.</para>
 ///
-/// <para><b>Numerics unvalidated.</b> No real-weight generation has been run against this yet, and the reference
-/// sampler (FlowDPM++ 2M midpoint) is not ported — see <see cref="SubstitutedSampler"/>.</para></summary>
+/// <para><b>Numerics unvalidated.</b> No real-weight generation has been run against this yet.</para></summary>
 public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 {
     /// <summary>The reference's clip length: 81 pixel frames, of which the last-but-one chunk boundary carries
@@ -38,10 +37,13 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     /// <summary>Upstream's <c>sample_shift</c>, applied to the sigmas.</summary>
     public const float DefaultFlowShift = 5f;
 
-    /// <summary>The solver actually run. The reference uses FlowDPM++ 2M midpoint over
-    /// <c>get_sampling_sigmas</c>; the engine has no flow-prediction DPM++, so UniPC stands in and every generation
-    /// says so. This is a real numerical divergence, not a rename.</summary>
-    public const string SubstitutedSampler = "unipc";
+    /// <summary>The reference solver, and this pipeline's default — <see cref="FlowDpmPlusPlus2MScheduler"/> over
+    /// <c>get_sampling_sigmas</c>.</summary>
+    public const string DefaultSampler = "dpm++2m";
+
+    /// <summary>The one alternative the pipeline will run. Selectable, never the default: UniPC's sigma grid differs
+    /// from <c>get_sampling_sigmas</c> as well as its solver, so it is not a parity reference.</summary>
+    public const string AlternateSampler = "unipc";
 
     private readonly WanAnimate2Transformer _transformer;
     private readonly IWanVaeDecoder _vae;
@@ -70,6 +72,19 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     /// for the distillation build.</summary>
     public static bool UsesCfgBranch(float guidance) => guidance > 1f;
 
+    /// <summary>Normalizes a requested sampler name to one this pipeline runs, throwing on anything else. Null or
+    /// blank selects <see cref="DefaultSampler"/>; upstream offers no other solver, so the only alternative is the
+    /// engine's own UniPC.</summary>
+    public static string ResolveSampler(string? requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested)) return DefaultSampler;
+        if (string.Equals(requested, DefaultSampler, StringComparison.OrdinalIgnoreCase)) return DefaultSampler;
+        if (string.Equals(requested, AlternateSampler, StringComparison.OrdinalIgnoreCase)) return AlternateSampler;
+        throw new NotSupportedException(
+            $"Wan-Animate-2 has no '{requested}' implementation. Upstream samples with FlowDPM++ 2M midpoint over "
+            + $"get_sampling_sigmas ('{DefaultSampler}', the default); '{AlternateSampler}' is the only alternative.");
+    }
+
     /// <summary>Latent frames the generation stream carries for a <paramref name="pixelFrames"/>-frame chunk: the
     /// causal VAE's <c>(T-1)/4 + 1</c> plus the prepended reference slot. The driving stream gets one fewer, which is
     /// the invariant <see cref="WanAnimate2Transformer.EncodeDriving"/> enforces.</summary>
@@ -81,12 +96,13 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     /// fps-resampled and resized — no pose or skeleton rendering. <paramref name="carriedRgbFrame"/> is the previous
     /// chunk's last decoded frame <c>[1,3,1,H,W]</c>, which both seeds the continuation encode and flips latent
     /// frame 1's mask to known; null on the first chunk. <paramref name="drivingClipEmbeds"/> must be the CLIP-ViT-H
-    /// state of <b>this chunk's</b> driving frame 0, not the reference image's.</summary>
+    /// state of <b>this chunk's</b> driving frame 0, not the reference image's. <paramref name="sampler"/> is resolved
+    /// by <see cref="ResolveSampler"/>; null takes the reference solver.</summary>
     public (byte[][] Frames, int Width, int Height, int Seed) GenerateChunk(
         Tensor promptEmbeds, Tensor negativeEmbeds, Tensor drivingPromptEmbeds,
         Tensor referenceRgb, Tensor drivingRgbClip, TextToImageRequest request,
         Tensor? referenceClipEmbeds = null, Tensor? drivingClipEmbeds = null,
-        Tensor? carriedRgbFrame = null, Action<GenerationProgress>? onProgress = null)
+        Tensor? carriedRgbFrame = null, string? sampler = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(referenceRgb);
@@ -123,13 +139,17 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         bool useCfg = UsesCfgBranch(guidance);
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? DefaultFlowShift;
+        string samplerName = ResolveSampler(sampler);
 
         Logs.Info($"Wan-Animate-2: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, "
-            + $"seed={seed} (gen latent {latentCh}x{tTotal}x{hLat}x{wLat}, driving {tTotal - 1} frame(s)"
+            + $"seed={seed}, sampler={samplerName} (gen latent {latentCh}x{tTotal}x{hLat}x{wLat}, driving {tTotal - 1} frame(s)"
             + $"{(continuation ? ", continuation chunk" : "")}, log_scale={_config.Animate2LogScale}).");
-        Logs.Warning("[WanAnimate2] Sampling with UniPC. The reference solver is FlowDPM++ 2M midpoint over "
-            + "get_sampling_sigmas, which this engine does not implement — the trajectory WILL differ from upstream, "
-            + "and this output is not a numerical parity reference.");
+        if (samplerName == AlternateSampler)
+        {
+            Logs.Warning("[WanAnimate2] UniPC was requested. Its sigma grid floors at 1/1000 where get_sampling_sigmas "
+                + "reaches 0, so the trajectory differs from upstream in the grid as well as the solver — this output "
+                + "is not a numerical parity reference.");
+        }
 
         Tensor? conditioning = null, drivingLatent = null, latents = null;
         WanAnimate2DrivingCache? driving = null;
@@ -180,13 +200,17 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             Backend.FreeActivations();
 
             latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
-            FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
-            scheduler.SetTimesteps(steps, shift);
+            bool alternate = samplerName == AlternateSampler;
+            FlowUniPCMultistepScheduler? unipc = alternate ? new FlowUniPCMultistepScheduler(solverOrder: 2) : null;
+            FlowDpmPlusPlus2MScheduler? dpm = alternate ? null : new FlowDpmPlusPlus2MScheduler();
+            unipc?.SetTimesteps(steps, shift);
+            dpm?.SetTimesteps(steps, shift);
+            float[] timesteps = (alternate ? unipc!.Timesteps : dpm!.Timesteps).ToArray();
 
             for (int k = 0; k < steps; k++)
             {
                 Stopwatch sw = Stopwatch.StartNew();
-                float tEmb = scheduler.Timesteps[k];
+                float tEmb = timesteps[k];
                 Tensor modelInput = WanAnimate2Conditioning.ConcatChannels(latents, conditioning);
                 Tensor vCond = _transformer.Forward(Backend, modelInput, promptEmbeds, tEmb, driving, referenceClipEmbeds);
                 if (useCfg)
@@ -198,7 +222,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                     vUncond.Dispose();
                 }
                 modelInput.Dispose();
-                scheduler.Step(latents, vCond);
+                if (alternate) unipc!.Step(latents, vCond); else dpm!.Step(latents, vCond);
                 vCond.Dispose();
                 sw.Stop();
                 onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
