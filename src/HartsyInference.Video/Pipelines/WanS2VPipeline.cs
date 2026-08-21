@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -77,6 +78,14 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         ReadOnlySpan<byte> referenceRgb24 = default, Action<GenerationProgress>? onProgress = null,
         Tensor? referenceLatent = null)
     {
+        // Sampler selection is NOT wired on this family (2026-08-20 audit): the family samples with a UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. This family samples with UniPC, so even an explicit 'euler' cannot be honoured here.
+        // Refuse rather than accepting the request and sampling with something else.
+        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Wan S2V. Leave the sampler unset.");
+        }
+
         ThrowIfDisposed();
         int width = request.Width ?? 832, height = request.Height ?? 480;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;

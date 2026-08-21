@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -99,6 +100,19 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         int[] latentPosIds = LancePipelineCommon.BuildLatentPositionIds(gridT, gridH, gridW, _config.MaxLatentSize);
 
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+
+        // Sampler selection is NOT wired on this family (2026-08-20 audit). Unlike LanceVideoPipeline — which keeps a
+        // HOST renorm combine followed by a plain Euler, and therefore converted — the image path fuses the guidance
+        // renorm INTO the device step via Backend.CfgRenormEulerStep: guided = uncond + g*(cond-uncond), then a
+        // clamped global rescale by ||cond||/||guided||, then the Euler update, all in one kernel. The sampler's pair
+        // contract expresses only a linear combine, and reimplementing the renorm host-side would change the default
+        // path. Refuse rather than accept a selection and sample with something else.
+        if (FlowMatchSampling.IsNonDefault(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Lance image — its guidance renorm is "
+                + "fused into the device Euler step, which the sampler seam cannot express. Leave the sampler unset.");
+        }
         Tensor latents = BuildInitialTokenLatents(request, tsteps, nVae, seed, startStep, out Tensor? sourceTokensKeep);
         Tensor? maskPixel = plan.MaskPixel;
         bool isMaskedInpaint = maskPixel is not null && sourceTokensKeep is not null;

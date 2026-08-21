@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -135,41 +136,107 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         // ── 3. Denoising loop ──
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
+        // Sampler seam. Zeta-Chroma is flow-matching, so it had no user-selectable sampler at all before this: the
+        // predictor converts each x0 pass to velocity and applies the family's own CFG, and the sampler integrates in
+        // the same velocity domain the host scheduler step did. Masked inpaint keeps the reference branch, which
+        // rebuilds the sample on the host from the SCHEDULER's sigmas every step and never consults the sampler.
+        bool samplerDriven = !isMaskedInpaint;
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Zeta-Chroma",
+            startsFromNoisedInit: startStep > 0);
+        bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
+        if (!samplerDriven && nonDefaultSampler)
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' runs only on Zeta-Chroma's sampler-driven path, and this "
+                + "generation fell back to the reference loop (masked inpaint). Drop the sampler selection, or "
+                + "drop the feature that forced the fallback.");
+        }
+
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.FlowVelocity,
+            (x, s, stepIndex) =>
+            {
+                // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression: the two are equal
+                // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for the
+                // other would shift every existing generation by an ulp of conditioning.
+                float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                    ? timestepTable[stepIndex] / 1000.0f
+                    : s;
+                // Z-Image lineage: the transformer conditions on the INVERTED timestep (1 - sigma); the
+                // transformer multiplies by t_scale=1000 internally. Validation-gated (research doc item 7).
+                float invertedSigma = 1.0f - t;
+
+                // Model predicts x0; convert each pass to velocity BEFORE the CFG combine. The conversion is a
+                // function of the sample being evaluated, so it runs against `x` and this evaluation's own t — a
+                // sub-step's x0 residual belongs to ITS sample, not the step's.
+                Tensor condX0 = _transformer.Forward(Backend, x, captionEmbeddings, invertedSigma);
+                Tensor condV = X0Prediction.ToVelocity(condX0, x, t);
+                condX0.Dispose();
+                if (!useCfg)
+                {
+                    return new DenoisePrediction(condV, condV);
+                }
+                Tensor uncondX0 = _transformer.Forward(Backend, x, negativeCaptionEmbeddings!, invertedSigma);
+                Tensor uncondV = X0Prediction.ToVelocity(uncondX0, x, t);
+                uncondX0.Dispose();
+
+                // VALIDATION-PENDING: standard uncond-anchored CFG on velocity — lodestones sampling.py::denoise_cfg
+                // uses it; the Chroma cond-anchored form over-guided by one unit and amplified the per-patch x0 tile
+                // texture. Kept as the HOST combine rather than handed to the fused kernel as a raw pair: ApplyCfg's
+                // u + s·(c − u) equals the kernel's s·c + (1 − s)·u mathematically but not in F32.
+                Tensor combined = CfgHelper.ApplyCfg(uncondV, condV, cfgScale);
+                uncondV.Dispose();
+                condV.Dispose();
+                return new DenoisePrediction(combined, combined);
+            });
+        if (samplerDriven)
+        {
+            sampler.Reset(pixelShape);
+        }
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
 
-            // Z-Image lineage: the transformer conditions on the INVERTED timestep (1 - sigma); the
-            // transformer multiplies by t_scale=1000 internally. Validation-gated (research doc item 7).
-            float invertedSigma = 1.0f - sigma;
-
-            Tensor condX0 = _transformer.Forward(Backend, pixels, captionEmbeddings, invertedSigma);
-            Tensor velocity = X0Prediction.ToVelocity(condX0, pixels, sigma);
-            condX0.Dispose();
-
-            if (useCfg)
+            if (samplerDriven)
             {
-                Tensor uncondX0 = _transformer.Forward(Backend, pixels, negativeCaptionEmbeddings!, invertedSigma);
-                Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
-                uncondX0.Dispose();
-
-                // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity
-                // (validation-gated, item 8); deliberately NOT ZImagePipeline's cond-baseline variant. Verify vs reference.
-                // lodestones sampling.py::denoise_cfg uses STANDARD uncond-anchored CFG; the
-                // cond-anchored form over-guided by one unit and amplified the per-patch x0 tile texture.
-                Tensor combined = CfgHelper.ApplyCfg(uncondV, velocity, cfgScale);
-                uncondV.Dispose();
-                velocity.Dispose();
-                velocity = combined;
+                sampler.Step(Backend, pixels, predictor, i);
             }
+            else
+            {
+                // Z-Image lineage: the transformer conditions on the INVERTED timestep (1 - sigma); the
+                // transformer multiplies by t_scale=1000 internally. Validation-gated (research doc item 7).
+                float invertedSigma = 1.0f - sigma;
 
-            Tensor newPixels = new Tensor(pixelShape, DType.F32);
-            scheduler.Step(newPixels, velocity, pixels, i);
-            velocity.Dispose();
-            pixels.Dispose();
-            pixels = newPixels;
+                Tensor condX0 = _transformer.Forward(Backend, pixels, captionEmbeddings, invertedSigma);
+                Tensor velocity = X0Prediction.ToVelocity(condX0, pixels, sigma);
+                condX0.Dispose();
+
+                if (useCfg)
+                {
+                    Tensor uncondX0 = _transformer.Forward(Backend, pixels, negativeCaptionEmbeddings!, invertedSigma);
+                    Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
+                    uncondX0.Dispose();
+
+                    // VALIDATION-PENDING: standard uncond-anchored CFG (see the predictor above); verify vs reference.
+                    Tensor combined = CfgHelper.ApplyCfg(uncondV, velocity, cfgScale);
+                    uncondV.Dispose();
+                    velocity.Dispose();
+                    velocity = combined;
+                }
+
+                Tensor newPixels = new Tensor(pixelShape, DType.F32);
+                scheduler.Step(newPixels, velocity, pixels, i);
+                velocity.Dispose();
+                pixels.Dispose();
+                pixels = newPixels;
+            }
 
             // Masked-inpaint blend in pixel space: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source at the next step's sigma.

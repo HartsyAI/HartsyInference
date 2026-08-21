@@ -99,8 +99,11 @@ public sealed class DpmPlusPlus2MSdeSampler : ISampler
             float noiseScale = sigmaNext * MathF.Sqrt(MathF.Max(0f, 1.0f - MathF.Exp(-2.0f * etaH)));
             SamplerOps.AddNoise(backend, z, _shape, _seed, stepIndex, noiseScale);
 
+            // Pinned for the same reason as DpmPlusPlus2MSampler: an unpinned cross-step tensor does not survive a
+            // pipeline's mid-loop FreeActivations, which frees without syncing back.
             _previousDenoised?.Dispose();
             _previousDenoised = denoised;
+            backend.PinActivation(_previousDenoised);
             denoised = null!;
             _previousH = h;
         }

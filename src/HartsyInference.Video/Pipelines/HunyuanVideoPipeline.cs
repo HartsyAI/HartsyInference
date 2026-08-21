@@ -7,6 +7,8 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
@@ -125,6 +127,12 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
         Tensor latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
+        // Sampler selection (2026-08-20). HunyuanVideo had no user-selectable sampler: the loop below was a hardcoded
+        // flow-match Euler over `tsteps`. That array IS the family's sigma schedule — descending from 1.0 with an exact
+        // terminal zero — so it goes to the sampler verbatim rather than being rebuilt through a lookalike scheduler,
+        // which would differ by an ulp for general (i, N) and shift every default generation.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, tsteps, seed, "HunyuanVideo");
+
         // Materialize the conditioning on the host so the per-step FreeActivations() below can't evict it (it is
         // re-uploaded fresh each step). promptEmbeds is already host (CropSequence), but pooled may be a live
         // GPU activation from the CLIP encoder — touching DataPointer forces the D2H sync + cache eviction.
@@ -134,12 +142,34 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1];
-            float tEmb = t * 1000f;
-            Tensor v = _dit.Forward(Backend, latent, promptEmbeds, pooled, tEmb, guidance);
-            // Embedded-guidance path: single velocity, plain flow-match Euler (z -= v·dt).
-            LancePipelineCommon.EulerCfgStep(latent, v, v, 1f, dt);
-            v.Dispose();
+
+            // Embedded/distilled guidance: ONE forward per step, no cond/uncond pair. The prediction therefore goes
+            // back as the guidance-free aliased form at exactly 1.0 — substituting the embedded scale would not cancel
+            // bit-exactly in F32 even though cond == uncond makes it mathematically irrelevant.
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, _) =>
+                {
+                    // The DiT conditions on the 0-1000 scale. The sigma array the sampler integrates over IS `tsteps`,
+                    // so on-schedule this reproduces the old `tsteps[k] * 1000f` bit-for-bit, and a second-order
+                    // sampler's intermediate sigma maps through the same expression instead of indexing a table.
+                    Tensor v = _dit.Forward(Backend, x, promptEmbeds, pooled, s * 1000f, guidance);
+                    return new DenoisePrediction(v, v);
+                });
+            if (k == 0)
+            {
+                sampler.Reset(latent.Shape);
+            }
+            // Plain flow-match Euler (z += v·(sigma_next − sigma)) is what EulerSampler collapses to, so a request
+            // naming no sampler runs the same update the host `EulerCfgStep(latent, v, v, 1f, t − tsteps[k+1])` did.
+            sampler.Step(Backend, latent, predictor, k);
+
+            // The step now lands on the DEVICE (CfgEulerStep is in-place and leaves the latent GPU-resident), while
+            // the FreeActivations sweep below reclaims device buffers WITHOUT a D2H sync-back — and the post-loop
+            // DecodeLatent reads the latent on the host. Materialize it here so neither can lose the step. Costs
+            // nothing net: the pre-sampler loop kept the latent host-side and D2H'd the velocity instead.
+            _ = latent.DataPointer;
+
             sw.Stop();
             if (onProgress is not null)
             {
@@ -153,7 +183,8 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             }
             // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and any
             // not read-back/disposed linger until GC, accumulating to OOM (they held ~18 GB → the VAE decode OOM'd).
-            // Safe: EulerCfgStep updates the latent in-place on the host, so nothing cross-step is GPU-only.
+            // Safe: the sampler's device step is materialized to the host immediately above, so nothing cross-step is
+            // GPU-only when this sweep frees the pool without syncing anything back.
             // trimPool:false — steps are identical, so the pool reservation is re-used verbatim; trimming here
             // released + re-mapped multiple GB of driver memory EVERY step.
             // SKIP on the step-graph path (HARTSY_DIT_GRAPH): the captured graph balances its own allocations and

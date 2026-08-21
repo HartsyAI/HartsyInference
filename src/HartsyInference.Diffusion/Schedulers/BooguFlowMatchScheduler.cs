@@ -109,6 +109,31 @@ public sealed class BooguFlowMatchScheduler : IScheduler
     /// device <c>IBackend.CfgEulerStep</c> drain-free path, identical to the dt used by <see cref="Step"/>.</summary>
     public float Dt(int stepIndex) => _timestepsFull[stepIndex + 1] - _timestepsFull[stepIndex];
 
+    /// <summary>Boogu's own schedule value at a step boundary: time-to-data, ASCENDING 0 → 1, which is what the
+    /// transformer conditions on. The mirror image of a sigma.</summary>
+    public float TimestepAt(int stepIndex) => _timestepsFull[stepIndex];
+
+    /// <summary>The schedule expressed as a DESCENDING sigma array with a terminal zero — the contract
+    /// <c>Sampling.ISampler</c> integrates over — via <c>sigma = 1 − t</c>.
+    ///
+    /// <para>Boogu measures time toward the data (t ascends to 1) where the sampler core measures noise remaining
+    /// (sigma descends to 0). They are the same schedule read in opposite directions, so the family's Euler delta
+    /// <c>t_next − t</c> is exactly <c>−(sigma_next − sigma)</c> — which is why a Boogu predictor reports
+    /// <see cref="PredictionType.NegatedFlowVelocity"/> and the sampler flips one scalar rather than negating a
+    /// tensor.</para>
+    ///
+    /// <para>Note <c>1 − (1 − t)</c> is NOT an exact F32 round trip, so a converted pipeline must recover the
+    /// conditioning value from <see cref="TimestepAt"/> for on-schedule steps rather than from <c>1 − sigma</c>.</para></summary>
+    public float[] Sigmas()
+    {
+        float[] sigmas = new float[_timestepsFull.Length];
+        for (int i = 0; i < sigmas.Length; i++)
+        {
+            sigmas[i] = 1.0f - _timestepsFull[i];
+        }
+        return sigmas;
+    }
+
     /// <summary>One forward Euler step: <c>x_next = x + v · (t_next − t)</c>.</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {

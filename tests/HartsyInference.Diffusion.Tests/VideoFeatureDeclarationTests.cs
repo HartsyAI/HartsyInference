@@ -41,7 +41,7 @@ public sealed class VideoFeatureDeclarationTests
     private static readonly string[] ExpectedLora =
     [
         "wan", "wan-22-5b", "wan-21-14b", "wan-21-1_3b",
-        "wan-vace", "wan-animate", "wan-s2v",
+        "wan-vace", "wan-animate", "wan-animate-2", "wan-s2v",
         "minimax-h3",
         // 2026-08-20 sweep. hunyuan-video, ltx-video-2 and lance-video declared NO conditioning at all before this
         // (they inherited IVideoRecipe's None); LoRA is the first bit each of them carries. LtxVideo2Recipe

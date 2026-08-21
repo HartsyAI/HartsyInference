@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -190,37 +191,79 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        // Sampler selection (2026-08-20). Kandinsky 5 video is flow-matching, so it had no user-selectable sampler at
+        // all before this. The decisions mirror the already-converted T2I Kandinsky5Pipeline, which shares this exact
+        // transformer: the predictor hands back the RAW cond/uncond pair at the real scale (the fused device op's
+        // v = g·cond + (1−g)·uncond is the same uncond-anchored combine CfgHelper.ApplyCfg applied here, and folding it
+        // into the step drops a per-step host materialization of BOTH velocities), and the 0-1000 conditioning scale is
+        // reproduced from the scheduler's own table rather than re-derived. There is no img2img start step (I2V pins
+        // frame 0 but still integrates from sigma[0]), no step cache, and no host fallback loop to narrow.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Kandinsky 5 Video");
+
+        // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
+        // lambda cannot capture. One small array copy per generation.
+        float[] timestepTable = timesteps.ToArray();
+
         for (int i = 0; i < steps; i++)
         {
             Stopwatch sw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor packed = PackVisualCond(noisy, condLatent, condMask);
-            Tensor velocity;
-            if (useCfg)
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    // This transformer conditions on the 0-1000 scale (sigma x 1000), NOT the [0,1] sigma the other
+                    // flow-match DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
+                    // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
+                    // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
+                        ? timestepTable[stepIndex]
+                        : s * 1000.0f;
+                    // The 33-channel model input is DERIVED from the latent, so it must be re-packed against the
+                    // sampler's `x` — a second-order sampler evaluates at an intermediate latent that is not the
+                    // loop's `noisy`, and reusing the outer packing would feed it the wrong noisy channels.
+                    Tensor packed = PackVisualCond(x, condLatent, condMask);
+                    try
+                    {
+                        if (useCfg)
+                        {
+                            // Paired forward: cond+uncond, captured as one CUDA graph under HARTSY_DIT_GRAPH (both
+                            // passes share the packed latent's patch-embed), else two eager forwards. Same numerics
+                            // either way, and both branches return fresh caller-owned velocities.
+                            (Tensor cond, Tensor uncond) = _transformer.ForwardVideoPaired(Backend, packed, stepT,
+                                qwenEmbeds, clipPooled, negQwenEmbeds!, negClipPooled!, scaleT, scaleH, scaleW);
+                            return new DenoisePrediction(cond, uncond, cfgScale);
+                        }
+                        // Guidance-free: the combine must be exactly 1.0 — the nominal scale would not cancel
+                        // bit-exactly in F32 even though cond == uncond makes it mathematically irrelevant.
+                        Tensor velocity = _transformer.ForwardVideo(Backend, packed, stepT, qwenEmbeds, clipPooled,
+                            scaleT, scaleH, scaleW);
+                        return new DenoisePrediction(velocity, velocity);
+                    }
+                    finally
+                    {
+                        packed.Dispose();
+                    }
+                });
+            if (i == 0)
             {
-                // Paired forward: cond+uncond, captured as one CUDA graph under HARTSY_DIT_GRAPH (both passes share
-                // the packed latent's patch-embed), else two eager forwards. Same numerics either way.
-                (Tensor cond, Tensor uncond) = _transformer.ForwardVideoPaired(Backend, packed, t,
-                    qwenEmbeds, clipPooled, negQwenEmbeds!, negClipPooled!, scaleT, scaleH, scaleW);
-                velocity = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
-                uncond.Dispose();
-                cond.Dispose();
+                sampler.Reset(noisy.Shape);
             }
-            else
-            {
-                velocity = _transformer.ForwardVideo(Backend, packed, t, qwenEmbeds, clipPooled,
-                    scaleT, scaleH, scaleW);
-            }
-            packed.Dispose();
+            // In-place on the latent: `noisy` keeps the same reference for the whole loop now (the host
+            // scheduler.Step allocated a fresh tensor and rebound it each step), which is what keeps the frame-0
+            // re-pin, the first-frame normalization and the VAE handoff below reading the tensor they were given.
+            sampler.Step(Backend, noisy, predictor, i);
 
-            Tensor next = new Tensor(latentShape, DType.F32);
-            scheduler.Step(next, velocity, noisy, i);
-            velocity.Dispose();
-            noisy.Dispose();
-            noisy = next;
+            // The step now lands on the DEVICE (CfgEulerStep is in-place and leaves the latent GPU-resident), while
+            // the FreeActivations sweep at the bottom of the loop reclaims device buffers WITHOUT a D2H sync-back.
+            // Materialize the latent here so the sweep cannot silently discard the step. Costs nothing net: the
+            // pre-sampler loop kept the latent host-side and materialized the velocity instead.
+            _ = noisy.DataPointer;
 
-            // I2V: frame 0 stays the image latent (the reference only steps frames 1..).
+            // I2V: frame 0 stays the image latent (the reference only steps frames 1..). Host write, over the
+            // already-materialized latent.
             if (firstFrameLatent is not null)
                 WriteFrame(noisy, 0, firstFrameLatent);
 
@@ -229,8 +272,8 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds));
 
             // Reclaim GPU-resident activations between steps (undisposed cached intermediates otherwise
-            // accumulate to OOM over the loop). Safe: the scheduler steps the latent on the host, and the
-            // conditioning tensors are host-backed (re-uploaded per step). trimPool:false — steps are
+            // accumulate to OOM over the loop). Safe: the sampler's device step is materialized to the host above,
+            // and the conditioning tensors are host-backed (re-uploaded per step). trimPool:false — steps are
             // identical, so the pool reservation is reused instead of a per-step driver release/re-map.
             // SKIP on the step-graph path: the captured graph balances its own allocations and holds the fixed
             // buffers at the addresses the capture bakes — freeing them here would corrupt the replay.

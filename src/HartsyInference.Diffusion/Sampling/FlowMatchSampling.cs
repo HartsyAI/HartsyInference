@@ -12,6 +12,16 @@ namespace HartsyInference.Diffusion.Sampling;
 /// replaces them, which is why <c>karras</c> on Flux stays a Flux schedule rather than becoming an SDXL one.</para></summary>
 public static class FlowMatchSampling
 {
+    /// <summary>Whether <paramref name="selection"/> names ANY sampler at all — the check an UNCONVERTED family must
+    /// use to refuse, as opposed to <see cref="IsNonDefault"/>.
+    ///
+    /// <para>The distinction matters for families whose default is not Euler. Wan samples with UniPC, so
+    /// <c>IsNonDefault("euler")</c> is false there and a user explicitly asking for Euler would silently receive
+    /// UniPC — the exact silently-dropped selection this workstream exists to remove. A converted family may use the
+    /// lenient check because <c>euler</c> genuinely IS what it runs; an unconvertible one cannot honour any request,
+    /// including that one.</para></summary>
+    public static bool IsAnySelection(string? selection) => !string.IsNullOrWhiteSpace(selection);
+
     /// <summary>Whether <paramref name="selection"/> asks for anything other than the family's default Euler. Pipelines
     /// use this to narrow incompatible fast paths (step-graph capture, step-cache, DiT sharding) for that generation
     /// only, rather than refusing the sampler outright.</summary>
@@ -35,6 +45,25 @@ public static class FlowMatchSampling
         bool startsFromNoisedInit = false)
     {
         ArgumentNullException.ThrowIfNull(scheduler);
+        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit);
+    }
+
+    /// <summary>Same resolution over a RAW sigma array, for the families that build their schedule inline instead of
+    /// constructing a <see cref="FlowMatchEulerDiscreteScheduler"/>.
+    ///
+    /// <para>Several families do: F-Lite's per-resolution <c>ShiftedTime</c>, Lance's
+    /// <c>LancePipelineCommon.BuildShiftedTimesteps</c>, LTX's shifted timesteps plus terminal stretch, Boogu's own
+    /// <c>BooguFlowMatchScheduler</c>. Requiring the scheduler TYPE rather than the sigmas it produces excluded all of
+    /// them from the seam for no reason — the sampler core only ever reads the array. Passing the family's own array
+    /// straight through also sidesteps the trap of rebuilding it with a lookalike scheduler: the two constructions
+    /// differ by an ulp for general (i, N), which would shift every default generation.</para>
+    ///
+    /// <para>The array must be descending with a terminal zero, the same contract
+    /// <see cref="FlowMatchEulerDiscreteScheduler.Sigmas"/> satisfies.</para></summary>
+    public static ISampler Resolve(string? selection, float[] baseSigmas, int seed, string family,
+        bool startsFromNoisedInit = false)
+    {
+        ArgumentNullException.ThrowIfNull(baseSigmas);
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(selection);
         if (startsFromNoisedInit && !string.IsNullOrEmpty(scheduleName))
         {
@@ -55,7 +84,7 @@ public static class FlowMatchSampling
             throw new NotSupportedException(
                 $"Sigma schedule '{scheduleName}' is not available. Schedules: {string.Join(", ", SigmaSchedule.Names)}.");
         }
-        float[] sigmas = SigmaSchedule.Apply(scheduleName, scheduler.Sigmas());
+        float[] sigmas = SigmaSchedule.Apply(scheduleName, baseSigmas);
         ISampler sampler = SamplerRegistry.Create(samplerName, sigmas, seed);
         if (IsNonDefault(selection))
         {

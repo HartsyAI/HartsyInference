@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -54,6 +55,20 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         bool cfgNormalization = true,
         float cfgTruncRatio = 1.0f)
     {
+        // Sampler selection is NOT wired on this family (2026-08-20 audit). Two things block it, and the second is
+        // decisive: Lumina-Image 2.0 is NextDiT so it predicts -v (handled now by PredictionType.NegatedFlowVelocity),
+        // but its PRODUCTION default runs Backend.CfgNormalizedEulerStep — a fused normalized-CFG + Euler op with no
+        // pair-form decomposition on the backend. Routing that through the sampler would silently DROP the CFG
+        // normalization, which is changed output rather than changed cost. `cfgTruncRatio` also makes fused-vs-plain
+        // a per-step decision, so a partial conversion would interleave direct and sampler steps and corrupt a
+        // stateful sampler's history. It converts once /Sampling/ grows a normalized combine.
+        if (FlowMatchSampling.IsNonDefault(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Lumina-Image 2.0 — its CFG normalization "
+                + "is fused into the device Euler step, which the sampler seam cannot express. Leave the sampler unset.");
+        }
+
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);

@@ -247,6 +247,20 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Array.Fill(indicatorImageOnly, OutputImageIndicator);
 
         // ── 3. Schedule ──
+        // Sampler selection is NOT wired on this family (2026-08-20 audit), and three independent things block it:
+        // (1) there is no FlowMatchEulerDiscreteScheduler here at all — the schedule is a LogitNormalSchedule plus a
+        // step-interval grid, so the sampler core has no sigma array to integrate over; (2) the denoise loop runs
+        // BACKWARD (startIdx down to 0) while ISampler indexes its sigmas forward; (3) guidance comes from the
+        // preset's own per-step schedule (gw ~7 main, ~3 polish) keyed on the descending index. Converting means
+        // restructuring the loop, not swapping a call. Refuse a named sampler rather than accepting it and sampling
+        // with something else.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Ideogram 4. This family samples on its "
+                + "own logit-normal schedule with a per-step guidance preset and has not been converted to the "
+                + "sampler seam. Leave the sampler unset.");
+        }
         LogitNormalSchedule schedule = LogitNormalSchedule.ForResolution(height, width, preset.Mu, preset.Std);
         float[] grid = LogitNormalSchedule.MakeStepIntervals(steps);
 

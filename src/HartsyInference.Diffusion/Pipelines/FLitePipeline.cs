@@ -1,3 +1,5 @@
+using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -215,42 +217,48 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         }
 
         bool useCfg = cfgScale > 1.0f;
+
+        // Sampler selection (2026-08-20). F-Lite builds its schedule inline — no scheduler object — so the sampler
+        // is resolved over the family's OWN sigma array, produced by the same ShiftedTime() the loop used. Rebuilding
+        // it with a lookalike FlowMatchEulerDiscreteScheduler would differ by an ulp for general (i, N) and shift
+        // every default generation; this is bit-identical by construction.
+        //
+        // F-Lite steps `latent += v·(t − tNext)` with a POSITIVE delta, i.e. its DiT predicts x0 − noise — the
+        // negation of the v = noise − x0 convention. That is exactly PredictionType.NegatedFlowVelocity, which makes
+        // the sampler flip the scalar delta rather than negate a latent-sized tensor per forward.
+        float[] fliteSigmas = new float[steps + 1];
+        for (int k = 0; k <= steps; k++)
+        {
+            fliteSigmas[k] = ShiftedTime(k, steps, alpha);
+        }
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, fliteSigmas, seed, "F-Lite",
+            startsFromNoisedInit: startStep > 0);
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.NegatedFlowVelocity,
+            (x, s, stepIndex) =>
+            {
+                // The transformer conditions on the schedule value itself, so an on-schedule sigma IS `t` — no
+                // scaling round trip to preserve here, unlike the families that condition on sigma x 1000.
+                if (!useCfg)
+                {
+                    Tensor velocity = _transformer.Forward(Backend, x, positiveContext, s);
+                    return new DenoisePrediction(velocity, velocity);
+                }
+                // Preserve the reference branch order: zero/negative context first, positive second.
+                Tensor uncond = _transformer.Forward(Backend, x, negativeContext, s);
+                Tensor cond = _transformer.Forward(Backend, x, positiveContext, s);
+                return new DenoisePrediction(cond, uncond, cfgScale);
+            });
+        sampler.Reset(latent.Shape);
+
         for (int step = startStep; step < steps; step++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = ShiftedTime(step, steps, alpha);
-            float tNext = ShiftedTime(step + 1, steps, alpha);
+            // Still needed below by the masked-inpaint re-noise and the step log; the sampler owns the update itself.
+            float t = fliteSigmas[step];
+            float tNext = fliteSigmas[step + 1];
             float dt = t - tNext;
-
-            if (useCfg)
-            {
-                Tensor? uncond = null;
-                Tensor? cond = null;
-                try
-                {
-                    // Preserve the reference branch order: zero/negative context first, positive second.
-                    uncond = _transformer.Forward(Backend, latent, negativeContext, t);
-                    cond = _transformer.Forward(Backend, latent, positiveContext, t);
-                    Backend.CfgEulerStep(latent, cond, uncond, cfgScale, dt);
-                }
-                finally
-                {
-                    cond?.Dispose();
-                    uncond?.Dispose();
-                }
-            }
-            else
-            {
-                Tensor velocity = _transformer.Forward(Backend, latent, positiveContext, t);
-                try
-                {
-                    Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, dt);
-                }
-                finally
-                {
-                    velocity.Dispose();
-                }
-            }
+            sampler.Step(Backend, latent, predictor, step);
 
             // Masked-inpaint blend directly on the latent (the integrator's source of truth): keep the
             // unmasked region on the source's trajectory by re-mixing the source with fresh noise at tNext.

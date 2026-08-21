@@ -57,6 +57,9 @@ public sealed class LmsSampler : ISampler
         Tensor derivative = new Tensor(z.Shape, DType.F32);
         SamplerOps.SetMix(backend, derivative, z, denoised, 1.0f / sigma, -1.0f / sigma);
 
+        // Pinned: LMS carries up to `Order` derivatives across steps, and a pipeline's mid-loop FreeActivations
+        // frees unpinned activations without syncing them back — the history would come back as stale bytes.
+        backend.PinActivation(derivative);
         _derivatives.Add(derivative);
         if (_derivatives.Count > Order)
         {

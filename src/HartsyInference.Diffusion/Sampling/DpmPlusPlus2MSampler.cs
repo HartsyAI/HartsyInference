@@ -89,8 +89,14 @@ public sealed class DpmPlusPlus2MSampler : ISampler
                 SamplerOps.MixInto(backend, z, extrapolated, sigmaRatio, negExpm1);
             }
 
+            // PIN the history. A pipeline's mid-loop Backend.FreeActivations() reclaims every unpinned activation
+            // WITHOUT a device-to-host sync and clears its GPU binding, so an unpinned denoised estimate would be
+            // read back as stale host bytes on the next step — a silent corruption only multistep samplers can hit,
+            // and only on the pipelines that reclaim per step (SD3, Flux, Qwen-Image, Z-Image and others do).
+            // Pinning here fixes it once for every pipeline rather than per conversion.
             _previousDenoised?.Dispose();
             _previousDenoised = denoised;
+            backend.PinActivation(_previousDenoised);
             denoised = null!;
             _previousH = h;
         }

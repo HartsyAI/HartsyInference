@@ -108,20 +108,22 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         // Drain-free loop: CFG combine + Euler run as ONE in-place device op (CfgEulerStep:
         // z += (neg + gw·(pos−neg))·dt ≡ uncond + tg·(cond−uncond) Euler; gw=1 degenerates to the plain
         // step). The old host scheduler.Step + ApplyCfg forced a velocity D2H + latent re-upload per step.
-        // Sampler selection (2026-08-20). Boogu-Image is flow-matching, so it had no user-selectable sampler before
-        // this. The text-to-image loop has no step graph, no step cache and no host fallback, so there is nothing to
-        // narrow for a non-default sampler; the RefEdit path (EditFromEmbeddings) is refused separately.
-        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Boogu-Image");
-        float[] timestepTable = timesteps.ToArray();
+        // Sampler selection (2026-08-20). Boogu drives its own BooguFlowMatchScheduler, whose schedule ASCENDS
+        // toward the data (t: 0 -> 1) where the sampler core measures noise remaining (sigma: 1 -> 0). Same schedule,
+        // opposite reading — so the sampler integrates over scheduler.Sigmas() (= 1 - t) and the predictor reports
+        // NegatedFlowVelocity, which makes the family's positive `Dt` fall out of the sampler's negative delta with
+        // one scalar flip and no tensor work.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler.Sigmas(), seed, "Boogu-Image");
         DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
-            PredictionType.FlowVelocity,
+            PredictionType.NegatedFlowVelocity,
             (x, s, stepIndex) =>
             {
-                // Boogu conditions on the RAW 0-1000 timestep, not sigma — so the on-schedule reuse takes the table
-                // entry unscaled, and only a genuine sub-step derives one (sigma x 1000), which has no table entry.
-                float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                    ? timestepTable[stepIndex]
-                    : s * 1000.0f;
+                // Recover the conditioning value from the scheduler's own table for an on-schedule step: `1 - (1 - t)`
+                // is not an exact F32 round trip, so deriving it from sigma would shift every existing generation by
+                // an ulp. Only a genuine sub-step takes the derived value, which has no table entry.
+                float t = stepIndex < steps && s == 1.0f - scheduler.TimestepAt(stepIndex)
+                    ? scheduler.TimestepAt(stepIndex)
+                    : 1.0f - s;
                 Tensor cond = _transformer.ForwardPacked(Backend, x, t, instructionEmbeddings, hPacked, wPacked);
                 if (textGuidanceScale <= 1.0f)
                 {

@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Audio;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -96,6 +97,18 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        // Sampler seam (2026-08-20): H3 is one of the families the seam cannot express, so the selection is refused
+        // here rather than silently dropped. One DiT forward returns BOTH stream velocities, and they are integrated
+        // over different deltas — video over -dSigma, audio over -dSigma scaled by the schedule map's derivative —
+        // whereas ISampler.Step advances a single latent per evaluation. Splitting it into two samplers would double
+        // the forwards, which is the whole cost of the generation.
+        if (FlowMatchSampling.IsNonDefault(request.Sampler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Sampler}' is not available on MiniMax-H3: one DiT forward drives both the "
+                + "video and the audio latent on different schedules, which the single-latent sampler seam cannot "
+                + "express. Leave the sampler unset.");
+        }
         // Tier 3.8: <refcrop:N,query[,threshold]> auto-crops reference image N to a CLIPSeg-matched region before
         // it reaches EncodeReferences below. Must run before request.Prompt is read anywhere (line ~191's text
         // encode) — an un-stripped tag left in the prompt is exactly the base-prompt tag-leak class of bug Tier

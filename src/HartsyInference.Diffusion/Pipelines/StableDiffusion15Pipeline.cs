@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -90,7 +91,29 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // 2. Set up scheduler (needed for both paths' initial-latent prep)
-        IScheduler scheduler = SchedulerFactory.Create(request.Scheduler);
+        //
+        // One request string carries both halves of ComfyUI's selection, so a pasted `dpmpp_2m_karras` splits into a
+        // sampler and a sigma schedule instead of being rejected whole. The scheduler still owns SD1.5's sigma range
+        // (its alphas-cumprod table); the schedule name only re-spaces those sigmas, and the sampler integrates over
+        // the result. Same split SdxlPipeline does, for the same reason.
+        (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(request.Scheduler);
+        // Refuse an unknown name rather than silently substituting Euler: a workflow asking for a sampler the engine
+        // lacks used to get a DIFFERENT IMAGE plus a log line nobody reads.
+        if (!SamplerRegistry.IsKnown(samplerName) && !SchedulerFactory.IsKnown(samplerName))
+        {
+            throw new NotSupportedException(
+                $"Unknown sampler '{samplerName}'. Available: "
+                + $"{string.Join(", ", SamplerRegistry.Names.Concat(SchedulerFactory.Names).Distinct(StringComparer.Ordinal))}. "
+                + $"Sigma schedules: {string.Join(", ", SigmaSchedule.Names)}.");
+        }
+        if (!SigmaSchedule.IsKnown(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Unknown sigma schedule '{scheduleName}'. Available: {string.Join(", ", SigmaSchedule.Names)}.");
+        }
+        // A SamplerRegistry sampler supplies its own integrator, so the scheduler is only here for the sigma range —
+        // pass null for the Euler base rather than the sampler's name, which the factory would (correctly) refuse.
+        IScheduler scheduler = SchedulerFactory.Create(SamplerRegistry.IsKnown(samplerName) ? null : samplerName);
         scheduler.SetTimesteps(steps);
 
         // 3. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
@@ -102,14 +125,57 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
-        // 4. Denoise loop (both paths run the same loop from their respective startStep)
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets, ipAdapters, onProgress, conditioningSchedule);
+        // 4. Sampler seam. The sampler-driven loop covers the plain t2i/img2img case on an epsilon Euler schedule;
+        //    every conditional feature (masked inpaint, ControlNet, IP-Adapter, a per-step conditioning schedule) and
+        //    the legacy non-Euler schedulers keep the reference host loop, which never consults a sampler.
+        bool samplerLoop = scheduler is EulerDiscreteScheduler euler && euler.FusedEulerCompatible
+            && !isMaskedInpaint
+            && (controlNets is null || controlNets.Count == 0)
+            && (ipAdapters is null || ipAdapters.Count == 0)
+            && conditioningSchedule is null;
+
+        // Refuse the combination rather than dropping it: silently running plain Euler when the user asked for
+        // euler_ancestral (or ignoring `karras`) is the exact INVISIBLE fallback this seam exists to remove — the
+        // image is fine, just not the one that was requested. The sampler half has to be checked as well as the
+        // schedule half, because a bare `euler_ancestral` carries no schedule suffix.
+        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName)
+            && samplerName.Length > 0
+            && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
+        if (!samplerLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
+        {
+            string asked = nonDefaultSampler
+                ? $"Sampler '{samplerName}'" + (scheduleName is null ? "" : $" with schedule '{scheduleName}'")
+                : $"Sigma schedule '{scheduleName}'";
+            throw new NotSupportedException(
+                $"{asked} runs only on SD1.5's sampler-driven Euler path, and this generation fell back to the "
+                + "reference loop. Masked inpaint, ControlNet, IP-Adapter, a per-step conditioning schedule and the "
+                + "legacy non-Euler schedulers (ddim, lcm, tcd) each force that fallback. Drop the sampler/schedule "
+                + "selection, or drop the feature that forced the fallback.");
+        }
+        // The init latent was noised at the SCHEDULER's own sigma[startStep], so a re-spaced schedule would start the
+        // sampler from a different noise level than the latent actually carries — coherent-but-wrong output with
+        // nothing to point at. FlowMatchSampling.Resolve refuses the same combination for the flow-matching families;
+        // the epsilon path builds its sampler directly, so the guard has to be spelled out here.
+        if (plan.StartStep > 0 && !string.IsNullOrEmpty(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{scheduleName}' cannot be combined with img2img or inpaint on SD1.5 yet: the init "
+                + "latent is noised at the scheduler's own sigma[startStep], so a re-spaced schedule would start the "
+                + "sampler from a different noise level than the latent actually carries. Use the schedule on a "
+                + "text-to-image generation, or drop the schedule suffix.");
+        }
+
+        // 5. Denoise loop (both paths run from their respective startStep)
+        latent = samplerLoop
+            ? RunSamplerDenoiseLoop(latent, latentShape, textEmbeddings, (EulerDiscreteScheduler)scheduler, plan.StartStep, totalSteps: steps, cfgScale,
+                SamplerRegistry.Create(samplerName, SigmaSchedule.Apply(scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas()), seed), onProgress)
+            : RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets, ipAdapters, onProgress, conditioningSchedule);
 
         textEmbeddings.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
-        // 5. VAE decode (tiled — caps im2col workspace at ~2.4 GB per tile)
+        // 6. VAE decode (tiled — caps im2col workspace at ~2.4 GB per tile)
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
@@ -117,14 +183,14 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // 6. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // 7. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
         //    Suppresses VAE encode/decode drift in unmasked regions (same as SDXL).
         if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
         {
             MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
-        // 7. Convert to RGB bytes
+        // 8. Convert to RGB bytes
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -170,6 +236,93 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         return (t2iNoise, null);
     }
 
+
+    /// <summary>Sampler-driven denoise loop: the step body (Euler input scaling, the UNet pass(es), the host CFG combine) lives behind an <see cref="IDenoisePredictor"/> and the update behind an <see cref="ISampler"/>, so SD1.5 gets the engine's full sampler + sigma-schedule vocabulary instead of plain Euler only.
+    /// <para>Covers the plain t2i/img2img case on an epsilon Euler schedule. ControlNet, IP-Adapter, masked inpaint, a per-step conditioning schedule and the legacy non-Euler schedulers all stay on <see cref="RunDenoiseLoop"/>; the caller refuses a named sampler in those cases rather than silently dropping it.</para>
+    /// <para>The predictor hands back the ALREADY-COMBINED prediction as both halves of the pair at guidance 1.0. SD1.5's combine is the host <see cref="CfgHelper.ApplyCfg"/> expression <c>u + s·(c − u)</c> — equal to the fused kernel's <c>s·c + (1 − s)·u</c> mathematically but not in F32 — so keeping the host combine is what leaves the default path unchanged.</para></summary>
+    private Tensor RunSamplerDenoiseLoop(
+        Tensor latent,
+        TensorShape latentShape,
+        Tensor textEmbeddings,
+        EulerDiscreteScheduler scheduler,
+        int startStep,
+        int totalSteps,
+        float cfgScale,
+        ISampler sampler,
+        Action<GenerationProgress>? onProgress)
+    {
+        ArgumentNullException.ThrowIfNull(sampler);
+        bool useCfg = cfgScale > 1.0f;
+        int seqLen = (int)textEmbeddings.Shape[1];
+        int hiddenSize = (int)textEmbeddings.Shape[2];
+        // Step-invariant conditioning, sliced once. The reference loop re-sliced it every step, uploading an
+        // identical tensor each time; a second-order sampler would have paid that twice per step.
+        Tensor condEmb = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+        Tensor? uncondEmb = useCfg ? CfgHelper.SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize) : null;
+
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.Epsilon,
+            (x, sigma, stepIndex) =>
+            {
+                // Both derived quantities come from the sigma the sampler passes rather than from the step index,
+                // because a second-order sampler evaluates at intermediate sigmas that appear nowhere in the
+                // schedule. The scale is the same 1/sqrt(sigma²+1) expression EulerDiscreteScheduler.ScaleModelInput
+                // computes, and TimestepForSigma returns the precomputed timestep unchanged for an on-schedule sigma
+                // — together that keeps the default path unchanged while still admitting sub-steps.
+                float t = scheduler.TimestepForSigma(sigma, stepIndex);
+                float inputScale = 1.0f / MathF.Sqrt((sigma * sigma) + 1.0f);
+                Tensor scaled = new Tensor(latentShape, DType.F32);
+                Backend.Scale(scaled, x, inputScale);
+
+                Tensor noisePred;
+                if (useCfg)
+                {
+                    // Reference branch order preserved: uncond first, cond second.
+                    Tensor uncondNoise = _unet.Forward(Backend, scaled, t, uncondEmb!);
+                    Tensor condNoise = _unet.Forward(Backend, scaled, t, condEmb);
+                    noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
+                    uncondNoise.Dispose();
+                    condNoise.Dispose();
+                }
+                else
+                {
+                    noisePred = _unet.Forward(Backend, scaled, t, condEmb);
+                }
+                scaled.Dispose();
+                // The combine already happened on the host, so one tensor serves both halves at guidance 1.0, which
+                // makes the sampler's own combine an exact identity.
+                return new DenoisePrediction(noisePred, noisePred);
+            });
+
+        Logs.Info("Starting denoising loop...");
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        sampler.Reset(latentShape);
+        Logs.Info($"[Sampling] sampler={sampler.Name}, {sampler.StepCount} steps.");
+
+        for (int i = startStep; i < totalSteps; i++)
+        {
+            Stopwatch stepSw = Stopwatch.StartNew();
+            float t = timesteps[i];
+            sampler.Step(Backend, latent, predictor, i);
+
+            stepSw.Stop();
+            Logs.Debug($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Sd15,
+            });
+        }
+
+        condEmb.Dispose();
+        uncondEmb?.Dispose();
+
+        // The sampler's in-place update keeps the latent device-resident; touching DataPointer syncs it back so the
+        // tiled VAE's host slicing sees the real final state.
+        Backend.Sync();
+        unsafe { _ = (nint)latent.DataPointer; }
+        return latent;
+    }
 
     /// <summary>Runs the diffusion denoising loop. Iterates <c>i</c> from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1, applying scheduler input scaling, the UNet (with optional CFG), and one scheduler step per iteration. Returns the final denoised latent. Disposes intermediate latents along the way.
     /// <para>When <paramref name="latentMask"/> is supplied (masked inpaint), after each scheduler step the loop blends in <c>scheduler.AddNoise(sourceLatent, freshNoise, nextStep)</c> on the unmasked region, keeping it on the source's noise trajectory while the masked region is freely denoised (same formulation as <see cref="SdxlPipeline"/>).</para></summary>

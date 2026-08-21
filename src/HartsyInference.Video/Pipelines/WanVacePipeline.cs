@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -60,6 +61,20 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
+        // NOT converted to the sampler seam, and it cannot be: VACE denoises through FlowUniPCMultistepScheduler, a
+        // stateful predictor/corrector. Its step converts to x0 (x0 = x − σ·v), retro-corrects the PREVIOUS sample
+        // with the current model output (UniC), then extrapolates from a multistep history of past x0 predictions
+        // (UniP). ISampler.Step advances one sample from one prediction pair and owns no cross-step history of the
+        // pipeline's, so the pair contract cannot express this update. Even solver_order=1 is not Euler — the
+        // order-1 UniP step is the DDIM-shaped x0 form xT = (σT/σS0)·x − αT·hφ1·x0. Refused here, before the control
+        // clip's two VAE encodes, so a request that cannot run does not burn them first.
+        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{request.Scheduler}' is not available on Wan VACE — the family samples with a "
+                + "UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. "
+                + "This family samples with UniPC (a multistep solver with a corrector), so even an explicit 'euler' cannot be honoured here. Leave the sampler unset.");
+        }
         float[] scales = new float[_config.VaceLayers.Length];
         for (int i = 0; i < scales.Length; i++) scales[i] = controlScale;
 

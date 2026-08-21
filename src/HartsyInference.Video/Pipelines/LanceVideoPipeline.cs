@@ -7,6 +7,8 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
@@ -108,22 +110,40 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
 
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(nVae, _config.PatchFeatureDim), seed);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // Sampler selection (2026-08-20). Lance's own shifted grid IS the sigma array the sampler integrates —
+        // descending 1→0 with the terminal zero — so it goes to the resolver directly. Rebuilding it through a
+        // lookalike FlowMatch scheduler would differ by an ulp for general (i, N) and shift every default
+        // generation. Text-to-video only: this pipeline has no img2img/inpaint entry, so the init latent is always
+        // pure noise at sigma[0] and `startsFromNoisedInit` stays false.
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, tsteps, seed, "Lance");
+
+        // Because the timesteps double as the sigmas, the value the transformer conditions on is the sampler's own
+        // sigma — no ×1000 round trip to reproduce, and a second-order sub-step conditions (and gates its CFG
+        // interval) at the sigma it is actually evaluating rather than at the enclosing step's.
+        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+            PredictionType.FlowVelocity,
+            (x, s, _) =>
+            {
+                Tensor vCond = _transformer.Forward(Backend, cond.TextTokenIds, x, latentPosIds, s,
+                    cond.PositionIds, cond.UndIdx, cond.GenIdx, cond.AttentionMask);
+                if (cfg > 1f && s > _config.CfgIntervalMin)
+                {
+                    Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, x, latentPosIds, s,
+                        uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
+                    // The global renorm is a NON-linear combine, so it cannot ride the pair's guidance scale.
+                    // Fold it here and hand the sampler an already-combined velocity as both halves at guidance 1,
+                    // which makes the fused op's combine an exact identity.
+                    LancePipelineCommon.CfgRenormGlobalInPlace(vCond, vUncond, cfg, _config.CfgRenormMin);
+                    vUncond.Dispose();
+                }
+                return new DenoisePrediction(vCond, vCond);
+            });
+        sampler.Reset(latents.Shape);
 
         for (int k = 0; k < steps; k++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1];
-            Tensor vCond = _transformer.Forward(Backend, cond.TextTokenIds, latents, latentPosIds, t,
-                cond.PositionIds, cond.UndIdx, cond.GenIdx, cond.AttentionMask);
-            if (cfg > 1f && t > _config.CfgIntervalMin)
-            {
-                Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, latents, latentPosIds, t,
-                    uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
-                LancePipelineCommon.CfgRenormGlobalInPlace(vCond, vUncond, cfg, _config.CfgRenormMin);
-                vUncond.Dispose();
-            }
-            LancePipelineCommon.EulerStep(latents, vCond, dt);
-            vCond.Dispose();
+            sampler.Step(Backend, latents, predictor, k);
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }

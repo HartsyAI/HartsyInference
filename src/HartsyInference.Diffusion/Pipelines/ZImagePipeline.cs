@@ -273,22 +273,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             // Step-graph mode (HARTSY_DIT_GRAPH, fast path only): route the latent through the transformer's FIXED
             // buffer so the captured graph's baked address stays valid across steps and gens. The fixed tensor is
             // transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
-            // Sampler selection (2026-08-20). Z-Image is NextDiT: it predicts −v and folds diffusers' mandatory
-            // noise_pred = −noise_pred into the step delta, which is why the predictor reports
-            // PredictionType.NegatedFlowVelocity — the sampler then flips a scalar coefficient instead of negating a
-            // latent-sized tensor on every forward.
-            ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Z-Image",
-                startsFromNoisedInit: startStep > 0);
             bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
-            if (!fastPath && nonDefaultSampler)
-            {
-                throw new NotSupportedException(
-                    $"Sampler/schedule '{request.Scheduler}' runs only on Z-Image's packed fast path, and this "
-                    + "generation fell back to the reference loop (masked inpaint or regional prompting). Drop the "
-                    + "sampler selection, or drop the feature that forced the fallback.");
-            }
-            float[] timestepTable = timesteps.ToArray();
-
             bool graphMode = fastPath && !useCfg && stepCacheInst is null && !nonDefaultSampler
                 && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
             int fpH = latentH / _config.PatchSize;
@@ -312,6 +297,26 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             }
 
             ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+            // Sampler selection (2026-08-20). Z-Image is NextDiT: it predicts −v and folds diffusers' mandatory
+            // noise_pred = −noise_pred into the step delta, which is why the predictor reports
+            // PredictionType.NegatedFlowVelocity — the sampler flips a scalar coefficient instead of negating a
+            // latent-sized tensor on every forward.
+            ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Z-Image",
+                startsFromNoisedInit: plan.StartStep > 0);
+            if (!fastPath && nonDefaultSampler)
+            {
+                throw new NotSupportedException(
+                    $"Sampler/schedule '{request.Scheduler}' runs only on Z-Image's packed fast path, and this "
+                    + "generation fell back to the reference loop (masked inpaint or regional prompting). Drop the "
+                    + "sampler selection, or drop the feature that forced the fallback.");
+            }
+            float[] timestepTable = timesteps.ToArray();
+            // `stepCacheInst` is a `ref` parameter of this method and cannot be captured by a lambda; the cache
+            // instance itself is what the closure needs, and it is never reassigned after this point.
+            DeviceFeatureCache? stepCache = stepCacheInst;
+            int startStep = plan.StartStep;
+
             for (int i = plan.StartStep; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();
@@ -341,7 +346,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                             bool eligible = !nonDefaultSampler
                                 && (stepCacheLate <= 0f || (stepIndex + 1) > steps * (1f - stepCacheLate));
                             Tensor cond = _transformer.ForwardPacked(Backend, x, captionEmbeddings, inverted, fpH, fpW,
-                                eligible ? stepCacheInst : null);
+                                eligible ? stepCache : null);
                             if (PredictionStatsEnabled)
                                 ValidatePredictionFinite(cond, $"conditional step {stepIndex + 1}", logStats: true);
                             if (!useCfg)

@@ -248,6 +248,21 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             throw new NotSupportedException(
                 $"Unknown sigma schedule '{scheduleName}'. Available: {string.Join(", ", SigmaSchedule.Names)}.");
         }
+        // A re-spaced schedule cannot be combined with img2img or inpaint. BuildInitialLatent below noises the init
+        // latent at the SCHEDULER's own sigma[startStep], while the sampler would integrate the re-spaced array — the
+        // latent would carry one noise level and the solver would assume another, which yields coherent-but-wrong
+        // output with nothing to point at. This mirrors FlowMatchSampling.Resolve's startsFromNoisedInit refusal,
+        // which the flow-match families get for free; the epsilon path builds its sampler directly, so it needs the
+        // check spelled out.
+        if (startStep > 0 && !string.IsNullOrEmpty(scheduleName))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{scheduleName}' cannot be combined with img2img or inpaint on SDXL yet: the init "
+                + "latent is noised at the family's own sigma[startStep], so a re-spaced schedule would start the "
+                + "sampler from a different noise level than the latent actually carries. Use the schedule on a "
+                + "text-to-image generation, or drop the schedule suffix.");
+        }
+
         // A SamplerRegistry sampler supplies its own integrator, so the scheduler is only here for the sigma range —
         // pass null for the Euler base rather than the sampler's name, which the factory would (correctly) refuse.
         IScheduler scheduler = SchedulerFactory.Create(SamplerRegistry.IsKnown(samplerName) ? null : samplerName);
