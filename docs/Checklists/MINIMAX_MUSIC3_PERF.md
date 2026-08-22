@@ -6,15 +6,12 @@ able to pick up any phase from this file alone.
 
 ## Where it stands
 
-Already **1.87× the reference**: 26.4 s of generation for 15.0 s of audio on a 4090 at `:q8`, against diffusers
-PR #14456 BF16 at 49.4 s (same card, prompt, seed, step count). The chain so far: 36.7 → 31.3 (depth KV cache) →
-28.3 (CFG batching, byte-identical output) → 26.4 (depth Q8).
-
-So this grind is "take the remaining measured headroom", not "catch up". Current split on the 4090 at `:q8`, 15 s
-of audio: **LM 9.9 s · depth 3.8 s · flow 9.5 s · vocoder 0.4 s · sampling 0.3 s · ~2.6 s unaccounted loop glue.**
-
-Speculative ceiling if every phase below lands: ~13–16 s, roughly 3× the reference. That is an estimate, not a
-promise.
+Current number lives in `benchmarks/scoreboards/AUDIO.md`, not here (this file's own absolute numbers go stale
+— see the caveat further down; trust same-tree A/B deltas from this doc, re-measure absolutes from the
+scoreboard). Framing: this grind is "take the remaining measured headroom", not "catch up" — the reference is
+already beaten. Current per-phase split (4090, `:q8`, 15s audio): **LM 9.9s · depth 3.8s · flow 9.5s · vocoder
+0.4s · sampling 0.3s · ~2.6s unaccounted loop glue.** Speculative ceiling if every phase below lands: ~13–16s.
+That is an estimate, not a promise.
 
 ## Hardware protocol — read before running anything
 

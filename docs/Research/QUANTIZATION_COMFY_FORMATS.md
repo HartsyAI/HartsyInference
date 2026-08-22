@@ -1,5 +1,11 @@
 # ComfyUI quantization formats (`comfy_quant` / comfy-kitchen)
 
+> **Stub-shaped by design.** `int8_tensorwise` is built and real-weight verified (MiniMax-H3, all five DiT
+> builds load — see `MODEL_STATUS_VIDEO.md`); `nvfp4` is verified bit-exact for GPU-dequant but the resident
+> kernel path is not yet exercised by a full generation. This is cross-cutting format/math reference shared by
+> LTX-2.5 and MiniMax-H3, not a single model's bring-up log — kept in full since it's already reference-only
+> (no narrative walkthrough to strip).
+
 ComfyUI has its own quantization family, unrelated to GGUF (see
 [`QUANTIZATION_DIFFUSION.md`](QUANTIZATION_DIFFUSION.md) for that one). It is what the **official**
 Lightricks LTX 2.5 and Comfy-Org MiniMax-H3 quantized releases ship, so supporting a model's official
