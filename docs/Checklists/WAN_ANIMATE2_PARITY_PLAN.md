@@ -56,6 +56,53 @@ pressure (pinned activations re-read by every block of every step beside a resid
 ⚠️ **"ComfyUI needs no amplification at 81 frames" is SECOND-HAND and load-bearing for this whole
 investigation. Tier 1's same-checkpoint/same-inputs protocol tests it for free — do not skip that read.**
 
+## TIER 1 RESULT (in progress) — the symptom was mis-stated, and every ranked suspect is dead
+
+**The symptom is not "ignores the driving video".** At 77 frames the subject moves plenty; the output is
+**hazy, smeared and mesh-textured**, worst in the later frames of the clip. "Doesn't follow the driver" was a
+misread of an unreadable image.
+
+**Length IS the variable, now with every confound controlled.** All rows: 384x640, `drive_half.mp4`,
+seed 424242, cfg 1, `dpm++2m`, single chunk.
+
+| frames | latent T | steps | result |
+|---|---|---|---|
+| 21 | 7  | 6  | **sharp** — crisp face, clean detail |
+| 21 | 7  | 20 | **sharp** — no mesh at all |
+| 33 | 9  | 6  | frame 0 ok, degraded by frame 20, mush by frame 32 |
+| 45 | 12 | 6  | mush at frame 20 |
+| 77 | 21 | 6  | mush throughout |
+| 77 | 21 | 20 | still mush — **more steps do not rescue it** |
+
+The verified-good 720x1200/21f run has s = 23625, refSeq = 20250, buffer = 27000; the failing 384x640/77f run
+has s = 20160, refSeq = 19200, buffer = 21120. **The working case is LARGER on every magnitude the plan's
+suspects #1 and #2 name.** Frame index alone is not it either: frame 20 is sharp at T=7 and mush at T=12.
+
+**Falsified in Tier 1 (do not re-chase):**
+1. **Steps.** 6 steps renders beautifully at T=7; 20 steps does not save T=21.
+2. **Resolution.** 384x640 is fine at T=7.
+3. **`SliceRows` / `ScatterSeqHeadMajor` / `WanRopeInterleaved` (suspects #1, #2).** `WanAnimate2LongSequenceParityTests`
+   runs a whole spliced forward CPU-vs-CUDA on the REAL token grid (40x24, hw = 960) at genFrames 7/11/16/21;
+   relL2 is 4.7–5.0e-4 at every length, flat in T. Caveat: 1 layer, 4 heads, synthetic F32 weights — it
+   exonerates the splice primitives at long shapes, not the int8 GEMM path or memory management.
+4. **The streamed VAE encode.** Streamed vs whole-clip is bit-exact at 13, 41 and 77 frames on the real
+   `[false,true,true]` temporal-downsample layout.
+5. **A per-frame-index VAE decode decay.** Output frame 20 is sharp at T=7 and mush at T=12.
+
+**Upstream settings, read from the repo (`infer/wan_animate_2*.yaml`, `wan_animate_2_demo.py`):**
+base = 40 steps / guidance 3.0 / `log_scale 0.0`; distillation = 10 steps / guidance 1.0 / `log_scale -1.3`.
+Both yamls sample at shift 5.0. Our checkpoint renders excellently at 6 steps / cfg 1, which is distillation
+behaviour — so `Animate2LogScale` may well be live rather than inert here. `__metadata__` carries only
+`{"transformer": {"model_type": "animate2"}}`; there is no distill marker in the file.
+
+⚠️ **Every failing datapoint so far was collected with two non-reference switches ON in the service unit:**
+`HARTSY_ANIMATE2_BF16_DRIVING_CACHE=1` and `HARTSY_ANIMATE2_POSE_STRENGTH_X100=120`. The BF16 driving cache has
+no correctness coverage anywhere (the parity test above runs the F32 default).
+
+**Still open, in order:** the BF16-cache / pose-strength knobs; driving-cache residency under block streaming
+(suspect #3, untouched); and the ComfyUI e2e at the exact failing config, which is the only thing that can
+still tell "our port has a bug" from "this checkpoint cannot do 77 frames at a quarter of its trained area".
+
 ## Tier 0 — desk checks, no GPU, hours (COMPLETE, see result above)
 
 Diff `WanVideoBlock.Animate2FrameLocalAttention` against `comfy_model_animate2.py`'s gen-frame loop
