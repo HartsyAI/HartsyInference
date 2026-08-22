@@ -27,6 +27,10 @@ public sealed record VideoRequest
     /// <summary>Sampler name; null uses the family's canonical solver. A family that cannot honor the named sampler refuses rather than silently substituting its own.</summary>
     public string? Sampler { get; init; }
 
+    /// <summary>Sigma-schedule name, independent of <see cref="Sampler"/>; null keeps the family's own spacing. The two
+    /// combine — a host sends them from separate dropdowns and the engine resolves them into one selection.</summary>
+    public string? Scheduler { get; init; }
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 

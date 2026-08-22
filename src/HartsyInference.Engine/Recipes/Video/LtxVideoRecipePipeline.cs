@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Features;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Linq;
 using HartsyInference.Core.Backends;
@@ -109,6 +110,9 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
             Steps = steps,
             CfgScale = cfgScale,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
 
         Action<GenerationProgress> bridge = p =>

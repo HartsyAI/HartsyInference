@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Features;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 
@@ -37,6 +38,9 @@ internal static class RecipeRequestMapper
             VariationSeed = request.VariationSeed?.Seed ?? -1,
             VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
             Seed = MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
     }
 }

@@ -138,6 +138,9 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
                 Height = height,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 SeamlessTiling = request.SeamlessTiling,
+                // The refiner runs the legacy SchedulerFactory path, which throws on a name it cannot build — so
+                // routing through the resolver here is what turns a named sampler into a refusal instead of a drop.
+                Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             };
             Action<GenerationProgress>? bridge = progress is null ? null : p =>
             {

@@ -274,6 +274,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
         // Refuse an unrunnable sampler up front, not after the text encoder and VAE have already run.
         WanAnimate2Pipeline.ResolveSampler(request.Sampler);
+        // Both of this family's solvers own their sigma spacing, so a named schedule has nothing to re-space.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{request.Scheduler}' is not available on Wan-Animate-2 — its solvers sample over "
+                + "get_sampling_sigmas and own their own spacing. Leave the schedule unset.");
+        }
     }
 
     /// <summary>One trim + one free-VRAM query serving two decisions: refuses a geometry that cannot fit even with the BF16 cache and a fully-streamed DiT (naming the largest chunk length that would), then resolves the driving-cache dtype for the whole generation via <see cref="WanAnimate2DrivingCachePolicy"/>. Runs before any encode, so an infeasible request costs nothing. Backends reporting no VRAM (CPU) skip the refusal and resolve to F32.</summary>

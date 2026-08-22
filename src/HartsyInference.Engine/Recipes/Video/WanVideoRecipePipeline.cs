@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Features;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -105,6 +106,9 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             Steps = steps,
             CfgScale = cfgScale,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             FlowShift = DefaultFlowShift,
         };
 
@@ -237,6 +241,9 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             Steps = steps,
             CfgScale = cfgScale,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             FlowShift = DefaultFlowShift,
         };
         Action<GenerationProgress> bridge = p =>

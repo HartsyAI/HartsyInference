@@ -87,6 +87,9 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
             Steps = steps,
             CfgScale = textGuidance,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
 
         // The edit path needs a drop-text embedding unconditionally (EditFromEmbeddings takes it non-null), so an
