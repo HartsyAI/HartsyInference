@@ -3,16 +3,9 @@ using System.Text.RegularExpressions;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>A byte-level BPE tokenizer built entirely from a GGUF file's embedded tokenizer metadata
-/// (<c>tokenizer.ggml.tokens</c> + <c>merges</c> + <c>token_type</c> + bos/eos ids) — no external tokenizer
-/// files needed. Covers the byte-level BPE family (Llama-3, Qwen, Mistral-v3, DeepSeek, GPT-OSS). SentencePiece
-/// GGUFs (Gemma, Llama-2) are a follow-up.
+/// <summary>A byte-level BPE tokenizer built entirely from a GGUF file's embedded tokenizer metadata (<c>tokenizer.ggml.tokens</c> + <c>merges</c> + <c>token_type</c> + bos/eos ids) — no external tokenizer files needed. Covers the byte-level BPE family (Llama-3, Qwen, Mistral-v3, DeepSeek, GPT-OSS). SentencePiece GGUFs (Gemma, Llama-2) are a follow-up.
 ///
-/// <para>Implements GPT-2/Llama byte-level BPE directly (regex pre-tokenization → byte-level remap → rank-based
-/// pair merges → vocab lookup) rather than going through a general tokenizer library, so word-boundary spaces
-/// and newline runs encode correctly (matching llama.cpp). Special/control tokens (type CONTROL or
-/// USER_DEFINED) are split out before BPE so a rendered chat template's literals map to their ids, and skipped
-/// on decode. Byte-level reversal via <see cref="ByteLevelCodec"/>.</para></summary>
+/// <para>Implements GPT-2/Llama byte-level BPE directly (regex pre-tokenization → byte-level remap → rank-based pair merges → vocab lookup) rather than going through a general tokenizer library, so word-boundary spaces and newline runs encode correctly (matching llama.cpp). Special/control tokens (type CONTROL or USER_DEFINED) are split out before BPE so a rendered chat template's literals map to their ids, and skipped on decode. Byte-level reversal via <see cref="ByteLevelCodec"/>.</para></summary>
 public sealed class GgufTokenizer : ILlmTokenizer
 {
     private const int TypeControl = 3;
@@ -40,12 +33,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
     public string? EosToken { get; }
     public IReadOnlyList<int> StopIds { get; }
 
-    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id);
-    /// <paramref name="merges"/> are "left right" byte-level pairs in rank order; <paramref name="tokenType"/>
-    /// (optional) marks control/user-defined tokens; <paramref name="extraStopIds"/> adds end-of-turn ids.
-    /// <paramref name="preTokenizerRegex"/> overrides the default GPT-2 split regex (Llama-3 differs in digit
-    /// grouping and contraction casing); <paramref name="ignoreMerges"/> mirrors HF's <c>ignore_merges</c> —
-    /// a pre-token that is itself a vocab entry is emitted directly instead of being re-derived by BPE.</summary>
+    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id); <paramref name="merges"/> are "left right" byte-level pairs in rank order; <paramref name="tokenType"/> (optional) marks control/user-defined tokens; <paramref name="extraStopIds"/> adds end-of-turn ids. <paramref name="preTokenizerRegex"/> overrides the default GPT-2 split regex (Llama-3 differs in digit grouping and contraction casing); <paramref name="ignoreMerges"/> mirrors HF's <c>ignore_merges</c> — a pre-token that is itself a vocab entry is emitted directly instead of being re-derived by BPE.</summary>
     public GgufTokenizer(string[] tokens, string[]? merges, int[]? tokenType,
         int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null,
         string? preTokenizerRegex = null, bool ignoreMerges = false)
@@ -138,8 +126,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
         return ByteLevelCodec.Decode(raw.ToString());
     }
 
-    /// <summary>Standard BPE on one byte-level pre-token: start from single characters, repeatedly merge the
-    /// adjacent pair with the lowest merge rank, then map the resulting pieces to ids.</summary>
+    /// <summary>Standard BPE on one byte-level pre-token: start from single characters, repeatedly merge the adjacent pair with the lowest merge rank, then map the resulting pieces to ids.</summary>
     private void EncodePieceBpe(string piece, List<int> ids)
     {
         if (piece.Length == 0) return;

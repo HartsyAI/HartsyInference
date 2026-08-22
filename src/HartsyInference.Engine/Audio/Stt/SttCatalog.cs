@@ -52,8 +52,7 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>distil-whisper — the same pipeline, but its model ids ("large-v3") do not contain "distil", so it
-    /// needs its own resolver.</summary>
+    /// <summary>distil-whisper — the same pipeline, but its model ids ("large-v3") do not contain "distil", so it needs its own resolver.</summary>
     internal static SttModelDescriptor DistilWhisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveDistilWhisperRepo,
@@ -79,9 +78,7 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>Useful Sensors 2nd-gen streaming Moonshine (tiny/small/medium) — a distinct architecture from the
-    /// original (sliding-window encoder, untied LM head), driven full-utterance through the same greedy decode as
-    /// <see cref="Moonshine"/>. No language/task tokens — those request fields are ignored.</summary>
+    /// <summary>Useful Sensors 2nd-gen streaming Moonshine (tiny/small/medium) — a distinct architecture from the original (sliding-window encoder, untied LM head), driven full-utterance through the same greedy decode as <see cref="Moonshine"/>. No language/task tokens — those request fields are ignored.</summary>
     internal static SttModelDescriptor MoonshineStreaming { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveMoonshineStreamingRepo,
@@ -92,8 +89,7 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>Kyutai delayed-streams STT — Helium LM + Mimi codec → text token ids, decoded by the SentencePiece
-    /// tokenizer. Input audio is 24 kHz; the architecture has no language/task tokens.</summary>
+    /// <summary>Kyutai delayed-streams STT — Helium LM + Mimi codec → text token ids, decoded by the SentencePiece tokenizer. Input audio is 24 kHz; the architecture has no language/task tokens.</summary>
     internal static SttModelDescriptor Kyutai { get; } = new SttModelDescriptor
     {
         InputSampleRate = 24_000,
@@ -134,9 +130,7 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>Whisper Streaming — the same Whisper weights driven through the LocalAgreement-2 hypothesis buffer.
-    /// For a request/response call the whole clip is pushed and flushed, so the result equals batch Whisper with the
-    /// streaming stabilizer; the value is the live partial/confirmed API for future real-time callers.</summary>
+    /// <summary>Whisper Streaming — the same Whisper weights driven through the LocalAgreement-2 hypothesis buffer. For a request/response call the whole clip is pushed and flushed, so the result equals batch Whisper with the streaming stabilizer; the value is the live partial/confirmed API for future real-time callers.</summary>
     internal static SttModelDescriptor WhisperStreaming { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
@@ -175,8 +169,7 @@ internal static class SttCatalog
         Translate = request.Translate,
     };
 
-    /// <summary>Whisper / distil-whisper variant → HF repo. Full repo ids pass through; otherwise a size token is
-    /// matched, else a sensible family default.</summary>
+    /// <summary>Whisper / distil-whisper variant → HF repo. Full repo ids pass through; otherwise a size token is matched, else a sensible family default.</summary>
     private static string ResolveWhisperRepo(string variant)
     {
         string id = (variant ?? string.Empty).Trim();
@@ -213,8 +206,7 @@ internal static class SttCatalog
         return "openai/whisper-base";
     }
 
-    /// <summary>distil-whisper variant → HF repo; unlike <see cref="ResolveWhisperRepo"/> this always resolves into
-    /// the distil-whisper family because its ids are bare ("large-v3", "large-v3.5").</summary>
+    /// <summary>distil-whisper variant → HF repo; unlike <see cref="ResolveWhisperRepo"/> this always resolves into the distil-whisper family because its ids are bare ("large-v3", "large-v3.5").</summary>
     private static string ResolveDistilWhisperRepo(string variant)
     {
         string id = (variant ?? string.Empty).Trim();

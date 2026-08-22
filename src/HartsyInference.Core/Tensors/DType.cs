@@ -20,9 +20,7 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>8-bit floating point E5M2 (5-bit exponent, 2-bit mantissa). Wider range, lower precision than E4M3.</summary>
     public static readonly DType F8E5M2 = new("F8_E5M2", 1, false);
 
-    /// <summary>4-bit floating point E2M1 (1 sign, 2 exponent, 1 mantissa), packed 2 elements per byte with a
-    /// separate block-scale tensor. The resident format for native tensor-core FP4 GEMM on Blackwell
-    /// (cuBLASLt <c>CUDA_R_4F_E2M1</c>). Block byte size 1 covers 2 elements; scales are stored separately.</summary>
+    /// <summary>4-bit floating point E2M1 (1 sign, 2 exponent, 1 mantissa), packed 2 elements per byte with a separate block-scale tensor. The resident format for native tensor-core FP4 GEMM on Blackwell (cuBLASLt <c>CUDA_R_4F_E2M1</c>). Block byte size 1 covers 2 elements; scales are stored separately.</summary>
     public static readonly DType F4E2M1 = new("F4_E2M1", 0, true, 1, 2);
 
     // ── Legacy 32-block quants (ggml type IDs 2-9) ─────────────────────

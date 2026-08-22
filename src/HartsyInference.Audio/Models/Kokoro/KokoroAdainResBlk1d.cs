@@ -83,9 +83,7 @@ internal sealed unsafe class KokoroAdainResBlk1d
         }
     }
 
-    /// <summary>Forward pass over a channels-first <c>[1, dim_in, T]</c> input. Returns
-    /// a fresh <c>[1, dim_out, T_out]</c> tensor where <c>T_out = 2*T</c> if
-    /// <c>upsample</c>, else <c>T</c>.</summary>
+    /// <summary>Maps a channels-first <c>[1, dim_in, T]</c> input to <c>[1, dim_out, T_out]</c>, where <c>T_out = 2*T</c> if <c>upsample</c> else <c>T</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor stylePred)
     {
         int batch = (int)x.Shape[0];

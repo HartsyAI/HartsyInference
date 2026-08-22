@@ -14,14 +14,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan-Video recipe (Wan-AI, umT5-conditioned text/image-to-video) and the entry point for the whole Wan
-/// family: the SwarmUI compat classes <c>wan-22-5b</c> / <c>wan-21-1_3b</c> / <c>wan-21-14b</c> are shared by the
-/// plain T2V/I2V backbone and the VACE / Animate / S2V conditioning variants, so — exactly like the extension's
-/// <c>WanModelVariants.Detect</c> — this recipe sniffs the checkpoint header and hands off to
-/// <see cref="WanVaceRecipe"/>, <see cref="WanAnimateRecipe"/>, or <see cref="WanS2VRecipe"/> when it sees their
-/// signature weights. Lifted from the SwarmUI backend's <c>WanVideoLoader</c>: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=48 Wan2.2 VAE (<see cref="SideModels.Wan22Vae"/>) or z=16 Wan2.1 VAE
-/// (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>) for Wan2.1 I2V.</summary>
+/// <summary>Wan-Video recipe (Wan-AI, umT5-conditioned text/image-to-video) and the entry point for the whole Wan family: the SwarmUI compat classes <c>wan-22-5b</c> / <c>wan-21-1_3b</c> / <c>wan-21-14b</c> are shared by the plain T2V/I2V backbone and the VACE / Animate / S2V conditioning variants, so — exactly like the extension's <c>WanModelVariants.Detect</c> — this recipe sniffs the checkpoint header and hands off to <see cref="WanVaceRecipe"/>, <see cref="WanAnimateRecipe"/>, or <see cref="WanS2VRecipe"/> when it sees their signature weights. Lifted from the SwarmUI backend's <c>WanVideoLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=48 Wan2.2 VAE (<see cref="SideModels.Wan22Vae"/>) or z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>) for Wan2.1 I2V.</summary>
 public sealed class WanVideoRecipe : IVideoRecipe
 {
     /// <summary>Wan2.2 TI2V-5B compat class (z=48 VAE).</summary>
@@ -36,16 +29,14 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <summary>Wan's umT5 context length (matches diffusers' 512-token encode).</summary>
     internal const int TokenLength = 512;
 
-    /// <summary>Upstream's <c>wan_shared_cfg.sample_neg_prompt</c> (<c>wan/configs/shared_config.py</c>), used by every
-    /// Wan family when the caller gives no negative prompt.</summary>
+    /// <summary>Upstream's <c>wan_shared_cfg.sample_neg_prompt</c> (<c>wan/configs/shared_config.py</c>), used by every Wan family when the caller gives no negative prompt.</summary>
     internal const string DefaultNegativePrompt =
         "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，"
         + "多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
 
     private readonly string _familyId;
 
-    /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights;
-    /// a compat-class id ("wan-22-5b" / "wan-21-1_3b" / "wan-21-14b") selects the matching preset instead.</summary>
+    /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights; a compat-class id ("wan-22-5b" / "wan-21-1_3b" / "wan-21-14b") selects the matching preset instead.</summary>
     public WanVideoRecipe(string familyId = "wan") => _familyId = familyId;
 
     /// <inheritdoc/>
@@ -71,18 +62,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
             ? VideoFeatures.InitImage
             : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
 
-    /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only
-    /// detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.)
-    /// a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when
-    /// the file cannot be peeked.
-    /// <para>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of
-    /// <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post
-    /// <see cref="WanVideoCheckpointConverter.LoadAndConvert"/>), not the raw checkpoint's own key names. Wan ships
-    /// both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here
-    /// (mirroring <see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>) risks silently misclassifying a checkpoint
-    /// whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as
-    /// a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring
-    /// (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</para></summary>
+    /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
+    /// <remarks>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post <see cref="WanVideoCheckpointConverter.LoadAndConvert"/>), not the raw checkpoint's own key names. Wan ships both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here (mirroring <see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>) risks silently misclassifying a checkpoint whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</remarks>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -107,10 +88,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         }
     }
 
-    /// <summary>The sampling defaults for a CONCRETE checkpoint. Same reason as <see cref="SupportsFor"/>: the
-    /// variants share Wan's compat classes, so a VACE/Animate/S2V checkpoint resolves under <c>wan-21-14b</c> and
-    /// would otherwise be handed the plain-Wan defaults — Animate's 20 steps at guidance 1.0 never applied, and the
-    /// request fell through to <c>WanVideoConfig</c>'s 50/5.0 instead.</summary>
+    /// <summary>The sampling defaults for a CONCRETE checkpoint. Same reason as <see cref="SupportsFor"/>: the variants share Wan's compat classes, so a VACE/Animate/S2V checkpoint resolves under <c>wan-21-14b</c> and would otherwise be handed the plain-Wan defaults — Animate's 20 steps at guidance 1.0 never applied, and the request fell through to <c>WanVideoConfig</c>'s 50/5.0 instead.</summary>
     public VideoDefaults DefaultsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -137,9 +115,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Wan's official sampling settings: 50 steps at guidance 5.0, 832x480 ("480p"), 33 frames — the
-    /// resolution/frame-count every <c>WanVariant_Gpu_E2E</c> 480p test verifies coherent at
-    /// (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    /// <summary>Wan's official sampling settings: 50 steps at guidance 5.0, 832x480 ("480p"), 33 frames — the resolution/frame-count every <c>WanVariant_Gpu_E2E</c> 480p test verifies coherent at (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f, Width = 832, Height = 480, Frames = 33 };
 
     /// <inheritdoc/>
@@ -167,8 +143,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         return ConstructBase(context, _familyId);
     }
 
-    /// <summary>Builds the plain T2V / I2V / TI2V pipeline. <paramref name="familyId"/> selects the config preset when
-    /// it is one of the three Wan compat classes; otherwise the config is derived from the converted weights.</summary>
+    /// <summary>Builds the plain T2V / I2V / TI2V pipeline. <paramref name="familyId"/> selects the config preset when it is one of the three Wan compat classes; otherwise the config is derived from the converted weights.</summary>
     internal IVideoRecipePipeline ConstructBase(RecipeContext context, string? familyId)
     {
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
@@ -312,11 +287,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         }
     }
 
-    /// <summary>Resolves the MoE timestep boundary. Null <paramref name="percent"/> → the preset's own boundary when
-    /// it has one, else Wan 2.2's official 0.875 (T2V) / 0.9 (I2V). An explicit p — the fraction of steps given to the
-    /// low-noise expert — warps through the shifted flow schedule (<c>boundary = s·p/(1+(s−1)·p)</c>, the same warp the
-    /// UniPC sigmas use; p=0.5 at shift 8 ≈ 0.889). The warp needs <see cref="WanVideoConfig.FlowShift"/>, which only
-    /// the engine knows — transports must pass the raw fraction, never a pre-warped boundary.</summary>
+    /// <summary>Resolves the MoE timestep boundary. Null <paramref name="percent"/> → the preset's own boundary when it has one, else Wan 2.2's official 0.875 (T2V) / 0.9 (I2V). An explicit p — the fraction of steps given to the low-noise expert — warps through the shifted flow schedule (<c>boundary = s·p/(1+(s−1)·p)</c>, the same warp the UniPC sigmas use; p=0.5 at shift 8 ≈ 0.889). The warp needs <see cref="WanVideoConfig.FlowShift"/>, which only the engine knows — transports must pass the raw fraction, never a pre-warped boundary.</summary>
     internal static float ResolveBoundary(double? percent, WanVideoConfig config, bool isConcatI2V)
     {
         if (percent is null)
@@ -328,9 +299,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         return shift * frac / (1f + (shift - 1f) * frac);
     }
 
-    /// <summary>Maps a Wan compat class (+ the DiT's CLIP-image-embedder presence and patch-embed in_channels) to the
-    /// engine config preset; falls back to the weight-derived <see cref="WanConfigDetector"/> when the caller supplied
-    /// the coarse catalog slug rather than a compat class.</summary>
+    /// <summary>Maps a Wan compat class (+ the DiT's CLIP-image-embedder presence and patch-embed in_channels) to the engine config preset; falls back to the weight-derived <see cref="WanConfigDetector"/> when the caller supplied the coarse catalog slug rather than a compat class.</summary>
     private static WanVideoConfig ResolveConfig(string? familyId, bool isClipI2V, int inChannels, IReadOnlyDictionary<string, Tensor> weights)
     {
         if (string.Equals(familyId, Wan21_1_3BCompatClassId, StringComparison.OrdinalIgnoreCase))
@@ -362,17 +331,14 @@ public sealed class WanVideoRecipe : IVideoRecipe
         /// <summary>Wan-Animate pose + face pathway.</summary>
         Animate,
 
-        /// <summary>Wan-Animate-2 driving-video stream. Carries no module of its own, so it is detectable only from
-        /// the file's <c>__metadata__</c>.</summary>
+        /// <summary>Wan-Animate-2 driving-video stream. Carries no module of its own, so it is detectable only from the file's <c>__metadata__</c>.</summary>
         Animate2,
 
         /// <summary>Wan2.2-S2V audio injector.</summary>
         S2V,
     }
 
-    /// <summary>Classifies a Wan checkpoint from its safetensors header keys. The extension took VACE from SwarmUI's
-    /// model-class id; with no host classifier here the VACE branch sniffs its own signature weights, which are as
-    /// unique to the variant as the Animate/S2V ones.</summary>
+    /// <summary>Classifies a Wan checkpoint from its safetensors header keys. The extension took VACE from SwarmUI's model-class id; with no host classifier here the VACE branch sniffs its own signature weights, which are as unique to the variant as the Animate/S2V ones.</summary>
     internal static WanVariant DetectVariant(string checkpointPath)
     {
         IReadOnlySet<string> keys = VideoRecipeUtils.PeekSafeTensorKeys(checkpointPath);

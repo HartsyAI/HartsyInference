@@ -4,24 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>Moonshine audio encoder. Operates directly on the raw 16-kHz waveform —
-/// no mel spectrogram. The 3-layer Conv1D stem does an aggressive 384× temporal
-/// downsample (kernel 127 stride 64 → kernel 7 stride 3 → kernel 3 stride 2), then
-/// 8 RoPE transformer blocks produce per-frame hidden states that the decoder
-/// cross-attends to.
-///
-/// <para><b>Layout choices:</b>
-/// <list type="bullet">
-///   <item>Conv1D is dispatched via the Conv2D H=1 trick (matches our Whisper encoder).</item>
-///   <item>Tanh between conv stages is inlined since <c>IBackend</c> doesn't expose it
-///         and the audio-stem tensors are small (a few thousand floats).</item>
-///   <item>GroupNorm with num_groups=1 (= LayerNorm over [C×T] per sample) is dispatched
-///         through <see cref="IBackend.GroupNorm"/> with the spatial axis flattened to
-///         [1, C, 1, T].</item>
-///   <item>All transformer norms are RMSNorm (weight-only — Llama-style); the bias-less
-///         q/k/v/o projections route through <see cref="WhisperOps.ProjectLinear"/> with
-///         <c>bias: null</c>.</item>
-/// </list></para></summary>
+/// <summary>Moonshine audio encoder: operates directly on the raw 16-kHz waveform (no mel spectrogram), with a 3-layer Conv1D stem doing an aggressive 384× temporal downsample before the RoPE transformer blocks.</summary>
+// Layout choices: Conv1D is dispatched via the Conv2D H=1 trick (matches our Whisper encoder); tanh
+// between conv stages is inlined since IBackend doesn't expose it and the audio-stem tensors are small;
+// GroupNorm(num_groups=1) (= LayerNorm over [C×T] per sample) is dispatched through IBackend.GroupNorm
+// with the spatial axis flattened to [1, C, 1, T]; all transformer norms are RMSNorm (weight-only).
 public sealed unsafe class MoonshineEncoder : IDisposable
 {
     private readonly MoonshineConfig _cfg;
@@ -35,7 +22,6 @@ public sealed unsafe class MoonshineEncoder : IDisposable
     private bool _loaded;
     private int _disposed;
 
-    /// <summary>Config the encoder was built with.</summary>
     public MoonshineConfig Config => _cfg;
 
     public MoonshineEncoder(MoonshineConfig cfg)
@@ -45,8 +31,7 @@ public sealed unsafe class MoonshineEncoder : IDisposable
         for (int i = 0; i < cfg.EncoderLayers; i++) _layers[i] = new MoonshineEncoderLayer(cfg);
     }
 
-    /// <summary>Loads weights from a HuggingFace safetensors dictionary using the
-    /// standard <c>model.encoder.*</c> prefix.</summary>
+    /// <summary>Loads weights from a HuggingFace safetensors dictionary using the standard <c>model.encoder.*</c> prefix.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "model.encoder")
     {
         Tensor c1 = WhisperOps.EnsureF32(weights[$"{prefix}.conv1.weight"]);          // [out, in, k]
@@ -76,9 +61,7 @@ public sealed unsafe class MoonshineEncoder : IDisposable
         _loaded = true;
     }
 
-    /// <summary>Forward pass. <paramref name="audio"/> is a mono 16-kHz waveform in
-    /// [-1, 1] of arbitrary length; the encoder produces
-    /// <c>[1, ceil(len / 384), hidden_size]</c> hidden states.</summary>
+    /// <summary><paramref name="audio"/> is a mono 16-kHz waveform in [-1, 1] of arbitrary length; produces <c>[1, ceil(len / 384), hidden_size]</c> hidden states.</summary>
     public Tensor Forward(IBackend backend, float[] audio)
     {
         ThrowIfDisposed();
@@ -126,7 +109,6 @@ public sealed unsafe class MoonshineEncoder : IDisposable
         c3Out.Dispose();
         // squeezed shares memory with c3Out (Reshape view); freed.
 
-        // 8 RoPE transformer blocks.
         for (int i = 0; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, hidden, t3, _cosTable!, _sinTable!);
@@ -163,9 +145,7 @@ public sealed unsafe class MoonshineEncoder : IDisposable
     public void Dispose() { Interlocked.Exchange(ref _disposed, 1); }
 }
 
-/// <summary>Single Moonshine encoder block. Pre-norm self-attention with partial RoPE,
-/// then pre-norm GELU MLP. All linear projections are bias-less (attention_bias=false);
-/// the MLP fcs DO have biases.</summary>
+/// <summary>Single Moonshine encoder block: pre-norm self-attention with partial RoPE, then pre-norm GELU MLP. Attention projections are bias-less; the MLP fcs DO have biases.</summary>
 internal sealed unsafe class MoonshineEncoderLayer
 {
     private readonly MoonshineConfig _cfg;

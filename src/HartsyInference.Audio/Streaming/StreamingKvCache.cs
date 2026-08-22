@@ -20,10 +20,10 @@ namespace HartsyInference.Audio.Streaming;
 /// <see cref="Reset"/> (cheap — no buffer realloc, just reset position).</para>
 ///
 /// <para>Used by streaming STT (Whisper-streaming, Parakeet streaming) and streaming TTS
-/// AR loops (Bark, XTTS streaming, CosyVoice streaming, Sesame CSM, VibeVoice). Diffusion
-/// pipelines don't need this — they consume the LM cache through the dotLLM dependency
-/// directly. This cache is for in-house transformer paths that bypass dotLLM (e.g. the
-/// non-LM decoders inside the audio models themselves).</para></summary>
+/// AR loops (Bark, XTTS streaming, CosyVoice streaming, Sesame CSM, VibeVoice). Plain
+/// text-generation LLM paths use the LLM package's own <c>KvCache</c>/<c>FixedKvCache</c>/
+/// <c>PagedKvCache</c> instead — this one is for in-house transformer decoders living inside
+/// the audio models themselves.</para></summary>
 public sealed class StreamingKvCache : IKvCache, IDisposable
 {
     private readonly Tensor[] _k;

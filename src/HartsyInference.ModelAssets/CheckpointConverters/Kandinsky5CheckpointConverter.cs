@@ -4,30 +4,20 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads <c>kandinskylab/Kandinsky-5.0-T2I-Lite-*-Diffusers</c> safetensors into a
-/// dictionary already keyed by the diffusers state-dict names that
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> expects.
+/// <summary>Loads <c>kandinskylab/Kandinsky-5.0-T2I-Lite-*-Diffusers</c> safetensors into a dictionary already keyed by the diffusers state-dict names that <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> expects.
 ///
-/// The diffusers folder layout ships the transformer in a per-component <c>transformer/</c>
-/// subdirectory whose state dict is already in the canonical form
-/// (<c>text_embeddings.in_layer.weight</c>, <c>visual_transformer_blocks.{i}.self_attention.to_query.weight</c>,
-/// etc.). This converter therefore mostly handles two real-world quirks:
+/// The diffusers folder layout ships the transformer in a per-component <c>transformer/</c> subdirectory whose state dict is already in the canonical form (<c>text_embeddings.in_layer.weight</c>, <c>visual_transformer_blocks.{i}.self_attention.to_query.weight</c>, etc.). This converter therefore mostly handles two real-world quirks:
 /// <list type="bullet">
-/// <item>Single-file repackaged checkpoints sometimes prepend a <c>transformer.</c> or <c>model.</c>
-/// prefix to every key. We strip the first matching prefix.</item>
-/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into
-/// <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
+/// <item>Single-file repackaged checkpoints sometimes prepend a <c>transformer.</c> or <c>model.</c> prefix to every key. We strip the first matching prefix.</item>
+/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
 /// </list>
 ///
-/// No sub-key renaming happens because the diffusers naming and the HartsyInference
-/// <c>Kandinsky5Transformer.LoadWeights</c> contract are intentionally aligned 1:1.</summary>
+/// No sub-key renaming happens because the diffusers naming and the HartsyInference <c>Kandinsky5Transformer.LoadWeights</c> contract are intentionally aligned 1:1.</summary>
 public sealed class Kandinsky5CheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["transformer.", "model."];
 
-    /// <summary>Result bundle. The Lite t2i model ships transformer + (CLIP + Qwen2.5-VL) text encoders
-    /// + Flux VAE in separate sub-directories of the diffusers repo, so when given a single transformer
-    /// safetensors only <see cref="Transformer"/> is populated.</summary>
+    /// <summary>Result bundle. The Lite t2i model ships transformer + (CLIP + Qwen2.5-VL) text encoders + Flux VAE in separate sub-directories of the diffusers repo, so when given a single transformer safetensors only <see cref="Transformer"/> is populated.</summary>
     public sealed class ConvertedWeights
     {
         public required Dictionary<string, Tensor> Transformer { get; init; }
@@ -61,8 +51,7 @@ public sealed class Kandinsky5CheckpointConverter
         return new ConvertedWeights { Transformer = transformer };
     }
 
-    /// <summary>Convenience: load a single safetensors file and convert. The caller owns the loader
-    /// and must dispose it once weights are no longer referenced.</summary>
+    /// <summary>Convenience: load a single safetensors file and convert. The caller owns the loader and must dispose it once weights are no longer referenced.</summary>
     public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
     {
         SafeTensorsLoader loader = new();
@@ -72,9 +61,7 @@ public sealed class Kandinsky5CheckpointConverter
         return (converted, loader);
     }
 
-    /// <summary>Loads a diffusers folder layout: scans the <c>transformer/</c> subdirectory for
-    /// safetensors shards and merges them into a single dictionary. Returns the converted result
-    /// plus the loaders (disposed by the caller).</summary>
+    /// <summary>Loads a diffusers folder layout: scans the <c>transformer/</c> subdirectory for safetensors shards and merges them into a single dictionary. Returns the converted result plus the loaders (disposed by the caller).</summary>
     public static (ConvertedWeights weights, List<SafeTensorsLoader> loaders) LoadDiffusersFolder(string transformerDir)
     {
         if (!Directory.Exists(transformerDir))
@@ -98,9 +85,7 @@ public sealed class Kandinsky5CheckpointConverter
         return (converted, loaders);
     }
 
-    /// <summary>Loads the T2V video transformer from either a diffusers <c>transformer/</c> directory or
-    /// a single repackaged safetensors file. The video state dict uses the same canonical key set as T2I
-    /// (plus the wider 33-channel <c>visual_embeddings.in_layer</c>), so the conversion path is shared.</summary>
+    /// <summary>Loads the T2V video transformer from either a diffusers <c>transformer/</c> directory or a single repackaged safetensors file. The video state dict uses the same canonical key set as T2I (plus the wider 33-channel <c>visual_embeddings.in_layer</c>), so the conversion path is shared.</summary>
     public static (ConvertedWeights weights, List<SafeTensorsLoader> loaders) LoadVideoTransformer(string transformerPathOrDir)
     {
         if (Directory.Exists(transformerPathOrDir))
@@ -113,10 +98,7 @@ public sealed class Kandinsky5CheckpointConverter
         return (weights, [loader]);
     }
 
-    /// <summary>Loads the HunyuanVideo VAE shard (<c>vae/diffusion_pytorch_model.safetensors</c> or a
-    /// directory containing it) for <c>HunyuanVideoVaeDecoder</c>/<c>HunyuanVideoVaeEncoder</c>. The
-    /// diffusers shard is already keyed <c>encoder.* / decoder.* / quant_conv.* / post_quant_conv.*</c>;
-    /// a <c>vae.</c> wrapper prefix (single-file repacks) is stripped. Caller disposes the loaders.</summary>
+    /// <summary>Loads the HunyuanVideo VAE shard (<c>vae/diffusion_pytorch_model.safetensors</c> or a directory containing it) for <c>HunyuanVideoVaeDecoder</c>/<c>HunyuanVideoVaeEncoder</c>. The diffusers shard is already keyed <c>encoder.* / decoder.* / quant_conv.* / post_quant_conv.*</c>; a <c>vae.</c> wrapper prefix (single-file repacks) is stripped. Caller disposes the loaders.</summary>
     public static (Dictionary<string, Tensor> weights, List<SafeTensorsLoader> loaders) LoadHunyuanVideoVae(string vaePathOrDir)
     {
         string[] shards;

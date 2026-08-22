@@ -23,7 +23,6 @@ internal static class HeartMulaMusicModel
     private const string RlRepo = "HeartMuLa/HeartMuLa-RL-oss-3B-20260123";
     private const string CodecRepo = "HeartMuLa/HeartCodec-oss-20260123";
 
-    /// <summary>The HeartMuLa descriptor.</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = true,
@@ -51,8 +50,7 @@ internal static class HeartMulaMusicModel
         return BaseRepo;
     }
 
-    /// <summary>Maps a model id's precision suffix to a quant mode: <c>-q8</c> → q8_0, <c>-q4</c> → q4_k, else null
-    /// (full bf16). The conversion runs once on first generation into a disk cache.</summary>
+    /// <summary>Maps a model id's precision suffix to a quant mode: <c>-q8</c> → q8_0, <c>-q4</c> → q4_k, else null (full bf16). The conversion runs once on first generation into a disk cache.</summary>
     private static string? ResolveQuant(string variant)
     {
         string lower = (variant ?? string.Empty).Trim().ToLowerInvariant();

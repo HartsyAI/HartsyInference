@@ -13,11 +13,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>LTX-Video recipe (Lightricks; catalog slug "ltx-video", SwarmUI compat class
-/// <c>lightricks-ltx-video</c>). Targets the single-file checkpoints that bundle DiT + VAE — the variant (0.9 2B base,
-/// 0.9.5 2B with the timestep-conditioned VAE, 0.9.7/0.9.8 13B) is detected from the DiT layer count and the VAE key
-/// shape. Lifted from the SwarmUI backend's <c>LtxVideoLoader</c>; the one side model is plain T5-XXL
-/// (<see cref="SideModels.T5XxlEnconly"/> — LTX uses standard T5, not Wan's umT5).</summary>
+/// <summary>LTX-Video recipe (Lightricks; catalog slug "ltx-video", SwarmUI compat class <c>lightricks-ltx-video</c>). Targets the single-file checkpoints that bundle DiT + VAE — the variant (0.9 2B base, 0.9.5 2B with the timestep-conditioned VAE, 0.9.7/0.9.8 13B) is detected from the DiT layer count and the VAE key shape. Lifted from the SwarmUI backend's <c>LtxVideoLoader</c>; the one side model is plain T5-XXL (<see cref="SideModels.T5XxlEnconly"/> — LTX uses standard T5, not Wan's umT5).</summary>
 public sealed class LtxVideoRecipe : IVideoRecipe
 {
     /// <summary>LTX's T5 context length (diffusers uses 128 tokens).</summary>
@@ -31,25 +27,13 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         string.Equals(familyId, "ltx-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>LTX-Video's official sampling settings: 50 steps at guidance 3.0, 704x480, 97 frames
-    /// (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>; frame count matches the pipeline's own
-    /// <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
+    /// <summary>LTX-Video's official sampling settings: 50 steps at guidance 3.0, 704x480, 97 frames (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>; frame count matches the pipeline's own <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97 };
 
-    /// <summary>Family-level default. <see cref="VideoFeatures.Lora"/> (added 2026-08-20) is checkpoint-independent —
-    /// it merges into the DiT, which every variant has — so unlike <see cref="VideoFeatures.InitImage"/> it is NOT
-    /// narrowed by <see cref="SupportsFor"/>. InitImage stays variant-gated there: only the base 0.9
-    /// (non-timestep-VAE, non-13B) checkpoint has a VAE encoder built for its config.</summary>
+    /// <summary>Family-level default. <see cref="VideoFeatures.Lora"/> (added 2026-08-20) is checkpoint-independent — it merges into the DiT, which every variant has — so unlike <see cref="VideoFeatures.InitImage"/> it is NOT narrowed by <see cref="SupportsFor"/>. InitImage stays variant-gated there: only the base 0.9 (non-timestep-VAE, non-13B) checkpoint has a VAE encoder built for its config.</summary>
     public VideoFeatures Supports => VideoFeatures.Lora;
 
-    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY
-    /// against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width
-    /// per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE,
-    /// different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there
-    /// would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for
-    /// Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>)
-    /// mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in
-    /// sync without a full weight load on every capability check.</summary>
+    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -168,8 +152,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         }
     }
 
-    /// <summary>Highest <c>transformer_blocks.{i}</c> index across the converted DiT keys (−1 if none) — tells the
-    /// 48-layer 13B (0.9.7/0.9.8) apart from the 28-layer 2B (0.9/0.9.5).</summary>
+    /// <summary>Highest <c>transformer_blocks.{i}</c> index across the converted DiT keys (−1 if none) — tells the 48-layer 13B (0.9.7/0.9.8) apart from the 28-layer 2B (0.9/0.9.5).</summary>
     private static int MaxTransformerBlockIndex(IEnumerable<string> keys)
     {
         const string Token = "transformer_blocks.";

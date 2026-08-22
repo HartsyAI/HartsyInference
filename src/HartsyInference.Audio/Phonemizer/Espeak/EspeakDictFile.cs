@@ -3,11 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Parses a compiled espeak-ng <c>&lt;lang&gt;_dict</c> file into the in-memory indices espeak builds at load
-/// time (ported from <c>LoadDictionary</c> + <c>InitGroups</c> in espeak-ng v1.50 <c>dictionary.c</c>). The on-disk
-/// layout is: bytes 0-3 = hash-table size (must equal 1024), bytes 4-7 = offset to the rules section, then the
-/// word-list hash buckets, then the letter-to-sound rule groups. All multi-byte integers are little-endian, matching
-/// the format espeak ships (verified against the installed v1.50 <c>en_dict</c>).</summary>
+/// <summary>Parses a compiled espeak-ng <c>&lt;lang&gt;_dict</c> file into the in-memory indices espeak builds at load time (ported from <c>LoadDictionary</c> + <c>InitGroups</c> in espeak-ng v1.50 <c>dictionary.c</c>); on-disk layout is bytes 0-3 = hash-table size (must equal 1024), bytes 4-7 = offset to the rules section, then the word-list hash buckets, then the letter-to-sound rule groups, all little-endian.</summary>
 internal sealed class EspeakDictFile
 {
     /// <summary>The whole dictionary file. Rule and word-entry offsets index directly into this array.</summary>

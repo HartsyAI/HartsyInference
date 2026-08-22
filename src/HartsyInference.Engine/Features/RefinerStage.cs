@@ -8,17 +8,7 @@ using HartsyInference.ModelAssets.Registry;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>The generic second-stage refiner: ANY image model refining ANY base result, the way the ComfyUI backend's
-/// PostApply method works — run the base in full, then run the refiner as img2img over the base's pixels at
-/// <c>Control</c> strength, optionally upscaled first (hires-fix). Because the hand-off is PIXELS, the
-/// cross-architecture problem Comfy solves with an explicit decode→re-encode (<c>modelMustReencode</c>) is
-/// structural here: the refiner pipeline's own img2img path VAE-encodes the pixels with its own encoder, whatever
-/// family it is.
-/// <para>The one case NOT handled here is the classic SDXL-refiner-on-SDXL pair, which
-/// <see cref="Recipes.Image.SdxlRecipePipeline"/> keeps internally — its dedicated
-/// <see cref="SdxlRefinerPipeline"/> carries the aesthetic-score conditioning and true mid-loop StepSwap that only
-/// exist for that pair. <see cref="IsSdxlInternalPair"/> is the single routing decision both sides consult, so the
-/// pass can never run twice or zero times.</para></summary>
+/// <summary>The generic second-stage refiner: ANY image model refining ANY base result, the way the ComfyUI backend's PostApply method works — run the base in full, then run the refiner as img2img over the base's pixels at <c>Control</c> strength, optionally upscaled first (hires-fix). Because the hand-off is PIXELS, the cross-architecture problem Comfy solves with an explicit decode→re-encode (<c>modelMustReencode</c>) is structural here: the refiner pipeline's own img2img path VAE-encodes the pixels with its own encoder, whatever family it is. <para>The one case NOT handled here is the classic SDXL-refiner-on-SDXL pair, which <see cref="Recipes.Image.SdxlRecipePipeline"/> keeps internally — its dedicated <see cref="SdxlRefinerPipeline"/> carries the aesthetic-score conditioning and true mid-loop StepSwap that only exist for that pair. <see cref="IsSdxlInternalPair"/> is the single routing decision both sides consult, so the pass can never run twice or zero times.</para></summary>
 public static class RefinerStage
 {
     /// <summary>Whether this request's refiner is the classic SDXL pair the SDXL recipe handles internally.</summary>
@@ -35,8 +25,7 @@ public static class RefinerStage
         return family is "sdxl-refiner";
     }
 
-    /// <summary>The refiner model's family id: the host-provided <see cref="Refiner.FamilyId"/> when present, else
-    /// the engine's own header sniff (classic single-file architectures only).</summary>
+    /// <summary>The refiner model's family id: the host-provided <see cref="Refiner.FamilyId"/> when present, else the engine's own header sniff (classic single-file architectures only).</summary>
     public static string ResolveRefinerFamily(Refiner refiner)
     {
         if (!string.IsNullOrWhiteSpace(refiner.FamilyId))
@@ -66,9 +55,7 @@ public static class RefinerStage
         }
     }
 
-    /// <summary>Runs the generic refiner pass over <paramref name="baseResult"/> when the request asks for one, else
-    /// returns it unchanged. <paramref name="request"/> must be the defaults-resolved, segment-stripped base request
-    /// (its prompt is what conditions the refine).</summary>
+    /// <summary>Runs the generic refiner pass over <paramref name="baseResult"/> when the request asks for one, else returns it unchanged. <paramref name="request"/> must be the defaults-resolved, segment-stripped base request (its prompt is what conditions the refine).</summary>
     internal static ImageResult Apply(
         InferenceEngine engine, ModelSpec baseSpec, ImageRequest request, ImageResult baseResult,
         IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -185,8 +172,7 @@ public static class RefinerStage
         return refined with { Meta = meta };
     }
 
-    /// <summary>The width/height multiple a family's pipeline requires. 16 satisfies every /8 and /16 family;
-    /// HunyuanImage's 32× VAE is the one stricter case.</summary>
+    /// <summary>The width/height multiple a family's pipeline requires. 16 satisfies every /8 and /16 family; HunyuanImage's 32× VAE is the one stricter case.</summary>
     private static int DimensionGranularity(string familyId) =>
         string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase) ? 32 : 16;
 }

@@ -1,20 +1,15 @@
 namespace HartsyInference.Audio.Models.Whisper;
 
-/// <summary>Configuration for a Whisper encoder-decoder model. Covers all released
-/// sizes (tiny through large-v3) plus the Sept-2024 large-v3-turbo (distilled to 4
-/// decoder layers) and the HuggingFace distil-whisper variants (2-layer decoder).
-/// All numbers are verified against the upstream <c>config.json</c> on HuggingFace.</summary>
+/// <summary>Configuration for a Whisper encoder-decoder model, covering all released sizes (tiny through large-v3) plus the Sept-2024 large-v3-turbo (distilled to 4 decoder layers) and the HuggingFace distil-whisper variants (2-layer decoder); all numbers are verified against the upstream <c>config.json</c> on HuggingFace.</summary>
 public sealed record WhisperConfig
 {
-    /// <summary>Vocabulary size including special tokens. 51865 for &lt;=v2, 51866 for v3+
-    /// (v3 added Cantonese, +1 entry).</summary>
+    /// <summary>Vocabulary size including special tokens — 51865 for &lt;=v2, 51866 for v3+ (v3 added Cantonese, +1 entry).</summary>
     public int VocabSize { get; init; } = 51_865;
 
     /// <summary>Number of mel bins in the input spectrogram. 80 for &lt;=v2, 128 for v3+.</summary>
     public int NumMelBins { get; init; } = 80;
 
-    /// <summary>Maximum encoder positions (audio context). Fixed at 1500 for all
-    /// Whisper sizes — equals 3000 STFT frames after stride-2 conv subsampling.</summary>
+    /// <summary>Maximum encoder positions (audio context), fixed at 1500 for all Whisper sizes — equals 3000 STFT frames after stride-2 conv subsampling.</summary>
     public int MaxAudioPositions { get; init; } = 1500;
 
     /// <summary>Maximum decoder positions (text context). Fixed at 448 for all sizes.</summary>
@@ -47,8 +42,7 @@ public sealed record WhisperConfig
     /// <summary>Convenience: head dimension. Always 64.</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
-    /// <summary>Number of language tokens. 99 through v2; large-v3 added Cantonese (<c>&lt;|yue|&gt;</c>) for 100,
-    /// which shifts every special token after the language block up by one.</summary>
+    /// <summary>Number of language tokens: 99 through v2; large-v3 added Cantonese (<c>&lt;|yue|&gt;</c>) for 100, which shifts every special token after the language block up by one.</summary>
     public int LanguageCount { get; init; } = 99;
 
     // ── Special token IDs (the block before the languages is fixed; everything after shifts with LanguageCount) ──
@@ -62,13 +56,11 @@ public sealed record WhisperConfig
     public int TranslateTokenId => LanguageTokenStart + LanguageCount;
     /// <summary>Transcribe task token. 50359 (&lt;=v2) / 50360 (v3).</summary>
     public int TranscribeTokenId => TranslateTokenId + 1;
-    /// <summary>No-speech token. 50362 (&lt;=v2) / 50363 (v3); the two ids between it and the transcribe
-    /// token are <c>&lt;|startoflm|&gt;</c> and <c>&lt;|startofprev|&gt;</c>.</summary>
+    /// <summary>No-speech token. 50362 (&lt;=v2) / 50363 (v3); the two ids between it and the transcribe token are <c>&lt;|startoflm|&gt;</c> and <c>&lt;|startofprev|&gt;</c>.</summary>
     public int NoSpeechTokenId => TranscribeTokenId + 3;
     /// <summary>No-timestamps token. 50363 (&lt;=v2) / 50364 (v3).</summary>
     public int NoTimestampsTokenId => NoSpeechTokenId + 1;
-    /// <summary>First timestamp token (corresponds to 0.00s). 50364 (&lt;=v2) / 50365 (v3); timestamps run
-    /// 1501 tokens in 0.02s steps, covering 0..30s.</summary>
+    /// <summary>First timestamp token (corresponds to 0.00s). 50364 (&lt;=v2) / 50365 (v3); timestamps run 1501 tokens in 0.02s steps, covering 0..30s.</summary>
     public int TimestampTokenStart => NoTimestampsTokenId + 1;
 
     // ── Presets (per OpenAI / HuggingFace config.json) ─────────────────────────
@@ -151,8 +143,7 @@ public sealed record WhisperConfig
     /// <summary>distil-large-v3 — 32-layer encoder, 2-layer decoder, 128 mel bins.</summary>
     public static WhisperConfig DistilLargeV3 => LargeV3 with { DecoderLayers = 2 };
 
-    /// <summary>distil-large-v3.5 — identical architecture to <see cref="DistilLargeV3"/> (1280/32enc/2dec,
-    /// 128 mel, 51866 vocab per its config.json); the .5 is a longer-trained release, not a shape change.</summary>
+    /// <summary>distil-large-v3.5 — identical architecture to <see cref="DistilLargeV3"/> (1280/32enc/2dec, 128 mel, 51866 vocab per its config.json); the .5 is a longer-trained release, not a shape change.</summary>
     public static WhisperConfig DistilLargeV3_5 => DistilLargeV3;
 
     /// <summary>distil-medium.en — 24/2, 80 mel, English-only.</summary>

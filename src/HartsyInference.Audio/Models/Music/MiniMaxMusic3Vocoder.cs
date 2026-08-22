@@ -6,13 +6,13 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>MiniMax Music 3's Flow-VAE waveform decoder. Architecturally a descript-audio-codec decoder — the same
-/// Snake activations, <c>k=7 dilated + k=1</c> residual units at dilations 1/3/9, and <c>kernel = 2·stride,
-/// padding = ceil(stride/2)</c> transposed convolutions — so the body is <see cref="DacDecoder"/> and this type only
-/// adds what differs: the <c>dec_in_proj</c> lift, the stereo channel fold, and the checkpoint's key names.
+/// <summary>MiniMax Music 3's Flow-VAE waveform decoder, architecturally a descript-audio-codec decoder reused via <see cref="DacDecoder"/>.</summary>
+/// <remarks>Same Snake activations, <c>k=7 dilated + k=1</c> residual units at dilations 1/3/9, and <c>kernel = 2·stride,
+/// padding = ceil(stride/2)</c> transposed convolutions as <see cref="DacDecoder"/>; this type only adds what
+/// differs: the <c>dec_in_proj</c> lift, the stereo channel fold, and the checkpoint's key names.
 ///
 /// <para>Stereo is a channel fold, not a batch axis: the 128 latent channels are two interleaved 64-channel streams
-/// (<c>reshape(2, 64, L)</c>), decoded independently and stacked back as left/right.</para></summary>
+/// (<c>reshape(2, 64, L)</c>), decoded independently and stacked back as left/right.</para></remarks>
 public sealed class MiniMaxMusic3Vocoder : IDisposable
 {
     /// <summary>Waveform samples per latent frame (∏ of the upsample strides).</summary>
@@ -50,9 +50,7 @@ public sealed class MiniMaxMusic3Vocoder : IDisposable
             prefix: "decoder");
     }
 
-    /// <summary>Fuses weight-norm and maps the checkpoint's <c>blocks.i.res_unit_j</c> names onto the
-    /// <c>model.i.block.j</c> layout <see cref="DacDecoder"/> expects. Every convolution is handed over
-    /// pre-fused so the decoder allocates nothing of its own and this type owns the whole weight set.</summary>
+    /// <summary>Fuses weight-norm and maps the checkpoint's <c>blocks.i.res_unit_j</c> names onto the <c>model.i.block.j</c> layout <see cref="DacDecoder"/> expects. Every convolution is handed over pre-fused so the decoder allocates nothing of its own and this type owns the whole weight set.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
@@ -81,8 +79,7 @@ public sealed class MiniMaxMusic3Vocoder : IDisposable
         _decoder.LoadWeights(remapped);
     }
 
-    /// <summary>Decodes flow-matched latents <c>[1, 128, length]</c> into a stereo waveform
-    /// <c>[1, 2, length · 512]</c> in <c>[-1, 1]</c>. Caller owns the result.</summary>
+    /// <summary>Decodes flow-matched latents <c>[1, 128, length]</c> into a stereo waveform <c>[1, 2, length · 512]</c> in <c>[-1, 1]</c>. Caller owns the result.</summary>
     public Tensor Decode(IBackend backend, Tensor latents)
     {
         ArgumentNullException.ThrowIfNull(backend);

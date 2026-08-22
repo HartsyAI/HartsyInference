@@ -7,18 +7,13 @@ namespace HartsyInference.Engine.Placement;
 /// <summary>One contiguous layer range assigned to one device selector; ranges are [Start, End).</summary>
 public readonly record struct LlmStagePlan(string Device, int StartLayer, int EndLayer);
 
-/// <summary>Turns a <see cref="PlacementConfig"/> plus probed device topology into concrete assignments: layer
-/// ranges for LLM sharding, component devices for diffusion. Explicit user config always wins; auto plans fill
-/// the gaps from free VRAM.</summary>
+/// <summary>Turns a <see cref="PlacementConfig"/> plus probed device topology into concrete assignments: layer ranges for LLM sharding, component devices for diffusion. Explicit user config always wins; auto plans fill the gaps from free VRAM.</summary>
 public static class PlacementPlanner
 {
     /// <summary>VRAM held back per device when auto-splitting by free memory: activations, KV, workspaces.</summary>
     private const long PerDeviceReserveBytes = 2L << 30;
 
-    /// <summary>Splits <paramref name="layerCount"/> layers across <paramref name="shardDevices"/> proportionally
-    /// to <paramref name="ratios"/> (explicit, llama.cpp tensor-split style) or to probed free VRAM minus a fixed
-    /// reserve. The last stage is additionally charged <paramref name="lastStageExtraBytes"/> (final norm + lm_head
-    /// + logits) when planning by VRAM. Every stage gets at least one layer.</summary>
+    /// <summary>Splits <paramref name="layerCount"/> layers across <paramref name="shardDevices"/> proportionally to <paramref name="ratios"/> (explicit, llama.cpp tensor-split style) or to probed free VRAM minus a fixed reserve. The last stage is additionally charged <paramref name="lastStageExtraBytes"/> (final norm + lm_head + logits) when planning by VRAM. Every stage gets at least one layer.</summary>
     public static IReadOnlyList<LlmStagePlan> LlmSplitPlan(
         IReadOnlyList<string> shardDevices,
         IReadOnlyList<float>? ratios,
@@ -104,9 +99,7 @@ public static class PlacementPlanner
         return plan;
     }
 
-    /// <summary>Auto component placement for diffusion on a multi-GPU box: text encoders on the smallest-VRAM
-    /// device, denoiser + VAE on the largest. Single (or no) GPU → <see cref="PlacementConfig.Single"/>.
-    /// Merged UNDER any explicit user config by the caller — this only produces the auto suggestion.</summary>
+    /// <summary>Auto component placement for diffusion on a multi-GPU box: text encoders on the smallest-VRAM device, denoiser + VAE on the largest. Single (or no) GPU → <see cref="PlacementConfig.Single"/>. Merged UNDER any explicit user config by the caller — this only produces the auto suggestion.</summary>
     public static PlacementConfig DiffusionAutoPlan()
     {
         IReadOnlyList<GpuTopologyInfo> topology = CudaTopology.Probe();
@@ -134,14 +127,7 @@ public static class PlacementPlanner
         return new PlacementConfig { TextEncoderDevice = $"cuda:{smallest.Ordinal}" };
     }
 
-    /// <summary>Splits a DiT's block loop into an N-way range split (Phase 8, generalized from the original 2-way
-    /// shape) proportional to each stage backend's free VRAM minus the fixed reserve. <paramref name="sharedWeightBytesFirstStage"/>
-    /// (img_in/time-embed/text-fusion/final-layer — <c>EnumerateSharedWeights</c>) is charged to the FIRST stage's
-    /// budget since those weights always live there — the mirror of <see cref="LlmSplitPlan"/>'s
-    /// <c>lastStageExtraBytes</c>, but as a prefix cost instead of a suffix one. Returns per-stage block counts
-    /// (parallel to <paramref name="freeBytesPerStage"/>) via <see cref="LargestRemainderCounts"/>, which already
-    /// generalizes to N weights — callers turn counts into <c>[start, end)</c> ranges via a running prefix sum. The
-    /// N=2 case (<c>counts[0]</c> as a single split point) is exactly the original 2-way behavior.</summary>
+    /// <summary>Splits a DiT's block loop into an N-way range split (Phase 8, generalized from the original 2-way shape) proportional to each stage backend's free VRAM minus the fixed reserve. <paramref name="sharedWeightBytesFirstStage"/> (img_in/time-embed/text-fusion/final-layer — <c>EnumerateSharedWeights</c>) is charged to the FIRST stage's budget since those weights always live there — the mirror of <see cref="LlmSplitPlan"/>'s <c>lastStageExtraBytes</c>, but as a prefix cost instead of a suffix one. Returns per-stage block counts (parallel to <paramref name="freeBytesPerStage"/>) via <see cref="LargestRemainderCounts"/>, which already generalizes to N weights — callers turn counts into <c>[start, end)</c> ranges via a running prefix sum. The N=2 case (<c>counts[0]</c> as a single split point) is exactly the original 2-way behavior.</summary>
     public static IReadOnlyList<int> DitSplitPlan(IReadOnlyList<long> freeBytesPerStage, int blockCount, long sharedWeightBytesFirstStage)
     {
         ArgumentNullException.ThrowIfNull(freeBytesPerStage);
@@ -186,13 +172,7 @@ public static class PlacementPlanner
         return counts;
     }
 
-    /// <summary>Byte-weighted variant of <see cref="DitSplitPlan(IReadOnlyList{long},int,long)"/> for heterogeneous-block
-    /// DiTs (Chroma/HunyuanImage/Flux double blocks are ~2× their single blocks — a count-proportional split
-    /// misallocates by GBs there). Picks each of the <c>stages-1</c> interior split points independently by walking
-    /// a prefix sum over <paramref name="perBlockBytes"/> to the block index closest to that boundary's cumulative
-    /// VRAM-share target, then converts to per-stage counts. For N=2 this is exactly the original single-cutpoint
-    /// prefix-sum search (same tie-break: first-found minimum, ascending split order), so a 2-stage call reproduces
-    /// the original split point bit-for-bit. Every stage gets at least one block.</summary>
+    /// <summary>Byte-weighted variant of <see cref="DitSplitPlan(IReadOnlyList{long},int,long)"/> for heterogeneous-block DiTs (Chroma/HunyuanImage/Flux double blocks are ~2× their single blocks — a count-proportional split misallocates by GBs there). Picks each of the <c>stages-1</c> interior split points independently by walking a prefix sum over <paramref name="perBlockBytes"/> to the block index closest to that boundary's cumulative VRAM-share target, then converts to per-stage counts. For N=2 this is exactly the original single-cutpoint prefix-sum search (same tie-break: first-found minimum, ascending split order), so a 2-stage call reproduces the original split point bit-for-bit. Every stage gets at least one block.</summary>
     public static IReadOnlyList<int> DitSplitPlan(IReadOnlyList<long> freeBytesPerStage, IReadOnlyList<long> perBlockBytes, long sharedWeightBytesFirstStage)
     {
         ArgumentNullException.ThrowIfNull(freeBytesPerStage);
@@ -298,9 +278,7 @@ public static class PlacementPlanner
         return string.Join(", ", parts);
     }
 
-    /// <summary>Rejects <see cref="PlacementConfig"/> combinations that were never designed to compose. Called at
-    /// every point a placement takes effect (construction and <c>InferenceEngine.SetPlacement</c>) so an invalid
-    /// config fails fast instead of misbehaving silently at generation time.</summary>
+    /// <summary>Rejects <see cref="PlacementConfig"/> combinations that were never designed to compose. Called at every point a placement takes effect (construction and <c>InferenceEngine.SetPlacement</c>) so an invalid config fails fast instead of misbehaving silently at generation time.</summary>
     public static void ValidatePlacement(PlacementConfig placement)
     {
         if (placement.TensorParallelDegree < 1)
@@ -391,8 +369,7 @@ public static class PlacementPlanner
         }
     }
 
-    /// <summary>Largest-remainder assignment of <paramref name="itemCount"/> range-partitionable units (LLM layers,
-    /// DiT blocks) proportional to <paramref name="weights"/>, with a 1-item floor per stage.</summary>
+    /// <summary>Largest-remainder assignment of <paramref name="itemCount"/> range-partitionable units (LLM layers, DiT blocks) proportional to <paramref name="weights"/>, with a 1-item floor per stage.</summary>
     private static int[] LargestRemainderCounts(float[] weights, float total, int itemCount)
     {
         int[] counts = new int[weights.Length];

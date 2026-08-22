@@ -13,11 +13,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Lance (video) recipe — the ByteDance Lance_3B_Video unified multimodal DiT, which ships as a FOLDER
-/// checkpoint (model.safetensors or shards + llm_config.json + the Qwen2 tokenizer files). The Wan2.2 48-channel VAE
-/// (<see cref="SideModels.Wan22Vae"/>) resolves as a side model. Lifted from the SwarmUI backend's
-/// <c>LanceLoader</c> (video half; the image half is <c>LanceImageRecipe</c>) and driven through
-/// <see cref="LanceVideoRecipePipeline"/>.</summary>
+/// <summary>Lance (video) recipe — the ByteDance Lance_3B_Video unified multimodal DiT, which ships as a FOLDER checkpoint (model.safetensors or shards + llm_config.json + the Qwen2 tokenizer files). The Wan2.2 48-channel VAE (<see cref="SideModels.Wan22Vae"/>) resolves as a side model. Lifted from the SwarmUI backend's <c>LanceLoader</c> (video half; the image half is <c>LanceImageRecipe</c>) and driven through <see cref="LanceVideoRecipePipeline"/>.</summary>
 public sealed class LanceVideoRecipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -26,9 +22,7 @@ public sealed class LanceVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-video", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0, 512x512, 25 frames
-    /// (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>; <c>LanceVideoGenerationTests</c> verified 512x512
-    /// coherent, using a shorter 9-frame clip only to keep the smoke test fast).</summary>
+    /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0, 512x512, 25 frames (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>; <c>LanceVideoGenerationTests</c> verified 512x512 coherent, using a shorter 9-frame clip only to keep the smoke test fast).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 30, CfgScale = 4.0f, Width = 512, Height = 512, Frames = 25 };
 
     /// <inheritdoc/>

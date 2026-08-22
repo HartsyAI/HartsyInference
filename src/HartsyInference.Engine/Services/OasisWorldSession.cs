@@ -8,14 +8,7 @@ using HartsyInference.World.Pipelines;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>A world session over Oasis. <b>The underlying pipeline is not resumable</b>: <c>OasisPipeline.Generate</c>
-/// takes a first frame plus a complete per-frame action plan and returns the whole rollout in one call, so this is
-/// not a true frame-by-frame interactive loop. What the session does instead is honest batching —
-/// <see cref="SendAction"/> queues actions, and <see cref="StreamAsync"/> drains everything queued so far into one
-/// rollout, yields its frames, then re-seeds the next batch from the last frame it produced. Actions queued while a
-/// batch is running are picked up by the next batch; the DiT's temporal context does <b>not</b> carry across batches,
-/// and the stream ends as soon as a drain finds the queue empty. Sending every action before enumerating (the CLI's
-/// pattern) therefore produces exactly one rollout, identical to the one-shot behavior.</summary>
+/// <summary>A world session over Oasis. <b>The underlying pipeline is not resumable</b>: <c>OasisPipeline.Generate</c> takes a first frame plus a complete per-frame action plan and returns the whole rollout in one call, so this is not a true frame-by-frame interactive loop. What the session does instead is honest batching — <see cref="SendAction"/> queues actions, and <see cref="StreamAsync"/> drains everything queued so far into one rollout, yields its frames, then re-seeds the next batch from the last frame it produced. Actions queued while a batch is running are picked up by the next batch; the DiT's temporal context does <b>not</b> carry across batches, and the stream ends as soon as a drain finds the queue empty. Sending every action before enumerating (the CLI's pattern) therefore produces exactly one rollout, identical to the one-shot behavior.</summary>
 public sealed class OasisWorldSession : IWorldSession
 {
     /// <summary>Denoising steps per frame when the request does not set one.</summary>
@@ -34,8 +27,7 @@ public sealed class OasisWorldSession : IWorldSession
     private int _emitted;
     private bool _disposed;
 
-    /// <summary>Creates a session seeded by <paramref name="request"/>'s first frame; the pipeline stays owned by the
-    /// service that handed it over.</summary>
+    /// <summary>Creates a session seeded by <paramref name="request"/>'s first frame; the pipeline stays owned by the service that handed it over.</summary>
     internal OasisWorldSession(OasisPipeline pipeline, WorldRequest request)
     {
         ImageData init = request.InitImage
@@ -94,9 +86,7 @@ public sealed class OasisWorldSession : IWorldSession
         }
     }
 
-    /// <summary>Parses an action token into a 25-dim VPT row: <c>+</c>-separated key names (forward, back, left,
-    /// right, jump, sneak, sprint, attack, use, drop, inventory) plus an optional <c>camera:x,y</c> term in [-1, 1].
-    /// An empty or unrecognized token becomes a no-op row (logged), never an exception mid-rollout.</summary>
+    /// <summary>Parses an action token into a 25-dim VPT row: <c>+</c>-separated key names (forward, back, left, right, jump, sneak, sprint, attack, use, drop, inventory) plus an optional <c>camera:x,y</c> term in [-1, 1]. An empty or unrecognized token becomes a no-op row (logged), never an exception mid-rollout.</summary>
     private static float[] ParseAction(string action)
     {
         byte[] keys = new byte[OasisActionEncoder.KeyCount];

@@ -5,10 +5,7 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
-/// <summary>One GPT-2 pre-norm block: <c>x + Attn(LN1(x))</c> then <c>x + MLP(LN2(x))</c>. Fused QKV
-/// projection, multi-head SDPA, 4× GELU MLP, all linears <c>bias=False</c>; LayerNorms carry weight+bias.
-/// Key scheme follows HF Bark (<c>layernorm_1</c>, <c>attn.att_proj</c>, <c>attn.out_proj</c>,
-/// <c>layernorm_2</c>, <c>mlp.in_proj</c>, <c>mlp.out_proj</c>).</summary>
+/// <summary>One GPT-2 pre-norm block: <c>x + Attn(LN1(x))</c> then <c>x + MLP(LN2(x))</c>, fused QKV projection, all linears <c>bias=False</c>; checkpoint key scheme follows HF Bark (<c>layernorm_1</c>, <c>attn.att_proj</c>, <c>attn.out_proj</c>, <c>layernorm_2</c>, <c>mlp.in_proj</c>, <c>mlp.out_proj</c>).</summary>
 public sealed unsafe class GptBlock : IDisposable
 {
     private readonly GptConfig _cfg;
@@ -32,9 +29,7 @@ public sealed unsafe class GptBlock : IDisposable
         _mlpOutW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.out_proj.weight"]);
     }
 
-    /// <summary>Full-sequence forward with NO KV cache — used for the bidirectional Bark-Fine stage
-    /// (<paramref name="causalMask"/> null) and parity-debug teacher forcing (causal mask). The incremental
-    /// AR path (prefill + decode) goes through <see cref="ForwardCached"/> instead.</summary>
+    /// <summary>Full-sequence forward with NO KV cache — used for the bidirectional Bark-Fine stage (<paramref name="causalMask"/> null) and parity-debug teacher forcing (causal mask); the incremental AR path goes through <see cref="ForwardCached"/> instead.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor? causalMask)
     {
         int t = (int)x.Shape[1];
@@ -97,13 +92,8 @@ public sealed unsafe class GptBlock : IDisposable
         return res2;
     }
 
-    /// <summary>GPU-resident cached forward for prefill (<c>t≥1</c>) AND incremental decode (<c>t=1</c>): the
-    /// fused-QKV projection runs on the backend, the split + head-permute + attention all stay device-side, K/V
-    /// are appended into the device-resident <paramref name="cache"/>, and causal FlashAttention runs over the
-    /// valid prefix — no <c>DataPointer</c> read crosses back to the host mid-forward (the old per-step host
-    /// attention loop + per-layer device→host sync are gone). <paramref name="qOffset"/> is the absolute
-    /// position of this call's first query, which equals the cache's committed length; the backbone advances the
-    /// shared length once, after all layers.</summary>
+    /// <summary>GPU-resident cached forward for prefill (<c>t≥1</c>) and incremental decode (<c>t=1</c>): everything after the QKV projection — split, head-permute, K/V cache append, causal FlashAttention over the valid prefix — stays device-side, so no <c>DataPointer</c> read crosses back to the host mid-forward.</summary>
+    /// <remarks>Replaces an older per-step host attention loop that synced device→host every layer. <paramref name="qOffset"/> is the absolute position of this call's first query, equal to the cache's committed length; the backbone advances the shared length once, after all layers.</remarks>
     public Tensor ForwardCached(IBackend backend, Tensor x, IKvCache cache, int layerIndex, int qOffset)
     {
         int t = (int)x.Shape[1];
@@ -171,8 +161,7 @@ public sealed unsafe class GptBlock : IDisposable
         return res2;
     }
 
-    /// <summary>Loads a LayerNorm bias, or returns a zero tensor (matching <paramref name="weightLike"/>'s length)
-    /// when the checkpoint has none — HF Bark's <c>BarkLayerNorm</c> uses <c>bias=False</c>.</summary>
+    /// <summary>Returns a zero tensor (matching <paramref name="weightLike"/>'s shape) when the checkpoint has no bias — HF Bark's <c>BarkLayerNorm</c> uses <c>bias=False</c>.</summary>
     internal static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, Tensor weightLike)
     {
         if (w.TryGetValue(key, out Tensor? b)) return WhisperOps.EnsureF32(b);

@@ -10,22 +10,12 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Zeta-Chroma text-to-image pipeline (<c>lodestones/Zeta-Chroma</c> pixel-proto) — pixel-space, VAE-free.
-/// Accepts pre-computed Qwen3-4B caption embeddings (same upstream encoder path as <see cref="ZImagePipeline"/>)
-/// and runs the <see cref="ZetaChromaTransformer"/> directly on RGB in [-1, 1].
-///
-/// Sampling (ALL validation-gated — the model is mid-pretraining, see docs/Research/CHROMA_RADIANCE_ARCHITECTURE.md
-/// §Zeta-Chroma):
+/// <summary>Zeta-Chroma text-to-image pipeline (<c>lodestones/Zeta-Chroma</c> pixel-proto) — pixel-space, VAE-free. Accepts pre-computed Qwen3-4B caption embeddings (same upstream encoder path as <see cref="ZImagePipeline"/>) and runs the <see cref="ZetaChromaTransformer"/> directly on RGB in [-1, 1]. Sampling (ALL validation-gated — the model is mid-pretraining, see docs/Research/CHROMA_RADIANCE_ARCHITECTURE.md §Zeta-Chroma):
 /// <list type="bullet">
-///   <item><b>x0 prediction</b> — converted per step via <see cref="X0Prediction.ToVelocity"/>
-///         (<c>v = (x_t − x0) / t</c>, ComfyUI <c>NextDiTPixelSpace</c>), then Chroma-family cond-anchored CFG on v
-///         (<see cref="CfgHelper.ApplyCfgCondAnchored"/>, <c>cond + scale·(cond − uncond)</c> — NOT Z-Image's
-///         non-standard cond-baseline formula; item 8).</item>
-///   <item><b>Timestep inversion</b> — the transformer is conditioned on <c>1 − sigma</c>, inheriting Z-Image's
-///         convention (item 7).</item>
+///   <item><b>x0 prediction</b> — converted per step via <see cref="X0Prediction.ToVelocity"/> (<c>v = (x_t − x0) / t</c>, ComfyUI <c>NextDiTPixelSpace</c>), then Chroma-family cond-anchored CFG on v (<see cref="CfgHelper.ApplyCfgCondAnchored"/>, <c>cond + scale·(cond − uncond)</c> — NOT Z-Image's non-standard cond-baseline formula; item 8).</item>
+///   <item><b>Timestep inversion</b> — the transformer is conditioned on <c>1 − sigma</c>, inheriting Z-Image's convention (item 7).</item>
 ///   <item><b>Flow-match Euler</b>, static shift 3.0 (item 9), default 50 steps, CFG 5.0.</item>
-///   <item><b>Resolution must be divisible by the pixel patch size</b> (32 reported) — no pad/crop path until the
-///         training resolution behavior is known.</item>
+///   <item><b>Resolution must be divisible by the pixel patch size</b> (32 reported) — no pad/crop path until the training resolution behavior is known.</item>
 /// </list></summary>
 public sealed class ZetaChromaPipeline : DiffusionPipelineBase
 {
@@ -40,10 +30,7 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. API mirrors
-    /// <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Img2img / inpaint is pixel-space (no VAE): pass an
-    /// <see cref="ImageToImageRequest"/> and the source pixels are noised directly at <c>sigma[startStep]</c>
-    /// (VALIDATION-PENDING alongside the rest of the sampling recipe — mid-pretraining checkpoint).</summary>
+    /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. API mirrors <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Img2img / inpaint is pixel-space (no VAE): pass an <see cref="ImageToImageRequest"/> and the source pixels are noised directly at <c>sigma[startStep]</c> (VALIDATION-PENDING alongside the rest of the sampling recipe — mid-pretraining checkpoint).</summary>
     /// <param name="captionEmbeddings">Qwen3-4B last-hidden-state for the prompt [B, capLen, 2560].</param>
     /// <param name="request">Generation parameters. Width/Height must be divisible by the 32-px patch.</param>
     /// <param name="cfgScale">CFG scale (5.0 recommended; 1.0 disables the second pass).</param>

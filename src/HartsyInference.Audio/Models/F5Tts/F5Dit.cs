@@ -5,20 +5,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>Full F5-TTS DiT denoiser. Predicts a vector field (in mel space) given
-/// noisy target mel + reference mel + text + flow timestep. The pipeline iterates this
-/// 32× under Sway-Sampling Euler to produce a denoised target mel, which is then
-/// vocoded by Vocos.
-///
-/// <para>Forward signature mirrors the upstream <c>DiT.forward</c>:
-/// <list type="bullet">
-///   <item><c>noisyMel [1, mel_dim, T]</c> — current flow-matching state (the "x" of the ODE)</item>
-///   <item><c>condMel  [1, mel_dim, T]</c> — masked reference mel (zeros over the target region)</item>
-///   <item><c>textIds  int[T_text]</c> — character token IDs</item>
-///   <item><c>time     float</c> — current flow timestep in [0, 1]</item>
-///   <item><c>dropAudioCond</c>, <c>dropText</c> — CFG uncond toggles</item>
-/// </list>
-/// Output: <c>vectorField [1, T, mel_dim]</c> — the model's prediction of dx/dt.</para></summary>
+/// <summary>Full F5-TTS DiT denoiser: predicts a vector field (in mel space) given noisy target mel + reference mel + text + flow timestep; the pipeline iterates this 32x under Sway-Sampling Euler to produce a denoised target mel, which is then vocoded by Vocos.</summary>
+// Forward signature mirrors the upstream DiT.forward: noisyMel [1, mel_dim, T] is the current
+// flow-matching state (the "x" of the ODE), condMel [1, mel_dim, T] is the masked reference mel (zeros
+// over the target region), textIds int[T_text] are character token IDs, time float is the current flow
+// timestep in [0, 1], and dropAudioCond/dropText are CFG uncond toggles. Output: vectorField
+// [1, T, mel_dim], the model's prediction of dx/dt.
 public sealed unsafe class F5Dit : IDisposable
 {
     private readonly F5TtsConfig _cfg;
@@ -68,9 +60,7 @@ public sealed unsafe class F5Dit : IDisposable
         for (int i = 0; i < cfg.Depth; i++) _blocks[i] = new F5DitBlock(cfg);
     }
 
-    /// <summary>Loads from a HuggingFace safetensors dictionary. The upstream prefix is
-    /// <c>ema_model.transformer</c> for the released F5-TTS v1 base checkpoint
-    /// (<c>F5TTS_v1_Base/model_1250000.safetensors</c>).</summary>
+    /// <summary>Loads from a HuggingFace safetensors dictionary; the upstream prefix is <c>ema_model.transformer</c> for the released F5-TTS v1 base checkpoint (<c>F5TTS_v1_Base/model_1250000.safetensors</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "ema_model.transformer")
     {
         _timeEmb.LoadWeights(w, $"{prefix}.time_embed");
@@ -140,8 +130,7 @@ public sealed unsafe class F5Dit : IDisposable
         return vec;
     }
 
-    /// <summary>Clears the per-loop text-embedding cache. Call once before each sampling loop — the cache keys
-    /// on sequence length only, so a new generation reusing a length with different text must reset first.</summary>
+    /// <summary>Call once before each sampling loop — the cache keys on sequence length only, so a new generation reusing a length with different text must reset first.</summary>
     public void ResetTextCache()
     {
         _txtCond?.Dispose(); _txtUncond?.Dispose();
@@ -149,9 +138,7 @@ public sealed unsafe class F5Dit : IDisposable
         _txtCacheLen = -1;
     }
 
-    /// <summary>Returns the cond/uncond text embedding, computing it once per sequence length and reusing the
-    /// cached tensor across all sampling steps. The returned tensor is owned by this cache — callers must NOT
-    /// dispose it. Invalidated automatically when the sequence length changes.</summary>
+    /// <summary>Returns the cond/uncond text embedding, computing it once per sequence length and reusing the cached tensor across all sampling steps; the returned tensor is owned by this cache and callers must NOT dispose it.</summary>
     private Tensor GetTextHidden(IBackend backend, ReadOnlySpan<int> textIds, int t, bool dropText)
     {
         if (t != _txtCacheLen)
@@ -165,8 +152,7 @@ public sealed unsafe class F5Dit : IDisposable
         return _txtCond ??= _textEmb.Forward(backend, textIds, t, dropText: false);
     }
 
-    /// <summary>The 22 DiT blocks + final AdaLN head + proj_out, eager. Does NOT dispose <paramref name="xIn"/>
-    /// (the caller — or the captured graph's fixed buffer — owns it). Returns <c>[1, T, mel_dim]</c>.</summary>
+    /// <summary>The 22 DiT blocks + final AdaLN head + proj_out, eager. Does NOT dispose <paramref name="xIn"/> — the caller (or the captured graph's fixed buffer) owns it.</summary>
     private Tensor RunBlocks(IBackend backend, Tensor xIn, Tensor siluTime, int t)
     {
         Tensor x = xIn;
@@ -183,9 +169,7 @@ public sealed unsafe class F5Dit : IDisposable
         return vec;
     }
 
-    /// <summary>Graph-captured block core. Refreshes the fixed input buffers, then replays the captured
-    /// cuGraph (or captures on call 3). Returns a fresh copy of the velocity so both CFG branches keep
-    /// independent buffers. Falls back to <see cref="RunBlocks"/> on any capture issue (sets _graphDead).</summary>
+    /// <summary>Graph-captured block core: refreshes the fixed input buffers, then replays the captured cuGraph (or captures on call 3); returns a fresh copy of the velocity so both CFG branches keep independent buffers, and falls back to <see cref="RunBlocks"/> on any capture issue.</summary>
     private Tensor RunBlocksGraph(IBackend backend, Tensor x, Tensor siluTime, int t)
     {
         // (Re)allocate fixed buffers on shape change; the sequence length t is the only varying dim.
@@ -253,8 +237,7 @@ public sealed unsafe class F5Dit : IDisposable
         return Clone(_graphVelocity!);
     }
 
-    /// <summary>Diagnostics — returns copies of the text-stem output, the DiT input embedding, the block-0
-    /// output, and the post-all-blocks hidden, for per-component parity checks. Caller disposes.</summary>
+    /// <summary>Diagnostics — returns copies of the text-stem output, the DiT input embedding, the block-0 output, and the post-all-blocks hidden, for per-component parity checks; caller disposes.</summary>
     public (Tensor TextEmb, Tensor XInput, Tensor Block0, Tensor PreNorm) DebugForward(
         IBackend backend, Tensor noisyMel, Tensor condMel, ReadOnlySpan<int> textIds, float timestep)
     {
@@ -292,9 +275,7 @@ public sealed unsafe class F5Dit : IDisposable
         return c;
     }
 
-    /// <summary>AdaLayerNorm_Final: <c>x = LN_no_affine(x) * (1 + scale) + shift</c>
-    /// where scale, shift come from a single Linear(dim → 2*dim) of <c>silu(time_emb)</c>.
-    /// Chunk order in the projection is [scale, shift]. Fully on-device.</summary>
+    /// <summary>AdaLayerNorm_Final: <c>x = LN_no_affine(x) * (1 + scale) + shift</c>, where scale/shift come from a single Linear(dim → 2*dim) of <c>silu(time_emb)</c> (chunk order [scale, shift]).</summary>
     private Tensor ApplyFinalAdaLn(IBackend backend, Tensor x, Tensor linW, Tensor linB, Tensor siluTime, int t)
     {
         int dim = _cfg.Dim;
@@ -342,17 +323,14 @@ public sealed unsafe class F5Dit : IDisposable
     }
 }
 
-/// <summary>F5-TTS sinusoidal-into-MLP timestep embedder. <c>freq_embed → Linear(1024) →
-/// SiLU → Linear(1024)</c>. Outputs a per-batch <c>[1, 1024]</c> embedding for the current
-/// flow-matching timestep <c>t ∈ [0, 1]</c>.</summary>
+/// <summary>F5-TTS sinusoidal-into-MLP timestep embedder (<c>freq_embed → Linear(1024) → SiLU → Linear(1024)</c>), outputting a per-batch <c>[1, 1024]</c> embedding for the current flow-matching timestep <c>t ∈ [0, 1]</c>.</summary>
 internal sealed unsafe class F5TimestepEmbedding
 {
     private readonly F5TtsConfig _cfg;
     private Tensor? _mlp0W, _mlp0B;  // [1024, 256]
     private Tensor? _mlp2W, _mlp2B;  // [1024, 1024]
 
-    /// <summary>Cached most-recent time embedding so the final AdaLN head can reuse it
-    /// without recomputing the MLP. (Sub-optimal but keeps the F5Dit forward simple.)</summary>
+    /// <summary>Cached most-recent time embedding so the final AdaLN head can reuse it without recomputing the MLP (sub-optimal, but keeps the F5Dit forward simple).</summary>
     public Tensor? LastTimeEmb { get; private set; }
 
     public F5TimestepEmbedding(F5TtsConfig cfg) { _cfg = cfg; }

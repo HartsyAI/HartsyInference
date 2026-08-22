@@ -2,17 +2,9 @@ using System.Text;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>A SentencePiece (LLaMA/Gemma "SPM") tokenizer built entirely from a GGUF file's embedded tokenizer
-/// metadata (<c>tokenizer.ggml.tokens</c> + <c>scores</c> + <c>token_type</c> + bos/eos ids) — the counterpart
-/// to <see cref="GgufTokenizer"/> for models whose <c>tokenizer.ggml.model</c> is <c>llama</c> (SPM) rather than
-/// byte-level BPE. Covers Gemma 1/2/3 and Llama-1/2.
+/// <summary>A SentencePiece (LLaMA/Gemma "SPM") tokenizer built entirely from a GGUF file's embedded tokenizer metadata (<c>tokenizer.ggml.tokens</c> + <c>scores</c> + <c>token_type</c> + bos/eos ids) — the counterpart to <see cref="GgufTokenizer"/> for models whose <c>tokenizer.ggml.model</c> is <c>llama</c> (SPM) rather than byte-level BPE. Covers Gemma 1/2/3 and Llama-1/2.
 ///
-/// <para>Implements the SentencePiece segmentation llama.cpp uses: spaces are replaced by the ▁ meta-symbol
-/// (U+2581), the text is split into single Unicode code points, then the adjacent pair whose merged string is a
-/// vocab entry with the <i>highest</i> score is merged repeatedly until none remain (score-driven, unlike BPE's
-/// rank-driven merges). Code points with no vocab token fall back to per-byte <c>&lt;0xNN&gt;</c> tokens.
-/// Control / user-defined tokens (the chat template's <c>&lt;bos&gt;</c>, <c>&lt;start_of_turn&gt;</c>, …) are
-/// split out before segmentation so their literals map to ids, and are skipped on decode.</para></summary>
+/// <para>Implements the SentencePiece segmentation llama.cpp uses: spaces are replaced by the ▁ meta-symbol (U+2581), the text is split into single Unicode code points, then the adjacent pair whose merged string is a vocab entry with the <i>highest</i> score is merged repeatedly until none remain (score-driven, unlike BPE's rank-driven merges). Code points with no vocab token fall back to per-byte <c>&lt;0xNN&gt;</c> tokens. Control / user-defined tokens (the chat template's <c>&lt;bos&gt;</c>, <c>&lt;start_of_turn&gt;</c>, …) are split out before segmentation so their literals map to ids, and are skipped on decode.</para></summary>
 public sealed class SpmGgufTokenizer : ILlmTokenizer
 {
     private const int TypeUnknown = 2;
@@ -37,10 +29,7 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
     public string? EosToken { get; }
     public IReadOnlyList<int> StopIds { get; }
 
-    /// <summary>Builds from GGUF metadata arrays. <paramref name="scores"/> is the per-token SentencePiece score
-    /// (parallel to <paramref name="tokens"/>); <paramref name="tokenType"/> marks control/user-defined/byte
-    /// tokens. <paramref name="addSpacePrefix"/> mirrors <c>tokenizer.ggml.add_space_prefix</c> (Llama-2 true,
-    /// Gemma-3 false) — when true a leading ▁ is added so the first word is treated like any space-prefixed word.</summary>
+    /// <summary>Builds from GGUF metadata arrays. <paramref name="scores"/> is the per-token SentencePiece score (parallel to <paramref name="tokens"/>); <paramref name="tokenType"/> marks control/user-defined/byte tokens. <paramref name="addSpacePrefix"/> mirrors <c>tokenizer.ggml.add_space_prefix</c> (Llama-2 true, Gemma-3 false) — when true a leading ▁ is added so the first word is treated like any space-prefixed word.</summary>
     public SpmGgufTokenizer(string[] tokens, float[] scores, int[]? tokenType,
         int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null, bool addSpacePrefix = false)
     {

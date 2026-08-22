@@ -15,11 +15,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>HunyuanVideo (Tencent 13B T2V) recipe: the Comfy-Org repacked bf16 single-file DiT + a standalone
-/// HunyuanVideo 3D VAE, conditioned by LLaVA-Llama-3-8B (fp8, <see cref="SideModels.LlavaLlama3"/>, layer −3 through
-/// the diffusers prompt template) and CLIP-L (<see cref="SideModels.ClipL"/>) for the pooled vector. Already
-/// parity-verified per memory <c>hunyuanvideo-13b-e2e</c>; this wrapper lifts <c>HunyuanVideoGenerationTests</c>'
-/// proven construction into the recipe registry so it is reachable from the CLI.</summary>
+/// <summary>HunyuanVideo (Tencent 13B T2V) recipe: the Comfy-Org repacked bf16 single-file DiT + a standalone HunyuanVideo 3D VAE, conditioned by LLaVA-Llama-3-8B (fp8, <see cref="SideModels.LlavaLlama3"/>, layer −3 through the diffusers prompt template) and CLIP-L (<see cref="SideModels.ClipL"/>) for the pooled vector. Already parity-verified per memory <c>hunyuanvideo-13b-e2e</c>; this wrapper lifts <c>HunyuanVideoGenerationTests</c>' proven construction into the recipe registry so it is reachable from the CLI.</summary>
 public sealed class HunyuanVideoRecipe : IVideoRecipe
 {
     // The exact diffusers prompt template + template-token crop count (pipeline_hunyuan_video.py:70-81).
@@ -42,11 +38,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         string.Equals(familyId, "hunyuan-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "hunyuanvideo", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>HunyuanVideo's official sampling settings: 20 steps at embedded-guidance 6.0 (no CFG here — no
-    /// negative branch amplifies fp8 noise), 512x320, 25 frames @ 24fps — the geometry
-    /// <c>HunyuanVideoGenerationTests</c> verified coherent (real 720p is the trained resolution but far too slow
-    /// for a CLI turnaround; per MODEL_STATUS_VIDEO.md the 512x320/2.15s-per-step config is the proven production
-    /// path).</summary>
+    /// <summary>HunyuanVideo's official sampling settings: 20 steps at embedded-guidance 6.0 (no CFG here — no negative branch amplifies fp8 noise), 512x320, 25 frames @ 24fps — the geometry <c>HunyuanVideoGenerationTests</c> verified coherent (real 720p is the trained resolution but far too slow for a CLI turnaround; per MODEL_STATUS_VIDEO.md the 512x320/2.15s-per-step config is the proven production path).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 6.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
@@ -115,8 +107,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         }
     }
 
-    /// <summary>Builds the templated + BOS-prefixed Llama-3 token sequence the diffusers pipeline feeds LLaVA
-    /// (add_special_tokens=True → BOS prepended), from the embedded Llama-3 byte-level BPE tokenizer.</summary>
+    /// <summary>Builds the templated + BOS-prefixed Llama-3 token sequence the diffusers pipeline feeds LLaVA (add_special_tokens=True → BOS prepended), from the embedded Llama-3 byte-level BPE tokenizer.</summary>
     internal static int[] BuildTemplatedTokens(string prompt)
     {
         using Stream json = EmbeddedTokenizerResources.OpenLlama3TokenizerJson();

@@ -133,7 +133,6 @@ public sealed unsafe class BarkFineModel : IDisposable
 
     private Tensor SumEmbeds(int[,] codes, int upTo, int t, int h)
     {
-        // Sum the embeddings of all known codebooks [0, upTo).
         Tensor outT = new(new TensorShape(1, t, h), DType.F32);
         float* op = (float*)outT.DataPointer;
         for (int cb = 0; cb < upTo; cb++)

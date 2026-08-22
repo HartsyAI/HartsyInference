@@ -22,8 +22,7 @@ namespace HartsyInference.Engine.Audio.Wake;
 /// are ignored rather than rejected.</para></summary>
 public readonly record struct WakeFrame(string Type, WakeFrameData Data, byte[]? Payload, int PayloadLength)
 {
-    /// <summary>Payload interpreted as 16-bit PCM samples, widened to the int16-scaled floats the wake models
-    /// expect (±32768, NOT normalized to ±1 — normalizing silently mis-scores).</summary>
+    /// <summary>Payload interpreted as 16-bit PCM samples, widened to the int16-scaled floats the wake models expect (±32768, NOT normalized to ±1 — normalizing silently mis-scores).</summary>
     public int ReadPcm(Span<float> destination)
     {
         if (Payload is null || PayloadLength == 0) return 0;
@@ -37,13 +36,10 @@ public readonly record struct WakeFrame(string Type, WakeFrameData Data, byte[]?
     }
 }
 
-/// <summary>The header fields the engine reads. Everything is optional: which ones are meaningful depends on
-/// <see cref="WakeFrame.Type"/>.</summary>
+/// <summary>The header fields the engine reads. Everything is optional: which ones are meaningful depends on <see cref="WakeFrame.Type"/>.</summary>
 public readonly record struct WakeFrameData(string? DeviceId, long Sequence, int Rate, int Width, int Channels, string? Text, string? Name, string? Token);
 
-/// <summary>Reads and writes <see cref="WakeFrame"/>s on a stream. One instance per connection; not thread-safe
-/// for concurrent reads, and writes are serialized internally so the worker thread and the connection loop can
-/// both send.</summary>
+/// <summary>Reads and writes <see cref="WakeFrame"/>s on a stream. One instance per connection; not thread-safe for concurrent reads, and writes are serialized internally so the worker thread and the connection loop can both send.</summary>
 public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
 {
     private const byte Newline = (byte)'\n';
@@ -165,8 +161,7 @@ public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
         return (type, new WakeFrameData(deviceId, sequence, rate, width, channels, text, name, token), payloadLength);
     }
 
-    /// <summary>Writes a header-only frame whose <c>data</c> object is <paramref name="dataJson"/> (already
-    /// serialized, or null for none).</summary>
+    /// <summary>Writes a header-only frame whose <c>data</c> object is <paramref name="dataJson"/> (already serialized, or null for none).</summary>
     public async Task WriteAsync(string type, string? dataJson, CancellationToken cancel)
     {
         StringBuilder sb = new();

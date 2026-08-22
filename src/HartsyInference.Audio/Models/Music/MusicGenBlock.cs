@@ -4,12 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>One MusicGen decoder layer (HF <c>MusicgenDecoderLayer</c> naming): pre-norm causal
-/// self-attention → pre-norm cross-attention against the T5 states → pre-norm GELU MLP. Bias-free
-/// attention projections (MusicGen default), bias on the MLP + LayerNorms. AR decoding is incremental:
+/// <summary>One MusicGen decoder layer (HF <c>MusicgenDecoderLayer</c> naming): pre-norm causal self-attention → pre-norm cross-attention against the T5 states → pre-norm GELU MLP.</summary>
+/// <remarks>Bias-free attention projections (MusicGen default), bias on the MLP + LayerNorms. AR decoding is incremental:
 /// one cache-capturing prefill <see cref="Forward"/> then O(T) per-token <see cref="ForwardStep"/> calls
 /// against the <see cref="MusicGenKvCache"/> (cross K/V projected once via <see cref="PrimeCross"/>).
-/// Reuses the WhisperOps attention helpers and the backend SDPA op.</summary>
+/// Reuses the WhisperOps attention helpers and the backend SDPA op.</remarks>
 public sealed unsafe class MusicGenBlock : IDisposable
 {
     private readonly MusicGenConfig _cfg;
@@ -52,10 +51,8 @@ public sealed unsafe class MusicGenBlock : IDisposable
         _fc2B = w.TryGetValue($"{prefix}.fc2.bias", out Tensor? fc2b) ? WhisperOps.EnsureF32(fc2b) : null;
     }
 
-    /// <summary>Runs the layer. <paramref name="hidden"/> is <c>[1, T, hidden]</c>; <paramref name="cross"/>
-    /// is the projected T5 states <c>[1, T_text, hidden]</c>; <paramref name="causalMask"/> is the
-    /// <c>[1,1,T,T]</c> additive mask (null for T==1). Pass <paramref name="cacheOut"/> to capture the
-    /// self-attn K/V rows (prefill), enabling incremental continuation via <see cref="ForwardStep"/>.</summary>
+    /// <summary>Runs the layer over <paramref name="hidden"/> <c>[1, T, hidden]</c> against <paramref name="cross"/> <c>[1, T_text, hidden]</c>; pass <paramref name="cacheOut"/> to capture the self-attn K/V rows (prefill), enabling incremental continuation via <see cref="ForwardStep"/>.</summary>
+    /// <param name="causalMask">The <c>[1,1,T,T]</c> additive causal mask; null when T==1.</param>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor cross, Tensor? causalMask,
         MusicGenKvCache.MusicGenKvLayer? cacheOut = null, int cacheOffset = 0)
     {
@@ -140,8 +137,7 @@ public sealed unsafe class MusicGenBlock : IDisposable
         return outT;
     }
 
-    /// <summary>Projects the text states' cross-attn K/V into the cache once per generation — they depend
-    /// only on the encoder output, so no per-step recompute.</summary>
+    /// <summary>Projects the text states' cross-attn K/V into the cache once per generation — they depend only on the encoder output, so no per-step recompute.</summary>
     public void PrimeCross(IBackend backend, Tensor cross, MusicGenKvCache.MusicGenKvLayer cache)
     {
         int b = (int)cross.Shape[0];   // 1 (no CFG) or 2 (CFG: [0]=cond text, [1]=null/zeros)
@@ -161,13 +157,12 @@ public sealed unsafe class MusicGenBlock : IDisposable
         cache.CrossV = cvh;
     }
 
-    /// <summary>Single-token decode step against the cache, fully on-device: projections run on the backend;
-    /// the 1×L self-attention appends the new K/V into the device cache at <paramref name="pos"/>
+    /// <summary>Single-token decode step against the cache, fully on-device. Input/output are <c>[1, 1, hidden]</c>.</summary>
+    /// <remarks>Projections run on the backend; the 1×L self-attention appends the new K/V into the device cache at <paramref name="pos"/>
     /// (<see cref="IBackend.KvCacheAppend"/>, no host copy) then runs <see cref="IBackend.FlashAttention"/> over
     /// rows <c>[0, pos]</c> (causal, qOffset=pos — no explicit mask); the 1×T_text cross-attention runs
     /// FlashAttention over the pre-projected device text K/V (rows <c>[0, crossLen)</c>, non-causal). Numerics
-    /// match the previous CPU path (same 1/√headDim scale, same causal prefix). Input/output are
-    /// <c>[1, 1, hidden]</c>.</summary>
+    /// match the previous CPU path (same 1/√headDim scale, same causal prefix).</remarks>
     public Tensor ForwardStep(IBackend backend, Tensor x, MusicGenKvCache.MusicGenKvLayer cache, int pos, int crossLen, ulong devicePos = 0)
     {
         int b = (int)x.Shape[0];   // 1 (no CFG) or 2 (CFG cond+uncond decoded together)

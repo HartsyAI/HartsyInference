@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>The on-disk layout for user-placed audio checkpoints: <c>{models}/audio/{category}/{prefix}</c>, the
-/// Engine-native replacement for the extension's <c>AudioConfiguration.ModelRoot</c> + provider model prefix.</summary>
+/// <summary>The on-disk layout for user-placed audio checkpoints: <c>{models}/audio/{category}/{prefix}</c>, the Engine-native replacement for the extension's <c>AudioConfiguration.ModelRoot</c> + provider model prefix.</summary>
 internal static class AudioModelRoot
 {
     /// <summary>The audio models root, <c>{models}/audio</c>. Shared assets (cmudict, contentvec) live here.</summary>

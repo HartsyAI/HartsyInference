@@ -2,10 +2,7 @@ using System.Text;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Renders a clause phoneme list to an IPA string, porting <c>GetTranslatedPhonemeString</c> +
-/// <c>WritePhMnemonic</c> from dictionary.c. Each phoneme's IPA comes from its bytecode program's <c>i_IPA_NAME</c>
-/// (via the interpreter), or, when none is defined, from converting its mnemonic through espeak's <c>ipa1</c> ascii
-/// table. Stress marks (ˈ/ˌ) are emitted from each syllable's stress level.</summary>
+/// <summary>Renders a clause phoneme list to an IPA string, porting <c>GetTranslatedPhonemeString</c> + <c>WritePhMnemonic</c> from dictionary.c; each phoneme's IPA comes from its bytecode program's <c>i_IPA_NAME</c>, or, when none is defined, from converting its mnemonic through espeak's <c>ipa1</c> ascii table, with stress marks (ˈ/ˌ) emitted from each syllable's stress level.</summary>
 internal sealed class EspeakPhonemeRenderer
 {
     // ipa1[96]: ascii 0x20..0x7f -> unicode codepoint (dictionary.c).
@@ -24,8 +21,7 @@ internal sealed class EspeakPhonemeRenderer
 
     public EspeakPhonemeRenderer(EspeakPhonemeInterpreter interpreter) => _interp = interpreter;
 
-    /// <summary>Renders the list (built by <see cref="EspeakPhonemeList"/>, with two guard entries at each end) to IPA,
-    /// separating words with a space.</summary>
+    /// <summary>Renders the list (built by <see cref="EspeakPhonemeList"/>, with two guard entries at each end) to IPA, separating words with a space.</summary>
     public string Render(IReadOnlyList<EspeakPhonemeListEntry> list)
     {
         StringBuilder sb = new();

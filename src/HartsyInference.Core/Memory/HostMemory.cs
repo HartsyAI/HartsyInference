@@ -3,8 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Core.Memory;
 
-/// <summary>Host (glibc) allocator control. Tensor storage is <see cref="NativeBuffer"/>, i.e. plain
-/// <c>aligned_alloc</c>, so a freed weight buffer returns to a glibc arena — not to the OS.</summary>
+/// <summary>Host (glibc) allocator control. Tensor storage is <see cref="NativeBuffer"/>, i.e. plain <c>aligned_alloc</c>, so a freed weight buffer returns to a glibc arena — not to the OS.</summary>
 /// <remarks>Freeing is not the same as returning. glibc only shrinks an arena's <em>topmost</em> heap, so a
 /// fully-free 64 MB heap in the middle of an arena's chain keeps its pages resident forever. Rotating model
 /// families allocates and frees hundreds of 12-31 MB weight buffers, which strands one such heap after another:
@@ -17,8 +16,7 @@ public static class HostMemory
     [DllImport("libc", EntryPoint = "malloc_trim", SetLastError = true)]
     private static extern int MallocTrim(nuint pad);
 
-    /// <summary>Returns free arena pages to the OS. Reports the anon-RSS delta, or null if the platform has no
-    /// <c>malloc_trim</c> (non-glibc) — callers treat that as "nothing to do", never as an error.</summary>
+    /// <summary>Returns free arena pages to the OS. Reports the anon-RSS delta, or null if the platform has no <c>malloc_trim</c> (non-glibc) — callers treat that as "nothing to do", never as an error.</summary>
     public static long? Trim()
     {
         long before = AnonymousRssBytes();
@@ -32,8 +30,7 @@ public static class HostMemory
         return before >= 0 && after >= 0 ? before - after : null;
     }
 
-    /// <summary>Trims and logs the reclaim when it is worth reading. Safe to call from cleanup paths — it never
-    /// throws.</summary>
+    /// <summary>Trims and logs the reclaim when it is worth reading. Safe to call from cleanup paths — it never throws.</summary>
     public static void TrimAndLog(string context)
     {
         try

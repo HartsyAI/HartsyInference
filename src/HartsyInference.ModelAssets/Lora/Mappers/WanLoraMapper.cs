@@ -5,27 +5,17 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora.Mappers;
 
-/// <summary>Parses Wan-family LoRA files (Wan2.1 / Wan2.2 DiTs incl. TI2V-5B and Matrix-Game finetunes) into canonical
-/// <c>WanVideoTransformer</c> keys. Two on-disk formats route here:
+/// <summary>Parses Wan-family LoRA files (Wan2.1 / Wan2.2 DiTs incl. TI2V-5B and Matrix-Game finetunes) into canonical <c>WanVideoTransformer</c> keys. Two on-disk formats route here:
 /// <list type="bullet">
-/// <item><see cref="LoraFormat.KohyaWan"/> — kohya/musubi-tuner: <c>lora_unet_blocks_{i}_self_attn_q.lora_down.weight</c>
-/// (underscored original Wan naming; <see cref="LoraKeyTransformer.UnderscoreToDot"/> restores the dots).</item>
-/// <item><see cref="LoraFormat.DiffusersWan"/> — ComfyUI-style repacks (lightx2v distills, Kijai conversions):
-/// <c>diffusion_model.blocks.{i}.self_attn.q.lora_A.weight</c> (dotted original naming), with either PEFT or kohya
-/// suffixes.</item>
+/// <item><see cref="LoraFormat.KohyaWan"/> — kohya/musubi-tuner: <c>lora_unet_blocks_{i}_self_attn_q.lora_down.weight</c> (underscored original Wan naming; <see cref="LoraKeyTransformer.UnderscoreToDot"/> restores the dots).</item>
+/// <item><see cref="LoraFormat.DiffusersWan"/> — ComfyUI-style repacks (lightx2v distills, Kijai conversions): <c>diffusion_model.blocks.{i}.self_attn.q.lora_A.weight</c> (dotted original naming), with either PEFT or kohya suffixes.</item>
 /// </list>
-/// Both end in <b>original Wan module naming</b>, mapped to the diffusers-style canonical keys via the same verbatim
-/// rename table the checkpoint converter uses (<see cref="WanVideoCheckpointConverter.MapKey"/> — <c>self_attn.q →
-/// attn1.to_q</c>, <c>ffn.0 → ffn.net.0.proj</c>, <c>cross_attn.k_img → attn2.add_k_proj</c>, …). Bodies already in
-/// diffusers naming pass through untouched, so mixed-era repacks load too. (Diffusers-PEFT Wan LoRAs with a
-/// <c>transformer.</c> prefix never reach this mapper — they ride the existing passthrough arm.) Comfy full-weight
-/// diff entries (<c>.diff</c>/<c>.diff_b</c>) are skipped with a warning — they are not low-rank.</summary>
+/// Both end in <b>original Wan module naming</b>, mapped to the diffusers-style canonical keys via the same verbatim rename table the checkpoint converter uses (<see cref="WanVideoCheckpointConverter.MapKey"/> — <c>self_attn.q → attn1.to_q</c>, <c>ffn.0 → ffn.net.0.proj</c>, <c>cross_attn.k_img → attn2.add_k_proj</c>, …). Bodies already in diffusers naming pass through untouched, so mixed-era repacks load too. (Diffusers-PEFT Wan LoRAs with a <c>transformer.</c> prefix never reach this mapper — they ride the existing passthrough arm.) Comfy full-weight diff entries (<c>.diff</c>/<c>.diff_b</c>) are skipped with a warning — they are not low-rank.</summary>
 public static class WanLoraMapper
 {
     private const string KohyaPrefix = "lora_unet_";
     private const string ComfyPrefix = "diffusion_model.";
 
-    /// <summary>Parses every LoRA layer in the file.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, LoraFormat format)
     {
         Dictionary<string, GroupBuffer> groups = [];
@@ -92,10 +82,7 @@ public static class WanLoraMapper
         return layers;
     }
 
-    /// <summary>Maps a dotted module body to the canonical <c>WanVideoTransformer</c> weight key (pure, testable).
-    /// Bodies in original Wan naming get the checkpoint converter's verbatim rename table; bodies already in
-    /// diffusers naming pass through. Detection is per-body via the unambiguous original-naming markers — LoRA targets
-    /// are linear projections, so the checkpoint-level <c>norm2</c>/<c>norm3</c> swap ambiguity never arises here.</summary>
+    /// <summary>Maps a dotted module body to the canonical <c>WanVideoTransformer</c> weight key (pure, testable). Bodies in original Wan naming get the checkpoint converter's verbatim rename table; bodies already in diffusers naming pass through. Detection is per-body via the unambiguous original-naming markers — LoRA targets are linear projections, so the checkpoint-level <c>norm2</c>/<c>norm3</c> swap ambiguity never arises here.</summary>
     public static string MapBodyToCanonical(string body)
     {
         bool original = body.Contains("self_attn.", StringComparison.Ordinal)

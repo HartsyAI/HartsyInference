@@ -1,8 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry;
 
-/// <summary>A 3D Gaussian-splat set (3DGS): per-splat position, anisotropic scale, orientation quaternion,
-/// opacity, and spherical-harmonic color coefficients. Data type only for v1 — the generators (TRELLIS)
-/// arrive with later models; <see cref="Io.PlyWriter"/> already supports the standard INRIA splat PLY layout.</summary>
+/// <summary>A 3D Gaussian-splat set (3DGS): per-splat position, scale, rotation, opacity, and SH color, compatible with the INRIA splat PLY layout written by <see cref="Io.PlyWriter"/>.</summary>
 public sealed class GaussianSplatCloud
 {
     /// <summary>Centers, length <c>3 * Count</c>.</summary>

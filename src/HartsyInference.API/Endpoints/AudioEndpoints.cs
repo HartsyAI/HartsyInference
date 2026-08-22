@@ -6,11 +6,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native audio routes: speech synthesis, music generation, transcription, voice conversion, and fx (stem separation /
-/// enhancement). All one-shot (no step-preview progress, unlike image/video), so none of these have a <c>/stream</c>
-/// variant. <see cref="AudioResult"/>/<see cref="TranscriptResult"/>/<see cref="StemsResult"/> already carry encoded
-/// bytes (or plain text/timestamps) — no PNG-style re-encoding step needed, just pass the native result straight
-/// through as JSON.</summary>
+/// <summary>Native audio routes: speech synthesis, music generation, transcription, voice conversion, and fx (stem separation / enhancement). All one-shot (no step-preview progress, unlike image/video), so none of these have a <c>/stream</c> variant. <see cref="AudioResult"/>/<see cref="TranscriptResult"/>/<see cref="StemsResult"/> already carry encoded bytes (or plain text/timestamps) — no PNG-style re-encoding step needed, just pass the native result straight through as JSON.</summary>
 public static class AudioEndpoints
 {
     /// <summary>Maps <c>/v1/native/speech</c>, <c>/music</c>, <c>/transcribe</c>, <c>/voice-convert</c>, and <c>/fx/*</c>.</summary>
@@ -104,8 +100,7 @@ public static class AudioEndpoints
         });
     }
 
-    /// <summary>Re-emits the native audio fields plus where the file landed. Property names match
-    /// <see cref="AudioResult"/> exactly, so this is additive for existing clients.</summary>
+    /// <summary>Re-emits the native audio fields plus where the file landed. Property names match <see cref="AudioResult"/> exactly, so this is additive for existing clients.</summary>
     private static object WithSavedPath(AudioResult result, string? savedPath) => new
     {
         result.Data,

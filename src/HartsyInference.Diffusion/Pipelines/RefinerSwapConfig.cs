@@ -3,12 +3,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Optional add-on for <see cref="SdxlPipeline.GenerateFromTokens"/> that turns
-/// the standard base-only denoise loop into a Comfy-style "StepSwap": run base UNet for
-/// the first <c>(1 - Strength)</c> fraction of steps, then mid-loop swap to the refiner
-/// UNet for the remainder. Both halves share the same latent state — no VAE round-trip
-/// in between (which is what <see cref="SdxlRefinerPipeline"/>'s PostApply mode does).
-///
+/// <summary>Optional add-on for <see cref="SdxlPipeline.GenerateFromTokens"/> that turns the standard base-only denoise loop into a Comfy-style "StepSwap": run base UNet for the first <c>(1 - Strength)</c> fraction of steps, then mid-loop swap to the refiner UNet for the remainder. Both halves share the same latent state — no VAE round-trip in between (which is what <see cref="SdxlRefinerPipeline"/>'s PostApply mode does).
 /// <para>The refiner UNet has a different shape than base (4 levels, CrossAttentionDim=1280
 /// from CLIP-G alone, AdmInChannels=2560 with aesthetic_score conditioning). The pipeline
 /// slices CLIP-G out of the base's concatenated text embedding for the refiner phase and
@@ -35,10 +30,6 @@ public sealed record RefinerSwapConfig
     /// <summary>Aesthetic score for the uncond branch (negative prompt). Trained around <c>2.5</c>; CFG steers away from this so lower values amplify the "more aesthetic" pull on the conditional side.</summary>
     public float NegativeAestheticScore { get; init; } = 2.5f;
 
-    /// <summary>Optional CLIP-G penultimate hidden states <c>[2, S, 1280]</c> (uncond, cond) encoded from a
-    /// separate <c>&lt;refiner&gt;</c> prompt. When set, the refiner phase cross-attends to this instead of the
-    /// base prompt's CLIP-G conditioning (SwarmUI's <c>&lt;refiner&gt;</c> prompt syntax — a distinct prompt for the
-    /// refine stage). Null → the refiner reuses the base prompt's CLIP-G (previous behavior). The caller owns
-    /// the tensor's lifetime; the pipeline only borrows it for the one <c>GenerateFromTokens</c> call.</summary>
+    /// <summary>Optional CLIP-G penultimate hidden states <c>[2, S, 1280]</c> (uncond, cond) encoded from a separate <c>&lt;refiner&gt;</c> prompt. When set, the refiner phase cross-attends to this instead of the base prompt's CLIP-G conditioning (SwarmUI's <c>&lt;refiner&gt;</c> prompt syntax — a distinct prompt for the refine stage). Null → the refiner reuses the base prompt's CLIP-G (previous behavior). The caller owns the tensor's lifetime; the pipeline only borrows it for the one <c>GenerateFromTokens</c> call.</summary>
     public Tensor? RefinerConditioning { get; init; }
 }

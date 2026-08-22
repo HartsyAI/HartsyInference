@@ -1,10 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Places lexical stress on a word's phoneme sequence, ported from <c>GetVowelStress</c> + <c>SetWordStress</c>
-/// in espeak-ng dictionary.c. Given the raw phoneme codes (from the dictionary list or the letter-to-sound rules) plus
-/// the dictionary flag bits (which may pin the stressed syllable), it strips any existing stress markers, decides the
-/// stress level of each vowel from the language stress rule and flags, and re-emits the sequence with the stress-marker
-/// phonemes inserted. English relies mostly on the explicit dictionary stress position with a penultimate fallback.</summary>
+/// <summary>Places lexical stress on a word's phoneme sequence, ported from <c>GetVowelStress</c> + <c>SetWordStress</c> in espeak-ng dictionary.c: strips any existing stress markers, decides each vowel's stress level from the language stress rule and dictionary flag bits (which may pin the stressed syllable), and re-emits the sequence with stress-marker phonemes inserted. English relies mostly on the explicit dictionary stress position with a penultimate fallback.</summary>
 internal sealed class EspeakStress
 {
     private const int MaxPhonemes = 200; // N_WORD_PHONEMES
@@ -149,9 +145,7 @@ internal sealed class EspeakStress
         return maxStress;
     }
 
-    /// <summary>Places stress on <paramref name="inputCodes"/> and returns the stressed phoneme code sequence.
-    /// <paramref name="dflags"/> are the dictionary flags (low bits pin the stressed syllable); pass 0 for
-    /// rule-translated words. <paramref name="tonic"/> &gt;= 0 replaces the top stress with that level (-1 for none).</summary>
+    /// <summary>Places stress on <paramref name="inputCodes"/> and returns the stressed phoneme code sequence. <paramref name="dflags"/> are the dictionary flags (low bits pin the stressed syllable, pass 0 for rule-translated words); <paramref name="tonic"/> &gt;= 0 replaces the top stress with that level (-1 for none).</summary>
     public List<byte> SetWordStress(List<byte> inputCodes, uint dflags, int tonic, int control)
     {
         byte[] phonetic = new byte[MaxPhonemes + 4];
@@ -407,8 +401,7 @@ internal sealed class EspeakStress
         return output;
     }
 
-    /// <summary>Dictionary flag "full stress if at end of clause" (translate.h FLAG_STRESS_END); set by the $u+
-    /// list attribute in addition to the 0x8 unstressed-field bit.</summary>
+    /// <summary>Dictionary flag "full stress if at end of clause" (translate.h FLAG_STRESS_END); set by the $u+ list attribute in addition to the 0x8 unstressed-field bit.</summary>
     private const uint FlagStressEnd = 0x200;
 
     // stress_flags (translate.h S_*).

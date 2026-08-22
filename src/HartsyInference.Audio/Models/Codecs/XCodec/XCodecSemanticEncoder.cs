@@ -4,9 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.XCodec;
 
-/// <summary>The x-codec <c>encoder_semantic</c> — a RepCodec/AudioDec-lineage <c>Encoder(input_channels=768,
-/// encode_channels=768)</c> that conditions the mean-of-13 HuBERT feature before it is concatenated with the
-/// acoustic branch:
+/// <summary>The x-codec <c>encoder_semantic</c> — a RepCodec/AudioDec-lineage <c>Encoder(input_channels=768, encode_channels=768)</c> that conditions the mean-of-13 HuBERT feature before it is concatenated with the acoustic branch.</summary>
+/// <remarks>
 /// <code>
 ///   conv (k3 s1 p1, NO bias)                                          stem
 ///   for b in 0, 1:
@@ -21,7 +20,7 @@ namespace HartsyInference.Audio.Models.Codecs.XCodec;
 /// <para><b>Key-spelling trap:</b> <c>Conv1d1x1</c> subclasses <c>nn.Conv1d</c> directly, so the second res-unit
 /// conv is <c>res_units.{u}.conv2.weight</c> — one nesting level shallower than its <c>conv1.conv.weight</c>
 /// sibling. The res-unit convs and the stem carry no bias (<c>ResidualUnit.bias</c> defaults to false and
-/// <c>EncoderBlock</c> never forwards its own <c>bias=True</c>); only the block-exit conv has one.</para></summary>
+/// <c>EncoderBlock</c> never forwards its own <c>bias=True</c>); only the block-exit conv has one.</para></remarks>
 internal sealed class XCodecSemanticEncoder
 {
     private readonly string _prefix;

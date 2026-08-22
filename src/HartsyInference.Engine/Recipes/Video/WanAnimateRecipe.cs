@@ -13,12 +13,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan-Animate recipe (character animation) — the Wan backbone plus a driving-pose latent
-/// (<c>pose_patch_embedding</c>) and a face pathway (<c>motion_encoder</c> → <c>face_encoder</c> →
-/// <c>face_adapter</c>). Config is weight-derived via <see cref="WanConfigDetector"/> (the layout the engine's Animate
-/// harness validated). Lifted from the SwarmUI backend's <c>WanAnimateLoader</c>: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H
-/// (<see cref="SideModels.ClipVisionH14"/>) when the checkpoint ships the i2v image embedder.</summary>
+/// <summary>Wan-Animate recipe (character animation) — the Wan backbone plus a driving-pose latent (<c>pose_patch_embedding</c>) and a face pathway (<c>motion_encoder</c> → <c>face_encoder</c> → <c>face_adapter</c>). Config is weight-derived via <see cref="WanConfigDetector"/> (the layout the engine's Animate harness validated). Lifted from the SwarmUI backend's <c>WanAnimateLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>) when the checkpoint ships the i2v image embedder.</summary>
 public sealed class WanAnimateRecipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -31,8 +26,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at
-    /// guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
+    /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 1.0f, Frames = 77, Fps = 30 };
 
     /// <inheritdoc/>

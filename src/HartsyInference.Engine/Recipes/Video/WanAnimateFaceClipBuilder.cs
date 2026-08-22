@@ -6,17 +6,13 @@ using HartsyInference.Vision.FaceDetection;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Builds Wan-Animate's face-motion driving clip by localizing the face per driving frame (YOLO11-pose
-/// keypoints → <see cref="PoseFaceCrop"/>) and bilinearly resampling a face-centered square to the motion-encoder
-/// resolution; a null pose pipeline (or an undetected frame) center-crop-squares instead. Ported from the SwarmUI
-/// extension's <c>WanAnimateFacePreprocessor</c>.</summary>
+/// <summary>Builds Wan-Animate's face-motion driving clip by localizing the face per driving frame (YOLO11-pose keypoints → <see cref="PoseFaceCrop"/>) and bilinearly resampling a face-centered square to the motion-encoder resolution; a null pose pipeline (or an undetected frame) center-crop-squares instead. Ported from the SwarmUI extension's <c>WanAnimateFacePreprocessor</c>.</summary>
 internal static class WanAnimateFaceClipBuilder
 {
     /// <summary>Mid-gray sample for crop pixels outside the frame (matches the YOLO letterbox fill).</summary>
     internal const float OutOfFramePad = 114f;
 
-    /// <summary>Returns the <c>[1, 3, T, S, S]</c> face clip in [-1, 1] for <c>T = frames.Count</c>, <c>S = motionSize</c>;
-    /// frames are interleaved HWC RGB24 at <paramref name="width"/>×<paramref name="height"/> (where pose runs).</summary>
+    /// <summary>Returns the <c>[1, 3, T, S, S]</c> face clip in [-1, 1] for <c>T = frames.Count</c>, <c>S = motionSize</c>; frames are interleaved HWC RGB24 at <paramref name="width"/>×<paramref name="height"/> (where pose runs).</summary>
     internal static unsafe Tensor Build(IBackend backend, YoloPosePipeline? pose, IReadOnlyList<byte[]> frames,
         int width, int height, int motionSize, CancellationToken cancel)
     {
@@ -98,8 +94,7 @@ internal static class WanAnimateFaceClipBuilder
         return new PoseFaceCrop.Rect((width - side) * 0.5f, (height - side) * 0.5f, side);
     }
 
-    /// <summary>Bilinearly samples the source frame's square crop into a <c>[3, outSize, outSize]</c> CHW buffer in
-    /// [-1, 1]; samples outside the frame read mid-gray (<see cref="OutOfFramePad"/>) so an off-image crop pads cleanly.</summary>
+    /// <summary>Bilinearly samples the source frame's square crop into a <c>[3, outSize, outSize]</c> CHW buffer in [-1, 1]; samples outside the frame read mid-gray (<see cref="OutOfFramePad"/>) so an off-image crop pads cleanly.</summary>
     internal static float[] SampleSquareChw(byte[] rgb, int width, int height, PoseFaceCrop.Rect crop, int outSize)
     {
         float[] chw = new float[3 * outSize * outSize];

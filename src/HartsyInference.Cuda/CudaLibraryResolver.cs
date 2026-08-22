@@ -17,13 +17,7 @@ public static class CudaLibraryResolver
         }
     }
 
-    /// <summary>Directories probed for CUDA userspace libs (cuBLAS/cuBLASLt/cuDNN/cudart) BEFORE the plain
-    /// soname search. The toolkit userspace on dev boxes often lives outside the loader's paths (this
-    /// project's documented install is <c>~/.local/lib/cuda13</c>), and <c>LD_LIBRARY_PATH</c> only works
-    /// when whoever launched the process remembered to export it — a bare SwarmUI relaunch without it kills
-    /// the whole backend (DllNotFoundException: libcublas.so.13). Probing here makes the engine
-    /// self-sufficient regardless of launcher environment. <c>HARTSY_CUDA_LIB_DIR</c> overrides/prepends.
-    /// libcuda.so.1 is NOT probed here — it's the driver, always in the system loader path.</summary>
+    /// <summary>Directories probed for CUDA userspace libs (cuBLAS/cuBLASLt/cuDNN/cudart) BEFORE the plain soname search. The toolkit userspace on dev boxes often lives outside the loader's paths (this project's documented install is <c>~/.local/lib/cuda13</c>), and <c>LD_LIBRARY_PATH</c> only works when whoever launched the process remembered to export it — a bare SwarmUI relaunch without it kills the whole backend (DllNotFoundException: libcublas.so.13). Probing here makes the engine self-sufficient regardless of launcher environment. <c>HARTSY_CUDA_LIB_DIR</c> overrides/prepends. libcuda.so.1 is NOT probed here — it's the driver, always in the system loader path.</summary>
     private static readonly string[] ProbeDirs = BuildProbeDirs();
 
     private static string[] BuildProbeDirs()
@@ -53,8 +47,7 @@ public static class CudaLibraryResolver
         return dirs.ToArray();
     }
 
-    /// <summary>Tries each candidate soname in order, first as an absolute path under every probe dir,
-    /// then via the default loader search (LD_LIBRARY_PATH / ldconfig / PATH).</summary>
+    /// <summary>Tries each candidate soname in order, first as an absolute path under every probe dir, then via the default loader search (LD_LIBRARY_PATH / ldconfig / PATH).</summary>
     private static bool TryLoadFirst(out nint handle, params string[] sonames)
     {
         foreach (string soname in sonames)
@@ -81,10 +74,7 @@ public static class CudaLibraryResolver
         return NativeLibrary.Load(sonames[0]);
     }
 
-    /// <summary>Availability probe for <see cref="CudaContext.IsAvailable"/>: can cuBLAS be loaded (probe
-    /// dirs included)? Keeps the availability check and the actual resolution on the SAME search logic —
-    /// a duplicated bare-soname probe here previously reported CUDA unavailable whenever LD_LIBRARY_PATH
-    /// was missing, even though the resolver could load everything from the probe dirs.</summary>
+    /// <summary>Availability probe for <see cref="CudaContext.IsAvailable"/>: can cuBLAS be loaded (probe dirs included)? Keeps the availability check and the actual resolution on the SAME search logic — a duplicated bare-soname probe here previously reported CUDA unavailable whenever LD_LIBRARY_PATH was missing, even though the resolver could load everything from the probe dirs.</summary>
     public static bool CublasLoadable()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

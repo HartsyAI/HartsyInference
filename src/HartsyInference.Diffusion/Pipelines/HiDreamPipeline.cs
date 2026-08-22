@@ -12,10 +12,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>HiDream-I1 text-to-image pipeline. Orchestrates a quad text-encoder stack
-/// (CLIP-L + CLIP-G → pooled 2048-d, T5-XXL → 4096-d sequence, Llama-3.1 → multi-layer 4096-d hidden states),
-/// runs the <see cref="HiDreamTransformer"/> with flow-match Euler scheduling, and decodes the predicted
-/// velocity through the 16-channel VAE.
+/// <summary>HiDream-I1 text-to-image pipeline. Orchestrates a quad text-encoder stack (CLIP-L + CLIP-G → pooled 2048-d, T5-XXL → 4096-d sequence, Llama-3.1 → multi-layer 4096-d hidden states), runs the <see cref="HiDreamTransformer"/> with flow-match Euler scheduling, and decodes the predicted velocity through the 16-channel VAE.
 /// <para>This pipeline is text-to-image only — image-to-image and editing pipelines are not provided.</para>
 /// <para>The HiDream transformer consumes one Llama hidden state per block (16 + 32 = 48 layers per the
 /// default config). The pipeline drives <see cref="LlamaStyleEncoder.EncodeMultiLayer"/> with the layer
@@ -33,10 +30,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly HiDreamConfig _config;
 
-    /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights +
-    /// next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it,
-    /// so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat
-    /// prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
     private static readonly bool KeepModelsResident =
         HartsyInference.Core.Runtime.EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -53,9 +47,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private Tensor? _cachedUncondPooled, _cachedUncondT5;
     private IReadOnlyList<Tensor>? _cachedUncondLlama;
 
-    /// <summary>Creates a new HiDream pipeline with all components pre-loaded. Caller owns each component
-    /// and is responsible for their lifetime — the pipeline does not dispose them on its own
-    /// <see cref="DiffusionPipelineBase.Dispose"/>.</summary>
+    /// <summary>Creates a new HiDream pipeline with all components pre-loaded. Caller owns each component and is responsible for their lifetime — the pipeline does not dispose them on its own <see cref="DiffusionPipelineBase.Dispose"/>.</summary>
     public HiDreamPipeline(IBackend backend,
         ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder t5, LlamaStyleEncoder llama,
@@ -65,9 +57,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     {
     }
 
-    /// <summary>Creates a HiDream pipeline with both VAE halves loaded — required for img2img / inpaint (pass an
-    /// <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with
-    /// <c>VaeConfig.Flux</c>, the 16-channel autoencoder HiDream shares with Flux.1.</summary>
+    /// <summary>Creates a HiDream pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with <c>VaeConfig.Flux</c>, the 16-channel autoencoder HiDream shares with Flux.1.</summary>
     public HiDreamPipeline(IBackend backend,
         ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder t5, LlamaStyleEncoder llama,
@@ -85,10 +75,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Builds the initial latent. Text-to-image: noise scaled by the scheduler's initial sigma. Img2img:
-    /// the VAE-encoded source combined with fresh noise through flow-matching <c>AddNoise</c> at
-    /// <c>sigma[startStep]</c>. When <paramref name="keepSourceLatent"/> is set (masked inpaint) the clean source
-    /// latent is returned alongside for per-step blending; the caller disposes both.</summary>
+    /// <summary>Builds the initial latent. Text-to-image: noise scaled by the scheduler's initial sigma. Img2img: the VAE-encoded source combined with fresh noise through flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. When <paramref name="keepSourceLatent"/> is set (masked inpaint) the clean source latent is returned alongside for per-step blending; the caller disposes both.</summary>
     private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(
         TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep, bool keepSourceLatent)
     {
@@ -481,9 +468,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the
-    /// non-sharded path — <see cref="HiDreamTransformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the non-sharded path — <see cref="HiDreamTransformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
     private Tensor RunForward(Tensor latent, float timestep, Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, DeviceFeatureCache? stepCache = null)
     {
         if (DitShardBackend is not null)
@@ -493,8 +478,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         return _transformer.Forward(Backend, latent, timestep, t5Hidden, llamaHiddenLayers, pooledEmbeds, stepCache);
     }
 
-    /// <summary>Disposes the cached positive conditioning (safe mid-session — the context is live at
-    /// replacement time; end-of-life teardown nulls via the weight-field pattern instead).</summary>
+    /// <summary>Disposes the cached positive conditioning (safe mid-session — the context is live at replacement time; end-of-life teardown nulls via the weight-field pattern instead).</summary>
     private void DisposeCachedCond()
     {
         _cachedCondPooled?.Dispose();

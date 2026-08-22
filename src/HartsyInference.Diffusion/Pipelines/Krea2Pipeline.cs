@@ -15,26 +15,16 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Krea 2 text-to-image pipeline. Encodes the prompt through Qwen3-VL-4B (12-layer hidden-state tap) via
-/// <see cref="LlamaStyleEncoder.EncodeMultiLayer"/>, runs the <see cref="Krea2Transformer"/> (which fuses the tapped
-/// layers, patchifies the latent, and predicts the flow-match velocity) under a resolution-aware flow-match Euler
-/// schedule, and decodes through the 16-channel Qwen-Image VAE. CFG is a dual pass when <c>request.CfgScale &gt; 1</c>
-/// (Base, ~4.5); Turbo/TDM runs a single conditional pass (guidance off). See <c>docs/Research/KREA2.md</c>.</summary>
+/// <summary>Krea 2 text-to-image pipeline. Encodes the prompt through Qwen3-VL-4B (12-layer hidden-state tap) via <see cref="LlamaStyleEncoder.EncodeMultiLayer"/>, runs the <see cref="Krea2Transformer"/> (which fuses the tapped layers, patchifies the latent, and predicts the flow-match velocity) under a resolution-aware flow-match Euler schedule, and decodes through the 16-channel Qwen-Image VAE. CFG is a dual pass when <c>request.CfgScale &gt; 1</c> (Base, ~4.5); Turbo/TDM runs a single conditional pass (guidance off). See <c>docs/Research/KREA2.md</c>.</summary>
 public sealed class Krea2Pipeline : DiffusionPipelineBase
 {
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
-    /// FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE
-    /// decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes).
-    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
 
-    /// <summary>Whether the DiT's weights are currently ALL on the device from a previous generation
-    /// (<see cref="KeepModelsResident"/>). Fed to <see cref="VramPlanner.PlanPhase"/> as <c>alreadyResident</c> — the
-    /// availability query cannot see past weights that are themselves occupying the space it measures, so without
-    /// this a warm generation reports "does not fit" and flips between resident and streamed on alternate runs.</summary>
+    /// <summary>Whether the DiT's weights are currently ALL on the device from a previous generation (<see cref="KeepModelsResident"/>). Fed to <see cref="VramPlanner.PlanPhase"/> as <c>alreadyResident</c> — the availability query cannot see past weights that are themselves occupying the space it measures, so without this a warm generation reports "does not fit" and flips between resident and streamed on alternate runs.</summary>
     private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used): tapped TE hidden states keyed on
@@ -69,10 +59,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image. <paramref name="promptTokenIds"/> / <paramref name="negativeTokenIds"/> are the
-    /// chat-templated Qwen token sequences; the leading <paramref name="promptDropIndex"/> (system-prefix) hidden
-    /// states are dropped (Krea 2's <c>prompt_template_encode_start_idx = 34</c>). The negative stream is used only
-    /// when <c>request.CfgScale &gt; 1</c> (Base); for Turbo pass <c>CfgScale ≤ 1</c>.
+    /// <summary>Generates an image. <paramref name="promptTokenIds"/> / <paramref name="negativeTokenIds"/> are the chat-templated Qwen token sequences; the leading <paramref name="promptDropIndex"/> (system-prefix) hidden states are dropped (Krea 2's <c>prompt_template_encode_start_idx = 34</c>). The negative stream is used only when <c>request.CfgScale &gt; 1</c> (Base); for Turbo pass <c>CfgScale ≤ 1</c>.
     /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source is encoded through the Qwen-Image
     /// 3D-causal VAE encoder and noised via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a
     /// <see cref="QwenImageVaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint
@@ -620,13 +607,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Routes one patchified-space denoise step through <see cref="DitShardBackend"/>'s block-range split
-    /// when configured, else the normal single-backend path. Sharding excludes step-cache (see
-    /// <see cref="Krea2Transformer.ForwardPatchedSharded"/>) — <paramref name="stepCache"/> is only honored on the
-    /// unsharded path; callers still pass it unconditionally, matching the existing call sites. <paramref name="attnBias"/>
-    /// (regional prompting, Tier 3.7) is excluded from sharding the same way — <see cref="Krea2Transformer.ForwardPatchedSharded"/>
-    /// has no bias parameter at all — so a non-null bias forces the unsharded path regardless of <see cref="DitShardBackend"/>;
-    /// callers must log this once per generation (see <c>GenerateFromTokens</c>), not silently drop the conditioning.</summary>
+    /// <summary>Routes one patchified-space denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path. Sharding excludes step-cache (see <see cref="Krea2Transformer.ForwardPatchedSharded"/>) — <paramref name="stepCache"/> is only honored on the unsharded path; callers still pass it unconditionally, matching the existing call sites. <paramref name="attnBias"/> (regional prompting, Tier 3.7) is excluded from sharding the same way — <see cref="Krea2Transformer.ForwardPatchedSharded"/> has no bias parameter at all — so a non-null bias forces the unsharded path regardless of <see cref="DitShardBackend"/>; callers must log this once per generation (see <c>GenerateFromTokens</c>), not silently drop the conditioning.</summary>
     private Tensor RunForwardPatched(Tensor patchLatent, float t, Tensor encoderHidden, int hPacked, int wPacked,
         DeviceFeatureCache? stepCache, Tensor? attnBias = null)
     {
@@ -648,9 +629,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         return _transformer.Forward(Backend, latent, t, encoderHidden);
     }
 
-    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: the source is encoded through the
-    /// Qwen-Image 3D-causal VAE encoder (already per-channel normalized to the transformer's latent space) and
-    /// combined with fresh noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: the source is encoded through the Qwen-Image 3D-causal VAE encoder (already per-channel normalized to the transformer's latent space) and combined with fresh noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned
     /// alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain
     /// img2img.</para></summary>
@@ -745,14 +724,10 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         _cachedUncondKey = null;
     }
 
-    /// <summary>Encodes one region's prompt text (Tier 3.7) through the SAME tapped-layer encode the base prompt
-    /// uses — the caller (recipe layer) must template + drop-index the region text identically to the base prompt
-    /// (<c>Krea2RecipePipeline.EncodeWithTemplate</c>), since <see cref="EncodeTapped"/> has no template logic of
-    /// its own.</summary>
+    /// <summary>Encodes one region's prompt text (Tier 3.7) through the SAME tapped-layer encode the base prompt uses — the caller (recipe layer) must template + drop-index the region text identically to the base prompt (<c>Krea2RecipePipeline.EncodeWithTemplate</c>), since <see cref="EncodeTapped"/> has no template logic of its own.</summary>
     public Tensor EncodeRegionText(int[] tokenIds, int dropIndex) => EncodeTapped(tokenIds, dropIndex);
 
-    /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops
-    /// the first <paramref name="dropIndex"/> token positions (the chat-template system prefix).</summary>
+    /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops the first <paramref name="dropIndex"/> token positions (the chat-template system prefix).</summary>
     private unsafe Tensor EncodeTapped(int[] tokenIds, int dropIndex)
     {
         Tensor full = _textEncoder.EncodeMultiLayer(Backend, [tokenIds], Krea2Config.TextEncoderSelectLayers,

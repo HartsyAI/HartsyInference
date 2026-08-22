@@ -3,8 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>The conditioning hint encoder that downsamples a 3-channel control image (canny edges, depth map, openpose skeleton, …) into the same spatial + channel dimensions as the base UNet's <c>conv_in</c> output, so the result can be added on top of the noisy latent before the down blocks.
-/// <para>Architecture (matches diffusers' <c>ControlNetConditioningEmbedding</c>): <c>conv_in(3→16)</c> → SiLU → 6 blocks alternating <c>same-stride</c> and <c>stride-2</c> convs (16→16, 16→32↓, 32→32, 32→96↓, 96→96, 96→256↓) → <c>conv_out(256→modelChannels)</c>. Three stride-2 convs give 8× total downsampling — exactly the VAE compression ratio, so a <c>1024²</c> image lands at <c>128²</c> matching the latent grid. <c>conv_out</c> is zero-initialized at training time so an untrained ControlNet contributes zero residuals; we don't enforce that here, we just trust the checkpoint.</para></summary>
+/// <summary>The conditioning hint encoder that downsamples a 3-channel control image (canny edges, depth map, openpose skeleton, …) into the same spatial + channel dimensions as the base UNet's <c>conv_in</c> output, so the result can be added on top of the noisy latent before the down blocks. Architecture (matches diffusers' <c>ControlNetConditioningEmbedding</c>): <c>conv_in(3→16)</c> → SiLU → 6 blocks alternating <c>same-stride</c> and <c>stride-2</c> convs (16→16, 16→32↓, 32→32, 32→96↓, 96→96, 96→256↓) → <c>conv_out(256→modelChannels)</c>. Three stride-2 convs give 8× total downsampling — exactly the VAE compression ratio, so a <c>1024²</c> image lands at <c>128²</c> matching the latent grid. <c>conv_out</c> is zero-initialized at training time so an untrained ControlNet contributes zero residuals; we don't enforce that here, we just trust the checkpoint.</summary>
 public sealed unsafe class ControlNetCondEmbedding : IDisposable
 {
     private readonly int _condChannels;

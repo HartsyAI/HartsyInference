@@ -55,10 +55,7 @@ public sealed class HiDreamRope
     public void Forward(Tensor q, Tensor k, int batch, int numHeads, int seqLen) =>
         _inner.Forward(q, k, batch, numHeads, seqLen);
 
-    /// <summary>GPU-resident rope on the PRE-permute <c>[1, S, H, D]</c> layout (see
-    /// <see cref="FluxRope.ApplyGpu"/> — bit-identical interleaved-pair rotation, device cos/sin tables).
-    /// S must equal the precomputed sequence length; zero-position text tokens rotate by identity, so
-    /// applying over the full joint sequence equals the old image-only host rotation. Batch-1 only.</summary>
+    /// <summary>GPU-resident rope on the PRE-permute <c>[1, S, H, D]</c> layout (see <see cref="FluxRope.ApplyGpu"/> — bit-identical interleaved-pair rotation, device cos/sin tables). S must equal the precomputed sequence length; zero-position text tokens rotate by identity, so applying over the full joint sequence equals the old image-only host rotation. Batch-1 only.</summary>
     public void ApplyGpu(HartsyInference.Core.Backends.IBackend backend, Tensor q, Tensor k, int numHeads) =>
         _inner.ApplyGpu(backend, q, k, numHeads);
 }

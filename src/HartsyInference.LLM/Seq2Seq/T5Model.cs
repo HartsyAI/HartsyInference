@@ -4,13 +4,7 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Seq2Seq;
 
-/// <summary>T5 / FLAN-T5 encoder-decoder (seq2seq) loaded from a llama.cpp <c>t5</c> GGUF. The encoder runs once
-/// over the input; the decoder autoregressively cross-attends to the encoder output. T5 quirks handled:
-/// inner attention dim = n_heads·key_length (≠ d_model); <b>no 1/√d attention scaling</b>; learned <b>relative
-/// position bias</b> (bucketed, shared across layers — weights on block 0; bidirectional for the encoder,
-/// causal/unidirectional for the decoder self-attn; none for cross-attn); T5LayerNorm = RMSNorm (no bias);
-/// GeGLU FFN (FLAN). Attention reuses <see cref="IBackend.ScaledDotProductAttention"/> with <c>scale = 1</c> and an
-/// additive per-head mask carrying the relative-position bias (+ causal −∞ for the decoder self-attn).</summary>
+/// <summary>T5/FLAN-T5 encoder-decoder loaded from a llama.cpp <c>t5</c> GGUF, handling T5's quirks: inner attention dim = n_heads·key_length (≠ d_model), <b>no 1/√d attention scaling</b>, learned <b>relative position bias</b> (bucketed, shared across layers, weights on block 0; bidirectional for the encoder, causal for the decoder self-attn, none for cross-attn), T5LayerNorm = RMSNorm (no bias), GeGLU FFN (FLAN).</summary>
 public sealed unsafe class T5Model : IDisposable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -92,8 +86,7 @@ public sealed unsafe class T5Model : IDisposable
         return ret + Math.Min(large, nb - 1);
     }
 
-    /// <summary>Builds the additive per-head attention mask [1, heads, qLen, kLen] = relative-position bias
-    /// (+ causal −∞ when <paramref name="causal"/>). <paramref name="relB"/> is the [buckets, heads] bias table.</summary>
+    /// <summary>Builds the additive per-head attention mask [1, heads, qLen, kLen] = relative-position bias (+ causal −∞ when <paramref name="causal"/>); <paramref name="relB"/> is the [buckets, heads] bias table.</summary>
     private Tensor RelBiasMask(int qLen, int kLen, bool bidirectional, bool causal, Tensor relB)
     {
         Tensor mask = new(new TensorShape(1, NumHeads, qLen, kLen), DType.F32);
@@ -120,8 +113,7 @@ public sealed unsafe class T5Model : IDisposable
         return mask;
     }
 
-    /// <summary>Multi-head attention with T5 conventions: no 1/√d scaling, additive per-head mask carrying the
-    /// relative-position bias. <paramref name="kvSrc"/> = the source of K/V (self = x; cross = encoder output).</summary>
+    /// <summary>Multi-head attention with T5 conventions: no 1/√d scaling, additive per-head mask carrying the relative-position bias; <paramref name="kvSrc"/> is the source of K/V (self = x, cross = encoder output).</summary>
     private Tensor Attention(IBackend backend, Tensor x, Tensor kvSrc, int qLen, int kLen, string prefix, Tensor mask)
     {
         int heads = NumHeads, hd = HeadDim, inner = Inner, d = DModel;
@@ -201,8 +193,7 @@ public sealed unsafe class T5Model : IDisposable
         return enc;
     }
 
-    /// <summary>Runs the decoder over <paramref name="decIds"/> (teacher-forced) against the encoder output and
-    /// returns the last-position logits.</summary>
+    /// <summary>Runs the decoder over <paramref name="decIds"/> (teacher-forced) against the encoder output and returns the last-position logits.</summary>
     public float[] DecodeLogits(IBackend backend, Tensor enc, int encLen, IReadOnlyList<int> decIds)
     {
         int seq = decIds.Count, d = DModel;

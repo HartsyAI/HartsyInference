@@ -2,13 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converts a <c>PekingU/rtdetr_r*vd</c> RT-DETR checkpoint into the weight dict the
-/// <c>RtDetrModel</c> loads. RT-DETR stores every conv's BatchNorm as separate
-/// <c>running_mean/var/weight/bias</c> buffers (three naming conventions —
-/// <c>*.normalization.*</c> in the ResNet backbone, <c>*.norm.*</c> in the CCFM conv layers, and the
-/// <c>Sequential(conv, bn)</c> index <c>*.1.*</c> in the input projections). This folds each BN into
-/// its preceding conv (giving the conv a bias), drops the BN buffers + <c>num_batches_tracked</c>, and
-/// passes every other tensor (Linear / LayerNorm / embeddings / heads) through unchanged.</summary>
+/// <summary>Converts a <c>PekingU/rtdetr_r*vd</c> RT-DETR checkpoint into the weight dict the <c>RtDetrModel</c> loads. RT-DETR stores every conv's BatchNorm as separate <c>running_mean/var/weight/bias</c> buffers (three naming conventions — <c>*.normalization.*</c> in the ResNet backbone, <c>*.norm.*</c> in the CCFM conv layers, and the <c>Sequential(conv, bn)</c> index <c>*.1.*</c> in the input projections). This folds each BN into its preceding conv (giving the conv a bias), drops the BN buffers + <c>num_batches_tracked</c>, and passes every other tensor (Linear / LayerNorm / embeddings / heads) through unchanged.</summary>
 public static class RtDetrCheckpointConverter
 {
     private const float BatchNormEps = 1e-5f;

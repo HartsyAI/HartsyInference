@@ -35,9 +35,7 @@ public static unsafe class Wan22VaePatch
         return outT;
     }
 
-    /// <summary>Inverse of <see cref="Patchify"/>: <c>[B, C·p², T, H, W] → [B, C, T, H·p, W·p]</c>.</summary>
-    /// <summary>GPU-resident overload: keeps unpatchify on-device (host <see cref="Unpatchify(Tensor,int)"/> forces a
-    /// D2H sync + H2D re-upload, once per decoded frame).</summary>
+    /// <summary>GPU-resident overload: keeps unpatchify on-device (the host <see cref="Unpatchify(Tensor,int)"/> forces a D2H sync + H2D re-upload, once per decoded frame).</summary>
     public static Tensor Unpatchify(HartsyInference.Core.Backends.IBackend backend, Tensor x, int patchSize)
     {
         if (patchSize == 1) return CloneRef(x);
@@ -51,6 +49,7 @@ public static unsafe class Wan22VaePatch
         return outT;
     }
 
+    /// <summary>Inverse of <see cref="Patchify"/>: <c>[B, C·p², T, H, W] → [B, C, T, H·p, W·p]</c>.</summary>
     public static Tensor Unpatchify(Tensor x, int patchSize)
     {
         if (patchSize == 1) return CloneRef(x);

@@ -18,8 +18,6 @@ public interface IModel : IDisposable
     void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, IBackend backend);
 
     /// <summary>Runs the model's forward pass.</summary>
-    /// <param name="output">Tensor to write the output into.</param>
     /// <param name="input">Input tensor(s) — meaning depends on model type.</param>
-    /// <param name="backend">Backend to execute operations on.</param>
     void Forward(Tensor output, Tensor input, IBackend backend);
 }

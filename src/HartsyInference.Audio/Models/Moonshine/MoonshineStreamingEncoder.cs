@@ -4,26 +4,21 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>2nd-gen streaming Moonshine encoder (verified against <c>transformers/models/
-/// moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1, cross-checked against the real
-/// <c>UsefulSensors/moonshine-streaming-{tiny,small,medium}</c> checkpoints). A completely different
-/// front end and attention pattern from the original <see cref="MoonshineEncoder"/> — NOT raw-waveform-
-/// direct-3-conv, and NOT RoPE'd full attention:
-///
-/// <para><b>Front end</b> (<c>MoonshineStreamingEncoderEmbedder</c>): reshape raw 16kHz samples into
-/// 5ms (80-sample) frames → per-frame CMVN (zero-mean, unit-RMS) → learned asinh compression
-/// (<c>asinh(exp(log_k) * x)</c>) → Linear(80 → hidden, no bias) + SiLU → 2× LEFT-PADDED CAUSAL
-/// Conv1d(k=5, s=2) — first with a trailing SiLU, the second with none. Total downsample 80×2×2=320
-/// samples/frame ≈ 50 Hz encoder rate (vs the original's raw-3-conv 384× stem).</para>
-///
-/// <para><b>Layers</b>: pre-norm self-attention (per-layer SLIDING-WINDOW mask, <b>no RoPE at all</b> —
-/// the original encoder's RoPE is absent here) → pre-norm GELU MLP (not gated). Norms are
-/// <see cref="MoonshineStreamingOps.UnitOffsetLayerNorm"/> (parameterless LayerNorm × <c>(gamma+1)</c>),
-/// NOT the original's plain weight-only <see cref="MoonshineOps.LayerNormNoBias"/>.</para>
-///
-/// <para>This is a full-utterance BATCH forward (bit-exact against the HF reference, which is itself
-/// batch-only) — true chunked/incremental encoder streaming (exploiting the bounded left/right window
-/// per layer) is a follow-up; see the class docs on <c>MoonshineStreamingPipeline</c>.</para></summary>
+/// <summary>2nd-gen streaming Moonshine encoder — a completely different front end and attention pattern from the original <see cref="MoonshineEncoder"/> (verified against <c>transformers/models/moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1, cross-checked against the real <c>UsefulSensors/moonshine-streaming-{tiny,small,medium}</c> checkpoints).</summary>
+// Front end (MoonshineStreamingEncoderEmbedder): reshape raw 16kHz samples into 5ms (80-sample) frames →
+// per-frame CMVN (zero-mean, unit-RMS) → learned asinh compression (asinh(exp(log_k) * x)) →
+// Linear(80 → hidden, no bias) + SiLU → 2x LEFT-PADDED CAUSAL Conv1d(k=5, s=2) — first with a trailing
+// SiLU, the second with none. Total downsample 80x2x2=320 samples/frame ≈ 50 Hz encoder rate (vs the
+// original's raw-3-conv 384x stem).
+//
+// Layers: pre-norm self-attention (per-layer SLIDING-WINDOW mask, no RoPE at all — the original
+// encoder's RoPE is absent here) → pre-norm GELU MLP (not gated). Norms are
+// MoonshineStreamingOps.UnitOffsetLayerNorm (parameterless LayerNorm × (gamma+1)), NOT the original's
+// plain weight-only MoonshineOps.LayerNormNoBias.
+//
+// This is a full-utterance BATCH forward (bit-exact against the HF reference, which is itself
+// batch-only) — true chunked/incremental encoder streaming (exploiting the bounded left/right window per
+// layer) is a follow-up; see the class docs on MoonshineStreamingPipeline.
 public sealed unsafe class MoonshineStreamingEncoder : IDisposable
 {
     private readonly MoonshineConfig _cfg;
@@ -63,9 +58,7 @@ public sealed unsafe class MoonshineStreamingEncoder : IDisposable
         _loaded = true;
     }
 
-    /// <summary>Forward pass. <paramref name="audio"/> is a mono 16-kHz waveform in [-1, 1]; length must
-    /// be a multiple of the frame length (80 samples at the default 5ms/16kHz). Returns
-    /// <c>[1, T, EncoderHiddenSize]</c>.</summary>
+    /// <summary><paramref name="audio"/> is a mono 16-kHz waveform in [-1, 1]; length must be a multiple of the frame length (80 samples at the default 5ms/16kHz). Returns <c>[1, T, EncoderHiddenSize]</c>.</summary>
     public Tensor Forward(IBackend backend, float[] audio)
     {
         ThrowIfDisposed();
@@ -144,8 +137,7 @@ public sealed unsafe class MoonshineStreamingEncoder : IDisposable
     public void Dispose() { Interlocked.Exchange(ref _disposed, 1); }
 }
 
-/// <summary>One streaming encoder block: unit-offset-LN → sliding-window self-attention (no RoPE) →
-/// residual → unit-offset-LN → plain (non-gated) GELU MLP → residual.</summary>
+/// <summary>One streaming encoder block: unit-offset-LN → sliding-window self-attention (no RoPE) → residual → unit-offset-LN → plain (non-gated) GELU MLP → residual.</summary>
 internal sealed unsafe class MoonshineStreamingEncoderLayer
 {
     private readonly MoonshineConfig _cfg;

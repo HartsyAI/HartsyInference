@@ -1,18 +1,13 @@
 namespace HartsyInference.Diffusion.Requests;
 
-/// <summary>Per-model reference generation defaults. Since <see cref="TextToImageRequest.Steps"/> /
-/// <see cref="TextToImageRequest.CfgScale"/> / <see cref="TextToImageRequest.Width"/> /
-/// <see cref="TextToImageRequest.Height"/> are nullable, each pipeline resolves an omitted (null) value against
-/// its model's entry here via <see cref="Resolve"/>. Values mirror the official diffusers / upstream pipeline
-/// <c>__call__</c> defaults.</summary>
+/// <summary>Per-model reference generation defaults; each pipeline resolves a null <see cref="TextToImageRequest"/> field against its entry here via <see cref="Resolve"/>. Values mirror the official diffusers / upstream pipeline <c>__call__</c> defaults.</summary>
 public readonly record struct GenerationDefaults(int Steps, float CfgScale, int Width, int Height)
 {
     /// <summary>Resolves a request's (possibly null) Steps/CfgScale/Width/Height against these defaults.</summary>
     public (int Steps, float CfgScale, int Width, int Height) Resolve(TextToImageRequest r)
         => (r.Steps ?? Steps, r.CfgScale ?? CfgScale, r.Width ?? Width, r.Height ?? Height);
 
-    /// <summary>The historical engine-generic default (20 / 7.5 / 512²). Used as the fallback for models that
-    /// have no tuned reference default of their own.</summary>
+    /// <summary>The historical engine-generic default (20 / 7.5 / 512²), used as the fallback for models with no tuned reference default of their own.</summary>
     public static GenerationDefaults Generic => new(20, 7.5f, 512, 512);
 
     // ── Image models (reference __call__ defaults) ──

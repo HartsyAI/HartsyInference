@@ -1,11 +1,10 @@
 namespace HartsyInference.Engine.Recipes;
 
-/// <summary>The conditioning a video recipe declares it can actually apply — the video counterpart of
-/// <see cref="ImageFeatures"/>.
-/// <para>This exists because the video side had no gate at all while transports were already populating
+/// <summary>The conditioning a video recipe declares it can actually apply — the video counterpart of <see cref="ImageFeatures"/>.</summary>
+/// <remarks>This exists because the video side had no gate at all while transports were already populating
 /// <see cref="Requests.VideoRequest.InitImage"/>: a family that never read it produced a plausible text-to-video clip
 /// and gave no indication the user's image had been discarded. A silent drop is worse than a refusal, because nothing
-/// in the output says the request was not honoured.</para></summary>
+/// in the output says the request was not honoured.</remarks>
 [Flags]
 public enum VideoFeatures
 {

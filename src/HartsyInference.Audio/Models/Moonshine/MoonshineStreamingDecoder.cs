@@ -4,23 +4,17 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>2nd-gen streaming Moonshine decoder. The per-layer block (RoPE causal self-attn →
-/// cross-attn (no RoPE) → SwiGLU MLP, plain weight-only LayerNorm throughout) is architecturally
-/// IDENTICAL to the original <see cref="MoonshineDecoder"/> — verified against <c>transformers/models/
-/// moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1 — so this wraps and reuses it
-/// unchanged. The only two deltas live here:
-/// <list type="bullet">
-///   <item>A learned absolute positional embedding (<c>model.decoder.pos_emb</c>) is added to the
-///         ENCODER hidden states (not the decoder's token embeddings) once, before cross-attention K/V
-///         are precomputed — the decoder's own token stream gets no additive positional signal at all
-///         (RoPE inside self-attention is its only position source).</item>
-///   <item>An optional <c>model.decoder.proj</c> Linear (present only when the encoder and decoder
-///         hidden sizes differ, e.g. streaming-small: 620→512, streaming-medium: 768→640; absent —
-///         Identity — for streaming-tiny where both are 320) re-projects the positioned encoder states
-///         to the decoder's hidden size before cross-attention.</item>
-/// </list>
-/// <see cref="MoonshineConfig.TieWordEmbeddings"/> must be false for streaming configs — the inner
-/// <see cref="MoonshineDecoder"/> then loads a separate top-level <c>proj_out.weight</c> LM head.</summary>
+/// <summary>2nd-gen streaming Moonshine decoder — the per-layer block is architecturally IDENTICAL to the original <see cref="MoonshineDecoder"/> (verified against <c>transformers/models/moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1), so this wraps and reuses it unchanged, adding only two deltas.</summary>
+// 1. A learned absolute positional embedding (model.decoder.pos_emb) is added to the ENCODER hidden
+//    states (not the decoder's token embeddings) once, before cross-attention K/V are precomputed — the
+//    decoder's own token stream gets no additive positional signal at all (RoPE inside self-attention is
+//    its only position source).
+// 2. An optional model.decoder.proj Linear (present only when the encoder and decoder hidden sizes
+//    differ, e.g. streaming-small: 620→512, streaming-medium: 768→640; absent — Identity — for
+//    streaming-tiny where both are 320) re-projects the positioned encoder states to the decoder's
+//    hidden size before cross-attention.
+// MoonshineConfig.TieWordEmbeddings must be false for streaming configs — the inner MoonshineDecoder
+// then loads a separate top-level proj_out.weight LM head.
 public sealed unsafe class MoonshineStreamingDecoder : IDisposable
 {
     private readonly MoonshineConfig _cfg;
@@ -46,8 +40,7 @@ public sealed unsafe class MoonshineStreamingDecoder : IDisposable
         _loaded = true;
     }
 
-    /// <summary>Adds the encoder-side positional embedding, optionally re-projects to the decoder's
-    /// hidden size, then precomputes cross-attention K/V — mirrors <see cref="MoonshineDecoder.StartDecode"/>.</summary>
+    /// <summary>Adds the encoder-side positional embedding, optionally re-projects to the decoder's hidden size, then precomputes cross-attention K/V — mirrors <see cref="MoonshineDecoder.StartDecode"/>.</summary>
     public MoonshineDecoder.DecodeState StartDecode(IBackend backend, Tensor encoderHidden)
     {
         ThrowIfDisposed();

@@ -2,15 +2,10 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora;
 
-/// <summary>Detects which LoRA naming format a safetensors file uses by inspecting key prefixes. The precedence rules
-/// are the return order at the bottom of <see cref="Detect"/>, strongest marker first: a file carrying a recognized
-/// wrapper prefix belongs to that wrapper's format, and only a file carrying none of them falls through to the
-/// roots-are-canonical bare-DiT reading.</summary>
+/// <summary>Detects which LoRA naming format a safetensors file uses by inspecting key prefixes. The precedence rules are the return order at the bottom of <see cref="Detect"/>, strongest marker first: a file carrying a recognized wrapper prefix belongs to that wrapper's format, and only a file carrying none of them falls through to the roots-are-canonical bare-DiT reading.</summary>
 public static class LoraFormatDetector
 {
-    /// <summary>Every wrapper prefix an earlier precedence arm claims. A key carrying one of these is that format's
-    /// business, never the bare-root fallback's — without this exclusion a kohya file whose block roots aren't in any
-    /// recognized shape would fall through to bare-root and derive `lora_unet_*` keys the converted dict never has.</summary>
+    /// <summary>Every wrapper prefix an earlier precedence arm claims. A key carrying one of these is that format's business, never the bare-root fallback's — without this exclusion a kohya file whose block roots aren't in any recognized shape would fall through to bare-root and derive `lora_unet_*` keys the converted dict never has.</summary>
     private static readonly string[] _knownWrapperPrefixes =
     [
         "transformer.", "text_encoder.", "diffusion_model.",
@@ -139,9 +134,7 @@ public static class LoraFormatDetector
         return false;
     }
 
-    /// <summary>Whether <paramref name="key"/> ends with a PEFT (<c>.lora_A</c>/<c>.lora_B</c>) or kohya
-    /// (<c>.lora_down</c>/<c>.lora_up</c>) role suffix — both spellings are accepted on every root
-    /// <see cref="Mappers.DiffusersFluxMapper"/> parses.</summary>
+    /// <summary>Whether <paramref name="key"/> ends with a PEFT (<c>.lora_A</c>/<c>.lora_B</c>) or kohya (<c>.lora_down</c>/<c>.lora_up</c>) role suffix — both spellings are accepted on every root <see cref="Mappers.DiffusersFluxMapper"/> parses.</summary>
     private static bool HasLoraSuffix(string key) =>
         key.EndsWith(".lora_A.weight", StringComparison.Ordinal)
         || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)

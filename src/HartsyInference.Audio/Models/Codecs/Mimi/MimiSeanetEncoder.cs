@@ -4,12 +4,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Mimi SEANet ENCODER, HF <c>transformers</c> layout (pre-fused <c>encoder.layers.N.conv</c> keys) —
-/// the mirror of <see cref="MimiSeanetDecoder"/>. For ratios [8,6,5,4] the encoder applies them in REVERSE
+/// <summary>Mimi SEANet ENCODER, HF <c>transformers</c> layout (pre-fused <c>encoder.layers.N.conv</c> keys) — the mirror of <see cref="MimiSeanetDecoder"/>; verified end-to-end by Kyutai-STT transcription on the real weights.</summary>
+/// <remarks>For ratios [8,6,5,4] the encoder applies them in REVERSE
 /// (downsampling by 4,5,6,8): layer 0 = causal Conv1d(1->nf, k7); then per ratio a <see cref="MimiSeanetDecoder"/>-style
 /// MimiResnetBlock (ELU, Conv1d k3 dim->dim/2, ELU, Conv1d k1 ->dim, residual) + an ELU + a causal strided
 /// Conv1d (k=2r, stride r, dim->2·dim); final ELU + Conv1d(mult·nf->latent, k3). All convs causal
-/// (left-pad k-stride). ELU alpha 1.0. Verified end-to-end by Kyutai-STT transcription on the real weights.</summary>
+/// (left-pad k-stride). ELU alpha 1.0.</remarks>
 internal sealed unsafe class MimiSeanetEncoder
 {
     // Encoder downsampling ratios = the config EncoderRates REVERSED (checkpoint kernels 8/10/12/16 = 2·[4,5,6,8]).
@@ -88,8 +88,7 @@ internal sealed unsafe class MimiSeanetEncoder
         return o;
     }
 
-    /// <summary>Strided causal downsampling conv: left-pad (kernel-stride) so the output length is exactly
-    /// <paramref name="tOut"/> = t/stride (causal, no look-ahead).</summary>
+    /// <summary>Strided causal downsampling conv: left-pad (kernel-stride) so the output length is exactly <paramref name="tOut"/> = t/stride (causal, no look-ahead).</summary>
     private static Tensor CausalConvOut(IBackend backend, Tensor x, Tensor wt, Tensor b, int batch, int inDim, int outDim, int t, int tOut, int kernel, int stride)
     {
         Tensor o = new(new TensorShape(batch, outDim, tOut), DType.F32);

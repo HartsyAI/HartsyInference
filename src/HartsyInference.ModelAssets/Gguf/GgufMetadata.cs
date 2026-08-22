@@ -11,7 +11,6 @@ public sealed class GgufMetadata
     /// <summary>Number of metadata entries.</summary>
     public int Count => _values.Count;
 
-    /// <summary>Adds a metadata key-value pair.</summary>
     internal void Add(string key, object value)
     {
         _values[key] = value;
@@ -97,7 +96,6 @@ public sealed class GgufMetadata
         return null;
     }
 
-    /// <summary>Checks if a metadata key exists.</summary>
     public bool ContainsKey(string key) => _values.ContainsKey(key);
 
     /// <summary>Gets the raw value for a metadata key.</summary>

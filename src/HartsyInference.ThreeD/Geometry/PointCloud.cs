@@ -1,8 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry;
 
-/// <summary>An unstructured point set in object space (positions, optional per-point colors/normals).
-/// Produced by surface sampling (<see cref="Ops.SurfaceSampler"/>) for VecSet-style encoders and as an
-/// intermediate for splat/point pipelines. Flat interleaved arrays, x,y,z per point.</summary>
+/// <summary>An unstructured point set in object space (positions, optional per-point colors/normals) produced by <see cref="Ops.SurfaceSampler"/> for VecSet-style encoders.</summary>
 public sealed class PointCloud
 {
     /// <summary>Point positions, length <c>3 * Count</c>.</summary>

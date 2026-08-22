@@ -6,13 +6,13 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>MiniMax Music 3's global language model: a Qwen3-8B backbone that emits one semantic RVQ code per 25 Hz
-/// audio frame. The decoder body is the shared <see cref="Qwen3Model"/>; this type owns the pieces the checkpoint
+/// <summary>MiniMax Music 3's global language model: a Qwen3-8B backbone that emits one semantic RVQ code per 25 Hz audio frame.</summary>
+/// <remarks>The decoder body is the shared <see cref="Qwen3Model"/>; this type owns the pieces the checkpoint
 /// puts outside it — the token embedding table and the output head.
 ///
 /// <para>The head is stored pre-sliced to the rows generation can ever choose: the 16384 semantic-code rows plus the
 /// end-of-audio row, which is exactly the reference's vocabulary mask expressed as a smaller matrix. That turns a
-/// 200000-row projection per frame into a 16385-row one and drops the head from 1.6 GB to 268 MB.</para></summary>
+/// 200000-row projection per frame into a 16385-row one and drops the head from 1.6 GB to 268 MB.</para></remarks>
 public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
 {
     /// <summary>Token id of the first audio semantic code; code <c>c</c> is token <c>AudioCodeOffset + c</c>.</summary>
@@ -41,9 +41,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     private Tensor? _semanticHead;
     private int _disposed;
 
-    /// <param name="halfPrecisionKv">Store the KV cache as F16. A five-minute song reaches ~7500 frames, which is
-    /// ~2.3 GB per branch at F32 and ~4.5 GB across the guided pair — more headroom than the quantized variants have
-    /// on a 12 GB card. CUDA-only; the CPU path keeps F32, which is also what the parity runs compare.</param>
+    /// <param name="halfPrecisionKv">Store the KV cache as F16. A five-minute song reaches ~7500 frames, which is ~2.3 GB per branch at F32 and ~4.5 GB across the guided pair — more headroom than the quantized variants have on a 12 GB card. CUDA-only; the CPU path keeps F32, which is also what the parity runs compare.</param>
     public MiniMaxMusic3GlobalLm(bool halfPrecisionKv = false)
     {
         _halfPrecisionKv = halfPrecisionKv;
@@ -61,8 +59,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         });
     }
 
-    /// <summary>Loads the backbone and builds the sliced output head. The embedding table keeps its checkpoint dtype;
-    /// rows are gathered and widened on demand.</summary>
+    /// <summary>Loads the backbone and builds the sliced output head. The embedding table keeps its checkpoint dtype; rows are gathered and widened on demand.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
@@ -72,12 +69,10 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         _semanticHead = SliceHead(weights["lm_head.weight"]);
     }
 
-    /// <summary>Allocates a decode cache sized for <paramref name="maxSeqLen"/> tokens. One per classifier-free
-    /// branch; the caller disposes them.
-    ///
-    /// <para>The graph-captured step used to force F32 storage because its device-position attention had no F16
+    /// <summary>Allocates a decode cache sized for <paramref name="maxSeqLen"/> tokens. One per classifier-free branch; the caller disposes them.</summary>
+    /// <remarks>The graph-captured step used to force F32 storage because its device-position attention had no F16
     /// variant; both halves have one now, so the quantized variants keep their half-width cache either way —
-    /// 288 KB per frame across the guided pair rather than 576.</para></summary>
+    /// 288 KB per frame across the guided pair rather than 576.</remarks>
     public IKvCache CreateCache(int maxSeqLen) => _halfPrecisionKv
         ? new FixedKvCache(_backbone.NumLayers, batch: 1, _backbone.KvHeads, _backbone.HeadDim, Math.Max(1, maxSeqLen),
             DType.F16)
@@ -96,8 +91,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         return embeds;
     }
 
-    /// <summary>Copies embedding row <paramref name="tokenId"/> into <paramref name="destination"/>
-    /// <c>[4096]</c>, widening from the checkpoint's dtype.</summary>
+    /// <summary>Copies embedding row <paramref name="tokenId"/> into <paramref name="destination"/> <c>[4096]</c>, widening from the checkpoint's dtype.</summary>
     public void ReadEmbeddingRow(int tokenId, Span<float> destination)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -134,8 +128,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         throw new NotSupportedException($"MiniMax Music 3 table has unsupported dtype {table.DType}.");
     }
 
-    /// <summary>Runs the decoder over <paramref name="embeds"/> <c>[1, steps, 4096]</c> and returns the final-normed
-    /// hidden state of the LAST step, <c>[1, 4096]</c>. Caller owns the result.</summary>
+    /// <summary>Runs the decoder over <paramref name="embeds"/> <c>[1, steps, 4096]</c> and returns the final-normed hidden state of the LAST step, <c>[1, 4096]</c>. Caller owns the result.</summary>
     public Tensor Forward(IBackend backend, Tensor embeds, IKvCache cache)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -151,14 +144,13 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         return last;
     }
 
-    /// <summary>Runs ONE decode step for both classifier-free branches as a single batch-2 forward and returns their
-    /// final-normed hidden states <c>[2, 4096]</c>, row 0 conditional. <paramref name="embeds"/> is
-    /// <c>[1, 2, 4096]</c> in the same row order and each row appends to its own cache.
+    /// <summary>Runs ONE decode step for both classifier-free branches as a single batch-2 forward, returning their final-normed hidden states <c>[2, 4096]</c> (row 0 conditional).</summary>
+    /// <remarks><paramref name="embeds"/> is <c>[1, 2, 4096]</c> in the same row order and each row appends to its own cache.
     ///
     /// <para>Single-token decode is bound by streaming the weights, not by the arithmetic, so running the two
     /// branches as separate batch-1 forwards reads all 8.6 GB twice per frame. One batch-2 forward reads it once.
     /// The branches stay position-aligned by construction (identical prompt length, one frame appended to each per
-    /// step), which is what lets them share a step at all. Caller owns the result.</para></summary>
+    /// step), which is what lets them share a step at all. Caller owns the result.</para></remarks>
     public Tensor ForwardCfgStep(IBackend backend, Tensor embeds, IKvCache conditional, IKvCache unconditional)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -181,9 +173,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
 
 
 
-    /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> onto the reachable vocabulary:
-    /// <c>[rows, 16385]</c>, where column <c>c</c> is semantic code <c>c</c> and the final column is end-of-audio.
-    /// Caller owns the result.</summary>
+    /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> onto the reachable vocabulary: <c>[rows, 16385]</c>, where column <c>c</c> is semantic code <c>c</c> and the final column is end-of-audio. Caller owns the result.</summary>
     public Tensor SemanticLogits(IBackend backend, Tensor hidden)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -192,8 +182,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         return logits;
     }
 
-    /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.
-    /// The embedding table is excluded: rows are gathered host-side, so uploading all 1.6 GB would be pure waste.</summary>
+    /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>. The embedding table is excluded: rows are gathered host-side, so uploading all 1.6 GB would be pure waste.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor tensor in _backbone.EnumerateWeights())
@@ -216,8 +205,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     }
 
 
-    /// <summary>Copies the 16384 semantic rows plus the end-of-audio row out of the full head, widened to F32 row by
-    /// row — casting the whole 200000-row head first would transiently cost 3.2 GB to keep 268 MB.</summary>
+    /// <summary>Copies the 16384 semantic rows plus the end-of-audio row out of the full head, widened to F32 row by row — casting the whole 200000-row head first would transiently cost 3.2 GB to keep 268 MB.</summary>
     private static Tensor SliceHead(Tensor head)
     {
         if (head.Shape[1] != HiddenSize)

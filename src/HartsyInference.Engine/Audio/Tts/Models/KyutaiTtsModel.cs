@@ -31,7 +31,6 @@ internal static class KyutaiTtsModel
     private const string VoiceSuffix = ".1e68beda@240.safetensors";
     private const string DefaultVoice = "expresso/ex03-ex01_happy_001_channel1_334s.wav";
 
-    /// <summary>The Kyutai TTS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
@@ -48,16 +47,14 @@ internal static class KyutaiTtsModel
         },
     };
 
-    /// <summary>Ensures a tts-voices speaker embedding is present, mapping the voice name (a repo-relative path) to
-    /// its versioned safetensors filename.</summary>
+    /// <summary>Ensures a tts-voices speaker embedding is present, mapping the voice name (a repo-relative path) to its versioned safetensors filename.</summary>
     private static async Task<string> EnsureVoiceAsync(string voiceName, CancellationToken cancel)
     {
         string file = voiceName.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) ? voiceName : voiceName + VoiceSuffix;
         return await AudioModelCache.GetAsync(VoicesRepo, file, category: "tts", ct: cancel).ConfigureAwait(false);
     }
 
-    /// <summary>A loaded Kyutai TTS model: generator + Mimi codec + SentencePiece tokenizer, plus a cache of
-    /// transposed voice embeddings. Owns the weight loaders and disposes everything together.</summary>
+    /// <summary>A loaded Kyutai TTS model: generator + Mimi codec + SentencePiece tokenizer, plus a cache of transposed voice embeddings. Owns the weight loaders and disposes everything together.</summary>
     private sealed unsafe class Session : IDisposable
     {
         private readonly MoshiTtsGenerator _generator;
@@ -94,10 +91,7 @@ internal static class KyutaiTtsModel
             return new Session(generator, codec, tokenizer, [dsm, mimi]);
         }
 
-        /// <summary>Everything <see cref="Synthesize"/> and <see cref="SynthesizeStream"/> need before the actual
-        /// generation loop runs — text tokenization/scheduling and the two conditioning tensors. Factored out so
-        /// the two entry points can never drift apart on how a job maps to a generation call; the caller owns
-        /// disposing <see cref="Cross"/>/<see cref="SumCond"/>.</summary>
+        /// <summary>Everything <see cref="Synthesize"/> and <see cref="SynthesizeStream"/> need before the actual generation loop runs — text tokenization/scheduling and the two conditioning tensors. Factored out so the two entry points can never drift apart on how a job maps to a generation call; the caller owns disposing <see cref="Cross"/>/<see cref="SumCond"/>.</summary>
         private readonly record struct GenerationPrep(Tensor Cross, Tensor SumCond, List<KyutaiTextScheduler.Entry> Entries,
             int MaxFrames, KyutaiTextScheduler Scheduler);
 
@@ -190,15 +184,7 @@ internal static class KyutaiTtsModel
             return audio;
         }
 
-        /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the same generation loop on a
-        /// background thread and decodes+emits audio every <c>FramesPerChunk</c> frames instead of once at the
-        /// end. Decodes via <see cref="Mimi.DecodeStreaming"/> with one <see cref="MimiDecoderStreamState"/> shared
-        /// across every chunk of this call (created fresh per utterance, disposed with the decoder below), which
-        /// carries the codec's causal-conv/transformer-KV/transpose-conv-overlap state across chunk boundaries —
-        /// this reconstructs (to float rounding) what a single monolithic <c>Decode</c> over the whole utterance
-        /// would have produced, verified by <c>MimiStreamParityTests</c> at chunk sizes down to 1 frame. 6 frames
-        /// @ 12.5 Hz = 480 ms; tune after a real listen test (plan Phase 1 acceptance criteria) rather than by
-        /// further guessing — state-carrying removed the boundary-quality floor that motivated a larger chunk.</summary>
+        /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the same generation loop on a background thread and decodes+emits audio every <c>FramesPerChunk</c> frames instead of once at the end. Decodes via <see cref="Mimi.DecodeStreaming"/> with one <see cref="MimiDecoderStreamState"/> shared across every chunk of this call (created fresh per utterance, disposed with the decoder below), which carries the codec's causal-conv/transformer-KV/transpose-conv-overlap state across chunk boundaries — this reconstructs (to float rounding) what a single monolithic <c>Decode</c> over the whole utterance would have produced, verified by <c>MimiStreamParityTests</c> at chunk sizes down to 1 frame. 6 frames @ 12.5 Hz = 480 ms; tune after a real listen test (plan Phase 1 acceptance criteria) rather than by further guessing — state-carrying removed the boundary-quality floor that motivated a larger chunk.</summary>
         public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
         {
             const int FramesPerChunk = 6;
@@ -263,10 +249,7 @@ internal static class KyutaiTtsModel
             Logs.Info($"[Audio][Kyutai-TTS] {prep.Entries.Count} words → streamed.");
         }
 
-        /// <summary>Packs one accumulated batch of generator frames into the <c>[1,NumCodebooks,n]</c> layout
-        /// <see cref="Mimi.Decode"/> expects and submits it — blocking (this always runs on the background
-        /// producer thread from <see cref="SynthesizeStream"/>, never a request thread) so the bounded channel's
-        /// backpressure genuinely paces generation against how fast the consumer drains chunks.</summary>
+        /// <summary>Packs one accumulated batch of generator frames into the <c>[1,NumCodebooks,n]</c> layout <see cref="Mimi.Decode"/> expects and submits it — blocking (this always runs on the background producer thread from <see cref="SynthesizeStream"/>, never a request thread) so the bounded channel's backpressure genuinely paces generation against how fast the consumer drains chunks.</summary>
         private static void SubmitPending(StreamingCodecDecoder<Mimi> decoder, List<int[]> frames, CancellationToken cancel)
         {
             int n = frames.Count;
@@ -289,8 +272,7 @@ internal static class KyutaiTtsModel
             }
         }
 
-        /// <summary>Loads (and caches) a voice embedding transposed to the conditioner's [1,T,512] layout; the
-        /// tts-voices files ship <c>speaker_wavs</c> channels-first.</summary>
+        /// <summary>Loads (and caches) a voice embedding transposed to the conditioner's [1,T,512] layout; the tts-voices files ship <c>speaker_wavs</c> channels-first.</summary>
         private Tensor GetVoice(string voiceName)
         {
             lock (_voiceLock)

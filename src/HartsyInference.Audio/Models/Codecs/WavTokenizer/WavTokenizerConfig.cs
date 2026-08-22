@@ -1,16 +1,15 @@
 namespace HartsyInference.Audio.Models.Codecs.WavTokenizer;
 
-/// <summary>Configuration for WavTokenizer (Ji et al. 2024). Single-codebook neural
-/// audio codec with a Vocos-style iSTFT decoder. Used by Orpheus forks and several
-/// research-grade single-token TTS systems where the "one token per frame" property
-/// simplifies the LM-side modeling.
+/// <summary>Configuration for WavTokenizer (Ji et al. 2024) — a single-codebook neural audio codec with a Vocos-style iSTFT decoder, used by Orpheus forks and several research-grade single-token TTS systems.</summary>
+/// <remarks>
+/// The "one token per frame" property simplifies the LM-side modeling.
 ///
 /// <para>Encoder: SEANet-style (Conv1d + snake activations + downsample stages) at
 /// 320× downsample → 75 Hz at 24 kHz input. Single codebook of 4096 entries — 12 bits
 /// per frame, 900 bits/s = 0.9 kbps.</para>
 ///
 /// <para>Decoder: ConvNeXt blocks + linear projection to mag/phase + iSTFT
-/// (frequency-domain vocoder, faster than time-domain transposed convs at this rate).</para></summary>
+/// (frequency-domain vocoder, faster than time-domain transposed convs at this rate).</para></remarks>
 public sealed record WavTokenizerConfig
 {
     public int SampleRate { get; init; } = 24_000;
@@ -53,8 +52,7 @@ public sealed record WavTokenizerConfig
 
     public static WavTokenizerConfig WavTokenizer24kHz => new();
 
-    /// <summary>40 tokens/s variant (24 kHz / 600 hop): EncoderRates [6,5,5,4], 2400-point
-    /// iSTFT, 600 hop, same ConvNeXt backbone dims as the default.</summary>
+    /// <summary>40 tokens/s variant (24 kHz / 600 hop): EncoderRates [6,5,5,4], 2400-point iSTFT, 600 hop, same ConvNeXt backbone dims as the default.</summary>
     public static WavTokenizerConfig Frame40 => new()
     {
         EncoderRates = [6, 5, 5, 4],

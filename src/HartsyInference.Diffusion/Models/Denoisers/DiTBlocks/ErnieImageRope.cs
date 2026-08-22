@@ -202,7 +202,6 @@ public sealed unsafe class ErnieImageRope
         }
     }
 
-    /// <summary>Non-interleaved rotation: pairs are <c>(i, i + halfDim)</c>. Computes <c>out[i] = x[i]*cos[i] - x[i+halfDim]*sin[i]</c> for <c>i &lt; halfDim</c> and <c>out[i] = x[i]*cos[i] + x[i-halfDim]*sin[i]</c> for <c>i &gt;= halfDim</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     /// <summary>GPU-resident equivalent of <see cref="ApplyRotaryEmb"/>: slices the packed
     /// <c>[B, S, 2·headDim]</c> freqs into <c>cos = freqs[..., :headDim]</c> / <c>sin = freqs[..., headDim:]</c>
@@ -224,6 +223,7 @@ public sealed unsafe class ErnieImageRope
         sin.Dispose();
     }
 
+    /// <summary>Non-interleaved rotation: pairs are <c>(i, i + halfDim)</c>. Computes <c>out[i] = x[i]*cos[i] - x[i+halfDim]*sin[i]</c> for <c>i &lt; halfDim</c> and <c>out[i] = x[i]*cos[i] + x[i-halfDim]*sin[i]</c> for <c>i &gt;= halfDim</c>.</summary>
     private static void ApplyNonInterleavedRotation(float* vec, float* cos, float* sin, int halfDim, Span<float> lowerSnapshot)
     {
         // Snapshot the lower half before overwriting — the upper-half write reads original lower-half values.

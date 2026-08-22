@@ -1,9 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Builds the clause phoneme list from per-word phoneme codes and runs espeak's change-phonemes pass
-/// (<c>MakePhonemeList</c> in phonemelist.c): allophone selection via the bytecode programs (CHANGEPHONEME / INSERT /
-/// REPLACE_NEXT) followed by consecutive-unstressed-syllable reduction. The result is rendered to IPA by
-/// <see cref="EspeakPhonemeRenderer"/>. Audio-only behaviours (vowel pauses, consonant doubling) are omitted.</summary>
+/// <summary>Builds the clause phoneme list from per-word phoneme codes and runs espeak's change-phonemes pass (<c>MakePhonemeList</c> in phonemelist.c): allophone selection via the bytecode programs (CHANGEPHONEME / INSERT / REPLACE_NEXT) followed by consecutive-unstressed-syllable reduction; audio-only behaviours (vowel pauses, consonant doubling) are omitted.</summary>
 internal sealed class EspeakPhonemeList
 {
     // stress_phonemes[] indexed by stress level (matches EspeakStress); inverted here to recover the level.
@@ -28,8 +25,7 @@ internal sealed class EspeakPhonemeList
         return ix < 0 ? -1 : ix;
     }
 
-    /// <summary>Builds the phoneme list for one clause from each word's stressed phoneme codes, then applies the
-    /// change-phonemes pass and reduction. Guard pause entries bracket the list so context conditions are safe.</summary>
+    /// <summary>Builds the phoneme list for one clause from each word's stressed phoneme codes, then applies the change-phonemes pass and reduction; guard pause entries bracket the list so context conditions are safe.</summary>
     public List<EspeakPhonemeListEntry> Build(IReadOnlyList<IReadOnlyList<byte>> words)
     {
         List<EspeakPhonemeListEntry> list = [PauseEntry(), PauseEntry()]; // leading guards (indices 0,1)

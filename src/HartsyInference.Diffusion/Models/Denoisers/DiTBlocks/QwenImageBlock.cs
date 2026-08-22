@@ -178,7 +178,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         foreach (Tensor w in _txtFfn.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Forward pass. Each modulation produces <c>[shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]</c>. Joint attention concats <c>[txt, img]</c>; QK rotated by <see cref="QwenImageRope"/> separately for image (per-token <c>[0, row, col]</c>) and text (offset by <paramref name="txtPositionStart"/>) before concat. Returns <c>(image, text)</c>.</summary>
+    /// <summary>Each modulation produces <c>[shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]</c>. Joint attention concats <c>[txt, img]</c>; QK rotated by <see cref="QwenImageRope"/> separately for image (per-token <c>[0, row, col]</c>) and text (offset by <paramref name="txtPositionStart"/>) before concat. Returns <c>(image, text)</c>.</summary>
     // GPU-residency rewrite (mirrors the verified ChromaDoubleStreamBlock): every glue op (LayerNorm / AdaLN
     // modulation / QK-norm / reshape-to-heads / joint concat / split / gated residual) runs as an IBackend GPU op so
     // the activation stays device-resident across the whole block — no per-op DataPointer reads / D2H sync barriers

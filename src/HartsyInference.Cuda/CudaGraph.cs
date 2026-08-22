@@ -2,8 +2,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Captures a fixed sequence of CUDA stream work into a graph and replays it with a single
-/// <c>cuGraphLaunch</c>, collapsing thousands of per-kernel CPU launch calls into one.</summary>
+/// <summary>Captures a fixed sequence of CUDA stream work into a graph and replays it with a single <c>cuGraphLaunch</c>, collapsing thousands of per-kernel CPU launch calls into one.</summary>
 /// <remarks>
 /// <para>The launch-overhead win is largest on workloads that issue the same kernel topology every iteration
 /// (e.g. a diffusion denoise step).</para>
@@ -25,15 +24,10 @@ namespace HartsyInference.Cuda;
 /// </remarks>
 public sealed class CudaGraph : IDisposable
 {
-    /// <summary>Base pointer of this graph's capture arena (0 = none) — set by CudaBackend.CaptureGraph,
-    /// released via GpuTransferHelper.FreeGraphArena in DisposeGraph.</summary>
+    /// <summary>Base pointer of this graph's capture arena (0 = none) — set by CudaBackend.CaptureGraph, released via GpuTransferHelper.FreeGraphArena in DisposeGraph.</summary>
     internal ulong ArenaBase;
 
-    /// <summary><c>CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH</c>: the executable graph automatically frees any
-    /// memory its allocation nodes produced in the previous launch before relaunching. Required to replay a graph that
-    /// captured stream-ordered activation allocations (the backend's per-op <c>cuMemAllocAsync</c>) more than once —
-    /// without it the second <c>cuGraphLaunch</c> re-allocs still-live graph memory and fails with INVALID_VALUE.
-    /// Addresses stay stable across launches, so pointers cached at capture time remain valid.</summary>
+    /// <summary><c>CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH</c>: the executable graph automatically frees any memory its allocation nodes produced in the previous launch before relaunching. Required to replay a graph that captured stream-ordered activation allocations (the backend's per-op <c>cuMemAllocAsync</c>) more than once — without it the second <c>cuGraphLaunch</c> re-allocs still-live graph memory and fails with INVALID_VALUE. Addresses stay stable across launches, so pointers cached at capture time remain valid.</summary>
     private const ulong FlagAutoFreeOnLaunch = 1;
 
     private readonly nint _stream;
@@ -44,9 +38,7 @@ public sealed class CudaGraph : IDisposable
     /// <summary>Whether an executable graph has been captured and is ready to <see cref="Launch"/>.</summary>
     public bool IsReady => _graphExec != 0;
 
-    /// <summary>Creates a graph bound to the stream its work will be captured on and replayed to. Set
-    /// <paramref name="autoFreeAllocationsOnRelaunch"/> when the captured work allocates memory (e.g. the backend's
-    /// per-op activation allocations) and the graph will be launched more than once — the loop case.</summary>
+    /// <summary>Creates a graph bound to the stream its work will be captured on and replayed to. Set <paramref name="autoFreeAllocationsOnRelaunch"/> when the captured work allocates memory (e.g. the backend's per-op activation allocations) and the graph will be launched more than once — the loop case.</summary>
     public CudaGraph(nint stream, bool autoFreeAllocationsOnRelaunch = false)
     {
         if (stream == 0) throw new ArgumentException("Stream handle must be non-zero.", nameof(stream));
@@ -54,9 +46,7 @@ public sealed class CudaGraph : IDisposable
         _instantiateFlags = autoFreeAllocationsOnRelaunch ? FlagAutoFreeOnLaunch : 0;
     }
 
-    /// <summary>Captures the device work issued by <paramref name="recordWork"/> on this graph's stream and
-    /// instantiates it. The delegate must issue only capturable (asynchronous) work — see the type remarks.
-    /// Replaces any previously captured graph.</summary>
+    /// <summary>Captures the device work issued by <paramref name="recordWork"/> on this graph's stream and instantiates it. The delegate must issue only capturable (asynchronous) work — see the type remarks. Replaces any previously captured graph.</summary>
     public void Capture(Action recordWork)
     {
         if (recordWork is null) throw new ArgumentNullException(nameof(recordWork));
@@ -105,9 +95,7 @@ public sealed class CudaGraph : IDisposable
         DestroyGraph(graph, throwOnError: true);
     }
 
-    /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the
-    /// direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays
-    /// (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
+    /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
     private static void DumpNodeHistogram(nint graph)
     {
         if (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") != "1") return;
@@ -128,8 +116,7 @@ public sealed class CudaGraph : IDisposable
         Logs.Info($"[CudaGraph] captured {count} nodes: {parts}");
     }
 
-    /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when
-    /// the topology is unchanged (cheaper than re-instantiating).</summary>
+    /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when the topology is unchanged (cheaper than re-instantiating).</summary>
     /// <remarks>Falls back to a full re-instantiate when the topology differs. No-op-safe to call before the
     /// first <see cref="Capture"/> (it just captures).</remarks>
     public void TryUpdate(Action recordWork)
@@ -167,9 +154,7 @@ public sealed class CudaGraph : IDisposable
         DestroyGraph(graph, throwOnError: true);
     }
 
-    /// <summary>Starts stream capture directly (the open-region twin of <see cref="Capture"/>, for callers whose
-    /// captured work spans multiple methods). Pair with <see cref="EndCaptureAndInstantiate"/>; on any exception
-    /// between the two, call <see cref="AbortCapture"/> so the stream doesn't stay in capture mode.</summary>
+    /// <summary>Starts stream capture directly (the open-region twin of <see cref="Capture"/>, for callers whose captured work spans multiple methods). Pair with <see cref="EndCaptureAndInstantiate"/>; on any exception between the two, call <see cref="AbortCapture"/> so the stream doesn't stay in capture mode.</summary>
     public void BeginCapture()
     {
         ThrowIfDisposed();
@@ -178,8 +163,7 @@ public sealed class CudaGraph : IDisposable
         CudaDriverApi.cuStreamBeginCapture(_stream, CudaDriverApi.CU_STREAM_CAPTURE_MODE_RELAXED).ThrowOnError();
     }
 
-    /// <summary>Ends an open capture region and instantiates the executable graph. NOTE: the work recorded during
-    /// capture did NOT execute — call <see cref="Launch"/> to run it.</summary>
+    /// <summary>Ends an open capture region and instantiates the executable graph. NOTE: the work recorded during capture did NOT execute — call <see cref="Launch"/> to run it.</summary>
     public void EndCaptureAndInstantiate()
     {
         ThrowIfDisposed();
@@ -207,8 +191,7 @@ public sealed class CudaGraph : IDisposable
         DestroyGraph(graph, throwOnError: true);
     }
 
-    /// <summary>Aborts an open capture region, leaving the stream clean (call from exception handlers between
-    /// <see cref="BeginCapture"/> and <see cref="EndCaptureAndInstantiate"/>).</summary>
+    /// <summary>Aborts an open capture region, leaving the stream clean (call from exception handlers between <see cref="BeginCapture"/> and <see cref="EndCaptureAndInstantiate"/>).</summary>
     public void AbortCapture()
     {
         List<Exception>? failures = null;

@@ -27,11 +27,9 @@ public sealed class CrossAttentionBlock
     private readonly TransformerSubBlock[] _crossAttns;
     private readonly FeedForwardBlock[] _ffns;
 
-    // Output projection
     private Tensor? _projOutWeight;
     private Tensor? _projOutBias;
 
-    /// <summary>Creates a cross-attention block with N transformer layers.</summary>
     /// <param name="channels">Number of input/output channels.</param>
     /// <param name="numHeads">Number of attention heads.</param>
     /// <param name="crossAttentionDim">Dimension of the cross-attention context (text encoder hidden size).</param>
@@ -159,7 +157,6 @@ public sealed class CrossAttentionBlock
             hidden.Dispose();
             hidden = crossOut;
 
-            // Feed-forward
             Tensor ffnOut = _ffns[i].Forward(backend, hidden);
             hidden.Dispose();
             hidden = ffnOut;
@@ -177,7 +174,6 @@ public sealed class CrossAttentionBlock
         backend.Transpose2D(output, projOut, spatial, channels);
         projOut.Dispose();
 
-        // Add residual from input
         Tensor result = new Tensor(spatialShape, dtype);
         backend.Add(result, output, input);
         output.Dispose();
@@ -195,7 +191,6 @@ internal sealed class TransformerSubBlock
     private readonly int _headDim;
     private readonly int _contextDim;
 
-    // LayerNorm
     private Tensor? _normWeight;
     private Tensor? _normBias;
 
@@ -288,7 +283,6 @@ internal sealed class TransformerSubBlock
         DType dtype = hidden.DType;
         bool hasIpa = ipaImageTokens is not null && toKIp is not null && toVIp is not null && ipaScale != 0f;
 
-        // LayerNorm
         TensorShape hidShape = new TensorShape(batch, seqLen, _channels);
         Tensor normed = new Tensor(hidShape, dtype);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
@@ -446,12 +440,10 @@ internal sealed class TransformerSubBlock
         backend.Permute0213(merged, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        // Output projection
         Tensor projected = new Tensor(hidShape, dtype);
         backend.Linear(projected, merged, _toOutWeight!, _toOutBias);
         merged.Dispose();
 
-        // Residual
         Tensor output = new Tensor(hidShape, dtype);
         backend.Add(output, hidden, projected);
         projected.Dispose();
@@ -466,7 +458,6 @@ internal sealed class FeedForwardBlock
 {
     private readonly int _channels;
 
-    // LayerNorm
     private Tensor? _normWeight;
     private Tensor? _normBias;
 
@@ -511,7 +502,6 @@ internal sealed class FeedForwardBlock
 
         DType dtype = hidden.DType;
 
-        // LayerNorm
         TensorShape shape = new TensorShape(batch, seqLen, _channels);
         Tensor normed = new Tensor(shape, dtype);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
@@ -537,7 +527,6 @@ internal sealed class FeedForwardBlock
         backend.Linear(outLinear, gated, _outLinearWeight!, _outLinearBias!);
         gated.Dispose();
 
-        // Residual
         Tensor output = new Tensor(shape, dtype);
         backend.Add(output, hidden, outLinear);
         outLinear.Dispose();

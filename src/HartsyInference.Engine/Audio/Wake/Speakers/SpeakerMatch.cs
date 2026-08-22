@@ -14,8 +14,7 @@ public readonly record struct SpeakerMatch(string? Name, float Score, SpeakerMat
     /// <summary>The accepted identity, or null for a guest or an unscorable clip.</summary>
     public string? IdentifiedName => IsIdentified ? Name : null;
 
-    /// <summary>Whether <paramref name="required"/> is satisfied — a null or empty requirement accepts anyone,
-    /// including a guest, which is what an unrestricted wake word wants.</summary>
+    /// <summary>Whether <paramref name="required"/> is satisfied — a null or empty requirement accepts anyone, including a guest, which is what an unrestricted wake word wants.</summary>
     public bool Satisfies(string? required) =>
         string.IsNullOrWhiteSpace(required)
         || (IsIdentified && string.Equals(Name, required, StringComparison.OrdinalIgnoreCase));

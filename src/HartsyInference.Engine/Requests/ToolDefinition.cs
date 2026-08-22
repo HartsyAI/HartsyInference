@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>A tool the model may call: a name, a description, and a JSON-schema string for its arguments. Drives the
-/// grammar-constrained tool-call decoding path.</summary>
+/// <summary>A tool the model may call: a name, a description, and a JSON-schema string for its arguments. Drives the grammar-constrained tool-call decoding path.</summary>
 public sealed record ToolDefinition
 {
     /// <summary>The tool name.</summary>

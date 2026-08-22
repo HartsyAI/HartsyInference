@@ -86,8 +86,7 @@ public sealed unsafe class Krea2TextFusion
     private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }
 
-/// <summary>Pre-norm transformer block used by <see cref="Krea2TextFusion"/> (no RoPE, no timestep modulation):
-/// <c>h = h + attn(norm1(h)); h = h + ff(norm2(h))</c>. Attention is full MHA with the Krea 2 sigmoid output gate.</summary>
+/// <summary>Pre-norm transformer block used by <see cref="Krea2TextFusion"/> (no RoPE, no timestep modulation): <c>h = h + attn(norm1(h)); h = h + ff(norm2(h))</c>, with the Krea 2 sigmoid output gate.</summary>
 public sealed unsafe class Krea2TextFusionBlock
 {
     private readonly int _dim;

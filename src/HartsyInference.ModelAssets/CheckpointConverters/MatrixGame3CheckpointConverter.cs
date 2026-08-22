@@ -4,26 +4,15 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads Matrix-Game 3.0 DiT checkpoints (<c>Skywork/Matrix-Game-3.0</c>,
-/// <c>base_model/diffusion_pytorch_model.safetensors</c>) for <c>MatrixGame3Transformer</c>. The core Wan2.2 keys are
-/// in original Wan naming and reuse <see cref="WanVideoCheckpointConverter.MapKey"/> (same rename table); the
-/// Matrix-Game additions — <c>blocks.{i}.action_model.*</c> (or <c>action_module.*</c>, normalized) and the Plücker
-/// projection (<c>patch_embedding_wancamctrl.*</c>, <c>c2ws_hidden_states_layer1/2.*</c>) — pass through in original
-/// naming and are routed BEFORE the Wan renames (whose <c>cross_attn</c>/<c>modulation</c> rules would corrupt them).
+/// <summary>Loads Matrix-Game 3.0 DiT checkpoints (<c>Skywork/Matrix-Game-3.0</c>, <c>base_model/diffusion_pytorch_model.safetensors</c>) for <c>MatrixGame3Transformer</c>. The core Wan2.2 keys are in original Wan naming and reuse <see cref="WanVideoCheckpointConverter.MapKey"/> (same rename table); the Matrix-Game additions — <c>blocks.{i}.action_model.*</c> (or <c>action_module.*</c>, normalized) and the Plücker projection (<c>patch_embedding_wancamctrl.*</c>, <c>c2ws_hidden_states_layer1/2.*</c>) — pass through in original naming and are routed BEFORE the Wan renames (whose <c>cross_attn</c>/<c>modulation</c> rules would corrupt them).
 ///
-/// <para>The DMD-distilled bundle (<c>base_distilled_model/</c>, ~2× the base size) carries student + critic/EMA
-/// copies; <see cref="Convert"/> auto-slices a recognized student prefix and drops the rest (prefix set is
-/// validation-gated until a key dump). <see cref="InferShape"/> resolves the dim/layers/ffn/heads contradiction
-/// between the repo config (5120/40/40) and the Wan-AI diffusers config (3072/24/30) from the weights themselves.
-/// VAE: the same <c>wan22_vae.safetensors</c> as Lance/Wan via <see cref="LanceCheckpointConverter.LoadVae"/>;
-/// MG-LightVAE pruned decoders are a follow-up. umT5-XXL ships separately.</para></summary>
+/// <para>The DMD-distilled bundle (<c>base_distilled_model/</c>, ~2× the base size) carries student + critic/EMA copies; <see cref="Convert"/> auto-slices a recognized student prefix and drops the rest (prefix set is validation-gated until a key dump). <see cref="InferShape"/> resolves the dim/layers/ffn/heads contradiction between the repo config (5120/40/40) and the Wan-AI diffusers config (3072/24/30) from the weights themselves. VAE: the same <c>wan22_vae.safetensors</c> as Lance/Wan via <see cref="LanceCheckpointConverter.LoadVae"/>; MG-LightVAE pruned decoders are a follow-up. umT5-XXL ships separately.</para></summary>
 public sealed class MatrixGame3CheckpointConverter
 {
     private static readonly string[] _studentPrefixes = ["student.", "generator."];
     private static readonly string[] _dropPrefixes = ["critic.", "fake_score.", "ema.", "discriminator."];
 
-    /// <summary>Result bucket: one dictionary holding the diffusers-renamed Wan core plus the original-named
-    /// Matrix-Game additions, exactly what <c>MatrixGame3Transformer.LoadWeights</c> consumes.</summary>
+    /// <summary>Result bucket: one dictionary holding the diffusers-renamed Wan core plus the original-named Matrix-Game additions, exactly what <c>MatrixGame3Transformer.LoadWeights</c> consumes.</summary>
     public sealed class ConvertedWeights
     {
         public required Dictionary<string, Tensor> Transformer { get; init; }
@@ -35,9 +24,7 @@ public sealed class MatrixGame3CheckpointConverter
     /// <summary>Inferred DiT shape, read from the weights (the authoritative answer to Open Question 2).</summary>
     public readonly record struct InferredShape(int Dim, int NumLayers, int FfnDim, int NumHeads, int InChannels);
 
-    /// <summary>Pure key mapping: returns the destination key, or <c>null</c> to drop. Matrix-Game-specific keys
-    /// (action modules, Plücker projection) bypass the Wan rename table; <c>action_module</c> is normalized to
-    /// <c>action_model</c>.</summary>
+    /// <summary>Pure key mapping: returns the destination key, or <c>null</c> to drop. Matrix-Game-specific keys (action modules, Plücker projection) bypass the Wan rename table; <c>action_module</c> is normalized to <c>action_model</c>.</summary>
     public static string? MapKey(string key, bool fromOriginalNaming)
     {
         foreach (string drop in _dropPrefixes)
@@ -59,8 +46,7 @@ public sealed class MatrixGame3CheckpointConverter
         return WanVideoCheckpointConverter.MapKey(key, fromOriginalNaming);
     }
 
-    /// <summary>Converts a flat weight dictionary: student-slice extraction (distilled bundles), Matrix-Game key
-    /// routing, Wan original→diffusers renames, FP8 scale folding.</summary>
+    /// <summary>Converts a flat weight dictionary: student-slice extraction (distilled bundles), Matrix-Game key routing, Wan original→diffusers renames, FP8 scale folding.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
@@ -99,8 +85,7 @@ public sealed class MatrixGame3CheckpointConverter
         return new ConvertedWeights { Transformer = transformer, ActionBlocks = [.. actionBlocks] };
     }
 
-    /// <summary>Reads the real DiT shape from converted weights: dim from <c>patch_embedding.weight</c>, layers from
-    /// the max block index, ffn from <c>blocks.0.ffn.net.0.proj.weight</c>, heads = dim / 128 (Wan2.2 head_dim).</summary>
+    /// <summary>Reads the real DiT shape from converted weights: dim from <c>patch_embedding.weight</c>, layers from the max block index, ffn from <c>blocks.0.ffn.net.0.proj.weight</c>, heads = dim / 128 (Wan2.2 head_dim).</summary>
     public static InferredShape InferShape(IReadOnlyDictionary<string, Tensor> transformer)
     {
         Tensor patch = transformer["patch_embedding.weight"];

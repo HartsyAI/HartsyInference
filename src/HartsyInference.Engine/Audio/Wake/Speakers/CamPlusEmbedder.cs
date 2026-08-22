@@ -32,8 +32,7 @@ public sealed class CamPlusEmbedder : IDisposable
     /// <summary>Fewest fbank frames the encoder's strided front end can consume.</summary>
     public const int MinimumFrames = 16;
 
-    /// <summary>Shortest clip that produces an embedding at all — not the shortest that produces a *reliable* one.
-    /// Text-independent verification degrades sharply below a couple of seconds; see <see cref="SpeakerVerifier"/>.</summary>
+    /// <summary>Shortest clip that produces an embedding at all — not the shortest that produces a *reliable* one. Text-independent verification degrades sharply below a couple of seconds; see <see cref="SpeakerVerifier"/>.</summary>
     public const double MinimumSeconds = 0.4;
 
     /// <summary>Checkpoint file names tried, in order, under the audio models root.</summary>
@@ -55,8 +54,7 @@ public sealed class CamPlusEmbedder : IDisposable
     /// <summary>Shortest buffer that can be embedded, in samples.</summary>
     public static int MinimumSamples => (int)(MinimumSeconds * SampleRate);
 
-    /// <summary>The CAM++ checkpoint on disk, or null when none is present. Weights are never downloaded: a silent
-    /// multi-GB fetch inside a wake-word detection is not acceptable.</summary>
+    /// <summary>The CAM++ checkpoint on disk, or null when none is present. Weights are never downloaded: a silent multi-GB fetch inside a wake-word detection is not acceptable.</summary>
     public static string? LocateWeights()
     {
         foreach (string name in _weightFileNames)
@@ -70,8 +68,7 @@ public sealed class CamPlusEmbedder : IDisposable
         return null;
     }
 
-    /// <summary>Loads CAM++ from a user-placed checkpoint, throwing an actionable
-    /// <see cref="InvalidOperationException"/> naming the expected file and directory when none is present.</summary>
+    /// <summary>Loads CAM++ from a user-placed checkpoint, throwing an actionable <see cref="InvalidOperationException"/> naming the expected file and directory when none is present.</summary>
     public static CamPlusEmbedder Load()
     {
         string path = LocateWeights() ?? throw new InvalidOperationException(
@@ -132,9 +129,7 @@ public sealed class CamPlusEmbedder : IDisposable
         return new CamPlusEmbedder(encoder, loaders);
     }
 
-    /// <summary>L2-normalized 192-d embedding of <paramref name="mono16k"/>, which must be mono 16 kHz. Amplitude
-    /// scale does not matter — cepstral mean normalization removes constant gain — so the wake path's int16-scaled
-    /// audio and a decoder's ±1 audio both work, as long as one clip is not a mix of the two.</summary>
+    /// <summary>L2-normalized 192-d embedding of <paramref name="mono16k"/>, which must be mono 16 kHz. Amplitude scale does not matter — cepstral mean normalization removes constant gain — so the wake path's int16-scaled audio and a decoder's ±1 audio both work, as long as one clip is not a mix of the two.</summary>
     public unsafe float[] Embed(IBackend backend, ReadOnlySpan<float> mono16k)
     {
         ArgumentNullException.ThrowIfNull(backend);

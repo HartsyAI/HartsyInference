@@ -8,8 +8,8 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 ///
 /// Accepts both layouts:
 /// <list type="bullet">
-///   <item><b>diffusers / official</b>: <c>{root}/transformer/</c>, <c>{root}/unconditional_transformer/</c>, <c>{root}/text_encoder/</c>, <c>{root}/vae/</c> (each a sharded folder).</item>
-///   <item><b>Comfy-Org</b>: <c>{root}/diffusion_models/ideogram4_*scaled.safetensors</c> (+ <c>*_unconditional_*</c>), <c>{root}/text_encoders/qwen3vl_8b_*.safetensors</c>, <c>{root}/vae/flux2-vae.safetensors</c>.</item>
+/// <item><b>diffusers / official</b>: <c>{root}/transformer/</c>, <c>{root}/unconditional_transformer/</c>, <c>{root}/text_encoder/</c>, <c>{root}/vae/</c> (each a sharded folder).</item>
+/// <item><b>Comfy-Org</b>: <c>{root}/diffusion_models/ideogram4_*scaled.safetensors</c> (+ <c>*_unconditional_*</c>), <c>{root}/text_encoders/qwen3vl_8b_*.safetensors</c>, <c>{root}/vae/flux2-vae.safetensors</c>.</item>
 /// </list>
 ///
 /// Transformer keys are diffusers-native (bare <c>input_proj.weight</c>, <c>layers.{i}.*</c>) — only an optional <c>transformer.</c>/<c>model.diffusion_model.</c> prefix is stripped, and fp8_scaled <c>*.scale_weight</c> companions are folded into <see cref="Tensor.Fp8ScaleFactor"/>. The Qwen3-VL keys are remapped to the <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> convention (<c>model.embed_tokens</c>, <c>model.layers.{i}.*</c>, <c>model.norm</c>); the vision tower and <c>lm_head</c> are dropped.</summary>

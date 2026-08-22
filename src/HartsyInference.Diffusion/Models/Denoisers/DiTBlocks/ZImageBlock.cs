@@ -129,11 +129,9 @@ public sealed unsafe class ZImageBlock
         if (_w3Weight is not null) yield return _w3Weight;
     }
 
-    /// <summary>Forward pass with optional RoPE.</summary>
-    /// <param name="backend">Compute backend.</param>
+    /// <summary>Runs the AdaLN-modulated self-attention → SwiGLU FFN sandwich; rotates Q/K via <paramref name="rope"/> when non-null.</summary>
     /// <param name="x">Token sequence [B, seqLen, hidden].</param>
     /// <param name="tEmb">Timestep embedding [B, adaLNEmbedDim] — already through t_embedder.mlp (Linear → SiLU → Linear), output is NOT SiLU'd.</param>
-    /// <param name="rope">Multi-axis RoPE precomputed for this seqLen, or null to skip.</param>
     public Tensor Forward(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];

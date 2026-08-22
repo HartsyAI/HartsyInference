@@ -343,14 +343,7 @@ internal sealed class AdaResLoader
     public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
 }
 
-/// <summary>Loader for the HiFi-GAN style <c>AdaINResBlock1</c> used in the generator's
-/// <c>resblocks</c> and <c>noise_res</c>. Each block has three parallel dilated branches
-/// (dilation 1, 3, 5 with the same kernel size). Each branch has AdaIN1d before its conv,
-/// a Snake activation with learnable per-channel alpha, then the same pattern again
-/// (so 6 conv layers per block, 6 AdaIN modules, 6 Snake alphas total).
-///
-/// <para>This class only loads the weights — the forward pass is not yet wired into
-/// <see cref="KokoroIStftNetDecoder.Forward"/> (placeholder; see class XML).</para></summary>
+/// <summary>Loader for the HiFi-GAN style <c>AdaINResBlock1</c> used in the generator's <c>resblocks</c> and <c>noise_res</c> — three parallel dilated branches (dilation 1, 3, 5, same kernel size), each <c>AdaIN1d → Snake → Conv1d</c> twice (6 conv layers, 6 AdaIN modules, 6 Snake alphas total).</summary>
 internal sealed unsafe class AdaSnakeResLoader
 {
     private readonly int _channels;

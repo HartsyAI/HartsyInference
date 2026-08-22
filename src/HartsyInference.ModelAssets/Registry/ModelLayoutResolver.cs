@@ -11,8 +11,7 @@ public enum ModelLayoutKind
     /// <summary>A multi-shard safetensors checkpoint (<c>model-00001-of-0000N.safetensors</c> + index).</summary>
     Sharded,
 
-    /// <summary>A diffusers-style directory: <c>model_index.json</c> plus per-component subfolders
-    /// (<c>unet/</c> or <c>transformer/</c>, <c>vae/</c>, <c>text_encoder/</c>, ...).</summary>
+    /// <summary>A diffusers-style directory: <c>model_index.json</c> plus per-component subfolders (<c>unet/</c> or <c>transformer/</c>, <c>vae/</c>, <c>text_encoder/</c>, ...).</summary>
     Diffusers,
 }
 
@@ -25,17 +24,14 @@ public sealed record ModelLayout
     /// <summary>Absolute root: the file itself for <see cref="ModelLayoutKind.SingleFile"/>, otherwise the directory.</summary>
     public required string RootPath { get; init; }
 
-    /// <summary>A single file whose header is representative of the checkpoint for architecture detection
-    /// (the bundled file, the first shard, or the transformer/unet component).</summary>
+    /// <summary>A single file whose header is representative of the checkpoint for architecture detection (the bundled file, the first shard, or the transformer/unet component).</summary>
     public required string RepresentativeFile { get; init; }
 
     /// <summary>Every safetensors file that makes up the checkpoint (1 for single-file).</summary>
     public required IReadOnlyList<string> SafeTensorsFiles { get; init; }
 }
 
-/// <summary>Resolves a path (a single checkpoint file, a sharded checkpoint, or a diffusers-layout
-/// directory) into a <see cref="ModelLayout"/>. Pairs with <see cref="ModelArchitectureDetector"/>:
-/// the resolver decides <i>which files</i> to read, the detector decides <i>what they are</i>.</summary>
+/// <summary>Resolves a path (a single checkpoint file, a sharded checkpoint, or a diffusers-layout directory) into a <see cref="ModelLayout"/>. Pairs with <see cref="ModelArchitectureDetector"/>: the resolver decides <i>which files</i> to read, the detector decides <i>what they are</i>.</summary>
 public static class ModelLayoutResolver
 {
     private static readonly string[] TransformerSubdirs = ["transformer", "unet"];

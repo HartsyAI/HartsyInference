@@ -5,12 +5,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Mimi's transformer-of-codecs, matching the HF <c>transformers</c> MimiModel layout (the format the
-/// real kyutai/mimi checkpoint ships). Pre-LayerNorm blocks with split Q/K/V projections, split-half (rotate_half)
+/// <summary>Mimi's transformer-of-codecs, matching the HF <c>transformers</c> MimiModel layout (the format the real kyutai/mimi checkpoint ships).</summary>
+/// <remarks>Pre-LayerNorm blocks with split Q/K/V projections, split-half (rotate_half)
 /// RoPE, sliding-window causal attention (<see cref="MimiConfig.TransformerContext"/> = 250), per-block
 /// <c>LayerScale</c>, and a bias-free exact-GELU MLP. Keys: <c>{prefix}.layers.N.{input_layernorm,
 /// post_attention_layernorm}.{weight,bias}</c>, <c>self_attn.{q,k,v,o}_proj.weight</c>, <c>mlp.fc1/fc2.weight</c>,
-/// <c>self_attn_layer_scale.scale</c>, <c>mlp_layer_scale.scale</c>.</summary>
+/// <c>self_attn_layer_scale.scale</c>, <c>mlp_layer_scale.scale</c>.</remarks>
 internal sealed unsafe class MimiTransformer
 {
     private readonly MimiConfig _cfg;
@@ -78,8 +78,7 @@ internal sealed unsafe class MimiTransformer
         }
     }
 
-    /// <summary>Copies rows <c>[r0, r1)</c> of a <c>[R, inDim]</c> row-major weight into a fresh owned
-    /// <c>[r1-r0, inDim]</c> tensor (splits a fused <c>in_proj_weight</c> into q/k/v). Runs once at load.</summary>
+    /// <summary>Copies rows <c>[r0, r1)</c> of a <c>[R, inDim]</c> row-major weight into a fresh owned <c>[r1-r0, inDim]</c> tensor (splits a fused <c>in_proj_weight</c> into q/k/v); runs once at load.</summary>
     private static Tensor SliceRows(Tensor w, int r0, int r1)
     {
         int inDim = (int)w.Shape[1];
@@ -147,12 +146,10 @@ internal sealed unsafe class MimiTransformer
         return cur;
     }
 
-    /// <summary>x channels-last <c>[1,t,dim]</c> -> <c>[1,t,dim]</c>, attending against <paramref name="cache"/>'s
-    /// carried prefix instead of only the frames in this call. Batch must be 1 (Mimi decode is always
-    /// single-sequence in this engine; the cache carries no batch dimension bookkeeping). Equivalent (to float
-    /// rounding) to <see cref="Forward"/> run once over the full concatenated sequence — verified by
-    /// <c>MimiStreamParityTests</c>: this is NOT an approximation, it's the same computation restructured to
-    /// avoid recomputing the whole prefix every call.</summary>
+    /// <summary>x channels-last <c>[1,t,dim]</c> -> <c>[1,t,dim]</c>, attending against <paramref name="cache"/>'s carried prefix instead of only the frames in this call; batch must be 1.</summary>
+    /// <remarks>Equivalent (to float rounding) to <see cref="Forward"/> run once over the full concatenated
+    /// sequence — verified by <c>MimiStreamParityTests</c>: this is NOT an approximation, it's the same
+    /// computation restructured to avoid recomputing the whole prefix every call.</remarks>
     public Tensor ForwardStreaming(IBackend backend, Tensor x, int t, MimiTransformerCache cache)
     {
         if (x.Shape[0] != 1) throw new NotSupportedException("MimiTransformer.ForwardStreaming supports batch=1 only.");
@@ -260,9 +257,7 @@ internal sealed unsafe class MimiTransformer
         return mask;
     }
 
-    /// <summary>Same sliding-window causal rule as <see cref="BuildMask"/>, generalized to a query block that
-    /// starts at absolute position <paramref name="priorLen"/> and a key axis spanning the full cached prefix
-    /// (<c>0..priorLen+t-1</c>) instead of assuming query and key both start at 0.</summary>
+    /// <summary>Same sliding-window causal rule as <see cref="BuildMask"/>, generalized to a query block starting at absolute position <paramref name="priorLen"/> and a key axis spanning the full cached prefix instead of assuming both start at 0.</summary>
     private static Tensor BuildWindowedMask(int t, int priorLen, int? context)
     {
         int totalKv = priorLen + t;

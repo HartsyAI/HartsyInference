@@ -9,34 +9,25 @@ public sealed record WakeServiceOptions
     /// <summary>TCP port satellites connect to. 0 binds an ephemeral port, which tests use.</summary>
     public int Port { get; init; } = 10_800;
 
-    /// <summary>Largest binary payload accepted on one frame. At 16 kHz mono this caps a frame at ~32 s of
-    /// audio, far above the 20-40 ms frames a satellite should send; it exists to bound the damage from a
-    /// corrupt or hostile header rather than to shape normal traffic.</summary>
+    /// <summary>Largest binary payload accepted on one frame. At 16 kHz mono this caps a frame at ~32 s of audio, far above the 20-40 ms frames a satellite should send; it exists to bound the damage from a corrupt or hostile header rather than to shape normal traffic.</summary>
     public int MaxPayloadBytes { get; init; } = 1 << 20;
 
-    /// <summary>How often the server pings an idle connection. A satellite that lost its access point leaves a
-    /// socket that still looks writable, so the absence of pongs is what actually surfaces the loss.</summary>
+    /// <summary>How often the server pings an idle connection. A satellite that lost its access point leaves a socket that still looks writable, so the absence of pongs is what actually surfaces the loss.</summary>
     public TimeSpan PingInterval { get; init; } = TimeSpan.FromSeconds(10);
 
-    /// <summary>Whether to bind the raw TCP port. Turn it off to accept satellites only over a transport the
-    /// host supplies (a WebSocket behind TLS, say) — then nothing is listening on the LAN at all.</summary>
+    /// <summary>Whether to bind the raw TCP port. Turn it off to accept satellites only over a transport the host supplies (a WebSocket behind TLS, say) — then nothing is listening on the LAN at all.</summary>
     public bool EnableTcpListener { get; init; } = true;
 
-    /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the
-    /// check, which is the sane default on a trusted LAN; set it before this endpoint is reachable from anywhere
-    /// less trusted, because without it any device that can open the port can stream audio in and receive every
-    /// detection — including the transcripts of what was said.</summary>
+    /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the check, which is the sane default on a trusted LAN; set it before this endpoint is reachable from anywhere less trusted, because without it any device that can open the port can stream audio in and receive every detection — including the transcripts of what was said.</summary>
     public string? AuthToken { get; init; }
 
     /// <summary>Audio captured around a detection and handed to transcription.</summary>
     public double UtteranceSeconds { get; init; } = 8.0;
 
-    /// <summary>Directory holding wake assets (<c>vad/</c>, <c>backbone/</c>, <c>heads/</c>). Defaults to
-    /// <c>{models}/audio/wake</c>.</summary>
+    /// <summary>Directory holding wake assets (<c>vad/</c>, <c>backbone/</c>, <c>heads/</c>). Defaults to <c>{models}/audio/wake</c>.</summary>
     public string? ModelRoot { get; init; }
 
-    /// <summary>Wake words to load, mapped to their per-word settings. Empty means every head found on disk,
-    /// with default settings.</summary>
+    /// <summary>Wake words to load, mapped to their per-word settings. Empty means every head found on disk, with default settings.</summary>
     public IReadOnlyDictionary<string, WakeWordConfig> Words { get; init; } = new Dictionary<string, WakeWordConfig>();
 
     /// <summary>Whether a detection should also transcribe the utterance that follows it.</summary>
@@ -45,25 +36,17 @@ public sealed record WakeServiceOptions
     /// <summary>Model id used for that transcription.</summary>
     public string TranscribeModel { get; init; } = "whisper";
 
-    /// <summary>Whether to identify who spoke and enforce per-word speaker restrictions. Requires CAM++
-    /// weights; when they are missing the service logs and runs ungated.</summary>
+    /// <summary>Whether to identify who spoke and enforce per-word speaker restrictions. Requires CAM++ weights; when they are missing the service logs and runs ungated.</summary>
     public bool IdentifySpeakers { get; init; } = true;
 
-    /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to
-    /// one engine's wake events without being in-process — the same detection can drive several agents.</summary>
+    /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to one engine's wake events without being in-process — the same detection can drive several agents.</summary>
     public IReadOnlyList<string> Webhooks { get; init; } = [];
 
-    /// <summary>Wraps the post-detection transcription call so the host can put it behind its own admission
-    /// gate. The engine is not safely re-entrant per backend, so in the API server this routes through the
-    /// same <c>InferenceQueue</c> every HTTP route uses — otherwise a detection could run Whisper on the
-    /// shared backend while an image or video job is mid-generation. Null runs it directly, which is correct
-    /// for a host that has no other traffic.</summary>
+    /// <summary>Wraps the post-detection transcription call so the host can put it behind its own admission gate. The engine is not safely re-entrant per backend, so in the API server this routes through the same <c>InferenceQueue</c> every HTTP route uses — otherwise a detection could run Whisper on the shared backend while an image or video job is mid-generation. Null runs it directly, which is correct for a host that has no other traffic.</summary>
     public Func<Func<Task<string?>>, Task<string?>>? TranscribeGate { get; init; }
 }
 
-/// <summary>Per-word configuration. <see cref="Route"/> is opaque to the engine: it is echoed back on the
-/// detection event so a caller can send different words to different agents without the engine knowing what
-/// any of them mean.</summary>
+/// <summary>Per-word configuration. <see cref="Route"/> is opaque to the engine: it is echoed back on the detection event so a caller can send different words to different agents without the engine knowing what any of them mean.</summary>
 public sealed record WakeWordConfig
 {
     /// <summary>Head file name (without extension) under <c>heads/</c>. Defaults to the word's key.</summary>

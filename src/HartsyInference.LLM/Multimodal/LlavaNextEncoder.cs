@@ -3,19 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>LLaVA-NeXT/1.6 anyres vision pipeline: tiles the image into a base/overview tile plus a variable-size
-/// grid of high-res crops (<see cref="LlavaNextImagePreprocessor"/>), runs each tile through the SAME CLIP tower
-/// + <c>mm.0</c>/<c>mm.2</c> projector already validated for LLaVA-1.5 (<see cref="SiglipVlmEncoder"/>, wrapped
-/// by composition — not reimplemented), then merges the per-tile embeddings
-/// (<see cref="LlavaNextFeatureMerger"/>) into one flat sequence spliced into the text decoder exactly like every
-/// other <see cref="IVlmImageEncoder"/>.
-///
-/// <para><see cref="Encode"/> takes the RAW (un-resized, un-normalized, <c>[0,255]</c>) image as
-/// <c>[1, 3, origH, origW]</c> — unlike every other family's fixed-square contract via
-/// <see cref="VlmImagePreprocessor"/> — because the merge's unpad step needs the original aspect ratio, which a
-/// pre-resized square would destroy. Callers must route LLaVA-NeXT through
-/// <see cref="LlavaNextImagePreprocessor.RawToNativeTensor"/> instead (mirrors how mllama already gets its own
-/// preprocessing call in <c>TextService</c>, rather than the shared <see cref="VlmImagePreprocessor.Preprocess"/>).</para></summary>
+/// <summary>LLaVA-NeXT/1.6 anyres vision pipeline: tiles the image (<see cref="LlavaNextImagePreprocessor"/>), runs each tile through the SAME CLIP tower + projector validated for LLaVA-1.5 (<see cref="SiglipVlmEncoder"/>, wrapped by composition), then merges the per-tile embeddings (<see cref="LlavaNextFeatureMerger"/>) into one flat sequence.</summary>
+/// <remarks><see cref="Encode"/> takes the RAW (un-resized, un-normalized, <c>[0,255]</c>) image as <c>[1, 3, origH, origW]</c> — unlike every other family's fixed-square contract via <see cref="VlmImagePreprocessor"/> — because the merge's unpad step needs the original aspect ratio, which a pre-resized square would destroy; callers must route LLaVA-NeXT through <see cref="LlavaNextImagePreprocessor.RawToNativeTensor"/> instead.</remarks>
 public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
 {
     private readonly SiglipVlmEncoder _tower;
@@ -28,8 +17,7 @@ public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
     public float[] ImageMean => _tower.ImageMean;
     public float[] ImageStd => _tower.ImageStd;
 
-    /// <summary>Vicuna-v1 prompt format, identical to LLaVA-1.5 — reuses <c>MultimodalGenerator</c>'s existing
-    /// "llava" branch unchanged.</summary>
+    /// <summary>Vicuna-v1 prompt format, identical to LLaVA-1.5 — reuses <c>MultimodalGenerator</c>'s existing "llava" branch unchanged.</summary>
     public string Family => "llava";
 
     private LlavaNextEncoder(SiglipVlmEncoder tower, (int h, int w)[] gridPinpoints, Tensor imageNewline)
@@ -55,8 +43,7 @@ public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
         catch { tower.Dispose(); throw; }
     }
 
-    /// <summary>Encodes a native-resolution image (see <see cref="LlavaNextImagePreprocessor.RawToNativeTensor"/>)
-    /// into <c>[1, totalTokens, projectionDim]</c> — token count varies per image (tile count × aspect ratio).</summary>
+    /// <summary>Encodes a native-resolution image (see <see cref="LlavaNextImagePreprocessor.RawToNativeTensor"/>) into <c>[1, totalTokens, projectionDim]</c> — token count varies per image (tile count × aspect ratio).</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
         (Tensor[] tiles, int origH, int origW) = LlavaNextImagePreprocessor.Tile(
@@ -84,9 +71,7 @@ public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
         }
     }
 
-    /// <summary>Same <c>HARTSY_VLM_DUMP</c> capture-hook convention as <see cref="SiglipVlmEncoder"/>'s internal
-    /// <c>Dbg</c> — raw little-endian f32, file <c>cs_{tag}.f32</c> — so the same Python reference harness
-    /// (<c>dump_llavanext_vision_ref.py</c>) can load and compare them.</summary>
+    /// <summary>Same <c>HARTSY_VLM_DUMP</c> capture-hook convention as <see cref="SiglipVlmEncoder"/>'s internal <c>Dbg</c> — raw little-endian f32, file <c>cs_{tag}.f32</c> — so the same Python reference harness (<c>dump_llavanext_vision_ref.py</c>) can load and compare them.</summary>
     private static void Dbg(IBackend backend, string tag, Tensor t)
     {
         if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") != "1" && Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP") is null) return;

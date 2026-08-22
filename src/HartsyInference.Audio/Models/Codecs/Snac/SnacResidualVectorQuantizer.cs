@@ -4,9 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC's hierarchical residual VQ. Each codebook has its own
-/// <c>stride</c> — bigger stride = coarser temporal resolution.
-///
+/// <summary>SNAC's hierarchical residual VQ. Each codebook has its own <c>stride</c> — bigger stride = coarser temporal resolution.</summary>
+/// <remarks>
 /// <para>Per-codebook forward (encode):</para>
 /// <list type="number">
 ///   <item>If <c>stride &gt; 1</c>: <c>avg_pool1d</c> the residual to <c>T / stride</c> samples.</item>
@@ -19,7 +18,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 ///
 /// <para>Codes for codebook <c>i</c> have shape <c>[batch, T / VqStrides[i]]</c> — that's
 /// why SNAC returns a list of variable-length code tensors rather than the rectangular
-/// <c>[nQ, B, T]</c> layout used by EnCodec / DAC.</para></summary>
+/// <c>[nQ, B, T]</c> layout used by EnCodec / DAC.</para></remarks>
 internal sealed unsafe class SnacResidualVectorQuantizer
 {
     public int NCodebooks { get; }
@@ -66,9 +65,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         }
     }
 
-    /// <summary>Encodes a latent. Output is a list of length <see cref="NCodebooks"/>;
-    /// entry <c>i</c> is shape <c>[batch, T / VqStrides[i]]</c> Int32. Caller owns
-    /// disposal of every returned tensor.</summary>
+    /// <summary>Encodes a latent. Output is a list of length <see cref="NCodebooks"/>; entry <c>i</c> is shape <c>[batch, T / VqStrides[i]]</c> Int32. Caller owns disposal of every returned tensor.</summary>
     public Tensor[] Encode(IBackend backend, Tensor latent, int batch, int t)
     {
         if (_inProjW[0] is null) throw new InvalidOperationException("SnacResidualVectorQuantizer weights not loaded.");
@@ -163,7 +160,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 
-            // residual -= reprojFull.
             float* rp = (float*)residual.DataPointer;
             float* xp = (float*)reprojFull.DataPointer;
             long n = residual.ElementCount;
@@ -175,10 +171,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return result;
     }
 
-    /// <summary>Decodes per-codebook codes back to a latent. <paramref name="codes"/>
-    /// must have length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T / VqStrides[i]]</c>.
-    /// Output is channels-first <c>[B, latent_dim, T]</c> where <c>T</c> is derived from
-    /// the largest code stream (codebook with stride=1).</summary>
+    /// <summary>Decodes per-codebook codes back to a latent. <paramref name="codes"/> must have length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T / VqStrides[i]]</c>. Output is channels-first <c>[B, latent_dim, T]</c> where <c>T</c> is derived from the largest code stream (codebook with stride=1).</summary>
     public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> codes, int batch)
     {
         if (codes.Count != NCodebooks)
@@ -222,7 +215,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 }
             }
 
-            // out_proj.
             Tensor reprojSmall = new(new TensorShape(batch, LatentDim, tQuant), DType.F32);
             backend.Conv1d(reprojSmall, quantizedSmall, _outProjW[q]!, _outProjB[q],
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
@@ -233,7 +225,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 
-            // latent += reprojFull.
             float* xp = (float*)reprojFull.DataPointer;
             for (long i = 0; i < total; i++) lp[i] += xp[i];
             reprojFull.Dispose();
@@ -281,8 +272,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return copy;
     }
 
-    /// <summary>1D average pool — non-overlapping windows of length <paramref name="stride"/>.
-    /// Input <c>[B, C, T]</c> → output <c>[B, C, T/stride]</c>.</summary>
+    /// <summary>1D average pool — non-overlapping windows of length <paramref name="stride"/>. Input <c>[B, C, T]</c> → output <c>[B, C, T/stride]</c>.</summary>
     private static Tensor AvgPool1d(Tensor src, int batch, int channels, int t, int stride)
     {
         int tOut = t / stride;
@@ -308,9 +298,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return result;
     }
 
-    /// <summary>Repeat-interleave along the time axis. Each element repeats
-    /// <paramref name="repeats"/> times — matches PyTorch's
-    /// <c>x.repeat_interleave(stride, dim=-1)</c>.</summary>
+    /// <summary>Repeat-interleave along the time axis. Each element repeats <paramref name="repeats"/> times — matches PyTorch's <c>x.repeat_interleave(stride, dim=-1)</c>.</summary>
     private static Tensor RepeatInterleave(Tensor src, int batch, int channels, int tIn, int repeats)
     {
         int tOut = tIn * repeats;

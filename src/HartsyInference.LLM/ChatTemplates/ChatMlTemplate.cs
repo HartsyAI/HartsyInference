@@ -4,9 +4,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
-/// <summary>The Qwen ChatML template (Qwen2.5 / Qwen3 and any model using the same format). Built-in fallback
-/// used when a GGUF carries no <c>chat_template</c>. Works with any <see cref="ILlmTokenizer"/> that knows the
-/// <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c> control tokens.</summary>
+/// <summary>Built-in ChatML fallback for Qwen2.5/Qwen3 (and any format-compatible model) used when a GGUF carries no <c>chat_template</c>; requires a tokenizer that knows <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c>.</summary>
 public sealed class ChatMlTemplate : IChatTemplate
 {
     private const string ImStart = "<|im_start|>";
@@ -16,8 +14,7 @@ public sealed class ChatMlTemplate : IChatTemplate
     public string Name => "chatml";
 
     /// <inheritdoc/>
-    /// <remarks>ChatML has no <c>enable_thinking</c> slot; <paramref name="enableThinking"/> is accepted for
-    /// interface parity but ignored.</remarks>
+    /// <remarks>ChatML has no <c>enable_thinking</c> slot; <paramref name="enableThinking"/> is accepted for interface parity but ignored.</remarks>
     public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
@@ -43,8 +40,7 @@ public sealed class ChatMlTemplate : IChatTemplate
         return ids.ToArray();
     }
 
-    /// <summary>Encodes a one-shot turn: optional system message (null uses the default helpful-assistant
-    /// prompt, empty string omits it) + a single user turn + a trailing assistant generation prompt.</summary>
+    /// <summary>Encodes a one-shot turn: optional system message (null uses the default helpful-assistant prompt, empty string omits it) + a single user turn + a trailing assistant generation prompt.</summary>
     public static int[] EncodeSingleTurn(ILlmTokenizer tok, string userPrompt, string? systemPrompt)
     {
         ArgumentNullException.ThrowIfNull(tok);

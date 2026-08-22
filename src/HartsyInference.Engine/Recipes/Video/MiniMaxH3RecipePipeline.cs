@@ -21,12 +21,10 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed MiniMax-H3 pipeline driven from the native <see cref="VideoRequest"/>. H3 emits a stereo
-/// soundtrack with every clip, so the result carries both streams.</summary>
+/// <summary>A constructed MiniMax-H3 pipeline driven from the native <see cref="VideoRequest"/>. H3 emits a stereo soundtrack with every clip, so the result carries both streams.</summary>
 public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>Reference caps the model was trained under. A reference video's own soundtrack is capped separately
-    /// from the standalone clips, as the reference node does, so both lists may carry three.</summary>
+    /// <summary>Reference caps the model was trained under. A reference video's own soundtrack is capped separately from the standalone clips, as the reference node does, so both lists may carry three.</summary>
     private const int MaxReferenceImages = 9, MaxReferenceAudios = 3, MaxReferenceVideos = 3;
 
     /// <summary>Pixels per latent cell on H/W; a reference block's grid is stated in latent cells.</summary>
@@ -37,8 +35,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private readonly IBackend _backend;
     /// <summary>Where the Qwen3-VL encode runs; equal to <see cref="_backend"/> unless placement moved it.</summary>
     private readonly IBackend _textEncoderBackend;
-    /// <summary>Where every VAE ENCODE runs (keyframes, references). The decodes are the pipeline's own
-    /// <c>VaeBackend</c>, set from the same placement so both halves of the VAE land on one device.</summary>
+    /// <summary>Where every VAE ENCODE runs (keyframes, references). The decodes are the pipeline's own <c>VaeBackend</c>, set from the same placement so both halves of the VAE land on one device.</summary>
     private readonly IBackend _vaeBackend;
     private readonly MiniMaxH3TextEncoder _textEncoder;
     private readonly Qwen2Tokenizer _tokenizer;
@@ -47,8 +44,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private readonly MiniMaxH3AudioVaeEncoder? _audioVaeEncoder;
     private readonly MergedLoraStack? _loraStack;
 
-    /// <summary>Takes ownership of the pipeline, the pre-encoded conditioning, and every loader backing the weights.
-    /// The encoders are null for decode-only VAEs, which disables keyframe and reference conditioning respectively.</summary>
+    /// <summary>Takes ownership of the pipeline, the pre-encoded conditioning, and every loader backing the weights. The encoders are null for decode-only VAEs, which disables keyframe and reference conditioning respectively.</summary>
     public MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
         MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
         MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null, MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null,
@@ -67,30 +63,23 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         _loraStack = loraStack;
     }
 
-    /// <summary>Tier 3.8's <c>&lt;refcrop:&gt;</c> backend — a pipeline-owned cache (mirrors
-    /// <c>ImagesService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;refcrop:&gt;</c>
-    /// tags never loads it.</summary>
+    /// <summary>Tier 3.8's <c>&lt;refcrop:&gt;</c> backend — a pipeline-owned cache (mirrors <c>ImagesService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;refcrop:&gt;</c> tags never loads it.</summary>
     private readonly ClipSegSegmenter _clipSeg = new();
 
-    /// <summary>One keyframe resolved into everything the two conditioning paths need: the DiT's packed rows, the
-    /// anchor that pins it to the clip's first or last frame, and the RGB the vision tower presents.</summary>
+    /// <summary>One keyframe resolved into everything the two conditioning paths need: the DiT's packed rows, the anchor that pins it to the clip's first or last frame, and the RGB the vision tower presents.</summary>
     private readonly record struct Keyframe(int FrameIndex, Tensor Rows, Tensor Rgb, int VisionTokens);
 
-    /// <summary>One ref2va reference resolved for both paths. The rows land in the stream its block kind names, so the
-    /// order these are produced in has to match the order the packed layout emits their segments. A soundtracked video
-    /// carries two conditions — its <c>&lt;Audio j&gt;</c> label then its <c>&lt;Video k&gt;</c> — behind one block.</summary>
+    /// <summary>One ref2va reference resolved for both paths. The rows land in the stream its block kind names, so the order these are produced in has to match the order the packed layout emits their segments. A soundtracked video carries two conditions — its <c>&lt;Audio j&gt;</c> label then its <c>&lt;Video k&gt;</c> — behind one block.</summary>
     private sealed record Reference(MiniMaxH3RefBlock Block, IReadOnlyList<MiniMaxH3TextEncoding.Condition> Conditions)
     {
         public Tensor? VideoRows { get; init; }
         public Tensor? AudioRows { get; init; }
 
-        /// <summary>What the vision tower presents, one entry per spliced block: a <c>[3, H, W]</c> still for an image
-        /// or a <c>[2, 3, H, W]</c> frame stack per video block. Empty for an audio reference, which is label-only.</summary>
+        /// <summary>What the vision tower presents, one entry per spliced block: a <c>[3, H, W]</c> still for an image or a <c>[2, 3, H, W]</c> frame stack per video block. Empty for an audio reference, which is label-only.</summary>
         public IReadOnlyList<Tensor> Rgb { get; init; } = [];
     }
 
-    /// <summary>A reference clip decoded, truncated onto the frame grid, and resized onto its canvas — everything both
-    /// encode passes need, resolved before either VAE is made resident.</summary>
+    /// <summary>A reference clip decoded, truncated onto the frame grid, and resized onto its canvas — everything both encode passes need, resolved before either VAE is made resident.</summary>
     private sealed record PreparedVideo(IReadOnlyList<byte[]> Frames, int Width, int Height, AudioClip? Soundtrack);
 
     /// <inheritdoc/>
@@ -261,15 +250,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Refuses instantly, before any encode/allocate work, when the requested geometry's activation floor
-    /// cannot fit even with the DiT streamed per-op and nothing else resident — turning the mid-generation OOM a
-    /// 481-frame/1280x704 request hit into an immediate, actionable error instead. Chunking
-    /// (<see cref="MiniMaxH3ChunkPolicy"/>) cannot rescue a request past this floor, so it is checked ahead of any
-    /// allocation rather than left to surface as an <see cref="OutOfVramException"/> mid-denoise; see
-    /// <see cref="MiniMaxH3ActivationEstimate"/> for what the floor accounts for. When DiT sharding is active, the
-    /// shard backend runs the exact same full-sequence forward for its own block range (only the WEIGHT range
-    /// splits, not the sequence), so it needs the identical floor and is checked too — a split that leaves the
-    /// smaller card's share too thin would otherwise only surface as a mid-denoise OOM on that backend.</summary>
+    /// <summary>Refuses instantly, before any encode/allocate work, when the requested geometry's activation floor cannot fit even with the DiT streamed per-op and nothing else resident — turning the mid-generation OOM a 481-frame/1280x704 request hit into an immediate, actionable error instead. Chunking (<see cref="MiniMaxH3ChunkPolicy"/>) cannot rescue a request past this floor, so it is checked ahead of any allocation rather than left to surface as an <see cref="OutOfVramException"/> mid-denoise; see <see cref="MiniMaxH3ActivationEstimate"/> for what the floor accounts for. When DiT sharding is active, the shard backend runs the exact same full-sequence forward for its own block range (only the WEIGHT range splits, not the sequence), so it needs the identical floor and is checked too — a split that leaves the smaller card's share too thin would otherwise only surface as a mid-denoise OOM on that backend.</summary>
     private void CheckVramFeasibility(int width, int height, int frames)
     {
         int seq = SequenceLengthFor(width, height, frames);
@@ -339,9 +320,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             + "DiT shard split.");
     }
 
-    /// <summary>Packed sequence length for a geometry, without allocating anything. Text/reference rows are only
-    /// known after encoding, but they are a small bounded addition next to a geometry large enough to be at risk
-    /// here, so a fixed conservative allowance keeps this usable as a pre-flight.</summary>
+    /// <summary>Packed sequence length for a geometry, without allocating anything. Text/reference rows are only known after encoding, but they are a small bounded addition next to a geometry large enough to be at risk here, so a fixed conservative allowance keeps this usable as a pre-flight.</summary>
     private int SequenceLengthFor(int width, int height, int frames)
     {
         int latentH = height / VaeSpatialRatio, latentW = width / VaeSpatialRatio;
@@ -351,11 +330,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return approxNonVideoRows + videoRows + audioRows;
     }
 
-    /// <summary>The longest clip that WOULD fit at this resolution, so the refusal can name a length that works
-    /// instead of only the one that doesn't. Walks the 17k+5 grid down from the request rather than solving: the
-    /// floor is not linear in frames (video and audio rows advance on different grids) and the search is at most a
-    /// few dozen arithmetic steps with no allocation. Returns 0 when even the shortest clip doesn't fit, which means
-    /// the resolution is the problem, not the length.</summary>
+    /// <summary>The longest clip that WOULD fit at this resolution, so the refusal can name a length that works instead of only the one that doesn't. Walks the 17k+5 grid down from the request rather than solving: the floor is not linear in frames (video and audio rows advance on different grids) and the search is at most a few dozen arithmetic steps with no allocation. Returns 0 when even the shortest clip doesn't fit, which means the resolution is the problem, not the length.</summary>
     private int LargestFeasibleFrameCount(int width, int height, int frames, long budgetBytes)
     {
         for (int candidate = frames - 17; candidate >= 5; candidate -= 17)
@@ -371,12 +346,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 
     private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 
-    /// <summary>Frees a component's weights after use — unless placement put that component on a device the DiT does
-    /// not use, in which case they stay resident so the next generation skips the re-upload. The opt-in is the
-    /// placement itself: on the primary the free is load-bearing (the DiT needs that room back), and off it there is
-    /// nothing competing for the space. Warm weights still go on <c>FreeMemory()</c>, model switch, and disposal,
-    /// which release every backend's weight set regardless. Only WEIGHTS are held — activations are freed normally,
-    /// so nothing a later generation faults back to host is kept alive by this.</summary>
+    /// <summary>Frees a component's weights after use — unless placement put that component on a device the DiT does not use, in which case they stay resident so the next generation skips the re-upload. The opt-in is the placement itself: on the primary the free is load-bearing (the DiT needs that room back), and off it there is nothing competing for the space. Warm weights still go on <c>FreeMemory()</c>, model switch, and disposal, which release every backend's weight set regardless. Only WEIGHTS are held — activations are freed normally, so nothing a later generation faults back to host is kept alive by this.</summary>
     private void ReleaseComponentWeights(IBackend backend, IEnumerable<Tensor> weights)
     {
         if (ReferenceEquals(backend, _backend))
@@ -385,10 +355,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images,
-    /// then videos, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation
-    /// label(s). The work is phased so each VAE is made resident exactly once even though a soundtracked video needs
-    /// both of them.</summary>
+    /// <summary>Encodes ref2va references in the order the presentation and the packed layout both expect: images, then videos, then standalone audio. Each becomes one <see cref="MiniMaxH3RefBlock"/> plus its presentation label(s). The work is phased so each VAE is made resident exactly once even though a soundtracked video needs both of them.</summary>
     private void EncodeReferences(VideoRequest request, int width, int height, int frameCount,
         CancellationToken cancel, List<Reference> into)
     {
@@ -534,9 +501,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Decodes a reference clip, truncates it onto the model's frame grid, and resizes it onto its canvas.
-    /// Truncation runs before the resize: the discarded frames would otherwise be resampled for nothing, and a long
-    /// HD clip is gigabytes of them.</summary>
+    /// <summary>Decodes a reference clip, truncates it onto the model's frame grid, and resizes it onto its canvas. Truncation runs before the resize: the discarded frames would otherwise be resampled for nothing, and a long HD clip is gigabytes of them.</summary>
     private static PreparedVideo PrepareReferenceVideo(ReferenceVideo reference, int frameCount, CancellationToken cancel)
     {
         FfmpegProcessDecoder decoder = new FfmpegProcessDecoder();
@@ -564,9 +529,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return new PreparedVideo(resized, canvasWidth, canvasHeight, reference.Audio);
     }
 
-    /// <summary>Assembles a prepared clip into its reference block, presentation labels, and the 2 fps frame stacks the
-    /// vision tower sees. The stack count must equal what <see cref="MiniMaxH3TextEncoding.VideoBlocks"/> produces —
-    /// a mismatch only surfaces as the vision tower's token-count assertion once real weights are loaded.</summary>
+    /// <summary>Assembles a prepared clip into its reference block, presentation labels, and the 2 fps frame stacks the vision tower sees. The stack count must equal what <see cref="MiniMaxH3TextEncoding.VideoBlocks"/> produces — a mismatch only surfaces as the vision tower's token-count assertion once real weights are loaded.</summary>
     private Reference BuildVideoReference(PreparedVideo video, Tensor videoRows, int latentT,
         Tensor? audioRows, int refAudioT)
     {
@@ -605,8 +568,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         };
     }
 
-    /// <summary>Scales a reference down (never up) to the generation's pixel area, keeping its own aspect — the
-    /// reference's "match" policy. A reference is not the canvas, so it keeps its shape rather than being stretched.</summary>
+    /// <summary>Scales a reference down (never up) to the generation's pixel area, keeping its own aspect — the reference's "match" policy. A reference is not the canvas, so it keeps its shape rather than being stretched.</summary>
     private Reference EncodeReferenceImage(ImageData image, int width, int height)
     {
         double scale = Math.Min(1.0, Math.Sqrt((double)width * height / ((double)image.Width * image.Height)));
@@ -630,8 +592,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>VAE-encodes a clip to packed audio rows plus its latent length. Shared by standalone reference audio
-    /// and by a reference video's soundtrack, which folds into that video's block instead of becoming its own.</summary>
+    /// <summary>VAE-encodes a clip to packed audio rows plus its latent length. Shared by standalone reference audio and by a reference video's soundtrack, which folds into that video's block instead of becoming its own.</summary>
     private (Tensor Rows, int RefAudioT) EncodeAudioRows(AudioClip clip)
     {
         (float[] left, float[] right) = AudioClipCodec.DecodeStereo(clip, _audioVaeEncoder!.Config.SampleRate);
@@ -646,8 +607,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return (MiniMaxH3Latents.PackAudio(latent, _config), (int)latent.Shape[3]);
     }
 
-    /// <summary>Encodes a standalone reference clip. It carries no vision block — the presentation is the
-    /// <c>&lt;Audio j&gt;</c> label alone.</summary>
+    /// <summary>Encodes a standalone reference clip. It carries no vision block — the presentation is the <c>&lt;Audio j&gt;</c> label alone.</summary>
     private Reference EncodeReferenceAudio(AudioClip clip)
     {
         (Tensor rows, int refAudioT) = EncodeAudioRows(clip);
@@ -675,8 +635,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             Blocks = [new MiniMaxH3TextEncoding.VisionBlock(visionTokens)],
         };
 
-    /// <summary>VAE-encodes the start and end images into keyframe conditioning. The first frame is stretched to the
-    /// canvas because it anchors the geometry; the last frame is cover-cropped so it does not distort what follows.</summary>
+    /// <summary>VAE-encodes the start and end images into keyframe conditioning. The first frame is stretched to the canvas because it anchors the geometry; the last frame is cover-cropped so it does not distort what follows.</summary>
     private void EncodeKeyframes(VideoRequest request, int width, int height, int frames, List<Keyframe> into)
     {
         if (request.InitImage is null && request.VideoEndFrame is null)

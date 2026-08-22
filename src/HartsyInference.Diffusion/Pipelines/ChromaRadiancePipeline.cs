@@ -12,22 +12,12 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Chroma Radiance text-to-image pipeline (<c>lodestones/Chroma1-Radiance</c>) — pixel-space, VAE-free.
-/// T5-XXL encode (identical text path to <see cref="ChromaPipeline"/>, including the "first padding token unmasked"
-/// mask rule) → <see cref="ChromaRadianceTransformer"/> denoising directly on RGB in [-1, 1] → bytes.
-///
-/// Sampling differences vs classic Chroma:
+/// <summary>Chroma Radiance text-to-image pipeline (<c>lodestones/Chroma1-Radiance</c>) — pixel-space, VAE-free. T5-XXL encode (identical text path to <see cref="ChromaPipeline"/>, including the "first padding token unmasked" mask rule) → <see cref="ChromaRadianceTransformer"/> denoising directly on RGB in [-1, 1] → bytes. Sampling differences vs classic Chroma:
 /// <list type="bullet">
-///   <item><b>x0 prediction</b> — the model predicts the clean image. Each step converts to velocity via
-///         <see cref="X0Prediction.ToVelocity"/> (<c>v = (x_t − x0) / max(t, ε)</c>, matching ComfyUI), CFG-combines
-///         on v, then takes the flow-match Euler step.</item>
+///   <item><b>x0 prediction</b> — the model predicts the clean image. Each step converts to velocity via <see cref="X0Prediction.ToVelocity"/> (<c>v = (x_t − x0) / max(t, ε)</c>, matching ComfyUI), CFG-combines on v, then takes the flow-match Euler step.</item>
 ///   <item><b>Static shift 1.0</b> (ComfyUI's Chroma sampling default — no dynamic shift), default 50 steps, CFG 3.5.</item>
-///   <item><b>Pixel space</b> — no latent packing, no VAE. Dimensions are padded up to a multiple of the 16-px patch
-///         and the output is cropped back. Previews are the in-flight image itself
-///         (<see cref="LatentArchitecture.ChromaRadiance"/>).</item>
-///   <item><b>Img2img / inpaint without a VAE</b> — the source image IS the clean sample: it's padded to the
-///         patch grid and noised directly via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Masked
-///         inpaint blends per step in pixel space (mask used at full resolution — no downsample).</item>
+///   <item><b>Pixel space</b> — no latent packing, no VAE. Dimensions are padded up to a multiple of the 16-px patch and the output is cropped back. Previews are the in-flight image itself (<see cref="LatentArchitecture.ChromaRadiance"/>).</item>
+///   <item><b>Img2img / inpaint without a VAE</b> — the source image IS the clean sample: it's padded to the patch grid and noised directly via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Masked inpaint blends per step in pixel space (mask used at full resolution — no downsample).</item>
 /// </list></summary>
 public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 {
@@ -58,8 +48,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-tokenized T5 input plus attention masks. API mirrors
-    /// <see cref="ChromaPipeline.GenerateFromTokens"/>.</summary>
+    /// <summary>Generates an image from pre-tokenized T5 input plus attention masks. API mirrors <see cref="ChromaPipeline.GenerateFromTokens"/>.</summary>
     /// <param name="promptTokenIdsT5">Prompt token IDs from the T5 tokenizer.</param>
     /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs.</param>
     /// <param name="promptAttentionMaskT5">Tokenizer attention mask for the prompt (1=real token, 0=pad).</param>
@@ -478,8 +467,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         return rem == 0 ? n : n + (multiple - rem);
     }
 
-    /// <summary>Device bytes a weight set occupies, via <see cref="DType.ComputeByteCount"/> so block-quantized
-    /// dtypes (which report <c>SizeInBytes == 0</c>) don't total to zero.</summary>
+    /// <summary>Device bytes a weight set occupies, via <see cref="DType.ComputeByteCount"/> so block-quantized dtypes (which report <c>SizeInBytes == 0</c>) don't total to zero.</summary>
     private static long SumBytes(IEnumerable<Tensor> weights)
     {
         long total = 0;
@@ -487,8 +475,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         return total;
     }
 
-    /// <summary>Activations + workspace the denoise phase needs alongside the weights, for
-    /// <see cref="VramPlanner.PlanPhase"/>.</summary>
+    /// <summary>Activations + workspace the denoise phase needs alongside the weights, for <see cref="VramPlanner.PlanPhase"/>.</summary>
     /// <remarks>Radiance is unusual in that the NeRF pixel head, not the backbone, dominates: at 1024² its
     /// per-pixel embedding, F16 GLU stream and <c>[1, nerfHidden, H, W]</c> feature map are each ~268 MB of F32,
     /// and the final pixel conv's workspace was the allocation that OOM'd a 12 GB card (1024 MB requested with
@@ -544,8 +531,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Crops a [1, 3, padH, padW] pixel tensor back to the requested [1, 3, H, W] (top-left anchored,
-    /// matching ComfyUI's <c>[:, :, :h, :w]</c> un-pad).</summary>
+    /// <summary>Crops a [1, 3, padH, padW] pixel tensor back to the requested [1, 3, H, W] (top-left anchored, matching ComfyUI's <c>[:, :, :h, :w]</c> un-pad).</summary>
     private static Tensor CropPixels(Tensor padded, int height, int width)
     {
         int padHeight = (int)padded.Shape[2];

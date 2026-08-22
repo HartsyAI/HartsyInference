@@ -3,19 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>The image-prompt projection used by plain IP-Adapter FaceID (h94's <c>MLPProjModel</c>): a 2-layer
-/// MLP from the L2-normalized 512-d InsightFace ArcFace identity embedding to <c>num_tokens ×
-/// cross_attention_dim</c> — <c>Linear(512 → 1024) → GELU → Linear(1024 → tokens·crossDim)</c>, reshaped to
-/// <c>[B, numTokens, crossAttnDim]</c> and finished with a LayerNorm over the per-token dim.
-///
-/// <para>Checkpoint keys (h94/IP-Adapter-FaceID <c>.bin</c>, flattened): <c>image_proj.proj.0.weight/bias</c>,
-/// <c>image_proj.proj.2.weight/bias</c>, <c>image_proj.norm.weight/bias</c>. The FaceID-Plus variants
-/// (<c>ProjPlusModel</c>, which additionally mix CLIP-Vision features through a perceiver resampler) are a
-/// different module and are NOT handled here.</para>
-///
-/// <para>Math is CPU-side like <see cref="IpAdapterStandardProjection"/> — the largest case (1024 → 8192,
-/// batch 1) is a few MFLOPs, dwarfed by everything around it. GELU uses the exact erf form matching
-/// <c>torch.nn.GELU</c>'s default.</para></summary>
+/// <summary>The image-prompt projection used by plain IP-Adapter FaceID (h94's <c>MLPProjModel</c>): a 2-layer MLP from the L2-normalized 512-d InsightFace ArcFace identity embedding to <c>num_tokens × cross_attention_dim</c> — <c>Linear(512 → 1024) → GELU → Linear(1024 → tokens·crossDim)</c>, reshaped to <c>[B, numTokens, crossAttnDim]</c> and finished with a LayerNorm over the per-token dim. Checkpoint keys (h94/IP-Adapter-FaceID <c>.bin</c>, flattened): <c>image_proj.proj.0.weight/bias</c>, <c>image_proj.proj.2.weight/bias</c>, <c>image_proj.norm.weight/bias</c>. The FaceID-Plus variants (<c>ProjPlusModel</c>, which additionally mix CLIP-Vision features through a perceiver resampler) are a different module and are NOT handled here. Math is CPU-side like <see cref="IpAdapterStandardProjection"/> — the largest case (1024 → 8192, batch 1) is a few MFLOPs, dwarfed by everything around it. GELU uses the exact erf form matching <c>torch.nn.GELU</c>'s default.</summary>
 public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
 {
     private readonly int _crossAttnDim;
@@ -62,8 +50,7 @@ public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
         if (_normBias is not null) yield return _normBias;
     }
 
-    /// <summary>Projects the L2-normalized ArcFace identity embedding (<c>[B, 512]</c>) into
-    /// <c>[B, numTokens, crossAttnDim]</c> image-prompt tokens.</summary>
+    /// <summary>Projects the L2-normalized ArcFace identity embedding (<c>[B, 512]</c>) into <c>[B, numTokens, crossAttnDim]</c> image-prompt tokens.</summary>
     public Tensor Forward(IBackend backend, Tensor faceEmbeds)
     {
         if (_proj0Weight is null)

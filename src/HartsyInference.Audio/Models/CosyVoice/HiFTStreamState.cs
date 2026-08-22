@@ -2,11 +2,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>Per-utterance carried state for <see cref="HiFTNetVocoder.ForwardStreaming"/>. Create one per
-/// utterance, feed it every mel chunk of that utterance in order, dispose it when the utterance is done.
-///
-/// <para>HiFTNetVocoder has two qualitatively different pieces, and they need two different streaming
-/// strategies:</para>
+/// <summary>Per-utterance carried state for <see cref="HiFTNetVocoder.ForwardStreaming"/> — create one per utterance, feed it every mel chunk in order, dispose it when done.</summary>
+/// <remarks>HiFTNetVocoder has two qualitatively different pieces, and they need two different streaming
+/// strategies:
 ///
 /// <para><b>conv_pre/upsample/MRF/conv_post + iSTFT</b> — purely local/convolutional/windowed, no
 /// cross-frame accumulation. Re-running the unmodified <see cref="HiFTNetVocoder"/>'s core over the FULL
@@ -49,27 +47,22 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// noise (same class as F0Predictor's, just far smaller since it doesn't feed an accumulator here), not a
 /// correctness bug. A real CosyVoice2 generation (streamed vs. the shipped GPU-F0 <c>Forward</c>) transcribes
 /// Whisper-identical and matches RMS/dynamic range closely, confirming the (larger, expected) host-CPU-vs-GPU
-/// F0Predictor numeric gap is perceptually inaudible.</para></summary>
+/// F0Predictor numeric gap is perceptually inaudible.</para></remarks>
 public sealed class HiFTStreamState : IDisposable
 {
     internal Tensor? MelHistory;
     internal int EmittedSamples;
 
-    /// <summary>One running phase sum per harmonic (<see cref="HiFTNetVocoder.Harmonics"/> entries) — mutated
-    /// in place by <see cref="HartsyInference.Audio.Dsp.NsfVocoderDsp.GenerateHarmonicSourceChunk"/>, never reset.</summary>
+    /// <summary>One running phase sum per harmonic (<see cref="HiFTNetVocoder.Harmonics"/> entries) — mutated in place by <see cref="HartsyInference.Audio.Dsp.NsfVocoderDsp.GenerateHarmonicSourceChunk"/>, never reset.</summary>
     internal readonly double[] HarmonicPhase = new double[HiFTNetVocoder.Harmonics];
 
-    /// <summary>Deterministic NSF-noise RNG state, threaded through the same way as <see cref="HarmonicPhase"/>
-    /// (unused when <c>HIFT_DETERMINISTIC=1</c> disables NSF noise, but always kept valid).</summary>
+    /// <summary>Deterministic NSF-noise RNG state, threaded through the same way as <see cref="HarmonicPhase"/> (unused when <c>HIFT_DETERMINISTIC=1</c> disables NSF noise, but always kept valid).</summary>
     internal uint NoiseRngState = 0x9E3779B9u;
 
     /// <summary>The finalized (never-to-be-recomputed) NSF harmonic-source audio, append-only.</summary>
     internal readonly List<float> HarmonicAudioSoFar = new();
 
-    /// <summary>How many leading mel frames' worth of F0 have already been consumed into
-    /// <see cref="HarmonicPhase"/>/<see cref="HarmonicAudioSoFar"/>. Frames at or beyond this index get a
-    /// throwaway (non-persisted) phase continuation each call, purely so the conv stack has something to
-    /// inject there — never real output, never emitted.</summary>
+    /// <summary>How many leading mel frames' worth of F0 have already been consumed into <see cref="HarmonicPhase"/>/<see cref="HarmonicAudioSoFar"/>. Frames at or beyond this index get a throwaway (non-persisted) phase continuation each call, purely so the conv stack has something to inject there — never real output, never emitted.</summary>
     internal int HarmonicSettledMelFrames;
 
     private int _disposed;

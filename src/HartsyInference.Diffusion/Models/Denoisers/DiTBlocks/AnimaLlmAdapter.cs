@@ -320,7 +320,7 @@ public sealed unsafe class AnimaLlmAdapterBlock
         if (_mlp2Bias is not null) yield return _mlp2Bias;
     }
 
-    /// <summary>Forward pass.</summary>
+    /// <summary>Pre-norm self-attn → cross-attn → MLP, each a residual addition (no gating, unlike the outer DiT).</summary>
     /// <param name="x">Main stream <c>[1, S_t5, hidden]</c>. Self-attn Q,K,V and cross-attn Q all derive from this.</param>
     /// <param name="context">Qwen-3 hidden states <c>[1, S_qwen3, hidden]</c>. Cross-attn K,V derive from this. Caller owns disposal.</param>
     /// <param name="cosTgt">Self-attn / cross-attn-Q RoPE cos <c>[S_t5, headDim]</c>. Caller owns.</param>

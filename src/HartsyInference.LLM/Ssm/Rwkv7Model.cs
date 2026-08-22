@@ -4,15 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>RWKV-7 ("Goose") decoder loaded from a llama.cpp <c>rwkv7</c> GGUF. A non-transformer recurrence built
-/// on the generalized <b>delta rule</b> (vs RWKV-6's WKV6 outer-product). Each block is a <b>time-mix</b>
-/// (fused token-shift lerp for r/w/k/v/a/g → receptance/key/value + a data-dependent decay <c>w</c>, an
-/// in-context-learning-rate <c>a</c>, a value-residual mix, and a gate, all via small LoRAs → an L2-normalized
-/// key <c>kk</c> and modified key <c>k</c> → the <b>WKV7 delta-rule state recurrence</b>
-/// <c>S = S·w + v⊗k + (a·S)⊗b</c> with <c>a=−kk, b=kk·iclr</c>, out = S·r → per-head GroupNorm → r·k bonus → gate
-/// → out_proj) and a <b>channel-mix</b> (token-shift → squared-ReLU MLP, no receptance). LayerNorm + residual
-/// around each. Big projections run through <see cref="IBackend.Linear"/>; the LoRAs, scan, GroupNorm and
-/// LayerNorms run host-side (the recurrence is sequential).</summary>
+/// <summary>RWKV-7 ("Goose") decoder loaded from a llama.cpp <c>rwkv7</c> GGUF: a non-transformer recurrence built on the generalized <b>delta rule</b> (vs RWKV-6's WKV6 outer-product).</summary>
+/// <remarks>Each block is a <b>time-mix</b> (fused token-shift lerp for r/w/k/v/a/g → receptance/key/value + a data-dependent decay <c>w</c>, an in-context-learning-rate <c>a</c>, a value-residual mix, and a gate, all via small LoRAs → an L2-normalized key <c>kk</c> and modified key <c>k</c> → the <b>WKV7 delta-rule state recurrence</b> <c>S = S·w + v⊗k + (a·S)⊗b</c> with <c>a=−kk, b=kk·iclr</c>, out = S·r → per-head GroupNorm → r·k bonus → gate → out_proj) and a <b>channel-mix</b> (token-shift → squared-ReLU MLP, no receptance), LayerNorm + residual around each. Big projections run through <see cref="IBackend.Linear"/>; the LoRAs, scan, GroupNorm and LayerNorms run host-side (the recurrence is sequential).</remarks>
 public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -55,9 +48,7 @@ public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
         }
     }
 
-    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation (the
-    /// model instance persists across chat turns via the provider's device slot; without this a fresh prompt
-    /// would continue from the previous conversation's WKV state).</summary>
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation, since the model instance persists across chat turns via the provider's device slot.</summary>
     public void ResetState()
     {
         foreach (float[] s in _wkvState) Array.Clear(s);
@@ -129,10 +120,7 @@ public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
             }
     }
 
-    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call (the whole
-    /// prompt for the first/prefill call, exactly one token per decode step) — advancing each layer's carried
-    /// recurrent state, and returns the next-token logits (last position). Call <see cref="ResetState"/> before
-    /// the first call of a new generation.</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;

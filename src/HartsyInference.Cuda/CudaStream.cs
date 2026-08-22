@@ -25,8 +25,7 @@ public sealed class CudaStream : IDisposable
         CudaDriverApi.cuStreamCreate(out _handle, flags).ThrowOnError();
     }
 
-    /// <summary>Wraps an existing stream handle. This instance takes ownership: its <see cref="Dispose"/>/finalizer
-    /// destroys <paramref name="existingHandle"/>, so callers must not also destroy it themselves.</summary>
+    /// <summary>Wraps an existing stream handle. This instance takes ownership: its <see cref="Dispose"/>/finalizer destroys <paramref name="existingHandle"/>, so callers must not also destroy it themselves.</summary>
     internal CudaStream(nint existingHandle)
     {
         _handle = existingHandle;

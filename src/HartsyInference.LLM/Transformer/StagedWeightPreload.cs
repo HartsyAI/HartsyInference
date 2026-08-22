@@ -2,19 +2,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Per-stage headroom-guarded weight preload for a layer-split <see cref="LlmPlacement"/> — shared by
-/// every staged generation driver (<see cref="Generation.TextGenerationPipeline"/>, the VLM generators) so the
-/// budget/logging loop isn't copy-pasted per driver. Without this, auto-promotion's size floor leaves every
-/// small weight (norms, gates) host-side forever on a stage, and each eager step re-uploads them.</summary>
+/// <summary>Per-stage headroom-guarded weight preload for a layer-split <see cref="LlmPlacement"/> — shared by every staged generation driver (<see cref="Generation.TextGenerationPipeline"/>, the VLM generators) so the budget/logging loop isn't copy-pasted per driver; without it, auto-promotion's size floor leaves every small weight (norms, gates) host-side forever on a stage, and each eager step re-uploads them.</summary>
 internal static class StagedWeightPreload
 {
     private const long BaseHeadroomBytes = 2L << 30;
 
-    /// <summary>Uploads each stage's weight slice up to its own free-VRAM headroom (base 2 GB per stage, plus
-    /// <paramref name="lastStageExtraHeadroom"/> reserved on the LAST stage only — e.g. the F32 embed table
-    /// graph decode later materializes there; 0 for drivers that never enter graph decode, which today is every
-    /// cross-attention/VLM path). The lazy per-op upload path covers anything skipped, landing on the right
-    /// device by construction since each layer's ops run on its own stage backend.</summary>
+    /// <summary>Uploads each stage's weight slice up to its own free-VRAM headroom (base 2 GB per stage, plus <paramref name="lastStageExtraHeadroom"/> reserved on the LAST stage only — e.g. the F32 embed table graph decode later materializes there; 0 for drivers that never enter graph decode). The lazy per-op upload path covers anything skipped, landing on the right device by construction since each layer's ops run on its own stage backend.</summary>
     public static void Preload(GenericTransformer model, LlmPlacement placement, long lastStageExtraHeadroom = 0)
     {
         for (int s = 0; s < placement.Stages.Count; s++)

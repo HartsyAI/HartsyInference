@@ -524,9 +524,6 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             }
         }
 
-        /// <summary>Head-major attention over rank-4 <c>[1, rows, heads, headDim]</c> tensors. The token-major
-        /// entry point is deliberately not used: it wants rank-2, and getting there from the rotary op's rank-4
-        /// layout requires a reshape, which is what broke GPU residency.</summary>
         /// <summary>Head-major attention over the shared rank-4 scratch. The token-major entry point is not used:
         /// it wants rank-2, and reaching that from the rotary op's rank-4 layout needs a reshape, which silently
         /// drops GPU residency.</summary>

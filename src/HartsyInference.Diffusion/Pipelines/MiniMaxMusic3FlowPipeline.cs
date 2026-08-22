@@ -7,10 +7,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>MiniMax Music 3's flow-matching stage: turns the autoregressive stage's per-frame hidden states into
-/// Flow-VAE latents, one 200-frame window at a time with a 100-frame hop, blending each window into the previous
-/// one over their overlap so neighbouring windows share a boundary.
-///
+/// <summary>MiniMax Music 3's flow-matching stage: turns the autoregressive stage's per-frame hidden states into Flow-VAE latents, one 200-frame window at a time with a 100-frame hop, blending each window into the previous one over their overlap so neighbouring windows share a boundary.
 /// <para>The integrator is written out rather than routed through <see cref="Schedulers.FlowMatchEulerDiscreteScheduler"/>:
 /// the checkpoint's scheduler config sets <c>invert_sigmas</c> with <c>num_train_timesteps = 1</c> over
 /// <c>linspace(1, 1/N, N)</c>, which reduces to <c>sigma_i = i/N</c> with a uniform <c>1/N</c> step — a plain Euler
@@ -72,10 +69,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         return starts;
     }
 
-    /// <summary>Crops the per-window waveforms so the kept spans tile the song exactly, and concatenates them into
-    /// one stereo pair. Neighbouring windows overlap by <c>2 · <see cref="OverlapLatentLength"/></c> latents: every
-    /// window after the first drops its leading <see cref="CropLeftLatents"/> and every window before the last drops
-    /// its trailing <see cref="CropRightLatents"/>.</summary>
+    /// <summary>Crops the per-window waveforms so the kept spans tile the song exactly, and concatenates them into one stereo pair. Neighbouring windows overlap by <c>2 · <see cref="OverlapLatentLength"/></c> latents: every window after the first drops its leading <see cref="CropLeftLatents"/> and every window before the last drops its trailing <see cref="CropRightLatents"/>.</summary>
     /// <param name="waveforms">One <c>[1, 2, samples]</c> waveform per window, in order.</param>
     /// <param name="hopLength">Waveform samples per latent frame.</param>
     public static (float[] Left, float[] Right) Stitch(IReadOnlyList<Tensor> waveforms, int hopLength)
@@ -116,9 +110,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         return (left, right2);
     }
 
-    /// <summary>Denoises every window of <paramref name="frameHiddens"/> (flat
-    /// <c>[frames · 8 · 4096]</c>) and returns the uncropped per-window latents. Caller disposes them.
-    ///
+    /// <summary>Denoises every window of <paramref name="frameHiddens"/> (flat <c>[frames · 8 · 4096]</c>) and returns the uncropped per-window latents. Caller disposes them.
     /// <para><paramref name="forcedNoise"/> substitutes the reference's saved noise draws so a parity run compares
     /// the integrator rather than two incompatible RNGs; pass null for real generation.</para></summary>
     public Tensor[] Denoise(
@@ -223,8 +215,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         return chunks;
     }
 
-    /// <summary>Each window draws its own noise from a per-window seed. The reference draws sequentially from one
-    /// generator instead; either way the windows are independent and the run reproduces from <paramref name="seed"/>.</summary>
+    /// <summary>Each window draws its own noise from a per-window seed. The reference draws sequentially from one generator instead; either way the windows are independent and the run reproduces from <paramref name="seed"/>.</summary>
     private static Tensor DrawNoise(int length, int seed, IReadOnlyList<float[]>? forcedNoise, int chunk)
     {
         TensorShape shape = new TensorShape(1, LatentChannels, length);
@@ -238,8 +229,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         return latents;
     }
 
-    /// <summary>Overwrites the window's leading <paramref name="overlap"/> latents with a blend of its own initial
-    /// noise and the previous window's trailing latents, weighted by the flow-matching time.</summary>
+    /// <summary>Overwrites the window's leading <paramref name="overlap"/> latents with a blend of its own initial noise and the previous window's trailing latents, weighted by the flow-matching time.</summary>
     private static void BlendOverlap(Tensor latents, Tensor noisePrompt, Tensor previousLatent, int overlap, float time)
     {
         int length = (int)latents.Shape[2];
@@ -279,8 +269,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         return Advance(backend, latents, velocity, 1f / stepCount);
     }
 
-    /// <summary>One Euler step, entirely on the backend. The host loop this replaces read <c>DataPointer</c> on the
-    /// latents, which synced them off the device and back for every step of every window.</summary>
+    /// <summary>One Euler step, entirely on the backend. The host loop this replaces read <c>DataPointer</c> on the latents, which synced them off the device and back for every step of every window.</summary>
     private static Tensor Advance(IBackend backend, Tensor latents, Tensor velocity, float dt)
     {
         using Tensor scaled = new Tensor(velocity.Shape, DType.F32);

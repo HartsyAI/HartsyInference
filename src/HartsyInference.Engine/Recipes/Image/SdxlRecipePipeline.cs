@@ -16,16 +16,13 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed SDXL pipeline driven against the native <see cref="ImageRequest"/>. Encodes the prompt/negative
-/// through the embedded CLIP-L/CLIP-G vocab, resolves the request's composition objects through
-/// <see cref="UnetCompositionPlan"/> plus the refiner swap, and runs <see cref="SdxlPipeline.GenerateFromTokens"/>.</summary>
+/// <summary>A constructed SDXL pipeline driven against the native <see cref="ImageRequest"/>. Encodes the prompt/negative through the embedded CLIP-L/CLIP-G vocab, resolves the request's composition objects through <see cref="UnetCompositionPlan"/> plus the refiner swap, and runs <see cref="SdxlPipeline.GenerateFromTokens"/>.</summary>
 public sealed class SdxlRecipePipeline : IRecipePipeline
 {
     private readonly SdxlPipeline _pipeline;
     private readonly ClipTokenizer _tokenizer = new ClipTokenizer();
     private readonly IBackend _backend;
-    /// <summary>Backend for weighted CLIP conditioning — follows the pipeline's text-encoder placement so the
-    /// weighted and unweighted encode paths agree on where the encoders live.</summary>
+    /// <summary>Backend for weighted CLIP conditioning — follows the pipeline's text-encoder placement so the weighted and unweighted encode paths agree on where the encoders live.</summary>
     private readonly IBackend _textBackend;
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
@@ -164,9 +161,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
 
-    /// <summary>Builds the mid-loop StepSwap config for a "StepSwap"-method refiner spec, loading (and caching)
-    /// the refiner UNet. Returns null for a null spec (no refiner) — the PostApply case never reaches here, its
-    /// spec is handled by <see cref="ApplyPostRefiner"/> after the base pass instead.</summary>
+    /// <summary>Builds the mid-loop StepSwap config for a "StepSwap"-method refiner spec, loading (and caching) the refiner UNet. Returns null for a null spec (no refiner) — the PostApply case never reaches here, its spec is handled by <see cref="ApplyPostRefiner"/> after the base pass instead.</summary>
     private RefinerSwapConfig? BuildStepSwapConfig(RefinerResolver.RefinerSpec? spec)
     {
         if (spec is null)
@@ -181,14 +176,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         return new RefinerSwapConfig { RefinerUnet = entry.Unet, Strength = spec.Strength };
     }
 
-    /// <summary>Tier 3.1 hires-fix: the PostApply hand-off. Resizes the base pass's decoded pixels (only when
-    /// <see cref="RefinerResolver.RefinerSpec.Upscale"/> != 1 — same tensor, no-op resize otherwise), VAE-encodes
-    /// the result through the SAME untiled encoder ordinary img2img already uses (SDXL's VAE runs F32 — outside
-    /// the BF16 cuDNN fast-path the tiled encoder's segfault requires, see ROADMAP.md), and redenoises the WHOLE
-    /// refiner schedule (<see cref="SdxlRefinerPipeline"/>, <c>Strength</c> = the resolved Control fraction) with
-    /// the refiner UNet's own CLIP-G-only/aesthetic-score conditioning. Reuses the base pass's own CLIP-G tokens
-    /// (no separate <c>&lt;refiner&gt;</c> prompt support in this first slice — StepSwap's
-    /// <see cref="RefinerSwapConfig.RefinerConditioning"/> override has no PostApply equivalent yet).</summary>
+    /// <summary>Tier 3.1 hires-fix: the PostApply hand-off. Resizes the base pass's decoded pixels (only when <see cref="RefinerResolver.RefinerSpec.Upscale"/> != 1 — same tensor, no-op resize otherwise), VAE-encodes the result through the SAME untiled encoder ordinary img2img already uses (SDXL's VAE runs F32 — outside the BF16 cuDNN fast-path the tiled encoder's segfault requires, see ROADMAP.md), and redenoises the WHOLE refiner schedule (<see cref="SdxlRefinerPipeline"/>, <c>Strength</c> = the resolved Control fraction) with the refiner UNet's own CLIP-G-only/aesthetic-score conditioning. Reuses the base pass's own CLIP-G tokens (no separate <c>&lt;refiner&gt;</c> prompt support in this first slice — StepSwap's <see cref="RefinerSwapConfig.RefinerConditioning"/> override has no PostApply equivalent yet).</summary>
     private (byte[] rgb, int width, int height) ApplyPostRefiner(
         RefinerResolver.RefinerSpec spec, byte[] baseRgb, int baseWidth, int baseHeight,
         string strippedPrompt, string strippedNegative, int[] tokensG, int[] negG, int eosG, int negEosG, int seed,
@@ -235,17 +223,10 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         return entry;
     }
 
-    /// <summary>Nearest multiple of 8, minimum 8 — SDXL's VAE downsamples by 8x, so both dimensions must divide
-    /// evenly for the latent shape to be exact.</summary>
+    /// <summary>Nearest multiple of 8, minimum 8 — SDXL's VAE downsamples by 8x, so both dimensions must divide evenly for the latent shape to be exact.</summary>
     private static int RoundToMultipleOf8(double v) => Math.Max(8, (int)(Math.Round(v / 8.0) * 8.0));
 
-    /// <summary>Resizes RGB bytes to a new resolution and converts to a VAE-input tensor <c>[1,3,dstH,dstW]</c> in
-    /// <c>[-1,1]</c>. Same-size case skips the resize pass entirely (byte-identical to
-    /// <see cref="Diffusion.Utilities.ImagePostProcessor.RgbBytesToTensor"/>). The resize itself mirrors
-    /// <c>SeedVr2Preprocess</c>'s own <c>TorchResize.BicubicAntialiasChw</c> usage: build [0,1] CHW planes, resize,
-    /// then map to [-1,1] — this hardcodes one resize algorithm rather than reading a user-selectable one (Comfy's
-    /// <c>refinerupscalemethod</c> stays unconsumed for that reason, see <c>HonoredComfyParams</c>'s own comment
-    /// in the extension repo).</summary>
+    /// <summary>Resizes RGB bytes to a new resolution and converts to a VAE-input tensor <c>[1,3,dstH,dstW]</c> in <c>[-1,1]</c>. Same-size case skips the resize pass entirely (byte-identical to <see cref="Diffusion.Utilities.ImagePostProcessor.RgbBytesToTensor"/>). The resize itself mirrors <c>SeedVr2Preprocess</c>'s own <c>TorchResize.BicubicAntialiasChw</c> usage: build [0,1] CHW planes, resize, then map to [-1,1] — this hardcodes one resize algorithm rather than reading a user-selectable one (Comfy's <c>refinerupscalemethod</c> stays unconsumed for that reason, see <c>HonoredComfyParams</c>'s own comment in the extension repo).</summary>
     private static Tensor ResizeRgbToSourceTensor(byte[] rgb, int srcW, int srcH, int dstW, int dstH)
     {
         if (srcW == dstW && srcH == dstH)

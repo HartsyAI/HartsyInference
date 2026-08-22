@@ -4,8 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.MemoryManagement;
 
-/// <summary>Owns one denoise loop's weight placement: decides resident-vs-streamed, sizes the resident prefix,
-/// preloads it, drives a <see cref="BlockStreamingController"/> over the remainder, and tears the hook down.</summary>
+/// <summary>Owns one denoise loop's weight placement: decides resident-vs-streamed, sizes the resident prefix, preloads it, drives a <see cref="BlockStreamingController"/> over the remainder, and tears the hook down.</summary>
 /// <remarks>The eight pipelines that streamed before this existed each hand-rolled the same twenty lines with a
 /// different policy — a hard-coded 6 GB margin here, a planner call there, a resident prefix in a third — so a fix or
 /// a measurement in one never reached the others, and a denoiser that had not been hand-wired (Wan) silently ignored
@@ -35,8 +34,7 @@ public sealed class BlockStreamingScope : IDisposable
         BlockBytes = blockBytes;
     }
 
-    /// <summary>Places <paramref name="options"/>'s denoiser on its backend and returns the scope that owns the
-    /// placement until it is disposed.</summary>
+    /// <summary>Places <paramref name="options"/>'s denoiser on its backend and returns the scope that owns the placement until it is disposed.</summary>
     public static BlockStreamingScope Open(BlockStreamingOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -103,12 +101,10 @@ public sealed class BlockStreamingScope : IDisposable
     /// <summary>Per-block weight bytes the sizing used; 0 when nothing was measured.</summary>
     public long BlockBytes { get; }
 
-    /// <summary>How many times <see cref="EndStep"/> has been called — the observable that makes a forgotten
-    /// per-step trim a test failure rather than a VRAM climb nobody notices until step 17.</summary>
+    /// <summary>How many times <see cref="EndStep"/> has been called — the observable that makes a forgotten per-step trim a test failure rather than a VRAM climb nobody notices until step 17.</summary>
     public int StepsEnded { get; private set; }
 
-    /// <summary>Shared weights plus the resident prefix's blocks — what a phase that has to displace the denoiser
-    /// frees, and what it re-preloads afterwards.</summary>
+    /// <summary>Shared weights plus the resident prefix's blocks — what a phase that has to displace the denoiser frees, and what it re-preloads afterwards.</summary>
     public IEnumerable<Tensor> EnumerateResidentWeights()
     {
         foreach (Tensor t in _denoiser.EnumerateSharedWeights()) yield return t;
@@ -119,8 +115,7 @@ public sealed class BlockStreamingScope : IDisposable
     public IEnumerable<Tensor> EnumerateStreamedWeights()
         => BlockRangeWeights(_denoiser, ResidentPrefixBlocks, _denoiser.BlockCount);
 
-    /// <summary>Call at the end of every denoise step. Returns the streamed path's pool reservations to the driver
-    /// unless the caller opted out via <see cref="BlockStreamingOptions.PerStepTrim"/>.</summary>
+    /// <summary>Call at the end of every denoise step. Returns the streamed path's pool reservations to the driver unless the caller opted out via <see cref="BlockStreamingOptions.PerStepTrim"/>.</summary>
     public void EndStep()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -131,8 +126,7 @@ public sealed class BlockStreamingScope : IDisposable
         }
     }
 
-    /// <summary>Unhooks the denoiser and evicts the streamed window. The resident prefix is left alone — whether it
-    /// survives to the next generation is the pipeline's call, made through <see cref="ResidentPrefixPin"/>.</summary>
+    /// <summary>Unhooks the denoiser and evicts the streamed window. The resident prefix is left alone — whether it survives to the next generation is the pipeline's call, made through <see cref="ResidentPrefixPin"/>.</summary>
     public void Dispose()
     {
         if (_disposed) return;

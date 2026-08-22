@@ -15,13 +15,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan2.2-S2V recipe (speech-to-video) — the Wan backbone plus an audio injector
-/// (<c>audio_injector.*</c>) and a causal audio encoder (<c>casual_audio_encoder.*</c>) over stacked Wav2Vec2
-/// features. Config comes from <see cref="WanConfigDetector"/> (the parity-proven S2V layout, including the
-/// non-uniform audio-inject block indices). Lifted from the SwarmUI backend's <c>WanS2VLoader</c>: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and the Wav2Vec2
-/// front-end (<see cref="SideModels.Wav2Vec2Large"/> / <see cref="SideModels.Wav2Vec2Base"/>, picked from the
-/// weight-derived audio feature dim).</summary>
+/// <summary>Wan2.2-S2V recipe (speech-to-video) — the Wan backbone plus an audio injector (<c>audio_injector.*</c>) and a causal audio encoder (<c>casual_audio_encoder.*</c>) over stacked Wav2Vec2 features. Config comes from <see cref="WanConfigDetector"/> (the parity-proven S2V layout, including the non-uniform audio-inject block indices). Lifted from the SwarmUI backend's <c>WanS2VLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and the Wav2Vec2 front-end (<see cref="SideModels.Wav2Vec2Large"/> / <see cref="SideModels.Wav2Vec2Base"/>, picked from the weight-derived audio feature dim).</summary>
 public sealed class WanS2VRecipe : IVideoRecipe
 {
     /// <inheritdoc/>

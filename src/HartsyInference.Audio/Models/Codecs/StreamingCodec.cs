@@ -4,10 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
 
-/// <summary>Streaming wrapper that turns any chunked codec (EnCodec, DAC, SNAC, Mimi,
-/// XCodec, WavTokenizer) into an incremental <c>Write(samples) → emit codes</c> /
-/// <c>EmitDecoded() → audio</c> pipeline suitable for live mic input and live playback.
-///
+/// <summary>Streaming wrapper that turns any chunked codec (EnCodec, DAC, SNAC, Mimi, XCodec, WavTokenizer) into an incremental <c>Write(samples) → emit codes</c> pipeline suitable for live mic input.</summary>
+/// <remarks>
 /// <para>This wrapper itself is causal-naive: every full chunk of audio is encoded
 /// fresh (no internal cache like VibeVoice's <see cref="VibeVoiceTokenizerStreamingCache"/>).
 /// That means the per-chunk cost is the same as a single non-streaming pass, and the
@@ -23,7 +21,8 @@ namespace HartsyInference.Audio.Models.Codecs;
 ///
 /// <para>Used by Sesame CSM's live demo (via Mimi codec), live-VC applications (via
 /// DAC), and any future low-latency wrapper that needs a chunk-by-chunk surface over a
-/// non-causal-aware codec.</para></summary>
+/// non-causal-aware codec.</para>
+/// </remarks>
 public sealed class StreamingCodecEncoder<TCodec> : IDisposable where TCodec : class
 {
     private readonly TCodec _codec;
@@ -54,12 +53,10 @@ public sealed class StreamingCodecEncoder<TCodec> : IDisposable where TCodec : c
         _stagingPcm = new float[chunkSamples * channels];
     }
 
-    /// <summary>Appends incoming PCM samples to the internal buffer. Safe to call from
-    /// the audio-callback thread.</summary>
+    /// <summary>Appends incoming PCM samples to the internal buffer. Safe to call from the audio-callback thread.</summary>
     public void Write(ReadOnlySpan<float> samples) => _ring.Write(samples);
 
-    /// <summary>Drains whatever full chunks are buffered, encodes each one, and returns
-    /// the resulting code tensors. Caller owns disposal of every returned tensor.</summary>
+    /// <summary>Drains whatever full chunks are buffered, encodes each one, and returns the resulting code tensors. Caller owns disposal of every returned tensor.</summary>
     public List<Tensor> ExtractAvailable()
     {
         ThrowIfDisposed();
@@ -101,9 +98,7 @@ public sealed class StreamingCodecEncoder<TCodec> : IDisposable where TCodec : c
     }
 }
 
-/// <summary>Mirror class for the decode side. Wraps a codec's <c>Decode</c> method so
-/// callers can stream codes in and pull PCM chunks out via an <see cref="AudioStreamer"/>.
-/// </summary>
+/// <summary>Mirror class for the decode side — wraps a codec's <c>Decode</c> method so callers can stream codes in and pull PCM chunks out via an <see cref="AudioStreamer"/>.</summary>
 public sealed class StreamingCodecDecoder<TCodec> : IDisposable where TCodec : class
 {
     private readonly TCodec _codec;
@@ -131,9 +126,7 @@ public sealed class StreamingCodecDecoder<TCodec> : IDisposable where TCodec : c
         _streamer = new AudioStreamer(channelCapacity);
     }
 
-    /// <summary>Decodes one chunk of codes <c>[nQ, 1, T_frames]</c> and pushes the
-    /// resulting PCM to the streamer as an <see cref="AudioChunk"/>. Caller is
-    /// responsible for disposing the input codes tensor.</summary>
+    /// <summary>Decodes one chunk of codes <c>[nQ, 1, T_frames]</c> and pushes the resulting PCM to the streamer as an <see cref="AudioChunk"/>. Caller is responsible for disposing the input codes tensor.</summary>
     public async ValueTask SubmitChunkAsync(Tensor codes, int tFrames, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -166,8 +159,7 @@ public sealed class StreamingCodecDecoder<TCodec> : IDisposable where TCodec : c
     /// <summary>Signals no more codes will be submitted. Drains the streamer.</summary>
     public void Complete() => _streamer.Complete();
 
-    /// <summary>Async consumer surface — yields <see cref="AudioChunk"/>s as they're
-    /// decoded.</summary>
+    /// <summary>Async consumer surface — yields <see cref="AudioChunk"/>s as they're decoded.</summary>
     public IAsyncEnumerable<AudioChunk> ReadAllAsync(CancellationToken cancellationToken = default)
         => _streamer.ReadAllAsync(cancellationToken);
 

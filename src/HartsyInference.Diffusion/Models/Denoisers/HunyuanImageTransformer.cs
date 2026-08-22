@@ -27,7 +27,6 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
     private Tensor? _normOutLinearWeight, _normOutLinearBias;
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>Creates a Hunyuan Image transformer from configuration.</summary>
     public HunyuanImageTransformer(HunyuanImageConfig config)
     {
         _config = config;
@@ -137,9 +136,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         if (_projOutBias is not null) yield return _projOutBias;
     }
 
-    /// <summary>Weights of flat blocks <c>[startBlock, endBlock)</c> only — the asymmetric-preload primitive for DiT
-    /// sharding: backend A preloads <see cref="EnumerateSharedWeights"/> + its range, backend B ONLY its range.
-    /// Never preload <see cref="EnumerateWeights"/> on both backends — that replicates instead of pooling.</summary>
+    /// <summary>Weights of flat blocks <c>[startBlock, endBlock)</c> only — the asymmetric-preload primitive for DiT sharding: backend A preloads <see cref="EnumerateSharedWeights"/> + its range, backend B ONLY its range. Never preload <see cref="EnumerateWeights"/> on both backends — that replicates instead of pooling.</summary>
     public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
     {
         for (int i = startBlock; i < endBlock; i++)
@@ -186,18 +183,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         return output;
     }
 
-    /// <summary>DiT-sharded forward: flat blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also
-    /// owns the shared embed/refiner/head weights), <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/>,
-    /// with the img+txt streams and temb handed across via <see cref="IBackend.CopyFromPeer"/> and the img stream
-    /// handed back for the head. VRAM pooling, not latency — the two backends run sequentially. Both regions carry
-    /// the (img, txt) pair (single blocks concat/split it internally per block), so the handoff is uniform wherever
-    /// the split lands — inside the doubles, inside the singles, or on the region boundary. Any ByT5 tokens were
-    /// concatenated into the txt stream by the embed-in on A, so they ride the txt handoff. Exclusions: no block
-    /// streaming (<see cref="BeforeBlockForward"/> must be null — the sharding preload owns block residency); no
-    /// step-graph exists here; the loop is pinned F32 (this arch never opts into HARTSY_DIT_F16 — see the range
-    /// helper's comment), matching the unsharded forward exactly. Callers preload
-    /// <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split) on A and
-    /// <see cref="EnumerateBlockRangeWeights"/>(split, BlockCount) on B.</summary>
+    /// <summary>DiT-sharded forward: flat blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also owns the shared embed/refiner/head weights), <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/>, with the img+txt streams and temb handed across via <see cref="IBackend.CopyFromPeer"/> and the img stream handed back for the head. VRAM pooling, not latency — the two backends run sequentially. Both regions carry the (img, txt) pair (single blocks concat/split it internally per block), so the handoff is uniform wherever the split lands — inside the doubles, inside the singles, or on the region boundary. Any ByT5 tokens were concatenated into the txt stream by the embed-in on A, so they ride the txt handoff. Exclusions: no block streaming (<see cref="BeforeBlockForward"/> must be null — the sharding preload owns block residency); no step-graph exists here; the loop is pinned F32 (this arch never opts into HARTSY_DIT_F16 — see the range helper's comment), matching the unsharded forward exactly. Callers preload <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/>(0, split) on A and <see cref="EnumerateBlockRangeWeights"/>(split, BlockCount) on B.</summary>
     public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor patchedLatent, Tensor encoderHidden,
         Tensor? encoderHidden2, float timestep, float guidanceScale, int postPatchH, int postPatchW, int splitBlock)
     {
@@ -514,7 +500,6 @@ public sealed unsafe class HunyuanImageTokenRefiner
 
     private readonly RefinerBlock[] _blocks;
 
-    /// <summary>Creates a token refiner.</summary>
     public HunyuanImageTokenRefiner(int inDim, int hiddenSize, int numHeads, int headDim,
         int numLayers, float mlpRatio = 4.0f, float qkNormEps = 1e-6f)
     {

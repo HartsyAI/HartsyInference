@@ -4,11 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>4-layer FFN-only diffusion denoiser. Predicts the v-target for the acoustic
-/// VAE's 64-d latents, conditioned on the LM's per-step hidden state and the current
-/// diffusion timestep. Mirrors <c>VibeVoiceDiffusionHead</c> in
-/// <c>vibevoice/modular/modular_vibevoice_diffusion_head.py</c>.
-///
+/// <summary>4-layer FFN-only diffusion denoiser predicting the v-target for the acoustic VAE's 64-d latents, conditioned on the LM's per-step hidden state and diffusion timestep; mirrors <c>VibeVoiceDiffusionHead</c> in <c>vibevoice/modular/modular_vibevoice_diffusion_head.py</c>.</summary>
+/// <remarks>
 /// <para>Forward (per inference step):
 /// <code>
 ///   x = noisy_images_proj(noisy_latents)   # [N, 64] → [N, H]
@@ -25,7 +22,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// <para>All Linear layers carry no bias (Python source uses <c>bias=False</c> across the
 /// head). The SwiGLU FFN has <c>head_ffn_ratio = 3.0</c> in the published checkpoints.
 /// The final layer is zero-initialized; that doesn't matter for inference but is noted
-/// here for parity.</para></summary>
+/// here for parity.</para></remarks>
 internal sealed unsafe class VibeVoiceDiffusionHead
 {
     private readonly VibeVoiceDiffusionHeadConfig _config;
@@ -85,11 +82,8 @@ internal sealed unsafe class VibeVoiceDiffusionHead
         for (int i = 0; i < _hiddenSize; i++) ones[i] = 1f;
     }
 
-    /// <summary>One denoising step. <paramref name="noisyLatents"/> and
-    /// <paramref name="condition"/> are channels-last <c>[1, N, ·]</c> tensors;
-    /// <paramref name="timesteps"/> is a length-N float vector (positions inside the
-    /// 1000-step DDPM schedule). Returns a fresh <c>[1, N, latent_size]</c> tensor with the
-    /// predicted v-target. Caller owns disposal.</summary>
+    /// <summary>One denoising step over channels-last <c>[1, N, ·]</c> tensors, <paramref name="timesteps"/> being positions inside the 1000-step DDPM schedule.</summary>
+    /// <returns>A fresh <c>[1, N, latent_size]</c> tensor with the predicted v-target; caller owns disposal.</returns>
     public Tensor Forward(IBackend backend, Tensor noisyLatents, ReadOnlySpan<float> timesteps, Tensor condition)
     {
         if (_noisyProjW is null) throw new InvalidOperationException($"VibeVoiceDiffusionHead '{_prefix}' weights not loaded.");
@@ -240,10 +234,8 @@ internal sealed unsafe class VibeVoiceDiffusionHead
 
     private const int SinDim = 256;
 
-    /// <summary>The fully-device core of one denoising step (no host reads) — CUDA-graph-capturable:
-    /// noisy_proj + t_embedder MLP + cond_proj → 4 head layers → final. <paramref name="sinEmb"/> is the
-    /// precomputed sinusoidal timestep embedding <c>[1, N, 256]</c> (the only host-computed input, materialized
-    /// outside the capture window). Returns a fresh <c>[1, N, latent]</c> tensor.</summary>
+    /// <summary>The fully-device core of one denoising step (no host reads) — CUDA-graph-capturable: noisy_proj + t_embedder MLP + cond_proj → 4 head layers → final.</summary>
+    /// <param name="sinEmb">Precomputed sinusoidal timestep embedding <c>[1, N, 256]</c> — the only host-computed input, materialized outside the capture window.</param>
     private Tensor RunFromSin(IBackend backend, Tensor noisyLatents, Tensor sinEmb, Tensor condition, int n)
     {
         // x = noisy_images_proj(noisy_latents)  →  [1, N, H]

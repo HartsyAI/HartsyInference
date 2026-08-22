@@ -29,9 +29,9 @@ public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _checkpointLoader;
     private readonly SafeTensorsLoader _qwenLoader;
 
-    /// <summary>Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
     public ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

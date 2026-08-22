@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS stage-2 structured-latent (SLAT) flow DiT (<c>slat_flow_img_dit_L_64l8p2</c>): predicts the
-/// rectified-flow velocity over a <see cref="SparseTensor"/> of active voxels, image-conditioned via cross-attention.
-/// A sparse U-Net: <c>input_layer → io ResBlocks (1 downsample) → APE(coords) → 24 transformer blocks (full attn,
-/// reuse <see cref="SsFlowBlock"/>) → io ResBlocks (upsample + skip-concat) → out_layer</c>. B=1 (single object) so
-/// full attention = dense SDPA over all voxels. All F32. See <c>docs/Research/TRELLIS_ARCHITECTURE.md</c>.</summary>
+/// <summary>TRELLIS stage-2 structured-latent (SLAT) flow DiT (<c>slat_flow_img_dit_L_64l8p2</c>): a sparse U-Net predicting rectified-flow velocity over a <see cref="SparseTensor"/> of active voxels, image-conditioned via cross-attention.</summary>
 public sealed unsafe class SlatFlowModel
 {
     private const int Width = 1024, HeadDim = 64;
@@ -40,9 +36,7 @@ public sealed unsafe class SlatFlowModel
         foreach (SsFlowBlock b in _blocks) foreach (Tensor t in b.Weights()) yield return t;
     }
 
-    /// <summary>Predicts the per-voxel velocity for <paramref name="x"/> at model-timestep <paramref name="tModel"/>,
-    /// conditioned on <paramref name="cond"/> <c>[1, Lc, 1024]</c>. Returns a SparseTensor with velocity feats
-    /// <c>[1, N, 8]</c> at the input voxels.</summary>
+    /// <summary>Predicts the per-voxel velocity for <paramref name="x"/> at model-timestep <paramref name="tModel"/>, conditioned on <paramref name="cond"/> <c>[1, Lc, 1024]</c>.</summary>
     public SparseTensor Forward(IBackend backend, SparseTensor x, float tModel, Tensor cond)
     {
         Tensor vec = TimestepEmbed(backend, tModel);
@@ -104,8 +98,7 @@ public sealed unsafe class SlatFlowModel
         return o;
     }
 
-    /// <summary>AbsolutePositionEmbedder(channels 1024, 3D): per voxel, per axis a∈{x,y,z} the 340-dim
-    /// <c>[sin(a·freqs), cos(a·freqs)]</c> (freq_dim 170, freqs 1/10000^(i/170)) → 1020 dims, zero-padded to 1024.</summary>
+    /// <summary>AbsolutePositionEmbedder (channels 1024, 3D): per voxel, per axis, sin/cos frequency bands zero-padded to 1024 dims.</summary>
     private static Tensor AbsolutePositionEmbed(int[] coords, int n, int channels)
     {
         int freqDim = channels / 3 / 2;   // 170

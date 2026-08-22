@@ -1,4 +1,4 @@
-using HartsyInference.Audio.Models.Whisper;  // WhisperOps for EnsureF32 + ProjectLinear
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 

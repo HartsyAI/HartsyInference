@@ -91,7 +91,6 @@ public sealed unsafe class T5Block
 
         // --- Self-Attention sublayer ---
 
-        // RMSNorm
         Tensor normed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(normed, input, _attnNormWeight!, _eps);
 
@@ -145,19 +144,16 @@ public sealed unsafe class T5Block
         ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
-        // Output projection (no bias)
         Tensor attnProjected = new Tensor(hidShape, DType.F32);
         backend.Linear(attnProjected, merged, _oWeight!, null);
         merged.Dispose();
 
-        // Residual connection
         Tensor attnResidual = new Tensor(hidShape, DType.F32);
         backend.Add(attnResidual, input, attnProjected);
         attnProjected.Dispose();
 
         // --- FFN sublayer ---
 
-        // RMSNorm
         Tensor ffnNormed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(ffnNormed, attnResidual, _ffnNormWeight!, _eps);
 
@@ -200,12 +196,10 @@ public sealed unsafe class T5Block
             proj.Dispose();
         }
 
-        // Output projection
         Tensor ffnOutput = new Tensor(hidShape, DType.F32);
         backend.Linear(ffnOutput, gated, _woWeight!, null);
         gated.Dispose();
 
-        // Residual connection
         Tensor output = new Tensor(hidShape, DType.F32);
         backend.Add(output, attnResidual, ffnOutput);
         attnResidual.Dispose();

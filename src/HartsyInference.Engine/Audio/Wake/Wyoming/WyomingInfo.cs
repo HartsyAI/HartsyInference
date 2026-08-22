@@ -13,8 +13,7 @@ namespace HartsyInference.Engine.Audio.Wake.Wyoming;
 public static class WyomingInfo
 {
     /// <summary>Serializes the manifest's <c>data</c> object.</summary>
-    /// <param name="wakeAvailable">False omits the wake service even when models are configured, because no
-    /// detector was wired and the words could never fire.</param>
+    /// <param name="wakeAvailable">False omits the wake service even when models are configured, because no detector was wired and the words could never fire.</param>
     public static byte[] Build(WyomingOptions options, bool wakeAvailable)
     {
         ArgumentNullException.ThrowIfNull(options);

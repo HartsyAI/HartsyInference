@@ -6,8 +6,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <summary>Converter for Z-Image (Tongyi Lab) single-file safetensors checkpoints. The SwarmUI single-file FP8Mix format uses ComfyUI's <c>fp8_scaled</c> layout with per-tensor <c>.weight_scale</c> companions and <c>.comfy_quant</c> metadata blobs. The transformer key naming is the official Z-Image / Tongyi naming (NOT diffusers): <c>x_embedder.{weight,bias}</c>, <c>final_layer.{adaLN_modulation.1,linear}.*</c>, <c>cap_pad_token</c>, <c>x_pad_token</c>, <c>layers.{i}.attention.qkv.weight</c> (fused), <c>layers.{i}.attention.out.weight</c>, <c>layers.{i}.attention.{q_norm,k_norm}</c>. This converter is mostly passthrough — its job is to fold weight scales into <see cref="Tensor.Fp8ScaleFactor"/>, drop quantization metadata, and partition transformer/VAE/text-encoder buckets.</summary>
 public sealed class ZImageCheckpointConverter
 {
-    /// <summary>Sampling variant. Base and Turbo have the same tensor architecture, so this cannot be inferred
-    /// from weight shapes; single-file loaders resolve it from an explicit filename token.</summary>
+    /// <summary>Sampling variant. Base and Turbo have the same tensor architecture, so this cannot be inferred from weight shapes; single-file loaders resolve it from an explicit filename token.</summary>
     public enum CheckpointVariant
     {
         Unknown,
@@ -30,8 +29,7 @@ public sealed class ZImageCheckpointConverter
         /// <summary>True if any transformer linear weight is FP8 — pipeline should preload via the FP8 path.</summary>
         public required bool IsFp8Mix { get; init; }
 
-        /// <summary>Base/Turbo sampling variant resolved by <see cref="LoadAndConvert"/>. Direct dictionary
-        /// conversion has no file identity and therefore returns <see cref="CheckpointVariant.Unknown"/>.</summary>
+        /// <summary>Base/Turbo sampling variant resolved by <see cref="LoadAndConvert"/>. Direct dictionary conversion has no file identity and therefore returns <see cref="CheckpointVariant.Unknown"/>.</summary>
         public CheckpointVariant Variant { get; init; }
     }
 
@@ -111,13 +109,7 @@ public sealed class ZImageCheckpointConverter
         };
     }
 
-    /// <summary>Detects the sampling variant from a standalone filename token. Official Base and Turbo weights are
-    /// architecturally indistinguishable. Safetensors metadata is not reliable enough as the sole contract: the
-    /// official BF16 Base file has no metadata, while the known FP8 repacks identify themselves in the filename.
-    /// Only the filename (not parent directories) is inspected. The official Base release carries NO variant token
-    /// — it ships under the bare family name (<c>Z-Image.safetensors</c>, <c>z_image_bf16.safetensors</c>) — so a
-    /// name that starts with the family name and lacks a variant token IS the Base checkpoint, not ambiguous.
-    /// Anything else without an unambiguous token remains Unknown.</summary>
+    /// <summary>Detects the sampling variant from a standalone filename token. Official Base and Turbo weights are architecturally indistinguishable. Safetensors metadata is not reliable enough as the sole contract: the official BF16 Base file has no metadata, while the known FP8 repacks identify themselves in the filename. Only the filename (not parent directories) is inspected. The official Base release carries NO variant token — it ships under the bare family name (<c>Z-Image.safetensors</c>, <c>z_image_bf16.safetensors</c>) — so a name that starts with the family name and lacks a variant token IS the Base checkpoint, not ambiguous. Anything else without an unambiguous token remains Unknown.</summary>
     public static CheckpointVariant DetectVariantFromFileName(string checkpointPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);

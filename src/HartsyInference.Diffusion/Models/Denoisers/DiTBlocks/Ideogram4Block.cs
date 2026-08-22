@@ -212,9 +212,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return result;
     }
 
-    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend
-    /// ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout)
-    /// and the head permutes reuse <c>Permute0213</c>.</summary>
+    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout) and the head permutes reuse <c>Permute0213</c>.</summary>
     private Tensor Attention(IBackend backend, Tensor input, Tensor cos, Tensor sin,
         Tensor? attentionMask, int batch, int seqLen)
     {
@@ -276,9 +274,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return projected;
     }
 
-    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c>
-    /// (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode
-    /// the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
+    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape ff = new TensorShape(batch, seqLen, _ffnHidden);

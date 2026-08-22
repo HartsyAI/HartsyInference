@@ -21,13 +21,8 @@ public sealed class T5Tokenizer : IDisposable
     private readonly int _maxLength;
     private int _disposed;
 
-    /// <summary>Creates a T5 tokenizer using the canonical T5 SentencePiece protobuf
-    /// embedded in this assembly. Same vocabulary as T5-base / T5-small / T5-XXL —
-    /// the encoder model size differs but the tokenizer is identical. Use the
-    /// path/stream overloads only if you need to override with a non-standard
-    /// SentencePiece model.</summary>
-    /// <param name="maxLength">Maximum sequence length. Default: 77 (matches the
-    /// CLIP context window — Flux and SD3 typically pass 256 or 512 instead).</param>
+    /// <summary>Creates a T5 tokenizer using the canonical T5 SentencePiece protobuf embedded in this assembly. Same vocabulary as T5-base / T5-small / T5-XXL — the encoder model size differs but the tokenizer is identical. Use the path/stream overloads only if you need to override with a non-standard SentencePiece model.</summary>
+    /// <param name="maxLength">Maximum sequence length. Default: 77 (matches the CLIP context window — Flux and SD3 typically pass 256 or 512 instead).</param>
     public T5Tokenizer(int maxLength = DefaultMaxLength)
     {
         using Stream stream = EmbeddedTokenizerResources.OpenT5Spiece();
@@ -36,9 +31,7 @@ public sealed class T5Tokenizer : IDisposable
         _maxLength = maxLength;
     }
 
-    /// <summary>Creates a tokenizer over the embedded umT5 multilingual SentencePiece (256k vocab,
-    /// <c>google/umt5-xxl</c>). Required for Wan-Video conditioning — the base T5 spiece produces
-    /// out-of-vocabulary IDs against a umT5-XXL encoder.</summary>
+    /// <summary>Creates a tokenizer over the embedded umT5 multilingual SentencePiece (256k vocab, <c>google/umt5-xxl</c>). Required for Wan-Video conditioning — the base T5 spiece produces out-of-vocabulary IDs against a umT5-XXL encoder.</summary>
     /// <param name="maxLength">Maximum sequence length. Default: 512 (Wan's umT5 context).</param>
     public static T5Tokenizer CreateUmt5(int maxLength = 512)
     {

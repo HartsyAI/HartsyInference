@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>One video generation's full output: the decoded frames plus the soundtrack that belongs with them, so a
-/// model that generates audio jointly with video (LTX-2.3, MiniMax-H3) can hand both to the caller that muxes them.</summary>
+/// <summary>One video generation's full output: the decoded frames plus the soundtrack that belongs with them, so a model that generates audio jointly with video (LTX-2.3, MiniMax-H3) can hand both to the caller that muxes them.</summary>
 public sealed record VideoGenerationResult
 {
     /// <summary>Decoded frames in sequence order.</summary>
@@ -10,8 +9,7 @@ public sealed record VideoGenerationResult
     /// <summary>The audio to mux alongside <see cref="Frames"/>; null for a silent generation.</summary>
     public AudioBuffer? Audio { get; init; }
 
-    /// <summary>Playback rate the pipeline pinned (e.g. matched to a decoded driving clip); null defers to the
-    /// request's fps / family default. <see cref="Services.VideoService"/> resolves the final value onto this property.</summary>
+    /// <summary>Playback rate the pipeline pinned (e.g. matched to a decoded driving clip); null defers to the request's fps / family default. <see cref="Services.VideoService"/> resolves the final value onto this property.</summary>
     public int? Fps { get; init; }
 
     /// <summary>Wraps a frame-only generation.</summary>

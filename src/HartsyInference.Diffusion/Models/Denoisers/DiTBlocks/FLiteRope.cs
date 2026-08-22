@@ -36,9 +36,7 @@ public sealed unsafe class FLiteRope
         }
     }
 
-    /// <summary>Builds cos/sin tables for the given image patch grid plus register token padding. Output length = <c>numRegisterTokens + hPacked * wPacked</c>; output last-dim = <c>headDim/2</c> (the half each side of the split rotates against).
-    ///
-    /// <para>Returned tensors are F32 with shape <c>[1, 1, T, headDim/2]</c> — broadcast-ready against multi-head Q/K of shape <c>[B, H, T, headDim]</c> (the rotation reads cos/sin against the first <c>headDim/2</c> and last <c>headDim/2</c> halves separately).</para></summary>
+    /// <summary>Builds cos/sin tables for the given image patch grid plus register token padding. Output length = <c>numRegisterTokens + hPacked * wPacked</c>; output last-dim = <c>headDim/2</c> (the half each side of the split rotates against). Returned tensors are F32 with shape <c>[1, 1, T, headDim/2]</c> — broadcast-ready against multi-head Q/K of shape <c>[B, H, T, headDim]</c> (the rotation reads cos/sin against the first <c>headDim/2</c> and last <c>headDim/2</c> halves separately).</summary>
     public (Tensor cos, Tensor sin) Build(int hPacked, int wPacked, int numRegisterTokens)
     {
         if (hPacked <= 0 || wPacked <= 0)

@@ -5,10 +5,7 @@ namespace HartsyInference.API;
 /// <summary>Read-only point-in-time view of one caller identity's usage, returned by <see cref="UsageTracker.Snapshot"/>.</summary>
 public sealed record UsageSnapshot(long TotalRequests, long ErrorCount, DateTimeOffset LastSeenUtc, IReadOnlyDictionary<string, long> ByModality);
 
-/// <summary>In-memory per-caller request counters, keyed by the resolved <see cref="ApiKeyIdentity.Name"/> (or
-/// <c>"anonymous"</c> when auth is disabled). Recorded from one place — the usage-tracking middleware in
-/// <c>HartsyInferenceServiceExtensions.MapHartsyInferenceEndpoints</c> — and read back via <c>GET /admin/usage</c>.
-/// Resets on restart, matching this project's in-memory-only state design; not intended as a billing ledger.</summary>
+/// <summary>In-memory per-caller request counters, keyed by the resolved <see cref="ApiKeyIdentity.Name"/> (or <c>"anonymous"</c> when auth is disabled). Recorded from one place — the usage-tracking middleware in <c>HartsyInferenceServiceExtensions.MapHartsyInferenceEndpoints</c> — and read back via <c>GET /admin/usage</c>. Resets on restart, matching this project's in-memory-only state design; not intended as a billing ledger.</summary>
 public sealed class UsageTracker
 {
     private readonly ConcurrentDictionary<string, KeyUsage> _byIdentity = new(StringComparer.Ordinal);

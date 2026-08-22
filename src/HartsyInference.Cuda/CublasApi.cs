@@ -2,8 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for cuBLAS. Library name "cublas" is resolved at runtime by CudaLibraryResolver
-/// to cublas64_12.dll (Windows) or libcublas.so.12 (Linux).</summary>
+/// <summary>P/Invoke bindings for cuBLAS. Library name "cublas" is resolved at runtime by CudaLibraryResolver to cublas64_12.dll (Windows) or libcublas.so.12 (Linux).</summary>
 internal static partial class CublasApi
 {
     private const string LibName = "cublas";

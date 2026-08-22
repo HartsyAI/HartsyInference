@@ -4,12 +4,7 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>Mamba-1 (selective state-space model) decoder loaded from a llama.cpp <c>mamba</c> GGUF (mamba-130m …,
-/// Falcon-Mamba). NOT a transformer — there is no attention. Each block is:
-/// RMSNorm → in_proj → [x, z] → causal depthwise Conv1d(x) → SiLU → x_proj → (dt, B, C) → dt_proj+softplus → δ →
-/// <b>selective scan</b> (h<sub>t</sub> = exp(δA)·h<sub>t-1</sub> + δB·x<sub>t</sub>; y<sub>t</sub> = C·h<sub>t</sub> + D·x<sub>t</sub>)
-/// → y·SiLU(z) → out_proj, with a residual. The linear projections run through <see cref="IBackend"/>; the conv,
-/// softplus, scan and gate run host-side (the scan is an inherently sequential recurrence).</summary>
+/// <summary>Mamba-1 (selective state-space model) decoder loaded from a llama.cpp <c>mamba</c> GGUF (mamba-130m…, Falcon-Mamba); NOT a transformer, there is no attention. Each block: RMSNorm → in_proj → [x, z] → causal depthwise Conv1d(x) → SiLU → x_proj → (dt, B, C) → dt_proj+softplus → δ → <b>selective scan</b> → y·SiLU(z) → out_proj, with a residual. The linear projections run through <see cref="IBackend"/>; the conv/softplus/scan/gate run host-side (the scan is an inherently sequential recurrence).</summary>
 public sealed unsafe class MambaModel : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -88,9 +83,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
 
     private Tensor W(string key) => _w[key];
 
-    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each
-    /// layer's carried recurrent state, and returns the next-token logits (last position). Call
-    /// <see cref="ResetState"/> before the first call of a new generation.</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;

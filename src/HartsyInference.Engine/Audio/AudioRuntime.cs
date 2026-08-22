@@ -4,11 +4,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Device management for audio inference on ONE engine's backend: one generation at a time on that engine,
-/// other models evicted when a switch would not fit, and activations plus the memory pool trimmed after every run.
-/// One instance per <see cref="InferenceEngine"/> — the caches and the generation lock used to be process-wide
-/// statics, which serialized audio across every GPU and handed engine B a runner whose weights lived on engine A's
-/// device.</summary>
+/// <summary>Device management for audio inference on ONE engine's backend: one generation at a time on that engine, other models evicted when a switch would not fit, and activations plus the memory pool trimmed after every run. One instance per <see cref="InferenceEngine"/> — the caches and the generation lock used to be process-wide statics, which serialized audio across every GPU and handed engine B a runner whose weights lived on engine A's device.</summary>
 internal sealed class AudioRuntime
 {
     /// <summary>Serializes inference across this engine's requests — one device per engine.</summary>
@@ -19,17 +15,11 @@ internal sealed class AudioRuntime
     /// <summary>Model that ran most recently — switches trigger the memory-pressure eviction check.</summary>
     private string? _lastKey;
 
-    /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline
-    /// first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the
-    /// process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the
-    /// machine, so the floor is generous. Override via HARTSY_AUDIO_EVICT_BELOW_GB. Host RAM is process-wide, so
-    /// with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM
-    /// floor below is genuinely per-device.</summary>
+    /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the machine, so the floor is generous. Override via HARTSY_AUDIO_EVICT_BELOW_GB. Host RAM is process-wide, so with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM floor below is genuinely per-device.</summary>
     private static readonly long EvictBelowAvailableKb =
         (long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUDIO_EVICT_BELOW_GB"), out long gb) && gb > 0 ? gb : 14L) * 1024 * 1024;
 
-    /// <summary>Free-VRAM floor: a prior model's promoted weights can hold most of the card, so the next model
-    /// would OOM at load even with plenty of host RAM free.</summary>
+    /// <summary>Free-VRAM floor: a prior model's promoted weights can hold most of the card, so the next model would OOM at load even with plenty of host RAM free.</summary>
     private const long EvictBelowFreeVramBytes = 3L * 1024 * 1024 * 1024;
 
     /// <summary>Resident speech pipelines, keyed by resolved repo.</summary>
@@ -61,10 +51,7 @@ internal sealed class AudioRuntime
         _caches = [Tts, Stt, Music, Vc, Demucs, Enhance];
     }
 
-    /// <summary>Drops every resident audio pipeline of THIS engine. Called when the engine releases its backend or
-    /// frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one.
-    /// Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a
-    /// pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
+    /// <summary>Drops every resident audio pipeline of THIS engine. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one. Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
     internal void UnloadAll(int waitSeconds = 0)
     {
         bool held = _genLock.Wait(TimeSpan.FromSeconds(Math.Max(0, waitSeconds)));
@@ -94,9 +81,7 @@ internal sealed class AudioRuntime
         _lastKey = null;
     }
 
-    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is
-    /// tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing
-    /// behind.</summary>
+    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind.</summary>
     internal async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
         IReadOnlyList<IBackend>? stageBackends = null)
     {
@@ -142,13 +127,7 @@ internal sealed class AudioRuntime
         }
     }
 
-    /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device
-    /// gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns —
-    /// the underlying generation loop keeps running on the device until every item has been yielded. Releases
-    /// when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below
-    /// runs exactly once either way. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c>
-    /// clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still
-    /// propagate to the caller, they just aren't logged at this layer.)</summary>
+    /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns — the underlying generation loop keeps running on the device until every item has been yielded. Releases when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below runs exactly once either way. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c> clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still propagate to the caller, they just aren't logged at this layer.)</summary>
     internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, string modelKey,
         Func<CancellationToken, IAsyncEnumerable<T>> work, [EnumeratorCancellation] CancellationToken cancel,
         IReadOnlyList<IBackend>? stageBackends = null)
@@ -184,9 +163,7 @@ internal sealed class AudioRuntime
         }
     }
 
-    /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident
-    /// pipeline (runner disposal also releases their auto-promoted GPU weights). Same-model repeat requests never
-    /// evict, so warm generation stays warm.</summary>
+    /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident pipeline (runner disposal also releases their auto-promoted GPU weights). Same-model repeat requests never evict, so warm generation stays warm.</summary>
     private void EvictOthersUnderMemoryPressure(IBackend backend, string modelKey)
     {
         if (string.Equals(_lastKey, modelKey, StringComparison.Ordinal))

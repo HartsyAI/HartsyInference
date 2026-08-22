@@ -7,8 +7,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Audio-effects service: Demucs stem separation from a placed checkpoint, and Resemble-Enhance speech
-/// enhancement, both run on the shared audio device under the generation lock.</summary>
+/// <summary>Audio-effects service: Demucs stem separation from a placed checkpoint, and Resemble-Enhance speech enhancement, both run on the shared audio device under the generation lock.</summary>
 public sealed class FxService : IFxService
 {
     private readonly InferenceEngine _engine;

@@ -3,11 +3,7 @@ using System.Text;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Qwen3 byte-level BPE tokenizer used by image-model text conditioning. The embedded production
-/// path loads the canonical tokenizer.json so Qwen's split regex, byte mapping, normalization, and added
-/// tokens match Hugging Face. The explicit vocab/merges constructor remains as a compatibility fallback.
-/// Vocab size is 151,936; <c>BosTokenId</c> = 151643 (<c>&lt;|endoftext|&gt;</c>); <c>EosTokenId</c> = 151645
-/// (<c>&lt;|im_end|&gt;</c>).</summary>
+/// <summary>Qwen3 byte-level BPE tokenizer used by image-model text conditioning. The embedded production path loads the canonical tokenizer.json so Qwen's split regex, byte mapping, normalization, and added tokens match Hugging Face. The explicit vocab/merges constructor remains as a compatibility fallback. Vocab size is 151,936; <c>BosTokenId</c> = 151643 (<c>&lt;|endoftext|&gt;</c>); <c>EosTokenId</c> = 151645 (<c>&lt;|im_end|&gt;</c>).</summary>
 public sealed class Qwen3Tokenizer : IDisposable
 {
     /// <summary>Vocabulary size (matches Qwen3-4B's <c>config.json</c>).</summary>
@@ -40,9 +36,7 @@ public sealed class Qwen3Tokenizer : IDisposable
     private readonly int _thinkStartId = ThinkStartId;
     private readonly int _thinkEndId = ThinkEndId;
 
-    /// <summary>Resolves one chat special id from the exact tokenizer's added-token table, keeping the
-    /// canonical Qwen3 id when the literal is present at its canonical position or the artifact omits it
-    /// (an omission is logged once — the canonical id is then a best-effort guess, not a contract).</summary>
+    /// <summary>Resolves one chat special id from the exact tokenizer's added-token table, keeping the canonical Qwen3 id when the literal is present at its canonical position or the artifact omits it (an omission is logged once — the canonical id is then a best-effort guess, not a contract).</summary>
     private static int ResolveSpecialId(GgufTokenizer exact, string literal, int canonicalId)
     {
         int? resolved = exact.SpecialId(literal);
@@ -56,12 +50,8 @@ public sealed class Qwen3Tokenizer : IDisposable
         return resolved.Value;
     }
 
-    /// <summary>Creates a Qwen3 tokenizer using the canonical <c>Qwen/Qwen3-4B</c>
-    /// tokenizer.json embedded in this assembly. This is the right constructor for
-    /// Flux.2 Klein and Z-Image text conditioning. Use the path overload only if
-    /// you need to override with a non-standard Qwen3 vocabulary.</summary>
-    /// <param name="maxLength">Truncation cap. Default 512 (matches typical diffusion
-    /// text-encoder windows; Qwen3 itself supports up to 40,960).</param>
+    /// <summary>Creates a Qwen3 tokenizer using the canonical <c>Qwen/Qwen3-4B</c> tokenizer.json embedded in this assembly. This is the right constructor for Flux.2 Klein and Z-Image text conditioning. Use the path overload only if you need to override with a non-standard Qwen3 vocabulary.</summary>
+    /// <param name="maxLength">Truncation cap. Default 512 (matches typical diffusion text-encoder windows; Qwen3 itself supports up to 40,960).</param>
     public Qwen3Tokenizer(int maxLength = 512)
     {
         if (maxLength <= 0)
@@ -81,10 +71,7 @@ public sealed class Qwen3Tokenizer : IDisposable
         }
     }
 
-    /// <summary>Creates a Qwen3 tokenizer from <c>vocab.json</c> and <c>merges.txt</c> files (download from
-    /// <c>Qwen/Qwen3-4B</c> on Hugging Face). When the files share a directory containing
-    /// <c>tokenizer.json</c>, that complete artifact is used so the split regex and added tokens remain exact;
-    /// otherwise this falls back to the inherently less-complete two-file BPE representation.</summary>
+    /// <summary>Creates a Qwen3 tokenizer from <c>vocab.json</c> and <c>merges.txt</c> files (download from <c>Qwen/Qwen3-4B</c> on Hugging Face). When the files share a directory containing <c>tokenizer.json</c>, that complete artifact is used so the split regex and added tokens remain exact; otherwise this falls back to the inherently less-complete two-file BPE representation.</summary>
     /// <param name="vocabPath">Path to <c>vocab.json</c>.</param>
     /// <param name="mergesPath">Path to <c>merges.txt</c>.</param>
     /// <param name="maxLength">Truncation cap. Default 512 (matches typical diffusion text-encoder windows; Qwen3 itself supports up to 40,960).</param>
@@ -170,18 +157,15 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// <summary>Encodes a single user prompt using the Qwen3 chat template (matches <c>apply_chat_template([{role:"user",content:prompt}], add_generation_prompt=True)</c>). The diffusion text encoder receives chat-formatted hidden states; raw prompt encoding produces wrong conditioning.
     /// <para>Two model families differ in the assistant generation prefix:</para>
     /// <list type="bullet">
-    ///   <item><b>Flux.2 Klein</b> (Qwen3 text, <paramref name="includeThinkBlock"/> = true, default): <c>…&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c> (the <c>enable_thinking=False</c> rendering of the Qwen3 text template).</item>
-    ///   <item><b>Z-Image</b> (Qwen3 text, <paramref name="includeThinkBlock"/> = false): upstream requests <c>enable_thinking=True</c>, so the generation prompt stops at <c>…&lt;|im_start|&gt;assistant\n</c>; no empty reasoning block is prefilled.</item>
-    ///   <item><b>Ideogram 4</b> (Qwen3-VL-8B-Instruct, <paramref name="includeThinkBlock"/> = false): <c>…&lt;|im_start|&gt;assistant\n</c> with NO think block — the VL-Instruct template emits no <c>&lt;think&gt;</c> tags and no default system message (verified against <c>Qwen/Qwen3-VL-8B-Instruct</c> tokenizer_config + upstream <c>pipeline_ideogram4.py</c>).</item>
+    /// <item><b>Flux.2 Klein</b> (Qwen3 text, <paramref name="includeThinkBlock"/> = true, default): <c>…&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c> (the <c>enable_thinking=False</c> rendering of the Qwen3 text template).</item>
+    /// <item><b>Z-Image</b> (Qwen3 text, <paramref name="includeThinkBlock"/> = false): upstream requests <c>enable_thinking=True</c>, so the generation prompt stops at <c>…&lt;|im_start|&gt;assistant\n</c>; no empty reasoning block is prefilled.</item>
+    /// <item><b>Ideogram 4</b> (Qwen3-VL-8B-Instruct, <paramref name="includeThinkBlock"/> = false): <c>…&lt;|im_start|&gt;assistant\n</c> with NO think block — the VL-Instruct template emits no <c>&lt;think&gt;</c> tags and no default system message (verified against <c>Qwen/Qwen3-VL-8B-Instruct</c> tokenizer_config + upstream <c>pipeline_ideogram4.py</c>).</item>
     /// </list>
     /// Format: <c>&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n[think]</c>. Right-padded with <see cref="BosTokenId"/> to maxLength. Note that the upstream boolean is inverted relative to this API: <c>enable_thinking=false</c> emits the empty think block, while <c>true</c> does not.</summary>
     public int[] EncodeChat(string prompt, bool includeThinkBlock = true) =>
         EncodeChatWithLength(prompt, includeThinkBlock).TokenIds;
 
-    /// <summary>Encodes the same chat template as <see cref="EncodeChat"/> and also returns the exact number
-    /// of real tokens before right-padding. Consumers that slice text-encoder hidden states must use this
-    /// metadata rather than infer length from token values: <see cref="BosTokenId"/> is both legal content and
-    /// the pad id, so a real trailing <c>&lt;|endoftext|&gt;</c> token is otherwise indistinguishable from padding.</summary>
+    /// <summary>Encodes the same chat template as <see cref="EncodeChat"/> and also returns the exact number of real tokens before right-padding. Consumers that slice text-encoder hidden states must use this metadata rather than infer length from token values: <see cref="BosTokenId"/> is both legal content and the pad id, so a real trailing <c>&lt;|endoftext|&gt;</c> token is otherwise indistinguishable from padding.</summary>
     /// <returns>The fixed-length token array and its real prefix length, capped at the configured max length.</returns>
     public (int[] TokenIds, int RealLength) EncodeChatWithLength(string prompt, bool includeThinkBlock = true)
     {
@@ -246,10 +230,7 @@ public sealed class Qwen3Tokenizer : IDisposable
         return _fallbackTokenizer!.EncodeToIds(ByteLevelCodec.Encode(normalized));
     }
 
-    /// <summary>Builds a best-effort [seq] attention mask: 1 through the last non-pad token, then 0 for the
-    /// trailing <see cref="BosTokenId"/> run. For chat encoding, prefer <see cref="EncodeChatWithLength"/>:
-    /// a real trailing <c>&lt;|endoftext|&gt;</c> token has the same id as padding and cannot be recovered from the
-    /// padded array alone.</summary>
+    /// <summary>Builds a best-effort [seq] attention mask: 1 through the last non-pad token, then 0 for the trailing <see cref="BosTokenId"/> run. For chat encoding, prefer <see cref="EncodeChatWithLength"/>: a real trailing <c>&lt;|endoftext|&gt;</c> token has the same id as padding and cannot be recovered from the padded array alone.</summary>
     public static int[] CreateAttentionMask(int[] tokenIds)
     {
         int[] mask = new int[tokenIds.Length];

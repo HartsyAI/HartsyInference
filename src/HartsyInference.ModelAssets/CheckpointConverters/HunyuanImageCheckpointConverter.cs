@@ -4,11 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE
-/// / CLIP / T5 dictionaries. The diffusers naming convention is preserved verbatim — Hunyuan ships in
-/// canonical diffusers layout, so no key remapping is required. FP8 <c>.scale_weight</c> companion
-/// tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared
-/// <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
+/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. The diffusers naming convention is preserved verbatim — Hunyuan ships in canonical diffusers layout, so no key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
 public sealed class HunyuanImageCheckpointConverter
 {
     /// <summary>Result of partitioning a Hunyuan Image 2.1 safetensors file.</summary>

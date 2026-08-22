@@ -4,20 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>Moonshine text decoder. Autoregressive Transformer with three sub-blocks per
-/// layer — RoPE causal self-attention, cross-attention against the encoder hidden states,
-/// then a SwiGLU MLP. Same KV-cache pattern as our Whisper decoder.
-///
-/// <para><b>Differences from Whisper decoder:</b>
-/// <list type="bullet">
-///   <item>All norms are RMSNorm (Llama-style, weight-only).</item>
-///   <item>All attention projections are bias-less (<c>attention_bias=false</c>).</item>
-///   <item>Self-attention applies RoPE; cross-attention does not (encoder hidden states
-///         already carry positional info).</item>
-///   <item>MLP is gated SwiGLU: fc1 outputs 2× intermediate; split, gate the first half
-///         with SiLU, multiply by the second half, fc2 reduces.</item>
-///   <item>Logits use weight-tied <c>embed_tokens</c> (no separate <c>proj_out</c>).</item>
-/// </list></para></summary>
+/// <summary>Moonshine text decoder: autoregressive Transformer with RoPE causal self-attention, cross-attention against the encoder hidden states, then a SwiGLU MLP, using the same KV-cache pattern as our Whisper decoder.</summary>
+// Differences from the Whisper decoder: all norms are RMSNorm (Llama-style, weight-only); all attention
+// projections are bias-less; self-attention applies RoPE but cross-attention does not (encoder hidden
+// states already carry positional info); the MLP is gated SwiGLU; logits use weight-tied embed_tokens
+// (no separate proj_out) except on the streaming variants.
 public sealed unsafe class MoonshineDecoder : IDisposable
 {
     private readonly MoonshineConfig _cfg;
@@ -59,8 +50,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
         _loaded = true;
     }
 
-    /// <summary>Decode state. Holds per-layer cross-attention K/V (precomputed once from
-    /// encoder output) and self-attention K/V (appended per step).</summary>
+    /// <summary>Holds per-layer cross-attention K/V (precomputed once from encoder output) and self-attention K/V (appended per step).</summary>
     public sealed class DecodeState : IDisposable
     {
         public Tensor[] CrossK { get; }
@@ -95,9 +85,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
         }
     }
 
-    /// <summary>Precomputes cross-attention K/V from the encoder output. Cross-attn does
-    /// NOT receive RoPE (verified against the HF transformers Moonshine reference) so the
-    /// cached tensors are just the multi-head-reshaped projections.</summary>
+    /// <summary>Precomputes cross-attention K/V from the encoder output; cross-attn does NOT receive RoPE (verified against the HF transformers Moonshine reference).</summary>
     public DecodeState StartDecode(IBackend backend, Tensor encoderHidden)
     {
         ThrowIfDisposed();
@@ -112,9 +100,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
         return state;
     }
 
-    /// <summary>Runs the decoder for a sequence of tokens (either the full prompt prefix
-    /// at start, or a single new token per step thereafter). Returns logits for the LAST
-    /// token in <paramref name="tokenIds"/>.</summary>
+    /// <summary>Runs the decoder for a sequence of tokens (full prompt prefix at start, or one new token per step thereafter), returning logits for the LAST token in <paramref name="tokenIds"/>.</summary>
     public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state)
     {
         ThrowIfDisposed();
@@ -205,8 +191,7 @@ public sealed unsafe class MoonshineDecoder : IDisposable
     public void Dispose() { Interlocked.Exchange(ref _disposed, 1); }
 }
 
-/// <summary>Single Moonshine decoder block. Pre-norm causal self-attn (RoPE, KV-cached)
-/// → pre-norm cross-attn (against precomputed encoder K/V, no RoPE) → pre-norm SwiGLU MLP.</summary>
+/// <summary>Single Moonshine decoder block: pre-norm causal self-attn (RoPE, KV-cached) → pre-norm cross-attn (against precomputed encoder K/V, no RoPE) → pre-norm SwiGLU MLP.</summary>
 internal sealed unsafe class MoonshineDecoderLayer
 {
     private readonly MoonshineConfig _cfg;
@@ -350,16 +335,14 @@ internal sealed unsafe class MoonshineDecoderLayer
         return res3;
     }
 
-    /// <summary>Moonshine's SwiGLU gating: fc1 output is split into [up, gate] along the last
-    /// dim — the FIRST half is the "up" projection, the SECOND half is the actual gate.
-    /// Matches <c>transformers/models/moonshine/modeling_moonshine.py</c>:
-    /// <code>
-    ///   hidden_states = self.fc1(hidden_states)
-    ///   hidden_states, gate = hidden_states.chunk(2, dim=-1)
-    ///   hidden_states = self.activation_fn(gate) * hidden_states
-    /// </code>
-    /// Easy to get backwards (and we did, on the first run) — most Llama-style models use
-    /// the opposite convention. Diff-debugged against the actual HF reference to nail down.</summary>
+    // Moonshine's SwiGLU gating: fc1 output is split into [up, gate] along the last dim — the FIRST half
+    // is the "up" projection, the SECOND half is the actual gate. Matches
+    // transformers/models/moonshine/modeling_moonshine.py:
+    //   hidden_states = self.fc1(hidden_states)
+    //   hidden_states, gate = hidden_states.chunk(2, dim=-1)
+    //   hidden_states = self.activation_fn(gate) * hidden_states
+    // Easy to get backwards (and we did, on the first run) — most Llama-style models use the opposite
+    // convention. Diff-debugged against the actual HF reference to nail down.
     private static void ApplySwiGlu(Tensor output, Tensor fc1Out, int seqLen, int inter)
     {
         float* o = (float*)output.DataPointer;

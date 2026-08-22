@@ -3,12 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converts the Comfy-Org MiniMax-Music-3 single-file DiT checkpoint
-/// (<c>diffusion_models/minimax_music3_dit_*.safetensors</c>: <c>diffusion_transformer.*</c> with fused QKV,
-/// plus the four condition-encoder tensors under Comfy naming) into the engine's diffusers-derived naming
-/// (<c>transformer_blocks.{i}.attn.to_q/…</c> and the <c>condition_encoder</c> keys). The Comfy file carries
-/// ONLY the flow DiT + condition encoder — the language model, depth decoder, vocoder, and tokenizer are not
-/// in it and load from the official repo.</summary>
+/// <summary>Converts the Comfy-Org MiniMax-Music-3 single-file DiT checkpoint (<c>diffusion_models/minimax_music3_dit_*.safetensors</c>: <c>diffusion_transformer.*</c> with fused QKV, plus the four condition-encoder tensors under Comfy naming) into the engine's diffusers-derived naming (<c>transformer_blocks.{i}.attn.to_q/…</c> and the <c>condition_encoder</c> keys). The Comfy file carries ONLY the flow DiT + condition encoder — the language model, depth decoder, vocoder, and tokenizer are not in it and load from the official repo.</summary>
 public static class MiniMaxMusic3CheckpointConverter
 {
     /// <summary>True when the header is a Comfy-Org MiniMax-Music-3 DiT single file.</summary>
@@ -16,9 +11,7 @@ public static class MiniMaxMusic3CheckpointConverter
         descriptors.ContainsKey("diffusion_transformer.transformer.layers.0.self_attn.to_qkv.weight")
         && descriptors.ContainsKey("cond_layer_logits");
 
-    /// <summary>Maps the Comfy DiT file into the engine's transformer + condition-encoder dictionaries. Fused
-    /// QKV rows split q-first (concat order proven by tensor diff against the official per-projection
-    /// weights). Unmapped keys throw — a silently dropped weight is a wrong generation, not a warning.</summary>
+    /// <summary>Maps the Comfy DiT file into the engine's transformer + condition-encoder dictionaries. Fused QKV rows split q-first (concat order proven by tensor diff against the official per-projection weights). Unmapped keys throw — a silently dropped weight is a wrong generation, not a warning.</summary>
     public static (Dictionary<string, Tensor> Transformer, Dictionary<string, Tensor> ConditionEncoder)
         ConvertComfyDit(IReadOnlyDictionary<string, Tensor> raw)
     {

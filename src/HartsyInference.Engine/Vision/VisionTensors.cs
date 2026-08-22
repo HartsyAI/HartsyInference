@@ -2,8 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Pixel packings the detectors need beyond <see cref="Features.FeatureImaging"/>: the ImageNet-normalized
-/// <c>[1,3,H,W]</c> tensor shared by Grounding DINO (DETR preprocessing) and SAM 2.</summary>
+/// <summary>Pixel packings the detectors need beyond <see cref="Features.FeatureImaging"/>: the ImageNet-normalized <c>[1,3,H,W]</c> tensor shared by Grounding DINO (DETR preprocessing) and SAM 2.</summary>
 public static class VisionTensors
 {
     /// <summary>ImageNet channel means used by the DETR-family preprocessors.</summary>

@@ -3,9 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Low-level helpers specific to VibeVoice (acoustic + semantic VAEs and the
-/// per-token diffusion head). All operate on F32 tensors via unsafe <c>float*</c> indexing.
-/// Weight tensors are pre-cast to F32 at load time so the pointer arithmetic never has to
+/// <summary>Low-level helpers specific to VibeVoice (acoustic + semantic VAEs and the per-token diffusion head), operating on F32 tensors via unsafe <c>float*</c> indexing.</summary>
+/// <remarks>Weight tensors are pre-cast to F32 at load time so the pointer arithmetic never has to
 /// reason about BF16 / FP16 layouts.
 ///
 /// <para>New ops here, relative to <see cref="Whisper.WhisperOps"/> and
@@ -30,13 +29,11 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 ///         the latent dim for the per-token diffusion head, where <c>x</c>, <c>shift</c>,
 ///         <c>scale</c> are all <c>[N, D]</c> (no time axis — the head operates on a
 ///         single latent frame at a time).</item>
-/// </list></para></summary>
+/// </list></para></remarks>
 internal static unsafe class VibeVoiceOps
 {
-    /// <summary>Causal Conv1D with constant zero-pad on the left. Output length is
-    /// <c>ceil((T + extra_right_pad) / stride)</c> when the left pad budget covers the
-    /// kernel footprint exactly.
-    ///
+    /// <summary>Causal Conv1D with constant zero-pad on the left; output length is <c>ceil((T + extra_right_pad) / stride)</c> when the left pad budget covers the kernel footprint exactly.</summary>
+    /// <remarks>
     /// <para>Layout: input <c>[B, C_in, T]</c>, weight <c>[C_out, C_in / groups, K]</c>,
     /// bias <c>[C_out]</c>, output <c>[B, C_out, T_out]</c>.</para>
     ///
@@ -47,7 +44,7 @@ internal static unsafe class VibeVoiceOps
     ///
     /// <para>Out-of-bound left taps read as zero (constant-pad). The caller is responsible
     /// for any right-side stride-alignment padding — pass <paramref name="extraRightPad"/>
-    /// computed as <c>get_extra_padding_for_conv1d(T, K, stride, padTotal)</c>.</para></summary>
+    /// computed as <c>get_extra_padding_for_conv1d(T, K, stride, padTotal)</c>.</para></remarks>
     public static void CausalConv1d(
         Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int batch, int cIn, int cOut, int tIn, int kernel, int stride,
@@ -106,10 +103,7 @@ internal static unsafe class VibeVoiceOps
         }
     }
 
-    /// <summary>Computes the same right-side stride alignment as the Python reference's
-    /// <c>get_extra_padding_for_conv1d</c>. Returns the number of additional right-side
-    /// zeros needed so the (T + padTotal + extra) effective length is exactly
-    /// <c>(ceil(n_frames) - 1) * stride + kernel - padTotal</c>.</summary>
+    /// <summary>Computes the same right-side stride alignment as the Python reference's <c>get_extra_padding_for_conv1d</c>: additional right-side zeros so the (T + padTotal + extra) effective length is exactly <c>(ceil(n_frames) - 1) * stride + kernel - padTotal</c>.</summary>
     public static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)
     {
         // n_frames = (T - K + padTotal) / stride + 1 (using float division)
@@ -119,8 +113,8 @@ internal static unsafe class VibeVoiceOps
         return extra < 0 ? 0 : extra;
     }
 
-    /// <summary>Causal ConvTranspose1D with right-trim. Mirrors the math of
-    /// <c>SConvTranspose1d</c>: input <c>[B, C_in, T_in]</c> → strided transposed conv
+    /// <summary>Causal ConvTranspose1D with right-trim, mirroring the math of <c>SConvTranspose1d</c>.</summary>
+    /// <remarks>Input <c>[B, C_in, T_in]</c> → strided transposed conv
     /// produces <c>[B, C_out, (T_in-1)*stride + K]</c>, then we trim
     /// <c>padTotal = K - stride</c> samples from the right (because
     /// <c>trim_right_ratio = 1.0</c> sends all the asymmetric pad budget to the right).
@@ -130,7 +124,7 @@ internal static unsafe class VibeVoiceOps
     /// after trim.</para>
     ///
     /// <para>No groups support — the VibeVoice decoder is always fully-connected per
-    /// stage. No dilation — always 1.</para></summary>
+    /// stage. No dilation — always 1.</para></remarks>
     public static void CausalConvTranspose1d(
         Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int batch, int cIn, int cOut, int tIn, int kernel, int stride)
@@ -185,13 +179,12 @@ internal static unsafe class VibeVoiceOps
         }
     }
 
-    /// <summary>GPU-resident channels-first RMSNorm: RMS over the channel axis of a
-    /// <c>[B, C, T]</c> tensor with a per-channel scale <paramref name="weight"/> (<c>[C]</c>).
-    /// Composed from existing backend ops (transpose → last-dim <see cref="IBackend.RmsNorm"/>
+    /// <summary>GPU-resident channels-first RMSNorm over a <c>[B, C, T]</c> tensor with a per-channel scale <paramref name="weight"/> (<c>[C]</c>).</summary>
+    /// <remarks>Composed from existing backend ops (transpose → last-dim <see cref="IBackend.RmsNorm"/>
     /// → transpose) so the whole VAE block stays on-device — avoiding the per-op device→host
     /// sync the host <see cref="RmsNormChannelsFirst"/> forced. <see cref="IBackend.RmsNorm"/>
-    /// uses <c>1/sqrt(meanSq + eps)</c>, matching the host reference bit-for-bit.
-    /// Returns a fresh <c>[B, C, T]</c> tensor; caller disposes.</summary>
+    /// uses <c>1/sqrt(meanSq + eps)</c>, matching the host reference bit-for-bit.</remarks>
+    /// <returns>A fresh <c>[B, C, T]</c> tensor; caller disposes.</returns>
     public static Tensor RmsNormChannelsFirstGpu(IBackend backend, Tensor x, Tensor weight, int batch, int channels, int t, float eps)
     {
         Tensor cl = new(new TensorShape(batch, t, channels), DType.F32);
@@ -205,11 +198,8 @@ internal static unsafe class VibeVoiceOps
         return cf;
     }
 
-    /// <summary>GPU-resident per-channel scale of a channels-first <c>[B, C, T]</c> tensor by
-    /// <paramref name="scaleWeight"/> shaped as a <c>[C, 1, 1]</c> depthwise conv kernel:
-    /// <c>out[b,c,t] = x[b,c,t] · scaleWeight[c]</c>. A groups=C, kernel=1 <see cref="IBackend.Conv1d"/>
-    /// computes exactly that, reusing the resident conv path (ConvNeXt "layer scale"), so no
-    /// host round-trip and no weight mutation. Returns a fresh tensor; caller disposes.</summary>
+    /// <summary>GPU-resident per-channel scale of a channels-first <c>[B, C, T]</c> tensor by <paramref name="scaleWeight"/> shaped as a <c>[C, 1, 1]</c> depthwise conv kernel: <c>out[b,c,t] = x[b,c,t] · scaleWeight[c]</c>, computed via a groups=C, kernel=1 <see cref="IBackend.Conv1d"/> (ConvNeXt "layer scale") to avoid a host round-trip.</summary>
+    /// <returns>A fresh tensor; caller disposes.</returns>
     public static Tensor ChannelScaleGpu(IBackend backend, Tensor x, Tensor scaleWeight, int batch, int channels, int t)
     {
         Tensor output = new(new TensorShape(batch, channels, t), DType.F32);
@@ -217,8 +207,7 @@ internal static unsafe class VibeVoiceOps
         return output;
     }
 
-    /// <summary>Copies a per-channel scale vector (<c>[C]</c>, any layout) into a fresh owning
-    /// <c>[C, 1, 1]</c> depthwise-conv kernel for <see cref="ChannelScaleGpu"/>.</summary>
+    /// <summary>Copies a per-channel scale vector (<c>[C]</c>, any layout) into a fresh owning <c>[C, 1, 1]</c> depthwise-conv kernel for <see cref="ChannelScaleGpu"/>.</summary>
     public static unsafe Tensor ToChannelScaleWeight(Tensor gamma, int channels)
     {
         using Tensor g = gamma.DType == DType.F32 ? null! : gamma.CastTo(DType.F32);
@@ -229,12 +218,10 @@ internal static unsafe class VibeVoiceOps
         return w;
     }
 
-    /// <summary>RMSNorm over the channel axis of a <c>[B, C, T]</c> tensor with a
-    /// per-channel learnable scale <c>weight</c> (shape <c>[C]</c>). Compute is
-    /// per-(batch, time) RMS over C in F32, then scale by <c>weight</c>.
-    /// <para>This matches Python's <c>ConvRMSNorm</c> which transposes to channels-last,
+    /// <summary>RMSNorm over the channel axis of a <c>[B, C, T]</c> tensor with a per-channel learnable scale <c>weight</c> (shape <c>[C]</c>); host-side per-(batch, time) RMS over C in F32.</summary>
+    /// <remarks>This matches Python's <c>ConvRMSNorm</c> which transposes to channels-last,
     /// runs RMSNorm on the channel dim, then transposes back. We collapse that into a
-    /// single pass to save bandwidth in the hot codec loop.</para></summary>
+    /// single pass to save bandwidth in the hot codec loop.</remarks>
     public static void RmsNormChannelsFirst(Tensor output, Tensor input, Tensor weight, int batch, int channels, int t, float eps)
     {
         float* ip = (float*)input.DataPointer;
@@ -263,9 +250,7 @@ internal static unsafe class VibeVoiceOps
         }
     }
 
-    /// <summary>Multiplies a channels-first <c>[B, C, T]</c> tensor by a per-channel
-    /// learnable scale <c>gamma</c> of shape <c>[C]</c>, in place. ConvNeXt's "layer scale"
-    /// applied after the mixer and after the FFN inside <c>Block1D</c>.</summary>
+    /// <summary>Multiplies a channels-first <c>[B, C, T]</c> tensor by a per-channel learnable scale <c>gamma</c> of shape <c>[C]</c>, in place; ConvNeXt's "layer scale" applied after the mixer and after the FFN inside <c>Block1D</c>.</summary>
     public static void LayerScaleApplyCF(Tensor x, Tensor gamma, int batch, int channels, int t)
     {
         float* xp = (float*)x.DataPointer;
@@ -281,10 +266,7 @@ internal static unsafe class VibeVoiceOps
         }
     }
 
-    /// <summary>Diffusion-head AdaLN modulation: <c>x = x * (1 + scale) + shift</c> with
-    /// all of <c>x</c>, <paramref name="scale"/>, and <paramref name="shift"/> having shape
-    /// <c>[N, D]</c>. The diffusion head denoises a single latent frame per LM step so the
-    /// time axis collapses to 1 and we operate on <c>[N, D]</c> directly.</summary>
+    /// <summary>Diffusion-head AdaLN modulation: <c>x = x * (1 + scale) + shift</c>, with <c>x</c>, <paramref name="scale"/> and <paramref name="shift"/> all shape <c>[N, D]</c> (the head denoises one latent frame per LM step, so the time axis collapses to 1).</summary>
     public static void AdaLnModulate(Tensor x, Tensor shift, Tensor scale, int n, int d)
     {
         float* xp = (float*)x.DataPointer;
@@ -300,10 +282,7 @@ internal static unsafe class VibeVoiceOps
         }
     }
 
-    /// <summary>Diffusion-head gated residual add: <c>out = residual + gate * h</c> with all
-    /// of <paramref name="residual"/>, <paramref name="h"/>, and <paramref name="gate"/>
-    /// having shape <c>[N, D]</c>. Writes into <paramref name="output"/>; safe when
-    /// <paramref name="output"/> aliases <paramref name="residual"/>.</summary>
+    /// <summary>Diffusion-head gated residual add: <c>out = residual + gate * h</c>, all shape <c>[N, D]</c>; safe when <paramref name="output"/> aliases <paramref name="residual"/>.</summary>
     public static void AdaLnGatedAdd(Tensor output, Tensor residual, Tensor gate, Tensor h, int n, int d)
     {
         float* op = (float*)output.DataPointer;
@@ -361,8 +340,7 @@ internal static unsafe class VibeVoiceOps
         return copy;
     }
 
-    /// <summary>Draws fresh decorrelated Gaussian noise from one persistent stream (matching
-    /// <c>torch.randn</c> per frame) — never reseed per frame, that correlates adjacent latents.</summary>
+    /// <summary>Draws fresh decorrelated Gaussian noise from one persistent stream (matching <c>torch.randn</c> per frame) — never reseed per frame, that correlates adjacent latents.</summary>
     public static Tensor SampleNoise(int dim, ref uint rng)
     {
         Tensor t = new(new TensorShape(1, 1, dim), DType.F32);
@@ -424,8 +402,7 @@ internal static unsafe class VibeVoiceOps
         return t;
     }
 
-    /// <summary>CFG combine from a batched <c>[1, 2, latent]</c> head output (row 0 = cond, row 1 = uncond):
-    /// <c>eps = uncond + cfg_scale * (cond - uncond)</c>. Latents are tiny (usually 64) so the tail stays host.</summary>
+    /// <summary>CFG combine from a batched <c>[1, 2, latent]</c> head output (row 0 = cond, row 1 = uncond): <c>eps = uncond + cfg_scale * (cond - uncond)</c>. Latents are tiny (usually 64) so the tail stays host.</summary>
     public static Tensor CombineCfgBatched(Tensor vBatched, float cfg, int latent)
     {
         Tensor result = new(new TensorShape(1, 1, latent), DType.F32);
@@ -443,11 +420,9 @@ internal static unsafe class VibeVoiceOps
         return *(float*)f.DataPointer;
     }
 
-    /// <summary>Runs the CFG-batched DDPM denoise loop shared by every VibeVoice variant: batches the
-    /// conditional/unconditional halves into one N=2 head forward per step (the head is FFN-only, no
-    /// cross-frame mixing, so each row is exactly its own pass), combines as
-    /// <c>eps = uncond + cfg_scale·(cond−uncond)</c>. Returns an owned tensor the caller disposes.
-    /// <paramref name="negCond"/> null or <paramref name="cfgScale"/> == 1 runs single-stream (no CFG).</summary>
+    /// <summary>Runs the CFG-batched DDPM denoise loop shared by every VibeVoice variant: batches the conditional/unconditional halves into one N=2 head forward per step (the head is FFN-only, no cross-frame mixing, so each row is exactly its own pass), combining as <c>eps = uncond + cfg_scale·(cond−uncond)</c>.</summary>
+    /// <param name="negCond">Null, or <paramref name="cfgScale"/> == 1, runs single-stream (no CFG).</param>
+    /// <returns>An owned tensor the caller disposes.</returns>
     public static Tensor DenoiseLatent(IBackend backend, VibeVoiceDiffusionHead diffusionHead, int numSteps,
         float cfgScale, Tensor noiseLatent, Tensor cond, Tensor? negCond, int latentDim, int hiddenDim)
     {

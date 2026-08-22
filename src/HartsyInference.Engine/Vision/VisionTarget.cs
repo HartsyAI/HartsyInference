@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>A parsed vision target: which detector to run plus the model name, text query, class filter and detection
-/// index decoded from the request prompt (the SwarmUI <c>&lt;segment:...&gt;</c> target grammar).</summary>
+/// <summary>A parsed vision target: which detector to run plus the model name, text query, class filter and detection index decoded from the request prompt (the SwarmUI <c>&lt;segment:...&gt;</c> target grammar).</summary>
 public sealed record VisionTarget
 {
     /// <summary>The detector this target routes to.</summary>

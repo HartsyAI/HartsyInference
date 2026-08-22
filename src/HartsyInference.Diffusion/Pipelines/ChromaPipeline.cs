@@ -13,25 +13,15 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Chroma text-to-image pipeline (<c>lodestones/Chroma</c>). T5-XXL → ChromaTransformer denoising
-/// with flow matching (dynamic shift, Flux-style) → 16-channel Flux VAE decode → RGB.
-///
-/// Differences from Flux that the pipeline must handle (see <see cref="ChromaTransformer"/> and
-/// <c>diffusers/pipelines/chroma/pipeline_chroma.py</c>):
+/// <summary>Chroma text-to-image pipeline (<c>lodestones/Chroma</c>). T5-XXL → ChromaTransformer denoising with flow matching (dynamic shift, Flux-style) → 16-channel Flux VAE decode → RGB. Differences from Flux that the pipeline must handle (see <see cref="ChromaTransformer"/> and <c>diffusers/pipelines/chroma/pipeline_chroma.py</c>):
 /// <list type="bullet">
 ///   <item><b>T5-only encode</b> — no CLIP. Caller passes already-tokenized T5 IDs and an attention mask.</item>
-///   <item><b>"First padding token unmasked"</b> — Chroma propagates a per-token attention mask through every
-///         transformer block. The mask is built from the tokenizer mask via
-///         <c>(arange(seq_len) &lt;= text_lens)</c> i.e. all real tokens plus exactly one extra unmasked
-///         padding slot at the EOS position.</item>
+///   <item><b>"First padding token unmasked"</b> — Chroma propagates a per-token attention mask through every transformer block. The mask is built from the tokenizer mask via <c>(arange(seq_len) &lt;= text_lens)</c> i.e. all real tokens plus exactly one extra unmasked padding slot at the EOS position.</item>
 ///   <item><b>True CFG</b> — dual transformer pass. Default cfg=5.0, steps=35.</item>
-///   <item><b>Dynamic flow-match shift</b> via <see cref="FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift"/>
-///         (Flux-style; same base/max constants).</item>
+///   <item><b>Dynamic flow-match shift</b> via <see cref="FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift"/> (Flux-style; same base/max constants).</item>
 ///   <item><b>Latent packing</b> identical to Flux (2x2 patchify into channel dim, 16ch → 64dim).</item>
 /// </list>
-/// VRAM eviction at the transformer→VAE boundary mirrors <see cref="Sd3Pipeline"/> / <see cref="FluxPipeline"/>.
-/// Img2img / inpaint follows the Flux pattern (packed AddNoise at sigma[startStep], per-step packed mask blend,
-/// final pixel recomposite) — pass an <see cref="ImageToImageRequest"/> and construct with a <see cref="VaeEncoder"/>.</summary>
+/// VRAM eviction at the transformer→VAE boundary mirrors <see cref="Sd3Pipeline"/> / <see cref="FluxPipeline"/>. Img2img / inpaint follows the Flux pattern (packed AddNoise at sigma[startStep], per-step packed mask blend, final pixel recomposite) — pass an <see cref="ImageToImageRequest"/> and construct with a <see cref="VaeEncoder"/>.</summary>
 public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
 {
     private readonly T5TextEncoder _t5;
@@ -41,10 +31,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
-    /// FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a
-    /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
-    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -65,9 +52,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// <param name="transformer">Chroma transformer (loaded with <see cref="ChromaConfig"/>).</param>
     /// <param name="vaeDecoder">16-channel Flux VAE decoder (use <see cref="VaeConfig.Flux"/>).</param>
     /// <param name="config">Chroma configuration (use <see cref="ChromaConfig.V1"/> for the v1 release).</param>
-    /// <param name="schedulerShift">Fallback static shift if the runtime ever needs one. Chroma uses a dynamic
-    /// shift derived from the image sequence length per call; this constant is only used if the call site
-    /// somehow short-circuits the dynamic path.</param>
+    /// <param name="schedulerShift">Fallback static shift if the runtime ever needs one. Chroma uses a dynamic shift derived from the image sequence length per call; this constant is only used if the call site somehow short-circuits the dynamic path.</param>
     public ChromaPipeline(IBackend backend, T5TextEncoder t5, ChromaTransformer transformer,
         VaeDecoder vaeDecoder, ChromaConfig config, float schedulerShift = 3.0f)
         : this(backend, t5, transformer, vaeDecoder, vaeEncoder: null, config, schedulerShift)
@@ -90,8 +75,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// <summary>Generates an image from pre-tokenized T5 input plus attention masks. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>: an <see cref="ImageToImageRequest"/> encodes the source through the 16-channel Flux VAE, packs it (2×2 patchify), and injects flow-matching noise at <c>sigma[startStep]</c> — requires a <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step packed blend + final pixel recomposite, same as <see cref="FluxPipeline"/>). Strength=0 short-circuits to byte-identical pass-through.</summary>
     /// <param name="promptTokenIdsT5">Prompt token IDs from the T5 tokenizer.</param>
     /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs (same length as <paramref name="promptTokenIdsT5"/>).</param>
-    /// <param name="promptAttentionMaskT5">Tokenizer attention mask for the prompt (1=real token, 0=pad). Required
-    /// — Chroma needs this to compute the "first padding token unmasked" extension.</param>
+    /// <param name="promptAttentionMaskT5">Tokenizer attention mask for the prompt (1=real token, 0=pad). Required — Chroma needs this to compute the "first padding token unmasked" extension.</param>
     /// <param name="negativeAttentionMaskT5">Tokenizer attention mask for the negative prompt.</param>
     /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional progress callback.</param>
@@ -654,10 +638,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Routes one conditioning pass to <see cref="ChromaTransformer.ForwardSharded"/> when DiT sharding
-    /// is configured (blocks [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, the rest on
-    /// <see cref="DiffusionPipelineBase.DitShardBackend"/>) and the plain single-backend
-    /// <see cref="ChromaTransformer.Forward"/> otherwise.</summary>
+    /// <summary>Routes one conditioning pass to <see cref="ChromaTransformer.ForwardSharded"/> when DiT sharding is configured (blocks [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, the rest on <see cref="DiffusionPipelineBase.DitShardBackend"/>) and the plain single-backend <see cref="ChromaTransformer.Forward"/> otherwise.</summary>
     private Tensor RunForward(Tensor packedLatent, Tensor context, float sigma, int hPacked, int wPacked, Tensor? mask)
     {
         int txtSeqLen = (int)context.Shape[1];
@@ -668,10 +649,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 txtSeqLen, hPacked, wPacked, mask);
     }
 
-    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
-    /// preload (an unsharded whole-set free silently no-ops on the shard backend's block range and leaks it).
-    /// Invalidates the step graph BEFORE any free: the captured graph bakes weight device pointers, and a later
-    /// replay after an uninvalidated free is a context-poisoning CUDA 700.</summary>
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric preload (an unsharded whole-set free silently no-ops on the shard backend's block range and leaks it). Invalidates the step graph BEFORE any free: the captured graph bakes weight device pointers, and a later replay after an uninvalidated free is a context-poisoning CUDA 700.</summary>
     private void FreeTransformerWeights()
     {
         _transformer.InvalidateStepGraph(Backend);
@@ -688,11 +666,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         _ditResident = false;
     }
 
-    /// <summary>Slices the encoded [1, seqLen, hidden] T5 context down to Chroma's kept tokens
-    /// (<c>text_len + 1</c>: all real tokens plus the one unmasked padding slot). Exact — the dropped rows are
-    /// masked out of every attention by the transformer-side rule, so they can never influence the output.
-    /// Consumes (disposes) the input when a trim happens; the read also host-materializes the result.
-    /// Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
+    /// <summary>Slices the encoded [1, seqLen, hidden] T5 context down to Chroma's kept tokens (<c>text_len + 1</c>: all real tokens plus the one unmasked padding slot). Exact — the dropped rows are masked out of every attention by the transformer-side rule, so they can never influence the output. Consumes (disposes) the input when a trim happens; the read also host-materializes the result. Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
     internal static Tensor TrimContextToKeptTokens(Tensor context, int[] tokenizerMask)
     {
         int seqLen = (int)context.Shape[1];
@@ -712,11 +686,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         return trimmed;
     }
 
-    /// <summary>Builds Chroma's transformer-side text mask. Per pipeline_chroma.py:249-252, the mask used inside
-    /// the transformer is <c>(arange(seq_len) &lt;= text_len)</c>: every real token plus exactly one extra
-    /// padding slot kept unmasked. <paramref name="tokenizerMask"/> is the standard tokenizer mask
-    /// (1=real, 0=pad). Returns a [batch, seq_len] F32 tensor with the extension applied.
-    /// Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
+    /// <summary>Builds Chroma's transformer-side text mask. Per pipeline_chroma.py:249-252, the mask used inside the transformer is <c>(arange(seq_len) &lt;= text_len)</c>: every real token plus exactly one extra padding slot kept unmasked. <paramref name="tokenizerMask"/> is the standard tokenizer mask (1=real, 0=pad). Returns a [batch, seq_len] F32 tensor with the extension applied. Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
     internal static Tensor BuildChromaTextMask(int[] tokenizerMask, int batchSize)
     {
         int seqLen = tokenizerMask.Length;

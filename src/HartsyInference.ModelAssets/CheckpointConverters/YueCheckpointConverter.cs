@@ -5,23 +5,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads YuE checkpoints (<c>m-a-p/YuE-s1-7B-*</c>, <c>m-a-p/YuE-s2-1B-general</c>,
-/// <c>m-a-p/xcodec_mini_infer</c>) for the <c>YueStage1Lm</c> (Qwen2/LLaMA body) and <c>XCodec</c> classes.
+/// <summary>Loads YuE checkpoints (<c>m-a-p/YuE-s1-7B-*</c>, <c>m-a-p/YuE-s2-1B-general</c>, <c>m-a-p/xcodec_mini_infer</c>) for the <c>YueStage1Lm</c> (Qwen2/LLaMA body) and <c>XCodec</c> classes.
 ///
-/// <para><b>Stage-1 / Stage-2 LMs</b> — standard HF LLaMA layout (<c>model.embed_tokens.weight</c>,
-/// <c>model.layers.{i}.self_attn.{q,k,v,o}_proj.weight</c>, <c>mlp.{gate,up,down}_proj.weight</c>,
-/// <c>input_layernorm</c>/<c>post_attention_layernorm</c>, <c>model.norm.weight</c>, <c>lm_head.weight</c>), which is
-/// exactly what <c>Qwen2Model.LoadWeights(w, "model")</c> consumes — pass-through, dropping the legacy
-/// <c>rotary_emb.inv_freq</c> buffers (the engine computes RoPE itself). Sharded HF folders are supported via
-/// <c>SafeTensorsShardLoader</c>; single files via <c>SafeTensorsLoader</c>.</para>
+/// <para><b>Stage-1 / Stage-2 LMs</b> — standard HF LLaMA layout (<c>model.embed_tokens.weight</c>, <c>model.layers.{i}.self_attn.{q,k,v,o}_proj.weight</c>, <c>mlp.{gate,up,down}_proj.weight</c>, <c>input_layernorm</c>/<c>post_attention_layernorm</c>, <c>model.norm.weight</c>, <c>lm_head.weight</c>), which is exactly what <c>Qwen2Model.LoadWeights(w, "model")</c> consumes — pass-through, dropping the legacy <c>rotary_emb.inv_freq</c> buffers (the engine computes RoPE itself). Sharded HF folders are supported via <c>SafeTensorsShardLoader</c>; single files via <c>SafeTensorsLoader</c>.</para>
 ///
-/// <para><b>X-Codec</b> — the engine <c>XCodec</c> expects DAC naming (<c>encoder.block.*</c>,
-/// <c>quantizer.quantizers.{q}.{in_proj,out_proj,codebook}.*</c>, <c>decoder.model.*</c>) with RAW weight-norm pairs
-/// (the engine fuses via <c>WeightNormFusion</c>, so the converter must NOT pre-fuse). The xcodec_mini_infer original
-/// is a torch <c>.pth</c> — this loader takes a safetensors export of its <c>codec_model</c> state dict. The acoustic
-/// decode path maps through and the semantic-reconstruction head (<c>decoder_semantic</c> + <c>fc_post1</c>) is always
-/// dropped; the encode branch (HuBERT <c>semantic_model</c> + <c>encoder_semantic</c> + acoustic <c>encoder</c> +
-/// <c>fc_prior</c>, ~95M extra params) is dropped unless <c>forEncode</c> is set.</para></summary>
+/// <para><b>X-Codec</b> — the engine <c>XCodec</c> expects DAC naming (<c>encoder.block.*</c>, <c>quantizer.quantizers.{q}.{in_proj,out_proj,codebook}.*</c>, <c>decoder.model.*</c>) with RAW weight-norm pairs (the engine fuses via <c>WeightNormFusion</c>, so the converter must NOT pre-fuse). The xcodec_mini_infer original is a torch <c>.pth</c> — this loader takes a safetensors export of its <c>codec_model</c> state dict. The acoustic decode path maps through and the semantic-reconstruction head (<c>decoder_semantic</c> + <c>fc_post1</c>) is always dropped; the encode branch (HuBERT <c>semantic_model</c> + <c>encoder_semantic</c> + acoustic <c>encoder</c> + <c>fc_prior</c>, ~95M extra params) is dropped unless <c>forEncode</c> is set.</para></summary>
 public sealed class YueCheckpointConverter
 {
     // VALIDATION-GATED (pending a real xcodec_mini_infer key dump): the upstream SoundStream class names its
@@ -43,8 +31,7 @@ public sealed class YueCheckpointConverter
         "decoder_semantic.", "decoder_semantic_2.", "fc_post1.", "fc_post_a.", "fc_post_s.", "discriminator.",
     ];
 
-    /// <summary>Loads a Stage-1 LM checkpoint (<c>m-a-p/YuE-s1-7B-anneal-en-cot</c> and siblings). <paramref name="path"/>
-    /// may be a sharded HF folder or a single safetensors file. Caller owns the loader.</summary>
+    /// <summary>Loads a Stage-1 LM checkpoint (<c>m-a-p/YuE-s1-7B-anneal-en-cot</c> and siblings). <paramref name="path"/> may be a sharded HF folder or a single safetensors file. Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadStage1(string path, bool castToF32 = false)
         => LoadLm(path, castToF32);
 
@@ -88,13 +75,7 @@ public sealed class YueCheckpointConverter
         "gate_proj.weight", "up_proj.weight", "down_proj.weight", "lm_head.weight",
     ];
 
-    /// <summary>Quantizes the LM's big 2D GEMM weights (attention/MLP projections + lm_head) to <paramref name="target"/>
-    /// (a GGUF quant dtype) in place, so a 7B fits a 12 GB card resident instead of streaming per forward. Prefer
-    /// <see cref="DType.Q4_K"/>: it fits the 7B in ~3.5 GB AND decode hits the llama.cpp-style dp4a GEMV
-    /// (<c>mul_mat_vec_q4k_q8_1</c>), which is ~an order of magnitude faster than the naive Q8_0 F32 GEMV. Only rank-2
-    /// tensors whose in-dim is a multiple of the target's block size (256 for Q4_K, so quant blocks never cross a row)
-    /// are touched; embeddings/norms are left as-is. Replaced tensors are owned by the dict (the borrowed source stays
-    /// valid until its loader disposes).</summary>
+    /// <summary>Quantizes the LM's big 2D GEMM weights (attention/MLP projections + lm_head) to <paramref name="target"/> (a GGUF quant dtype) in place, so a 7B fits a 12 GB card resident instead of streaming per forward. Prefer <see cref="DType.Q4_K"/>: it fits the 7B in ~3.5 GB AND decode hits the llama.cpp-style dp4a GEMV (<c>mul_mat_vec_q4k_q8_1</c>), which is ~an order of magnitude faster than the naive Q8_0 F32 GEMV. Only rank-2 tensors whose in-dim is a multiple of the target's block size (256 for Q4_K, so quant blocks never cross a row) are touched; embeddings/norms are left as-is. Replaced tensors are owned by the dict (the borrowed source stays valid until its loader disposes).</summary>
     public static unsafe void QuantizeLmWeights(Dictionary<string, Tensor> weights, DType target)
     {
         IGgufCodec codec = GgufCodecRegistry.Get(target);
@@ -120,10 +101,7 @@ public sealed class YueCheckpointConverter
         }
     }
 
-    /// <summary>Loads an X-Codec safetensors export for the engine <c>XCodec</c> class. Caller owns the loader.
-    /// <paramref name="forEncode"/> additionally keeps the encode branch (HuBERT semantic model, RepCodec
-    /// <c>encoder_semantic</c>, acoustic <c>encoder</c>, <c>fc_prior</c>) — ~95M extra params, so leave it off for
-    /// the pure-generation path.</summary>
+    /// <summary>Loads an X-Codec safetensors export for the engine <c>XCodec</c> class. Caller owns the loader. <paramref name="forEncode"/> additionally keeps the encode branch (HuBERT semantic model, RepCodec <c>encoder_semantic</c>, acoustic <c>encoder</c>, <c>fc_prior</c>) — ~95M extra params, so leave it off for the pure-generation path.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadXCodec(string path, bool castToF32 = false, bool forEncode = false)
     {
         SafeTensorsLoader loader = new();
@@ -137,9 +115,7 @@ public sealed class YueCheckpointConverter
         return (weights, loader);
     }
 
-    /// <summary>Loads a converted YuE Vocos vocoder (<c>decoder_131000/151000.pth</c> → safetensors) as-is: the keys
-    /// (<c>backbone.embed/norm/convnext.*/final_layer_norm</c>, <c>head.out</c>) are already what <c>VocosDecoder</c>
-    /// consumes, so no mapping — just F32 (small: ~18M params).</summary>
+    /// <summary>Loads a converted YuE Vocos vocoder (<c>decoder_131000/151000.pth</c> → safetensors) as-is: the keys (<c>backbone.embed/norm/convnext.*/final_layer_norm</c>, <c>head.out</c>) are already what <c>VocosDecoder</c> consumes, so no mapping — just F32 (small: ~18M params).</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadVocoder(string path, bool castToF32 = true)
     {
         SafeTensorsLoader loader = new();
@@ -150,15 +126,10 @@ public sealed class YueCheckpointConverter
         return (weights, loader);
     }
 
-    /// <summary>The mapped key that proves an x-codec export carries the encode branch. <c>fc_prior</c> is the fusion
-    /// projection every encode call needs and nothing on the decode path touches, so its presence is exactly the
-    /// engine <c>XCodec.CanEncode</c> condition.</summary>
+    /// <summary>The mapped key that proves an x-codec export carries the encode branch. <c>fc_prior</c> is the fusion projection every encode call needs and nothing on the decode path touches, so its presence is exactly the engine <c>XCodec.CanEncode</c> condition.</summary>
     public const string XCodecEncodeProbeKey = "fc_prior.weight";
 
-    /// <summary>Whether a repacked x-codec export carries the encode roots. Keys are routed through
-    /// <see cref="MapXCodecKey"/> rather than compared literally because a repack preserves the source spelling,
-    /// which may still carry the <c>codec_model.</c> wrapper prefix. An export written before the encode branch was
-    /// kept answers false — the caller must re-repack rather than serve a silently encode-less codec.</summary>
+    /// <summary>Whether a repacked x-codec export carries the encode roots. Keys are routed through <see cref="MapXCodecKey"/> rather than compared literally because a repack preserves the source spelling, which may still carry the <c>codec_model.</c> wrapper prefix. An export written before the encode branch was kept answers false — the caller must re-repack rather than serve a silently encode-less codec.</summary>
     public static bool XCodecExportHasEncodeRoots(IEnumerable<string> keys)
     {
         foreach (string key in keys)
@@ -168,9 +139,7 @@ public sealed class YueCheckpointConverter
         return false;
     }
 
-    /// <summary>Pure X-Codec key mapping (testable without files): strips wrapper prefixes, drops the semantic branch,
-    /// renames the acoustic <c>decoder_2.*</c> root to <c>decoder.*</c>, and normalizes weight-norm key spellings.
-    /// Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>
+    /// <summary>Pure X-Codec key mapping (testable without files): strips wrapper prefixes, drops the semantic branch, renames the acoustic <c>decoder_2.*</c> root to <c>decoder.*</c>, and normalizes weight-norm key spellings. Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>
     public static string? MapXCodecKey(string key, bool forEncode = false)
     {
         foreach (string prefix in _xCodecWrapperPrefixes)

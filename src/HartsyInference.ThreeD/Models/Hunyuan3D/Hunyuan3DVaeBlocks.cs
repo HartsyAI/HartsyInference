@@ -3,10 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>ShapeVAE transformer self-attention block (CLIP-style <c>ResidualAttentionBlock</c>), <b>GPU-resident</b>:
-/// affine-LN → q/k/v (the fused head-interleaved <c>c_qkv</c> weight is split into head-major q/k/v weights at load
-/// so each is a plain Linear) → per-head LayerNorm QK-norm → SDPA → <c>c_proj</c> residual; then affine-LN → erf-GELU
-/// MLP residual. All glue routes through <see cref="IBackend"/> — no mid-forward host <c>DataPointer</c> reads.</summary>
+/// <summary>ShapeVAE transformer self-attention block (CLIP-style <c>ResidualAttentionBlock</c>), <b>GPU-resident</b> end to end via <see cref="IBackend"/> ops.</summary>
 internal sealed unsafe class Hunyuan3DVaeResBlock
 {
     private readonly int _width, _heads, _headDim, _mlpDim;
@@ -67,9 +64,7 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
     private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => Hunyuan3DShapeVae.F32(w[k]);
 }
 
-/// <summary>ShapeVAE <c>geo_decoder</c> (GPU-resident): Fourier-embed query points → <c>query_proj</c> → one
-/// cross-attn block (queries attend to the latents via precomputed K/V) → <c>ln_post</c> → <c>output_proj</c>
-/// (Width→1 occupancy). The fused head-interleaved <c>c_kv</c> weight is split into head-major k/v weights at load.</summary>
+/// <summary>ShapeVAE <c>geo_decoder</c> (GPU-resident): Fourier-embeds query points, cross-attends them to the latents via precomputed K/V, and projects to a scalar occupancy.</summary>
 internal sealed unsafe class Hunyuan3DGeoDecoder
 {
     private readonly int _width, _heads, _headDim, _bands, _fourierDim, _mlpDim;
@@ -109,8 +104,7 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
-    /// <summary>Precomputes the query-independent cross-attn K/V (head-major, permuted to [1,H,Nl,D]) from the
-    /// processed latents: <c>ln_2(latents)</c> → k/v Linears → k_norm(k). Returns (kP, vP) [1,H,Nl,D].</summary>
+    /// <summary>Precomputes the query-independent cross-attn K/V (head-major, permuted to <c>[1,H,Nl,D]</c>) from the processed latents.</summary>
     public (Tensor kP, Tensor vP) PrepareKv(IBackend backend, Tensor latents)
     {
         int nl = (int)latents.Shape[1];
@@ -165,12 +159,10 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => Hunyuan3DShapeVae.F32(w[k]);
 }
 
-/// <summary>Host helpers for the ShapeVAE: one-time head-interleaved weight split (so fused <c>c_qkv</c>/<c>c_kv</c>
-/// become plain head-major Linears). The FourierEmbedder is now a device op (<see cref="IBackend.FourierEmbed"/>).</summary>
+/// <summary>Host helpers for the ShapeVAE: one-time head-interleaved weight split so fused <c>c_qkv</c>/<c>c_kv</c> become plain head-major Linears.</summary>
 internal static unsafe class Hunyuan3DVaeOps
 {
-    /// <summary>Splits a fused, head-interleaved projection weight <c>[k·W, W]</c> (row layout per head [t=0..k-1]·D)
-    /// into <paramref name="k"/> head-major weights <c>[W, W]</c> (row = h·D+d ← fused row h·k·D + t·D + d). One-time.</summary>
+    /// <summary>Splits a fused, head-interleaved projection weight <c>[k·W, W]</c> into <paramref name="k"/> head-major weights <c>[W, W]</c>; a one-time load-path transform.</summary>
     public static (Tensor, Tensor, Tensor) SplitInterleavedWeight(Tensor fused, int k, int heads, int headDim)
     {
         int w = heads * headDim, inDim = (int)fused.Shape[1];

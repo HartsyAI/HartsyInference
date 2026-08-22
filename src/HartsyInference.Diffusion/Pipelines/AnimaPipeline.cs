@@ -13,17 +13,10 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Anima (Cosmos-Predict2 family) text-to-image pipeline. Image-only path with two-stage text conditioning:
-/// caller-supplied Qwen-3 0.6B hidden states are first refined by the in-checkpoint
-/// <see cref="AnimaLlmAdapter"/> (a 6-block self+cross+MLP transformer) into 1024-dim features, which then feed
-/// the DiT's cross-attention. The flow-match Euler scheduler is fixed at <c>shift = 3.0</c> per the Anima reference
-/// workflow (ER-SDE substitute; pixel parity with Comfy's <c>er_sde + simple</c> requires a dedicated SDE scheduler
-/// — see roadmap).</summary>
+/// <summary>Anima (Cosmos-Predict2 family) text-to-image pipeline. Image-only path with two-stage text conditioning: caller-supplied Qwen-3 0.6B hidden states are first refined by the in-checkpoint <see cref="AnimaLlmAdapter"/> (a 6-block self+cross+MLP transformer) into 1024-dim features, which then feed the DiT's cross-attention. The flow-match Euler scheduler is fixed at <c>shift = 3.0</c> per the Anima reference workflow (ER-SDE substitute; pixel parity with Comfy's <c>er_sde + simple</c> requires a dedicated SDE scheduler — see roadmap).</summary>
 public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
-    /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a
-    /// tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay
-    /// device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
+    /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
     private static readonly bool DiagnosticStats = Environment.GetEnvironmentVariable("ANIMA_DEBUG_STATS") == "1";
 
     private readonly AnimaTransformer _transformer;
@@ -38,19 +31,14 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
     private int[]? _cachedUncondKey;
     private Tensor? _cachedUncond;
 
-    /// <summary>Creates an Anima t2i pipeline. Caller owns the components. The VAE is the
-    /// <see cref="QwenImageVaeDecoder"/> (3D causal autoencoder collapsed to 2D for image mode);
-    /// the standard <see cref="VaeDecoder"/> class can't load this checkpoint because the key
-    /// layout and conv ranks differ. Img2img is unavailable; use the overload accepting a
-    /// <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
+    /// <summary>Creates an Anima t2i pipeline. Caller owns the components. The VAE is the <see cref="QwenImageVaeDecoder"/> (3D causal autoencoder collapsed to 2D for image mode); the standard <see cref="VaeDecoder"/> class can't load this checkpoint because the key layout and conv ranks differ. Img2img is unavailable; use the overload accepting a <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
     public AnimaPipeline(IBackend backend, AnimaTransformer transformer, AnimaLlmAdapter llmAdapter,
         QwenImageVaeDecoder vaeDecoder, AnimaConfig config)
         : this(backend, transformer, llmAdapter, vaeDecoder, vaeEncoder: null, config)
     {
     }
 
-    /// <summary>Creates an Anima pipeline with both VAE halves loaded — required for img2img / inpaint
-    /// (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>).</summary>
+    /// <summary>Creates an Anima pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>).</summary>
     public AnimaPipeline(IBackend backend, AnimaTransformer transformer, AnimaLlmAdapter llmAdapter,
         QwenImageVaeDecoder vaeDecoder, QwenImageVaeEncoder? vaeEncoder, AnimaConfig config)
         : base(backend)
@@ -62,10 +50,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-computed Qwen-3 0.6B hidden states <c>[1, T, 1024]</c> + T5
-    /// tokenizations of the same prompt(s). The LlmAdapter's main stream is built from
-    /// <c>embed[t5TokenIds]</c>; the Qwen-3 states are the cross-attention K/V source. The adapter's output
-    /// sequence length equals the T5 token count (NOT the Qwen-3 token count).
+    /// <summary>Generates an image from pre-computed Qwen-3 0.6B hidden states <c>[1, T, 1024]</c> + T5 tokenizations of the same prompt(s). The LlmAdapter's main stream is built from <c>embed[t5TokenIds]</c>; the Qwen-3 states are the cross-attention K/V source. The adapter's output sequence length equals the T5 token count (NOT the Qwen-3 token count).
     /// <para>CFG dual-pass when <paramref name="cfgScale"/> &gt; 1 and both negative embeddings and negative
     /// T5 token ids are provided.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromEmbeddings(
@@ -399,10 +384,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         _cachedUncondKey = null;
     }
 
-    /// <summary>Print min/max/mean/abs_mean/std/has_nan/has_inf for a tensor, F32 or convertible. Used to
-    /// trace where the pipeline diverges from expected ranges per the Phase 3/4 debugging methodology
-    /// (see PHASE_3_DEVIATIONS.md — the recurring failure mode is "structurally right but numerically off",
-    /// and the cheapest diagnostic is stats prints at every boundary).</summary>
+    /// <summary>Print min/max/mean/abs_mean/std/has_nan/has_inf for a tensor, F32 or convertible. Used to trace where the pipeline diverges from expected ranges per the Phase 3/4 debugging methodology (see PHASE_3_DEVIATIONS.md — the recurring failure mode is "structurally right but numerically off", and the cheapest diagnostic is stats prints at every boundary).</summary>
     private static unsafe void LogStats(string label, Tensor t)
     {
         Tensor src = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
@@ -431,10 +413,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         if (!ReferenceEquals(src, t)) src.Dispose();
     }
 
-    /// <summary>Print per-channel mean/std/abs_mean of a 4-D tensor [B, C, H, W]. Used to detect whether
-    /// individual latent channels carry distinct content (suggesting the DiT produced meaningful output
-    /// and the VAE is the issue) vs all channels looking statistically identical (suggesting the DiT
-    /// is producing uniform-ish noise per channel = DiT is the issue).</summary>
+    /// <summary>Print per-channel mean/std/abs_mean of a 4-D tensor [B, C, H, W]. Used to detect whether individual latent channels carry distinct content (suggesting the DiT produced meaningful output and the VAE is the issue) vs all channels looking statistically identical (suggesting the DiT is producing uniform-ish noise per channel = DiT is the issue).</summary>
     private static unsafe void LogPerChannelStats(string label, Tensor t)
     {
         Tensor src = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
@@ -491,10 +470,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return copy;
     }
 
-    /// <summary>Right-pads <paramref name="text"/> <c>[B, S, D]</c> to <paramref name="targetLen"/> tokens by
-    /// appending all-zero rows. Caller owns the returned tensor and the input. Mirrors
-    /// <c>diffsynth/models/anima_dit.py:preprocess_text_embeds</c>'s
-    /// <c>F.pad(out, (0, 0, 0, 512 - out.shape[1]))</c>.</summary>
+    /// <summary>Right-pads <paramref name="text"/> <c>[B, S, D]</c> to <paramref name="targetLen"/> tokens by appending all-zero rows. Caller owns the returned tensor and the input. Mirrors <c>diffsynth/models/anima_dit.py:preprocess_text_embeds</c>'s <c>F.pad(out, (0, 0, 0, 512 - out.shape[1]))</c>.</summary>
     private static unsafe Tensor PadSeq(Tensor text, int targetLen)
     {
         int batch = (int)text.Shape[0];
@@ -533,8 +509,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         for (long i = 0; i < n; i++) p[i] *= s;
     }
 
-    /// <summary>Out-of-place scalar multiply: <c>out[i] = s * src[i]</c>. Used for the EDM
-    /// <c>latent_model_input = latent * c_in</c> step.</summary>
+    /// <summary>Out-of-place scalar multiply: <c>out[i] = s * src[i]</c>. Used for the EDM <c>latent_model_input = latent * c_in</c> step.</summary>
     private static unsafe Tensor ScaleClone(Tensor src, float s)
     {
         Tensor result = new Tensor(src.Shape, DType.F32);
@@ -545,10 +520,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return result;
     }
 
-    /// <summary>Cosmos-style CFG: <c>out[i] = x0_cond[i] + scale * (x0_cond[i] - x0_uncond[i])</c>.
-    /// NB: this differs from SD3/Flux's <c>uncond + scale * (cond - uncond)</c> — Cosmos uses cond as the
-    /// baseline, not uncond, so the conditioning side is amplified additively. Matches
-    /// diffusers' pipeline_cosmos2_text2image.py line 198.</summary>
+    /// <summary>Cosmos-style CFG: <c>out[i] = x0_cond[i] + scale * (x0_cond[i] - x0_uncond[i])</c>. NB: this differs from SD3/Flux's <c>uncond + scale * (cond - uncond)</c> — Cosmos uses cond as the baseline, not uncond, so the conditioning side is amplified additively. Matches diffusers' pipeline_cosmos2_text2image.py line 198.</summary>
     private static unsafe Tensor CosmosCfg(Tensor x0Cond, Tensor x0Uncond, float scale)
     {
         Tensor result = new Tensor(x0Cond.Shape, DType.F32);
@@ -560,8 +532,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return result;
     }
 
-    /// <summary>EDM denoised estimate: <c>x0[i] = cSkip * latent[i] + cOut * f[i]</c>.
-    /// Matches diffusers' <c>noise_pred = c_skip * latents + c_out * F</c>.</summary>
+    /// <summary>EDM denoised estimate: <c>x0[i] = cSkip * latent[i] + cOut * f[i]</c>. Matches diffusers' <c>noise_pred = c_skip * latents + c_out * F</c>.</summary>
     private static unsafe Tensor EdmDenoise(Tensor latent, Tensor f, float cSkip, float cOut)
     {
         Tensor x0 = new Tensor(latent.Shape, DType.F32);
@@ -573,8 +544,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return x0;
     }
 
-    /// <summary>Convert EDM denoised estimate to FlowMatchEuler-compatible epsilon:
-    /// <c>eps[i] = (latent[i] - x0[i]) / sigma</c>.</summary>
+    /// <summary>Convert EDM denoised estimate to FlowMatchEuler-compatible epsilon: <c>eps[i] = (latent[i] - x0[i]) / sigma</c>.</summary>
     private static unsafe Tensor EpsFromX0(Tensor latent, Tensor x0, float sigma)
     {
         Tensor eps = new Tensor(latent.Shape, DType.F32);
@@ -587,9 +557,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return eps;
     }
 
-    /// <summary>Flow-matching forward noising for img2img: <c>out = (1 − sigma)·source + sigma·noise</c>.
-    /// Mirrors the Z-Image / Anima schedule where the clean latent sits at sigma=0 and pure noise at the
-    /// initial sigma, so the denoise loop resumed at step <c>startStep</c> integrates back to the source.</summary>
+    /// <summary>Flow-matching forward noising for img2img: <c>out = (1 − sigma)·source + sigma·noise</c>. Mirrors the Z-Image / Anima schedule where the clean latent sits at sigma=0 and pure noise at the initial sigma, so the denoise loop resumed at step <c>startStep</c> integrates back to the source.</summary>
     private static unsafe void AddNoiseFlowMatch(Tensor outLatent, Tensor source, Tensor noise, float sigma)
     {
         float* op = (float*)outLatent.DataPointer;

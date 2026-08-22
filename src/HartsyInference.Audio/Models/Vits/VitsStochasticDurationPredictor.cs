@@ -5,14 +5,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS stochastic duration predictor (<c>StochasticDurationPredictor</c>, used when
-/// <c>use_sdp=True</c> — Piper's default). Inference (reverse) path: <c>pre</c> Conv1d → <c>convs</c> DDSConv
-/// (depthwise-separable dilated conv stack, LayerNorm + GELU) → <c>proj</c> as the flow conditioner; then
-/// sample <c>z ~ randn * noise_scale_w</c> of shape <c>[1,2,T]</c> and run it BACKWARD through the flow stack
-/// <c>[Flip, (ConvFlow, Flip)…, ElementwiseAffine]</c>. Each <c>ConvFlow</c> builds spline parameters with its
-/// own DDSConv and applies an unconstrained piecewise-rational-quadratic-spline transform (10 bins, linear
-/// tails) in reverse. The first latent channel is <c>logw</c> (log-durations, one per text frame); the
-/// downstream <see cref="VitsLengthRegulator"/> applies <c>exp</c>. Channels-first <c>[1, hidden, T]</c>.</summary>
+/// <summary>VITS stochastic duration predictor (<c>StochasticDurationPredictor</c>, used when <c>use_sdp=True</c> — Piper's default).</summary>
+/// <remarks>Inference (reverse) path: <c>pre</c> Conv1d → <c>convs</c> DDSConv (depthwise-separable dilated conv stack, LayerNorm + GELU) → <c>proj</c> as the flow conditioner; then sample <c>z ~ randn * noise_scale_w</c> of shape <c>[1,2,T]</c> and run it BACKWARD through the flow stack <c>[Flip, (ConvFlow, Flip)…, ElementwiseAffine]</c>. Each <c>ConvFlow</c> builds spline parameters with its own DDSConv and applies an unconstrained piecewise-rational-quadratic-spline transform (10 bins, linear tails) in reverse. The first latent channel is <c>logw</c> (log-durations, one per text frame); the downstream <see cref="VitsLengthRegulator"/> applies <c>exp</c>.</remarks>
 public sealed unsafe class VitsStochasticDurationPredictor
 {
     private const int NumBins = 10;
@@ -83,9 +77,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
         return null; // identity (logs == 0)
     }
 
-    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c> → <c>float[T]</c>. When a
-    /// speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and a <c>cond</c> layer are present, <c>cond(g)</c>
-    /// is added after <c>pre(x)</c> (MeloTTS/Bert-VITS2).</summary>
+    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c>; when a speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and a <c>cond</c> layer are present, <c>cond(g)</c> is added after <c>pre(x)</c> (MeloTTS/Bert-VITS2).</summary>
     public float[] Forward(IBackend backend, Tensor x, int t, float noiseScaleW, int seed, Tensor? g = null)
     {
         if (_preW is null || _convs is null || _flows is null)
@@ -163,10 +155,8 @@ public sealed unsafe class VitsStochasticDurationPredictor
         }
     }
 
-    /// <summary>Unconstrained piecewise-rational-quadratic-spline transform (Neural Spline Flow) for a single
-    /// scalar input. Outside <c>[-B, B]</c> the linear tails pass the input through unchanged; inside, the
-    /// (forward or inverse) rational-quadratic map is applied. Public + static so the inverse pass can be unit
-    /// tested directly. Returns the transformed value (logabsdet is irrelevant at inference and dropped).</summary>
+    /// <summary>Unconstrained piecewise-rational-quadratic-spline transform (Neural Spline Flow) for a single scalar input: outside <c>[-B, B]</c> the linear tails pass the input through unchanged, inside the (forward or inverse) rational-quadratic map is applied. Public + static so the inverse pass can be unit tested directly.</summary>
+    /// <returns>The transformed value (logabsdet is irrelevant at inference and dropped).</returns>
     public static float UnconstrainedRationalQuadraticSpline(float input, ReadOnlySpan<float> unnormWidths,
         ReadOnlySpan<float> unnormHeights, ReadOnlySpan<float> unnormDerivatives, bool inverse,
         float tailBound = TailBound)
@@ -177,8 +167,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
             -tailBound, tailBound, -tailBound, tailBound);
     }
 
-    /// <summary>The bounded rational-quadratic spline on <c>[left,right]×[bottom,top]</c>. Forward maps the
-    /// input domain to the output range; <paramref name="inverse"/> solves the per-bin quadratic to invert.</summary>
+    /// <summary>The bounded rational-quadratic spline on <c>[left,right]×[bottom,top]</c>: forward maps the input domain to the output range, <paramref name="inverse"/> solves the per-bin quadratic to invert.</summary>
     private static float RationalQuadraticSpline(float input, ReadOnlySpan<float> unnormWidths,
         ReadOnlySpan<float> unnormHeights, ReadOnlySpan<float> unnormDerivatives, bool inverse,
         float left, float right, float bottom, float top)
@@ -272,9 +261,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
         return x > 20f ? x : MathF.Log(1f + MathF.Exp(x));
     }
 
-    /// <summary>Depthwise-separable dilated conv stack (<c>DDSConv</c>): per layer a depthwise conv
-    /// (groups=channels, dilation=kernel^i) → LayerNorm → GELU → pointwise 1×1 conv → LayerNorm → GELU, added
-    /// as a residual. Channels-first <c>[1, ch, T]</c>. LayerNorm is over the channel dim.</summary>
+    /// <summary>Depthwise-separable dilated conv stack (<c>DDSConv</c>): per layer a depthwise conv (groups=channels, dilation=kernel^i) → LayerNorm → GELU → pointwise 1×1 conv → LayerNorm → GELU, added as a residual; LayerNorm is over the channel dim.</summary>
     private sealed class DdsConv
     {
         private readonly int _ch, _kernel, _layers;
@@ -379,9 +366,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
         }
     }
 
-    /// <summary>A single <c>ConvFlow</c> coupling layer: a DDSConv-backed network predicts per-frame spline
-    /// parameters (widths/heights/derivatives) from one half of the channels, and the rational-quadratic spline
-    /// transforms the other half. Here the channels are split <c>1|1</c> (the SDP operates on 2 channels).</summary>
+    /// <summary>A single <c>ConvFlow</c> coupling layer: a DDSConv-backed network predicts per-frame spline parameters (widths/heights/derivatives) from one half of the channels, and the rational-quadratic spline transforms the other half; here the channels are split <c>1|1</c> (the SDP operates on 2 channels).</summary>
     private sealed class ConvFlow
     {
         private readonly int _filter, _kernel, _layers, _numBins;
@@ -401,8 +386,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
             _convs.LoadWeights(w, $"{prefix}.convs");
         }
 
-        /// <summary>Reverse coupling on <paramref name="z"/> <c>[1,2,T]</c>: channel 0 (x0) conditions the spline
-        /// applied (inverse) to channel 1 (x1), in place; channel 0 is unchanged.</summary>
+        /// <summary>Reverse coupling on <paramref name="z"/> <c>[1,2,T]</c>: channel 0 (x0) conditions the spline applied (inverse) to channel 1 (x1), in place; channel 0 is unchanged.</summary>
         public unsafe void ReverseInPlace(IBackend backend, Tensor z, Tensor cond, int t)
         {
             float* zp = (float*)z.DataPointer;

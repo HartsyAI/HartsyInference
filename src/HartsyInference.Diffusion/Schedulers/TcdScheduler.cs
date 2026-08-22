@@ -24,13 +24,13 @@ public sealed unsafe class TcdScheduler : IScheduler
     /// <summary>Seed for per-step noise; set to the generation seed for reproducibility.</summary>
     public int Seed { get; set; }
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "tcd";
 
-    /// <summary>Number of configured inference steps.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
-    /// <summary>The computed timestep schedule.</summary>
+    /// <inheritdoc/>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
     /// <summary>Initial noise sigma (always 1.0 for TCD).</summary>

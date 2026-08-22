@@ -34,8 +34,7 @@ public sealed class WakeModelSet : IDisposable
         get { lock (_lock) return [.. _heads.Keys]; }
     }
 
-    /// <summary>Loads the shared front-end and backbone, then every configured head. When
-    /// <paramref name="words"/> is empty, every head found on disk is loaded with default settings.</summary>
+    /// <summary>Loads the shared front-end and backbone, then every configured head. When <paramref name="words"/> is empty, every head found on disk is loaded with default settings.</summary>
     public void Load(IReadOnlyDictionary<string, WakeWordConfig> words)
     {
         string backbone = Path.Combine(ModelRoot, "backbone");
@@ -88,8 +87,7 @@ public sealed class WakeModelSet : IDisposable
         Logs.Info($"[Audio][Wake] Loaded {_heads.Count} wake word(s): {string.Join(", ", Words)}.");
     }
 
-    /// <summary>Loads one head, adding it to any live pipelines the caller then refreshes. Returns false and logs
-    /// when the head file is absent, so one bad entry does not prevent the rest from serving.</summary>
+    /// <summary>Loads one head, adding it to any live pipelines the caller then refreshes. Returns false and logs when the head file is absent, so one bad entry does not prevent the rest from serving.</summary>
     public bool TryLoadHead(string name, WakeWordConfig config)
     {
         string stem = config.Head ?? name;

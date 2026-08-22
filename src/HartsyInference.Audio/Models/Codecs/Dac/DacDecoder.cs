@@ -5,7 +5,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Dac;
 
-/// <summary>DAC decoder. Mirrors the descript-audio-codec decoder:
+/// <summary>DAC decoder — mirrors the descript-audio-codec decoder architecture.</summary>
+/// <remarks>
 /// <code>
 ///   initial: WNConv1d(latent_dim → decoder_dim, k=7, padding=3)
 ///   for stride in decoder_rates:
@@ -28,7 +29,8 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 /// <c>padLeft</c>/<c>padRight</c> signature without needing an explicit
 /// <c>output_padding</c> argument.</para>
 ///
-/// <para>Final <c>tanh</c> keeps reconstructed PCM safely inside <c>[-1, 1]</c>.</para></summary>
+/// <para>Final <c>tanh</c> keeps reconstructed PCM safely inside <c>[-1, 1]</c>.</para>
+/// </remarks>
 internal sealed class DacDecoder
 {
     private readonly DacConfig _cfg;
@@ -100,8 +102,7 @@ internal sealed class DacDecoder
         _finalConvB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{_nStages + 2}.bias"]);
     }
 
-    /// <summary>Forward — <paramref name="latent"/> channels-first
-    /// <c>[B, latent_dim, T_frames]</c> → <c>[B, 1, T_frames * hop]</c>.</summary>
+    /// <summary>Forward — <paramref name="latent"/> channels-first <c>[B, latent_dim, T_frames]</c> → <c>[B, 1, T_frames * hop]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
     {
         if (_initialW is null) throw new InvalidOperationException("DacDecoder weights not loaded.");
@@ -116,10 +117,8 @@ internal sealed class DacDecoder
         int t = tInit;
         int dim = _cfg.DecoderDim;
 
-        // Decoder stages.
         for (int i = 0; i < _nStages; i++)
         {
-            // Snake.
             Tensor snk = new(x.Shape, DType.F32);
             backend.Snake(snk, x, _stageSnakeAlpha[i]!, null);
             x.Dispose();

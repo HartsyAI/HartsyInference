@@ -12,8 +12,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Kandinsky 5.0 T2I-Lite recipe (kandinskylab, ~6B DiT): the checkpoint is the transformer — either a single repackaged safetensors or a diffusers <c>transformer/</c> shard directory — and the dual text stack (Qwen2.5-VL-7B sequence embeddings via <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) plus the 16-channel Flux VAE (<see cref="SideModels.FluxAe"/>) resolve as side models.
-/// <para>Unlike the other lifted families this one has NO SwarmUI loader to port — the extension lists Kandinsky 5 as unsupported because <see cref="Kandinsky5Pipeline"/> only accepts PRE-COMPUTED embeddings. Construction here follows the pipeline's own ctor and the <c>Kandinsky5GenerationTests</c> wiring; the live encode in <see cref="Kandinsky5RecipePipeline"/> is ported from the diffusers reference (<c>pipeline_kandinsky_t2i.encode_prompt</c>) and is UNVERIFIED against real weights.</para></summary>
+/// <summary>Kandinsky 5.0 T2I-Lite recipe (kandinskylab, ~6B DiT): the checkpoint is the transformer — either a single repackaged safetensors or a diffusers <c>transformer/</c> shard directory — and the dual text stack (Qwen2.5-VL-7B sequence embeddings via <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) plus the 16-channel Flux VAE (<see cref="SideModels.FluxAe"/>) resolve as side models.</summary>
+/// <remarks>Unlike the other lifted families this one has NO SwarmUI loader to port — the extension lists Kandinsky 5 as unsupported because <see cref="Kandinsky5Pipeline"/> only accepts PRE-COMPUTED embeddings. Construction here follows the pipeline's own ctor and the <c>Kandinsky5GenerationTests</c> wiring; the live encode in <see cref="Kandinsky5RecipePipeline"/> is ported from the diffusers reference (<c>pipeline_kandinsky_t2i.encode_prompt</c>) and is UNVERIFIED against real weights.</remarks>
 public sealed class Kandinsky5Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>

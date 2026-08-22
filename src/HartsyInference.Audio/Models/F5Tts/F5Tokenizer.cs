@@ -3,14 +3,11 @@ using System.Text;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>F5-TTS character-level tokenizer. The reference repo's <c>vocab.txt</c> is
-/// a flat list of single characters (one per line), one ID per line, with ID 0 reserved
-/// as a filler/pad. F5-TTS does NOT require G2P — raw text characters go in as token IDs
-/// and the model learns the text-to-speech mapping internally.
-///
-/// <para>For multilingual fine-tunes (Mandarin, Japanese, etc.) the vocab may include
-/// pinyin tokens or CJK characters; this tokenizer falls back to a Unicode-codepoint
-/// lookup so any character not in the trained vocab simply maps to the filler token.</para></summary>
+/// <summary>F5-TTS character-level tokenizer; F5-TTS does NOT require G2P — raw text characters go in as token IDs and the model learns the text-to-speech mapping internally.</summary>
+// The reference repo's vocab.txt is a flat list of single characters (one per line), one ID per line,
+// with ID 0 reserved as a filler/pad. For multilingual fine-tunes (Mandarin, Japanese, etc.) the vocab
+// may include pinyin tokens or CJK characters; any character not in the trained vocab simply maps to the
+// filler token.
 public sealed class F5Tokenizer : IDisposable
 {
     private readonly Dictionary<string, int> _vocab;
@@ -20,9 +17,7 @@ public sealed class F5Tokenizer : IDisposable
     /// <summary>Vocab size including the implicit ID 0 filler (so 1 + line-count).</summary>
     public int VocabSize { get; }
 
-    /// <summary>Loads the tokenizer from <c>vocab.txt</c> in the model directory. The
-    /// file has one token per line; the line number (1-based) becomes the token ID,
-    /// because the model uses 0 internally as a filler / batch-padding token.</summary>
+    /// <summary>Loads the tokenizer from <c>vocab.txt</c> in the model directory; the line number (1-based) becomes the token ID, since the model uses 0 internally as a filler / batch-padding token.</summary>
     public F5Tokenizer(string modelDirectory)
     {
         string path = Path.Combine(modelDirectory, "vocab.txt");
@@ -43,9 +38,7 @@ public sealed class F5Tokenizer : IDisposable
         VocabSize = lines.Length + 1;  // +1 for the filler token
     }
 
-    /// <summary>Tokenizes a string into character token IDs. Unknown characters silently
-    /// map to the filler ID 0 (matching the upstream <c>list_str_to_idx</c> behavior with
-    /// <c>extra_token_idx</c>=0).</summary>
+    /// <summary>Unknown characters silently map to the filler ID 0 (matching the upstream <c>list_str_to_idx</c> behavior with <c>extra_token_idx</c>=0).</summary>
     public int[] Encode(string text)
     {
         ThrowIfDisposed();
@@ -60,8 +53,7 @@ public sealed class F5Tokenizer : IDisposable
         return ids;
     }
 
-    /// <summary>Decodes a sequence of token IDs to a string. Used only for sanity
-    /// printing — F5-TTS is a synthesizer, never produces token IDs as output.</summary>
+    /// <summary>Used only for sanity printing — F5-TTS is a synthesizer, never produces token IDs as output.</summary>
     public string Decode(ReadOnlySpan<int> ids)
     {
         ThrowIfDisposed();

@@ -1,8 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>One entry in the clause phoneme list (espeak <c>PHONEME_LIST</c>), the context over which the bytecode
-/// interpreter runs. Holds the current phoneme, its resolved table entry, stress level, and word-boundary marker that
-/// the condition tests (prevPh/nextPh/word-boundary) consult.</summary>
+/// <summary>One entry in the clause phoneme list (espeak <c>PHONEME_LIST</c>), the context over which the bytecode interpreter runs; holds the current phoneme, its resolved table entry, stress level, and word-boundary marker that the condition tests (prevPh/nextPh/word-boundary) consult.</summary>
 internal sealed class EspeakPhonemeListEntry
 {
     /// <summary>Phoneme code (index into the active phoneme table).</summary>

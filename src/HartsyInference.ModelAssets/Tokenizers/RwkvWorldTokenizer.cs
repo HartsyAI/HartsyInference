@@ -2,19 +2,13 @@ using System.Text;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>The RWKV "World" tokenizer (<c>tokenizer.ggml.model == "rwkv"</c>): a fixed vocabulary of arbitrary
-/// byte strings tokenized by GREEDY LONGEST-PREFIX MATCH over raw UTF-8 bytes — no BPE merges, no
-/// SentencePiece unigram scoring. llama.cpp's GGUF converter stores each vocab entry as an escaped ASCII string
-/// (<c>\t</c>/<c>\n</c>/<c>\r</c>/<c>\xNN</c> plus a literal backslash-escape fallback) so arbitrary/invalid-UTF8
-/// byte sequences survive the GGUF string table; this class un-escapes them back to raw bytes at load and
-/// matches llama.cpp's <c>llm_tokenizer_rwkv</c> byte-trie exactly (see <c>llama-vocab.cpp</c>).</summary>
+/// <summary>The RWKV "World" tokenizer (<c>tokenizer.ggml.model == "rwkv"</c>): a fixed vocabulary of arbitrary byte strings tokenized by GREEDY LONGEST-PREFIX MATCH over raw UTF-8 bytes — no BPE merges, no SentencePiece unigram scoring. llama.cpp's GGUF converter stores each vocab entry as an escaped ASCII string (<c>\t</c>/<c>\n</c>/<c>\r</c>/<c>\xNN</c> plus a literal backslash-escape fallback) so arbitrary/invalid-UTF8 byte sequences survive the GGUF string table; this class un-escapes them back to raw bytes at load and matches llama.cpp's <c>llm_tokenizer_rwkv</c> byte-trie exactly (see <c>llama-vocab.cpp</c>).</summary>
 public sealed class RwkvWorldTokenizer : ILlmTokenizer
 {
     private const int TypeControl = 3;
     private const int TypeUserDefined = 4;
 
-    /// <summary>Byte-trie node: one child per possible next byte, plus an optional token id when a vocab entry
-    /// ends here (a token can be a byte-string that is also a strict prefix of a longer one).</summary>
+    /// <summary>Byte-trie node: one child per possible next byte, plus an optional token id when a vocab entry ends here (a token can be a byte-string that is also a strict prefix of a longer one).</summary>
     private sealed class TrieNode
     {
         public Dictionary<byte, TrieNode>? Children;
@@ -33,10 +27,7 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
     public string? EosToken { get; }
     public IReadOnlyList<int> StopIds { get; }
 
-    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id, each
-    /// entry the llama.cpp-escaped byte string); <paramref name="tokenType"/> (optional) marks control/
-    /// user-defined tokens (used only for special-literal recognition in rendered chat text — RWKV-World has no
-    /// real chat template, so most callers fall back to ChatML and rarely hit this path).</summary>
+    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id, each entry the llama.cpp-escaped byte string); <paramref name="tokenType"/> (optional) marks control/ user-defined tokens (used only for special-literal recognition in rendered chat text — RWKV-World has no real chat template, so most callers fall back to ChatML and rarely hit this path).</summary>
     public RwkvWorldTokenizer(string[] tokens, int[]? tokenType, int? bosId, int? eosId,
         IReadOnlyList<int>? extraStopIds = null)
     {
@@ -73,10 +64,7 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
         StopIds = stops.ToArray();
     }
 
-    /// <summary>Reverses llama.cpp's RWKV vocab escaping (<c>llama_unescape_rwkv_token</c>): <c>\t</c>/<c>\n</c>/
-    /// <c>\r</c>/<c>\xHH</c> plus "backslash followed by any other char emits that char literally". Operates on
-    /// the token's raw UTF-8 bytes (not .NET chars) so it exactly reproduces the original byte string, including
-    /// byte sequences that are not valid UTF-8 on their own.</summary>
+    /// <summary>Reverses llama.cpp's RWKV vocab escaping (<c>llama_unescape_rwkv_token</c>): <c>\t</c>/<c>\n</c>/ <c>\r</c>/<c>\xHH</c> plus "backslash followed by any other char emits that char literally". Operates on the token's raw UTF-8 bytes (not .NET chars) so it exactly reproduces the original byte string, including byte sequences that are not valid UTF-8 on their own.</summary>
     private static byte[] UnescapeToken(string escaped)
     {
         byte[] src = Encoding.UTF8.GetBytes(escaped);

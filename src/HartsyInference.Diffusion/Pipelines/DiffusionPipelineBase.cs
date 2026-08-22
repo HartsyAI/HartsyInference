@@ -34,72 +34,44 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// </summary>
 public abstract class DiffusionPipelineBase : IDisposable
 {
-    /// <summary>Compute backend used by every model component the pipeline routes through unless a component
-    /// backend below overrides it. Injected at construction, immutable for the pipeline's lifetime.</summary>
+    /// <summary>Compute backend used by every model component the pipeline routes through unless a component backend below overrides it. Injected at construction, immutable for the pipeline's lifetime.</summary>
     protected IBackend Backend { get; }
 
-    /// <summary>Backend the prompt/text encoders run on; defaults to <see cref="Backend"/>. Settable at
-    /// construction only (init) — cached pipelines are keyed by placement, so a live pipeline never re-places.
-    /// Safe to point at another GPU because encoder→denoiser handoffs host-materialize the conditioning (the
-    /// pre-loop <c>DataPointer</c> sweeps are the load-bearing boundary).</summary>
+    /// <summary>Backend the prompt/text encoders run on; defaults to <see cref="Backend"/>. Settable at construction only (init) — cached pipelines are keyed by placement, so a live pipeline never re-places. Safe to point at another GPU because encoder→denoiser handoffs host-materialize the conditioning (the pre-loop <c>DataPointer</c> sweeps are the load-bearing boundary).</summary>
     public IBackend TextEncoderBackend { get; init; }
 
-    /// <summary>Backend the VAE encode/decode runs on; defaults to <see cref="Backend"/>. Same host-side
-    /// boundary argument as <see cref="TextEncoderBackend"/> (latents cross via host tensors).</summary>
+    /// <summary>Backend the VAE encode/decode runs on; defaults to <see cref="Backend"/>. Same host-side boundary argument as <see cref="TextEncoderBackend"/> (latents cross via host tensors).</summary>
     public IBackend VaeBackend { get; init; }
 
-    /// <summary>Second backend to run the CFG uncond branch on, concurrent with cond on <see cref="Backend"/>;
-    /// null (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>, which default to
-    /// <see cref="Backend"/>) means CFG-branch parallelism is off — the denoise loop runs cond/uncond
-    /// sequentially on <see cref="Backend"/> as before. Settable at construction only (init).</summary>
+    /// <summary>Second backend to run the CFG uncond branch on, concurrent with cond on <see cref="Backend"/>; null (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>, which default to <see cref="Backend"/>) means CFG-branch parallelism is off — the denoise loop runs cond/uncond sequentially on <see cref="Backend"/> as before. Settable at construction only (init).</summary>
     public IBackend? CfgParallelBackend { get; init; }
 
-    /// <summary>Second backend to run the DiT's tail block range on for VRAM-pooling sharding (Phase 8); null
-    /// (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>) means it's off — the denoise loop runs
-    /// the whole DiT on <see cref="Backend"/> as before. Unlike <see cref="CfgParallelBackend"/> this SPLITS the
-    /// block range instead of replicating weights, so the win is pooled VRAM, not latency. Settable at
-    /// construction only (init); pairs with <see cref="DitShardSplitBlock"/>.</summary>
+    /// <summary>Second backend to run the DiT's tail block range on for VRAM-pooling sharding (Phase 8); null (unlike <see cref="TextEncoderBackend"/>/<see cref="VaeBackend"/>) means it's off — the denoise loop runs the whole DiT on <see cref="Backend"/> as before. Unlike <see cref="CfgParallelBackend"/> this SPLITS the block range instead of replicating weights, so the win is pooled VRAM, not latency. Settable at construction only (init); pairs with <see cref="DitShardSplitBlock"/>.</summary>
     public IBackend? DitShardBackend { get; init; }
 
-    /// <summary>Block index at which the DiT's block loop splits when <see cref="DitShardBackend"/> is set:
-    /// <see cref="Backend"/> runs <c>[0, DitShardSplitBlock)</c>, <see cref="DitShardBackend"/> runs
-    /// <c>[DitShardSplitBlock, BlockCount)</c>. Meaningless when <see cref="DitShardBackend"/> is null.</summary>
+    /// <summary>Block index at which the DiT's block loop splits when <see cref="DitShardBackend"/> is set: <see cref="Backend"/> runs <c>[0, DitShardSplitBlock)</c>, <see cref="DitShardBackend"/> runs <c>[DitShardSplitBlock, BlockCount)</c>. Meaningless when <see cref="DitShardBackend"/> is null.</summary>
     public int DitShardSplitBlock { get; init; }
 
-    /// <summary>Ordered N-way DiT block-range stages (Phase 8+ generalization); null/empty = not configured. Where
-    /// a pipeline supports this it takes priority over <see cref="DitShardBackend"/>/<see cref="DitShardSplitBlock"/>,
-    /// which is the 2-way shape the other sharded pipelines still use unmodified — see <c>QwenImagePipeline</c> for
-    /// the one consumer today (<c>ROADMAP.md</c> item 7 tracks widening this to the rest). Settable at construction
-    /// only (init).</summary>
+    /// <summary>Ordered N-way DiT block-range stages (Phase 8+ generalization); null/empty = not configured. Where a pipeline supports this it takes priority over <see cref="DitShardBackend"/>/<see cref="DitShardSplitBlock"/>, which is the 2-way shape the other sharded pipelines still use unmodified — see <c>QwenImagePipeline</c> for the one consumer today (<c>ROADMAP.md</c> item 7 tracks widening this to the rest). Settable at construction only (init).</summary>
     public IReadOnlyList<DitShardStage>? DitShardStages { get; init; }
 
-    /// <summary>Ordered context-parallel rank backends (the video DiT's token-sequence split with REPLICATED
-    /// weights — a latency feature); entry 0 must be <see cref="Backend"/>. Null/empty = off, the byte-identical
-    /// single-backend denoise. Settable at construction only (init); consumed by the Wan video pipeline.</summary>
+    /// <summary>Ordered context-parallel rank backends (the video DiT's token-sequence split with REPLICATED weights — a latency feature); entry 0 must be <see cref="Backend"/>. Null/empty = off, the byte-identical single-backend denoise. Settable at construction only (init); consumed by the Wan video pipeline.</summary>
     public IReadOnlyList<IBackend>? CpBackends { get; init; }
 
-    /// <summary>Which path the most recent generation's context-parallel dispatch took — <c>"active"</c> or
-    /// <c>"fell-back(&lt;reason&gt;)"</c>; null when <see cref="CpBackends"/> isn't configured or the generation made
-    /// no decision yet. Same observability contract as <see cref="LastCfgParallelDecision"/>.</summary>
+    /// <summary>Which path the most recent generation's context-parallel dispatch took — <c>"active"</c> or <c>"fell-back(&lt;reason&gt;)"</c>; null when <see cref="CpBackends"/> isn't configured or the generation made no decision yet. Same observability contract as <see cref="LastCfgParallelDecision"/>.</summary>
     public string? LastCpDecision { get; protected set; }
 
-    /// <summary>Records <see cref="LastCpDecision"/> and mirrors it to the log with the stable
-    /// <c>[ContextParallel]</c> prefix tests and operators grep for.</summary>
+    /// <summary>Records <see cref="LastCpDecision"/> and mirrors it to the log with the stable <c>[ContextParallel]</c> prefix tests and operators grep for.</summary>
     protected void RecordCpDecision(string decision)
     {
         LastCpDecision = decision;
         Logs.Info($"[ContextParallel] {decision}");
     }
 
-    /// <summary>Which path the most recent generation's CFG-parallel dispatch took — <c>"active"</c>,
-    /// <c>"fell-back(&lt;reason&gt;)"</c>, or <c>"inapplicable(&lt;reason&gt;)"</c>; null when
-    /// <see cref="CfgParallelBackend"/> isn't configured or the generation made no decision yet. The fallback is
-    /// deliberately silent at the API level (a generation still succeeds), so this — plus the mirrored
-    /// <c>[CfgParallel]</c> log line — is how operators and tests observe which path actually ran.</summary>
+    /// <summary>Which path the most recent generation's CFG-parallel dispatch took — <c>"active"</c>, <c>"fell-back(&lt;reason&gt;)"</c>, or <c>"inapplicable(&lt;reason&gt;)"</c>; null when <see cref="CfgParallelBackend"/> isn't configured or the generation made no decision yet. The fallback is deliberately silent at the API level (a generation still succeeds), so this — plus the mirrored <c>[CfgParallel]</c> log line — is how operators and tests observe which path actually ran.</summary>
     public string? LastCfgParallelDecision { get; protected set; }
 
-    /// <summary>Records <see cref="LastCfgParallelDecision"/> and mirrors it to the log with the stable
-    /// <c>[CfgParallel]</c> prefix tests and operators grep for.</summary>
+    /// <summary>Records <see cref="LastCfgParallelDecision"/> and mirrors it to the log with the stable <c>[CfgParallel]</c> prefix tests and operators grep for.</summary>
     protected void RecordCfgParallelDecision(string decision)
     {
         LastCfgParallelDecision = decision;
@@ -122,13 +94,7 @@ public abstract class DiffusionPipelineBase : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
-    /// <summary>The single noise entry point for every pipeline's text-to-image path: the injected
-    /// <c>InitialNoise</c> when the request carries one (validated against <paramref name="latentShape"/>, throws
-    /// naming both shapes on mismatch), else fresh seeded noise — with the request's variation seed slerp-blended
-    /// in when set. Blending here, at whatever shape the pipeline seeds in, is what makes variation seed
-    /// architecture-agnostic: SD's 4-channel latents, 16-channel DiT latents, Chroma-Radiance's pixels and
-    /// Lens/Flux2's packed sequences all pass through this one site. Per-step re-noise and img2img draws stay on
-    /// <c>SeedGenerator.CreateNoise</c> directly — variation only ever replaces the STARTING noise.</summary>
+    /// <summary>The single noise entry point for every pipeline's text-to-image path: the injected <c>InitialNoise</c> when the request carries one (validated against <paramref name="latentShape"/>, throws naming both shapes on mismatch), else fresh seeded noise — with the request's variation seed slerp-blended in when set. Blending here, at whatever shape the pipeline seeds in, is what makes variation seed architecture-agnostic: SD's 4-channel latents, 16-channel DiT latents, Chroma-Radiance's pixels and Lens/Flux2's packed sequences all pass through this one site. Per-step re-noise and img2img draws stay on <c>SeedGenerator.CreateNoise</c> directly — variation only ever replaces the STARTING noise.</summary>
     protected static Tensor TakeOrCreateNoise(Requests.TextToImageRequest request, TensorShape latentShape, int seed)
     {
         if (request.InitialNoise is not null)
@@ -155,9 +121,7 @@ public abstract class DiffusionPipelineBase : IDisposable
         return noise;
     }
 
-    /// <summary>Switches every conv-running backend this pipeline owns to wrap (circular) padding for the duration of
-    /// one generation, so the output tiles seamlessly. <paramref name="mode"/> takes SwarmUI's vocabulary:
-    /// null/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis.
+    /// <summary>Switches every conv-running backend this pipeline owns to wrap (circular) padding for the duration of one generation, so the output tiles seamlessly. <paramref name="mode"/> takes SwarmUI's vocabulary: null/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis.
     /// <para>Backends are cached per architecture and persist across generations, so leaving a flag set would
     /// silently wrap-pad an unrelated request. Dispose restores each backend's PREVIOUS value rather than forcing
     /// false, so nesting and re-entrancy are safe. Always use with <c>using</c>.</para>

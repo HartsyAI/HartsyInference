@@ -6,13 +6,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>End-to-end text generation for the recurrent (SSM) decoders, mirroring
-/// <see cref="TextGenerationPipeline"/>'s contract (chat template → tokenize → decode loop → stop on
-/// EOS/limit → detokenize) so <c>HartsyLocalLLMProvider</c> can drive either pipeline uniformly.
-///
-/// <para>No KV cache — instead the model itself carries a fixed-size recurrent state across calls
-/// (<see cref="ISsmModel.ResetState"/> at the start of a generation, then <see cref="ISsmModel.ForwardLastLogits"/>
-/// fed only the NEW tokens each call). True O(1)-per-decode-step, unlike a transformer's growing KV buffer.</para></summary>
+/// <summary>End-to-end text generation for the recurrent (SSM) decoders, mirroring <see cref="TextGenerationPipeline"/>'s contract so <c>HartsyLocalLLMProvider</c> can drive either pipeline uniformly.</summary>
+/// <remarks>No KV cache — instead the model itself carries a fixed-size recurrent state across calls (<see cref="ISsmModel.ResetState"/> at the start of a generation, then <see cref="ISsmModel.ForwardLastLogits"/> fed only the NEW tokens each call); true O(1)-per-decode-step, unlike a transformer's growing KV buffer.</remarks>
 public sealed class SsmGenerationPipeline
 {
     private readonly ISsmModel _model;
@@ -50,8 +45,7 @@ public sealed class SsmGenerationPipeline
         catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"ssm weight preload failed (continuing lazy): {ex.Message}"); }
     }
 
-    /// <summary><paramref name="ct"/> is checked once per generated token, mirroring
-    /// <see cref="TextGenerationPipeline.Generate"/>.</summary>
+    /// <summary><paramref name="ct"/> is checked once per generated token, mirroring <see cref="TextGenerationPipeline.Generate"/>.</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();

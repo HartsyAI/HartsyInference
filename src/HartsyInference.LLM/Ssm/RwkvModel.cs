@@ -4,14 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>RWKV-6 ("Finch") decoder loaded from a llama.cpp <c>rwkv6</c> GGUF. A non-transformer linear-attention
-/// recurrence: each block is a <b>time-mix</b> (data-dependent token-shift via LoRA → r/k/v/g + a data-dependent
-/// per-channel decay → WKV6 outer-product state recurrence → per-head GroupNorm → gate → out) and a <b>channel-mix</b>
-/// (token-shift → squared-ReLU gated MLP), both with LayerNorm + residual. llama.cpp pre-divides the deep-layer
-/// output weights by 2^(layer/rescale); we apply the matching runtime <c>x *= 0.5</c> every <c>rescale</c> layers.
-///
-/// <para>Big projections run through <see cref="IBackend.Linear"/>; the token-shift LoRAs, WKV6 scan, GroupNorm and
-/// LayerNorms run host-side (the recurrence is inherently sequential).</para></summary>
+/// <summary>RWKV-6 ("Finch") decoder loaded from a llama.cpp <c>rwkv6</c> GGUF: a non-transformer linear-attention recurrence, each block a <b>time-mix</b> (token-shift LoRA → r/k/v/g + data-dependent decay → WKV6 outer-product state recurrence → per-head GroupNorm → gate → out) and a <b>channel-mix</b> (token-shift → squared-ReLU gated MLP), both with LayerNorm + residual.</summary>
+/// <remarks>llama.cpp pre-divides the deep-layer output weights by 2^(layer/rescale); we apply the matching runtime <c>x *= 0.5</c> every <c>rescale</c> layers. Big projections run through <see cref="IBackend.Linear"/>; the token-shift LoRAs, WKV6 scan, GroupNorm and LayerNorms run host-side (the recurrence is inherently sequential).</remarks>
 public sealed unsafe class RwkvModel : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -125,9 +119,7 @@ public sealed unsafe class RwkvModel : IDisposable, ISsmModel
             }
     }
 
-    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each
-    /// layer's carried recurrent state, and returns the next-token logits (last position). Call
-    /// <see cref="ResetState"/> before the first call of a new generation.</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;

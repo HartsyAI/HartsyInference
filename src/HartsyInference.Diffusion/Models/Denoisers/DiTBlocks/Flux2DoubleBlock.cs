@@ -55,9 +55,7 @@ public sealed unsafe class Flux2DoubleBlock
     }
 
     /// <summary>Loads weights with diffusers-style naming. Converter is expected to split BFL <c>img_attn.qkv</c> → <c>attn.to_{q,k,v}</c> and <c>img_mlp.0</c> → <c>ff.linear_in_gate / ff.linear_in_up</c>; same for txt-stream.</summary>
-    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
-    /// see <see cref="ChromaF16"/>): damps every branch-output projection so the residual stream rides at
-    /// 1/32 scale; the no-affine LayerNorms make it exact. 1.0 = off.</param>
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe — see <see cref="ChromaF16"/>): damps every branch-output projection so the residual stream rides at 1/32 scale; the no-affine LayerNorms make it exact. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         // Image Q/K/V (no bias)

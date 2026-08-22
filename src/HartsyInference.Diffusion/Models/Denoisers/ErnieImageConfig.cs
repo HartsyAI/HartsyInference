@@ -34,12 +34,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 ///
 /// VAE: `AutoencoderKLFlux2` — Flux2-style 128-channel VAE. Reuse the existing Flux2 VAE infra.
 ///
-/// Text encoder: **Custom Baidu encoder** (loaded via `from transformers import AutoModel`).
-/// Likely an in-house ERNIE-class encoder — must inspect `text_encoder/config.json` on the
-/// HF repo before implementing. Optional `pe` Prompt Enhancer LLM (`AutoModelForCausalLM`) — skip in v1.
-///
-/// **Implementation status:** scaffolding only. See PHASE_4_MODEL_BREADTH.md `### ERNIE-Image`.
-/// </summary>
+/// Text encoder: custom Baidu Llama-style encoder, see <see cref="TextEncoders.ErnieImageLlamaTextEncoder"/>.
+/// Optional `pe` Prompt Enhancer LLM (`AutoModelForCausalLM`) is not implemented.</summary>
 public sealed record ErnieImageConfig
 {
     /// <summary>Hidden dim (= num_attention_heads * head_dim). 4096 for `baidu/ERNIE-Image`.</summary>

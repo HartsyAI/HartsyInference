@@ -1,12 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for the Gemma family (<c>gemma</c>, <c>gemma2</c>, <c>gemma3</c> text models). Shares the
-/// llama.cpp <c>blk.N.attn_*/ffn_*</c> dialect but adds Gemma's sandwich norms (<c>post_attention_norm</c>,
-/// <c>post_ffw_norm</c>) and, for Gemma-3, per-head Q/K norms — remapped to the HF names the
-/// <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> loader expects. Gemma ties the LM head, so
-/// there is no <c>output.weight</c>. The architectural quirks (GeGLU, (1+w)-norm, embedding scale, dual-RoPE,
-/// logit soft-cap) are config flags set from the arch string, not naming differences, so this mapper is purely
-/// the mechanical key rewrite.</summary>
+/// <summary>GGUF mapper for the Gemma family (<c>gemma</c>, <c>gemma2</c>, <c>gemma3</c> text models). Shares the llama.cpp <c>blk.N.attn_*/ffn_*</c> dialect but adds Gemma's sandwich norms (<c>post_attention_norm</c>, <c>post_ffw_norm</c>) and, for Gemma-3, per-head Q/K norms — remapped to the HF names the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> loader expects. Gemma ties the LM head, so there is no <c>output.weight</c>. The architectural quirks (GeGLU, (1+w)-norm, embedding scale, dual-RoPE, logit soft-cap) are config flags set from the arch string, not naming differences, so this mapper is purely the mechanical key rewrite.</summary>
 public sealed class GemmaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "gemma";

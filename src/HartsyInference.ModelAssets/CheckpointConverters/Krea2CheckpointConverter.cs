@@ -4,44 +4,23 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads Krea 2 (`krea/Krea-2-Turbo`, `CalamitousFelicitousness/Krea-2-Base-Diffusers`) checkpoints. Krea 2
-/// ships in the diffusers folder layout: <c>{root}/transformer/</c> (the
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/>), <c>{root}/text_encoder/</c> (Qwen3-VL-4B
-/// language tower), <c>{root}/vae/</c> (the Qwen-Image VAE), plus <c>{root}/scheduler/</c> + <c>{root}/tokenizer/</c>.
+/// <summary>Loads Krea 2 (`krea/Krea-2-Turbo`, `CalamitousFelicitousness/Krea-2-Base-Diffusers`) checkpoints. Krea 2 ships in the diffusers folder layout: <c>{root}/transformer/</c> (the <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/>), <c>{root}/text_encoder/</c> (Qwen3-VL-4B language tower), <c>{root}/vae/</c> (the Qwen-Image VAE), plus <c>{root}/scheduler/</c> + <c>{root}/tokenizer/</c>.
 ///
-/// <para>Transformer keys are diffusers-native (bare <c>img_in.weight</c>, <c>transformer_blocks.{i}.*</c>,
-/// <c>text_fusion.*</c>, <c>time_embed.*</c>, <c>final_layer.*</c>) — only an optional <c>transformer.</c> /
-/// <c>model.diffusion_model.</c> prefix is stripped and fp8_scaled companions are folded via
-/// <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>. The Qwen3-VL-4B keys are remapped to the
-/// <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> convention (vision tower + lm_head
-/// dropped). The Qwen-Image VAE keys are consumed directly.</para>
+/// <para>Transformer keys are diffusers-native (bare <c>img_in.weight</c>, <c>transformer_blocks.{i}.*</c>, <c>text_fusion.*</c>, <c>time_embed.*</c>, <c>final_layer.*</c>) — only an optional <c>transformer.</c> / <c>model.diffusion_model.</c> prefix is stripped and fp8_scaled companions are folded via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>. The Qwen3-VL-4B keys are remapped to the <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> convention (vision tower + lm_head dropped). The Qwen-Image VAE keys are consumed directly.</para>
 ///
-/// <para>TODO: the Comfy single-file release (fp8/nv4 under <c>diffusion_models/</c>) may use the original short-name
-/// config (<c>features</c>/<c>heads</c>/… ) and raw weight keys; add a single-file key remap when that layout is needed.</para></summary>
+/// <para>TODO: the Comfy single-file release (fp8/nv4 under <c>diffusion_models/</c>) may use the original short-name config (<c>features</c>/<c>heads</c>/… ) and raw weight keys; add a single-file key remap when that layout is needed.</para></summary>
 public sealed class Krea2CheckpointConverter
 {
-    /// <summary>Loads the Krea 2 transformer from <c>{root}/transformer/</c> (or a <c>krea2*</c> single file). fp8 folded.
-    /// Keys are normalized to the diffusers <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/>
-    /// convention via <see cref="RemapTransformerKey"/> (handles both the released <b>raw</b> Comfy single-file naming
-    /// — <c>blocks.N.*</c> / <c>txtfusion.*</c> / <c>tmlp</c> / <c>tproj</c> / <c>last.*</c> — and an already-diffusers
-    /// folder, which passes through).</summary>
+    /// <summary>Loads the Krea 2 transformer from <c>{root}/transformer/</c> (or a <c>krea2*</c> single file). fp8 folded. Keys are normalized to the diffusers <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> convention via <see cref="RemapTransformerKey"/> (handles both the released <b>raw</b> Comfy single-file naming — <c>blocks.N.*</c> / <c>txtfusion.*</c> / <c>tmlp</c> / <c>tproj</c> / <c>last.*</c> — and an already-diffusers folder, which passes through).</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTransformer(string rootPath)
     {
         string[] shards = DiscoverShards(Path.Combine(rootPath, "transformer"), rootPath, "krea2");
         return LoadShards(shards, 1200, k => RemapTransformerKey(StripTransformerPrefix(k)));
     }
 
-    /// <summary>Maps a Krea 2 transformer weight key to the diffusers convention the engine's
-    /// <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> consumes. The released checkpoints use
-    /// the model's original ("raw") names; this rewrites them. Already-diffusers keys are returned unchanged.
+    /// <summary>Maps a Krea 2 transformer weight key to the diffusers convention the engine's <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> consumes. The released checkpoints use the model's original ("raw") names; this rewrites them. Already-diffusers keys are returned unchanged.
     ///
-    /// <para>Top level: <c>first→img_in</c>, <c>tmlp.0/2→time_embed.linear_1/2</c>, <c>tproj.1→time_mod_proj</c>,
-    /// <c>txtmlp.0.scale→txt_in.norm.weight</c>, <c>txtmlp.1/3→txt_in.linear_1/2</c>, <c>txtfusion→text_fusion</c>,
-    /// <c>last.modulation.lin→final_layer.scale_shift_table</c>, <c>last.norm.scale→final_layer.norm.weight</c>,
-    /// <c>last.linear→final_layer.linear</c>. Blocks: <c>blocks.N→transformer_blocks.N</c> with the per-block sub-map
-    /// (<c>prenorm/postnorm.scale→norm1/norm2.weight</c>, <c>attn.w{q,k,v,o}→attn.to_{q,k,v,out.0}</c>,
-    /// <c>attn.gate→attn.to_gate</c>, <c>attn.qknorm.{q,k}norm.scale→attn.norm_{q,k}.weight</c>,
-    /// <c>mlp.{gate,up,down}→ff.{gate,up,down}</c>, <c>mod.lin→scale_shift_table</c>).</para></summary>
+    /// <para>Top level: <c>first→img_in</c>, <c>tmlp.0/2→time_embed.linear_1/2</c>, <c>tproj.1→time_mod_proj</c>, <c>txtmlp.0.scale→txt_in.norm.weight</c>, <c>txtmlp.1/3→txt_in.linear_1/2</c>, <c>txtfusion→text_fusion</c>, <c>last.modulation.lin→final_layer.scale_shift_table</c>, <c>last.norm.scale→final_layer.norm.weight</c>, <c>last.linear→final_layer.linear</c>. Blocks: <c>blocks.N→transformer_blocks.N</c> with the per-block sub-map (<c>prenorm/postnorm.scale→norm1/norm2.weight</c>, <c>attn.w{q,k,v,o}→attn.to_{q,k,v,out.0}</c>, <c>attn.gate→attn.to_gate</c>, <c>attn.qknorm.{q,k}norm.scale→attn.norm_{q,k}.weight</c>, <c>mlp.{gate,up,down}→ff.{gate,up,down}</c>, <c>mod.lin→scale_shift_table</c>).</para></summary>
     public static string RemapTransformerKey(string key)
     {
         // fp8 scale companions (`.weight_scale` / `.scale_weight`) must remap to the SAME base key as their
@@ -136,8 +115,7 @@ public sealed class Krea2CheckpointConverter
         return LoadShards(shards, 400, k => k);
     }
 
-    /// <summary>Loads + remaps the Qwen3-VL-4B language tower from <c>{root}/text_encoder/</c> to the
-    /// <c>LlamaStyleEncoder</c> convention (drops the vision tower and <c>lm_head</c>).</summary>
+    /// <summary>Loads + remaps the Qwen3-VL-4B language tower from <c>{root}/text_encoder/</c> to the <c>LlamaStyleEncoder</c> convention (drops the vision tower and <c>lm_head</c>).</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTextEncoder(string rootPath)
     {
         string te1 = Path.Combine(rootPath, "text_encoder");

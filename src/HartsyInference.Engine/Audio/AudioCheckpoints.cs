@@ -7,8 +7,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Loads a HuggingFace checkpoint into one merged tensor map plus the loaders whose mmapped buffers the
-/// tensors reference: single-file safetensors, then the sharded index, then a PyTorch pickle.</summary>
+/// <summary>Loads a HuggingFace checkpoint into one merged tensor map plus the loaders whose mmapped buffers the tensors reference: single-file safetensors, then the sharded index, then a PyTorch pickle.</summary>
 internal static class AudioCheckpoints
 {
     /// <summary>Resolves and loads <paramref name="repo"/>'s weights, downloading them on first use.</summary>
@@ -56,10 +55,7 @@ internal static class AudioCheckpoints
         return (pickle.GetAllTensors(), [pickle]);
     }
 
-    /// <summary>Loads one SUBFOLDER of a repo, fetching only that subfolder's files. Multi-component checkpoints
-    /// (diffusers-style: <c>transformer/</c>, <c>vocoder/</c>, …) have no weights at the repo root, and pulling the
-    /// whole repo would drag in every sibling component — for MiniMax Music 3 that is tens of gigabytes of formats
-    /// the engine never reads.</summary>
+    /// <summary>Loads one SUBFOLDER of a repo, fetching only that subfolder's files. Multi-component checkpoints (diffusers-style: <c>transformer/</c>, <c>vocoder/</c>, …) have no weights at the repo root, and pulling the whole repo would drag in every sibling component — for MiniMax Music 3 that is tens of gigabytes of formats the engine never reads.</summary>
     internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadSubfolderAsync(
         string repo, string subfolder, string category, CancellationToken cancel)
     {

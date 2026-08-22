@@ -53,9 +53,6 @@ public sealed unsafe class Hubert : IDisposable
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}encoder.layers.{i}");
     }
 
-    /// <summary>Composes a <c>weight_norm(dim=2)</c> grouped Conv1d weight: for each kernel position k,
-    /// <c>W[:,:,k] = V[:,:,k] · g[0,0,k] / ‖V[:,:,k]‖_F</c>. <paramref name="g"/> is <c>[1,1,K]</c>,
-    /// <paramref name="v"/> is <c>[outC, inC/groups, K]</c>.</summary>
     /// <summary>Exact (erf-based) GELU in place: <c>0.5·x·(1 + erf(x/√2))</c> (Abramowitz-Stegun 7.1.26,
     /// max abs error ≈ 1.5e-7). HuBERT/wav2vec2 use the exact GELU, not the tanh approximation.</summary>
     internal static void ExactGelu(float* p, long n)
@@ -72,6 +69,9 @@ public sealed unsafe class Hubert : IDisposable
         }
     }
 
+    /// <summary>Composes a <c>weight_norm(dim=2)</c> grouped Conv1d weight: for each kernel position k,
+    /// <c>W[:,:,k] = V[:,:,k] · g[0,0,k] / ‖V[:,:,k]‖_F</c>. <paramref name="g"/> is <c>[1,1,K]</c>,
+    /// <paramref name="v"/> is <c>[outC, inC/groups, K]</c>.</summary>
     private static Tensor ComposePosConvWeightNorm(Tensor g, Tensor v)
     {
         int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];

@@ -5,16 +5,8 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
-/// <summary>GPT-2-style pre-norm Transformer backbone (learned absolute positions, multi-head attention,
-/// 4× GELU MLP, LayerNorm, <c>bias=False</c> on linears). The shared decoder body for the 2019-vintage
-/// GPT-2 audio LMs in the package (Bark's three stages; reusable by XTTS / ChatTTS) — parameterized by
-/// depth / width / head count rather than copied per model. Operates on caller-supplied input embeddings
-/// <c>[1, T, hidden]</c> (each model owns its own token / codebook embedding tables + output heads),
-/// adds the learned positional embedding, runs the block stack, returns the final-LayerNorm hidden state.
-/// Supports causal and non-causal (full bidirectional, e.g. Bark-Fine). AR decoding is incremental: one
-/// cache-capturing prefill <see cref="Forward"/> then O(T) per-token <see cref="ForwardStep"/> calls against
-/// a device-resident <see cref="IKvCache"/> — projections, attention (FlashAttention) and the K/V cache all
-/// stay on the backend, so nothing crosses back to the host mid-forward.</summary>
+/// <summary>GPT-2-style pre-norm Transformer backbone (learned absolute positions, multi-head attention, 4× GELU MLP, LayerNorm, <c>bias=False</c> on linears) shared by the package's 2019-vintage GPT-2 audio LMs — Bark's three stages, reusable by XTTS / ChatTTS — parameterized by depth / width / head count rather than copied per model.</summary>
+/// <remarks>Operates on caller-supplied input embeddings <c>[1, T, hidden]</c> (each model owns its own token / codebook embedding tables and output heads). Supports causal and non-causal (full bidirectional, e.g. Bark-Fine). AR decoding is incremental: one cache-capturing prefill <see cref="Forward"/> then O(T) per-token <see cref="ForwardStep"/> calls against a device-resident <see cref="IKvCache"/> — projections, attention (FlashAttention), and the K/V cache all stay on the backend, so nothing crosses back to the host mid-forward.</remarks>
 public sealed unsafe class GptBackbone : IDisposable
 {
     private readonly GptConfig _cfg;
@@ -33,9 +25,7 @@ public sealed unsafe class GptBackbone : IDisposable
         for (int i = 0; i < cfg.NumLayers; i++) _blocks[i] = new GptBlock(cfg);
     }
 
-    /// <summary>Loads the positional embedding, blocks, and final LayerNorm. Keys follow the HF Bark
-    /// scheme by default (<c>position_embeds_layer.weight</c>, <c>layers.{i}.*</c>, <c>layernorm_final.*</c>);
-    /// pass the model's own keys.</summary>
+    /// <summary>Keys follow the HF Bark scheme by default (<c>position_embeds_layer.weight</c>, <c>layers.{i}.*</c>, <c>layernorm_final.*</c>); pass the model's own keys for other checkpoints.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string posKey, string blockPrefix,
         string lnFGammaKey, string lnFBetaKey)
     {
@@ -45,13 +35,8 @@ public sealed unsafe class GptBackbone : IDisposable
         _lnFBeta = GptBlock.LoadBiasOrZero(w, lnFBetaKey, _lnFGamma);
     }
 
-    /// <summary>Runs the stack over <paramref name="inputEmbeds"/> <c>[1, T, hidden]</c>, adding learned
-    /// positions from the cache's committed length (0 for a fresh sequence). When <paramref name="cache"/> is
-    /// supplied, this is the incremental-decode PREFILL: every layer's K/V for the prompt are appended into the
-    /// device cache and attention runs causally via FlashAttention, enabling continuation via
-    /// <see cref="ForwardStep"/>. When <paramref name="cache"/> is null, it is a plain full-sequence forward
-    /// (causal unless <paramref name="nonCausal"/>) — used by the bidirectional Bark-Fine stage. Returns
-    /// <c>[1, T, hidden]</c>.</summary>
+    /// <summary>Runs the stack over <paramref name="inputEmbeds"/> <c>[1, T, hidden]</c>, positioned from the cache's committed length (0 if none); supplying <paramref name="cache"/> makes this the incremental-decode PREFILL (every layer's K/V appended into the device cache, enabling continuation via <see cref="ForwardStep"/>), otherwise it's a plain full-sequence forward (causal unless <paramref name="nonCausal"/>, used by the bidirectional Bark-Fine stage).</summary>
+    /// <returns><c>[1, T, hidden]</c>.</returns>
     public Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal = false, IKvCache? cache = null)
     {
         ThrowIfDisposed();
@@ -93,15 +78,10 @@ public sealed unsafe class GptBackbone : IDisposable
         return normed;
     }
 
-    /// <summary>Creates an empty device-resident K/V cache sized to the model's block size, for use with
-    /// <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/> (per-token decode). Bark is MHA, so the
-    /// K/V head count equals the query head count.</summary>
+    /// <summary>Creates an empty device-resident K/V cache sized to the model's block size; Bark is MHA, so the K/V head count equals the query head count.</summary>
     public IKvCache CreateCache() => KvCaches.ForDecode(_cfg.NumLayers, _cfg.NumHeads, _cfg.HeadDim, _cfg.BlockSize);
 
-    /// <summary>Incremental decode: runs one token's embedding <c>[1, 1, hidden]</c> through the stack against
-    /// the cache (appending its K/V at position <see cref="IKvCache.CurrentLength"/>), and returns the
-    /// final-LayerNorm hidden state <c>[1, 1, hidden]</c>. Equivalent to the last position of a full-sequence
-    /// causal <see cref="Forward"/> over the cached prefix plus this token, at O(T) instead of O(T²).</summary>
+    /// <summary>Runs one token's embedding <c>[1, 1, hidden]</c> through the stack against <paramref name="cache"/> (appending its K/V at <see cref="IKvCache.CurrentLength"/>) — equivalent to the last position of a full-sequence causal <see cref="Forward"/> over the cached prefix plus this token, but at O(T) instead of O(T²).</summary>
     public Tensor ForwardStep(IBackend backend, Tensor inputEmbed, IKvCache cache)
     {
         ThrowIfDisposed();
@@ -127,9 +107,7 @@ public sealed unsafe class GptBackbone : IDisposable
         return normed;
     }
 
-    /// <summary>Adds the learned absolute position embedding (positions <c>[posStart, posStart+t)</c>) to the
-    /// input embeddings, returning a fresh <c>[1, t, hidden]</c> tensor. Host-side: the input is a freshly
-    /// host-built embedding table lookup (no prior device op), so this touches no device memory.</summary>
+    /// <summary>Adds the learned position embedding for <c>[posStart, posStart+t)</c>; runs host-side since the input is a freshly host-built embedding lookup that hasn't touched the device yet.</summary>
     private Tensor AddPositions(Tensor inputEmbeds, int t, int h, int posStart)
     {
         Tensor hidden = new(inputEmbeds.Shape, DType.F32);

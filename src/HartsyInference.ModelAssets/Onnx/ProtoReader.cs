@@ -1,11 +1,6 @@
 namespace HartsyInference.ModelAssets.Onnx;
 
-/// <summary>Minimal protobuf wire-format cursor over a byte buffer — just enough to walk ONNX
-/// <c>ModelProto</c> / <c>GraphProto</c> / <c>NodeProto</c> / <c>TensorProto</c> without a generated descriptor
-/// or the <c>Google.Protobuf</c> dependency (matching the engine's hand-rolled pickle / safetensors parsers).
-/// Positions are absolute indices into the shared buffer so length-delimited sub-messages can be re-read by
-/// constructing a bounded cursor over the same span — and a <c>raw_data</c> blob's absolute offset is recovered
-/// for a zero-intermediate-copy materialization.</summary>
+/// <summary>Minimal protobuf wire-format cursor over a byte buffer — just enough to walk ONNX <c>ModelProto</c> / <c>GraphProto</c> / <c>NodeProto</c> / <c>TensorProto</c> without a generated descriptor or the <c>Google.Protobuf</c> dependency (matching the engine's hand-rolled pickle / safetensors parsers). Positions are absolute indices into the shared buffer so length-delimited sub-messages can be re-read by constructing a bounded cursor over the same span — and a <c>raw_data</c> blob's absolute offset is recovered for a zero-intermediate-copy materialization.</summary>
 internal ref struct ProtoReader
 {
     public const int WireVarint = 0;
@@ -54,8 +49,7 @@ internal ref struct ProtoReader
         throw new InvalidDataException("Truncated protobuf varint.");
     }
 
-    /// <summary>Reads a length-delimited field, returning its absolute offset/length into the shared buffer
-    /// and advancing past it.</summary>
+    /// <summary>Reads a length-delimited field, returning its absolute offset/length into the shared buffer and advancing past it.</summary>
     public (int Offset, int Length) ReadLengthDelimited()
     {
         int len = (int)ReadVarint();

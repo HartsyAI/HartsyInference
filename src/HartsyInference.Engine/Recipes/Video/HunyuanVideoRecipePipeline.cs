@@ -13,10 +13,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed HunyuanVideo pipeline driven against the native <see cref="VideoRequest"/>.
-/// <see cref="HunyuanVideoPipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: LLaVA
-/// -Llama-3-8B through the diffusers prompt template (layer −3, cropped to drop the template preamble) and CLIP-L's
-/// pooled EOS embedding. Mirrors <c>HunyuanVideoGenerationTests</c>' proven construction.</summary>
+/// <summary>A constructed HunyuanVideo pipeline driven against the native <see cref="VideoRequest"/>. <see cref="HunyuanVideoPipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: LLaVA-Llama-3-8B through the diffusers prompt template (layer −3, cropped to drop the template preamble) and CLIP-L's pooled EOS embedding. Mirrors <c>HunyuanVideoGenerationTests</c>' proven construction.</summary>
 public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
 {
     private readonly IBackend _backend;

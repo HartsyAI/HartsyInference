@@ -5,13 +5,10 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Centralized resolution of the request's sampling knobs into the concrete numbers a pipeline takes: effective
-/// step count (honoring <see cref="ImageRequest.EndStepsEarly"/>), scheduler name, and CLIP-skip.</summary>
+/// <summary>Centralized resolution of the request's sampling knobs into the concrete numbers a pipeline takes: effective step count (honoring <see cref="ImageRequest.EndStepsEarly"/>), scheduler name, and CLIP-skip.</summary>
 public static class SamplingParamResolver
 {
-    /// <summary>Effective step count for a single-stage generation, always at least 1. <c>EndStepsEarly</c> is the
-    /// fraction of the configured steps to cut off (Steps=20, EndStepsEarly=0.25 → 15 steps); the truncating cast matches
-    /// ComfyUI's <c>endStep = (int)(steps * (1 - endEarly))</c> so the two backends agree.</summary>
+    /// <summary>Effective step count for a single-stage generation, always at least 1. <c>EndStepsEarly</c> is the fraction of the configured steps to cut off (Steps=20, EndStepsEarly=0.25 → 15 steps); the truncating cast matches ComfyUI's <c>endStep = (int)(steps * (1 - endEarly))</c> so the two backends agree.</summary>
     public static int ResolveSteps(ImageRequest request, int fallback)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -32,16 +29,7 @@ public static class SamplingParamResolver
         return steps;
     }
 
-    /// <summary>Resolves the request's sampler/scheduler choice into the string a pipeline consumes — a
-    /// <c>SchedulerFactory</c> name, a <c>Sampling.SamplerRegistry</c> name, or a compound
-    /// <c>sampler_schedule</c> selection, passed through for the pipeline to split.
-    ///
-    /// <para><b>An unrecognized name now throws.</b> This method used to map anything it did not know onto Euler and
-    /// write a <c>Logs.Verbose</c> line, on the reasoning that "sampler choice is a preference, not a correctness
-    /// contract". For someone migrating a ComfyUI workflow it IS a correctness contract: they ask for
-    /// <c>dpmpp_2m_sde_karras</c>, silently receive a Euler image, and conclude the engine is broken rather than that
-    /// the sampler is missing. The refusal names the value and lists what exists, matching the trade
-    /// <c>LoraApplier</c> already makes for a zero-match LoRA.</para></summary>
+    /// <summary>Resolves the request's sampler/scheduler choice into the string a pipeline consumes — a <c>SchedulerFactory</c> name, a <c>Sampling.SamplerRegistry</c> name, or a compound <c>sampler_schedule</c> selection, passed through for the pipeline to split. <para><b>An unrecognized name now throws.</b> This method used to map anything it did not know onto Euler and write a <c>Logs.Verbose</c> line, on the reasoning that "sampler choice is a preference, not a correctness contract". For someone migrating a ComfyUI workflow it IS a correctness contract: they ask for <c>dpmpp_2m_sde_karras</c>, silently receive a Euler image, and conclude the engine is broken rather than that the sampler is missing. The refusal names the value and lists what exists, matching the trade <c>LoraApplier</c> already makes for a zero-match LoRA.</para></summary>
     /// <exception cref="NotSupportedException">The requested sampler or sigma schedule is not available.</exception>
     public static string? ResolveSchedulerName(ImageRequest request)
     {
@@ -76,13 +64,10 @@ public static class SamplingParamResolver
             : MapSamplerName(samplerName);
     }
 
-    /// <summary><c>euler</c> maps to null (the factory default), which is indistinguishable from "unmapped" in
-    /// <see cref="MapSamplerName"/>'s return — so the validation above has to ask about it separately.</summary>
+    /// <summary><c>euler</c> maps to null (the factory default), which is indistinguishable from "unmapped" in <see cref="MapSamplerName"/>'s return — so the validation above has to ask about it separately.</summary>
     private static bool IsLegacyEuler(string name) => string.Equals(name, "euler", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Converts the request's CLIP-skip into the layers-from-end convention (1 = final layer, 2 = penultimate).
-    /// Hosts using the negative-from-end convention (-1 = final) are accepted too. Returns null when unset or default.
-    /// Only SD 1.5 honors this — SDXL is penultimate by spec, matching ComfyUI.</summary>
+    /// <summary>Converts the request's CLIP-skip into the layers-from-end convention (1 = final layer, 2 = penultimate). Hosts using the negative-from-end convention (-1 = final) are accepted too. Returns null when unset or default. Only SD 1.5 honors this — SDXL is penultimate by spec, matching ComfyUI.</summary>
     public static int? ResolveClipSkip(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

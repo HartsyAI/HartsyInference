@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native vision request: embed, detect, or segment an image, optionally conditioned on a text prompt
-/// (for open-vocabulary detectors/segmenters like GroundingDINO and ClipSeg).</summary>
+/// <summary>Native vision request: embed, detect, or segment an image, optionally conditioned on a text prompt (for open-vocabulary detectors/segmenters like GroundingDINO and ClipSeg).</summary>
 public sealed record VisionRequest
 {
     /// <summary>The input image.</summary>

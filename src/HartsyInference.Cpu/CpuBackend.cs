@@ -15,7 +15,7 @@ public sealed class CpuBackend : IBackend
     /// <summary>Gets the device kind for this backend, which is always <see cref="DeviceKind.Cpu"/>.</summary>
     public DeviceKind Device { get; } = DeviceKind.Cpu;
 
-    /// <summary>Gets the capabilities of this CPU backend.</summary>
+    /// <summary>F32, F16, Conv2D, SDPA, and FFT are supported; nothing else is.</summary>
     public BackendCapabilities Capabilities { get; } = new BackendCapabilities
     {
         SupportsF32 = true,
@@ -344,7 +344,7 @@ public sealed class CpuBackend : IBackend
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
-    /// <summary>Releases all resources used by this backend.</summary>
+    /// <summary>Marks the backend disposed; there is no unmanaged state here to free.</summary>
     public void Dispose()
     {
         Volatile.Write(ref _disposed, 1);

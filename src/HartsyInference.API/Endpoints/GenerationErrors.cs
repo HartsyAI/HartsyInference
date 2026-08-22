@@ -3,8 +3,7 @@ using HartsyInference.Engine;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Maps the exceptions <see cref="HartsyInference.Engine.Services.IInferenceEngine"/>'s typed services
-/// can throw to HTTP status codes, shared by every generation route's non-streaming path.</summary>
+/// <summary>Maps the exceptions <see cref="HartsyInference.Engine.Services.IInferenceEngine"/>'s typed services can throw to HTTP status codes, shared by every generation route's non-streaming path.</summary>
 internal static class GenerationErrors
 {
     public static IResult Map(Exception ex) => ex switch

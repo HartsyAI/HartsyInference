@@ -3,15 +3,11 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Spark-TTS-0.5B (SparkAudio/Spark-TTS-0.5B) — a Qwen2.5-0.5B LM emits the unified global + semantic
-/// BiCodec token stream, decoded to 16 kHz. Runs the controllable mode: text plus a coarse style (gender from the
-/// voice field, speed bucketed from the rate multiplier). Zero-shot cloning needs the BiCodec encoder side, which is
-/// not built, so a supplied reference clip is ignored.</summary>
+/// <summary>Spark-TTS-0.5B (SparkAudio/Spark-TTS-0.5B) — a Qwen2.5-0.5B LM emits the unified global + semantic BiCodec token stream, decoded to 16 kHz. Runs the controllable mode: text plus a coarse style (gender from the voice field, speed bucketed from the rate multiplier). Zero-shot cloning needs the BiCodec encoder side, which is not built, so a supplied reference clip is ignored.</summary>
 internal static class SparkTtsModel
 {
     private const string Repo = "SparkAudio/Spark-TTS-0.5B";
 
-    /// <summary>The Spark-TTS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,

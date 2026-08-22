@@ -4,20 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>The Qwen3-VL / Qwen3.5-VL vision tower (<c>clip.projector_type = qwen3vl_merger</c>), loaded from
-/// llama.cpp's <c>mmproj-*.gguf</c>. Structurally close to <see cref="Qwen25VlEncoder"/>'s Qwen2-VL path —
-/// LayerNorm (with bias), non-gated tanh-GELU MLP, FULL attention on every block (no window schedule), 2D-RoPE,
-/// 2×2 patch-merger — but with two Qwen3-specific additions:
-/// <list type="bullet">
-/// <item>a <b>fused QKV</b> projection (<c>v.blk.N.attn_qkv</c>), split into per-head q/k/v at load; and</item>
-/// <item>a <b>learned absolute position embedding</b> (<c>v.position_embd</c>, a √P×√P grid) bilinearly
-/// interpolated to the actual patch grid and ADDED to the patch embeddings before the blocks (in addition to the
-/// 2D-RoPE).</item>
-/// </list>
-/// <para><b>DeepStack</b> (multi-decoder-layer visual injection) is NOT implemented here: the mmproj this was
-/// built against (<c>unsloth/Qwen3.5-0.8B-GGUF</c>) carries no <c>deepstack_{norm,fc1,fc2}</c> merger tensors, so
-/// llama.cpp runs it with <c>n_deepstack_layers = 0</c>. If a future mmproj carries those tensors, the encoder
-/// must emit the extra streams and the decoder must add them at layers 0..n-1 — see the phased plan.</para></summary>
+/// <summary>The Qwen3-VL/Qwen3.5-VL vision tower (<c>clip.projector_type = qwen3vl_merger</c>), structurally close to <see cref="Qwen25VlEncoder"/>'s Qwen2-VL path but with a fused QKV projection split at load and a learned absolute position embedding bilinearly interpolated onto the patch grid and added before the blocks (in addition to 2D-RoPE).</summary>
+/// <remarks><b>DeepStack</b> (multi-decoder-layer visual injection) is NOT implemented here: the mmproj this was built against (<c>unsloth/Qwen3.5-0.8B-GGUF</c>) carries no <c>deepstack_{norm,fc1,fc2}</c> merger tensors, so llama.cpp runs it with <c>n_deepstack_layers = 0</c>. If a future mmproj carries those tensors, the encoder must emit the extra streams and the decoder must add them at layers 0..n-1 — see the phased plan.</remarks>
 public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -294,8 +282,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         return result;
     }
 
-    /// <summary>Adds the learned position embedding to <paramref name="embed"/> (host [np, hidden] in merge-block
-    /// order). The stored √P×√P grid is bilinearly interpolated (align_corners=false) to the (gh, gw) patch grid.</summary>
+    /// <summary>Adds the learned position embedding to <paramref name="embed"/> (host [np, hidden] in merge-block order); the stored √P×√P grid is bilinearly interpolated (align_corners=false) to the (gh, gw) patch grid.</summary>
     private void AddInterpolatedPosEmbed(Tensor embed, int gh, int gw, int m)
     {
         int hidden = Hidden, bg = _posGrid;
@@ -326,8 +313,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
                     }
     }
 
-    /// <summary>2D rotary cos/sin tables [np, headDim] in merge-block order (h-freqs on the first quarter, w-freqs
-    /// on the second, mirrored on the upper half — the standard Qwen-VL vision 2D-RoPE with rotate_half layout).</summary>
+    /// <summary>2D rotary cos/sin tables [np, headDim] in merge-block order (h-freqs on the first quarter, w-freqs on the second, mirrored on the upper half — the standard Qwen-VL vision 2D-RoPE with rotate_half layout).</summary>
     private (float[] cos, float[] sin) BuildRope(int gh, int gw)
     {
         int hd = HeadDim, m = Merge, np = gh * gw, ropeDim = hd / 2;

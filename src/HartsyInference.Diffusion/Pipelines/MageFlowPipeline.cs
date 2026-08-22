@@ -10,12 +10,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Microsoft Mage-Flow text-to-image pipeline (NR-MMDiT, arXiv 2607.19064). Encodes the prompt through
-/// Qwen3-VL-4B (<see cref="LlamaStyleEncoder"/> final-layer <c>last_hidden_state</c>), packs the 128-channel latent
-/// into patch-1 tokens (identity — Mage-Flow does no patchify), runs the reused <see cref="QwenImageTransformer"/>
-/// (Mage-Flow config: 12 dual-stream blocks, image-only RoPE) under flow-match Euler with STATIC shift 6.0, and
-/// decodes through the bespoke one-step <see cref="MageVaeDecoder"/>.
-///
+/// <summary>Microsoft Mage-Flow text-to-image pipeline (NR-MMDiT, arXiv 2607.19064). Encodes the prompt through Qwen3-VL-4B (<see cref="LlamaStyleEncoder"/> final-layer <c>last_hidden_state</c>), packs the 128-channel latent into patch-1 tokens (identity — Mage-Flow does no patchify), runs the reused <see cref="QwenImageTransformer"/> (Mage-Flow config: 12 dual-stream blocks, image-only RoPE) under flow-match Euler with STATIC shift 6.0, and decodes through the bespoke one-step <see cref="MageVaeDecoder"/>.
 /// <para>This is the lean correctness-first path: no block-streaming / step-cache / prompt-cache (those are perf
 /// layers to add once GPU parity is confirmed). CFG is a dual forward when <c>cfgScale &gt; 1</c> (Turbo uses
 /// cfgScale 1.0 → single forward). Build-blind: the seeded noise uses a host Gaussian (System.Random Box-Muller),
@@ -43,11 +38,7 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from already-tokenized (chat-templated) prompts. <paramref name="condDrop"/>/
-    /// <paramref name="uncondDrop"/> is the number of leading (system-prefix) tokens to discard from the encoder
-    /// hidden states before they enter the DiT text stream (mirrors Krea2/Qwen-Image). Pass
-    /// <paramref name="uncondTokens"/>=null (or cfgScale ≤ 1) for the guidance-free / Turbo path. Returns the decoded
-    /// image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
+    /// <summary>Generates an image from already-tokenized (chat-templated) prompts. <paramref name="condDrop"/>/ <paramref name="uncondDrop"/> is the number of leading (system-prefix) tokens to discard from the encoder hidden states before they enter the DiT text stream (mirrors Krea2/Qwen-Image). Pass <paramref name="uncondTokens"/>=null (or cfgScale ≤ 1) for the guidance-free / Turbo path. Returns the decoded image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop,
         int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null,
         string? seamlessTiling = null, long variationSeed = -1, double variationSeedStrength = 0,

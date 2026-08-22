@@ -6,22 +6,12 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Qwen-Image DiT ControlNet adapter — a faithful port of diffusers' <c>QwenImageControlNetModel</c>
-/// (the InstantX architecture). It is a shallow copy of the base <c>QwenImageTransformer</c>: its own
-/// <c>img_in</c> / <c>txt_norm</c> / <c>txt_in</c> / <c>time_text_embed</c> and a reduced stack of the SAME
-/// dual-stream blocks (<see cref="QwenImageBlock"/>, identical checkpoint key layout), plus two
-/// ControlNet-specific parts:
+/// <summary>Qwen-Image DiT ControlNet adapter — a faithful port of diffusers' <c>QwenImageControlNetModel</c> (the InstantX architecture). It is a shallow copy of the base <c>QwenImageTransformer</c>: its own <c>img_in</c> / <c>txt_norm</c> / <c>txt_in</c> / <c>time_text_embed</c> and a reduced stack of the SAME dual-stream blocks (<see cref="QwenImageBlock"/>, identical checkpoint key layout), plus two ControlNet-specific parts:
 /// <list type="bullet">
-/// <item>a zero-init <c>controlnet_x_embedder</c> Linear(64→hidden) whose projection of the packed
-/// VAE-encoded control image is ADDED to the img-embedded noise tokens,</item>
-/// <item>one zero-init output Linear(hidden→hidden) per block (<c>controlnet_blocks.{i}</c>) that gates each
-/// block's image stream into a residual.</item>
+///   <item>a zero-init <c>controlnet_x_embedder</c> Linear(64→hidden) whose projection of the packed VAE-encoded control image is ADDED to the img-embedded noise tokens,</item>
+///   <item>one zero-init output Linear(hidden→hidden) per block (<c>controlnet_blocks.{i}</c>) that gates each block's image stream into a residual.</item>
 /// </list>
-/// The residuals are consumed by <c>QwenImageTransformer.Forward</c> via
-/// <see cref="QwenImageControlNetResiduals"/> with diffusers' interval mapping. Weight tensors are owned by
-/// the <see cref="ControlNetFile"/> that produced them; this class only borrows references (same ownership
-/// model as <see cref="FluxControlNet"/>). The released checkpoints have no mode embedder — union behavior is
-/// trained in, so the control image is taken as-is.</summary>
+/// The residuals are consumed by <c>QwenImageTransformer.Forward</c> via <see cref="QwenImageControlNetResiduals"/> with diffusers' interval mapping. Weight tensors are owned by the <see cref="ControlNetFile"/> that produced them; this class only borrows references (same ownership model as <see cref="FluxControlNet"/>). The released checkpoints have no mode embedder — union behavior is trained in, so the control image is taken as-is.</summary>
 public sealed class QwenImageControlNet : IDisposable
 {
     private readonly QwenImageControlNetConfig _config;
@@ -57,9 +47,7 @@ public sealed class QwenImageControlNet : IDisposable
     /// <summary>The config this adapter was built from.</summary>
     public QwenImageControlNetConfig Config => _config;
 
-    /// <summary>Loads all weights using diffusers <c>QwenImageControlNetModel</c> naming. Block keys are
-    /// identical to the base transformer's (<c>transformer_blocks.{i}.*</c>); the ControlNet extras are
-    /// <c>controlnet_x_embedder</c> and <c>controlnet_blocks.{i}</c>.</summary>
+    /// <summary>Loads all weights using diffusers <c>QwenImageControlNetModel</c> naming. Block keys are identical to the base transformer's (<c>transformer_blocks.{i}.*</c>); the ControlNet extras are <c>controlnet_x_embedder</c> and <c>controlnet_blocks.{i}</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         _imgInWeight = weights["img_in.weight"];
@@ -90,9 +78,7 @@ public sealed class QwenImageControlNet : IDisposable
         }
     }
 
-    /// <summary>Runs the ControlNet for one denoising step and returns the per-block residuals. Matches the
-    /// reference pipeline's calling convention: run ONCE per step with the CONDITIONAL text stream; the same
-    /// residuals feed both CFG passes of the base transformer.</summary>
+    /// <summary>Runs the ControlNet for one denoising step and returns the per-block residuals. Matches the reference pipeline's calling convention: run ONCE per step with the CONDITIONAL text stream; the same residuals feed both CFG passes of the base transformer.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="packedLatent">Packed noisy latent <c>[1, imgSeqLen, 64]</c> — the SAME tensor the base transformer sees this step.</param>
     /// <param name="packedControl">Packed VAE-encoded control image <c>[1, imgSeqLen, 64]</c> (built once per generation via the pipeline's PackLatent).</param>
@@ -228,8 +214,7 @@ public sealed class QwenImageControlNet : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
-    /// <summary>Releases borrowed weight references (and the owned F32 txt_norm cast copy). The underlying
-    /// weight tensors belong to the safetensors loader that produced them.</summary>
+    /// <summary>Releases borrowed weight references (and the owned F32 txt_norm cast copy). The underlying weight tensors belong to the safetensors loader that produced them.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)

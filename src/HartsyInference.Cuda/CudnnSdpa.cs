@@ -3,29 +3,14 @@ using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API).
-/// Replaces the materialized cuBLAS QKᵀ→softmax→PV path (which allocates a [B·H, Sq, Skv] score matrix)
-/// with a single fused kernel that never materializes the scores — ~34× faster at Krea2 self-attention
-/// shape (B=1,H=24,S=4608,D=128: 62.7ms → 1.8ms/call, workspace 0), measured on RTX 4090.
-///
-/// The graph mirrors what NVIDIA's cudnn-frontend emits for plain inference SDPA on cuDNN ≥ 9.21:
-///   bmm1: S = Q @ Kᵀ  (matmul, fp32 accum) → scale: Ss = S·attn_scale (pointwise mul)
-///   → softmax: P = softmax(Ss)  (the UNIFIED backend SOFTMAX op — the decomposed
-///     max/sub/exp/sum/div graph does NOT match the fused engine) → bmm2: O = P @ V.
-/// Tensors are 4D [B,H,S,D], fp16 I/O + fp32 compute. Q/K/V/O and the scale scalar are non-virtual I/O;
-/// S/Ss/P are virtual so the engine keeps them in registers/shared memory.
-///
-/// Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by
-/// shape, exact scale bits, and bias layout. Instances are created per <see cref="CudaBackend"/> (one cuDNN
-/// handle bound to the compute stream).</summary>
+/// <summary>Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API). Replaces the materialized cuBLAS QKᵀ→softmax→PV path (which allocates a [B·H, Sq, Skv] score matrix) with a single fused kernel that never materializes the scores — ~34× faster at Krea2 self-attention shape (B=1,H=24,S=4608,D=128: 62.7ms → 1.8ms/call, workspace 0), measured on RTX 4090. The graph mirrors what NVIDIA's cudnn-frontend emits for plain inference SDPA on cuDNN ≥ 9.21: bmm1: S = Q @ Kᵀ (matmul, fp32 accum) → scale: Ss = S·attn_scale (pointwise mul) → softmax: P = softmax(Ss) (the UNIFIED backend SOFTMAX op — the decomposed max/sub/exp/sum/div graph does NOT match the fused engine) → bmm2: O = P @ V. Tensors are 4D [B,H,S,D], fp16 I/O + fp32 compute. Q/K/V/O and the scale scalar are non-virtual I/O; S/Ss/P are virtual so the engine keeps them in registers/shared memory. Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by shape, exact scale bits, and bias layout. Instances are created per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream).</summary>
 internal sealed class CudnnSdpa : IDisposable
 {
     private readonly nint _handle;
     private readonly ConcurrentDictionary<PlanKey, Lazy<Plan>> _plans = new();
     private bool _disposed;
 
-    /// <summary>Memory layout of the Q/K/V/O device buffers. <c>TokenMajor</c> is [b,s,h,d] addressed purely by
-    /// strides — what a fused QKV projection already produces, so callers can skip the permute on both sides.</summary>
+    /// <summary>Memory layout of the Q/K/V/O device buffers. <c>TokenMajor</c> is [b,s,h,d] addressed purely by strides — what a fused QKV projection already produces, so callers can skip the permute on both sides.</summary>
     internal enum SdpaLayout { HeadMajor, TokenMajor }
 
     /// <summary>Exact identity of a cached execution plan and its immutable device scale scalar.</summary>
@@ -57,21 +42,10 @@ internal sealed class CudnnSdpa : IDisposable
         _handle = handle;
     }
 
-    /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented
-    /// flash-fprop envelope on SM80+ — covers 64/96/112/120/128, e.g. Boogu's 120) plus 256 (Ideogram 4,
-    /// build/arch-dependent). The caller falls back per-D on rejection (<c>_cudnnSdpaDeadDims</c>), so an
-    /// unsupported D costs one warning and the materialized path — never a session kill.</summary>
+    /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented flash-fprop envelope on SM80+ — covers 64/96/112/120/128, e.g. Boogu's 120) plus 256 (Ideogram 4, build/arch-dependent). The caller falls back per-D on rejection (<c>_cudnnSdpaDeadDims</c>), so an unsupported D costs one warning and the materialized path — never a session kill.</summary>
     public static bool ShapeSupported(long d) => d == 256 || (d >= 64 && d <= 128 && d % 8 == 0);
 
-    /// <summary>
-    /// Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D]
-    /// (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically).
-    /// <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as
-    /// [biasB,1,biasSq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores
-    /// before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine.
-    /// <paramref name="biasSq"/> of 1 broadcasts one [Skv] row over every query, which is what a bias that depends
-    /// only on the key needs (Wan-Animate-2's log_scale band) — a full [Sq,Skv] buffer for it is pure duplication.
-    /// </summary>
+    /// <summary> Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D] (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically). <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as [biasB,1,biasSq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine. <paramref name="biasSq"/> of 1 broadcasts one [Skv] row over every query, which is what a bias that depends only on the key needs (Wan-Animate-2's log_scale band) — a full [Sq,Skv] buffer for it is pure duplication. </summary>
     public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
                                long b, long h, long sq, long sk, long d, float scale,
                                ulong biasF32 = 0, long biasB = 1, long biasSq = 0)

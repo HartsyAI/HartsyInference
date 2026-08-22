@@ -6,11 +6,7 @@ using HartsyInference.ThreeD.Models.Hunyuan3D;
 
 namespace HartsyInference.ThreeD.Models.TripoSr;
 
-/// <summary>TripoSR <c>NeRFMLP</c> + <c>TriplaneNeRFRenderer.query_triplane</c>: a 3D point in [−R,R]³ is
-/// scaled to [−1,1], projected onto the three planes (XY/XZ/YZ), grid-sampled
-/// (<see cref="GridSampler.GridSamplePlane"/>, align_corners=False, zeros pad), concatenated to 3·C features,
-/// and run through a SiLU MLP (<c>layers.0,2,…</c>) → density (1) + features (3). Density activation is
-/// <c>exp(density + DensityBias)</c>; color is <c>sigmoid(features)</c>.</summary>
+/// <summary>TripoSR <c>NeRFMLP</c> + <c>TriplaneNeRFRenderer.query_triplane</c>: grid-samples the three triplane planes at a 3D point, concatenates the features, and runs a SiLU MLP into density + color.</summary>
 public sealed unsafe class TriplaneNerfDecoder
 {
     private readonly TripoSrConfig _cfg;
@@ -43,10 +39,7 @@ public sealed unsafe class TriplaneNerfDecoder
         if (_midB is not null) foreach (Tensor t in _midB) yield return t;
     }
 
-    /// <summary>Decodes the activated density field over a <paramref name="resolution"/>³ grid spanning
-    /// [−R,R]³ in <b>ij order</b> (x outermost, z innermost — matches TSR's grid_vertices). Feeds marching
-    /// cubes at <see cref="TripoSrConfig.DensityThreshold"/>. The triplane sampling + NeRF MLP run device-resident
-    /// (grid coords generated in-kernel — no host per-point loop); only the final density is read back.</summary>
+    /// <summary>Decodes the activated density field over a <paramref name="resolution"/>³ grid spanning [−R,R]³ in <b>ij order</b> (x outermost, z innermost, matching TSR's grid_vertices), for marching cubes at <see cref="TripoSrConfig.DensityThreshold"/>.</summary>
     public ScalarField3D DecodeDensityField(IBackend backend, Triplane tri, int resolution, int chunkSize = 131072)
     {
         int res = resolution;
@@ -70,8 +63,7 @@ public sealed unsafe class TriplaneNerfDecoder
         return new ScalarField3D { Values = values, ResX = res, ResY = res, ResZ = res, Min = (-r, -r, -r), Max = (r, r, r) };
     }
 
-    /// <summary>Samples per-point RGB (<c>sigmoid(features)</c>) at <paramref name="points"/> (3·count xyz in
-    /// [−R,R]³). Used to color mesh vertices.</summary>
+    /// <summary>Samples per-point RGB (<c>sigmoid(features)</c>) at <paramref name="points"/>, used to color mesh vertices.</summary>
     public float[] DecodeColors(IBackend backend, Triplane tri, ReadOnlySpan<float> points, int count)
     {
         Tensor planes = BuildPlanes(tri);
@@ -87,8 +79,7 @@ public sealed unsafe class TriplaneNerfDecoder
         return rgb;
     }
 
-    /// <summary>Runs the MLP over <paramref name="count"/> points (xyz in [−R,R]³), returning <c>[1, count, 4]</c>
-    /// (<c>[density_raw, r, g, b]</c>; density pre-exp, rgb pre-sigmoid). Exposed for parity testing.</summary>
+    /// <summary>Runs the MLP over <paramref name="count"/> points, returning <c>[1, count, 4]</c> = <c>[density_raw, r, g, b]</c> (pre-activation); exposed for parity testing.</summary>
     public Tensor Evaluate(IBackend backend, Triplane tri, ReadOnlySpan<float> coords, int count)
     {
         Tensor planes = BuildPlanes(tri);
@@ -99,8 +90,7 @@ public sealed unsafe class TriplaneNerfDecoder
         return outp;
     }
 
-    /// <summary>Uploads the triplane features once as a <c>[3,C,H,W]</c> tensor (weight-cache resident) so the
-    /// grid-sample kernel + MLP never touch the host per point.</summary>
+    /// <summary>Uploads the triplane features once as a weight-cache-resident tensor so the grid-sample kernel + MLP never touch the host per point.</summary>
     private static Tensor BuildPlanes(Triplane tri)
     {
         int n = 3 * tri.Channels * tri.Height * tri.Width;

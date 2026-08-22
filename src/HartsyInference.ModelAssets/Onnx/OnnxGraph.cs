@@ -1,8 +1,6 @@
 namespace HartsyInference.ModelAssets.Onnx;
 
-/// <summary>A parsed ONNX <c>TensorProto</c> initializer: its name, shape, element type, and the absolute
-/// byte range of its <c>raw_data</c> blob in the source buffer (so it can be copied straight into native
-/// memory with no intermediate allocation).</summary>
+/// <summary>A parsed ONNX <c>TensorProto</c> initializer: its name, shape, element type, and the absolute byte range of its <c>raw_data</c> blob in the source buffer (so it can be copied straight into native memory with no intermediate allocation).</summary>
 public sealed class OnnxTensor
 {
     public required string Name { get; init; }
@@ -13,9 +11,7 @@ public sealed class OnnxTensor
     public required int RawLength { get; init; }
 }
 
-/// <summary>A parsed ONNX <c>NodeProto</c> in graph (topological) order: its op type, inputs, outputs, and
-/// optional name. Used to bind anonymized initializers (<c>onnx::MatMul_NNNN</c>) to logical layers by walking
-/// which node consumes them.</summary>
+/// <summary>A parsed ONNX <c>NodeProto</c> in graph (topological) order: its op type, inputs, outputs, and optional name. Used to bind anonymized initializers (<c>onnx::MatMul_NNNN</c>) to logical layers by walking which node consumes them.</summary>
 public sealed class OnnxNode
 {
     public required string OpType { get; init; }
@@ -24,9 +20,7 @@ public sealed class OnnxNode
     public required string[] Outputs { get; init; }
 }
 
-/// <summary>The subset of an ONNX model the engine needs: the initializer tensors (weights) and the node list
-/// in graph order. Parsed by walking the protobuf wire format directly (see <see cref="ProtoReader"/>); only
-/// <c>ModelProto.graph</c> → {<c>node</c>, <c>initializer</c>} are decoded, every other field is skipped.</summary>
+/// <summary>The subset of an ONNX model the engine needs: the initializer tensors (weights) and the node list in graph order. Parsed by walking the protobuf wire format directly (see <see cref="ProtoReader"/>); only <c>ModelProto.graph</c> → {<c>node</c>, <c>initializer</c>} are decoded, every other field is skipped.</summary>
 public sealed class OnnxModel
 {
     // ModelProto field numbers.

@@ -17,9 +17,7 @@ namespace HartsyInference.API;
 /// <summary>DI registration and endpoint mapping for the HartsyInference server.</summary>
 public static class HartsyInferenceServiceExtensions
 {
-    /// <summary>The <c>HttpContext.Items</c> key the auth middleware stashes a resolved <see cref="ApiKeyIdentity"/>
-    /// under, for the rate limiter's partition key, <see cref="UsageTracker"/>'s counter key, and the request's
-    /// <see cref="Activity"/> tag to share without re-parsing headers.</summary>
+    /// <summary>The <c>HttpContext.Items</c> key the auth middleware stashes a resolved <see cref="ApiKeyIdentity"/> under, for the rate limiter's partition key, <see cref="UsageTracker"/>'s counter key, and the request's <see cref="Activity"/> tag to share without re-parsing headers.</summary>
     internal const string ApiKeyIdentityItemKey = "HartsyInference.ApiKeyIdentity";
 
     /// <summary>Registers the inference engine facade and its concurrency gate.</summary>
@@ -135,8 +133,7 @@ public static class HartsyInferenceServiceExtensions
         return services;
     }
 
-    /// <summary>Maps health/settings/admin probes, API-key auth + per-key rate limiting + usage metering,
-    /// observability endpoints, and native + OpenAI-compat generation endpoints — all onto <see cref="IInferenceEngine"/>.</summary>
+    /// <summary>Maps health/settings/admin probes, API-key auth + per-key rate limiting + usage metering, observability endpoints, and native + OpenAI-compat generation endpoints — all onto <see cref="IInferenceEngine"/>.</summary>
     public static void MapHartsyInferenceEndpoints(this WebApplication app)
     {
         HartsyInferenceServerOptions options = app.Services.GetRequiredService<HartsyInferenceServerOptions>();
@@ -270,9 +267,7 @@ public static class HartsyInferenceServiceExtensions
     private static bool IsProbePath(PathString path) =>
         path.StartsWithSegments("/health") || path.StartsWithSegments("/ready") || path.StartsWithSegments("/version");
 
-    /// <summary>Coarse modality tag for usage/metrics, derived from the route path so this doesn't require
-    /// touching every endpoint file to attach metadata: the first segment after <c>/v1/native/</c> for native
-    /// routes, otherwise a fixed bucket per route group.</summary>
+    /// <summary>Coarse modality tag for usage/metrics, derived from the route path so this doesn't require touching every endpoint file to attach metadata: the first segment after <c>/v1/native/</c> for native routes, otherwise a fixed bucket per route group.</summary>
     private static string ModalityFromPath(PathString path)
     {
         string p = path.Value ?? "";
@@ -300,8 +295,7 @@ public static class HartsyInferenceServiceExtensions
         return null;
     }
 
-    /// <summary>Structured error response, OpenAI-shaped for continuity with the compat routes that will land
-    /// alongside generation endpoints. Internal so the <c>Endpoints/*.cs</c> route groups can share it.</summary>
+    /// <summary>Structured error response, OpenAI-shaped for continuity with the compat routes that will land alongside generation endpoints. Internal so the <c>Endpoints/*.cs</c> route groups can share it.</summary>
     internal static IResult Problem(int status, string message, string type) =>
         Results.Json(OpenAiError.Make(message, type), statusCode: status);
 

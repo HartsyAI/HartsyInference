@@ -72,7 +72,6 @@ public sealed unsafe class OasisPipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_dit.EnumerateWeights());
         VaeBackend.PreloadWeights(_vae.EnumerateWeights());
 
-        // Prompt frame → scaled latent.
         Tensor promptRgb = RgbToTensor(promptRgb24, width, height);
         Tensor promptLatent = _vae.Encode(VaeBackend, promptRgb);
         promptRgb.Dispose();

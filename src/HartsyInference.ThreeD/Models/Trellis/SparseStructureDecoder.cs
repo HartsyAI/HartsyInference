@@ -3,12 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS sparse-structure VAE decoder (<c>ss_dec_conv3d_16l8</c>): decodes an <c>[1,8,16³]</c> latent to a
-/// <c>[1,1,64³]</c> occupancy-logit grid via 3D conv res-blocks + pixel-shuffle upsampling. Stage-2 takes
-/// <c>argwhere(occ &gt; 0)</c> as the active-voxel coords. Every conv is k3/s1/p1; upsampling is depth-to-space
-/// (<see cref="IBackend.PixelShuffle3d"/>), norms are channel-axis LayerNorm (<see cref="IBackend.ChannelLayerNorm3d"/>,
-/// eps 1e-5). All math runs F32 (correctness-first — the decode is one-shot). See
-/// <c>docs/Research/TRELLIS_ARCHITECTURE.md</c>.</summary>
+/// <summary>TRELLIS sparse-structure VAE decoder (<c>ss_dec_conv3d_16l8</c>): decodes an <c>[1,8,16³]</c> latent to a <c>[1,1,64³]</c> occupancy-logit grid via 3D conv res-blocks + pixel-shuffle upsampling.</summary>
 public sealed class SparseStructureDecoder
 {
     private const float NormEps = 1e-5f;

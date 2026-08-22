@@ -59,8 +59,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         _loaders = loaders;
     }
 
-    /// <summary>The process-wide instance, loaded from disk on first use. Callers run under the audio generation
-    /// lock, which is what makes the shared (non-thread-safe) encoder safe to reuse.</summary>
+    /// <summary>The process-wide instance, loaded from disk on first use. Callers run under the audio generation lock, which is what makes the shared (non-thread-safe) encoder safe to reuse.</summary>
     internal static SpeakerDiarizer Shared()
     {
         lock (_gate)
@@ -69,8 +68,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         }
     }
 
-    /// <summary>Attributes speakers to <paramref name="mono16k"/>, cutting on <paramref name="segments"/> when the
-    /// transcriber produced timestamps and on a fixed sliding window otherwise.</summary>
+    /// <summary>Attributes speakers to <paramref name="mono16k"/>, cutting on <paramref name="segments"/> when the transcriber produced timestamps and on a fixed sliding window otherwise.</summary>
     internal IReadOnlyList<DiarizedSegment> Diarize(IBackend backend, float[] mono16k, IReadOnlyList<SttSegment>? segments,
         CancellationToken cancel)
     {
@@ -107,8 +105,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         return Merge(kept, labels);
     }
 
-    /// <summary>Loads CAM++ from a user-placed checkpoint. Never downloads: diarization is a side capability and a
-    /// silent multi-GB fetch inside a transcription call is not acceptable.</summary>
+    /// <summary>Loads CAM++ from a user-placed checkpoint. Never downloads: diarization is a side capability and a silent multi-GB fetch inside a transcription call is not acceptable.</summary>
     private static SpeakerDiarizer Load()
     {
         string[] names = ["campplus_cn_common.bin", "campplus_cn_common.safetensors", "campplus.safetensors", "s3gen.safetensors"];
@@ -201,8 +198,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         return spans;
     }
 
-    /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector.
-    /// Returns null when the span has too few frames for the encoder's strided front end.</summary>
+    /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector. Returns null when the span has too few frames for the encoder's strided front end.</summary>
     private unsafe float[]? Embed(IBackend backend, float[] mono16k, SttSegment span)
     {
         int from = Math.Clamp((int)(span.Start * SampleRate), 0, mono16k.Length);
@@ -262,8 +258,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         }
     }
 
-    /// <summary>Agglomerative average-linkage clustering over cosine distance: merge the closest pair while it is
-    /// under <see cref="MergeDistance"/>, or while more than <see cref="MaxSpeakers"/> clusters remain.</summary>
+    /// <summary>Agglomerative average-linkage clustering over cosine distance: merge the closest pair while it is under <see cref="MergeDistance"/>, or while more than <see cref="MaxSpeakers"/> clusters remain.</summary>
     private static int[] Cluster(List<float[]> embeddings, CancellationToken cancel)
     {
         int count = embeddings.Count;

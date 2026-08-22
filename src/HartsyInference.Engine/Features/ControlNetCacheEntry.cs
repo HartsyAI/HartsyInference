@@ -2,8 +2,7 @@ using HartsyInference.Diffusion.Adapters;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>A loaded UNet-family ControlNet kept alive for one generation: the mmap-backed checkpoint plus the constructed
-/// adapter, disposed together.</summary>
+/// <summary>A loaded UNet-family ControlNet kept alive for one generation: the mmap-backed checkpoint plus the constructed adapter, disposed together.</summary>
 public sealed class ControlNetCacheEntry : IDisposable
 {
     /// <summary>Path the checkpoint was loaded from.</summary>

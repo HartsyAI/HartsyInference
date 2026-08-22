@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native text-to-speech request. Carries the text plus an optional voice reference (for zero-shot cloning)
-/// and the per-model knobs pipelines honor when they support them.</summary>
+/// <summary>Native text-to-speech request. Carries the text plus an optional voice reference (for zero-shot cloning) and the per-model knobs pipelines honor when they support them.</summary>
 public sealed record SpeechRequest
 {
     /// <summary>The text to speak.</summary>
@@ -49,8 +48,7 @@ public sealed record SpeechRequest
     /// <summary>Maximum tokens to generate; null uses the model default (Dia 3072).</summary>
     public int? MaxTokens { get; init; }
 
-    /// <summary>Zonos 8-way emotion vector in the reference order (Happiness, Sadness, Disgust, Fear,
-    /// Surprise, Anger, Other, Neutral); renormalized to sum 1. Null uses the model default.</summary>
+    /// <summary>Zonos 8-way emotion vector in the reference order (Happiness, Sadness, Disgust, Fear, Surprise, Anger, Other, Neutral); renormalized to sum 1. Null uses the model default.</summary>
     public IReadOnlyList<double>? Emotion { get; init; }
 
     /// <summary>Zonos speaking rate in phonemes per second (0-40; 15 default, 30 very fast, 10 slow).</summary>

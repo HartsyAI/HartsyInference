@@ -6,13 +6,10 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native text-generation routes: a byte-for-byte pass-through of <see cref="TextRequest"/> to
-/// <see cref="TextResult"/>, plus real incremental-text streaming via <see cref="TextChunk"/>.</summary>
+/// <summary>Native text-generation routes: a byte-for-byte pass-through of <see cref="TextRequest"/> to <see cref="TextResult"/>, plus real incremental-text streaming via <see cref="TextChunk"/>.</summary>
 public static class TextEndpoints
 {
-    /// <summary>Maps <c>/v1/native/text</c>, its SSE streaming variant, and <c>/count-tokens</c>. POST rather than
-    /// the plan's originally-sketched GET for count-tokens — GET requests with a JSON body are poorly supported by
-    /// HTTP tooling and ASP.NET Core minimal APIs don't bind one by default.</summary>
+    /// <summary>Maps <c>/v1/native/text</c>, its SSE streaming variant, and <c>/count-tokens</c>. POST rather than the plan's originally-sketched GET for count-tokens — GET requests with a JSON body are poorly supported by HTTP tooling and ASP.NET Core minimal APIs don't bind one by default.</summary>
     public static void MapTextEndpoints(this WebApplication app)
     {
         app.MapPost("/v1/native/text", async (NativeTextRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>

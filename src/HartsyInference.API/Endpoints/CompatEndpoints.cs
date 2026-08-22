@@ -7,14 +7,10 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>OpenAI-shaped <c>/v1/chat/completions</c> and <c>/v1/images/generations</c> — thin DTO mappers that
-/// call the SAME native handlers <see cref="TextEndpoints"/>/<see cref="ImageEndpoints"/> use, not a parallel
-/// implementation. Deliberately narrow: composition-heavy requests (LoRA/ControlNet/regional prompting, tool
-/// calling, JSON-schema response format) don't fit OpenAI's schema and belong on the native routes instead.</summary>
+/// <summary>OpenAI-shaped <c>/v1/chat/completions</c> and <c>/v1/images/generations</c> — thin DTO mappers that call the SAME native handlers <see cref="TextEndpoints"/>/<see cref="ImageEndpoints"/> use, not a parallel implementation. Deliberately narrow: composition-heavy requests (LoRA/ControlNet/regional prompting, tool calling, JSON-schema response format) don't fit OpenAI's schema and belong on the native routes instead.</summary>
 public static class CompatEndpoints
 {
-    /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that
-    /// field's doc comment for why this isn't a real per-model timestamp.</summary>
+    /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that field's doc comment for why this isn't a real per-model timestamp.</summary>
     private static readonly long s_processStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
     /// <summary>Maps the OpenAI-compat routes.</summary>

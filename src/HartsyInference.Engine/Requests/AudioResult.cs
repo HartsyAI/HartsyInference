@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>The result of a speech / music / voice-conversion generation: encoded audio bytes plus its format,
-/// duration, and sample rate.</summary>
+/// <summary>The result of a speech / music / voice-conversion generation: encoded audio bytes plus its format, duration, and sample rate.</summary>
 public sealed record AudioResult
 {
     /// <summary>Encoded audio container bytes (WAV by default).</summary>

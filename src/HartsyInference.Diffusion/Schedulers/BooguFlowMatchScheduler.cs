@@ -35,10 +35,10 @@ public sealed class BooguFlowMatchScheduler : IScheduler
     private float[] _timestepsFull;
     private int _numInferenceSteps;
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "boogu_flow_match_v1";
 
-    /// <summary>Number of inference steps configured.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
     /// <summary>The shifted per-step timestep values <c>t'</c> in <c>[0, 1]</c> (ascending). Pass these to the transformer.</summary>

@@ -1,10 +1,6 @@
 namespace HartsyInference.ThreeD.Models.TripoSr;
 
-/// <summary>TripoSR (Stability AI / Tripo, MIT) configuration — a feed-forward single-image→3D LRM: a DINO
-/// ViT-B/16 image tokenizer feeds a diffusers <c>Transformer1D</c> over learned triplane tokens, the result
-/// is upsampled (ConvTranspose2d) into a triplane and decoded by a <c>NeRFMLP</c> into density+color, meshed
-/// via marching cubes. Deterministic (no diffusion). Dims match the public <c>stabilityai/TripoSR</c>
-/// <c>config.yaml</c>.</summary>
+/// <summary>TripoSR (Stability AI / Tripo, MIT) configuration for a feed-forward, deterministic single-image→3D LRM (no diffusion); dims match the public <c>stabilityai/TripoSR</c> <c>config.yaml</c>.</summary>
 public sealed record TripoSrConfig
 {
     // --- Triplane (Triplane1DTokenizer + TriplaneUpsampleNetwork) ---
@@ -62,8 +58,7 @@ public sealed record TripoSrConfig
     /// <summary>Number of triplane tokens the backbone processes (3 planes × PlaneSize²).</summary>
     public int TriplaneTokens => 3 * PlaneSize * PlaneSize;
 
-    /// <summary>Default config for the public <c>stabilityai/TripoSR</c> checkpoint. Pairs with a DINO
-    /// ViT-B/16 tokenizer (CrossAttentionDim = 768) at a 512px conditioning image.</summary>
+    /// <summary>Default config for the public <c>stabilityai/TripoSR</c> checkpoint, pairing with a DINO ViT-B/16 tokenizer at a 512px conditioning image.</summary>
     public static TripoSrConfig TripoSr => new()
     {
         TriplaneChannels = 40, PlaneSize = 32, NumChannels = 1024,

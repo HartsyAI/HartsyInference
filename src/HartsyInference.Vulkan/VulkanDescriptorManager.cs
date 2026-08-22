@@ -49,10 +49,7 @@ public sealed class VulkanDescriptorManager : IDisposable
         return fp;
     }
 
-    /// <summary>True when VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors are active.
-    /// In this mode <see cref="PushSet"/> writes descriptors directly into the command buffer,
-    /// bypassing the pool ring entirely. Saves a vkAllocateDescriptorSets + vkUpdateDescriptorSets
-    /// round-trip per dispatch.</summary>
+    /// <summary>True when VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors are active. In this mode <see cref="PushSet"/> writes descriptors directly into the command buffer, bypassing the pool ring entirely. Saves a vkAllocateDescriptorSets + vkUpdateDescriptorSets round-trip per dispatch.</summary>
     public bool PushDescriptorActive => _pushDescriptor;
 
     public VulkanDescriptorManager(nint device, bool enablePushDescriptor = false)
@@ -66,9 +63,7 @@ public sealed class VulkanDescriptorManager : IDisposable
         }
     }
 
-    /// <summary>Returns (or creates) a layout for <c>n</c> storage buffers at bindings 0..n-1, all visible to the
-    /// compute stage. <paramref name="forPush"/> selects the push-descriptor-flagged flavor (see the field doc
-    /// above) — cached separately from the pool-allocatable default.</summary>
+    /// <summary>Returns (or creates) a layout for <c>n</c> storage buffers at bindings 0..n-1, all visible to the compute stage. <paramref name="forPush"/> selects the push-descriptor-flagged flavor (see the field doc above) — cached separately from the pool-allocatable default.</summary>
     public ulong GetSetLayout(int storageBufferCount, bool forPush = false)
     {
         Dictionary<int, ulong> cache = forPush ? _pushSetLayouts : _setLayouts;
@@ -195,11 +190,7 @@ public sealed class VulkanDescriptorManager : IDisposable
         _setsInActive = 0;
     }
 
-    /// <summary>Records descriptor writes directly into the command buffer via
-    /// <c>vkCmdPushDescriptorSet</c>. No descriptor set allocation, no pool, no
-    /// <c>vkUpdateDescriptorSets</c> round-trip. Active when <see cref="PushDescriptorActive"/>
-    /// is true (set at construction). Safe to call from any recorded dispatch — the descriptors
-    /// are valid for the next dispatch only, which matches the per-op binding pattern we use.</summary>
+    /// <summary>Records descriptor writes directly into the command buffer via <c>vkCmdPushDescriptorSet</c>. No descriptor set allocation, no pool, no <c>vkUpdateDescriptorSets</c> round-trip. Active when <see cref="PushDescriptorActive"/> is true (set at construction). Safe to call from any recorded dispatch — the descriptors are valid for the next dispatch only, which matches the per-op binding pattern we use.</summary>
     public unsafe void PushSet(nint commandBuffer, ulong pipelineLayout, ReadOnlySpan<ulong> bufferHandles)
     {
         int n = bufferHandles.Length;

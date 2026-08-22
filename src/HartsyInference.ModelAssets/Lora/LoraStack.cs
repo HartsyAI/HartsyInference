@@ -246,18 +246,9 @@ public sealed class LoraStack : IDisposable
         }
     }
 
-    /// <summary>Maps a split attention canonical key onto its FUSED sibling when the dictionary carries the fused
-    /// form: <c>…attn.to_q/k/v.weight → …attn.qkv.weight</c> rows [q;k;v], and
-    /// <c>…attn.add_{q,k,v}_proj.weight → …attn.add_qkv.weight</c> — the layout ChromaCheckpointConverter (and the
-    /// other Flux-lineage converters) keep for fp8 builds.
-    /// <para>The <c>attention.qkv</c> and bare <c>qkv</c> spellings cover two families that keep attention fused in
-    /// their ordinary (not just fp8) layout: Ideogram 4 reads <c>layers.{i}.attention.qkv.weight</c> and F-Lite reads
-    /// <c>blocks.{i}.qkv.weight</c>. A LoRA trained directly against either names the fused module and matches without
-    /// this path; one converted to split form would otherwise miss EVERY attention delta and still merge its non-
-    /// attention weights, so the stack would report a successful merge and the image would come out subtly
-    /// under-LoRA'd — the Chroma failure mode this whole fallback exists for, with no error to point at it.</para>
-    /// <para>A miss here is safe by construction: the fallback only fires when the split key is absent from the dict
-    /// AND the fused candidate is present, so it cannot capture a key the direct lookup would have served.</para></summary>
+    /// <summary>Maps a split attention canonical key onto its FUSED sibling when the dictionary carries the fused form: <c>…attn.to_q/k/v.weight → …attn.qkv.weight</c> rows [q;k;v], and <c>…attn.add_{q,k,v}_proj.weight → …attn.add_qkv.weight</c> — the layout ChromaCheckpointConverter (and the other Flux-lineage converters) keep for fp8 builds.
+    /// <para>The <c>attention.qkv</c> and bare <c>qkv</c> spellings cover two families that keep attention fused in their ordinary (not just fp8) layout: Ideogram 4 reads <c>layers.{i}.attention.qkv.weight</c> and F-Lite reads <c>blocks.{i}.qkv.weight</c>. A LoRA trained directly against either names the fused module and matches without this path; one converted to split form would otherwise miss EVERY attention delta and still merge its non- attention weights, so the stack would report a successful merge and the image would come out subtly under-LoRA'd — the Chroma failure mode this whole fallback exists for, with no error to point at it.</para>
+    /// <para>A miss here is safe by construction: the fallback only fires when the split key is absent from the dict AND the fused candidate is present, so it cannot capture a key the direct lookup would have served.</para></summary>
     private static bool TryResolveFusedSlice(string canonicalKey, IDictionary<string, Tensor> weights,
         out string fusedKey, out int sliceIndex, out int sliceCount)
     {
@@ -297,9 +288,7 @@ public sealed class LoraStack : IDisposable
         return false;
     }
 
-    /// <summary>Like <see cref="AccumulateDelta"/> but adds the <c>up @ down</c> delta into the row window
-    /// [<paramref name="rowOffset"/>, rowOffset + up.rows) of <paramref name="accumF32"/> — the fused-QKV slice merge.
-    /// Host math: F32 tensors are host-resident at this point and the add is a one-time load-path cost.</summary>
+    /// <summary>Like <see cref="AccumulateDelta"/> but adds the <c>up @ down</c> delta into the row window [<paramref name="rowOffset"/>, rowOffset + up.rows) of <paramref name="accumF32"/> — the fused-QKV slice merge. Host math: F32 tensors are host-resident at this point and the add is a one-time load-path cost.</summary>
     private static unsafe void AccumulateDeltaIntoRows(IBackend backend, Tensor accumF32, LoraLayer layer, float strength, long rowOffset)
     {
         Tensor upF32 = layer.LoraUp.CastTo(DType.F32);

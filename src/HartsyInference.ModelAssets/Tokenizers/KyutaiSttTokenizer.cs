@@ -3,10 +3,7 @@ using Microsoft.ML.Tokenizers;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Kyutai STT text-vocab decoder — turns the SentencePiece text token ids
-/// <c>KyutaiSttPipeline.Transcribe</c> emits into text. The Audio package carries no text-vocab dependency,
-/// so the caller supplies the model's SentencePiece <c>text.model</c> (8k en_fr / en). Decode is what STT
-/// needs; Encode is provided for symmetry.</summary>
+/// <summary>Kyutai STT text-vocab decoder — turns the SentencePiece text token ids <c>KyutaiSttPipeline.Transcribe</c> emits into text. The Audio package carries no text-vocab dependency, so the caller supplies the model's SentencePiece <c>text.model</c> (8k en_fr / en). Decode is what STT needs; Encode is provided for symmetry.</summary>
 public sealed class KyutaiSttTokenizer : IDisposable
 {
     private readonly SentencePieceTokenizer _sp;

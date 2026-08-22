@@ -4,23 +4,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Routes an LTX-2.x (Lightricks, 22B audiovisual; 2.3 and 2.5) checkpoint into the per-component weight
-/// dictionaries the model code consumes: the DiT (<c>LtxVideo2Transformer</c>), the per-modality text connectors
-/// (<c>LtxVideo2TextConnectors</c>), the video VAEs (<c>LtxVideo2VaeDecoder</c> conv / <c>LtxVideo25DiffusionDecoder</c>),
-/// the audio VAE (<c>LtxAudioVaeDecoder</c>), the vocoder (<c>LtxAudioVocoder</c>), and — when bundled — the text
-/// tower (Gemma-3-12B on 2.3, Gemma-4-12B on 2.5).
+/// <summary>Routes an LTX-2.x (Lightricks, 22B audiovisual; 2.3 and 2.5) checkpoint into the per-component weight dictionaries the model code consumes: the DiT (<c>LtxVideo2Transformer</c>), the per-modality text connectors (<c>LtxVideo2TextConnectors</c>), the video VAEs (<c>LtxVideo2VaeDecoder</c> conv / <c>LtxVideo25DiffusionDecoder</c>), the audio VAE (<c>LtxAudioVaeDecoder</c>), the vocoder (<c>LtxAudioVocoder</c>), and — when bundled — the text tower (Gemma-3-12B on 2.3, Gemma-4-12B on 2.5).
 ///
-/// <para>The single-file Lightricks checkpoint (<c>ltx-2.3-22b-dev.safetensors</c>) carries the DiT and connectors
-/// under <c>model.diffusion_model.*</c>, the video VAE under <c>vae.*</c>, the audio VAE under <c>audio_vae.*</c>, the
-/// vocoder under <c>vocoder.*</c>, and (optionally) the text encoder under <c>text_encoder.*</c>. Routing strips the
-/// component prefix where the consumer expects bare keys (DiT, both VAEs, text encoder) and keeps it where the
-/// consumer looks the key up with its prefix intact (the connectors read <c>model.diffusion_model.*_embeddings_connector.*</c>
-/// and the vocoder reads <c>vocoder.vocoder.*</c> / <c>vocoder.bwe_generator.*</c> / <c>vocoder.mel_stft.*</c>).</para>
+/// <para>The single-file Lightricks checkpoint (<c>ltx-2.3-22b-dev.safetensors</c>) carries the DiT and connectors under <c>model.diffusion_model.*</c>, the video VAE under <c>vae.*</c>, the audio VAE under <c>audio_vae.*</c>, the vocoder under <c>vocoder.*</c>, and (optionally) the text encoder under <c>text_encoder.*</c>. Routing strips the component prefix where the consumer expects bare keys (DiT, both VAEs, text encoder) and keeps it where the consumer looks the key up with its prefix intact (the connectors read <c>model.diffusion_model.*_embeddings_connector.*</c> and the vocoder reads <c>vocoder.vocoder.*</c> / <c>vocoder.bwe_generator.*</c> / <c>vocoder.mel_stft.*</c>).</para>
 ///
-/// <para><b>Status:</b> the rename table is verified against the real checkpoint header (see the table comment
-/// below), and the conv-VAE + audio paths have real-weight parity vs ComfyUI; DiT end-to-end numeric parity is
-/// still tracked in PARITY_VERIFICATION.md. Already-diffusers-named inputs (folder shards) pass through the
-/// prefix routing unchanged.</para></summary>
+/// <para><b>Status:</b> the rename table is verified against the real checkpoint header (see the table comment below), and the conv-VAE + audio paths have real-weight parity vs ComfyUI; DiT end-to-end numeric parity is still tracked in PARITY_VERIFICATION.md. Already-diffusers-named inputs (folder shards) pass through the prefix routing unchanged.</para></summary>
 public sealed class LtxVideo2CheckpointConverter
 {
     private const string DiffusionPrefix = "model.diffusion_model.";
@@ -65,8 +53,7 @@ public sealed class LtxVideo2CheckpointConverter
         Connectors,
         /// <summary>Video VAE decoder weights (<c>decoder.*</c> + <c>latents_mean</c>/<c>latents_std</c>).</summary>
         Vae,
-        /// <summary>LTX-2.5 <c>NADiffusionDecoder</c> weights, kept apart because it shares module names
-        /// (<c>decoder.conv_in</c>, <c>decoder.conv_out</c>) with the convolutional decoder it replaces.</summary>
+        /// <summary>LTX-2.5 <c>NADiffusionDecoder</c> weights, kept apart because it shares module names (<c>decoder.conv_in</c>, <c>decoder.conv_out</c>) with the convolutional decoder it replaces.</summary>
         VaeDiffusionDecoder,
         /// <summary>Audio VAE decoder weights.</summary>
         AudioVae,
@@ -91,17 +78,13 @@ public sealed class LtxVideo2CheckpointConverter
         public required Dictionary<string, Tensor> TextEncoder { get; init; }
     }
 
-    /// <summary>True when a key belongs to the text-connector subtree (the per-modality connectors + the aggregate
-    /// feature projection), which the connector code reads with its prefix intact.</summary>
+    /// <summary>True when a key belongs to the text-connector subtree (the per-modality connectors + the aggregate feature projection), which the connector code reads with its prefix intact.</summary>
     private static bool IsConnectorKey(string key) =>
         key.Contains("embeddings_connector", StringComparison.Ordinal)
         || key.Contains("text_embedding_projection", StringComparison.Ordinal);
 
-    /// <summary>Whether a bare key belongs to a standalone Gemma 4 text tower (LTX-2.5's <c>gemma4-12b-with-proj</c>
-    /// file) rather than to the DiT.</summary>
-    /// <remarks>The multimodal heads (<c>vision_model</c>, <c>audio_projector</c>, <c>multi_modal_projector</c>) ride
-    /// along in that file and are unused for LTX conditioning; they route here so they land somewhere the tower
-    /// ignores instead of being mistaken for DiT weights.</remarks>
+    /// <summary>Whether a bare key belongs to a standalone Gemma 4 text tower (LTX-2.5's <c>gemma4-12b-with-proj</c> file) rather than to the DiT.</summary>
+    /// <remarks>The multimodal heads (<c>vision_model</c>, <c>audio_projector</c>, <c>multi_modal_projector</c>) ride along in that file and are unused for LTX conditioning; they route here so they land somewhere the tower ignores instead of being mistaken for DiT weights.</remarks>
     private static bool IsGemma4TowerKey(string key) =>
         key.StartsWith("model.layers.", StringComparison.Ordinal)
         || key.StartsWith("model.embed_tokens.", StringComparison.Ordinal)
@@ -111,13 +94,10 @@ public sealed class LtxVideo2CheckpointConverter
         || key.StartsWith("vision_model.", StringComparison.Ordinal)
         || key == "tokenizer_json";
 
-    /// <summary>Key whose presence identifies an LTX-2.5 diffusion video VAE — the noised-pixel input projection,
-    /// which the convolutional decoder has no counterpart for. Same signature ComfyUI selects on.</summary>
+    /// <summary>Key whose presence identifies an LTX-2.5 diffusion video VAE — the noised-pixel input projection, which the convolutional decoder has no counterpart for. Same signature ComfyUI selects on.</summary>
     public const string DiffusionDecoderSignatureKey = "decoder.conv_in_x_t.weight";
 
-    /// <summary>Whether these keys belong to a diffusion video VAE rather than a convolutional one. This has to be a
-    /// whole-file question: the two decoders share <c>decoder.conv_in</c>/<c>decoder.conv_out</c>, so no single key
-    /// answers it.</summary>
+    /// <summary>Whether these keys belong to a diffusion video VAE rather than a convolutional one. This has to be a whole-file question: the two decoders share <c>decoder.conv_in</c>/<c>decoder.conv_out</c>, so no single key answers it.</summary>
     public static bool IsDiffusionVideoVae(IEnumerable<string> keys)
     {
         ArgumentNullException.ThrowIfNull(keys);
@@ -133,8 +113,7 @@ public sealed class LtxVideo2CheckpointConverter
         return false;
     }
 
-    /// <summary>Whether a raw checkpoint key belongs to the DiT, used to pick which file of a split bundle carries
-    /// the architecture metadata.</summary>
+    /// <summary>Whether a raw checkpoint key belongs to the DiT, used to pick which file of a split bundle carries the architecture metadata.</summary>
     public static bool IsTransformerKey(string key) => RouteKey(key).Bucket == Ltx2Bucket.Transformer;
 
     /// <summary>Pure key routing (testable without files): returns the destination bucket and the mapped key.</summary>
@@ -217,9 +196,7 @@ public sealed class LtxVideo2CheckpointConverter
         return (Ltx2Bucket.Vae, key);
     }
 
-    /// <summary>Maps an original flat <c>up_blocks.{i}</c> token to the diffusers grouping by index parity: index 0 is
-    /// the mid block; odd i is the (i−1)/2-th up-stage's upsampler; even i&gt;0 is the (i/2−1)-th up-stage's resnets.
-    /// Handles any up-block count (19B has 7, 22B has 9). Keys without an <c>up_blocks.</c> token pass through.</summary>
+    /// <summary>Maps an original flat <c>up_blocks.{i}</c> token to the diffusers grouping by index parity: index 0 is the mid block; odd i is the (i−1)/2-th up-stage's upsampler; even i&gt;0 is the (i/2−1)-th up-stage's resnets. Handles any up-block count (19B has 7, 22B has 9). Keys without an <c>up_blocks.</c> token pass through.</summary>
     private static string RegroupUpBlock(string key)
     {
         const string tok = "up_blocks.";
@@ -238,9 +215,7 @@ public sealed class LtxVideo2CheckpointConverter
     private static (Ltx2Bucket, string?) MapAudioVae(string key) => (Ltx2Bucket.AudioVae, key);
 
     /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets.</summary>
-    /// <param name="residentNvfp4">Keep an nvfp4 build packed instead of unpacking it to BF16 at load. Only a caller
-    /// whose backend can consume a packed weight may ask for it — the official 18.72 GB LTX-2.5 distilled nvfp4 DiT
-    /// unpacks to 42 GB, so this is the difference between fitting a 24 GB card and not.</param>
+    /// <param name="residentNvfp4">Keep an nvfp4 build packed instead of unpacking it to BF16 at load. Only a caller whose backend can consume a packed weight may ask for it — the official 18.72 GB LTX-2.5 distilled nvfp4 DiT unpacks to 42 GB, so this is the difference between fitting a 24 GB card and not.</param>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool residentNvfp4 = false)
     {
         // Folds every quantized build's companions onto the weight before routing: the LTX-2.5 comfy-int8-convrot DiT
@@ -290,8 +265,7 @@ public sealed class LtxVideo2CheckpointConverter
         };
     }
 
-    /// <summary>Loads a single bundled safetensors file and routes it. The caller owns the loader and disposes it
-    /// once the weights are no longer referenced.</summary>
+    /// <summary>Loads a single bundled safetensors file and routes it. The caller owns the loader and disposes it once the weights are no longer referenced.</summary>
     public static (ConvertedWeights Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
     {
         if (!File.Exists(checkpointPath))

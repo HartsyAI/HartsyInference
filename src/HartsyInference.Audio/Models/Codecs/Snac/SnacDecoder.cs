@@ -5,8 +5,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC decoder, matching the official hubertsiuzdak/snac <c>Decoder</c> (snac/layers.py).
-///
+/// <summary>SNAC decoder, matching the official hubertsiuzdak/snac <c>Decoder</c> (snac/layers.py).</summary>
+/// <remarks>
 /// <para>The published checkpoints set <c>depthwise=true</c> and <c>noise=true</c>, which changes the
 /// module layout vs a plain DAC decoder:</para>
 /// <list type="bullet">
@@ -22,7 +22,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 ///
 /// PARITY-TODO: verify against real snac_24khz weights. The NoiseBlock is stochastic in the reference
 /// (torch.randn); here it uses a fixed-seed Gaussian so decode is deterministic. The 32/44 kHz checkpoints
-/// add a LocalMHA (attn_window_size 32) which is not yet wired (throws if requested).</summary>
+/// add a LocalMHA (attn_window_size 32) which is not yet wired (throws if requested).</remarks>
 internal sealed unsafe class SnacDecoder
 {
     private readonly SnacConfig _cfg;
@@ -125,13 +125,10 @@ internal sealed unsafe class SnacDecoder
         _finalConvB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{finalSnakeIdx + 1}.bias"]);
     }
 
-    /// <param name="callSeed">Distinguishes separate <see cref="Forward"/> calls that decode overlapping
-    /// windows of the same utterance (Orpheus's streaming path — see <see cref="Pipelines.OrpheusPipeline"/>) so
-    /// each window's <see cref="ApplyNoiseBlock"/> draws different noise. A single monolithic decode (the default,
-    /// <c>callSeed=0</c>) is unaffected — it reduces to the exact same fixed-seed sequence this method always
-    /// used, so non-streaming callers see byte-identical output. Without this, every window would replay the
-    /// identical Gaussian sequence at the same relative offset, producing an audible periodic artifact that never
-    /// shows up in a single whole-utterance decode.</param>
+    /// <param name="callSeed">Distinguishes separate <see cref="Forward"/> calls that decode overlapping windows of the same utterance so each window's <see cref="ApplyNoiseBlock"/> draws different noise; the default (<c>callSeed=0</c>) reduces to the same fixed-seed sequence this method always used, so non-streaming callers see byte-identical output.</param>
+    /// <remarks>Used by Orpheus's streaming path (see <see cref="Pipelines.OrpheusPipeline"/>). Without per-call
+    /// seed distinction, every window would replay the identical Gaussian sequence at the same relative offset,
+    /// producing an audible periodic artifact that never shows up in a single whole-utterance decode.</remarks>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames, int callSeed = 0)
     {
         if (_cfg.AttnWindowSize is not null)
@@ -214,8 +211,7 @@ internal sealed unsafe class SnacDecoder
         return pcm;
     }
 
-    /// <summary>NoiseBlock: h = conv1x1(x); x += randn[B,1,T] * h (noise broadcast across channels).
-    /// Reference uses torch.randn; we use a fixed-seed Gaussian so decode is reproducible (PARITY-TODO).</summary>
+    /// <summary>NoiseBlock: h = conv1x1(x); x += randn[B,1,T] * h (noise broadcast across channels). Reference uses torch.randn; we use a fixed-seed Gaussian so decode is reproducible (PARITY-TODO).</summary>
     private void ApplyNoiseBlock(IBackend backend, Tensor x, Tensor linearW, int batch, int dim, int t, int stageSeed, int callSeed)
     {
         Tensor h = new(new TensorShape(batch, dim, t), DType.F32);

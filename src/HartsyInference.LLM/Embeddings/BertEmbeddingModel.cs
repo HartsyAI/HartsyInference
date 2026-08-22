@@ -5,16 +5,15 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Embeddings;
 
-/// <summary>A BERT-family text-embedding model loaded from a llama.cpp encoder GGUF (<c>bert</c>, <c>nomic-bert</c>,
-/// …). Runs the bidirectional post-norm encoder and pools the token states (CLS / mean per <c>pooling_type</c>),
-/// then L2-normalizes. Config-driven over the family differences (detected from metadata + tensor presence):
+/// <summary>A BERT-family text-embedding model loaded from a llama.cpp encoder GGUF (<c>bert</c>, <c>nomic-bert</c>, …); runs the bidirectional post-norm encoder, pools (CLS/mean per <c>pooling_type</c>), then L2-normalizes.</summary>
+/// <remarks>Config-driven over family differences detected from metadata + tensor presence:
 /// <list type="bullet">
 /// <item>position: absolute table (bge, all-MiniLM) vs rotary (nomic-bert)</item>
 /// <item>QKV: separate <c>attn_q/k/v</c> (bge) vs fused <c>attn_qkv</c> (nomic, split at load)</item>
 /// <item>MLP: GELU (bge) vs GeGLU <c>ffn_gate·ffn_up</c> (nomic)</item>
 /// <item>biases: present (bge) vs none on the linears (nomic)</item>
 /// </list>
-/// Reuses the engine's Linear / LayerNorm / FlashAttention (non-causal) primitives.</summary>
+/// Reuses the engine's Linear / LayerNorm / FlashAttention (non-causal) primitives.</remarks>
 public sealed unsafe class BertEmbeddingModel : IDisposable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -65,9 +64,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return outp;
     }
 
-    /// <summary>Copies <paramref name="rows"/> rows from <paramref name="src"/> (starting at <paramref name="srcR0"/>)
-    /// into <paramref name="dst"/> (starting at <paramref name="dstR0"/>); both are row-major <c>[·, inDim]</c>. Used
-    /// to de-interleave neo-bert's per-head fused QKV into contiguous q/k/v.</summary>
+    /// <summary>Copies <paramref name="rows"/> row-major <c>[·, inDim]</c> rows from <paramref name="src"/>/<paramref name="srcR0"/> to <paramref name="dst"/>/<paramref name="dstR0"/>; used to de-interleave neo-bert's per-head fused QKV into contiguous q/k/v.</summary>
     private static void CopyRows(Tensor src, int srcR0, Tensor dst, int dstR0, int rows, int inDim)
     {
         Buffer.MemoryCopy((byte*)src.DataPointer + (long)srcR0 * inDim * 4, (byte*)dst.DataPointer + (long)dstR0 * inDim * 4,
@@ -230,8 +227,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
     private Tensor W(string key) => _w[key];
     private Tensor? Wopt(string key) => _w.TryGetValue(key, out Tensor? t) ? t : null;
 
-    /// <summary>Encodes WordPiece token ids (including <c>[CLS]</c>/<c>[SEP]</c>) into a pooled, L2-normalized
-    /// sentence embedding of length <see cref="Hidden"/>.</summary>
+    /// <summary>Encodes WordPiece token ids (including <c>[CLS]</c>/<c>[SEP]</c>) into a pooled, L2-normalized sentence embedding of length <see cref="Hidden"/>.</summary>
     public float[] Encode(IBackend backend, IReadOnlyList<int> ids)
     {
         int hidden = Hidden;
@@ -254,9 +250,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return outv;
     }
 
-    /// <summary>Reranker (cross-encoder) relevance score for a (query, document) token sequence: runs the encoder,
-    /// takes the CLS token (0), and applies the classification head (<c>cls</c> dense → tanh → <c>cls.output</c> → 1
-    /// logit). Higher = more relevant. Requires <see cref="HasRerankHead"/>.</summary>
+    /// <summary>Reranker (cross-encoder) relevance score for a (query, document) token sequence: runs the encoder, takes the CLS token (0), and applies the classification head (<c>cls</c> dense → tanh → <c>cls.output</c> → 1 logit); higher = more relevant. Requires <see cref="HasRerankHead"/>.</summary>
     public float Score(IBackend backend, IReadOnlyList<int> ids)
     {
         if (!HasRerankHead) throw new InvalidOperationException("This GGUF has no reranker head (cls.*).");
@@ -324,9 +318,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return h;
     }
 
-    /// <summary>nomic-bert-moe routed FFN: a softmax router (<c>ffn_gate_inp</c>) selects the top-K of
-    /// <see cref="NumExperts"/> non-gated GELU experts per token; the selected experts' renormalized weights blend
-    /// their <c>down(gelu(up(x)))</c> outputs. Returns <c>[1, seq, hidden]</c>.</summary>
+    /// <summary>nomic-bert-moe routed FFN: a softmax router (<c>ffn_gate_inp</c>) selects the top-K of <see cref="NumExperts"/> non-gated GELU experts per token, blending their <c>down(gelu(up(x)))</c> outputs by the (unrenormalized) softmax weight.</summary>
     private Tensor MoeFfn(IBackend backend, Tensor normed1, int i, int seq)
     {
         int hidden = Hidden, inter = Intermediate, E = NumExperts, K = ExpertsUsed;
@@ -378,8 +370,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return outp;
     }
 
-    /// <summary>One neo-bert pre-norm block: RMSNorm → RoPE self-attn (bidirectional) → +res → RMSNorm → SwiGLU
-    /// FFN → +res. No biases anywhere; the fused QKV and SwiGLU gate/up are split at load.</summary>
+    /// <summary>One neo-bert pre-norm block: RMSNorm → RoPE self-attn (bidirectional) → +res → RMSNorm → SwiGLU FFN → +res; no biases, fused QKV and SwiGLU gate/up split at load.</summary>
     private Tensor NeoBlock(IBackend backend, Tensor x, int i, int seq, float[]? cos, float[]? sin)
     {
         int hidden = Hidden, heads = NumHeads, hd = HeadDim;
@@ -445,8 +436,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return result;
     }
 
-    /// <summary>One post-norm block: (optionally rotary) bidirectional self-attention → +res → LayerNorm →
-    /// FFN (GELU or GeGLU) → +res → LayerNorm. Biases are optional (nomic-bert has none on the linears).</summary>
+    /// <summary>One post-norm block: (optionally rotary) bidirectional self-attention → +res → LayerNorm → FFN (GELU or GeGLU) → +res → LayerNorm; biases are optional (nomic-bert has none on the linears).</summary>
     private Tensor Block(IBackend backend, Tensor x, int i, int seq, float[]? cos, float[]? sin)
     {
         int hidden = Hidden, heads = NumHeads, hd = HeadDim;
@@ -539,9 +529,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return (cos, sin);
     }
 
-    /// <summary>Interleaved (GPT-J / complex) RoPE: rotates each adjacent pair (2i, 2i+1) by pos·θ_i where
-    /// θ_i = base^(−2i/hd). Matches NeoBERT's <c>view_as_complex(x.reshape(...,-1,2))</c> rotary (distinct from the
-    /// NeoX rotate-half in <see cref="ApplyRope"/>).</summary>
+    /// <summary>Interleaved (GPT-J / complex) RoPE: rotates each adjacent pair (2i, 2i+1) by pos·θ_i, θ_i = base^(−2i/hd); matches NeoBERT's <c>view_as_complex(x.reshape(...,-1,2))</c> rotary, distinct from the NeoX rotate-half in <see cref="ApplyRope"/>.</summary>
     private static void ApplyRopeInterleaved(Tensor t, float ropeBase, int seq, int heads, int hd)
     {
         float* pp = (float*)t.DataPointer;   // [1, seq, heads, hd]

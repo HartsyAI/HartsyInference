@@ -5,10 +5,7 @@ using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>StyleTTS 2 (yl4579/StyleTTS2-LibriTTS) — diffusion-style TTS at 24 kHz. Voice-clone: the reference clip's
-/// 256-d style comes from the StarGAN-v2 style encoders, then the shared PLBERT/text-encoder/prosody backbone plus
-/// the LibriTTS HiFi-GAN generator synthesize the target text in that voice. Random (no-reference) synthesis needs
-/// the diffusion style sampler, which is not yet reconciled to the real checkpoint, so a reference is required.</summary>
+/// <summary>StyleTTS 2 (yl4579/StyleTTS2-LibriTTS) — diffusion-style TTS at 24 kHz. Voice-clone: the reference clip's 256-d style comes from the StarGAN-v2 style encoders, then the shared PLBERT/text-encoder/prosody backbone plus the LibriTTS HiFi-GAN generator synthesize the target text in that voice. Random (no-reference) synthesis needs the diffusion style sampler, which is not yet reconciled to the real checkpoint, so a reference is required.</summary>
 internal static class StyleTts2Model
 {
     private const string Repo = "yl4579/StyleTTS2-LibriTTS";
@@ -17,7 +14,6 @@ internal static class StyleTts2Model
     // vowels and stripping punctuation makes the prosody predictor slur across phrase boundaries.
     private const string EspeakLanguage = "en-us";
 
-    /// <summary>The StyleTTS 2 descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,

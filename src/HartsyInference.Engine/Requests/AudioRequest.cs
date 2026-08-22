@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native speech-to-text request: the audio to transcribe plus decode options. The timestamp/diarization
-/// toggles request the richer <see cref="TranscriptResult"/> outputs when the model supports them.</summary>
+/// <summary>Native speech-to-text request: the audio to transcribe plus decode options. The timestamp/diarization toggles request the richer <see cref="TranscriptResult"/> outputs when the model supports them.</summary>
 public sealed record AudioRequest
 {
     /// <summary>The audio to transcribe.</summary>

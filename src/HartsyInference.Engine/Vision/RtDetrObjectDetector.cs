@@ -6,8 +6,7 @@ using HartsyInference.Vision.Detection;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Closed-set (80-class COCO) detection with the pure-C# RT-DETR (<c>rtdetr_r18vd</c>) — a transformer,
-/// NMS-free alternative to YOLO. Pipelines are cached per checkpoint because weight load + conversion is expensive.</summary>
+/// <summary>Closed-set (80-class COCO) detection with the pure-C# RT-DETR (<c>rtdetr_r18vd</c>) — a transformer, NMS-free alternative to YOLO. Pipelines are cached per checkpoint because weight load + conversion is expensive.</summary>
 public sealed class RtDetrObjectDetector : IDisposable
 {
     private readonly Dictionary<string, RtDetrPipeline> _cache = new(StringComparer.Ordinal);

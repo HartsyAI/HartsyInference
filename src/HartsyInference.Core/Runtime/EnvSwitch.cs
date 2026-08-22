@@ -29,8 +29,7 @@ public static class EnvSwitch
         return defaultOn;
     }
 
-    /// <summary>Resolves a numeric override from the environment; unset, empty, or unparsable → <paramref name="fallback"/>.
-    /// Invariant culture — an env var must not change meaning with the host locale.</summary>
+    /// <summary>Resolves a numeric override from the environment; unset, empty, or unparsable → <paramref name="fallback"/>. Invariant culture — an env var must not change meaning with the host locale.</summary>
     public static float GetFloat(string name, float fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);

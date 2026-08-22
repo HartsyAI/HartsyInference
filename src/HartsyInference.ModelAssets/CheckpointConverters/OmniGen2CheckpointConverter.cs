@@ -4,8 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets an OmniGen 2 safetensors checkpoint into transformer / VAE / text encoder
-/// dictionaries. OmniGen 2 ships in canonical diffusers naming.</summary>
+/// <summary>Loads + buckets an OmniGen 2 safetensors checkpoint into transformer / VAE / text encoder dictionaries. OmniGen 2 ships in canonical diffusers naming.</summary>
 public sealed class OmniGen2CheckpointConverter
 {
     /// <summary>Result of partitioning an OmniGen 2 safetensors file.</summary>

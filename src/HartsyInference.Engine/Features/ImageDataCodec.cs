@@ -3,13 +3,10 @@ using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Decodes an encoded image (PNG today) into the raw RGB24 <see cref="ImageData"/> the request contract
-/// carries. Every transport needs this: the contract is deliberately raster-only so the Engine has no host image
-/// dependency, but a CLI has a file path and an HTTP client has base64 — neither has loose RGB bytes.</summary>
+/// <summary>Decodes an encoded image (PNG today) into the raw RGB24 <see cref="ImageData"/> the request contract carries. Every transport needs this: the contract is deliberately raster-only so the Engine has no host image dependency, but a CLI has a file path and an HTTP client has base64 — neither has loose RGB bytes.</summary>
 public static class ImageDataCodec
 {
-    /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode,
-    /// because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
+    /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
     public static ImageData Decode(ReadOnlySpan<byte> encoded)
     {
         if (encoded.Length < 8)
@@ -25,8 +22,7 @@ public static class ImageDataCodec
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
 
-    /// <summary>Decodes a base64 payload, tolerating a <c>data:image/png;base64,</c> prefix since browser clients send
-    /// data URIs verbatim.</summary>
+    /// <summary>Decodes a base64 payload, tolerating a <c>data:image/png;base64,</c> prefix since browser clients send data URIs verbatim.</summary>
     public static ImageData DecodeBase64(string base64)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(base64);

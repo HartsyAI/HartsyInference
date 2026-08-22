@@ -405,7 +405,6 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();
 
-        // Dispose modulation slices
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 
@@ -431,10 +430,6 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         return output;
     }
 
-    /// <summary>Slices <paramref name="rowCount"/> consecutive rows out of a <c>[B, K, hidden]</c> modulation
-    /// table starting at <paramref name="rowStart"/>, returning each row as its own <c>[B, hidden]</c> tensor.
-    /// Lets <see cref="AdaLNModulation.ApplyModulation"/> / <see cref="AdaLNModulation.ApplyGatedResidual"/>
-    /// consume them with the same per-batch broadcast semantics as Flux's modulation outputs.</summary>
     /// <summary>Device twin of <see cref="SliceModRows"/> (B=1): per-row <c>backend.SliceRows</c> so the
     /// device-resident temb is never drained to the host mid-forward.</summary>
     private static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowStart, int rowCount)
@@ -450,6 +445,8 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         return rows;
     }
 
+    /// <summary>Slices <paramref name="rowCount"/> consecutive rows out of a <c>[B, K, hidden]</c> modulation table
+    /// starting at <paramref name="rowStart"/>, returning each row as its own <c>[B, hidden]</c> tensor (B&gt;1 host path).</summary>
     private Tensor[] SliceModRows(Tensor temb, int batch, int rowStart, int rowCount)
     {
         int totalRows = (int)temb.Shape[1];
@@ -473,9 +470,4 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         }
         return rows;
     }
-
-    /// <summary>Builds an additive SDPA mask <c>[B, 1, S, S]</c> from a per-token boolean mask <c>[B, S]</c>.
-    /// Diffusers does <c>mask[:, None, None, :] * mask[:, None, :, None]</c> producing a 0/1 outer-product mask;
-    /// we reproduce the same semantics by writing 0 where attention is allowed and a large negative value where
-    /// it must be killed (additive-mask convention used by <see cref="IBackend.ScaledDotProductAttention"/>).</summary>
 }

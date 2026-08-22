@@ -21,8 +21,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// The pooled CLIP embedding is projected to <c>time_dim</c> and added to the timestep embedding.</item>
 /// <item>Flux VAE (16-channel latent, 8× downsample).</item>
 /// <item>Flow-matching with <c>FlowMatchEulerDiscreteScheduler(shift=5.0)</c>.</item>
-/// </list>
-/// </summary>
+/// </list></summary>
 public sealed record Kandinsky5Config
 {
     /// <summary>Visual latent channels (16 for Flux VAE).</summary>

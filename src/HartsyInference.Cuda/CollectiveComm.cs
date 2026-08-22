@@ -3,9 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Factory for <see cref="ICollectiveComm"/>: NCCL when every rank is a distinct-device
-/// <see cref="CudaBackend"/> and libnccl resolves, else the host-staged fallback. Never throws for a missing
-/// library — the transport decision is logged either way (greppable <c>[Collective]</c>).</summary>
+/// <summary>Factory for <see cref="ICollectiveComm"/>: NCCL when every rank is a distinct-device <see cref="CudaBackend"/> and libnccl resolves, else the host-staged fallback. Never throws for a missing library — the transport decision is logged either way (greppable <c>[Collective]</c>).</summary>
 public static class CollectiveComm
 {
     /// <summary>Creates the best available communicator over one backend per rank.</summary>

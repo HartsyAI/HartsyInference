@@ -56,17 +56,14 @@ public sealed unsafe class TimestepEmbedding
     {
         int batch = (int)embedding.Shape[0];
 
-        // 1. Linear1: [B, embeddingDim] → [B, timeDim]
         TensorShape outShape = new TensorShape(batch, _timeDim);
         Tensor linear1Out = new Tensor(outShape, DType.F32);
         backend.Linear(linear1Out, embedding, _linear1Weight!, _linear1Bias!);
 
-        // 2. SiLU activation
         Tensor siluOut = new Tensor(outShape, DType.F32);
         backend.Silu(siluOut, linear1Out);
         linear1Out.Dispose();
 
-        // 3. Linear2: [B, timeDim] → [B, timeDim]
         Tensor linear2Out = new Tensor(outShape, DType.F32);
         backend.Linear(linear2Out, siluOut, _linear2Weight!, _linear2Bias!);
         siluOut.Dispose();

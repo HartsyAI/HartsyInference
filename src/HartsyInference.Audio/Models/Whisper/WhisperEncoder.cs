@@ -3,10 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
 
-/// <summary>Whisper audio encoder. Takes a log-mel spectrogram and produces per-frame
-/// hidden states used as cross-attention keys/values by the decoder.
-///
-/// <para>Architecture (per <c>WHISPER_ARCHITECTURE.md</c>):
+/// <summary>Whisper audio encoder — takes a log-mel spectrogram and produces per-frame hidden states used as cross-attention keys/values by the decoder.</summary>
+/// <remarks>Architecture (per <c>WHISPER_ARCHITECTURE.md</c>):
 /// <code>
 /// mel [B, n_mels, 3000]
 ///   → Conv1D(k=3, s=1, p=1) + GELU   → [B, d_model, 3000]
@@ -16,7 +14,7 @@ namespace HartsyInference.Audio.Models.Whisper;
 ///   → N × ResidualAttentionBlock (pre-norm self-attn → MLP)
 ///   → final_layer_norm
 ///   → [B, 1500, d_model]
-/// </code></para>
+/// </code>
 ///
 /// <para>Conv1D is dispatched through <see cref="IBackend.Conv2D"/> by treating the
 /// 1-D weight <c>[out, in, k]</c> as a 2-D weight <c>[out, in, 1, k]</c> with
@@ -30,7 +28,7 @@ namespace HartsyInference.Audio.Models.Whisper;
 ///
 /// <para><b>Key projection has no bias</b>: HF safetensors omit
 /// <c>self_attn.k_proj.bias</c>; <see cref="WhisperOps.ProjectLinear"/> handles a null
-/// bias by skipping the broadcast-add.</para></summary>
+/// bias by skipping the broadcast-add.</para></remarks>
 public sealed unsafe class WhisperEncoder : IDisposable
 {
     private readonly WhisperConfig _cfg;
@@ -50,11 +48,9 @@ public sealed unsafe class WhisperEncoder : IDisposable
     private bool _weightsLoaded;
     private int _disposed;
 
-    /// <summary>Config this encoder was built with.</summary>
     public WhisperConfig Config => _cfg;
 
-    /// <summary>Creates an encoder with no weights loaded. Call <see cref="LoadWeights"/>
-    /// after construction.</summary>
+    /// <summary>Creates an encoder with no weights loaded — call <see cref="LoadWeights"/> after construction.</summary>
     public WhisperEncoder(WhisperConfig cfg)
     {
         _cfg = cfg;
@@ -63,10 +59,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
             _layers[i] = new WhisperEncoderLayer(cfg);
     }
 
-    /// <summary>Loads weights from a HuggingFace safetensors dictionary. The default
-    /// prefix matches the standard HF transformers Whisper save layout
-    /// (<c>model.encoder.*</c>). Pass a different prefix if your conversion script
-    /// strips or remaps it.</summary>
+    /// <summary>Loads weights from a HuggingFace safetensors dictionary; the default prefix matches the standard HF transformers Whisper save layout (<c>model.encoder.*</c>) — pass a different prefix if your conversion script strips or remaps it.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "model.encoder")
     {
         // Conv weights ship as 3-D [out, in, k] in HF safetensors. Reshape to 4-D
@@ -89,10 +82,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
         _weightsLoaded = true;
     }
 
-    /// <summary>Forward pass: <c>mel [B, n_mels, n_frames]</c> →
-    /// <c>features [B, n_frames/2, d_model]</c>. <paramref name="mel"/> typically has
-    /// <c>n_frames = 3000</c> (matches Whisper's 30-second chunk) but the encoder will
-    /// run on any frame count for ablations / unit tests.</summary>
+    /// <summary>Forward pass: <c>mel [B, n_mels, n_frames]</c> → <c>features [B, n_frames/2, d_model]</c>; <paramref name="mel"/> typically has <c>n_frames = 3000</c> (Whisper's 30-second chunk) but the encoder runs on any frame count for ablations / unit tests.</summary>
     public Tensor Forward(IBackend backend, Tensor mel)
     {
         ThrowIfDisposed();
@@ -191,10 +181,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
     }
 }
 
-/// <summary>Single Whisper encoder block: pre-norm self-attention → residual → pre-norm MLP → residual.
-/// Identical structure to GPT-2 / CLIP — Whisper diverges only in the lack of a key
-/// bias and (in OpenAI's reference) the split Q/K scaling, both of which are handled
-/// at the projection / SDPA level.</summary>
+/// <summary>Single Whisper encoder block: pre-norm self-attention → residual → pre-norm MLP → residual; identical structure to GPT-2 / CLIP — Whisper diverges only in the lack of a key bias and (in OpenAI's reference) the split Q/K scaling, both handled at the projection / SDPA level.</summary>
 internal sealed unsafe class WhisperEncoderLayer
 {
     private readonly WhisperConfig _cfg;

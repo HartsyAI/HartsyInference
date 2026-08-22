@@ -139,8 +139,7 @@ public sealed unsafe class OmniGen2Block
         if (_ffnNorm2Weight is not null) yield return _ffnNorm2Weight;
     }
 
-    /// <summary>Forward pass.</summary>
-    /// <param name="backend">Compute backend.</param>
+    /// <summary>Runs self-attention (rotated per <paramref name="ropeMode"/>) then the SwiGLU FFN, gated by AdaLN modulation when <see cref="Modulation"/> is true.</summary>
     /// <param name="hidden">Block input <c>[B, S, hiddenSize]</c>. Caller owns the lifetime — this method allocates a new output tensor.</param>
     /// <param name="rope">Shared 3-axis RoPE.</param>
     /// <param name="ropeMode">How to position tokens for RoPE. Either <see cref="RopeApplyMode.Text"/> (positions <c>(s,s,s)</c>) or <see cref="RopeApplyMode.Image"/> (positions <c>(timeOffset, row, col)</c>).</param>

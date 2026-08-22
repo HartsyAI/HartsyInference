@@ -6,8 +6,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio.Wake;
 
-/// <summary>What a session is currently doing. Post-trigger capture is tracked here so a detection can hand
-/// the utterance to transcription without the worker holding any lock while that runs.</summary>
+/// <summary>What a session is currently doing. Post-trigger capture is tracked here so a detection can hand the utterance to transcription without the worker holding any lock while that runs.</summary>
 public enum WakeSessionState
 {
     /// <summary>Connected but no <c>hello</c> received yet.</summary>
@@ -27,12 +26,10 @@ public enum WakeSessionState
 /// briefly, whereas blocking the socket would stall the device and cascade into its reconnect logic.</para></summary>
 public sealed class WakeSession : IDisposable
 {
-    /// <summary>Audio buffered between the socket and the worker (2 s). Sized to absorb scheduling jitter and
-    /// short inference stalls without becoming a latency reservoir.</summary>
+    /// <summary>Audio buffered between the socket and the worker (2 s). Sized to absorb scheduling jitter and short inference stalls without becoming a latency reservoir.</summary>
     public const int RingCapacitySamples = 32_000;
 
-    /// <summary>Rolling raw audio retained for post-trigger use — transcription and speaker identification both
-    /// need the audio from before the word fired, not just after.</summary>
+    /// <summary>Rolling raw audio retained for post-trigger use — transcription and speaker identification both need the audio from before the word fired, not just after.</summary>
     public const int CaptureCapacitySamples = 16_000 * 15;
 
     private readonly AudioRingBuffer _ring = new(RingCapacitySamples);
@@ -65,9 +62,7 @@ public sealed class WakeSession : IDisposable
         Pipeline = pipeline;
     }
 
-    /// <summary>Queues audio from the socket and mirrors it into the capture buffer. <paramref name="sequence"/>
-    /// is the client's frame counter; a gap means audio was lost in flight, so the models are reset rather than
-    /// fed a splice across the discontinuity.</summary>
+    /// <summary>Queues audio from the socket and mirrors it into the capture buffer. <paramref name="sequence"/> is the client's frame counter; a gap means audio was lost in flight, so the models are reset rather than fed a splice across the discontinuity.</summary>
     public void Enqueue(ReadOnlySpan<float> samples, long sequence)
     {
         if (_expectedSequence >= 0 && sequence != _expectedSequence)
@@ -91,9 +86,7 @@ public sealed class WakeSession : IDisposable
     /// <summary>Set when the stream became discontinuous; the worker clears it after resetting the pipeline.</summary>
     public bool RequestReset { get; set; }
 
-    /// <summary>Word changes waiting to be applied. A pipeline is single-threaded by contract and is owned by
-    /// the worker, so configuration changes are queued from whatever thread requests them and applied by the
-    /// worker between drains rather than mutating a pipeline mid-push.</summary>
+    /// <summary>Word changes waiting to be applied. A pipeline is single-threaded by contract and is owned by the worker, so configuration changes are queued from whatever thread requests them and applied by the worker between drains rather than mutating a pipeline mid-push.</summary>
     public ConcurrentQueue<(string Name, WakeHead? Head, WakeWordSettings? Settings)> PendingWords { get; } = new();
 
     /// <summary>Applies queued word changes. Called only by the wake worker.</summary>
@@ -110,8 +103,7 @@ public sealed class WakeSession : IDisposable
     /// <summary>Drains queued audio for the worker. Returns the sample count written to <paramref name="destination"/>.</summary>
     public int Drain(Span<float> destination) => _ring.Read(destination);
 
-    /// <summary>Marks a fresh connection: the pipeline's audio context is meaningless across a disconnect, so it
-    /// is cleared rather than resumed.</summary>
+    /// <summary>Marks a fresh connection: the pipeline's audio context is meaningless across a disconnect, so it is cleared rather than resumed.</summary>
     public void OnReconnected(WakeFrameCodec codec)
     {
         Codec = codec;
@@ -123,8 +115,7 @@ public sealed class WakeSession : IDisposable
         lock (_captureLock) _captureWritten = 0;
     }
 
-    /// <summary>Copies the most recent <paramref name="seconds"/> of audio, oldest first — the utterance around a
-    /// detection, for transcription or speaker identification.</summary>
+    /// <summary>Copies the most recent <paramref name="seconds"/> of audio, oldest first — the utterance around a detection, for transcription or speaker identification.</summary>
     public float[] SnapshotRecent(double seconds)
     {
         int want = Math.Min((int)(seconds * 16_000), CaptureCapacitySamples);

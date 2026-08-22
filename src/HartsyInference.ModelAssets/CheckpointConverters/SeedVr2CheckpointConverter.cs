@@ -4,22 +4,12 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Normalizes a SeedVR2 NaDiT checkpoint for
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers"/>' SeedVr2Dit, which consumes the ORIGINAL
-/// ByteDance key names verbatim (<c>blocks.{i}.attn.proj_qkv.{vid|txt|all}.weight</c>, …) — a deliberate
-/// near-identity mapping to keep the silent-wrongness surface at zero. What this converter actually does:
-/// strips bundling prefixes, drops per-block <c>attn.rope.rope.freqs</c> buffers (RoPE frequencies are
-/// recomputed exactly at runtime; keeping them would fail the consumed-inventory check), and STRICTLY
-/// validates the inventory — every remaining tensor must match the NaDiT structure including the
-/// separate-vs-shared (<c>.vid./.txt.</c> vs <c>.all.</c>) block boundary, and every structurally expected
-/// tensor must exist. Unknown keys throw; missing keys throw. Dims themselves are validated in
-/// SeedVr2Config.Detect (Diffusion side).</summary>
+/// <summary>Normalizes a SeedVR2 NaDiT checkpoint for <see cref="HartsyInference.Diffusion.Models.Denoisers"/>' SeedVr2Dit, which consumes the ORIGINAL ByteDance key names verbatim (<c>blocks.{i}.attn.proj_qkv.{vid|txt|all}.weight</c>, …) — a deliberate near-identity mapping to keep the silent-wrongness surface at zero. What this converter actually does: strips bundling prefixes, drops per-block <c>attn.rope.rope.freqs</c> buffers (RoPE frequencies are recomputed exactly at runtime; keeping them would fail the consumed-inventory check), and STRICTLY validates the inventory — every remaining tensor must match the NaDiT structure including the separate-vs-shared (<c>.vid./.txt.</c> vs <c>.all.</c>) block boundary, and every structurally expected tensor must exist. Unknown keys throw; missing keys throw. Dims themselves are validated in SeedVr2Config.Detect (Diffusion side).</summary>
 public static class SeedVr2CheckpointConverter
 {
     private static readonly string[] BundlePrefixes = ["model.diffusion_model.", "model.", "module."];
 
-    /// <summary>Head/tail tensors every SeedVR2 DiT checkpoint must carry (tail norm/ada are 3B-only and
-    /// validated conditionally).</summary>
+    /// <summary>Head/tail tensors every SeedVR2 DiT checkpoint must carry (tail norm/ada are 3B-only and validated conditionally).</summary>
     private static readonly string[] FixedKeys =
     [
         "vid_in.proj.weight", "vid_in.proj.bias",
@@ -49,8 +39,7 @@ public static class SeedVr2CheckpointConverter
     private static readonly string[] BlockSuffixesPlainMlp =
         ["mlp.{b}.proj_in.weight", "mlp.{b}.proj_in.bias", "mlp.{b}.proj_out.weight", "mlp.{b}.proj_out.bias"];
 
-    /// <summary>Strips prefixes, drops recomputable RoPE buffers, and validates the full inventory.
-    /// Returned tensors reference the source dictionary (keep its loader alive).</summary>
+    /// <summary>Strips prefixes, drops recomputable RoPE buffers, and validates the full inventory. Returned tensors reference the source dictionary (keep its loader alive).</summary>
     public static Dictionary<string, Tensor> Convert(Dictionary<string, Tensor> allWeights)
     {
         Dictionary<string, Tensor> weights = StripBundlePrefix(allWeights);
@@ -67,8 +56,7 @@ public static class SeedVr2CheckpointConverter
         return result;
     }
 
-    /// <summary>Loads a safetensors checkpoint and converts it. Caller disposes the returned loader
-    /// after weights are uploaded/copied.</summary>
+    /// <summary>Loads a safetensors checkpoint and converts it. Caller disposes the returned loader after weights are uploaded/copied.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
     {
         SafeTensorsLoader loader = new();

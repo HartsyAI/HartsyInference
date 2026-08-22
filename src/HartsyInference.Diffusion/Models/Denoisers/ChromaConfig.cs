@@ -12,12 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 ///
 /// Reference: <c>diffusers/models/transformers/transformer_chroma.py</c> (624 lines), <c>diffusers/pipelines/chroma/pipeline_chroma.py</c>.
 /// Also see <c>diffusers/loaders/single_file_utils.py:convert_chroma_transformer_checkpoint_to_diffusers</c> for the
-/// BFL→diffusers key remap.
-///
-/// **Implementation status:** scaffolding only. The transformer + approximator + pruned-AdaLN block variants
-/// + checkpoint converter + T5-only pipeline are not yet implemented. See PHASE_4_MODEL_BREADTH.md `### Chroma`
-/// for the full task list.
-/// </summary>
+/// BFL→diffusers key remap.</summary>
 public sealed record ChromaConfig
 {
     /// <summary>Number of dual-stream blocks (`ChromaTransformerBlock`). 19 for the v1 release.</summary>

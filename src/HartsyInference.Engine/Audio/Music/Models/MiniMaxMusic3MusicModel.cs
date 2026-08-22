@@ -31,10 +31,7 @@ internal static class MiniMaxMusic3MusicModel
     private const string DefaultRepo = "MiniMaxAI/MiniMax-Music3";
     private const string Category = "music";
 
-    /// <summary>The MiniMax Music 3 descriptor. A user-selected checkpoint (<see cref="AudioModelSelector.LocalPath"/>,
-    /// the Comfy-Org single-file DiT) is honored for the flow transformer + condition encoder — it participates in
-    /// the cache key so switching checkpoints never serves the previous file's runner. The language model, depth
-    /// decoder, vocoder, and tokenizer always come from the official repo (the DiT file does not carry them).</summary>
+    /// <summary>A user-selected checkpoint (<see cref="AudioModelSelector.LocalPath"/>, the Comfy-Org single-file DiT) is honored for the flow transformer + condition encoder — it participates in the cache key so switching checkpoints never serves the previous file's runner. The language model, depth decoder, vocoder, and tokenizer always come from the official repo (the DiT file does not carry them).</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = true,
@@ -44,16 +41,14 @@ internal static class MiniMaxMusic3MusicModel
             LoadAsync(context, ResolveRepo(selector.Variant), ResolveQuant(selector.Variant), selector.LocalPath, cancel),
     };
 
-    /// <summary>A bare id is the released checkpoint; an <c>org/repo</c> variant passes through so a future official
-    /// release needs no code change. The precision suffix does not affect repo selection.</summary>
+    /// <summary>A bare id is the released checkpoint; an <c>org/repo</c> variant passes through so a future official release needs no code change. The precision suffix does not affect repo selection.</summary>
     private static string ResolveRepo(string variant)
     {
         string id = (variant ?? string.Empty).Trim();
         return id.Contains('/', StringComparison.Ordinal) ? id.Split(':')[0] : DefaultRepo;
     }
 
-    /// <summary>Maps a variant's precision suffix to a quant mode for the global language model: <c>-q8</c>/<c>:q8</c>
-    /// → q8_0, <c>-q4</c>/<c>:q4</c> → q4_k, else null (the checkpoint's BF16).</summary>
+    /// <summary>Maps a variant's precision suffix to a quant mode for the global language model: <c>-q8</c>/<c>:q8</c> → q8_0, <c>-q4</c>/<c>:q4</c> → q4_k, else null (the checkpoint's BF16).</summary>
     private static string? ResolveQuant(string variant)
     {
         string lower = (variant ?? string.Empty).Trim().ToLowerInvariant();
@@ -245,10 +240,7 @@ internal static class MiniMaxMusic3MusicModel
         return new MusicRunner(vocoder.SampleRate, Synth, keep);
     }
 
-    /// <summary>Merges the request's LoRAs into the language model and the transformer before either is loaded, the
-    /// same weight-space merge the diffusion pipelines use. Both dictionaries are offered to the stack under
-    /// <see cref="ModelAssets.Lora.LoraTarget.Transformer"/> and each layer lands wherever its key exists — no MiniMax Music 3 LoRAs
-    /// have been published yet, so which component a real one targets is not yet known.</summary>
+    /// <summary>Merges the request's LoRAs into the language model and the transformer before either is loaded, the same weight-space merge the diffusion pipelines use. Both dictionaries are offered to the stack under <see cref="ModelAssets.Lora.LoraTarget.Transformer"/> and each layer lands wherever its key exists — no MiniMax Music 3 LoRAs have been published yet, so which component a real one targets is not yet known.</summary>
     private static ModelAssets.Lora.LoraStack? ApplyLoras(MusicLoadContext context,
         ref IReadOnlyDictionary<string, Tensor> languageWeights, ref IReadOnlyDictionary<string, Tensor> ditWeights)
     {

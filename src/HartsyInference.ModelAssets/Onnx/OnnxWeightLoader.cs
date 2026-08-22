@@ -2,15 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Onnx;
 
-/// <summary>Loads the weight initializers from an ONNX (<c>.onnx</c>) file into a
-/// <c>Dictionary&lt;string, Tensor&gt;</c>, mirroring <see cref="SafeTensors.SafeTensorsLoader"/> /
-/// <see cref="PyTorch.PytorchPickleLoader"/> so any model loader can consume ONNX-only checkpoints (CosyVoice2's
-/// <c>campplus.onnx</c> / <c>speech_tokenizer_v2.onnx</c>, g2pW, …). This reads <b>weights only</b> — it does not
-/// execute the graph — but also exposes the parsed node list (<see cref="Model"/>) in topological order so a
-/// model whose ONNX export anonymized its weight names (<c>onnx::MatMul_NNNN</c>) can bind them by graph order.
-/// <para>Handles FLOAT (F32) and FLOAT16 raw-data initializers, which covers the trained weights; integer
-/// constants (shapes/axes) and typed (non-raw) data are not materialized — the engine reimplements each model's
-/// forward, so only the float weight tensors are needed.</para></summary>
+/// <summary>Loads the weight initializers from an ONNX (<c>.onnx</c>) file into a <c>Dictionary&lt;string, Tensor&gt;</c>, mirroring <see cref="SafeTensors.SafeTensorsLoader"/> / <see cref="PyTorch.PytorchPickleLoader"/> so any model loader can consume ONNX-only checkpoints (CosyVoice2's <c>campplus.onnx</c> / <c>speech_tokenizer_v2.onnx</c>, g2pW, …). This reads <b>weights only</b> — it does not execute the graph — but also exposes the parsed node list (<see cref="Model"/>) in topological order so a model whose ONNX export anonymized its weight names (<c>onnx::MatMul_NNNN</c>) can bind them by graph order.
+/// <para>Handles FLOAT (F32) and FLOAT16 raw-data initializers, which covers the trained weights; integer constants (shapes/axes) and typed (non-raw) data are not materialized — the engine reimplements each model's forward, so only the float weight tensors are needed.</para></summary>
 public sealed unsafe class OnnxWeightLoader : IDisposable
 {
     // ONNX TensorProto.DataType values we materialize.
@@ -25,8 +18,7 @@ public sealed unsafe class OnnxWeightLoader : IDisposable
 
     public string FilePath { get; private set; } = string.Empty;
 
-    /// <summary>Reads the <c>.onnx</c> file, parses the graph, and materializes every FLOAT/FLOAT16 initializer
-    /// into owned native memory.</summary>
+    /// <summary>Reads the <c>.onnx</c> file, parses the graph, and materializes every FLOAT/FLOAT16 initializer into owned native memory.</summary>
     public void Load(string filePath)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -65,9 +57,7 @@ public sealed unsafe class OnnxWeightLoader : IDisposable
         return new Dictionary<string, Tensor>(_tensors);
     }
 
-    /// <summary>Like <see cref="GetAllTensors"/> but with anonymized weight-norm-fused weights (<c>onnx::Conv_NNNN</c>)
-    /// renamed to their recovered module names via <see cref="OnnxWeightNameResolver"/>, so they match the PyTorch
-    /// weight keys a model loader expects.</summary>
+    /// <summary>Like <see cref="GetAllTensors"/> but with anonymized weight-norm-fused weights (<c>onnx::Conv_NNNN</c>) renamed to their recovered module names via <see cref="OnnxWeightNameResolver"/>, so they match the PyTorch weight keys a model loader expects.</summary>
     public Dictionary<string, Tensor> GetResolvedTensors()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

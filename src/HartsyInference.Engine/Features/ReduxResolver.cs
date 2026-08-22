@@ -8,15 +8,7 @@ using ImagePromptRequest = HartsyInference.Engine.Requests.IpAdapter;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Resolves a FLUX.1 Redux style model into conditioning tokens: SigLIP so400m/14-384 patch tokens → Redux
-/// projector → <c>[1, 729, 4096]</c> tokens the Flux pipeline appends after the T5 stream. Redux shares the request's
-/// image-prompt slot, so the reference image comes from <see cref="ImagePromptRequest.PromptImages"/>.
-///
-/// <para>Strength semantics match ComfyUI/SwarmUI's workflow generation: the multiply strength scales the redux tokens
-/// (<c>StyleModelApply strength_type=multiply</c>), and the merge strength — a ConditioningAverage between styled and
-/// original conditioning — reduces to ANOTHER scalar on the redux tokens, because the text tokens are identical on both
-/// sides and the original's missing redux positions are zero-padded. The apply-start fraction maps to the pipeline's
-/// per-step conditioning switch.</para></summary>
+/// <summary>Resolves a FLUX.1 Redux style model into conditioning tokens: SigLIP so400m/14-384 patch tokens → Redux projector → <c>[1, 729, 4096]</c> tokens the Flux pipeline appends after the T5 stream. Redux shares the request's image-prompt slot, so the reference image comes from <see cref="ImagePromptRequest.PromptImages"/>. <para>Strength semantics match ComfyUI/SwarmUI's workflow generation: the multiply strength scales the redux tokens (<c>StyleModelApply strength_type=multiply</c>), and the merge strength — a ConditioningAverage between styled and original conditioning — reduces to ANOTHER scalar on the redux tokens, because the text tokens are identical on both sides and the original's missing redux positions are zero-padded. The apply-start fraction maps to the pipeline's per-step conditioning switch.</para></summary>
 public static class ReduxResolver
 {
     /// <summary>Resolved Redux conditioning: projected style tokens (strength pre-applied) plus the apply-start fraction.</summary>
@@ -43,8 +35,7 @@ public static class ReduxResolver
     private static SafeTensorsLoader? _cachedVisionLoader;
     private static SafeTensorsLoader? _cachedStyleLoader;
 
-    /// <summary>Resolves the Redux tokens, or null when no style model is selected. Throws with a clear message when a
-    /// style model is named but unusable (missing file / missing prompt image). Caller disposes the returned spec.</summary>
+    /// <summary>Resolves the Redux tokens, or null when no style model is selected. Throws with a clear message when a style model is named but unusable (missing file / missing prompt image). Caller disposes the returned spec.</summary>
     /// <param name="styleModel">Redux projector model id or path; null/"None" disables Redux.</param>
     /// <param name="visionModel">CLIP/SigLIP vision tower override; null auto-downloads <see cref="SideModels.SigclipVision384"/>.</param>
     public static async Task<ReduxSpec?> ResolveAsync(
@@ -156,8 +147,7 @@ public static class ReduxResolver
         }
     }
 
-    /// <summary>Stretch-resize to <paramref name="imageSize"/>² (no crop — diffusers' SiglipImageProcessor and the
-    /// crop:"none" CLIPVisionEncode wiring both stretch) plus SigLIP normalize (mean = std = 0.5).</summary>
+    /// <summary>Stretch-resize to <paramref name="imageSize"/>² (no crop — diffusers' SiglipImageProcessor and the crop:"none" CLIPVisionEncode wiring both stretch) plus SigLIP normalize (mean = std = 0.5).</summary>
     private static Tensor PreprocessSiglip(Requests.ImageData input, int imageSize)
     {
         byte[] rgb = FeatureImaging.ResizeRgb24(input, imageSize, imageSize);

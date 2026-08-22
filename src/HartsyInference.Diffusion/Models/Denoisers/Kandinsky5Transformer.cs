@@ -24,7 +24,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 ///
 /// Tensor layout note: diffusers uses NHWC for visual tokens (channels last). Our pipeline produces
 /// BCHW latents; the patch-embed step transposes channel-last during reshape and the final
-/// <see cref="ToBchw"/> step converts back so the rest of HartsyInference's VAE/scheduler stack stays
+/// <see cref="Unpatchify"/> step converts back so the rest of HartsyInference's VAE/scheduler stack stays
 /// in the same NCHW convention as Flux/SD3/Z-Image.</summary>
 public sealed unsafe class Kandinsky5Transformer : IDisposable
 {
@@ -719,7 +719,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
-    /// <summary>Releases all tensor references held by this transformer.</summary>
+    /// <summary>Drops tensor references without disposing them — the underlying weight storage is owned by the mmap loader.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -737,9 +737,8 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    /// <summary>Helper for tests: convert BCHW → channel-last (BHWC) view used internally. Unused
-    /// publicly but kept for parity with diffusers' input contract for advanced callers that already
-    /// have channel-last latents.</summary>
+    /// <summary>Converts a channel-last (BHWC) tensor to BCHW. No call sites in this codebase today — kept
+    /// for advanced callers that already have channel-last latents.</summary>
     public static Tensor ToBchw(Tensor bhwc)
     {
         int b = (int)bhwc.Shape[0];

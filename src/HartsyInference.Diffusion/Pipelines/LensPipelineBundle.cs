@@ -5,19 +5,12 @@ using HartsyInference.Diffusion.Models.Vae;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Owns a fully-wired <see cref="LensPipeline"/> together with the heavy components and
-/// factory-allocated resources behind it (transformer, GPT-OSS encoder, Flux.2 VAE decoder, the
-/// extracted BN mean/var copies, and any on-disk loaders the factory opened). Produced by
-/// <see cref="LensPipelineFactory"/>. <see cref="DiffusionPipelineBase"/> deliberately does NOT own its
-/// components — this bundle fills that gap so a caller has a single handle to dispose once it's done
-/// generating. Disposing the bundle releases the pipeline, frees the transformer/encoder, disposes the
-/// BN copies the factory allocated, and closes any owned loaders (releasing their memory-mapped views).</summary>
+/// <summary>Owns a fully-wired <see cref="LensPipeline"/> together with the heavy components and factory-allocated resources behind it (transformer, GPT-OSS encoder, Flux.2 VAE decoder, the extracted BN mean/var copies, and any on-disk loaders the factory opened). Produced by <see cref="LensPipelineFactory"/>. <see cref="DiffusionPipelineBase"/> deliberately does NOT own its components — this bundle fills that gap so a caller has a single handle to dispose once it's done generating. Disposing the bundle releases the pipeline, frees the transformer/encoder, disposes the BN copies the factory allocated, and closes any owned loaders (releasing their memory-mapped views).</summary>
 public sealed class LensPipelineBundle : IDisposable
 {
     private int _disposed;
 
-    /// <summary>The wired pipeline. Use <see cref="LensPipeline.GenerateFromTokens"/> (requires an
-    /// attached encoder) or <see cref="LensPipeline.GenerateFromEmbeddings"/>.</summary>
+    /// <summary>The wired pipeline. Use <see cref="LensPipeline.GenerateFromTokens"/> (requires an attached encoder) or <see cref="LensPipeline.GenerateFromEmbeddings"/>.</summary>
     public LensPipeline Pipeline { get; }
 
     /// <summary>The Lens DiT backbone.</summary>

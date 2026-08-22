@@ -45,8 +45,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
         for (int i = 0; i < numBlocks; i++) _blocks[i] = new RefinerBlock(hidden, numHeads, _headDim, _mlpDim);
     }
 
-    /// <summary>Loads weights under <paramref name="prefix"/> (default <c>txt_in</c>). Fused <c>self_attn.qkv</c> is
-    /// split into per-projection Q/K/V at load. All tensors are cast to F32 (the refiner is small and stays resident).</summary>
+    /// <summary>Loads weights under <paramref name="prefix"/> (default <c>txt_in</c>). Fused <c>self_attn.qkv</c> is split into per-projection Q/K/V at load. All tensors are cast to F32 (the refiner is small and stays resident).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "txt_in")
     {
         string p = prefix + ".";
@@ -66,8 +65,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
         foreach (RefinerBlock b in _blocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Refines <paramref name="text"/> <c>[B, L, textDim]</c> → <c>[B, L, hidden]</c> conditioned on
-    /// <paramref name="timestep"/> (the scheduler timestep, ≈0..1000, same value the main DiT uses).</summary>
+    /// <summary>Refines <paramref name="text"/> <c>[B, L, textDim]</c> → <c>[B, L, hidden]</c> conditioned on <paramref name="timestep"/> (the scheduler timestep, ≈0..1000, same value the main DiT uses).</summary>
     public Tensor Forward(IBackend backend, Tensor text, float timestep)
     {
         int b = (int)text.Shape[0];
@@ -119,9 +117,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
 
     internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
-    /// <summary>One <c>TokenRefinerBlock</c>: LN(affine) → MHA self-attn (bias, no QK-norm/RoPE) → gated residual →
-    /// LN(affine) → Linear→SiLU→Linear MLP → gated residual. The two gates come from
-    /// <c>adaLN_modulation.1(SiLU(temb)).chunk(2)</c>.</summary>
+    /// <summary>One <c>TokenRefinerBlock</c>: LN(affine) → MHA self-attn (bias, no QK-norm/RoPE) → gated residual → LN(affine) → Linear→SiLU→Linear MLP → gated residual. The two gates come from <c>adaLN_modulation.1(SiLU(temb)).chunk(2)</c>.</summary>
     private sealed class RefinerBlock
     {
         private readonly int _hidden, _numHeads, _headDim, _mlpDim;

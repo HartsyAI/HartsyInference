@@ -1,16 +1,12 @@
 namespace HartsyInference.Engine.Audio.Wake.Speakers;
 
-/// <summary>The vector arithmetic behind speaker profiles, deliberately free of any model, backend or disk
-/// dependency so enrollment and the open-set decision stay testable on a machine with no CAM++ weights.</summary>
+/// <summary>The vector arithmetic behind speaker profiles, deliberately free of any model, backend or disk dependency so enrollment and the open-set decision stay testable on a machine with no CAM++ weights.</summary>
 public static class SpeakerEmbeddingMath
 {
     /// <summary>Below this L2 norm a vector carries no usable direction, so cosine against it is undefined.</summary>
     private const double DegenerateNorm = 1e-9d;
 
-    /// <summary>Speaker model for a set of enrollment utterances: each embedding is L2-normalized (a no-op when the
-    /// caller already normalized), those unit vectors are averaged, and the mean is L2-normalized again. Normalizing
-    /// the inputs first is what makes the centroid a direction average rather than a magnitude-weighted one — a loud
-    /// utterance must not outvote a quiet one.</summary>
+    /// <summary>Speaker model for a set of enrollment utterances: each embedding is L2-normalized (a no-op when the caller already normalized), those unit vectors are averaged, and the mean is L2-normalized again. Normalizing the inputs first is what makes the centroid a direction average rather than a magnitude-weighted one — a loud utterance must not outvote a quiet one.</summary>
     public static float[] Centroid(IReadOnlyList<float[]> embeddings)
     {
         ArgumentNullException.ThrowIfNull(embeddings);
@@ -58,8 +54,7 @@ public static class SpeakerEmbeddingMath
         return copy;
     }
 
-    /// <summary>Scales to unit L2 length; a vector whose norm is numerically zero is left as-is rather than being
-    /// blown up to infinity.</summary>
+    /// <summary>Scales to unit L2 length; a vector whose norm is numerically zero is left as-is rather than being blown up to infinity.</summary>
     public static void NormalizeInPlace(Span<float> vector)
     {
         double norm = Math.Sqrt(SquaredNorm(vector));
@@ -74,8 +69,7 @@ public static class SpeakerEmbeddingMath
         }
     }
 
-    /// <summary>Cosine similarity in [-1, 1], dividing by both norms so the result is correct for inputs that were
-    /// never normalized. Returns 0 when either side is degenerate.</summary>
+    /// <summary>Cosine similarity in [-1, 1], dividing by both norms so the result is correct for inputs that were never normalized. Returns 0 when either side is degenerate.</summary>
     public static float CosineSimilarity(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
         if (a.Length != b.Length)

@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>The non-streaming result of a text generation: the full text, why it stopped, token counts, and an
-/// optional native tool call the model emitted instead of finishing.</summary>
+/// <summary>The non-streaming result of a text generation: the full text, why it stopped, token counts, and an optional native tool call the model emitted instead of finishing.</summary>
 public sealed record TextResult
 {
     /// <summary>The generated text.</summary>

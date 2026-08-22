@@ -4,31 +4,15 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Routes a MiniMax-H3 ("Hailuo 03") checkpoint into the per-component weight dictionaries the model code
-/// consumes: the DiT (<c>MiniMaxH3Transformer</c>), the video VAE, the audio VAE, and the Qwen3-VL-32B conditioning
-/// tower.
+/// <summary>Routes a MiniMax-H3 ("Hailuo 03") checkpoint into the per-component weight dictionaries the model code consumes: the DiT (<c>MiniMaxH3Transformer</c>), the video VAE, the audio VAE, and the Qwen3-VL-32B conditioning tower.
 ///
-/// <para>The official release is a diffusers folder (<c>FL2VA/{transformer,video_vae,audio_vae,text_encoder}/</c>) in
-/// which every file is already flat and unprefixed, so DiT keys route through unchanged — verified key-for-key against
-/// the 535-tensor header of <c>minimax_h3_fl2va_bf16.safetensors</c> and the 902-tensor header of
-/// <c>qwen3vl_32b_minimax_h3_bf16.safetensors</c>. The dotted component prefixes (<c>model.diffusion_model.</c>,
-/// <c>vae.</c>, <c>audio_vae.</c>, <c>text_encoders.qwen3vl_32b.transformer.</c>) are supported defensively for a
-/// ComfyUI-style single-file bundle and are <b>not</b> verified against a real bundled H3 checkpoint.</para>
+/// <para>The official release is a diffusers folder (<c>FL2VA/{transformer,video_vae,audio_vae,text_encoder}/</c>) in which every file is already flat and unprefixed, so DiT keys route through unchanged — verified key-for-key against the 535-tensor header of <c>minimax_h3_fl2va_bf16.safetensors</c> and the 902-tensor header of <c>qwen3vl_32b_minimax_h3_bf16.safetensors</c>. The dotted component prefixes (<c>model.diffusion_model.</c>, <c>vae.</c>, <c>audio_vae.</c>, <c>text_encoders.qwen3vl_32b.transformer.</c>) are supported defensively for a ComfyUI-style single-file bundle and are <b>not</b> verified against a real bundled H3 checkpoint.</para>
 ///
-/// <para>Both VAE files are flat and share bare <c>encoder.</c>/<c>decoder.</c> roots, so an unprefixed VAE key is not
-/// distinguishable from the other VAE's — feed VAE component files to their own loaders; only the prefixed bundle form
-/// routes them here.</para>
+/// <para>Both VAE files are flat and share bare <c>encoder.</c>/<c>decoder.</c> roots, so an unprefixed VAE key is not distinguishable from the other VAE's — feed VAE component files to their own loaders; only the prefixed bundle form routes them here.</para>
 ///
-/// <para>The DiT ships BF16 with 13 F32 tensors (both patch projections, both output heads, the time embedder,
-/// <c>rope.inv_freq</c>); <c>MiniMaxH3Transformer</c> consumes F32 throughout, so BF16/F16 tensors are materialized as
-/// F32 when <c>castToF32</c> is set. Cast tensors are caller-owned; uncast ones borrow the loader's mmap and die with
-/// it.</para>
+/// <para>The DiT ships BF16 with 13 F32 tensors (both patch projections, both output heads, the time embedder, <c>rope.inv_freq</c>); <c>MiniMaxH3Transformer</c> consumes F32 throughout, so BF16/F16 tensors are materialized as F32 when <c>castToF32</c> is set. Cast tensors are caller-owned; uncast ones borrow the loader's mmap and die with it.</para>
 ///
-/// <para>The pruned release swaps the time embedder for an <c>adaln_t_table</c> curve basis (supported — the config
-/// detects it and the transformer implements the lerp) and quantizes the four block linears to int8 with a
-/// block-diagonal input rotation (<c>convrot</c>). Those weights stay packed: their <c>.weight_scale</c> and
-/// <c>.comfy_quant</c> companions are folded onto <see cref="Tensor.QuantInfo"/> by
-/// <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> and the backend consumes the int8 bytes directly.</para></summary>
+/// <para>The pruned release swaps the time embedder for an <c>adaln_t_table</c> curve basis (supported — the config detects it and the transformer implements the lerp) and quantizes the four block linears to int8 with a block-diagonal input rotation (<c>convrot</c>). Those weights stay packed: their <c>.weight_scale</c> and <c>.comfy_quant</c> companions are folded onto <see cref="Tensor.QuantInfo"/> by <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> and the backend consumes the int8 bytes directly.</para></summary>
 public sealed class MiniMaxH3CheckpointConverter
 {
     private const string DiffusionPrefix = "model.diffusion_model.";
@@ -50,8 +34,7 @@ public sealed class MiniMaxH3CheckpointConverter
         AudioVae,
         /// <summary>Qwen3-VL-32B conditioning tower weights (<c>model.*</c> + <c>visual.*</c>).</summary>
         TextEncoder,
-        /// <summary>Unused (fp8 scale markers). Quantization companions never reach routing — <see cref="Convert"/>
-        /// folds them onto their weight and drops them first.</summary>
+        /// <summary>Unused (fp8 scale markers). Quantization companions never reach routing — <see cref="Convert"/> folds them onto their weight and drops them first.</summary>
         Drop,
     }
 
@@ -114,8 +97,7 @@ public sealed class MiniMaxH3CheckpointConverter
         return false;
     }
 
-    /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets, casting
-    /// BF16/F16 to F32 when <paramref name="castToF32"/> (the DiT consumer is F32-only).</summary>
+    /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets, casting BF16/F16 to F32 when <paramref name="castToF32"/> (the DiT consumer is F32-only).</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool castToF32 = true)
     {
         ArgumentNullException.ThrowIfNull(allWeights);
@@ -153,8 +135,7 @@ public sealed class MiniMaxH3CheckpointConverter
     private static Tensor MaybeCast(Tensor tensor, bool castToF32) =>
         CodecKeyUtils.MaybeCast(tensor, castToF32 && (tensor.DType == DType.BF16 || tensor.DType == DType.F16));
 
-    /// <summary>Loads one safetensors file (a diffusers component file or a bundled checkpoint) and routes it. The
-    /// caller owns the loader and disposes it once the weights are no longer referenced.</summary>
+    /// <summary>Loads one safetensors file (a diffusers component file or a bundled checkpoint) and routes it. The caller owns the loader and disposes it once the weights are no longer referenced.</summary>
     public static (ConvertedWeights Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath,
         bool castToF32 = true)
     {
@@ -174,9 +155,7 @@ public sealed class MiniMaxH3CheckpointConverter
         }
     }
 
-    /// <summary>Loads and merges the <c>*.safetensors</c> shards of ONE component directory (e.g. <c>FL2VA/transformer</c>
-    /// or a sharded <c>text_encoder</c>), then routes the merged dictionary. Deliberately non-recursive: both H3 VAEs
-    /// use bare <c>encoder.</c>/<c>decoder.</c> roots, so merging the whole FL2VA tree would be unroutable.</summary>
+    /// <summary>Loads and merges the <c>*.safetensors</c> shards of ONE component directory (e.g. <c>FL2VA/transformer</c> or a sharded <c>text_encoder</c>), then routes the merged dictionary. Deliberately non-recursive: both H3 VAEs use bare <c>encoder.</c>/<c>decoder.</c> roots, so merging the whole FL2VA tree would be unroutable.</summary>
     public static (ConvertedWeights Weights, List<SafeTensorsLoader> Loaders) LoadAndConvertShards(string dir,
         bool castToF32 = true)
     {

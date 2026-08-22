@@ -2,26 +2,7 @@ using System.Runtime.CompilerServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Native FP4 (e2m1) GEMM via cublasLtMatmul, gated on Blackwell (SM 10.0+) GPUs. Mirrors
-/// <see cref="Fp8GemmExecutor"/>: a per-call descriptor + layout set is created and torn down inside
-/// <see cref="Run"/>; the handle and workspace are owned here and reused across calls.
-///
-/// <para><b>Hardware requirement.</b> Tensor-core FP4 paths exist only on Blackwell (SM 10.0 for
-/// datacenter B100/B200, SM 12.0 for consumer RTX 50xx). On everything earlier the constructor reports
-/// <see cref="IsSupported"/> = false and callers must fall back to dequant→F16 GEMM (the same strategy
-/// the engine uses for MXFP4/NVFP4/NF4 today).</para>
-///
-/// <para><b>Untested locally and not yet wired into dispatch.</b> The author's hardware is RTX 3060
-/// (SM 8.6, Ampere) — exactly the situation <see cref="Fp8GemmExecutor"/> documents. This executor was
-/// written from the cuBLASLt 12.8 FP4 documentation but has never been exercised on Blackwell. It is
-/// therefore <b>not</b> referenced by <c>CudaBackend</c>'s GEMM dispatch yet; it compiles and is ready
-/// for validation. Two things must be confirmed on real hardware before wiring it in:</para>
-/// <list type="number">
-///   <item>The block-scaling <b>scale-mode</b> descriptor attribute (VEC16-UE4M3 for NVFP4, VEC32-UE8M0
-///         for MXFP4). The attribute IDs were intentionally not hard-coded here to avoid shipping a
-///         wrong/colliding enum value; set them once verified against the installed CUDA headers.</item>
-///   <item>The exact block-scale tensor layout cuBLASLt expects via the A/B scale pointers.</item>
-/// </list></summary>
+/// <summary>Native FP4 (e2m1) GEMM via cublasLtMatmul, gated on Blackwell (SM 10.0+) GPUs. Mirrors <see cref="Fp8GemmExecutor"/>: a per-call descriptor + layout set is created and torn down inside <see cref="Run"/>; the handle and workspace are owned here and reused across calls. <para><b>Hardware requirement.</b> Tensor-core FP4 paths exist only on Blackwell (SM 10.0 for datacenter B100/B200, SM 12.0 for consumer RTX 50xx). On everything earlier the constructor reports <see cref="IsSupported"/> = false and callers must fall back to dequant→F16 GEMM (the same strategy the engine uses for MXFP4/NVFP4/NF4 today).</para> <para><b>Untested locally and not yet wired into dispatch.</b> The author's hardware is RTX 3060 (SM 8.6, Ampere) — exactly the situation <see cref="Fp8GemmExecutor"/> documents. This executor was written from the cuBLASLt 12.8 FP4 documentation but has never been exercised on Blackwell. It is therefore <b>not</b> referenced by <c>CudaBackend</c>'s GEMM dispatch yet; it compiles and is ready for validation. Two things must be confirmed on real hardware before wiring it in:</para> <list type="number"> <item>The block-scaling <b>scale-mode</b> descriptor attribute (VEC16-UE4M3 for NVFP4, VEC32-UE8M0 for MXFP4). The attribute IDs were intentionally not hard-coded here to avoid shipping a wrong/colliding enum value; set them once verified against the installed CUDA headers.</item> <item>The exact block-scale tensor layout cuBLASLt expects via the A/B scale pointers.</item> </list></summary>
 public sealed unsafe class Fp4GemmExecutor : IDisposable
 {
     private nint _ltHandle;
@@ -38,8 +19,7 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
     /// <summary>Compute capability detected at construction.</summary>
     public int SmMinor { get; }
 
-    /// <summary>Initializes the executor. Allocates the cuBLASLt handle + workspace if SM ≥ 10.0;
-    /// otherwise leaves itself unsupported without allocating any GPU resources.</summary>
+    /// <summary>Initializes the executor. Allocates the cuBLASLt handle + workspace if SM ≥ 10.0; otherwise leaves itself unsupported without allocating any GPU resources.</summary>
     public Fp4GemmExecutor(int smMajor, int smMinor)
     {
         SmMajor = smMajor;
@@ -56,14 +36,7 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
         _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
-    /// <summary>Runs an FP4 Linear GEMM matching <see cref="CudaBackend"/>'s row-major convention:
-    /// <c>output[M, N] = input[M, K] · weight^T[N, K]</c>. Weight and input are e2m1 (2 elements/byte);
-    /// <paramref name="weightBlockScale"/> / <paramref name="inputBlockScale"/> are the device pointers to
-    /// their microscaling block-scale tensors.
-    ///
-    /// <para><b>Gated.</b> Throws on non-Blackwell hardware — callers must check <see cref="IsSupported"/>.
-    /// The block-scaling scale-mode attribute is not set here (see type remarks); until that is wired and
-    /// validated this method must not be relied upon for correctness.</para></summary>
+    /// <summary>Runs an FP4 Linear GEMM matching <see cref="CudaBackend"/>'s row-major convention: <c>output[M, N] = input[M, K] · weight^T[N, K]</c>. Weight and input are e2m1 (2 elements/byte); <paramref name="weightBlockScale"/> / <paramref name="inputBlockScale"/> are the device pointers to their microscaling block-scale tensors. <para><b>Gated.</b> Throws on non-Blackwell hardware — callers must check <see cref="IsSupported"/>. The block-scaling scale-mode attribute is not set here (see type remarks); until that is wired and validated this method must not be relied upon for correctness.</para></summary>
     public void Run(ulong weight, ulong weightBlockScale, ulong input, ulong inputBlockScale, ulong outPtr,
         int m, int n, int k, nint stream)
     {

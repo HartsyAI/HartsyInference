@@ -7,21 +7,10 @@ namespace HartsyInference.Cuda;
 /// <summary>GPU memory allocation and transfer helpers wrapping CUDA Driver API memory functions.</summary>
 public static class CudaMemory
 {
-    /// <summary>Resolves the calling thread's OWNING BACKEND's compute stream via
-    /// <see cref="GpuTransferHelper"/>'s ambient state (0 = none; falls back to the synchronous allocator).
-    /// The old per-context stream registry could not tell two same-device backends apart (they share the primary
-    /// context handle), so backend A's transients allocated/freed on backend B's stream — the same class of
-    /// cross-stream poison the registry was originally built to stop across devices.</summary>
+    /// <summary>Resolves the calling thread's OWNING BACKEND's compute stream via <see cref="GpuTransferHelper"/>'s ambient state (0 = none; falls back to the synchronous allocator). The old per-context stream registry could not tell two same-device backends apart (they share the primary context handle), so backend A's transients allocated/freed on backend B's stream — the same class of cross-stream poison the registry was originally built to stop across devices.</summary>
     private static nint ResolveStream() => GpuTransferHelper.ResolvedStreamHandle;
 
-    /// <summary>Allocates <b>transient</b> device memory (op outputs, dtype casts, scratch) and returns a device
-    /// pointer. Routes through the stream-ordered pool (<c>cuMemAllocAsync</c> on the compute stream) so the memory
-    /// is reused by the matching <c>cuMemFreeAsync</c> frees in <see cref="GpuTransferHelper.FreeDevice"/> — the
-    /// previous mix of synchronous <c>cuMemAlloc</c> here with async frees there sent freed bytes into the pool
-    /// where subsequent sync allocs couldn't see them, so the GPU "filled up" and every op OOM-retried with a full
-    /// stream-drain + pool-trim (the cause of the Ideogram-4 ~100s/step thrash on a near-full A100). This mirrors the
-    /// fix already applied to the streaming weight cache. Persistent buffers (resident weights, cuBLAS workspaces)
-    /// freed via synchronous <see cref="Free"/> must use <see cref="AllocatePersistent"/> instead.</summary>
+    /// <summary>Allocates <b>transient</b> device memory (op outputs, dtype casts, scratch) and returns a device pointer. Routes through the stream-ordered pool (<c>cuMemAllocAsync</c> on the compute stream) so the memory is reused by the matching <c>cuMemFreeAsync</c> frees in <see cref="GpuTransferHelper.FreeDevice"/> — the previous mix of synchronous <c>cuMemAlloc</c> here with async frees there sent freed bytes into the pool where subsequent sync allocs couldn't see them, so the GPU "filled up" and every op OOM-retried with a full stream-drain + pool-trim (the cause of the Ideogram-4 ~100s/step thrash on a near-full A100). This mirrors the fix already applied to the streaming weight cache. Persistent buffers (resident weights, cuBLAS workspaces) freed via synchronous <see cref="Free"/> must use <see cref="AllocatePersistent"/> instead.</summary>
     public static ulong Allocate(nuint byteSize)
     {
         nint stream = ResolveStream();
@@ -30,10 +19,7 @@ public static class CudaMemory
         return AllocatePersistent(byteSize);
     }
 
-    /// <summary>Allocates <b>persistent</b> device memory with the synchronous driver allocator (<c>cuMemAlloc</c>),
-    /// to be released with the synchronous <see cref="Free"/>. Use for buffers that live for the whole model/session
-    /// (resident weights, cuBLAS workspaces) — keeping them out of the churning stream-ordered pool. On OOM, drains
-    /// the active streams and trims the pool back to the driver before retrying once.</summary>
+    /// <summary>Allocates <b>persistent</b> device memory with the synchronous driver allocator (<c>cuMemAlloc</c>), to be released with the synchronous <see cref="Free"/>. Use for buffers that live for the whole model/session (resident weights, cuBLAS workspaces) — keeping them out of the churning stream-ordered pool. On OOM, drains the active streams and trims the pool back to the driver before retrying once.</summary>
     public static ulong AllocatePersistent(nuint byteSize)
     {
         int result = CudaDriverApi.cuMemAlloc(out ulong dptr, byteSize);
@@ -58,8 +44,7 @@ public static class CudaMemory
         return dptr;
     }
 
-    /// <summary>Throws for a terminal allocation failure, surfacing a genuine exhaustion as the typed
-    /// <see cref="OutOfVramException"/> (carrying requested vs free bytes) rather than a bare CUDA error 2.</summary>
+    /// <summary>Throws for a terminal allocation failure, surfacing a genuine exhaustion as the typed <see cref="OutOfVramException"/> (carrying requested vs free bytes) rather than a bare CUDA error 2.</summary>
     /// <remarks>Callers that can degrade — the VRAM planner re-planning to a streamed layout, the graph arena falling
     /// back to un-arena'd allocation, the service layer reclaiming device memory before rethrowing — need to
     /// distinguish "the card is full" from "the driver is broken". Every other error code stays a
@@ -86,9 +71,7 @@ public static class CudaMemory
         throw new OutOfVramException((long)requested, freeBytes);
     }
 
-    /// <summary>Emits a one-line diagnostic showing requested bytes alongside the driver's
-    /// view of free / total VRAM. Best-effort: a failure here is swallowed so it can never
-    /// mask the real allocation failure that triggered the call.</summary>
+    /// <summary>Emits a one-line diagnostic showing requested bytes alongside the driver's view of free / total VRAM. Best-effort: a failure here is swallowed so it can never mask the real allocation failure that triggered the call.</summary>
     private static void LogOomDiagnostic(string stage, nuint requested)
     {
         try
@@ -142,8 +125,7 @@ public static class CudaMemory
         CudaDriverApi.cuMemcpyDtoH((nint)dst, src, byteSize).ThrowOnError();
     }
 
-    /// <summary>Copies bytes between device pointers (synchronous — serializes against the null stream; NOT
-    /// legal during stream capture. Hot paths should use <see cref="CopyDeviceToDeviceAsync"/>).</summary>
+    /// <summary>Copies bytes between device pointers (synchronous — serializes against the null stream; NOT legal during stream capture. Hot paths should use <see cref="CopyDeviceToDeviceAsync"/>).</summary>
     public static void CopyDeviceToDevice(ulong dst, ulong src, nuint byteSize)
     {
         CudaDriverApi.cuMemcpyDtoD(dst, src, byteSize).ThrowOnError();
@@ -167,9 +149,7 @@ public static class CudaMemory
         CudaDriverApi.cuMemsetD32(dptr, value, count).ThrowOnError();
     }
 
-    /// <summary>Allocates device memory asynchronously on the given stream. Mirrors
-    /// <see cref="Allocate"/>'s OOM retry: if the stream-ordered allocator can't satisfy
-    /// the request, drain everything and trim the pool, then retry once.</summary>
+    /// <summary>Allocates device memory asynchronously on the given stream. Mirrors <see cref="Allocate"/>'s OOM retry: if the stream-ordered allocator can't satisfy the request, drain everything and trim the pool, then retry once.</summary>
     // Capture-window alloc/free tracker (diagnostic): during step-graph capture, every cuMemAllocAsync
     // becomes a graph allocation whose lifetime the graph owns — an alloc without a matching captured free
     // leaks one launch's worth of memory permanently when the graph is destroyed. Enabled by

@@ -6,8 +6,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native 3D-mesh route. Unlike the other Phase 3 additions, <see cref="IMeshService.GenerateAsync"/>
-/// takes an <see cref="IProgress{T}"/> just like images do, so this gets the same <c>/stream</c> variant.</summary>
+/// <summary>Native 3D-mesh route. Unlike the other Phase 3 additions, <see cref="IMeshService.GenerateAsync"/> takes an <see cref="IProgress{T}"/> just like images do, so this gets the same <c>/stream</c> variant.</summary>
 public static class MeshEndpoints
 {
     /// <summary>Maps <c>/v1/native/mesh</c> and its SSE step-preview variant.</summary>
@@ -42,8 +41,7 @@ public static class MeshEndpoints
         });
     }
 
-    /// <summary>Re-emits the native mesh fields plus where the file landed; property names match
-    /// <see cref="MeshResult"/>, so this is additive for existing clients.</summary>
+    /// <summary>Re-emits the native mesh fields plus where the file landed; property names match <see cref="MeshResult"/>, so this is additive for existing clients.</summary>
     private static object WithSavedPath(MeshResult result, string? savedPath) => new
     {
         result.Data,

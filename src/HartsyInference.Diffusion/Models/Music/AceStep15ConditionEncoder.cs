@@ -59,10 +59,6 @@ public sealed unsafe class AceStep15ConditionEncoder
             foreach (Tensor t in l.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Builds the packed condition sequence <c>[1, L_lyric + (timbre ? 1 : 0) + T_text, 2048]</c>.
-    /// <paramref name="textHidden"/> and <paramref name="lyricHidden"/> are per-token Qwen3-Embedding-0.6B states
-    /// <c>[T, 1024]</c>; <paramref name="timbreLatent"/> is a reference-audio Oobleck latent <c>[T_ref, 64]</c>
-    /// (time-major), null for plain text-to-music.</summary>
     /// <summary>Validates a hidden-states tensor as [T, hidden] or [1, T, hidden] (the latter is what
     /// <c>CfgHelper.SliceBatchElement</c> emits) and returns the sequence length T.</summary>
     private static int SeqLen(Tensor t, int hidden, string param, string label)
@@ -75,6 +71,10 @@ public sealed unsafe class AceStep15ConditionEncoder
         return (int)t.Shape[rank - 2];
     }
 
+    /// <summary>Builds the packed condition sequence <c>[1, L_lyric + (timbre ? 1 : 0) + T_text, 2048]</c>.
+    /// <paramref name="textHidden"/> and <paramref name="lyricHidden"/> are per-token Qwen3-Embedding-0.6B states
+    /// <c>[T, 1024]</c>; <paramref name="timbreLatent"/> is a reference-audio Oobleck latent <c>[T_ref, 64]</c>
+    /// (time-major), null for plain text-to-music.</summary>
     public Tensor EncodeConditions(IBackend backend, Tensor textHidden, Tensor? lyricHidden, Tensor? timbreLatent)
     {
         // Accept [T, H] or the [1, T, H] that CfgHelper.SliceBatchElement produces (the standard upstream

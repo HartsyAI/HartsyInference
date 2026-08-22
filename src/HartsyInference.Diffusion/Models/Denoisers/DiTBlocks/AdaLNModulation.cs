@@ -41,7 +41,6 @@ public sealed unsafe class AdaLNModulation
         int batch = (int)timestepEmb.Shape[0];
         int outDim = _numParams * _hiddenSize;
 
-        // SiLU activation on input
         TensorShape inputShape = new TensorShape(batch, _hiddenSize);
         Tensor activated = new Tensor(inputShape, timestepEmb.DType);
         backend.Silu(activated, timestepEmb);

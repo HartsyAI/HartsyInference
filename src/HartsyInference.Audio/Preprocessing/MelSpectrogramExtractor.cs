@@ -4,9 +4,8 @@ namespace HartsyInference.Audio.Preprocessing;
 /// <see cref="MelFilterbank"/> into a single audio → log-mel pipeline that matches
 /// the model-specific preprocessing exactly.
 ///
-/// <para>Three preset configurations are provided as static factories — these are the
-/// parameter sets needed by every audio model in scope. Custom configurations are
-/// constructed directly via the constructor.</para>
+/// <para>Preset configurations are provided as static factories — one per model family in
+/// scope. Custom configurations are constructed directly via the constructor.</para>
 ///
 /// <para><b>Allocation contract:</b> the extractor pre-allocates all scratch buffers
 /// at construction. <see cref="Compute"/> writes into a caller-provided output buffer
@@ -207,7 +206,7 @@ public sealed class MelSpectrogramExtractor
     {
         _cfg = cfg;
         _window = HannWindow.Get(cfg.WinLength);
-        // FFT size must be a power of two; round up if win_length is not.
+        // FFT size must be a power of two; round up if NFft is not.
         _fftSize = NextPow2(cfg.NFft);
         _numBins = _fftSize / 2 + 1;
         _filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);

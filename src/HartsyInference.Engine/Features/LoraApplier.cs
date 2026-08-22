@@ -5,14 +5,10 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Builds and applies a <see cref="MergedLoraStack"/> from resolved <see cref="LoraResolver.LoraSpec"/> entries
-/// against per-architecture weight dictionaries. The dicts are mutated in place — matching keys get newly-allocated
-/// merged tensors owned by the returned stack, so dispose the stack only <em>after</em> the components built from those
-/// dicts are done with.</summary>
+/// <summary>Builds and applies a <see cref="MergedLoraStack"/> from resolved <see cref="LoraResolver.LoraSpec"/> entries against per-architecture weight dictionaries. The dicts are mutated in place — matching keys get newly-allocated merged tensors owned by the returned stack, so dispose the stack only <em>after</em> the components built from those dicts are done with.</summary>
 public static class LoraApplier
 {
-    /// <summary>Opens every LoRA file, partitions layers by target, and merges into the supplied weight dicts. Returns
-    /// the stack (null for an empty spec list) so the caller can free the merged tensors when generation finishes.</summary>
+    /// <summary>Opens every LoRA file, partitions layers by target, and merges into the supplied weight dicts. Returns the stack (null for an empty spec list) so the caller can free the merged tensors when generation finishes.</summary>
     /// <param name="unetWeights">Pass when targeting an SD 1.5 / SDXL UNet, else null.</param>
     /// <param name="transformerWeights">Pass when targeting a DiT transformer, else null.</param>
     /// <param name="clipGWeights">Pass when the architecture has a CLIP-G encoder (SDXL only).</param>
@@ -69,8 +65,7 @@ public static class LoraApplier
         }
     }
 
-    /// <summary>Shallow-copies a weight dict so LoRA replacement doesn't poison the cache's original. Tensor instances
-    /// are referenced, not copied; the replacements written into the copy are owned by the stack from <see cref="BuildAndApply"/>.</summary>
+    /// <summary>Shallow-copies a weight dict so LoRA replacement doesn't poison the cache's original. Tensor instances are referenced, not copied; the replacements written into the copy are owned by the stack from <see cref="BuildAndApply"/>.</summary>
     public static Dictionary<string, Tensor>? ShallowClone(IReadOnlyDictionary<string, Tensor>? source)
     {
         if (source is null)

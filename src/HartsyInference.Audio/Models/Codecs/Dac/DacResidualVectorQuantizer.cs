@@ -4,11 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Dac;
 
-/// <summary>DAC-style residual vector quantizer. Each codebook layer has its own
-/// projection convs that map the latent down to a small <c>codebook_dim</c> for the
-/// nearest-neighbor lookup, then back up to the latent dimension for the residual
-/// subtraction. Both projections are 1×1 weight-normed Conv1d, fused at load time.
-///
+/// <summary>DAC-style residual vector quantizer — each codebook layer has its own 1×1 weight-normed projection convs down to <c>codebook_dim</c> for the nearest-neighbor lookup and back up to the latent dimension for the residual subtraction, fused at load time.</summary>
+/// <remarks>
 /// <para>This differs from the simpler <see cref="ResidualVectorQuantizer"/> we built
 /// for EnCodec, which has no per-layer projection. The DAC variant gives each codebook
 /// its own subspace and dramatically improves codebook utilization — that's the whole
@@ -24,7 +21,8 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 ///   <item><c>quantizer.quantizers.{i}.in_proj.weight_g</c> / <c>weight_v</c> / <c>bias</c></item>
 ///   <item><c>quantizer.quantizers.{i}.out_proj.weight_g</c> / <c>weight_v</c> / <c>bias</c></item>
 ///   <item><c>quantizer.quantizers.{i}.codebook.weight</c> — <c>[codebook_size, codebook_dim]</c></item>
-/// </list></para></summary>
+/// </list></para>
+/// </remarks>
 internal sealed unsafe class DacResidualVectorQuantizer
 {
     public int NCodebooks { get; }
@@ -67,9 +65,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
         }
     }
 
-    /// <summary>Encodes a continuous latent into integer codes. <paramref name="latent"/>
-    /// is channels-first <c>[batch, latent_dim, T]</c>; output is <c>[nQ, batch, T]</c>
-    /// Int32.</summary>
+    /// <summary>Encodes a continuous latent into integer codes. <paramref name="latent"/> is channels-first <c>[batch, latent_dim, T]</c>; output is <c>[nQ, batch, T]</c> Int32.</summary>
     public Tensor Encode(IBackend backend, Tensor latent, int batch, int t, int? nQOverride = null)
     {
         if (_inProjW[0] is null) throw new InvalidOperationException("DacResidualVectorQuantizer weights not loaded.");
@@ -161,7 +157,6 @@ internal sealed unsafe class DacResidualVectorQuantizer
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
             quantized.Dispose();
 
-            // residual -= reproj.
             float* rp = (float*)residual.DataPointer;
             float* xp = (float*)reproj.DataPointer;
             long n = residual.ElementCount;
@@ -173,8 +168,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
         return codes;
     }
 
-    /// <summary>Decodes integer codes back to a continuous latent. Codes shape
-    /// <c>[nQ, batch, T]</c>; output channels-first <c>[batch, latent_dim, T]</c>.</summary>
+    /// <summary>Decodes integer codes back to a continuous latent. Codes shape <c>[nQ, batch, T]</c>; output channels-first <c>[batch, latent_dim, T]</c>.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int t)
     {
         if (_inProjW[0] is null) throw new InvalidOperationException("DacResidualVectorQuantizer weights not loaded.");
@@ -211,7 +205,6 @@ internal sealed unsafe class DacResidualVectorQuantizer
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
             quantized.Dispose();
 
-            // latent += reproj.
             float* xp = (float*)reproj.DataPointer;
             for (long i = 0; i < total; i++) lp[i] += xp[i];
             reproj.Dispose();
@@ -234,8 +227,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
         return WeightNormFusion.Compose(w, prefix);
     }
 
-    /// <summary>L2-normalizes each row of a 2D codebook tensor. Cached once at load time
-    /// so the cosine-similarity inner loop is a pure dot product.</summary>
+    /// <summary>L2-normalizes each row of a 2D codebook tensor. Cached once at load time so the cosine-similarity inner loop is a pure dot product.</summary>
     private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
     {
         Tensor result = new(src.Shape, DType.F32);

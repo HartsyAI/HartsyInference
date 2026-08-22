@@ -68,7 +68,7 @@ public sealed unsafe class BooguImageDoubleBlock
     private Tensor? _imgAttnNorm, _imgSelfAttnNorm, _imgFfnNorm1, _imgFfnNorm2;
     private Tensor? _insAttnNorm, _insFfnNorm1, _insFfnNorm2;
 
-    /// <summary>Creates a dual-stream block.</summary>
+    /// <summary>Creates a dual-stream block; requires <c>numQHeads * headDim == hidden</c> and <c>numQHeads % numKvHeads == 0</c>.</summary>
     public BooguImageDoubleBlock(int hidden, int numQHeads, int numKvHeads, int headDim, int ffnInner,
         int conditioningDim, float normEps = 1e-5f, float qkNormEps = 1e-5f)
     {

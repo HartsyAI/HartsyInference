@@ -23,7 +23,6 @@ internal static class OpenVoiceModel
     private const int Hop = 256;
     private const int SpecChannels = 513;
 
-    /// <summary>The OpenVoice V2 descriptor.</summary>
     internal static VcModelDescriptor Descriptor { get; } = new VcModelDescriptor
     {
         ManagesOwnWeights = true,

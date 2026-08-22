@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Regional / segment prompting: the region plan (parsed from the prompt's region/segment syntax by the
-/// caller) plus the mask shaping and per-segment step/cfg overrides applied to segment refinement passes.</summary>
+/// <summary>Regional / segment prompting: the region plan (parsed from the prompt's region/segment syntax by the caller) plus the mask shaping and per-segment step/cfg overrides applied to segment refinement passes.</summary>
 public sealed record Regional
 {
     /// <summary>The raw region/segment plan expression (the prompt's <c>&lt;region&gt;</c>/<c>&lt;segment&gt;</c> syntax).</summary>

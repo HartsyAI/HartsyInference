@@ -4,12 +4,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.XCodec;
 
-/// <summary>The real xcodec_mini_infer (SoundStream) residual vector quantizer — an EMA
-/// <c>EuclideanCodebook</c> RVQ, NOT the factorized DAC RVQ. Each of the 12 codebooks is a single
-/// <c>[codebook_size, dimension]</c> embedding table (<c>quantizer.vq.layers.{i}._codebook.embed</c>,
-/// shape <c>[1024, 1024]</c>); there is no per-codebook in/out projection (the upstream
-/// <c>VectorQuantization</c> has <c>codebook_dim == dimension</c> so <c>project_in/out</c> are
-/// <c>nn.Identity</c>).
+/// <summary>The real xcodec_mini_infer (SoundStream) residual vector quantizer — an EMA <c>EuclideanCodebook</c> RVQ, NOT the factorized DAC RVQ.</summary>
+/// <remarks>
+/// Each of the 12 codebooks is a single <c>[codebook_size, dimension]</c> embedding table
+/// (<c>quantizer.vq.layers.{i}._codebook.embed</c>, shape <c>[1024, 1024]</c>); there is no per-codebook
+/// in/out projection (the upstream <c>VectorQuantization</c> has <c>codebook_dim == dimension</c> so
+/// <c>project_in/out</c> are <c>nn.Identity</c>).
 ///
 /// <para><b>Decode</b> (the only path YuE needs) mirrors
 /// <c>ResidualVectorQuantization.decode</c> / <c>EuclideanCodebook.decode</c>:
@@ -27,7 +27,7 @@ namespace HartsyInference.Audio.Models.Codecs.XCodec;
 ///
 /// <para><b>Encode</b> mirrors the residual nearest-neighbor loop (Euclidean argmin = max of
 /// <c>2·x·e − ||e||²</c>) and is provided for round-trip parity; the YuE decode path does not use
-/// it.</para></summary>
+/// it.</para></remarks>
 internal sealed unsafe class XCodecEmaResidualVectorQuantizer
 {
     public int NCodebooks { get; }
@@ -58,9 +58,7 @@ internal sealed unsafe class XCodecEmaResidualVectorQuantizer
         }
     }
 
-    /// <summary>Decodes integer codes back to the continuous latent. Codes <c>[nQ, batch, T]</c>
-    /// Int32; output channels-first <c>[batch, dimension, T]</c>. Sums the per-codebook embedding
-    /// lookups across the first <c>nQ = codes.Shape[0]</c> codebooks.</summary>
+    /// <summary>Decodes integer codes back to the continuous latent. Codes <c>[nQ, batch, T]</c> Int32; output channels-first <c>[batch, dimension, T]</c>. Sums the per-codebook embedding lookups across the first <c>nQ = codes.Shape[0]</c> codebooks.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int t)
     {
         _ = backend;
@@ -93,8 +91,7 @@ internal sealed unsafe class XCodecEmaResidualVectorQuantizer
         return latent;
     }
 
-    /// <summary>Encodes a continuous latent <c>[batch, dimension, T]</c> into codes <c>[nQ, batch, T]</c>
-    /// via the residual Euclidean nearest-neighbor loop. Provided for round-trip parity testing.</summary>
+    /// <summary>Encodes a continuous latent <c>[batch, dimension, T]</c> into codes <c>[nQ, batch, T]</c> via the residual Euclidean nearest-neighbor loop. Provided for round-trip parity testing.</summary>
     public Tensor Encode(IBackend backend, Tensor latent, int batch, int t, int? nQOverride = null)
     {
         _ = backend;

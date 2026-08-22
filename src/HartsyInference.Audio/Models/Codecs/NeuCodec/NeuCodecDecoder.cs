@@ -5,10 +5,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>NeuCodec decode path (the part NeuTTS needs), faithful to the on-disk
-/// <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c> layout, verified against
-/// transformers PR #47143 <c>modeling_neucodec.py</c>). Flow:
-/// FSQ index → codebook de-quant (8-d in [-1,1]) → <c>quantizer.project_out</c> (8→2048) →
+/// <summary>NeuCodec decode path (the part NeuTTS needs), faithful to the on-disk <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c> layout, verified against transformers PR #47143 <c>modeling_neucodec.py</c>).</summary>
+/// <remarks>
+/// Flow: FSQ index → codebook de-quant (8-d in [-1,1]) → <c>quantizer.project_out</c> (8→2048) →
 /// <c>acoustic_decoder.fc</c> (2048→1024) → Conv1d embed (k7) → 2× ResNet prior-net →
 /// 12 transformer layers (RMSNorm + full bidirectional MHA + SiLU MLP) → 2× ResNet post-net →
 /// final LayerNorm → ISTFT head (Linear 1024→n_fft+2, "same"-padding iSTFT) → 24 kHz PCM.
@@ -20,7 +19,7 @@ namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 /// <c>position_ids = arange(num_heads)</c> (a per-head-constant angle, identical for q and k and
 /// uniform across time). Because that rotation is orthogonal and identical on q and k, it cancels
 /// in every q·kᵀ score — RoPE is a mathematical no-op here, so we omit it for bit-identical output.
-/// (This mirrors the original torchtune misuse the HF port faithfully reproduces.)</para></summary>
+/// (This mirrors the original torchtune misuse the HF port faithfully reproduces.)</para></remarks>
 public sealed unsafe class NeuCodecDecoder : IDisposable
 {
     private readonly NeuCodecConfig _cfg;
@@ -48,10 +47,7 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
         _blocks = new TxWeights[cfg.Depth];
     }
 
-    /// <summary>Loads the decode-side weights straight from the checkpoint dictionary (raw
-    /// safetensors key names, no prefix rewriting). The encode-side stacks
-    /// (<c>acoustic_encoder</c>, <c>semantic_encoder</c>, <c>semantic_adapter</c>, <c>fc_encoder</c>,
-    /// <c>quantizer.project_in</c>) are not needed for token→audio and are ignored.</summary>
+    /// <summary>Loads the decode-side weights straight from the checkpoint dictionary (raw safetensors key names, no prefix rewriting); the encode-side stacks (<c>acoustic_encoder</c>, <c>semantic_encoder</c>, <c>semantic_adapter</c>, <c>fc_encoder</c>, <c>quantizer.project_in</c>) are not needed for token→audio and are ignored.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "acoustic_decoder")
     {
         _projOutW = WhisperOps.EnsureF32(w["quantizer.project_out.weight"]);

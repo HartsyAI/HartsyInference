@@ -3,11 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Decides which waveform ships with a generated video, so every family gets the same behaviour instead of
-/// each pipeline inventing one. Precedence: whatever the pipeline attached (a generated soundtrack, or the driving
-/// speech an audio-conditioned family consumed) beats <see cref="VideoRequest.VideoAudioInput"/>, the caller-supplied
-/// pass-through track. <see cref="VideoRequest.VideoAudioReference"/> is deliberately NOT a fallback — it is
-/// conditioning, and a family that means it to be heard attaches it itself.</summary>
+/// <summary>Decides which waveform ships with a generated video, so every family gets the same behaviour instead of each pipeline inventing one. Precedence: whatever the pipeline attached (a generated soundtrack, or the driving speech an audio-conditioned family consumed) beats <see cref="VideoRequest.VideoAudioInput"/>, the caller-supplied pass-through track. <see cref="VideoRequest.VideoAudioReference"/> is deliberately NOT a fallback — it is conditioning, and a family that means it to be heard attaches it itself.</summary>
 public static class VideoAudioResolver
 {
     // Sub-frame shortfalls are latent-count rounding and pad silently; a quarter second means the wrong track.

@@ -6,21 +6,14 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>Loads a GGUF decoder-LLM checkpoint (Qwen2.5 / Qwen3 / Llama family) into a ready-to-run
-/// <see cref="GenericTransformer"/>. Owns the underlying GGUF handle (the quantized projection weights are
-/// memory-mapped from the file and consumed lazily by the matmul backend), so this object must outlive any
-/// inference that uses <see cref="Transformer"/>.
-///
-/// <para>Pipeline: <c>GgufModelLoader.Load</c> (parse + key-remap, still quantized) →
-/// <see cref="GgufConfigFactory.FromGguf"/> (architecture config) → <see cref="GenericTransformer.LoadWeights"/>
-/// (embed + norms to F32, projections kept quantized).</para></summary>
+/// <summary>Loads a GGUF decoder-LLM checkpoint (Qwen2.5 / Qwen3 / Llama family) into a ready-to-run <see cref="GenericTransformer"/>; owns the underlying GGUF handle (quantized projection weights are memory-mapped and consumed lazily), so this object must outlive any inference using <see cref="Transformer"/>.</summary>
+/// <remarks>Pipeline: <c>GgufModelLoader.Load</c> (parse + key-remap, still quantized) → <see cref="GgufConfigFactory.FromGguf"/> (architecture config) → <see cref="GenericTransformer.LoadWeights"/> (embed + norms to F32, projections kept quantized).</remarks>
 public sealed class GgufLanguageModel : IDisposable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private int _disposed;
 
-    /// <summary>GGUF quant formats the CUDA path supports directly (dequant-to-F16 and the fused GEMV); other
-    /// quant tensors are dequantized to F32 at load.</summary>
+    /// <summary>GGUF quant formats the CUDA path supports directly (dequant-to-F16 and the fused GEMV); other quant tensors are dequantized to F32 at load.</summary>
     private static readonly HashSet<string> GpuSupportedQuant = ["Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K"];
 
     /// <summary>The architecture config inferred from the GGUF metadata + weights.</summary>
@@ -48,10 +41,7 @@ public sealed class GgufLanguageModel : IDisposable
         Template = template;
     }
 
-    /// <summary>Architectures that are NOT <see cref="GenericTransformer"/> decoders — dense/MoE-transformer
-    /// config inference (head_count etc.) is meaningless for these and throws (e.g. mamba2's
-    /// <c>attention.head_count</c> is 0, so deriving head_dim = hidden/heads divides by zero). Route them
-    /// through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
+    /// <summary>Architectures that are NOT <see cref="GenericTransformer"/> decoders — dense/MoE-transformer config inference (head_count etc.) is meaningless and throws for these (e.g. mamba2's <c>attention.head_count</c> is 0, so head_dim = hidden/heads divides by zero); route them through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
     internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7", "qwen35", "qwen35moe"];
 
     internal static ILlmTokenizer BuildTokenizer(GgufMetadata meta)
@@ -98,15 +88,7 @@ public sealed class GgufLanguageModel : IDisposable
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
     }
 
-    /// <summary>Compiles the model's own Jinja <c>chat_template</c> when present, but stays tolerant: some models
-    /// (e.g. embedding models) ship templates using constructs the engine doesn't support (Python slicing). Those
-    /// models are still usable for raw completion / embeddings, so fall back to a template the tokenizer can
-    /// actually render — ChatML when the tokenizer has the <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c>
-    /// control tokens, else <see cref="RawCompletionTemplate"/> — rather than failing the whole load. Falling
-    /// back to ChatML unconditionally used to throw at Encode time for any tokenizer without those tokens (base
-    /// models like GPT-2/StarCoder2, and Vicuna-family VLM backbones like LLaVA) — a bare
-    /// <see cref="GenerationRequest.Prompt"/> should never crash regardless of what turn format the model
-    /// natively wants.</summary>
+    /// <summary>Compiles the model's own Jinja <c>chat_template</c> when present, but stays tolerant: some models ship templates using constructs the engine doesn't support (Python slicing), so falls back to ChatML (when the tokenizer has <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c>) or <see cref="RawCompletionTemplate"/> rather than failing the whole load — a bare <see cref="GenerationRequest.Prompt"/> should never crash regardless of what turn format the model natively wants.</summary>
     internal static IChatTemplate BuildTemplate(GgufMetadata meta, ILlmTokenizer tokenizer)
     {
         IChatTemplate ChatMlOrRaw() =>
@@ -146,14 +128,7 @@ public sealed class GgufLanguageModel : IDisposable
     private const string Gpt4oPreTokenRegex =
         @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
-    /// <summary>Loads the GGUF at <paramref name="path"/>. Set <paramref name="lowVramQuant"/> to keep weights
-    /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights. Set
-    /// <paramref name="dequantizeToF32"/> for the CPU backend, which is F32-only and cannot consume the quantized
-    /// projection weights the CUDA path keeps compressed — every quantized/half tensor is widened to F32 at load.</summary>
-    /// <summary>Checkpoint loaded for TENSOR-PARALLEL construction: the raw (relabeled/split) weight dict plus
-    /// config/tokenizer/template, with NO <see cref="GenericTransformer"/>. <c>TensorParallelTransformer.LoadWeights</c>
-    /// copies per-rank slices out of <see cref="Weights"/>; dict tensors keep borrowing this object's GGUF mmap,
-    /// so it must stay alive as long as the TP transformer does (host page-cache residency — cheap).</summary>
+    /// <summary>Checkpoint loaded for TENSOR-PARALLEL construction: the raw (relabeled/split) weight dict plus config/tokenizer/template, with NO <see cref="GenericTransformer"/>; <c>TensorParallelTransformer.LoadWeights</c> copies per-rank slices out of <see cref="Weights"/>, and dict tensors keep borrowing this object's GGUF mmap so it must stay alive as long as the TP transformer does.</summary>
     public sealed class TpCheckpoint : IDisposable
     {
         private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -184,8 +159,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Loads the checkpoint for tensor-parallel use — same relabel/dequant/fused-split pipeline as
-    /// <see cref="Load"/>, stopping before <see cref="GenericTransformer"/> construction.</summary>
+    /// <summary>Loads the checkpoint for tensor-parallel use — same relabel/dequant/fused-split pipeline as <see cref="Load"/>, stopping before <see cref="GenericTransformer"/> construction.</summary>
     public static TpCheckpoint LoadForTensorParallel(string path, bool lowVramQuant = false)
     {
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
@@ -203,6 +177,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
+    /// <summary>Loads the GGUF at <paramref name="path"/>; <paramref name="lowVramQuant"/> keeps weights compressed on-device instead of caching dequantized F16, and <paramref name="dequantizeToF32"/> widens every quantized/half tensor to F32 for the CPU backend (F32-only, can't consume compressed projection weights).</summary>
     public static GgufLanguageModel Load(string path, bool lowVramQuant = false, bool dequantizeToF32 = false)
     {
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
@@ -224,8 +199,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors →
-    /// infer config. Everything up to (but excluding) transformer construction.</summary>
+    /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors → infer config; everything up to (but excluding) transformer construction.</summary>
     private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
         GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32)
     {
@@ -271,9 +245,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Splits Phi-3's fused <c>qkv_proj</c> (→ q/k/v) and <c>gate_up_proj</c> (→ gate/up) into the
-    /// separate per-projection tensors. Rows are contiguous in the (possibly quantized) layout, so each split is
-    /// a byte-range copy that preserves the dtype.</summary>
+    /// <summary>Splits Phi-3's fused <c>qkv_proj</c> (→ q/k/v) and <c>gate_up_proj</c> (→ gate/up) into separate per-projection tensors; rows are contiguous in the (possibly quantized) layout, so each split is a dtype-preserving byte-range copy.</summary>
     private static unsafe void SplitFusedPhi(Dictionary<string, Tensor> w, GgufMetadata meta, string arch = "phi3")
     {
         int hq = (int)meta.GetUInt32($"{arch}.attention.head_count");
@@ -306,9 +278,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Splits GPT-2's fused <c>qkv_proj</c> (weight + bias) into separate q/k/v projections. GPT-2 is MHA
-    /// and lays the fused tensor out as <c>[full_q | full_k | full_v]</c> contiguous rows, so each split is a
-    /// byte-range view (weights, dtype-preserving) or a float slice (the F32 bias).</summary>
+    /// <summary>Splits GPT-2's fused <c>qkv_proj</c> (weight + bias) into separate q/k/v projections; GPT-2 is MHA and lays the fused tensor out as <c>[full_q | full_k | full_v]</c> contiguous rows, so each split is a byte-range view or float slice.</summary>
     private static unsafe void SplitFusedGpt2(Dictionary<string, Tensor> w, GgufMetadata meta, string arch)
     {
         int hidden = (int)meta.GetUInt32($"{arch}.embedding_length");
@@ -338,8 +308,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Zero-copy view of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/>
-    /// (used to split a fused F32 bias vector).</summary>
+    /// <summary>Zero-copy view of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/> (used to split a fused F32 bias vector).</summary>
     private static unsafe Tensor SliceVec(Tensor src, int start, int count)
     {
         long elemBytes = src.DType.ComputeByteCount(1);
@@ -347,12 +316,8 @@ public sealed class GgufLanguageModel : IDisposable
         return new Tensor((void*)s, new TensorShape(count), src.DType, src.Device);
     }
 
-    /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>,
-    /// shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block
-    /// loads. Each expert occupies a contiguous block, so a flatten-to-2D + per-expert row-byte copy works on the
-    /// quantized weights with no dequant.</summary>
-    /// <summary>Internal (not private) so <c>HartsyInference.LLM.Tests</c> can regression-test the fused-vs-separate
-    /// expert tensor split directly, without constructing a full synthetic GGUF file.</summary>
+    /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>, shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block loads via a flatten-to-2D + per-expert row-byte copy (no dequant needed).</summary>
+    /// <remarks>Internal (not private) so <c>HartsyInference.LLM.Tests</c> can regression-test the fused-vs-separate expert tensor split directly, without constructing a full synthetic GGUF file.</remarks>
     internal static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
     {
         int e = cfg.Moe!.NumExperts;
@@ -375,9 +340,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Splits one fused gate+up stacked expert tensor (flattened to <c>[E·2·inter, inDim]</c>, gate then
-    /// up per expert — matches ggml <c>build_moe_ffn</c>'s <c>gate_up_exps</c> view split) into per-expert
-    /// <c>experts.{i}.gate_proj</c> / <c>experts.{i}.up_proj</c> 2D tensors, then removes the stacked source.</summary>
+    /// <summary>Splits one fused gate+up stacked expert tensor (flattened to <c>[E·2·inter, inDim]</c>, gate then up per expert, matching ggml <c>build_moe_ffn</c>'s <c>gate_up_exps</c> view split) into per-expert <c>experts.{i}.gate_proj</c>/<c>experts.{i}.up_proj</c> tensors, then removes the stacked source.</summary>
     private static void SplitFusedGateUpExperts(Dictionary<string, Tensor> w, string stackedKey,
         string gateFormat, string upFormat, int e, int inter, int inDim)
     {
@@ -391,9 +354,7 @@ public sealed class GgufLanguageModel : IDisposable
         w.Remove(stackedKey);
     }
 
-    /// <summary>Splits one stacked expert tensor (flattened to <c>[E·outDim, inDim]</c>) into <paramref name="e"/>
-    /// per-expert <c>[outDim, inDim]</c> tensors keyed by <paramref name="targetFormat"/> (a <c>{0}</c> expert-index
-    /// placeholder), then removes the stacked source.</summary>
+    /// <summary>Splits one stacked expert tensor (flattened to <c>[E·outDim, inDim]</c>) into <paramref name="e"/> per-expert <c>[outDim, inDim]</c> tensors keyed by <paramref name="targetFormat"/> (a <c>{0}</c> expert-index placeholder), then removes the stacked source.</summary>
     private static void SplitExperts(Dictionary<string, Tensor> w, string stackedKey, string targetFormat,
         int e, int outDim, int inDim)
     {
@@ -404,9 +365,7 @@ public sealed class GgufLanguageModel : IDisposable
         w.Remove(stackedKey);
     }
 
-    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor into a new tensor of the same
-    /// dtype. A row is contiguous in both float and block-quantized layouts (quant blocks run along the column
-    /// dim), so this is a plain byte-range copy that works on quantized weights.</summary>
+    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor into a new tensor of the same dtype; a row is contiguous in both float and block-quantized layouts (quant blocks run along the column dim), so this is a plain byte-range copy that works on quantized weights.</summary>
     private static unsafe Tensor SliceRows(Tensor src, int startRow, int numRows)
     {
         int inDim = (int)src.Shape[1];

@@ -90,7 +90,6 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         }
     }
 
-    /// <summary>Convenience accessor for the config.</summary>
     public OmniGen2Config Config => _config;
 
     /// <summary>Loads weights from a diffusers-style key dict.</summary>

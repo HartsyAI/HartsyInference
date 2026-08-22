@@ -9,12 +9,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Resolves textual-inversion embed markers (<c>\0swarmembed:NAME\0end</c>, the control form hosts rewrite
-/// <c>&lt;embed:name&gt;</c> into) for CLIP pipelines: loads each embedding's learned vectors via
-/// <see cref="TextualInversion.Load"/> and builds a token sequence where each embedding's N vectors occupy N sequential
-/// placeholder ids past the tokenizer vocab. The caller encodes those tokens with the per-hidden-size
-/// <see cref="Plan.InlineMap"/> so the engine substitutes the learned vectors at the placeholder positions. Returns null
-/// when the prompt carries no markers — callers keep their plain token path unchanged.</summary>
+/// <summary>Resolves textual-inversion embed markers (<c>\0swarmembed:NAME\0end</c>, the control form hosts rewrite <c>&lt;embed:name&gt;</c> into) for CLIP pipelines: loads each embedding's learned vectors via <see cref="TextualInversion.Load"/> and builds a token sequence where each embedding's N vectors occupy N sequential placeholder ids past the tokenizer vocab. The caller encodes those tokens with the per-hidden-size <see cref="Plan.InlineMap"/> so the engine substitutes the learned vectors at the placeholder positions. Returns null when the prompt carries no markers — callers keep their plain token path unchanged.</summary>
 public static class EmbeddingResolver
 {
     private static readonly Regex _markerRx = new Regex("\u0000swarmembed:(.*?)\u0000end", RegexOptions.Compiled, TimeSpan.FromSeconds(2));
@@ -38,8 +33,7 @@ public static class EmbeddingResolver
 
         internal void AddOwned(Tensor t) => _owned.Add(t);
 
-        /// <summary>The <c>{placeholderId → [hidden] vector}</c> map for one encoder's hidden size; empty when no occurrence
-        /// has a tensor at that size (e.g. an SD1.5-only embed under an SDXL CLIP-G request).</summary>
+        /// <summary>The <c>{placeholderId → [hidden] vector}</c> map for one encoder's hidden size; empty when no occurrence has a tensor at that size (e.g. an SD1.5-only embed under an SDXL CLIP-G request).</summary>
         public Dictionary<int, Tensor> InlineMap(int hiddenSize)
         {
             Dictionary<int, Tensor> merged = [];
@@ -68,13 +62,7 @@ public static class EmbeddingResolver
         }
     }
 
-    /// <summary>Builds the embed plan for <paramref name="prompt"/>, or null when it has no embed markers.
-    /// <paramref name="hiddenSizes"/> are the encoder hidden sizes to load per embed ([768] for SD1.5, [768, 1280] for
-    /// SDXL). Unresolvable or partially-loadable embeds are skipped. <paramref name="startPlaceholderId"/> defaults to
-    /// just past the real vocab; callers resolving BOTH a positive and a negative prompt into the same batched
-    /// <c>EncodePenultimate</c> call (see <see cref="BuildDualClipSchedule"/>) must give the negative plan a disjoint
-    /// range — <c>inlineEmbeddings</c> is one dictionary shared across every row, so two different embeds landing on
-    /// the same placeholder id would silently pick whichever one the dictionary happened to keep.</summary>
+    /// <summary>Builds the embed plan for <paramref name="prompt"/>, or null when it has no embed markers. <paramref name="hiddenSizes"/> are the encoder hidden sizes to load per embed ([768] for SD1.5, [768, 1280] for SDXL). Unresolvable or partially-loadable embeds are skipped. <paramref name="startPlaceholderId"/> defaults to just past the real vocab; callers resolving BOTH a positive and a negative prompt into the same batched <c>EncodePenultimate</c> call (see <see cref="BuildDualClipSchedule"/>) must give the negative plan a disjoint range — <c>inlineEmbeddings</c> is one dictionary shared across every row, so two different embeds landing on the same placeholder id would silently pick whichever one the dictionary happened to keep.</summary>
     public static Plan? Resolve(string? prompt, ClipTokenizer tokenizer, int[] hiddenSizes, int startPlaceholderId = ClipTokenizer.VocabSize)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
@@ -162,15 +150,7 @@ public static class EmbeddingResolver
     public static string? StripMarkers(string? prompt)
         => string.IsNullOrEmpty(prompt) ? prompt : _markerRx.Replace(prompt, "");
 
-    /// <summary>Builds an SDXL dual-CLIP <c>[2, S, 2048]</c> conditioning schedule (uncond, cond) from an embed plan:
-    /// penultimate CLIP-L (768) + CLIP-G (1280), each encoded with its inline-embedding map so the learned vectors occupy
-    /// the placeholder positions. Matches the SDXL pipeline's plain textEmbeddings shape, so it is passed as a
-    /// conditioning-schedule override while the pooled vector stays on the pipeline's plain path.
-    /// <para><paramref name="negativePlan"/> resolves embed markers in the negative prompt too — the common real-world
-    /// shape for a "bad-hands"/"easynegative"-style embed. It must have been <see cref="Resolve"/>d with a
-    /// <c>startPlaceholderId</c> disjoint from <paramref name="plan"/>'s (both maps below get merged into one
-    /// dictionary shared across the whole batch). Either plan may be null — a null one falls back to that row's
-    /// plain-encoded prompt, so a caller with an embed on only one side still gets the other side resolved.</para></summary>
+    /// <summary>Builds an SDXL dual-CLIP <c>[2, S, 2048]</c> conditioning schedule (uncond, cond) from an embed plan: penultimate CLIP-L (768) + CLIP-G (1280), each encoded with its inline-embedding map so the learned vectors occupy the placeholder positions. Matches the SDXL pipeline's plain textEmbeddings shape, so it is passed as a conditioning-schedule override while the pooled vector stays on the pipeline's plain path. <para><paramref name="negativePlan"/> resolves embed markers in the negative prompt too — the common real-world shape for a "bad-hands"/"easynegative"-style embed. It must have been <see cref="Resolve"/>d with a <c>startPlaceholderId</c> disjoint from <paramref name="plan"/>'s (both maps below get merged into one dictionary shared across the whole batch). Either plan may be null — a null one falls back to that row's plain-encoded prompt, so a caller with an embed on only one side still gets the other side resolved.</para></summary>
     public static ConditioningSchedule BuildDualClipSchedule(
         IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
         Plan? plan, string? positive, string? negative, int layersFromEnd, Plan? negativePlan = null)

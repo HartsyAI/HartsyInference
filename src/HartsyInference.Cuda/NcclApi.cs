@@ -2,24 +2,14 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for NCCL (NVIDIA Collective Communications Library, <c>libnccl.so.2</c>).
-/// Library-policy exception in the same category as cuBLAS/cuDNN (BSD-3, runtime-resolved, no build-time
-/// reference) — the decision and the exact API list live in <c>docs/Research/MULTI_GPU_PARALLELISM.md</c> §4.3.
-/// Resolution: <see cref="CudaLibraryResolver"/> probes <c>HARTSY_NCCL_DIR</c> plus the standard CUDA lib dirs,
-/// so a torch-venv-bundled copy works without a system install. RCCL (AMD) keeps these symbol names — a
-/// library swap targets ROCm without code changes.
-/// <para>Streams: NCCL takes <c>cudaStream_t</c>, which is handle-compatible with the driver-API
-/// <c>CUstream</c> this codebase uses (both are the same opaque handle under the device's primary context —
-/// and <see cref="CudaContext"/> deliberately uses primary contexts, the configuration NCCL expects in a
-/// single-process setup).</para></summary>
+/// <summary>P/Invoke bindings for NCCL (NVIDIA Collective Communications Library, <c>libnccl.so.2</c>). Library-policy exception in the same category as cuBLAS/cuDNN (BSD-3, runtime-resolved, no build-time reference) — the decision and the exact API list live in <c>docs/Research/MULTI_GPU_PARALLELISM.md</c> §4.3. Resolution: <see cref="CudaLibraryResolver"/> probes <c>HARTSY_NCCL_DIR</c> plus the standard CUDA lib dirs, so a torch-venv-bundled copy works without a system install. RCCL (AMD) keeps these symbol names — a library swap targets ROCm without code changes. <para>Streams: NCCL takes <c>cudaStream_t</c>, which is handle-compatible with the driver-API <c>CUstream</c> this codebase uses (both are the same opaque handle under the device's primary context — and <see cref="CudaContext"/> deliberately uses primary contexts, the configuration NCCL expects in a single-process setup).</para></summary>
 internal static partial class NcclApi
 {
     private const string LibName = "nccl";
 
     internal const int Success = 0;
 
-    /// <summary>Opaque 128-byte rendezvous blob (<c>ncclUniqueId</c>) — only needed for the multi-process
-    /// <see cref="ncclCommInitRank"/> path; single-process uses <see cref="ncclCommInitAll"/>.</summary>
+    /// <summary>Opaque 128-byte rendezvous blob (<c>ncclUniqueId</c>) — only needed for the multi-process <see cref="ncclCommInitRank"/> path; single-process uses <see cref="ncclCommInitAll"/>.</summary>
     [StructLayout(LayoutKind.Sequential, Size = 128)]
     internal struct NcclUniqueId
     {
@@ -56,9 +46,7 @@ internal static partial class NcclApi
     [LibraryImport(LibName)]
     internal static partial int ncclGetUniqueId(out NcclUniqueId uniqueId);
 
-    /// <summary>Single-process init: one communicator per entry of <paramref name="devlist"/> (CUDA ordinals),
-    /// all created by ONE calling thread. NCCL sets each device current internally via the runtime API, which
-    /// shares the primary contexts <see cref="CudaContext"/> retains.</summary>
+    /// <summary>Single-process init: one communicator per entry of <paramref name="devlist"/> (CUDA ordinals), all created by ONE calling thread. NCCL sets each device current internally via the runtime API, which shares the primary contexts <see cref="CudaContext"/> retains.</summary>
     [LibraryImport(LibName)]
     internal static unsafe partial int ncclCommInitAll(nint* comms, int ndev, int* devlist);
 
@@ -80,16 +68,14 @@ internal static partial class NcclApi
     [LibraryImport(LibName)]
     internal static partial int ncclBroadcast(ulong sendbuff, ulong recvbuff, nuint count, DataType datatype, int root, nint comm, nint stream);
 
-    /// <summary>Gathers each rank's <paramref name="sendbuff"/> (count elements) into every rank's
-    /// <paramref name="recvbuff"/> (count × nranks elements, rank r's block at offset r·count).</summary>
+    /// <summary>Gathers each rank's <paramref name="sendbuff"/> (count elements) into every rank's <paramref name="recvbuff"/> (count × nranks elements, rank r's block at offset r·count).</summary>
     [LibraryImport(LibName)]
     internal static partial int ncclAllGather(ulong sendbuff, ulong recvbuff, nuint sendcount, DataType datatype, nint comm, nint stream);
 
     [LibraryImport(LibName)]
     internal static partial int ncclReduceScatter(ulong sendbuff, ulong recvbuff, nuint recvcount, DataType datatype, RedOp op, nint comm, nint stream);
 
-    /// <summary>Point-to-point. There is NO public ncclAllToAll — grouped Send/Recv inside
-    /// <see cref="ncclGroupStart"/>/<see cref="ncclGroupEnd"/> IS the all-to-all.</summary>
+    /// <summary>Point-to-point. There is NO public ncclAllToAll — grouped Send/Recv inside <see cref="ncclGroupStart"/>/<see cref="ncclGroupEnd"/> IS the all-to-all.</summary>
     [LibraryImport(LibName)]
     internal static partial int ncclSend(ulong sendbuff, nuint count, DataType datatype, int peer, nint comm, nint stream);
 
@@ -104,8 +90,7 @@ internal static partial class NcclApi
 
     private static int _loadable = -1;
 
-    /// <summary>Whether libnccl can be loaded on this box (memoized). False means the collective factory
-    /// falls back to the peer-copy transport — never an exception.</summary>
+    /// <summary>Whether libnccl can be loaded on this box (memoized). False means the collective factory falls back to the peer-copy transport — never an exception.</summary>
     internal static bool IsLoadable
     {
         get

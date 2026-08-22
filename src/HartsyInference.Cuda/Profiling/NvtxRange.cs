@@ -6,18 +6,18 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda.Profiling;
 
-/// <summary>RAII-style NVTX range that shows up in Nsight Systems traces. Use with
-/// <c>using</c>:
-///
+/// <summary>RAII-style NVTX range that shows up in Nsight Systems traces.</summary>
+/// <remarks>
+/// Use with <c>using</c>:
 /// <code>
 /// using NvtxRange range = NvtxRange.Push("Linear");
 /// // ... work ...
 /// </code>
-///
-/// <para>If NVTX isn't available (e.g. running on a non-CUDA machine or in a container without the
-/// CUDA toolkit installed), the wrapper detects this on first call and disables itself for the rest
-/// of the process lifetime — no exceptions thrown, ranges become no-ops. The first failed call's
-/// exception type is logged to stderr once as a debugging hint.</para></summary>
+/// <para>If NVTX isn't available (e.g. running on a non-CUDA machine or in a container without the CUDA toolkit
+/// installed), the wrapper detects this on first call and disables itself for the rest of the process lifetime —
+/// no exceptions thrown, ranges become no-ops. The first failed call's exception type is logged to stderr once as
+/// a debugging hint.</para>
+/// </remarks>
 public readonly ref struct NvtxRange
 {
     private readonly bool _active;
@@ -40,8 +40,7 @@ public readonly ref struct NvtxRange
     internal static readonly bool ProfileFine =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE_FINE") == "1";
 
-    /// <summary>HARTSY_PROFILE_SHAPES=1: split selected op labels by shape, so one label's total can be attributed
-    /// to the call regimes inside it. Off by default — it multiplies the label count.</summary>
+    /// <summary>HARTSY_PROFILE_SHAPES=1: split selected op labels by shape, so one label's total can be attributed to the call regimes inside it. Off by default — it multiplies the label count.</summary>
     internal static readonly bool ProfileShapes =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE_SHAPES") == "1";
 
@@ -80,20 +79,17 @@ public readonly ref struct NvtxRange
         _profName = profName;
     }
 
-    /// <summary>Returns true once any NVTX call has thrown a DllNotFoundException — subsequent
-    /// pushes are skipped. Test hook for unit tests.</summary>
+    /// <summary>Returns true once any NVTX call has thrown a DllNotFoundException — subsequent pushes are skipped. Test hook for unit tests.</summary>
     public static bool IsDisabled => Volatile.Read(ref _disabled) != 0;
 
-    /// <summary>Like <see cref="Push"/> but for sub-op ranges nested inside an op that already pushes one —
-    /// a no-op unless <c>HARTSY_PROFILE_FINE=1</c>.</summary>
+    /// <summary>Like <see cref="Push"/> but for sub-op ranges nested inside an op that already pushes one — a no-op unless <c>HARTSY_PROFILE_FINE=1</c>.</summary>
     /// <remarks>A single op can hide several launches (the Sage attention prologue hides four), and attributing
     /// them needs a range per launch. Those extra pushes are pure overhead in a production run, and this model
     /// launches enough of them per step to be measurable — so they stay off unless explicitly asked for.</remarks>
     public static NvtxRange PushFine(string message) =>
         ProfileFine ? Push(message) : new NvtxRange(active: false);
 
-    /// <summary>Pushes an NVTX range with the given label. The range pops on Dispose.
-    /// <paramref name="message"/> must be non-null.</summary>
+    /// <summary>Pushes an NVTX range with the given label. The range pops on Dispose. <paramref name="message"/> must be non-null.</summary>
     public static NvtxRange Push(string message)
     {
         ArgumentNullException.ThrowIfNull(message);

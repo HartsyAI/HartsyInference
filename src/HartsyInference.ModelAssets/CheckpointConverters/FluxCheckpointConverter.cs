@@ -183,14 +183,12 @@ public sealed class FluxCheckpointConverter
 
     private static void ConvertBflTransformerKey(string bflKey, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        // Image input projection
         if (bflKey.StartsWith("img_in.", StringComparison.Ordinal))
         {
             output["x_embedder." + bflKey["img_in.".Length..]] = tensor;
             return;
         }
 
-        // Text input projection
         if (bflKey.StartsWith("txt_in.", StringComparison.Ordinal))
         {
             output["context_embedder." + bflKey["txt_in.".Length..]] = tensor;
@@ -218,21 +216,18 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // Final layer
         if (bflKey.StartsWith("final_layer.", StringComparison.Ordinal))
         {
             ConvertFinalLayerKey(bflKey["final_layer.".Length..], tensor, output);
             return;
         }
 
-        // Double-stream blocks
         if (bflKey.StartsWith("double_blocks.", StringComparison.Ordinal))
         {
             ConvertDoubleBlockKey(bflKey["double_blocks.".Length..], tensor, output);
             return;
         }
 
-        // Single-stream blocks
         if (bflKey.StartsWith("single_blocks.", StringComparison.Ordinal))
         {
             ConvertSingleBlockKey(bflKey["single_blocks.".Length..], tensor, output);
@@ -368,7 +363,6 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // Output projection
         if (rest.StartsWith("proj.", StringComparison.Ordinal))
         {
             output[$"{prefix}.attn.to_out.0.{rest["proj.".Length..]}"] = tensor;
@@ -402,7 +396,6 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // Output projection
         if (rest.StartsWith("proj.", StringComparison.Ordinal))
         {
             output[$"{prefix}.attn.to_add_out.{rest["proj.".Length..]}"] = tensor;

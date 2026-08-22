@@ -15,11 +15,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Drives the classic SDXL-refiner checkpoint (<c>stable-diffusion-xl-v1-refiner</c>) as a standalone
-/// model, matching ComfyUI's behavior of letting the refiner generate directly. The checkpoint carries ONE text
-/// encoder (CLIP-G at <c>conditioner.embedders.0</c>) plus the standard SDXL VAE; conditioning is the refiner's
-/// 5-scalar aesthetic-score ADM. Text-to-image runs the full schedule from noise (strength 1 over a mid-gray
-/// source); Init Image gives the model its natural img2img/refine use.</summary>
+/// <summary>Drives the classic SDXL-refiner checkpoint (<c>stable-diffusion-xl-v1-refiner</c>) as a standalone model, matching ComfyUI's behavior of letting the refiner generate directly. The checkpoint carries ONE text encoder (CLIP-G at <c>conditioner.embedders.0</c>) plus the standard SDXL VAE; conditioning is the refiner's 5-scalar aesthetic-score ADM. Text-to-image runs the full schedule from noise (strength 1 over a mid-gray source); Init Image gives the model its natural img2img/refine use.</summary>
 public sealed class SdxlRefinerRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
@@ -82,8 +78,7 @@ public sealed class SdxlRefinerRecipe : IArchitectureRecipe
     }
 }
 
-/// <summary>Thin driver over <see cref="SdxlRefinerPipeline.RefineFromTokens"/>: CLIP-G-only tokenization,
-/// a mid-gray full-strength source for text-to-image, the request's own init image otherwise.</summary>
+/// <summary>Thin driver over <see cref="SdxlRefinerPipeline.RefineFromTokens"/>: CLIP-G-only tokenization, a mid-gray full-strength source for text-to-image, the request's own init image otherwise.</summary>
 internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
 {
     private readonly SdxlRefinerPipeline _pipeline;

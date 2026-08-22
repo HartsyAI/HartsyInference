@@ -19,8 +19,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>The text-to-speech model registry: catalog id → descriptor, plus the shared runner cache. Adding a model
-/// is a descriptor, not a class.</summary>
+/// <summary>The text-to-speech model registry: catalog id → descriptor, plus the shared runner cache. Adding a model is a descriptor, not a class.</summary>
 internal static class TtsCatalog
 {
     /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
@@ -70,8 +69,7 @@ internal static class TtsCatalog
         ["zipvoice"] = ZipVoiceModel.Descriptor,
     };
 
-    /// <summary>VibeVoice — long-form multi-speaker synthesis (default, 1.5B) or the single-speaker low-latency
-    /// Realtime-0.5B variant (<c>vibevoice:realtime</c>). Both need a 24 kHz voice reference.</summary>
+    /// <summary>VibeVoice — long-form multi-speaker synthesis (default, 1.5B) or the single-speaker low-latency Realtime-0.5B variant (<c>vibevoice:realtime</c>). Both need a 24 kHz voice reference.</summary>
     internal static TtsModelDescriptor VibeVoice { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => IsRealtimeVariant(variant) ? "microsoft/VibeVoice-Realtime-0.5B" : "microsoft/VibeVoice-1.5B",
@@ -131,8 +129,7 @@ internal static class TtsCatalog
     private static bool IsRealtimeVariant(string variant) =>
         (variant ?? string.Empty).Contains("realtime", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Kokoro-82M — fast CPU-capable TTS at 24 kHz over the engine's English G2P, backed by the CMU
-    /// dictionary; voice packs are fetched per voice (default <c>af_heart</c>).</summary>
+    /// <summary>Kokoro-82M — fast CPU-capable TTS at 24 kHz over the engine's English G2P, backed by the CMU dictionary; voice packs are fetched per voice (default <c>af_heart</c>).</summary>
     internal static TtsModelDescriptor Kokoro { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "hexgrad/Kokoro-82M",
@@ -158,8 +155,7 @@ internal static class TtsCatalog
         },
     };
 
-    /// <summary>Ensures a Kokoro voice pack exists as the raw-float32 <c>.bin</c> the engine reads. The HF repo ships
-    /// each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
+    /// <summary>Ensures a Kokoro voice pack exists as the raw-float32 <c>.bin</c> the engine reads. The HF repo ships each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
     private static async Task EnsureKokoroVoiceAsync(string voiceName, CancellationToken cancel)
     {
         string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");

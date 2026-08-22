@@ -33,8 +33,7 @@ public sealed class WyomingListener : IDisposable
     /// <summary>The port actually bound, which differs from the configured one when port 0 was requested.</summary>
     public int Port { get; private set; }
 
-    /// <param name="engine">Null serves <c>describe</c> and <c>ping</c> but answers every ASR/TTS request with an
-    /// <c>error</c> event — useful for wiring the endpoint up before an engine exists.</param>
+    /// <param name="engine">Null serves <c>describe</c> and <c>ping</c> but answers every ASR/TTS request with an <c>error</c> event — useful for wiring the endpoint up before an engine exists.</param>
     public WyomingListener(IInferenceEngine? engine, WyomingOptions? options = null)
     {
         _engine = engine;

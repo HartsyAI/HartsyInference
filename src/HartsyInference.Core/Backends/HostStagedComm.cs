@@ -2,12 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-/// <summary>Universal-fallback <see cref="ICollectiveComm"/>: stages every rank's data through host memory
-/// and does the reduction on the CPU. Correct on any backend mix (including no-P2P boxes and CPU backends)
-/// and used whenever NCCL is unavailable — slower by design, never wrong.
-/// <para>Reading <see cref="Tensor.DataPointer"/> demotes any device copy (the binding fires the D2H sync
-/// and unbinds), so the host mutation below is authoritative and the next device consumer re-uploads —
-/// the same engine-wide pattern host-side scheduler steps rely on.</para></summary>
+/// <summary>Universal-fallback <see cref="ICollectiveComm"/>: stages every rank's data through host memory and does the reduction on the CPU. Correct on any backend mix (including no-P2P boxes and CPU backends) and used whenever NCCL is unavailable — slower by design, never wrong. <para>Reading <see cref="Tensor.DataPointer"/> demotes any device copy (the binding fires the D2H sync and unbinds), so the host mutation below is authoritative and the next device consumer re-uploads — the same engine-wide pattern host-side scheduler steps rely on.</para></summary>
 public sealed unsafe class HostStagedComm : ICollectiveComm
 {
     private readonly int _ranks;

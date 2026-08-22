@@ -1,12 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for the DeepSeek-V2/V3 family (<c>deepseek2</c> — also covers Kimi-K2, a V3-architecture
-/// model). These use Multi-head Latent Attention (compressed KV latent + shared RoPE key, up-projected per head)
-/// and fine-grained MoE (many small routed experts + a shared expert, a leading dense layer). The MLA tensors
-/// (<c>attn_kv_a_mqa</c>, <c>attn_kv_a_norm</c>, <c>attn_kv_b</c>, and either a direct <c>attn_q</c> or the
-/// compressed <c>attn_q_a</c>/<c>attn_q_b</c> pair) and the stacked/​shared expert tensors are remapped to the
-/// HF-style names the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> MLA + MoE paths expect;
-/// the stacked <c>*_exps</c> are split downstream (GgufLanguageModel).</summary>
+/// <summary>GGUF mapper for the DeepSeek-V2/V3 family (<c>deepseek2</c> — also covers Kimi-K2, a V3-architecture model). These use Multi-head Latent Attention (compressed KV latent + shared RoPE key, up-projected per head) and fine-grained MoE (many small routed experts + a shared expert, a leading dense layer). The MLA tensors (<c>attn_kv_a_mqa</c>, <c>attn_kv_a_norm</c>, <c>attn_kv_b</c>, and either a direct <c>attn_q</c> or the compressed <c>attn_q_a</c>/<c>attn_q_b</c> pair) and the stacked/​shared expert tensors are remapped to the HF-style names the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> MLA + MoE paths expect; the stacked <c>*_exps</c> are split downstream (GgufLanguageModel).</summary>
 public sealed class DeepSeekKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "deepseek2";

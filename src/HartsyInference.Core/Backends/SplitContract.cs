@@ -9,10 +9,7 @@ internal readonly record struct SplitGeometry(
     long Inner,
     int ElementSize);
 
-/// <summary>
-/// Centralizes the exact split contract so host and accelerator implementations cannot disagree about
-/// dtype width, output geometry, or storage aliasing.
-/// </summary>
+/// <summary>Centralizes the exact split contract so host and accelerator implementations cannot disagree about dtype width, output geometry, or storage aliasing.</summary>
 internal static class SplitContract
 {
     internal static SplitGeometry Validate(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)

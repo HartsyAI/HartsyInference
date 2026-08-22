@@ -4,15 +4,9 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Registry;
 
-/// <summary>Detects the <see cref="ModelArchitecture"/> of a checkpoint by inspecting its tensor-key
-/// layout. The per-model <c>*CheckpointConverter</c> classes each key off a distinctive prefix set;
-/// this consolidates those signatures into one ordered dispatch table so a factory / loader can route
-/// to the right pipeline without each caller re-deriving the heuristic.
+/// <summary>Detects the <see cref="ModelArchitecture"/> of a checkpoint by inspecting its tensor-key layout. The per-model <c>*CheckpointConverter</c> classes each key off a distinctive prefix set; this consolidates those signatures into one ordered dispatch table so a factory / loader can route to the right pipeline without each caller re-deriving the heuristic.
 ///
-/// <para>Rules are evaluated <b>most-specific first</b> — e.g. SDXL base (which has
-/// <c>conditioner.embedders.1</c>) must be tested before the SDXL refiner rule (which only requires
-/// embedder 0), and SD3 (MMDiT) before the generic LDM rules. A checkpoint that matches nothing
-/// returns <see cref="ModelArchitecture.Unknown"/>.</para></summary>
+/// <para>Rules are evaluated <b>most-specific first</b> — e.g. SDXL base (which has <c>conditioner.embedders.1</c>) must be tested before the SDXL refiner rule (which only requires embedder 0), and SD3 (MMDiT) before the generic LDM rules. A checkpoint that matches nothing returns <see cref="ModelArchitecture.Unknown"/>.</para></summary>
 public static class ModelArchitectureDetector
 {
     private delegate bool Signature(KeySet keys);
@@ -83,9 +77,7 @@ public static class ModelArchitectureDetector
     public static ModelArchitecture Detect(IReadOnlyDictionary<string, Tensor> weights) =>
         Detect(weights.Keys);
 
-    /// <summary>Detects the architecture from a safetensors file by reading only its header (no tensor
-    /// data is materialized). For a diffusers-layout directory or multi-shard checkpoint, pass the
-    /// representative file resolved by <see cref="ModelLayoutResolver"/>.</summary>
+    /// <summary>Detects the architecture from a safetensors file by reading only its header (no tensor data is materialized). For a diffusers-layout directory or multi-shard checkpoint, pass the representative file resolved by <see cref="ModelLayoutResolver"/>.</summary>
     public static ModelArchitecture DetectFromFile(string safetensorsPath)
     {
         using SafeTensorsLoader loader = new SafeTensorsLoader();
@@ -93,8 +85,7 @@ public static class ModelArchitectureDetector
         return Detect(loader.Descriptors.Keys);
     }
 
-    /// <summary>Lightweight prefix-membership probe over a checkpoint's key set. Sorted once so prefix
-    /// hits are a single binary search rather than a full scan per query.</summary>
+    /// <summary>Lightweight prefix-membership probe over a checkpoint's key set. Sorted once so prefix hits are a single binary search rather than a full scan per query.</summary>
     private sealed class KeySet
     {
         private readonly string[] _sorted;
@@ -114,8 +105,7 @@ public static class ModelArchitectureDetector
             return insert < _sorted.Length && _sorted[insert].StartsWith(prefix, StringComparison.Ordinal);
         }
 
-        /// <summary>True if any key starts with <paramref name="inner"/>, with or without the
-        /// <paramref name="optionalOuter"/> wrapper (handles BFL <c>model.diffusion_model.</c> prefixing).</summary>
+        /// <summary>True if any key starts with <paramref name="inner"/>, with or without the <paramref name="optionalOuter"/> wrapper (handles BFL <c>model.diffusion_model.</c> prefixing).</summary>
         public bool HasPrefixAfterOptional(string optionalOuter, string inner) =>
             HasPrefix(inner) || HasPrefix(optionalOuter + inner);
     }

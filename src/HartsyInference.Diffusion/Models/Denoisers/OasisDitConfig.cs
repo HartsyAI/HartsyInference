@@ -16,7 +16,6 @@ public sealed record OasisDitConfig
     /// <summary>VAE latent channels.</summary>
     public int InChannels { get; init; } = 16;
 
-    /// <summary>Model dim.</summary>
     public int HiddenSize { get; init; } = 1024;
 
     /// <summary>Number of spatio-temporal blocks.</summary>
@@ -25,7 +24,6 @@ public sealed record OasisDitConfig
     /// <summary>Attention heads (head dim = HiddenSize / NumHeads = 64).</summary>
     public int NumHeads { get; init; } = 16;
 
-    /// <summary>MLP expansion.</summary>
     public float MlpRatio { get; init; } = 4.0f;
 
     /// <summary>Action vector width (Minecraft VPT: 23 keys + 2 camera floats).</summary>

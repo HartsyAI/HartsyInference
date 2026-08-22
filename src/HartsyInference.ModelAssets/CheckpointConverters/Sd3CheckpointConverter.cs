@@ -78,7 +78,6 @@ public sealed class Sd3CheckpointConverter
             {
                 ConvertT5(key, tensor, t5);
             }
-            // VAE
             else if (key.StartsWith("first_stage_model."))
             {
                 string ldmKey = key["first_stage_model.".Length..];
@@ -111,7 +110,6 @@ public sealed class Sd3CheckpointConverter
 
     private static void ConvertTransformerKey(string ldmKey, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        // Patch embedding
         if (ldmKey.StartsWith("x_embedder.proj."))
         {
             output["pos_embed.proj." + ldmKey["x_embedder.proj.".Length..]] = tensor;
@@ -130,7 +128,6 @@ public sealed class Sd3CheckpointConverter
             return;
         }
 
-        // Timestep embedder
         if (ldmKey.StartsWith("t_embedder.mlp."))
         {
             string rest = ldmKey["t_embedder.mlp.".Length..];
@@ -152,14 +149,12 @@ public sealed class Sd3CheckpointConverter
             return;
         }
 
-        // Final layer
         if (ldmKey.StartsWith("final_layer."))
         {
             ConvertFinalLayerKey(ldmKey["final_layer.".Length..], tensor, output);
             return;
         }
 
-        // Joint transformer blocks
         if (ldmKey.StartsWith("joint_blocks."))
         {
             ConvertJointBlockKey(ldmKey["joint_blocks.".Length..], tensor, output);
@@ -281,7 +276,6 @@ public sealed class Sd3CheckpointConverter
             return;
         }
 
-        // MLP
         if (rest.StartsWith("mlp.fc1."))
         {
             output[$"{prefix}.ff.net.0.proj.{rest["mlp.fc1.".Length..]}"] = tensor;
@@ -296,14 +290,12 @@ public sealed class Sd3CheckpointConverter
 
     private static void ConvertContextBlockKey(string prefix, string rest, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        // AdaLN modulation
         if (rest.StartsWith("adaLN_modulation.1."))
         {
             output[$"{prefix}.norm1_context.linear.{rest["adaLN_modulation.1.".Length..]}"] = tensor;
             return;
         }
 
-        // Attention
         if (rest.StartsWith("attn."))
         {
             string attnKey = rest["attn.".Length..];
@@ -322,7 +314,6 @@ public sealed class Sd3CheckpointConverter
                 return;
             }
 
-            // Output projection
             if (attnKey.StartsWith("proj."))
             {
                 output[$"{prefix}.attn.to_add_out.{attnKey["proj.".Length..]}"] = tensor;
@@ -344,7 +335,6 @@ public sealed class Sd3CheckpointConverter
             return;
         }
 
-        // MLP
         if (rest.StartsWith("mlp.fc1."))
         {
             output[$"{prefix}.ff_context.net.0.proj.{rest["mlp.fc1.".Length..]}"] = tensor;

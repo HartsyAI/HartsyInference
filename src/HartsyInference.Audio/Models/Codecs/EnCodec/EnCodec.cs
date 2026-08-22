@@ -3,11 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 
-/// <summary>Top-level EnCodec neural audio codec. Wraps the
-/// <see cref="SeaNetEncoder"/>, <see cref="ResidualVectorQuantizer"/>, and
-/// <see cref="SeaNetDecoder"/> into the standard <c>Encode</c> / <c>Decode</c>
-/// surface.
-///
+/// <summary>Top-level EnCodec neural audio codec, wrapping <see cref="SeaNetEncoder"/>, <see cref="ResidualVectorQuantizer"/>, and <see cref="SeaNetDecoder"/> into the standard <c>Encode</c> / <c>Decode</c> surface.</summary>
+/// <remarks>
 /// <para>State-dict layout matches Meta's <c>facebook/encodec_24khz</c>:</para>
 /// <list type="bullet">
 ///   <item><c>encoder.model.*</c> — SEANet encoder</item>
@@ -22,7 +19,8 @@ namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 ///
 /// <para>Inference-only: no training path, no straight-through estimator, no
 /// commitment loss. The encoder and decoder run independently — typical pipelines
-/// encode reference audio once and decode generated tokens many times.</para></summary>
+/// encode reference audio once and decode generated tokens many times.</para>
+/// </remarks>
 public sealed class EnCodec
 {
     public EnCodecConfig Config { get; }
@@ -50,13 +48,7 @@ public sealed class EnCodec
         _decoder.LoadWeights(w);
     }
 
-    /// <summary>Encodes raw PCM to integer RVQ codes. <paramref name="pcm"/> is
-    /// channels-first <c>[batch, channels=1, T_pcm]</c>; output is <c>[nQ, batch, T_frames]</c>
-    /// where <c>T_frames = T_pcm / hop</c> (320 for the 24 kHz model).
-    ///
-    /// <para><paramref name="nQ"/> defaults to <see cref="EnCodecConfig.ActiveCodebooks"/>.
-    /// Pass a smaller value for a lower-bandwidth encoding; larger values up to
-    /// <see cref="EnCodecConfig.VqMaxCodebooks"/> yield higher quality.</para></summary>
+    /// <summary>Encodes raw PCM to integer RVQ codes. <paramref name="pcm"/> is channels-first <c>[batch, channels=1, T_pcm]</c>; output is <c>[nQ, batch, T_frames]</c> where <c>T_frames = T_pcm / hop</c> (320 for the 24 kHz model). <paramref name="nQ"/> defaults to <see cref="EnCodecConfig.ActiveCodebooks"/>; pass a smaller value for lower bandwidth, up to <see cref="EnCodecConfig.VqMaxCodebooks"/> for higher quality.</summary>
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm, int? nQ = null)
     {
         int activeCodebooks = nQ ?? Config.ActiveCodebooks;
@@ -67,9 +59,7 @@ public sealed class EnCodec
         return codes;
     }
 
-    /// <summary>Decodes RVQ codes back to PCM. <paramref name="codes"/> is
-    /// <c>[nQ, batch, T_frames]</c> Int32. Returns channels-first
-    /// <c>[batch, channels=1, T_frames * 320]</c>.</summary>
+    /// <summary>Decodes RVQ codes back to PCM. <paramref name="codes"/> is <c>[nQ, batch, T_frames]</c> Int32. Returns channels-first <c>[batch, channels=1, T_frames * 320]</c>.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {
         Tensor latentCf = _quantizer.Decode(codes, batch, tFrames);

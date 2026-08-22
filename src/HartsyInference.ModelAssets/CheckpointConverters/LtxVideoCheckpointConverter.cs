@@ -4,24 +4,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads LTX-Video checkpoints into the diffusers state-dict names that
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers.LtxVideoTransformer"/> and
-/// <see cref="HartsyInference.Diffusion.Models.Vae.LtxVideoVaeDecoder"/> expect.
+/// <summary>Loads LTX-Video checkpoints into the diffusers state-dict names that <see cref="HartsyInference.Diffusion.Models.Denoisers.LtxVideoTransformer"/> and <see cref="HartsyInference.Diffusion.Models.Vae.LtxVideoVaeDecoder"/> expect.
 ///
-/// <para>Two layouts: (1) the <c>Lightricks/LTX-Video</c> single-file checkpoints (e.g. <c>ltx-video-2b-v0.9.safetensors</c>),
-/// which bundle the DiT under <c>model.diffusion_model.*</c> and the VAE under <c>vae.*</c> in the original naming —
-/// keys are routed by prefix and renamed via the rule tables ported verbatim from diffusers
-/// <c>scripts/convert_ltx_to_diffusers.py</c> (transformer: <c>patchify_proj→proj_in</c>, <c>adaln_single→time_embed</c>,
-/// <c>q_norm/k_norm→norm_q/norm_k</c>; VAE: the ordered flat <c>up_blocks.{0..9}</c>/<c>down_blocks.{0..9}</c> regrouping +
-/// <c>res_blocks→resnets</c> + <c>per_channel_statistics</c> → <c>latents_mean</c>/<c>latents_std</c>); (2) the diffusers repo
-/// folder layout (<c>transformer/</c> + <c>vae/</c> shards, already diffusers-named) — pass-through.</para>
+/// <para>Two layouts: (1) the <c>Lightricks/LTX-Video</c> single-file checkpoints (e.g. <c>ltx-video-2b-v0.9.safetensors</c>), which bundle the DiT under <c>model.diffusion_model.*</c> and the VAE under <c>vae.*</c> in the original naming — keys are routed by prefix and renamed via the rule tables ported verbatim from diffusers <c>scripts/convert_ltx_to_diffusers.py</c> (transformer: <c>patchify_proj→proj_in</c>, <c>adaln_single→time_embed</c>, <c>q_norm/k_norm→norm_q/norm_k</c>; VAE: the ordered flat <c>up_blocks.{0..9}</c>/<c>down_blocks.{0..9}</c> regrouping + <c>res_blocks→resnets</c> + <c>per_channel_statistics</c> → <c>latents_mean</c>/<c>latents_std</c>); (2) the diffusers repo folder layout (<c>transformer/</c> + <c>vae/</c> shards, already diffusers-named) — pass-through.</para>
 ///
-/// <para>The VAE rename table targets the released 0.9 base VAE (the variant <c>LtxVideoVaeDecoder</c> implements). The
-/// 0.9.1+ timestep-conditioned decoder additionally renames <c>last_time_embedder→time_embedder</c> /
-/// <c>last_scale_shift_table→scale_shift_table</c> (included). The per-block <c>decoder.{mid_block,up_blocks.N}.time_embedder.*</c>
-    /// and decoder-level <c>decoder.time_embedder.*</c>/<c>decoder.scale_shift_table</c> keys pass through to the now
-    /// timestep-conditioned <c>LtxVideoVaeDecoder</c> (consumed when built with <c>timestepConditioned: true</c>);
-    /// numerics validation-pending vs diffusers LTXPipeline 0.9.7.</para></summary>
+/// <para>The VAE rename table targets the released 0.9 base VAE (the variant <c>LtxVideoVaeDecoder</c> implements). The 0.9.1+ timestep-conditioned decoder additionally renames <c>last_time_embedder→time_embedder</c> / <c>last_scale_shift_table→scale_shift_table</c> (included). The per-block <c>decoder.{mid_block,up_blocks.N}.time_embedder.*</c> and decoder-level <c>decoder.time_embedder.*</c>/<c>decoder.scale_shift_table</c> keys pass through to the now timestep-conditioned <c>LtxVideoVaeDecoder</c> (consumed when built with <c>timestepConditioned: true</c>); numerics validation-pending vs diffusers LTXPipeline 0.9.7.</para></summary>
 public sealed class LtxVideoCheckpointConverter
 {
     private const string TransformerPrefix = "model.diffusion_model.";
@@ -116,14 +103,11 @@ public sealed class LtxVideoCheckpointConverter
         /// <summary>DiT weights in diffusers naming for <c>LtxVideoTransformer.LoadWeights</c>.</summary>
         public required Dictionary<string, Tensor> Transformer { get; init; }
 
-        /// <summary>VAE weights in diffusers naming for <c>LtxVideoVaeDecoder.LoadWeights</c> (decoder keys; encoder keys
-        /// are carried for a future encoder, <c>latents_mean</c>/<c>latents_std</c> for pipeline-side normalization).</summary>
+        /// <summary>VAE weights in diffusers naming for <c>LtxVideoVaeDecoder.LoadWeights</c> (decoder keys; encoder keys are carried for a future encoder, <c>latents_mean</c>/<c>latents_std</c> for pipeline-side normalization).</summary>
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>True when the VAE is the 0.9.5+/13B timestep-conditioned decoder (per-block/decoder-level time
-    /// embedders present) — selects <see cref="_vaeRenames095"/> instead of the 0.9 <see cref="_vaeRenames"/>, whose
-    /// up_block regrouping differs. Detected on original-naming keys (the diffusers-folder path is already renamed).</summary>
+    /// <summary>True when the VAE is the 0.9.5+/13B timestep-conditioned decoder (per-block/decoder-level time embedders present) — selects <see cref="_vaeRenames095"/> instead of the 0.9 <see cref="_vaeRenames"/>, whose up_block regrouping differs. Detected on original-naming keys (the diffusers-folder path is already renamed).</summary>
     public static bool IsTimestepVae(IEnumerable<string> keys)
     {
         foreach (string key in keys)
@@ -146,10 +130,7 @@ public sealed class LtxVideoCheckpointConverter
         return false;
     }
 
-    /// <summary>Pure key routing (testable without files): returns the destination bucket and the mapped key.
-    /// Single-file keys carry the <c>model.diffusion_model.</c>/<c>vae.</c> prefixes; bare keys (diffusers folder
-    /// shards) are treated as transformer or VAE by content. <paramref name="vaeOriginalNaming"/> gates the VAE
-    /// regrouping renames (never apply them to already-diffusers-named keys — they would corrupt the layout).</summary>
+    /// <summary>Pure key routing (testable without files): returns the destination bucket and the mapped key. Single-file keys carry the <c>model.diffusion_model.</c>/<c>vae.</c> prefixes; bare keys (diffusers folder shards) are treated as transformer or VAE by content. <paramref name="vaeOriginalNaming"/> gates the VAE regrouping renames (never apply them to already-diffusers-named keys — they would corrupt the layout).</summary>
     public static (LtxBucket Bucket, string? MappedKey) RouteKey(string key, bool vaeOriginalNaming, bool timestepVae = false)
     {
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
@@ -210,8 +191,7 @@ public sealed class LtxVideoCheckpointConverter
         return new ConvertedWeights { Transformer = transformer, Vae = vae };
     }
 
-    /// <summary>Loads a single safetensors file (bundled DiT + VAE) and converts. The caller owns the loader and
-    /// disposes it once the weights are no longer referenced.</summary>
+    /// <summary>Loads a single safetensors file (bundled DiT + VAE) and converts. The caller owns the loader and disposes it once the weights are no longer referenced.</summary>
     public static (ConvertedWeights Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
     {
         if (!File.Exists(checkpointPath))
@@ -222,8 +202,7 @@ public sealed class LtxVideoCheckpointConverter
         return (converted, loader);
     }
 
-    /// <summary>Loads a diffusers folder layout: merges the safetensors shards of <paramref name="componentDir"/>
-    /// (a <c>transformer/</c> or <c>vae/</c> subdirectory) and converts.</summary>
+    /// <summary>Loads a diffusers folder layout: merges the safetensors shards of <paramref name="componentDir"/> (a <c>transformer/</c> or <c>vae/</c> subdirectory) and converts.</summary>
     public static (ConvertedWeights Weights, List<SafeTensorsLoader> Loaders) LoadDiffusersFolder(string componentDir)
     {
         if (!Directory.Exists(componentDir))

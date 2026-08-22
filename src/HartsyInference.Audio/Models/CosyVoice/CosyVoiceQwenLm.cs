@@ -6,8 +6,8 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>CosyVoice 2 text→speech-token language model: a Qwen2.5-0.5B backbone driving a unified
-/// text+speech autoregressive sequence. Mirrors <c>cosyvoice/llm/llm.py:Qwen2LM</c> rather than the
+/// <summary>CosyVoice 2 text→speech-token language model: a Qwen2.5-0.5B backbone driving a unified text+speech autoregressive sequence.</summary>
+/// <remarks>Mirrors <c>cosyvoice/llm/llm.py:Qwen2LM</c> rather than the
 /// research doc's simplified "single extended-vocab softmax":
 /// <list type="bullet">
 ///   <item><b>Text</b> tokens embed through the Qwen backbone's <c>embed_tokens</c>.</item>
@@ -25,7 +25,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// <para><b>Checkpoint-validation pending:</b> exact state-dict key prefixes are the documented
 /// FunAudioLLM layout (<c>llm.model.model.*</c> backbone + top-level <c>speech_embedding</c> /
 /// <c>llm_decoder</c> / <c>llm_embedding</c>); <see cref="LoadWeights"/> parameterizes them so they can
-/// be reconciled against the real <c>llm.pt</c> when it's downloaded.</para></summary>
+/// be reconciled against the real <c>llm.pt</c> when it's downloaded.</para></remarks>
 public sealed unsafe class CosyVoiceQwenLm : IDisposable
 {
     private readonly CosyVoiceConfig _cfg;
@@ -41,9 +41,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
 
     public CosyVoiceConfig Config => _cfg;
 
-    /// <summary>Optional layer-split placement for the Qwen2.5-0.5B backbone — pools VRAM across GPUs. Null =
-    /// single-backend on the per-call backend. The speech-decoder head follows <see cref="LlmPlacement.LastBackend"/>
-    /// when set, mirroring <see cref="HartsyInference.Audio.Models.Music.YueStage1Lm.Placement"/>.</summary>
+    /// <summary>Optional layer-split placement for the Qwen2.5-0.5B backbone — pools VRAM across GPUs. Null = single-backend on the per-call backend. The speech-decoder head follows <see cref="LlmPlacement.LastBackend"/> when set, mirroring <see cref="HartsyInference.Audio.Models.Music.YueStage1Lm.Placement"/>.</summary>
     public LlmPlacement? Placement { get; set; }
 
     public CosyVoiceQwenLm(CosyVoiceConfig cfg)
@@ -54,8 +52,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         _eosSpeechToken = cfg.SpeechTokenSize;
     }
 
-    /// <summary>Loads the Qwen backbone plus the three speech-side heads. Key prefixes default to the
-    /// FunAudioLLM layout; override per a real checkpoint dump.</summary>
+    /// <summary>Loads the Qwen backbone plus the three speech-side heads. Key prefixes default to the FunAudioLLM layout; override per a real checkpoint dump.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w,
         string backbonePrefix = "llm.model.model",
         string speechEmbeddingKey = "speech_embedding.weight",
@@ -71,10 +68,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         _llmEmbedding = WhisperOps.EnsureF32(w[llmEmbeddingKey]);
     }
 
-    /// <summary>Autoregressively generates the speech-token stream for <paramref name="textTokens"/>
-    /// (zero-shot, non-streaming). <paramref name="promptTextTokens"/> + <paramref name="promptSpeechTokens"/>
-    /// are the reference clip's transcript tokens + its S3 speech tokens (empty for preset-voice modes).
-    /// Returns the emitted speech-token IDs (EOS excluded).</summary>
+    /// <summary>Autoregressively generates the speech-token stream for <paramref name="textTokens"/> (zero-shot, non-streaming). <paramref name="promptTextTokens"/> + <paramref name="promptSpeechTokens"/> are the reference clip's transcript tokens + its S3 speech tokens (empty for preset-voice modes). Returns the emitted speech-token IDs (EOS excluded).</summary>
     /// <param name="maxTokens">Hard cap on generated speech tokens (default ~ 30 s at 25 Hz).</param>
     /// <param name="seed">Deterministic sampling seed.</param>
     public List<int> GenerateSpeechTokens(IBackend backend,
@@ -155,12 +149,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         if (_llmEmbedding is not null) yield return _llmEmbedding;
     }
 
-    /// <summary>One placement stage's weight tensors (asymmetric preload for the layer-split path): the
-    /// backbone's layer range, plus, on the last stage, the speech-decoder head that
-    /// <see cref="GenerateSpeechTokens"/> projects on <see cref="LlmPlacement.LastBackend"/>.
-    /// <see cref="_speechEmbedding"/>/<see cref="_llmEmbedding"/> are read host-side only (raw
-    /// <see cref="Tensor.DataPointer"/> gathers in <see cref="WriteSpeechRow"/>/<see cref="WriteControlRow"/>,
-    /// never routed through <see cref="IBackend"/>) so they are excluded from every stage's preload set.</summary>
+    /// <summary>One placement stage's weight tensors (asymmetric preload for the layer-split path): the backbone's layer range, plus, on the last stage, the speech-decoder head that <see cref="GenerateSpeechTokens"/> projects on <see cref="LlmPlacement.LastBackend"/>. <see cref="_speechEmbedding"/>/<see cref="_llmEmbedding"/> are read host-side only (raw <see cref="Tensor.DataPointer"/> gathers in <see cref="WriteSpeechRow"/>/<see cref="WriteControlRow"/>, never routed through <see cref="IBackend"/>) so they are excluded from every stage's preload set.</summary>
     public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
         bool includeRedundantSplits = true)
     {

@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>CosyVoice 2 flow-matching stage (speech tokens → mel). Mirrors
+/// <summary>CosyVoice 2 flow-matching stage (speech tokens → mel).</summary>
+/// <remarks>Mirrors
 /// <c>cosyvoice/flow/flow.py:CausalMaskedDiffWithXvec</c>: embeds the LM speech tokens, runs them
 /// through the (chunk-aware causal) encoder, time-upsamples 25 Hz → 50 Hz, projects to the 80-bin mel
 /// conditioning <c>μ</c>, projects the CAM++ speaker vector to mel dim, then solves the OT-CFM ODE with
@@ -13,7 +14,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// <para>The token-conditioning path is now the real <see cref="UpsampleConformerEncoder"/>: embedded
 /// tokens → conformer stack → 2× ConvTranspose1d upsample (25 Hz → 50 Hz) → conformer stack →
 /// <c>encoder_proj</c> → mel conditioning <c>μ</c>. Everything downstream of <c>μ</c> (the CFM solve, CFG,
-/// speaker conditioning) is exact.</para></summary>
+/// speaker conditioning) is exact.</para></remarks>
 public sealed unsafe class CosyVoiceFlow : IDisposable
 {
     private readonly CosyVoiceConfig _cfg;
@@ -47,18 +48,9 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         _estimator.LoadWeights(w, $"{p}decoder.estimator");
     }
 
-    /// <summary>Generates the target mel <c>[1, melBins, T_mel]</c> for a speech-token stream.
-    /// <paramref name="promptSpeechTokens"/> + <paramref name="promptMel"/> are the reference clip's
-    /// tokens + mel (empty for preset-voice modes); <paramref name="speakerEmbed"/> is the CAM++
-    /// 192-d vector.</summary>
-    /// <param name="chunkCausalSize">When set, solves with a block-diagonal-causal attention mask
-    /// (<see cref="MaskBuilder.BuildChunkCausalMask"/>) over the whole <c>tMel</c> span instead of the
-    /// default full-attention mask — the Phase-5.0 quality probe: exercises the chunk-causal training mode
-    /// in one monolithic call, no actual chunking/state-carry yet. Null preserves today's exact output.</param>
-    /// <param name="x0Override">When set, replaces the fresh <paramref name="seed"/>-derived CFM noise draw
-    /// (see <see cref="ConditionalCfm.Solve"/>'s doc comment) — used by <see cref="InferenceChunk"/> so each
-    /// chunk's target frames draw the SAME noise a monolithic call would give those absolute positions,
-    /// instead of a fresh unrelated draw every call.</param>
+    /// <summary>Generates the target mel <c>[1, melBins, T_mel]</c> for a speech-token stream. <paramref name="promptSpeechTokens"/> + <paramref name="promptMel"/> are the reference clip's tokens + mel (empty for preset-voice modes); <paramref name="speakerEmbed"/> is the CAM++ 192-d vector.</summary>
+    /// <param name="chunkCausalSize">When set, solves with a block-diagonal-causal attention mask (<see cref="MaskBuilder.BuildChunkCausalMask"/>) over the whole <c>tMel</c> span instead of the default full-attention mask — the Phase-5.0 quality probe: exercises the chunk-causal training mode in one monolithic call, no actual chunking/state-carry yet. Null preserves today's exact output.</param>
+    /// <param name="x0Override">When set, replaces the fresh <paramref name="seed"/>-derived CFM noise draw (see <see cref="ConditionalCfm.Solve"/>'s doc comment) — used by <see cref="InferenceChunk"/> so each chunk's target frames draw the SAME noise a monolithic call would give those absolute positions, instead of a fresh unrelated draw every call.</param>
     public Tensor Inference(IBackend backend,
         ReadOnlySpan<int> speechTokens,
         ReadOnlySpan<int> promptSpeechTokens,
@@ -122,8 +114,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return tail;
     }
 
-    /// <summary>Returns a fresh <c>[1, mel, tMel-promptFrames]</c> holding the generated tail of a channels-first
-    /// mel, dropping the leading prompt region.</summary>
+    /// <summary>Returns a fresh <c>[1, mel, tMel-promptFrames]</c> holding the generated tail of a channels-first mel, dropping the leading prompt region.</summary>
     private static Tensor TrimPromptFrames(Tensor full, int mel, int tMel, int promptFrames)
     {
         int keep = tMel - promptFrames;
@@ -135,8 +126,8 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return tail;
     }
 
-    /// <summary>Chunked variant of <see cref="Inference"/> for streaming: produces mel for ONE chunk of new
-    /// speech tokens, using the caller-supplied lookback (previous chunk's own settled tokens + mel, or the
+    /// <summary>Chunked variant of <see cref="Inference"/> for streaming: produces mel for ONE chunk of new speech tokens from caller-supplied lookback context; NOT PRODUCTION-VIABLE AS-IS — rolling the model's own previous output forward as conditioning causes a measured, progressive mel-domain drift (see remarks).</summary>
+    /// <remarks>Uses the caller-supplied lookback (previous chunk's own settled tokens + mel, or the
     /// real zero-shot reference clip for chunk 0) as conditioning context instead of recomputing from t=0
     /// every call. This is a thin wrapper over <see cref="Inference"/> — its existing prompt/trim mechanism
     /// (<see cref="WritePromptCond"/>/<see cref="TrimPromptFrames"/>) already IS the lookback mechanism this
@@ -162,7 +153,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// would make longer streamed utterances progressively louder/more distorted. A pre-drawn full-utterance
     /// noise buffer sliced per chunk (<c>x0Override</c>/<paramref name="fullNoise"/>, tried first as the
     /// obvious suspect) does NOT fix this — the drift is in <c>cond</c>'s conditioning distribution, not the
-    /// CFM noise seed.
+    /// CFM noise seed.</para>
     ///
     /// <para><b>Design lever for whoever picks this back up</b> (not implemented — a genuinely different
     /// design from what's below): keep <c>cond</c>'s prompt region pinned to the REAL reference-clip mel for
@@ -204,7 +195,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// the full utterance's token timeline — <paramref name="absoluteTokenOffset"/> is that range's start
     /// (in tokens, from the same origin as <c>promptSpeechTokens ++ speechTokens</c>), and
     /// <paramref name="fullNoise"/>/<paramref name="fullNoiseFrames"/> are the one-time
-    /// <see cref="ConditionalCfm.DrawFullNoise"/> draw covering the whole utterance.</para></summary>
+    /// <see cref="ConditionalCfm.DrawFullNoise"/> draw covering the whole utterance.</para></remarks>
     public Tensor InferenceChunk(IBackend backend,
         ReadOnlySpan<int> lookbackTokens, Tensor lookbackMel,
         ReadOnlySpan<int> chunkTokens, ReadOnlySpan<int> lookaheadTokens,
@@ -238,8 +229,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return chunkMel;
     }
 
-    /// <summary>Returns a fresh <c>[1, mel, keep]</c> holding the LEADING <paramref name="keep"/> frames of a
-    /// channels-first mel, dropping the trailing frames — the mirror of <see cref="TrimPromptFrames"/>.</summary>
+    /// <summary>Returns a fresh <c>[1, mel, keep]</c> holding the LEADING <paramref name="keep"/> frames of a channels-first mel, dropping the trailing frames — the mirror of <see cref="TrimPromptFrames"/>.</summary>
     private static Tensor TrimTrailingFrames(Tensor full, int mel, int totalFrames, int keep)
     {
         Tensor head = new(new TensorShape(1, mel, keep), DType.F32);
@@ -250,8 +240,8 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return head;
     }
 
-    /// <summary>Streaming design that avoids <see cref="InferenceChunk"/>'s exposure-bias drift (see its doc
-    /// comment) BY CONSTRUCTION: every call recomputes the FULL target-token history so far, against the
+    /// <summary>Streaming design that avoids <see cref="InferenceChunk"/>'s exposure-bias drift by construction, at a measured O(n²) cost that disqualifies it for real-time use (see <see cref="InferenceGrowingWindowed"/> and remarks).</summary>
+    /// <remarks>Every call recomputes the FULL target-token history so far, against the
     /// SAME real, unchanged zero-shot reference prompt (<paramref name="promptSpeechTokens"/>/
     /// <paramref name="promptMel"/> never change call to call) — <c>cond</c> is NEVER self-generated, so
     /// there is no feedback loop for errors to compound through across chunks. This is a thin wrapper over
@@ -290,7 +280,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// <c>[0, (promptSpeechTokens.Length + tokensSoFar.Length) × ratio)</c> from the SAME start (0), unlike
     /// <see cref="InferenceChunk"/>'s per-call offset, since every call here spans from the true beginning.
     /// <paramref name="emittedFrames"/> is the caller's own running cursor (mel frames already returned by a
-    /// previous call) — pass <c>0</c> for the first call, then thread the ref-updated value forward.</para></summary>
+    /// previous call) — pass <c>0</c> for the first call, then thread the ref-updated value forward.</para></remarks>
     public Tensor InferenceGrowing(IBackend backend,
         ReadOnlySpan<int> tokensSoFar, ReadOnlySpan<int> promptSpeechTokens, Tensor promptMel,
         Tensor speakerEmbed, int seed,
@@ -318,8 +308,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return newPortion;
     }
 
-    /// <summary>Returns a fresh <c>[1, mel, len]</c> holding <c>full[:, :, start..start+len)</c> of a
-    /// channels-first mel.</summary>
+    /// <summary>Returns a fresh <c>[1, mel, len]</c> holding <c>full[:, :, start..start+len)</c> of a channels-first mel.</summary>
     private static Tensor SliceFrames(Tensor full, int mel, int totalFrames, int start, int len)
     {
         Tensor slice = new(new TensorShape(1, mel, len), DType.F32);
@@ -330,10 +319,8 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         return slice;
     }
 
-    /// <summary>Bounded-window variant of <see cref="InferenceGrowing"/>: fixes the O(n²)-total-cost problem
-    /// measured on that method (see its own remaining doc, and the memory record — 13.75× real-time / an
-    /// 18.6s final call at a 26.2s utterance, disqualifying for real-time streaming) WITHOUT reintroducing
-    /// <see cref="InferenceChunk"/>'s exposure-bias drift. The key structural fact making this safe: in the
+    /// <summary>Bounded-window variant of <see cref="InferenceGrowing"/> that fixes its O(n²) total-cost problem without reintroducing <see cref="InferenceChunk"/>'s exposure-bias drift (see remarks for the measured cost/quality tradeoffs and the one known artifact).</summary>
+    /// <remarks>The key structural fact making this safe: in the
     /// EXISTING, already-verified monolithic <see cref="Inference"/> path, <c>cond</c> is zero for the ENTIRE
     /// target-token span — <see cref="WritePromptCond"/> only ever writes the real
     /// <paramref name="promptMel"/> into the reference-clip prefix, nothing else. So a windowed PAST-target-
@@ -392,7 +379,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     /// does NOT touch that artifact at all, confirming it originates in the (unmaskable) encoder, not CFM
     /// attention. Real, modest speed/quality tradeoff knob for callers who want it — left off by default
     /// (best measured quality) rather than defaulted on, since the speed win is smaller than
-    /// <paramref name="chunkSizeTokens"/> tuning's own effect and stacks with it if wanted.</para></summary>
+    /// <paramref name="chunkSizeTokens"/> tuning's own effect and stacks with it if wanted.</para></remarks>
     public Tensor InferenceGrowingWindowed(IBackend backend,
         ReadOnlySpan<int> windowTokens, int windowStartToken,
         ReadOnlySpan<int> promptSpeechTokens, Tensor promptMel,
@@ -469,8 +456,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         Buffer.MemoryCopy(sp, dp, dim * 4, dim * 4);
     }
 
-    /// <summary>L2-normalizes the speaker x-vector into a fresh <c>[1, 1, dim]</c> tensor
-    /// (<c>F.normalize(embedding, dim=1)</c>, eps 1e-12). Never mutates the caller's tensor.</summary>
+    /// <summary>L2-normalizes the speaker x-vector into a fresh <c>[1, 1, dim]</c> tensor (<c>F.normalize(embedding, dim=1)</c>, eps 1e-12). Never mutates the caller's tensor.</summary>
     private static Tensor L2NormalizeRow(Tensor v, int dim)
     {
         if (v.ElementCount != dim) throw new ArgumentException($"speaker embed must have {dim} elements, got {v.ElementCount}.");

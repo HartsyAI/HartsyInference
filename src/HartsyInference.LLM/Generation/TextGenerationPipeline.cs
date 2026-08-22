@@ -7,10 +7,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>End-to-end LLM text generation: chat template → tokenize → GPU-resident prefill → autoregressive
-/// decode (per-token sampler chain) → stop on EOS/limit → detokenize. Composes a <see cref="GenericTransformer"/>,
-/// an <see cref="ILlmTokenizer"/> (any model family), an <see cref="IChatTemplate"/>, and a backend-selected
-/// <see cref="IBackend"/>. Stop tokens come from the tokenizer. The pipeline does not own the model/tokenizer.</summary>
+/// <summary>End-to-end LLM text generation: chat template → tokenize → GPU-resident prefill → autoregressive decode (per-token sampler chain) → stop on EOS/limit → detokenize; the pipeline does not own the model/tokenizer.</summary>
 public sealed class TextGenerationPipeline
 {
     private readonly GenericTransformer? _model;
@@ -19,20 +16,16 @@ public sealed class TextGenerationPipeline
     private readonly IBackend _backend;
     private readonly HashSet<int> _stopIds;
 
-    /// <summary>Tensor-parallel transformer when this pipeline runs TP; null otherwise. Mutually exclusive
-    /// with <see cref="_model"/> — TP has its own forward/logits and no graph/speculative/staged paths.</summary>
+    /// <summary>Tensor-parallel transformer when this pipeline runs TP; null otherwise. Mutually exclusive with <see cref="_model"/> — TP has its own forward/logits and no graph/speculative/staged paths.</summary>
     private readonly TensorParallelTransformer? _tp;
 
-    /// <summary>Layer-split plan when this pipeline runs sharded across devices; null = single-backend. When
-    /// set, <see cref="_backend"/> is the LAST stage's backend (final norm, logits, sampling live there).</summary>
+    /// <summary>Layer-split plan when sharded across devices, null = single-backend; when set, <see cref="_backend"/> is the LAST stage's backend (final norm, logits, sampling live there).</summary>
     private readonly LlmPlacement? _placement;
 
     /// <summary>True when a genuine multi-stage placement is active.</summary>
     private bool Staged => _placement is not null && !_placement.IsSingle;
 
-    /// <summary>Creates the pipeline. <paramref name="template"/> defaults to ChatML when not supplied.
-    /// <paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps the
-    /// single-backend path byte-identical.</summary>
+    /// <summary><paramref name="template"/> defaults to ChatML when not supplied; <paramref name="placement"/> shards the decoder layers across devices (VRAM pooling), or null keeps the single-backend path byte-identical.</summary>
     public TextGenerationPipeline(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
         IChatTemplate? template = null, LlmPlacement? placement = null)
     {
@@ -51,10 +44,7 @@ public sealed class TextGenerationPipeline
         PreloadDecodeWeights();
     }
 
-    /// <summary>Tensor-parallel pipeline: prefill + eager greedy/sampled decode via
-    /// <see cref="TensorParallelTransformer.ForwardTp"/>. Graph/speculative decode and layer-split staging are
-    /// structurally unreachable in this mode. The caller preloads per-rank weights (it owns the rank backends);
-    /// <paramref name="rankZeroBackend"/> is where logits/sampling rows are read.</summary>
+    /// <summary>Tensor-parallel pipeline: prefill + eager greedy/sampled decode via <see cref="TensorParallelTransformer.ForwardTp"/>; graph/speculative decode and layer-split staging are structurally unreachable here. The caller preloads per-rank weights; <paramref name="rankZeroBackend"/> is where logits/sampling rows are read.</summary>
     public TextGenerationPipeline(TensorParallelTransformer tp, ILlmTokenizer tokenizer, IBackend rankZeroBackend,
         IChatTemplate? template = null)
     {
@@ -65,15 +55,13 @@ public sealed class TextGenerationPipeline
         _stopIds = [.. tokenizer.StopIds];
     }
 
-    /// <summary>The hidden-state forward for one step: staged across the placement when sharded, else the
-    /// plain single-backend path.</summary>
+    /// <summary>The hidden-state forward for one step: staged across the placement when sharded, else the plain single-backend path.</summary>
     private Tensor ForwardTokens(ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache) =>
         Staged
             ? _model!.ForwardStaged(_placement!, tokenIds, posStart, cache)
             : _model!.Forward(_backend, tokenIds, posStart, cache);
 
-    /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving
-    /// 2 GB of VRAM free (large stragglers stay lazy). Idempotent — already-cached tensors are skipped.</summary>
+    /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving 2 GB of VRAM free (large stragglers stay lazy); idempotent — already-cached tensors are skipped.</summary>
     private void PreloadDecodeWeights()
     {
         try
@@ -123,12 +111,7 @@ public sealed class TextGenerationPipeline
         catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"weight preload failed (continuing with lazy residency): {ex.Message}"); }
     }
 
-    /// <summary>Generates text for <paramref name="request"/>. <paramref name="onToken"/> is invoked with each
-    /// new token id as it is produced (for streaming). <paramref name="ct"/> is checked once per generated
-    /// token (both the eager loop and the graph-decode replay loop) — cancelling stops generation between
-    /// tokens and throws <see cref="OperationCanceledException"/>; already-produced tokens are lost (callers
-    /// that want partial output on cancellation should rely on <paramref name="onToken"/>, which still fires
-    /// for every token generated before the cancellation is observed).</summary>
+    /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between tokens and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -245,9 +228,7 @@ public sealed class TextGenerationPipeline
         };
     }
 
-    /// <summary>Tensor-parallel generation: prefill + eager decode over the per-rank KV caches. No graph or
-    /// speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward), no last-row
-    /// gather optimization in v1 (the prefill projects all rows; correctness-first, noted follow-up).</summary>
+    /// <summary>Tensor-parallel generation: prefill + eager decode over per-rank KV caches; no graph/speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward) and no last-row gather optimization yet (prefill projects all rows, correctness-first).</summary>
     private GenerationResult GenerateTp(GenerationRequest request, int[] promptIds, SamplerChain sampler,
         HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
@@ -289,17 +270,8 @@ public sealed class TextGenerationPipeline
         }
     }
 
-    /// <summary>Greedy decode via one captured CUDA graph, replayed once per token. <paramref name="firstToken"/>
-    /// is the token already sampled from the prefill's last position (mirrors the eager loop's starting state).
-    /// Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested —
-    /// the token history) is refreshed OUTSIDE the graph before each replay — see IBackend's "Device-side decode
-    /// position" docs for why that's what makes one capture valid for every step. Repetition penalty is the only
-    /// sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why
-    /// temperature/top-k/top-p/min-p are no-ops for a greedy pick); when the request's penalty is 1.0 the history
-    /// buffers are still allocated (cheap, fixed-size) but the backend skips the append/penalty kernels entirely.
-    /// Falls back silently to nothing extra on failure: if capture throws (an eligible-looking model hits
-    /// something the graphed path doesn't actually support), the exception propagates — this path is opt-in
-    /// (env-gated), so a user who turns it on and hits a gap gets a clear error, not silent mis-generation.</summary>
+    /// <summary>Greedy decode via one captured CUDA graph, replayed once per token; <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
+    /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). Repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. If capture throws (an eligible-looking model hits something the graphed path doesn't support), the exception propagates rather than falling back — this path is opt-in (env-gated), so a gap surfaces as a clear error, not silent mis-generation.</remarks>
     private bool GenerateGraphDecode(GenerationRequest request, FixedKvCache cache, int promptLen, int firstToken,
         List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
@@ -381,25 +353,9 @@ public sealed class TextGenerationPipeline
     private const int SpecMaxDraftTokens = 8;
     private const int SpecMaxLookback = 4096;
 
-    /// <summary>Prompt-lookup speculative decoding: greedy-only, draft-model-free. Each round drafts up to
-    /// <see cref="SpecMaxDraftTokens"/> tokens via <see cref="FindDraftContinuation"/> (n-gram match against
-    /// the prompt + generated-so-far) and verifies the whole draft plus one bonus position in ONE batched
-    /// forward pass — reusing the exact same prefill-shaped <see cref="GenericTransformer.Forward"/> call the
-    /// prompt itself goes through, just with a short token span at an arbitrary <c>posStart</c> against an
-    /// already-partially-filled cache. The longest correct prefix (verified against this same model's own
-    /// greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward
-    /// call, same as the eager loop, so this is a pure speedup on repetitive content (regenerating similar
-    /// JSON, quoting earlier text) and a no-op tax otherwise. Every accepted token's history-dependent sampler
-    /// state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is
-    /// byte-identical to plain greedy decode — this is what makes the technique a pure speedup rather than an
-    /// approximation. Rejected draft tokens' KV entries were already physically written by the verification
-    /// forward pass (unavoidable — verification needs every candidate present in the batch before any is
-    /// judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
-    ///
-    /// <para>Requires <see cref="SamplingOptions.Greedy"/> (there is no order-independent way to reproduce a
-    /// non-greedy multinomial draw out of sequence) and excludes JSON grammar mode (its incremental state
-    /// walker isn't designed to be rolled back mid-token) — both are enforced by the caller's dispatch gate,
-    /// not re-checked here.</para></summary>
+    /// <summary>Prompt-lookup speculative decoding: greedy-only, draft-model-free, drafting via n-gram match and verifying the whole draft plus one bonus position in one batched forward pass.</summary>
+    /// <remarks>Each round drafts up to <see cref="SpecMaxDraftTokens"/> tokens via <see cref="FindDraftContinuation"/> (n-gram match against the prompt + generated-so-far) and verifies them in ONE batched forward pass, reusing the same prefill-shaped <see cref="GenericTransformer.Forward"/> call with a short token span at an arbitrary <c>posStart</c> against an already-partially-filled cache. The longest correct prefix (verified against this model's own greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward call, same as the eager loop, so this is a pure speedup on repetitive content and a no-op tax otherwise. Every accepted token's history-dependent sampler state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is byte-identical to plain greedy decode. Rejected draft tokens' KV entries were already physically written by the verification forward pass (unavoidable — verification needs every candidate present in the batch before any is judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
+    /// <para>Requires <see cref="SamplingOptions.Greedy"/> (no order-independent way to reproduce a non-greedy multinomial draw out of sequence) and excludes JSON grammar mode (its incremental state walker isn't designed to roll back mid-token) — both enforced by the caller's dispatch gate, not re-checked here.</para></remarks>
     private bool GenerateSpeculative(GenerationRequest request, FixedKvCache cache, int[] promptIds, SamplerChain sampler,
         int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
@@ -462,21 +418,8 @@ public sealed class TextGenerationPipeline
         return false;
     }
 
-    /// <summary>Searches <paramref name="promptIds"/> + <paramref name="generated"/> (context so far) for a
-    /// prior occurrence of the last <paramref name="ngramSize"/> tokens and, if found, returns the
-    /// up-to-<paramref name="maxDraftLen"/> tokens that followed it as a draft continuation guess. Deliberately
-    /// searches OLDEST-match-first rather than nearest-match-first: the nearer a match is to the current
-    /// position, the less context trails it (a match found 1 token back only has 1 token of continuation to
-    /// draw from before running into the present), so nearest-first pathologically degenerates to
-    /// single-token drafts on short-period repeats (e.g. a stuck "the the the the..." loop, a known failure
-    /// mode of weak/small models under pure greedy decoding — the exact case this technique should help most).
-    /// Oldest-first costs nothing extra: every draft is verified against the real model regardless of which
-    /// historical match produced it, so there's no reliability tradeoff, only more usable length. No draft
-    /// model — this only pays off when the n-gram genuinely recurs (repetitive structure); returns an empty
-    /// array whenever no match exists (the common case for free-form prose), which is always safe since an
-    /// empty draft just costs one plain decode step. The search window is capped at
-    /// <see cref="SpecMaxLookback"/> tokens so a very long generation can't turn this into an O(n²) scan —
-    /// missing a distant match only forgoes a speedup, it never affects correctness.</summary>
+    /// <summary>Searches context for a prior occurrence of the last <paramref name="ngramSize"/> tokens and, if found, returns the up-to-<paramref name="maxDraftLen"/> tokens that followed it as a draft continuation guess.</summary>
+    /// <remarks>Deliberately searches OLDEST-match-first rather than nearest-match-first: the nearer a match is to the current position, the less context trails it, so nearest-first pathologically degenerates to single-token drafts on short-period repeats (e.g. a stuck "the the the the..." loop) — the exact case this technique should help most. Oldest-first costs nothing extra since every draft is verified against the real model regardless of which historical match produced it. Returns an empty array whenever no match exists (safe — costs one plain decode step). The search window is capped at <see cref="SpecMaxLookback"/> tokens so a very long generation can't turn this into an O(n²) scan; missing a distant match only forgoes a speedup, it never affects correctness.</remarks>
     private static int[] FindDraftContinuation(int[] promptIds, List<int> generated, int ngramSize, int maxDraftLen)
     {
         int totalLen = promptIds.Length + generated.Count;

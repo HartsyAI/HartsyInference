@@ -1,14 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for the GLM-4 text decoder (<c>glm4</c> — GLM-4-9B/32B-0414, the LLM_ARCH_GLM4 lineage, NOT
-/// the older <c>chatglm</c> arch). GLM-4 uses Gemma-style <b>sandwich norms</b> (a post-attention and a post-FFN
-/// RMSNorm applied to each sublayer output before its residual add) but, unlike Gemma, carries Q/K/V projection
-/// <i>biases</i> and a <i>fused</i> gate+up FFN (<c>ffn_up</c> holds <c>[gate | up]</c> of width 2·ffn, split
-/// downstream in <see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>). The attention output has no bias,
-/// the LM head is untied, RoPE is partial (rope.dimension_count &lt; head_dim). The norm tensor names map onto the
-/// same sandwich slots the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> loader expects:
-/// <c>ffn_norm</c> is the <i>pre</i>-FFN norm (Gemma's <c>pre_feedforward_layernorm</c>), and <c>post_ffw_norm</c>
-/// is the post-FFN norm.</summary>
+/// <summary>GGUF mapper for the GLM-4 text decoder (<c>glm4</c> — GLM-4-9B/32B-0414, the LLM_ARCH_GLM4 lineage, NOT the older <c>chatglm</c> arch). GLM-4 uses Gemma-style <b>sandwich norms</b> (a post-attention and a post-FFN RMSNorm applied to each sublayer output before its residual add) but, unlike Gemma, carries Q/K/V projection <i>biases</i> and a <i>fused</i> gate+up FFN (<c>ffn_up</c> holds <c>[gate | up]</c> of width 2·ffn, split downstream in <see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>). The attention output has no bias, the LM head is untied, RoPE is partial (rope.dimension_count &lt; head_dim). The norm tensor names map onto the same sandwich slots the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> loader expects: <c>ffn_norm</c> is the <i>pre</i>-FFN norm (Gemma's <c>pre_feedforward_layernorm</c>), and <c>post_ffw_norm</c> is the post-FFN norm.</summary>
 public sealed class Glm4KeyMapper : IGgufKeyMapper
 {
     public string Architecture => "glm4";

@@ -1,9 +1,7 @@
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>All carried state for one streamed-decode utterance across <see cref="Mimi.Decode(Core.Backends.IBackend,Core.Tensors.Tensor,int,int,MimiDecoderStreamState)"/>
-/// calls: the decoder transformer's growing K/V history plus the SEANet decoder's causal-conv/upsample-overlap
-/// tails. Create one per utterance, reuse it for every chunk of that utterance in order, dispose it when the
-/// utterance is done.</summary>
+/// <summary>All carried state for one streamed-decode utterance: the decoder transformer's growing K/V history plus the SEANet decoder's causal-conv/upsample-overlap tails.</summary>
+/// <remarks>Create one per utterance, reuse it for every chunk of that utterance in order, dispose it when the utterance is done.</remarks>
 public sealed class MimiDecoderStreamState : IDisposable
 {
     internal MimiTransformerCache Transformer { get; } = new();

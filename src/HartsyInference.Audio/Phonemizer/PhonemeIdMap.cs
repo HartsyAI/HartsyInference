@@ -3,10 +3,7 @@ using System.Text.Json;
 
 namespace HartsyInference.Audio.Phonemizer;
 
-/// <summary>Maps IPA phoneme codepoints to model token ids, matching how piper-phonemize tokenizes for a Piper voice.
-/// The map (from the voice's <c>.onnx.json</c> <c>phoneme_id_map</c>) is keyed by single IPA codepoints; encoding
-/// follows piper's interleaving: begin-of-sentence, a pad, then each phoneme's id(s) each followed by a pad, then
-/// end-of-sentence (<c>^ _ p0 _ p1 _ … pN _ $</c>).</summary>
+/// <summary>Maps IPA phoneme codepoints to model token ids, matching how piper-phonemize tokenizes for a Piper voice; encoding follows piper's interleaving: begin-of-sentence, a pad, then each phoneme's id(s) each followed by a pad, then end-of-sentence (<c>^ _ p0 _ p1 _ … pN _ $</c>).</summary>
 public sealed class PhonemeIdMap
 {
     private const string Bos = "^";
@@ -57,8 +54,7 @@ public sealed class PhonemeIdMap
         return FromPhonemeMap(parsed);
     }
 
-    /// <summary>Encodes an IPA phoneme string to model token ids (piper interleaving). Codepoints absent from the map
-    /// are skipped, exactly as piper-phonemize does.</summary>
+    /// <summary>Encodes an IPA phoneme string to model token ids (piper interleaving); codepoints absent from the map are skipped, exactly as piper-phonemize does.</summary>
     public int[] Encode(string ipa)
     {
         List<int> ids = new(ipa.Length * 2 + 4);

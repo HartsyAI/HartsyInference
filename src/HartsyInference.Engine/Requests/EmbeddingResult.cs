@@ -9,7 +9,6 @@ public sealed record EmbeddingResult
     /// <summary>Vector width — every entry in <see cref="Vectors"/> has exactly this length.</summary>
     public required int Dimensions { get; init; }
 
-    /// <summary>Total tokens actually fed through the model across every input (including the appended EOS per
-    /// input) — a real count from the same tokenize pass that produced <see cref="Vectors"/>, not an estimate.</summary>
+    /// <summary>Total tokens actually fed through the model across every input (including the appended EOS per input) — a real count from the same tokenize pass that produced <see cref="Vectors"/>, not an estimate.</summary>
     public required int TotalTokens { get; init; }
 }

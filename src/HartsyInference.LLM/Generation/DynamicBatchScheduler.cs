@@ -9,39 +9,12 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>True continuous-batching scheduler: unlike the static-batch design it replaces (which took a
-/// fixed request list up front and ran it to completion before returning anything), this admits requests at
-/// ANY time via <see cref="SubmitAsync"/> and evicts each sequence the moment it finishes/stops/cancels,
-/// rather than waiting for the whole cohort. A single dedicated background loop owns the model/backend and
-/// every active sequence's mutable state exclusively — external callers only ever touch a thread-safe
-/// <see cref="Channel{T}"/>, never the model directly — which is what makes it safe to call
-/// <see cref="SubmitAsync"/> from multiple concurrent callers even though the underlying backend is not
-/// itself safely re-entrant (see <c>InferenceQueue</c>'s doc comment on that constraint, which this
-/// sidesteps by construction rather than by serializing callers).
-///
-/// <para>Each round: (1) drain newly-submitted requests, prefilling and admitting each one (single-sequence
-/// prefill, matching the design this replaces — chunked/batched prefill is a further throughput
-/// optimization, not required for correctness, and is left as a documented follow-up); (2) evict any
-/// sequence that is cancelled, just hit a stop token, or hit its token limit — BEFORE running a decode round,
-/// so a sequence never wastes a batched step after it should have stopped; (3) run one batched decode step
-/// (<see cref="GenericTransformer.ForwardBatchDecode"/>) over every remaining active sequence. KV storage
-/// comes from a <see cref="PagedKvPool"/> shared across every active sequence — admission fails fast with
-/// <see cref="KvPoolExhaustedException"/> when the pool has no room, rather than blocking or evicting
-/// something else (reject policy, matching the pool's own design).</para>
-///
-/// <para><b>Backend exclusivity:</b> multiple concurrent <see cref="SubmitAsync"/> callers is exactly the
-/// point (that's what lets requests batch together), but the shared <see cref="IBackend"/> instance is NOT
-/// itself safely re-entrant (one CUDA stream, non-thread-safe activation/weight caches) — and on a server
-/// that also runs diffusion image generation through the SAME backend instance via a separate queue, this
-/// scheduler's GPU work must never overlap with THAT either. So every GPU-touching step (prefill, one
-/// decode round) is gated through the optional <paramref name="gpuGate"/> — pass the server's existing
-/// <c>InferenceQueue</c> (shared with diffusion) to keep the whole server down to one physical GPU operation
-/// at a time, while still batching every concurrently-submitted chat request into that one operation. This
-/// does NOT serialize chat requests the way routing each whole request through the queue would (that was
-/// tried first and rejected — it would gate one call to <see cref="SubmitAsync"/> at a time, so a second
-/// request could never even be ADMITTED into the batch until the first one's entire generation finished,
-/// defeating the purpose); only the actual GPU round is gated, and rounds already contain every request that
-/// arrived since the last one.</para></summary>
+/// <summary>True continuous-batching scheduler: admits requests at ANY time via <see cref="SubmitAsync"/> and evicts each sequence the moment it finishes/stops/cancels, rather than waiting for the whole cohort like the static-batch design it replaces.</summary>
+/// <remarks>
+/// <para>A single dedicated background loop owns the model/backend and every active sequence's mutable state exclusively — external callers only ever touch a thread-safe <see cref="Channel{T}"/>, never the model directly — which is what makes it safe to call <see cref="SubmitAsync"/> from multiple concurrent callers even though the underlying backend is not itself safely re-entrant (see <c>InferenceQueue</c>'s doc comment on that constraint, which this sidesteps by construction rather than by serializing callers).</para>
+/// <para>Each round: (1) drain newly-submitted requests, prefilling and admitting each one (single-sequence prefill, matching the design this replaces — chunked/batched prefill is a further throughput optimization, not required for correctness, and is left as a documented follow-up); (2) evict any sequence that is cancelled, just hit a stop token, or hit its token limit — BEFORE running a decode round, so a sequence never wastes a batched step after it should have stopped; (3) run one batched decode step (<see cref="GenericTransformer.ForwardBatchDecode"/>) over every remaining active sequence. KV storage comes from a <see cref="PagedKvPool"/> shared across every active sequence — admission fails fast with <see cref="KvPoolExhaustedException"/> when the pool has no room, rather than blocking or evicting something else (reject policy, matching the pool's own design).</para>
+/// <para><b>Backend exclusivity:</b> multiple concurrent <see cref="SubmitAsync"/> callers is exactly the point (that's what lets requests batch together), but the shared <see cref="IBackend"/> instance is NOT itself safely re-entrant (one CUDA stream, non-thread-safe activation/weight caches) — and on a server that also runs diffusion image generation through the SAME backend instance via a separate queue, this scheduler's GPU work must never overlap with THAT either. So every GPU-touching step (prefill, one decode round) is gated through the optional <paramref name="gpuGate"/> — pass the server's existing <c>InferenceQueue</c> (shared with diffusion) to keep the whole server down to one physical GPU operation at a time, while still batching every concurrently-submitted chat request into that one operation. This does NOT serialize chat requests the way routing each whole request through the queue would (that was tried first and rejected — it would gate one call to <see cref="SubmitAsync"/> at a time, so a second request could never even be ADMITTED into the batch until the first one's entire generation finished, defeating the purpose); only the actual GPU round is gated, and rounds already contain every request that arrived since the last one.</para>
+/// </remarks>
 public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 {
     private readonly GenericTransformer _model;
@@ -63,14 +36,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         public required TaskCompletionSource<GenerationResult> Completion;
     }
 
-    /// <summary>One active sequence's per-request state. <see cref="Cache"/> is <see cref="IKvCache"/> (not
-    /// concretely <see cref="PagedKvCache"/>) so a sequence admitted while the scheduler is otherwise idle can
-    /// use a dedicated <see cref="FixedKvCache"/> instead — see the graph-decode retrofit design in
-    /// <c>docs/Checklists/LLM_DECODE_PERF_GRIND.md</c>'s "NEW PLAN" section. <see cref="GraphSession"/> is
-    /// non-null only for such a sequence, only while it's still eligible for graph replay (see
-    /// <see cref="RunLoopAsync"/>'s one-way retirement). <see cref="Dispose"/> is intentionally the ONLY way
-    /// callers free this sequence's resources (never call <c>seq.Cache.Dispose()</c> directly) so a session
-    /// can never be forgotten at a disposal call site.</summary>
+    /// <summary>One active sequence's per-request state; <see cref="Cache"/> is <see cref="IKvCache"/> rather than concretely <see cref="PagedKvCache"/> so an idle-admitted sequence can use a dedicated <see cref="FixedKvCache"/> instead (see <c>docs/Checklists/LLM_DECODE_PERF_GRIND.md</c>'s "NEW PLAN"). <see cref="GraphSession"/> is non-null only for such a sequence while still eligible for graph replay (see <see cref="RunLoopAsync"/>'s one-way retirement); <see cref="Dispose"/> is intentionally the ONLY way callers free this sequence's resources so a session can never be forgotten at a disposal call site.</summary>
     private sealed class ActiveSeq : IDisposable
     {
         public required PendingRequest Pending;
@@ -89,12 +55,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    /// <summary>Creates a scheduler backed by <paramref name="pool"/> (shared across every sequence this
-    /// scheduler admits — size it for the concurrency you want to support, not per-request).
-    /// <paramref name="gpuGate"/>, when supplied, wraps every GPU-touching step (prefill, one decode round)
-    /// — pass a function that runs its argument through the server's shared backend-exclusivity queue (see
-    /// class doc "Backend exclusivity"); omit it only when nothing else can contend for the same backend
-    /// instance (e.g. tests, or a CPU-only deployment with no diffusion sharing the process).</summary>
+    /// <summary><paramref name="pool"/> is shared across every sequence this scheduler admits (size it for the concurrency you want, not per-request); <paramref name="gpuGate"/>, when supplied, wraps every GPU-touching step through the server's shared backend-exclusivity queue (see class doc "Backend exclusivity") — omit only when nothing else can contend for the same backend instance.</summary>
     public DynamicBatchScheduler(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
         PagedKvPool pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
     {
@@ -117,31 +78,16 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
     }
 
-    /// <summary>True while the background loop is still running. Goes false once it exits — cleanly on
-    /// <see cref="Dispose"/>, or (should every containment in <see cref="RunLoopAsync"/> somehow fail to
-    /// catch something) if it faults. Callers that track a model's serving health (e.g. an HTTP readiness
-    /// check) should treat <c>false</c> after a successful construction as "this model's chat traffic is
-    /// dead and won't recover without reloading the model."</summary>
+    /// <summary>True while the background loop is running; goes false cleanly on <see cref="Dispose"/> or if it faults — callers tracking serving health should treat <c>false</c> after successful construction as "this model's chat traffic is dead and won't recover without reloading the model."</summary>
     public bool IsLoopAlive => !_loopTask.IsCompleted;
 
-    /// <summary>Test-only fault injection: when set, invoked once per decode round with that round's feeder
-    /// count; a non-null return is thrown instead of running the round. Exists so fault-isolation behavior
-    /// (a round failing without killing the loop or affecting unrelated sequences) can be tested
-    /// deterministically — reproducing a REAL backend crash (like the CPU-MoE AccessViolationException that
-    /// motivated this containment) isn't something a fast, safe unit test can do on demand. Null in
-    /// production; never read unless a test sets it.</summary>
+    /// <summary>Test-only fault injection: when set, invoked once per decode round with that round's feeder count; a non-null return is thrown instead of running the round, so fault-isolation behavior can be tested deterministically without reproducing a real backend crash. Null in production.</summary>
     internal Func<int, Exception?>? TestFaultInjector { get; set; }
 
-    /// <summary>Test-only override for the "does this architecture/backend support graph decode" check in
-    /// <see cref="AdmitAndPrefill"/> — the CPU backend never satisfies this for real (graph decode is
-    /// CUDA-only), so a CPU-backend unit test can't otherwise reach the solo-admission graph-capture path at
-    /// all. Null in production (falls through to the real <c>_model.SupportsGraphDecode(_backend)</c> check).</summary>
+    /// <summary>Test-only override for the "does this architecture/backend support graph decode" check in <see cref="AdmitAndPrefill"/> — the CPU backend never satisfies this for real, so a CPU-backend unit test can't otherwise reach the solo-admission graph-capture path. Null in production.</summary>
     internal bool? TestForceSupportsGraphDecode { get; set; }
 
-    /// <summary>Test-only fault injection for <see cref="CaptureGraphSession"/>: when set, invoked once per
-    /// capture attempt; a non-null return is thrown instead of actually capturing, exercising the circuit
-    /// breaker (<see cref="_graphCaptureUnavailable"/>) without needing a real CUDA capture failure. Null in
-    /// production.</summary>
+    /// <summary>Test-only fault injection for <see cref="CaptureGraphSession"/>: when set, invoked once per capture attempt; a non-null return is thrown instead of actually capturing, exercising the <see cref="_graphCaptureUnavailable"/> circuit breaker without a real CUDA capture failure. Null in production.</summary>
     internal Func<Exception?>? TestGraphCaptureFailureInjector { get; set; }
 
     private async Task RunGpuWork(Action work)
@@ -302,10 +248,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    /// <summary>True once a CUDA-graph capture has failed once for this scheduler's model. A capture failure
-    /// is architecture/backend-determined, not request-specific — it will fail identically for every future
-    /// solo-eligible request against this same model, so this is a circuit breaker (stop attempting capture
-    /// at all, avoiding a repeat of whatever it costs to fail) rather than a per-request retry.</summary>
+    /// <summary>True once a CUDA-graph capture has failed once for this scheduler's model; a capture failure is architecture/backend-determined, not request-specific, so this is a circuit breaker rather than a per-request retry.</summary>
     private bool _graphCaptureUnavailable;
 
     private ActiveSeq AdmitAndPrefill(PendingRequest pending, bool solo)
@@ -389,11 +332,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         return a;
     }
 
-    /// <summary>Captures one CUDA graph for greedy decode against <paramref name="cache"/> — mirrors
-    /// <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> capture step exactly (same device
-    /// buffer allocations, same capture call), just returning a <see cref="GraphDecodeSession"/> that
-    /// outlives one method call instead of local variables scoped to one generation. On failure, disposes
-    /// whatever was already allocated before rethrowing — no partial session leaks.</summary>
+    /// <summary>Captures one CUDA graph for greedy decode against <paramref name="cache"/>, mirroring <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> capture step but returning a <see cref="GraphDecodeSession"/> that outlives one method call; disposes whatever was already allocated before rethrowing on failure.</summary>
     private GraphDecodeSession CaptureGraphSession(FixedKvCache cache, int promptLen, int firstToken, float repetitionPenalty)
     {
         // Checked before any real backend call so a test can simulate a capture failure without needing an
@@ -482,16 +421,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             feeders[b].Next = feeders[b].Sampler.Next(LastRow(logits, b + 1, cfg.VocabSize), feeders[b].Generated);
     }
 
-    /// <summary>One round for a lone sequence with a captured graph — mirrors
-    /// <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> per-step loop body exactly (add the
-    /// current token, invoke the callback, THEN replay to get the next one) so the scheduler's existing
-    /// stop/MaxTokens eviction check — which runs BEFORE this round, on <see cref="ActiveSeq.Next"/> — stays
-    /// exactly as correct here as it already is for <see cref="RunDecodeRound"/>. <see cref="IKvCache.AdvanceLength"/>
-    /// is called explicitly here (unlike the CLI path, which never needs to since it never mixes a
-    /// <see cref="FixedKvCache"/> into a later eager multi-sequence round) — required so
-    /// <see cref="ActiveSeq.Cache"/>'s position bookkeeping stays correct if this sequence is later joined by
-    /// another and falls back to <see cref="RunDecodeRound"/>'s eager path, which reads
-    /// <see cref="IKvCache.CurrentLength"/> to compute that round's position.</summary>
+    /// <summary>One round for a lone sequence with a captured graph — mirrors <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> loop body order (add token, invoke callback, THEN replay) so the eviction check on <see cref="ActiveSeq.Next"/> stays correct; calls <see cref="IKvCache.AdvanceLength"/> explicitly so <see cref="ActiveSeq.Cache"/>'s position stays correct if this sequence is later joined by another and falls back to <see cref="RunDecodeRound"/>'s eager path.</summary>
     private void ReplayGraphRound(ActiveSeq seq, GraphDecodeSession gs)
     {
         seq.Generated.Add(seq.Next);
@@ -503,9 +433,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Next = next;
     }
 
-    /// <summary>Builds the final result and completes the request's task. Does NOT dispose <paramref name="seq"/>
-    /// — callers batch every evicted sequence's disposal into one gated <see cref="RunGpuWork"/> call (see
-    /// <see cref="RunLoopAsync"/>) rather than disposing inline here, one at a time, ungated.</summary>
+    /// <summary>Builds the final result and completes the request's task; does NOT dispose <paramref name="seq"/> — callers batch every evicted sequence's disposal into one gated <see cref="RunGpuWork"/> call (see <see cref="RunLoopAsync"/>) instead.</summary>
     private void CompleteSeq(ActiveSeq seq, bool stopped)
     {
         GenerationResult result = new()
@@ -538,8 +466,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         return new Span<float>(p + (long)(t - 1) * vocab, vocab);
     }
 
-    /// <summary>Stops the background loop and fails every still-active/pending request. Does NOT dispose the
-    /// shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
+    /// <summary>Stops the background loop and fails every still-active/pending request; does NOT dispose the shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
     public void Dispose()
     {
         _shutdown.Cancel();

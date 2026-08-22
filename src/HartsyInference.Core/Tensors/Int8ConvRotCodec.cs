@@ -3,8 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace HartsyInference.Core.Tensors;
 
-/// <summary>ComfyUI's <c>int8_tensorwise</c> weight format, with and without the <c>convrot</c> Hadamard rotation
-/// (comfy-kitchen <c>tensor/int8_utils.py</c> + <c>backends/eager/quantization.py</c>).</summary>
+/// <summary>ComfyUI's <c>int8_tensorwise</c> weight format, with and without the <c>convrot</c> Hadamard rotation (comfy-kitchen <c>tensor/int8_utils.py</c> + <c>backends/eager/quantization.py</c>).</summary>
 /// <remarks><para>The quantizer stores <c>W @ Hᵀ</c> row-quantized to int8 with a per-output-row scale, and expects the
 /// consumer to rotate the activation by <c>H</c> per group at runtime: <c>(x·H)·(W·Hᵀ)ᵀ = x·H·H·Wᵀ = x·Wᵀ</c>, because
 /// the normalized regular Hadamard is both symmetric and orthogonal. This type provides the un-rotating dequant for
@@ -42,8 +41,7 @@ public static unsafe class Int8ConvRotCodec
     /// <summary>Whether <paramref name="size"/> is a usable ConvRot group size (a power of four, at least 4).</summary>
     public static bool IsValidGroupSize(int size) => size >= 4 && (size & (size - 1)) == 0 && (size & 0x55555554) != 0;
 
-    /// <summary>Rotates every contiguous <paramref name="groupSize"/>-wide group of <paramref name="values"/> by
-    /// <c>H</c> in place.</summary>
+    /// <summary>Rotates every contiguous <paramref name="groupSize"/>-wide group of <paramref name="values"/> by <c>H</c> in place.</summary>
     public static void ApplyRotationInPlace(Span<float> values, int groupSize)
     {
         ValidateGroupSize(groupSize);
@@ -55,8 +53,7 @@ public static unsafe class Int8ConvRotCodec
         }
     }
 
-    /// <summary>Dequantizes an int8 weight <c>[out, in]</c> and un-rotates it, producing the BF16 <c>[out, in]</c>
-    /// <c>IBackend.Linear</c> consumes.</summary>
+    /// <summary>Dequantizes an int8 weight <c>[out, in]</c> and un-rotates it, producing the BF16 <c>[out, in]</c> <c>IBackend.Linear</c> consumes.</summary>
     /// <param name="rowScale">F32, one scale per output row; a single element is broadcast as a per-tensor scale.</param>
     /// <param name="convRotGroupSize">0 for a weight quantized without rotation.</param>
     public static Tensor DequantToBf16(Tensor weight, Tensor rowScale, int convRotGroupSize)

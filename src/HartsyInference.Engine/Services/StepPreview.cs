@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Services;
 
-/// <summary>A progress tick from a diffusion/video generation: the current step, the total, and an optional
-/// low-res RGB preview of the in-progress latent.</summary>
+/// <summary>A progress tick from a diffusion/video generation: the current step, the total, and an optional low-res RGB preview of the in-progress latent.</summary>
 public readonly record struct StepPreview
 {
     /// <summary>The current step (1-based).</summary>

@@ -14,13 +14,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan-Animate-2 recipe — the Wan2.1 I2V-14B backbone driven by a raw video through a second token stream
-/// rather than by a pose/face pathway. The checkpoint adds no module of its own, so it is key-for-key an I2V-14B one
-/// and is recognised only by <c>__metadata__["config"].transformer.model_type == "animate2"</c>; see
-/// <see cref="WanVideoRecipe.DetectVariant"/>. Side models are the family's usual set: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>) and CLIP-ViT-H
-/// (<see cref="SideModels.ClipVisionH14"/>), which is <b>required</b> here — both token streams carry a 257-token
-/// image context.</summary>
+/// <summary>Wan-Animate-2 recipe — the Wan2.1 I2V-14B backbone driven by a raw video through a second token stream rather than by a pose/face pathway. The checkpoint adds no module of its own, so it is key-for-key an I2V-14B one and is recognised only by <c>__metadata__["config"].transformer.model_type == "animate2"</c>; see <see cref="WanVideoRecipe.DetectVariant"/>. Side models are the family's usual set: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>) and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>), which is <b>required</b> here — both token streams carry a 257-token image context.</summary>
 public sealed class WanAnimate2Recipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -35,10 +29,7 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate-2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an
-    /// 81-frame clip at 24 fps. The distillation build wants 10 steps at guidance 1.0 instead; only its
-    /// <c>log_scale</c> is routed automatically (<see cref="WanAnimate2Transformer.ResolveLogScale"/>) — the step
-    /// count and guidance stay the caller's, because a filename is too weak a signal to override them on.</summary>
+    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an 81-frame clip at 24 fps. The distillation build wants 10 steps at guidance 1.0 instead; only its <c>log_scale</c> is routed automatically (<see cref="WanAnimate2Transformer.ResolveLogScale"/>) — the step count and guidance stay the caller's, because a filename is too weak a signal to override them on.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 40, CfgScale = 3.0f, Frames = 81, Fps = 24 };
 
     /// <inheritdoc/>

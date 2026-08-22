@@ -1,8 +1,6 @@
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 shape-generation configuration: the VecSet flow-match DiT plus the ShapeVAE decoder.
-/// Exact values for a given checkpoint come from its config; the defaults here track Hunyuan3D-2 and the
-/// dims marked in <c>docs/Research/HUNYUAN3D_2_ARCHITECTURE.md</c> are <b>validation-gated</b>.</summary>
+/// <summary>Hunyuan3D-2 shape-generation configuration for the VecSet flow-match DiT plus ShapeVAE decoder; dims marked in <c>docs/Research/HUNYUAN3D_2_ARCHITECTURE.md</c> are <b>validation-gated</b>.</summary>
 public sealed record Hunyuan3DConfig
 {
     // --- VecSet latent / DiT ---
@@ -49,8 +47,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Number of Fourier frequency bands for query-point positional encoding (per axis).</summary>
     public int FourierBands { get; init; } = 8;
 
-    /// <summary>ShapeVAE latent scale (config <c>scale_factor</c>); the sampled latent is divided by this before
-    /// decode (<c>latents /= scale_factor</c>).</summary>
+    /// <summary>ShapeVAE latent scale (config <c>scale_factor</c>); the sampled latent is divided by this before decode.</summary>
     public float VaeScaleFactor { get; init; } = 1.0f;
 
     // --- Sampling / extraction defaults ---
@@ -72,9 +69,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Half-extent of the cubic query box in object space (grid spans [-Bound, Bound]³).</summary>
     public float BoundingBox { get; init; } = 1.01f;
 
-    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model. <b>All dims are
-    /// validation-gated</b> — reconcile against the checkpoint's <c>config.json</c> during the diff pass.
-    /// Pairs with <c>Dinov2Preset.Large</c> (CondDim = 1024).</summary>
+    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model; <b>all dims are validation-gated</b> against the checkpoint's <c>config.json</c>.</summary>
     public static Hunyuan3DConfig Hunyuan3D2 => new()
     {
         LatentTokens = 3072, LatentChannels = 64, Width = 1024, DepthDouble = 16, DepthSingle = 32, NumHeads = 16,

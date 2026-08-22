@@ -143,7 +143,7 @@ public sealed unsafe class AnimaBlock
         if (_mlp2 is not null) yield return _mlp2;
     }
 
-    /// <summary>Forward pass through one DiT block.</summary>
+    /// <summary>Runs self-attention, cross-attention, then MLP, each residual-gated by its own AdaLN-LoRA modulator.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="hidden">Image token sequence <c>[B, S, hidden]</c>.</param>
     /// <param name="encoderHidden">Refined text features from <see cref="AnimaLlmAdapter"/>, <c>[B, T, kvDim=1024]</c>.</param>

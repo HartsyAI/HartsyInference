@@ -26,7 +26,6 @@ internal static class FishSpeechModel
     private const string SpecialTokensFile = "special_tokens.json";
     private const int FramesPerChunk = 25; // ~500ms @ Fish-Speech's ~50Hz frame rate (matches Kyutai's ~480ms convention).
 
-    /// <summary>The Fish-Speech descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
@@ -64,8 +63,7 @@ internal static class FishSpeechModel
 
     private sealed class Session(FishSpeechPipeline pipeline, FishSpeechTokenizer tokenizer)
     {
-        /// <summary>Upstream v1.5 template (system turn + <|voice|> assistant opener). <|audio_start|> is NOT in
-        /// the 1.5 vocab — it BPE-encodes as literal text and degrades generation.</summary>
+        /// <summary>Upstream v1.5 template (system turn + <|voice|> assistant opener). <|audio_start|> is NOT in the 1.5 vocab — it BPE-encodes as literal text and degrades generation.</summary>
         private static int[] BuildPrompt(FishSpeechTokenizer tokenizer, string text)
         {
             string prompt = $"{FishSpeechTokenizer.ImStart}system\nSpeak out the provided text.{FishSpeechTokenizer.ImEnd}"

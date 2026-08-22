@@ -31,13 +31,10 @@ public static class LowVramPolicy
     /// <summary>The last value logged, so a stable setting announces itself once instead of every phase.</summary>
     private static string? _lastLogged;
 
-    /// <summary>Per-backend overrides, so two engines in one process (one per GPU) can run different policies. Weak
-    /// keys: a disposed backend's entry vanishes with it, no unregistration required on the failure paths.</summary>
+    /// <summary>Per-backend overrides, so two engines in one process (one per GPU) can run different policies. Weak keys: a disposed backend's entry vanishes with it, no unregistration required on the failure paths.</summary>
     private static readonly ConditionalWeakTable<IBackend, ModeBox> _overrides = new();
 
-    /// <summary>Pins the policy for <paramref name="backend"/>; wins over the environment variable in
-    /// <see cref="Resolve(IBackend?)"/>. Hosts with a per-backend low-VRAM setting (the SwarmUI extension) use this
-    /// instead of the env var, whose process-wide last-writer-wins semantics broke multi-backend setups.</summary>
+    /// <summary>Pins the policy for <paramref name="backend"/>; wins over the environment variable in <see cref="Resolve(IBackend?)"/>. Hosts with a per-backend low-VRAM setting (the SwarmUI extension) use this instead of the env var, whose process-wide last-writer-wins semantics broke multi-backend setups.</summary>
     public static void SetOverride(IBackend backend, LowVramMode mode)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -51,8 +48,7 @@ public static class LowVramPolicy
         _overrides.Remove(backend);
     }
 
-    /// <summary>The mode governing <paramref name="backend"/>: its override when one is set, else the process-wide
-    /// environment resolution. Null backend = environment only.</summary>
+    /// <summary>The mode governing <paramref name="backend"/>: its override when one is set, else the process-wide environment resolution. Null backend = environment only.</summary>
     public static LowVramMode Resolve(IBackend? backend)
     {
         if (backend is not null && _overrides.TryGetValue(backend, out ModeBox? box))
@@ -69,8 +65,7 @@ public static class LowVramPolicy
         public LowVramMode Mode { get; }
     }
 
-    /// <summary>The current mode: unset/unrecognized → <see cref="LowVramMode.Auto"/>; <c>1</c>/<c>on</c>/<c>true</c>
-    /// → <see cref="LowVramMode.ForceOn"/>; <c>0</c>/<c>off</c>/<c>false</c> → <see cref="LowVramMode.ForceOff"/>.</summary>
+    /// <summary>The current mode: unset/unrecognized → <see cref="LowVramMode.Auto"/>; <c>1</c>/<c>on</c>/<c>true</c> → <see cref="LowVramMode.ForceOn"/>; <c>0</c>/<c>off</c>/<c>false</c> → <see cref="LowVramMode.ForceOff"/>.</summary>
     /// <remarks>Deliberately re-read every call rather than cached. A host may set the variable after the process has
     /// already resolved it once — the SwarmUI backend writes it during backend init, which can land after an earlier
     /// backend or a warm-up generation has run — and a cached first answer would silently ignore that, making the

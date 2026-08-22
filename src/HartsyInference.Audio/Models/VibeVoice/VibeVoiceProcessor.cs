@@ -6,13 +6,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Multi-speaker prompt processor for VibeVoice. Takes a per-speaker script and a
-/// list of reference-audio paths, builds the Qwen-tokenized prompt that VibeVoice's LM
-/// expects, and returns the token-IDs + the <c>speech_input_mask</c> that tells the
-/// pipeline which positions to overwrite with acoustic-VAE-encoded voice latents at
-/// prefill time.
-///
-/// <para>Mirrors <c>vibevoice/processor/vibevoice_processor.py</c>. Prompt template:</para>
+/// <summary>Multi-speaker prompt processor for VibeVoice: builds the Qwen-tokenized prompt from a per-speaker script and reference-audio paths, returning token-IDs plus the <c>speech_input_mask</c> marking positions the pipeline overwrites with acoustic-VAE-encoded voice latents at prefill time.</summary>
+/// <remarks>
+/// <para>Mirrors <c>vibevoice/processor/vibevoice_processor.py</c>. Prompt template:
 /// <code>
 ///  Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.
 ///  Voice input:
@@ -25,12 +21,12 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 ///  ...
 ///  Speech output:
 /// &lt;|vision_start|&gt;
-/// </code>
+/// </code></para>
 ///
 /// <para>The trailing <c>&lt;|vision_start|&gt;</c> is the cursor — generation begins from
 /// there. <c>N_i = ceil(speaker_i_audio_samples / 3200)</c> is the count of
 /// <c>&lt;|vision_pad|&gt;</c> sentinels needed to represent the speaker's voice prompt at
-/// the acoustic VAE's 7.5 Hz frame rate.</para></summary>
+/// the acoustic VAE's 7.5 Hz frame rate.</para></remarks>
 public sealed class VibeVoiceProcessor
 {
     private const string SystemPrompt = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.";
@@ -47,14 +43,9 @@ public sealed class VibeVoiceProcessor
         _tokenizer = tokenizer;
     }
 
-    /// <summary>Parses a script and assembles all the inputs the pipeline needs to start
-    /// generation. Each entry in <paramref name="lines"/> is one speaker turn — either a
-    /// "Speaker N: text" formatted line, or a plain string that's assumed to be the next
-    /// speaker in rotation (Speaker 0 on the first line, Speaker 1 on the second, etc.).
-    ///
-    /// <para><paramref name="voiceAudioPaths"/> is one 24 kHz mono WAV path per speaker.
-    /// The processor reads each file, normalizes to -25 dB FS, and counts the resulting
-    /// <c>N_i = ceil(samples / 3200)</c> latent slots.</para></summary>
+    /// <summary>Parses a script and assembles all the inputs the pipeline needs to start generation.</summary>
+    /// <param name="lines">Each entry is one speaker turn — either a "Speaker N: text" formatted line, or a plain string assumed to be the next speaker in rotation (Speaker 0 on the first line, Speaker 1 on the second, etc).</param>
+    /// <param name="voiceAudioPaths">One 24 kHz mono WAV path per speaker; each is normalized to -25 dB FS and its <c>N_i = ceil(samples / 3200)</c> latent slots counted.</param>
     public PreparedPrompt Prepare(IReadOnlyList<string> lines, IReadOnlyList<string> voiceAudioPaths)
     {
         if (voiceAudioPaths is null || voiceAudioPaths.Count == 0)
@@ -121,9 +112,7 @@ public sealed class VibeVoiceProcessor
         };
     }
 
-    /// <summary>Tokenizes <paramref name="text"/> and appends each resulting id to
-    /// <paramref name="tokens"/> with a matching <c>false</c> in
-    /// <paramref name="mask"/> — text positions are never voice-prompt positions.</summary>
+    /// <summary>Tokenizes <paramref name="text"/> and appends each id to <paramref name="tokens"/> with a matching <c>false</c> in <paramref name="mask"/> — text positions are never voice-prompt positions.</summary>
     private void AppendText(List<int> tokens, List<bool> mask, string text)
     {
         int[] ids = _tokenizer.Encode(text);
@@ -134,9 +123,7 @@ public sealed class VibeVoiceProcessor
         }
     }
 
-    /// <summary>Parses <paramref name="lines"/> into <see cref="Turn"/> records. Recognizes
-    /// "Speaker N: text" pattern; falls back to round-robin speaker assignment for plain
-    /// lines that don't match.</summary>
+    /// <summary>Parses <paramref name="lines"/> into <see cref="Turn"/> records, recognizing "Speaker N: text"; falls back to round-robin speaker assignment for plain lines that don't match.</summary>
     private static Turn[] ParseScript(IReadOnlyList<string> lines, int numSpeakers)
     {
         Regex pat = new(@"^\s*Speaker\s+(\d+)\s*:\s*(.*)$", RegexOptions.CultureInvariant);
@@ -175,25 +162,19 @@ public sealed class VibeVoiceProcessor
     /// <summary>One speaker turn in the script.</summary>
     private readonly record struct Turn(int SpeakerIndex, string Text);
 
-    /// <summary>One speaker's voice prompt — the PCM bytes plus the latent count that the
-    /// prompt template needs to know up front.</summary>
+    /// <summary>One speaker's voice prompt — the PCM bytes plus the latent count that the prompt template needs to know up front.</summary>
     public sealed record VoicePrompt(float[] Pcm, int LatentCount);
 
-    /// <summary>Output of <see cref="Prepare"/>: everything the pipeline needs to start the
-    /// AR loop.</summary>
+    /// <summary>Output of <see cref="Prepare"/>: everything the pipeline needs to start the AR loop.</summary>
     public sealed class PreparedPrompt
     {
         /// <summary>Full token-ID stream for the LM.</summary>
         public required int[] TokenIds { get; init; }
 
-        /// <summary>Parallel array — <c>true</c> at positions where the pipeline should
-        /// replace the embedded token with the acoustic-VAE latent for the matching voice
-        /// prompt. The order is: voice 0's <c>N_0</c> slots, then voice 1's <c>N_1</c>
-        /// slots, then voice 2's, and so on.</summary>
+        /// <summary>Parallel array, <c>true</c> at positions where the pipeline should replace the embedded token with the acoustic-VAE latent for the matching voice prompt; order is voice 0's <c>N_0</c> slots, then voice 1's <c>N_1</c> slots, and so on.</summary>
         public required bool[] SpeechInputMask { get; init; }
 
-        /// <summary>Per-speaker reference audio (normalized to -25 dB FS) plus the latent
-        /// count that should be encoded for the prefill.</summary>
+        /// <summary>Per-speaker reference audio (normalized to -25 dB FS) plus the latent count that should be encoded for the prefill.</summary>
         public required VoicePrompt[] Voices { get; init; }
     }
 }

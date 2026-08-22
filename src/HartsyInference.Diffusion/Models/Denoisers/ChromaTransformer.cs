@@ -61,7 +61,6 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
     private int _disposed;
 
-    /// <summary>Creates a Chroma transformer from configuration.</summary>
     public ChromaTransformer(ChromaConfig config)
     {
         _config = config;

@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS SLAT → Gaussian-splat VAE decoder (<c>slat_dec_gs_swin8_B_64l8gs32</c>): a plain sparse
-/// transformer (DiT-B, 12 blocks, swin window-8 attention, no modulation/cross-attn/qk-norm) → per-voxel
-/// 448-dim head = 32 gaussians × (xyz3 + features_dc3 + scaling3 + rotation4 + opacity1). Windowed attention is one
-/// masked dense SDPA over all voxels with a block-diagonal mask (attend within the same 8³ window; shift alternates
-/// 0/4 → two precomputed masks). B=1. All F32. See <c>docs/Research/TRELLIS_ARCHITECTURE.md</c>.</summary>
+/// <summary>TRELLIS SLAT → Gaussian-splat VAE decoder (<c>slat_dec_gs_swin8_B_64l8gs32</c>): a swin window-8 sparse transformer producing a per-voxel 448-dim head of 32 gaussians each.</summary>
 public sealed unsafe class SlatGaussianDecoder
 {
     private const int Width = 768, Heads = 12, HeadDim = 64, WindowSize = 8, OutCh = 448;
@@ -59,8 +55,7 @@ public sealed unsafe class SlatGaussianDecoder
         return h.Replace(outFeats);
     }
 
-    /// <summary>Block-diagonal attention mask <c>[1,1,N,N]</c>: 0 where two voxels share the same
-    /// <c>((coord+shift)/window)</c> cube, −1e30 otherwise (additive pre-softmax).</summary>
+    /// <summary>Block-diagonal attention mask <c>[1,1,N,N]</c>: 0 where two voxels share the same <c>((coord+shift)/window)</c> cube, −1e30 otherwise.</summary>
     private static Tensor WindowMask(IBackend backend, int[] coords, int n, int shift)
     {
         int[] wid = new int[n];
@@ -109,8 +104,7 @@ public sealed unsafe class SlatGaussianDecoder
     private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => SparseStructureFlow.F(w, k);
 }
 
-/// <summary>Non-modulated sparse transformer block: <c>norm1·windowed-SDPA·+x → norm2·tanh-GELU-MLP·+x</c>
-/// (norms non-affine eps 1e-6, no qk-norm).</summary>
+/// <summary>Non-modulated sparse transformer block: <c>norm1·windowed-SDPA·+x → norm2·tanh-GELU-MLP·+x</c>, both norms non-affine.</summary>
 internal sealed unsafe class GsBlock
 {
     private const int W = 768, H = 12, Hd = 64, Mlp = 3072;

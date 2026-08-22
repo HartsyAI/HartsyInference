@@ -25,9 +25,9 @@ public sealed class HiDreamRecipePipeline : IRecipePipeline
     private readonly HiDreamTransformer _transformer;
     private readonly List<SafeTensorsLoader> _loaders;
 
-    /// <summary>Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
     public HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

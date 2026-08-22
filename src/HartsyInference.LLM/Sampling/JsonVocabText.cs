@@ -3,9 +3,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Per-tokenizer cache of each vocab id's standalone decoded text, shared by every JSON-grammar
-/// sampler step (<see cref="JsonGrammarStep"/>, <see cref="SentinelJsonGrammarStep"/>) so the O(vocab size)
-/// decode pass happens once per loaded model, not once per request.</summary>
+/// <summary>Per-tokenizer cache of each vocab id's standalone decoded text, shared by every JSON-grammar sampler step (<see cref="JsonGrammarStep"/>, <see cref="SentinelJsonGrammarStep"/>) so the O(vocab size) decode pass happens once per loaded model, not once per request.</summary>
 internal static class JsonVocabText
 {
     private static readonly ConditionalWeakTable<ILlmTokenizer, string[]> Cache = new();

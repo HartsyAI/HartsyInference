@@ -4,13 +4,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>MiniMax Music 3's local language model: within one audio frame it autoregressively predicts the seven
-/// residual RVQ codebooks from the global language model's hidden state and the frame's semantic code, and exposes
-/// the per-step hidden states that condition the flow-matching stage.
-///
-/// <para>Steps are decoded against a <see cref="MiniMaxMusic3DepthCache"/> rather than by re-running the sequence
+/// <summary>MiniMax Music 3's local language model, which autoregressively predicts the seven residual RVQ codebooks within one audio frame and exposes the per-step hidden states that condition the flow-matching stage.</summary>
+/// <remarks>Steps are decoded against a <see cref="MiniMaxMusic3DepthCache"/> rather than by re-running the sequence
 /// per codebook as the reference does. It also owns the residual codebooks' embedding table, which the
-/// autoregressive loop uses to embed complete frames for the global model's feedback.</para></summary>
+/// autoregressive loop uses to embed complete frames for the global model's feedback.</remarks>
 public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 {
     /// <summary>RVQ layers: one semantic codebook plus seven residual ones.</summary>
@@ -19,8 +16,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
     /// <summary>Entries per residual codebook.</summary>
     public const int AudioVocabSize = 1024;
 
-    /// <summary>Longest depth sequence: the global hidden state, the frame's semantic code, and the six residual
-    /// codes that are fed back — the seventh is sampled from the last step and never re-enters.</summary>
+    /// <summary>Longest depth sequence: the global hidden state, the frame's semantic code, and the six residual codes that are fed back — the seventh is sampled from the last step and never re-enters.</summary>
     public const int MaxDepthSteps = NumCodebooks;
 
     private const int HiddenSize = 4096;
@@ -68,8 +64,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         }
     }
 
-    /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> through the shared input projection — the
-    /// depth sequence is built from these, both for the global hidden state and for each embedded code.</summary>
+    /// <summary>Projects <paramref name="hidden"/> <c>[rows, 4096]</c> through the shared input projection — the depth sequence is built from these, both for the global hidden state and for each embedded code.</summary>
     public Tensor Project(IBackend backend, Tensor hidden)
     {
         Tensor projected = new Tensor(hidden.Shape, DType.F32);
@@ -77,8 +72,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         return projected;
     }
 
-    /// <summary>Embeds residual code <paramref name="code"/> of codebook <paramref name="index"/> (1-based over the
-    /// residual books, matching <c>audio_heads[index-1]</c>) into <c>[1, 4096]</c>.</summary>
+    /// <summary>Embeds residual code <paramref name="code"/> of codebook <paramref name="index"/> (1-based over the residual books, matching <c>audio_heads[index-1]</c>) into <c>[1, 4096]</c>.</summary>
     public Tensor EmbedResidual(int index, int code)
     {
         Tensor embedded = new Tensor(new TensorShape(1, HiddenSize), DType.F32);
@@ -86,8 +80,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         return embedded;
     }
 
-    /// <summary>Adds the residual codebooks' embeddings for one complete frame into <paramref name="destination"/>
-    /// <c>[4096]</c>, the sum the global model's feedback embedding needs.</summary>
+    /// <summary>Adds the residual codebooks' embeddings for one complete frame into <paramref name="destination"/> <c>[4096]</c>, the sum the global model's feedback embedding needs.</summary>
     public void AccumulateFrameResiduals(ReadOnlySpan<int> frameCodes, Span<float> destination)
     {
         for (int index = 1; index < NumCodebooks; index++)
@@ -103,8 +96,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         return new MiniMaxMusic3DepthCache(NumLayers, batch * NumHeads, HeadDim, MaxDepthSteps);
     }
 
-    /// <summary>Appends <paramref name="sequence"/> <c>[batch, steps, 4096]</c> to <paramref name="cache"/> and
-    /// returns those steps' final-normed hidden states, same shape.</summary>
+    /// <summary>Appends <paramref name="sequence"/> <c>[batch, steps, 4096]</c> to <paramref name="cache"/> and returns those steps' final-normed hidden states, same shape.</summary>
     /// <remarks>The absolute position of each step is the cache's length plus its offset in the block, which is what
     /// lets the absolute position embedding be added here — it is applied to the INPUT, before layer 0, so a cached
     /// step only ever needs its own row.</remarks>
@@ -149,8 +141,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         return normed;
     }
 
-    /// <summary>Logits of residual codebook <paramref name="index"/> (1-based) for <paramref name="hidden"/>
-    /// <c>[rows, 4096]</c>.</summary>
+    /// <summary>Logits of residual codebook <paramref name="index"/> (1-based) for <paramref name="hidden"/> <c>[rows, 4096]</c>.</summary>
     public Tensor Head(IBackend backend, int index, Tensor hidden)
     {
         Tensor logits = new Tensor(new TensorShape((int)hidden.Shape[0], AudioVocabSize), DType.F32);

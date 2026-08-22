@@ -4,8 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>The CFM velocity estimator — the CosyVoice 2 / Matcha-TTS <c>ConditionalDecoder</c> (causal),
-/// reimplemented to match the real <c>flow.decoder.estimator</c> checkpoint. A 1-D U-Net with a single
+/// <summary>The CFM velocity estimator — the CosyVoice 2 / Matcha-TTS <c>ConditionalDecoder</c> (causal), reimplemented to match the real <c>flow.decoder.estimator</c> checkpoint.</summary>
+/// <remarks>A 1-D U-Net with a single
 /// resolution: pack <c>[x, μ, spk-broadcast, cond]</c> (4·80 = 320 ch) → 1 down block → 12 mid blocks →
 /// 1 up block (skip concat) → final block → final 1×1 proj to 80 mel channels. Each down/mid/up block is one
 /// <see cref="CausalResnet1D"/> (timestep-injected) followed by <see cref="MatchaTransformerBlock"/>×NumBlocks.
@@ -17,7 +17,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// into one of the other masks this checkpoint was actually trained on — CosyVoice2's flow model samples a
 /// mask (non-causal / full-causal / chunk-M / chunk-2M) per training batch specifically so a single trained
 /// checkpoint supports all of them at inference; this is exercising a real training-time mode, not an
-/// ad-hoc mask bolted onto an unmasked checkpoint.</para></summary>
+/// ad-hoc mask bolted onto an unmasked checkpoint.</para></remarks>
 public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
 {
     private readonly CosyVoiceFlowConfig _cfg;
@@ -211,9 +211,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         return outT;
     }
 
-    /// <summary>Packs <c>[x, μ, spk-broadcast, cond]</c> into <c>[1, 4·mel, T]</c> on the device: the speaker
-    /// vector <c>[1, mel, 1]</c> is time-broadcast via <see cref="IBackend.RepeatTime"/>, then all four
-    /// channel-first blocks are concatenated with <see cref="IBackend.Concat"/> — no host copies.</summary>
+    /// <summary>Packs <c>[x, μ, spk-broadcast, cond]</c> into <c>[1, 4·mel, T]</c> on the device: the speaker vector <c>[1, mel, 1]</c> is time-broadcast via <see cref="IBackend.RepeatTime"/>, then all four channel-first blocks are concatenated with <see cref="IBackend.Concat"/> — no host copies.</summary>
     private static Tensor PackInput(IBackend backend, Tensor x, Tensor mu, Tensor spk, Tensor cond, int mel, int t)
     {
         Tensor spkBroad = new(new TensorShape(1, mel, t), DType.F32);
@@ -251,8 +249,7 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
     }
 }
 
-/// <summary>CausalResnetBlock1D: <c>h = block1(x); h += Mish(time_emb)·mlp; h = block2(h);
-/// out = h + res_conv(x)</c>. block1/block2 are CausalConv1d → LayerNorm → Mish.</summary>
+/// <summary>CausalResnetBlock1D: <c>h = block1(x); h += Mish(time_emb)·mlp; h = block2(h); out = h + res_conv(x)</c>. block1/block2 are CausalConv1d → LayerNorm → Mish.</summary>
 internal sealed unsafe class CausalResnet1D
 {
     private readonly int _inCh, _outCh;
@@ -310,9 +307,7 @@ internal sealed unsafe class CausalResnet1D
     }
 }
 
-/// <summary>Matcha/diffusers BasicTransformerBlock (self-attention only): pre-LN self-attn (no qkv bias,
-/// out proj has bias, scale 1/√head_dim) + residual, then pre-LN GELU feed-forward + residual. Operates on
-/// <c>[1, T, C]</c>.</summary>
+/// <summary>Matcha/diffusers BasicTransformerBlock (self-attention only): pre-LN self-attn (no qkv bias, out proj has bias, scale 1/√head_dim) + residual, then pre-LN GELU feed-forward + residual. Operates on <c>[1, T, C]</c>.</summary>
 internal sealed unsafe class MatchaTransformerBlock
 {
     private readonly int _ch, _heads, _headDim, _inner;

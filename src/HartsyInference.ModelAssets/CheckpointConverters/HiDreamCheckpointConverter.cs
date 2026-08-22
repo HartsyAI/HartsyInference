@@ -4,10 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a HiDream i1 single-file safetensors checkpoint into transformer / VAE /
-/// CLIP-L / CLIP-G / T5-XXL / Llama-3.1 dictionaries. HiDream ships in canonical diffusers naming, so no
-/// key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into
-/// <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</summary>
+/// <summary>Loads + buckets a HiDream i1 single-file safetensors checkpoint into transformer / VAE / CLIP-L / CLIP-G / T5-XXL / Llama-3.1 dictionaries. HiDream ships in canonical diffusers naming, so no key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</summary>
 public sealed class HiDreamCheckpointConverter
 {
     /// <summary>Result of partitioning a HiDream i1 single-file checkpoint.</summary>

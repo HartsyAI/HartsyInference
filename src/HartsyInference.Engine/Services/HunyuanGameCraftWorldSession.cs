@@ -35,11 +35,7 @@ public sealed class HunyuanGameCraftWorldSession : IWorldSession
         "HunyuanVideoCheckpointConverter.ConvertVaeDecoder's AttnProj applies for the decoder has no encoder-side " +
         "counterpart wired up yet). See HunyuanGameCraftPipeline.CanEncodeReferenceFrame.";
 
-    /// <summary>Validates the request shape, then fails fast with <see cref="MissingVaeEncoderMessage"/> unless
-    /// <paramref name="pipeline"/> was built with a VAE encoder (never true for a <see cref="WorldService"/>-loaded
-    /// pipeline today). Parameters are accepted (rather than an argumentless constructor) so the shape matches
-    /// every other loaded world model's session — <see cref="WorldService.LoadHunyuanGameCraft"/> passes its real,
-    /// loaded components — and so a future VAE-encoder follow-up has everything it needs already threaded through.</summary>
+    /// <summary>Validates the request shape, then fails fast with <see cref="MissingVaeEncoderMessage"/> unless <paramref name="pipeline"/> was built with a VAE encoder (never true for a <see cref="WorldService"/>-loaded pipeline today). Parameters are accepted (rather than an argumentless constructor) so the shape matches every other loaded world model's session — <see cref="WorldService.LoadHunyuanGameCraft"/> passes its real, loaded components — and so a future VAE-encoder follow-up has everything it needs already threaded through.</summary>
     internal HunyuanGameCraftWorldSession(HunyuanGameCraftPipeline pipeline, LlamaStyleEncoder llava,
         ClipTextEncoder clipL, ClipTokenizer clipTokenizer, WorldRequest request)
     {

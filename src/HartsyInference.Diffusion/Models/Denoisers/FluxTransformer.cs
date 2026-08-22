@@ -50,7 +50,6 @@ public sealed unsafe class FluxTransformer : IDisposable
     private Tensor? _normOutLinearWeight, _normOutLinearBias;
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>Creates a Flux transformer from configuration.</summary>
     public FluxTransformer(FluxConfig config)
     {
         _config = config;
@@ -102,7 +101,6 @@ public sealed unsafe class FluxTransformer : IDisposable
                 $"[Flux] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0})");
         }
 
-        // Timestep embedding MLP
         _timestepLinear1Weight = weights["time_text_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear1Bias = weights["time_text_embed.timestep_embedder.linear_1.bias"];
         _timestepLinear2Weight = weights["time_text_embed.timestep_embedder.linear_2.weight"];
@@ -123,15 +121,12 @@ public sealed unsafe class FluxTransformer : IDisposable
             _guidanceLinear2Bias = weights["time_text_embed.guidance_embedder.linear_2.bias"];
         }
 
-        // Double-stream blocks
         for (int i = 0; i < _config.Depth; i++)
             _doubleBlocks[i].LoadWeights(weights, $"transformer_blocks.{i}", branchDamp);
 
-        // Single-stream blocks
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
             _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}", branchDamp);
 
-        // Final layer
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _normOutLinearBias = weights["norm_out.linear.bias"];
         _projOutWeight = weights["proj_out.weight"];

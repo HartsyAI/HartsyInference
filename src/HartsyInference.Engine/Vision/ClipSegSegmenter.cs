@@ -7,15 +7,13 @@ using HartsyInference.Vision.Segmentation;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Free-text segmentation with the pure-C# CLIPSeg (<c>clipseg-rd64-refined</c>): a soft [0,1] mask at 224²
-/// that is bilinearly upsampled to the source resolution and binarized at the request threshold.</summary>
+/// <summary>Free-text segmentation with the pure-C# CLIPSeg (<c>clipseg-rd64-refined</c>): a soft [0,1] mask at 224² that is bilinearly upsampled to the source resolution and binarized at the request threshold.</summary>
 public sealed class ClipSegSegmenter : IDisposable
 {
     private readonly Dictionary<string, ClipSegPipeline> _cache = new(StringComparer.Ordinal);
     private readonly object _lock = new();
 
-    /// <summary>Segments <paramref name="query"/> in <paramref name="image"/>, returning a source-resolution L8 mask
-    /// (255 = matched), or null when nothing scored above <paramref name="threshold"/>.</summary>
+    /// <summary>Segments <paramref name="query"/> in <paramref name="image"/>, returning a source-resolution L8 mask (255 = matched), or null when nothing scored above <paramref name="threshold"/>.</summary>
     public byte[]? Segment(IBackend backend, string modelDirectory, ImageData image, string query, float threshold)
     {
         ArgumentNullException.ThrowIfNull(image);

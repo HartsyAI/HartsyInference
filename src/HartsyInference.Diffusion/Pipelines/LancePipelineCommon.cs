@@ -156,10 +156,7 @@ public static unsafe class LancePipelineCommon
         }
     }
 
-    /// <summary>Folds 2-way CFG into <paramref name="cond"/> in place: <c>cond ← uncond + cfg·(cond − uncond)</c>.
-    /// Use this to produce the single combined velocity that a stateful scheduler (e.g.
-    /// <c>FlowUniPCMultistepScheduler</c>) steps with, instead of <see cref="EulerCfgStep"/> which combines and steps
-    /// in one pass.</summary>
+    /// <summary>Folds 2-way CFG into <paramref name="cond"/> in place: <c>cond ← uncond + cfg·(cond − uncond)</c>. Use this to produce the single combined velocity that a stateful scheduler (e.g. <c>FlowUniPCMultistepScheduler</c>) steps with, instead of <see cref="EulerCfgStep"/> which combines and steps in one pass.</summary>
     public static void CfgCombineInPlace(Tensor cond, Tensor uncond, float cfg)
     {
         long n = cond.Shape.ElementCount;
@@ -168,12 +165,7 @@ public static unsafe class LancePipelineCommon
         for (long i = 0; i < n; i++) c[i] = u[i] + cfg * (c[i] - u[i]);
     }
 
-    /// <summary>CFG with guidance-renormalization (Lin et al. 2023, "Common Diffusion Noise Schedules…"). Folds
-    /// <c>v_cfg = uncond + cfg·(cond − uncond)</c>, then rescales <c>v_cfg</c> so its mean+std match the raw
-    /// <b>conditional</b> prediction (which is on-distribution), blended by <paramref name="rescale"/> in [0,1].
-    /// Corrects the mean/std inflation that high CFG induces — the DC drift that turns fp8-quantized DiTs' output dark
-    /// at cfg≥5. <paramref name="rescale"/>=0 is byte-identical to plain <see cref="CfgCombineInPlace"/> (so fp16
-    /// models with the flag off are unchanged); ~0.7 tames the drift while preserving the guidance direction.</summary>
+    /// <summary>CFG with guidance-renormalization (Lin et al. 2023, "Common Diffusion Noise Schedules…"). Folds <c>v_cfg = uncond + cfg·(cond − uncond)</c>, then rescales <c>v_cfg</c> so its mean+std match the raw <b>conditional</b> prediction (which is on-distribution), blended by <paramref name="rescale"/> in [0,1]. Corrects the mean/std inflation that high CFG induces — the DC drift that turns fp8-quantized DiTs' output dark at cfg≥5. <paramref name="rescale"/>=0 is byte-identical to plain <see cref="CfgCombineInPlace"/> (so fp16 models with the flag off are unchanged); ~0.7 tames the drift while preserving the guidance direction.</summary>
     public static void CfgCombineRenormInPlace(Tensor cond, Tensor uncond, float cfg, float rescale)
     {
         if (rescale <= 0f) { CfgCombineInPlace(cond, uncond, cfg); return; }

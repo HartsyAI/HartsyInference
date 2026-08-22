@@ -4,10 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>ConvNeXt-V1-style 1D block used by both the acoustic and semantic VAE
-/// encoders, and by the acoustic decoder. Mirrors Python's <c>Block1D</c> in
-/// <c>modular_vibevoice_tokenizer.py</c>.
-///
+/// <summary>ConvNeXt-V1-style 1D block used by both the acoustic and semantic VAE encoders, and by the acoustic decoder; mirrors Python's <c>Block1D</c> in <c>modular_vibevoice_tokenizer.py</c>.</summary>
+/// <remarks>
 /// <para>Per-block forward (channels-first <c>[B, C, T]</c> throughout, transposing only
 /// inside the FFN):
 /// <code>
@@ -30,7 +28,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// </code></para>
 ///
 /// <para>FFN expansion is 4× across all official checkpoints. Layer scale γ initializes
-/// to 1e-6 — at inference we just load the trained value.</para></summary>
+/// to 1e-6 — at inference we just load the trained value.</para></remarks>
 internal sealed unsafe class VibeVoiceConvNeXtBlock
 {
     private readonly string _prefix;
@@ -78,12 +76,8 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
         _mixer.LoadWeights(w, $"{_prefix}.mixer.conv");
     }
 
-    /// <summary>Forward — <paramref name="x"/> is <c>[batch, dim, t]</c> channels-first.
-    /// Returns a freshly-allocated <c>[batch, dim, t]</c> tensor. Caller owns disposal of
-    /// the returned tensor; the input is NOT disposed.
-    ///
-    /// <para>When <paramref name="cache"/> is non-null the mixer runs in streaming mode
-    /// (depthwise conv keeps a per-(layer, sample) history). Non-streaming when null.</para></summary>
+    /// <summary>Forward on <paramref name="x"/> <c>[batch, dim, t]</c> channels-first; streams via the mixer when <paramref name="cache"/> is non-null (per-(layer, sample) depthwise-conv history), otherwise non-streaming.</summary>
+    /// <returns>A freshly-allocated <c>[batch, dim, t]</c> tensor; caller owns disposal, the input is NOT disposed.</returns>
     public Tensor Forward(IBackend backend, Tensor x, int batch, int t,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {

@@ -128,8 +128,7 @@ public sealed class ModelRegistry : IDisposable
         }
     }
 
-    /// <summary>Downloads the preferred safetensors variant of <paramref name="repoId"/> into the cache
-    /// (skipping if already present) and returns the local file path.</summary>
+    /// <summary>Downloads the preferred safetensors variant of <paramref name="repoId"/> into the cache (skipping if already present) and returns the local file path.</summary>
     private static async Task<string> EnsureDownloadedAsync(
         string repoId, ModelCacheStore cache, HuggingFaceClient hub, IProgress<double>? progress, CancellationToken ct)
     {
@@ -257,7 +256,6 @@ public sealed class ModelRegistry : IDisposable
 /// <summary>A model that is currently loaded in memory with its tensor weights.</summary>
 public sealed class LoadedModel
 {
-    /// <summary>Model metadata.</summary>
     public required ModelInfo Info { get; init; }
 
     /// <summary>Tensor name → weight data mapping.</summary>

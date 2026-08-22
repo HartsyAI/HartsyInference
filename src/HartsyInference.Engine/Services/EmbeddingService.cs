@@ -7,17 +7,12 @@ using HartsyInference.LLM.Embeddings;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Decoder-LLM-backed text embeddings (Qwen3-Embedding, gte-Qwen2, e5-mistral, LLM2Vec, …) — reuses the
-/// same GGUF-loading + tokenizer pipeline chat models use, via <see cref="DecoderEmbeddingModel"/>. BERT-family
-/// encoders (bge/gte/nomic) are NOT wired here: they need a WordPiece tokenizer this service doesn't have
-/// (<see cref="HartsyInference.LLM.Embeddings.BertEmbeddingModel"/> exists but isn't reachable from any service
-/// yet) — a separate, later scope.</summary>
+/// <summary>Decoder-LLM-backed text embeddings (Qwen3-Embedding, gte-Qwen2, e5-mistral, LLM2Vec, …) — reuses the same GGUF-loading + tokenizer pipeline chat models use, via <see cref="DecoderEmbeddingModel"/>. BERT-family encoders (bge/gte/nomic) are NOT wired here: they need a WordPiece tokenizer this service doesn't have (<see cref="HartsyInference.LLM.Embeddings.BertEmbeddingModel"/> exists but isn't reachable from any service yet) — a separate, later scope.</summary>
 public sealed class EmbeddingService : IEmbeddingService, IDisposable
 {
     private readonly InferenceEngine _engine;
 
-    /// <summary>One loaded model per resolved checkpoint path — a much lighter cache than the audio/diffusion
-    /// pipelines' since a GGUF embedding load is a single synchronous file read, not a multi-asset async build.</summary>
+    /// <summary>One loaded model per resolved checkpoint path — a much lighter cache than the audio/diffusion pipelines' since a GGUF embedding load is a single synchronous file read, not a multi-asset async build.</summary>
     private readonly ConcurrentDictionary<string, DecoderEmbeddingModel> _models = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -65,9 +60,7 @@ public sealed class EmbeddingService : IEmbeddingService, IDisposable
         return Task.FromResult(new EmbeddingResult { Vectors = vectors, Dimensions = model.Hidden, TotalTokens = totalTokens });
     }
 
-    /// <summary>Releases every cached model — called from <c>InferenceEngine.ReleaseLoaded</c> alongside the
-    /// other lazily-constructed services, so a backend switch/free-memory doesn't leave a model bound to a
-    /// disposed device.</summary>
+    /// <summary>Releases every cached model — called from <c>InferenceEngine.ReleaseLoaded</c> alongside the other lazily-constructed services, so a backend switch/free-memory doesn't leave a model bound to a disposed device.</summary>
     public void Dispose()
     {
         foreach (DecoderEmbeddingModel model in _models.Values)

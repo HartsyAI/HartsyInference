@@ -364,11 +364,6 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
-    /// <summary>qkv projection, per-head q/k RMS norm, partial split-half rope, attention, output projection.
-    /// q/k/v are allocated head-major <c>[1, heads, seq, headDim]</c> up front so the fused split+norm, the in-place
-    /// rope and SDPA all consume them directly — only the attention output needs a permute back.
-    /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
-    /// would only add casts around them. Only the projection's input and output ride the body-dtype residual stream.</summary>
     /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
     /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
     /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
@@ -401,6 +396,11 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Logs.Warning($"[h3-vprobe] {prefix}: max|V|={mx:G6} ({verdict}), nonfinite={bad}, n={n}");
     }
 
+    /// <summary>qkv projection, per-head q/k RMS norm, partial split-half rope, attention, output projection.
+    /// q/k/v are allocated head-major <c>[1, heads, seq, headDim]</c> up front so the fused split+norm, the in-place
+    /// rope and SDPA all consume them directly — only the attention output needs a permute back.
+    /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
+    /// would only add casts around them. Only the projection's input and output ride the body-dtype residual stream.</summary>
     private Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin)
     {
         int seq = (int)x.Shape[0];

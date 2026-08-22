@@ -3,7 +3,7 @@ namespace HartsyInference.Diffusion.Schedulers;
 /// <summary>Computes beta, alpha, and cumulative alpha schedules shared by all diffusion schedulers.</summary>
 public static class NoiseSchedule
 {
-    /// <summary>Computes the beta schedule for the given config.</summary>
+    /// <summary>Linear or, for <see cref="BetaScheduleType.ScaledLinear"/>, sqrt-interpolated-then-squared beta schedule, per <see cref="SchedulerConfig.BetaSchedule"/>.</summary>
     public static float[] ComputeBetas(SchedulerConfig config)
     {
         float[] betas = new float[config.NumTrainTimesteps];
@@ -46,7 +46,7 @@ public static class NoiseSchedule
         return alphas;
     }
 
-    /// <summary>Computes cumulative product of alphas.</summary>
+    /// <summary>Running product <c>ᾱ_i = Π(alphas[0..i])</c>.</summary>
     public static float[] ComputeAlphasCumprod(float[] alphas)
     {
         float[] alphasCumprod = new float[alphas.Length];

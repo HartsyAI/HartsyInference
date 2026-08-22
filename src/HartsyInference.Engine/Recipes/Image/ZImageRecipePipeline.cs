@@ -46,9 +46,9 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     private int[]? _cachedNegativeKey;
     private Tensor? _cachedNegative;
 
-    /// <summary>Wraps the constructed Z-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Z-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
         ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder,
         Tensor[] transformerWeightTensors, Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights,

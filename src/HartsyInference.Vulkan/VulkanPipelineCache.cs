@@ -14,8 +14,7 @@ public sealed class VulkanPipelineCache : IDisposable
 
     public ulong Handle => _handle;
 
-    /// <summary>Filesystem path of the on-disk pipeline-cache blob (set at construction). Exposed so
-    /// tests can verify persist+reload behavior across backend instances.</summary>
+    /// <summary>Filesystem path of the on-disk pipeline-cache blob (set at construction). Exposed so tests can verify persist+reload behavior across backend instances.</summary>
     public string CachePath => _cachePath;
 
     public VulkanPipelineCache(nint device, VulkanCapabilities caps)

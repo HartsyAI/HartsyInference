@@ -14,13 +14,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Hunyuan Image 2.1 text-to-image pipeline. The transformer takes per-token text embeddings
-/// at 3584-dim (Qwen2.5-VL-7B hidden) plus an optional 1472-dim secondary stream (ByT5 in the upstream
-/// model). Conditioning is driven by the timestep + optional distilled-guidance embedding — there is no
-/// pooled-conditioning path, so the CLIP encoder constructor parameter is accepted for API compatibility
-/// but unused. The pipeline patchifies the latent before the transformer call (<c>patch_size</c> from
-/// config) and unpatchifies after, then VAE-decodes through the 32-channel Hunyuan VAE.
-///
+/// <summary>Hunyuan Image 2.1 text-to-image pipeline. The transformer takes per-token text embeddings at 3584-dim (Qwen2.5-VL-7B hidden) plus an optional 1472-dim secondary stream (ByT5 in the upstream model). Conditioning is driven by the timestep + optional distilled-guidance embedding — there is no pooled-conditioning path, so the CLIP encoder constructor parameter is accepted for API compatibility but unused. The pipeline patchifies the latent before the transformer call (<c>patch_size</c> from config) and unpatchifies after, then VAE-decodes through the 32-channel Hunyuan VAE.
 /// <para>Two text-encode paths: the primary <see cref="HunyuanImageQwenTextEncoder"/> path matching the
 /// upstream model (template → pad 1034 → <c>hidden_states[-3]</c> → drop the 34-token prefix), and a
 /// legacy CLIP-L + T5-XXL constructor kept for repackaged checkpoints that bundle those encoders.
@@ -33,23 +27,17 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly T5TextEncoder? _t5Encoder;
     private readonly HunyuanImageQwenTextEncoder? _qwenEncoder;
     private readonly HunyuanImageTransformer _transformer;
-    /// <summary>Optional encoder half (configure with <c>VaeConfig.HunyuanImage</c> — its 6-stage block list gives the
-    /// 32x downscale this family needs). Required for img2img; an <see cref="ImageToImageRequest"/> without it throws.
-    /// Set through an initializer rather than a fourth constructor overload, matching how the backends are supplied.</summary>
+    /// <summary>Optional encoder half (configure with <c>VaeConfig.HunyuanImage</c> — its 6-stage block list gives the 32x downscale this family needs). Required for img2img; an <see cref="ImageToImageRequest"/> without it throws. Set through an initializer rather than a fourth constructor overload, matching how the backends are supplied.</summary>
     public VaeEncoder? VaeEncoder { get; init; }
 
-    /// <summary>The bespoke 2.1 pixel-shuffle encoder — the img2img/inpaint unlock. Takes priority over
-    /// <see cref="VaeEncoder"/> (which the generic loader cannot build for this VAE anyway).</summary>
+    /// <summary>The bespoke 2.1 pixel-shuffle encoder — the img2img/inpaint unlock. Takes priority over <see cref="VaeEncoder"/> (which the generic loader cannot build for this VAE anyway).</summary>
     public HunyuanImageVaeEncoder? HyVaeEncoder { get; init; }
 
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen
-    /// re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under
-    /// this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline
-    /// staging pattern). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline staging pattern). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -86,10 +74,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Legacy/fallback constructor using CLIP-L + T5-XXL (repackaged checkpoints).
-    /// <paramref name="clipEncoder"/> is accepted for API compatibility but not consumed — Hunyuan's
-    /// pooled-conditioning path is replaced by the timestep + distilled-guidance embedding inside the
-    /// transformer.</summary>
+    /// <summary>Legacy/fallback constructor using CLIP-L + T5-XXL (repackaged checkpoints). <paramref name="clipEncoder"/> is accepted for API compatibility but not consumed — Hunyuan's pooled-conditioning path is replaced by the timestep + distilled-guidance embedding inside the transformer.</summary>
     public HunyuanImagePipeline(IBackend backend, ClipTextEncoder? clipEncoder, T5TextEncoder t5Encoder,
         HunyuanImageTransformer transformer, VaeDecoder vaeDecoder, HunyuanImageConfig config)
         : base(backend)
@@ -101,10 +86,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image via the primary Qwen2.5-VL path. Token ids come from
-    /// <c>Qwen2Tokenizer.EncodeChat(prompt, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt,
-    /// addGenerationPrompt: false)</c> padded to <see cref="HunyuanImageQwenTextEncoder.PaddedLength"/>
-    /// with matching attention masks. Negative inputs may be null when CFG is off (cfg ≤ 1).</summary>
+    /// <summary>Generates an image via the primary Qwen2.5-VL path. Token ids come from <c>Qwen2Tokenizer.EncodeChat(prompt, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt, addGenerationPrompt: false)</c> padded to <see cref="HunyuanImageQwenTextEncoder.PaddedLength"/> with matching attention masks. Negative inputs may be null when CFG is off (cfg ≤ 1).</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsQwen,
         int[] promptAttentionMaskQwen,
@@ -185,9 +167,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return Denoise(cond, uncond, request, seed, textOwned: false, onProgress);
     }
 
-    /// <summary>Generates an image from pre-tokenized input via the legacy CLIP+T5 path. CLIP token args
-    /// are unused (kept for signature stability); the T5 encoder produces per-token context fed to the
-    /// transformer.</summary>
+    /// <summary>Generates an image from pre-tokenized input via the legacy CLIP+T5 path. CLIP token args are unused (kept for signature stability); the T5 encoder produces per-token context fed to the transformer.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsClip,
         int[] negativePromptTokenIdsClip,
@@ -236,12 +216,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return Denoise(cond, uncond, request, seed, textOwned: true, onProgress);
     }
 
-    /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop
-    /// (patchify once, in-place device <c>CfgEulerStep</c> per step, one unpatchify at the end via the device
-    /// <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip —
-    /// token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space
-    /// Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the
-    /// conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
+    /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop (patchify once, in-place device <c>CfgEulerStep</c> per step, one unpatchify at the end via the device <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip — token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
     private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
         TextToImageRequest request, int seed, bool textOwned, Action<GenerationProgress>? onProgress)
     {
@@ -543,19 +518,14 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Routes the per-step forward to <see cref="HunyuanImageTransformer.ForwardSharded"/> when DiT
-    /// sharding is configured and the plain <see cref="HunyuanImageTransformer.Forward"/> otherwise, keeping the
-    /// denoise-loop body identical either way. The ByT5 glyph stream is not wired yet, so both paths pass a null
-    /// <c>encoderHidden2</c>.</summary>
+    /// <summary>Routes the per-step forward to <see cref="HunyuanImageTransformer.ForwardSharded"/> when DiT sharding is configured and the plain <see cref="HunyuanImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way. The ByT5 glyph stream is not wired yet, so both paths pass a null <c>encoderHidden2</c>.</summary>
     private Tensor RunForward(Tensor latentTokens, Tensor text, float t, float guidance, int hPacked, int wPacked) =>
         DitShardBackend is not null
             ? _transformer.ForwardSharded(Backend, DitShardBackend, latentTokens, text, encoderHidden2: null,
                 t, guidance, hPacked, wPacked, DitShardSplitBlock)
             : _transformer.Forward(Backend, latentTokens, text, encoderHidden2: null, t, guidance, hPacked, wPacked);
 
-    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
-    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's
-    /// block range (frees are per-backend) and leak it every non-resident generation.</summary>
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's block range (frees are per-backend) and leak it every non-resident generation.</summary>
     private void FreeTransformerWeights()
     {
         if (DitShardBackend is not null)
@@ -571,12 +541,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         _ditResident = false;
     }
 
-    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the DiT
-    /// weights, so the resident-vs-stream decision and the prefetch depth can never disagree. The deepest valley
-    /// is a single-stream block holding the joint <c>[img,txt]</c> stream, the modulated copy, Q/K/V both pre- and
-    /// post-permute, and the parallel MLP branch (proj + activated + the feature-dim concat) at once. Everything
-    /// is F32: this transformer deliberately does not opt into the shared 16-bit hot path (its Qwen2.5-VL text
-    /// stream overflows F16 — see the comment in <see cref="HunyuanImageTransformer.Forward"/>). Sized for B=1.
+    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the DiT weights, so the resident-vs-stream decision and the prefetch depth can never disagree. The deepest valley is a single-stream block holding the joint <c>[img,txt]</c> stream, the modulated copy, Q/K/V both pre- and post-permute, and the parallel MLP branch (proj + activated + the feature-dim concat) at once. Everything is F32: this transformer deliberately does not opt into the shared 16-bit hot path (its Qwen2.5-VL text stream overflows F16 — see the comment in <see cref="HunyuanImageTransformer.Forward"/>). Sized for B=1.
     /// <para>Kept private rather than shared with <c>FluxPipeline</c>'s equivalent: the tensor inventory and the
     /// activation dtype are both per-architecture, and the two would only diverge if merged.</para></summary>
     private static long EstimateActivationReserveBytes(int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
@@ -624,8 +589,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return total;
     }
 
-    /// <summary>Patchifies <c>[B, C, H, W]</c> -&gt; <c>[B, S, p²·C]</c> with channel-outer ordering inside each patch
-    /// (matches the diffusers <c>einops.rearrange("B C (H p) (W q) -&gt; B (H W) (p q C)")</c>).</summary>
+    /// <summary>Patchifies <c>[B, C, H, W]</c> -&gt; <c>[B, S, p²·C]</c> with channel-outer ordering inside each patch (matches the diffusers <c>einops.rearrange("B C (H p) (W q) -&gt; B (H W) (p q C)")</c>).</summary>
     private static Tensor PatchifyLatent(Tensor latent, int channels, int height, int width, int patch)
     {
         int batch = (int)latent.Shape[0];

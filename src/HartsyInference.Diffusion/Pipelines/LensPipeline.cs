@@ -13,7 +13,6 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>Microsoft Lens text-to-image pipeline (`microsoft/Lens` RL-tuned, `microsoft/Lens-Turbo` 4-step distilled, `microsoft/Lens-Base` SFT-only). Like <see cref="Kandinsky5Pipeline"/> this pipeline only handles the diffusion side — the GPT-OSS MoE text encoder is not yet implemented as a HartsyInference text encoder. Callers must pre-compute the four multi-layer hidden-state captures (at layers 5/11/17/23 of GPT-OSS, each <c>[B, S_txt, 2880]</c>) plus their negative-prompt counterparts; this matches diffusers' <c>LensPipeline.__call__(prompt_embeds=, negative_prompt_embeds=, ...)</c> escape hatch. Once a GPT-OSS MoE encoder lands in HartsyInference the pipeline can grow a tokenizer-fed overload without touching the denoising path.
-///
 /// <para><b>Distinguishing details vs Flux/SD3/Qwen-Image pipelines:</b></para>
 /// <list type="bullet">
 /// <item><b>Empirical-mu shift schedule.</b> <c>mu = compute_empirical_mu(seq_len, num_steps)</c> per upstream's piecewise-linear calibration constants (a1/b1/a2/b2). Sigmas are <c>linspace(1.0, 1.0/N, N)</c> with a 0 appended at the end (matches diffusers' <c>FlowMatchEulerDiscreteScheduler.set_timesteps(sigmas=..., mu=...)</c>). The <c>time_shift(mu, 1, sigma) = exp(mu) / (exp(mu) + (1/sigma - 1))</c> form is algebraically identical to the existing C# scheduler's <c>shift * sigma / (1 + (shift - 1) * sigma)</c> when <c>shift = exp(mu)</c> — so we set the scheduler's shift parameter directly.</item>
@@ -23,8 +22,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// </list></summary>
 public sealed unsafe class LensPipeline : DiffusionPipelineBase
 {
-    /// <summary>Strict opt-in (<c>LENS_DEBUG_STATS=1</c>) for the per-step D2H-sync/latency line. Off by default so
-    /// nothing in the loop is tempted to read a <c>DataPointer</c> on a real run.</summary>
+    /// <summary>Strict opt-in (<c>LENS_DEBUG_STATS=1</c>) for the per-step D2H-sync/latency line. Off by default so nothing in the loop is tempted to read a <c>DataPointer</c> on a real run.</summary>
     private static readonly bool DiagnosticStats = Environment.GetEnvironmentVariable("LENS_DEBUG_STATS") == "1";
 
     /// <summary>Upstream's <c>max(||comb||, 1e-12)</c> floor on the per-token combined norm.</summary>
@@ -32,8 +30,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
 
     private readonly LensTransformer _transformer;
     private readonly LensGptOssEncoder? _textEncoder;
-    /// <summary>Optional encoder half (configure with <c>VaeConfig.Flux2</c> — Lens reuses that VAE verbatim).
-    /// Required for img2img; supplied through an initializer rather than a third constructor overload.</summary>
+    /// <summary>Optional encoder half (configure with <c>VaeConfig.Flux2</c> — Lens reuses that VAE verbatim). Required for img2img; supplied through an initializer rather than a third constructor overload.</summary>
     public VaeEncoder? VaeEncoder { get; init; }
 
     private readonly VaeDecoder _vaeDecoder;
@@ -47,16 +44,14 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     private Tensor? _rescaleOnes;
     private Tensor? _rescaleChannelMean;
 
-    /// <summary>Creates a Lens pipeline without an attached text encoder. Use this when callers will
-    /// supply pre-computed multi-layer text embeddings via <see cref="GenerateFromEmbeddings"/>.</summary>
+    /// <summary>Creates a Lens pipeline without an attached text encoder. Use this when callers will supply pre-computed multi-layer text embeddings via <see cref="GenerateFromEmbeddings"/>.</summary>
     public LensPipeline(IBackend backend, LensTransformer transformer, VaeDecoder vaeDecoder,
         Tensor bnMean, Tensor bnVar, LensConfig config, float bnEps = 1e-5f)
         : this(backend, transformer, textEncoder: null, vaeDecoder, bnMean, bnVar, config, bnEps)
     {
     }
 
-    /// <summary>Creates a Lens pipeline with an attached <see cref="LensGptOssEncoder"/>. Required
-    /// for the tokenizer-fed <see cref="GenerateFromTokens"/> overload.</summary>
+    /// <summary>Creates a Lens pipeline with an attached <see cref="LensGptOssEncoder"/>. Required for the tokenizer-fed <see cref="GenerateFromTokens"/> overload.</summary>
     public LensPipeline(IBackend backend, LensTransformer transformer,
         LensGptOssEncoder? textEncoder, VaeDecoder vaeDecoder,
         Tensor bnMean, Tensor bnVar, LensConfig config, float bnEps = 1e-5f)
@@ -71,15 +66,9 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from chat-templated token id arrays. Runs the
-    /// <see cref="LensGptOssEncoder"/> on the positive prompt (and on the negative when
-    /// <c>request.CfgScale &gt; 1</c>), then delegates to <see cref="GenerateFromEmbeddings"/>. Frees
-    /// the encoder's GPU weights after the encode pass so the DiT has maximum VRAM available — same
-    /// pattern as <see cref="Flux2Pipeline"/> / <see cref="Sd3Pipeline"/>.</summary>
-    /// <param name="positiveTokenIds">Chat-templated tokens for the positive prompt (rendered by
-    /// <see cref="HartsyInference.ModelAssets.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
-    /// <param name="negativeTokenIds">Chat-templated tokens for the negative prompt. Required when
-    /// <c>request.CfgScale &gt; 1.0</c>; pass <c>null</c> when CFG is disabled (Lens-Turbo).</param>
+    /// <summary>Generates an image from chat-templated token id arrays. Runs the <see cref="LensGptOssEncoder"/> on the positive prompt (and on the negative when <c>request.CfgScale &gt; 1</c>), then delegates to <see cref="GenerateFromEmbeddings"/>. Frees the encoder's GPU weights after the encode pass so the DiT has maximum VRAM available — same pattern as <see cref="Flux2Pipeline"/> / <see cref="Sd3Pipeline"/>.</summary>
+    /// <param name="positiveTokenIds">Chat-templated tokens for the positive prompt (rendered by <see cref="HartsyInference.ModelAssets.Tokenizers.GptOssTokenizer.BuildChatInputs"/>).</param>
+    /// <param name="negativeTokenIds">Chat-templated tokens for the negative prompt. Required when <c>request.CfgScale &gt; 1.0</c>; pass <c>null</c> when CFG is disabled (Lens-Turbo).</param>
     /// <param name="request">Generation parameters.</param>
     /// <param name="onProgress">Optional per-step progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
@@ -511,8 +500,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         return packed;
     }
 
-    /// <summary>2x2 spatial patchify: <c>[B, C, H*2, W*2] -> [B, C*4, H, W]</c> — the inverse of
-    /// <see cref="UnpatchifyLatent"/>, so a source latent enters the loop in the layout the DiT emits.</summary>
+    /// <summary>2x2 spatial patchify: <c>[B, C, H*2, W*2] -> [B, C*4, H, W]</c> — the inverse of <see cref="UnpatchifyLatent"/>, so a source latent enters the loop in the layout the DiT emits.</summary>
     private static Tensor PatchifyLatent(Tensor input, int outChannels, int patchSize)
     {
         int batch = (int)input.Shape[0];
@@ -549,8 +537,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>BN normalize on the 128-channel patchified latent: <c>z = (z - mean) / sqrt(var + eps)</c> per channel —
-    /// the inverse of <see cref="ApplyBnUnNormalize"/>.</summary>
+    /// <summary>BN normalize on the 128-channel patchified latent: <c>z = (z - mean) / sqrt(var + eps)</c> per channel — the inverse of <see cref="ApplyBnUnNormalize"/>.</summary>
     private static Tensor ApplyBnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
     {
         int batch = (int)latent.Shape[0];

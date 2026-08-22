@@ -3,12 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>NCCL-backed <see cref="ICollectiveComm"/>: one communicator per rank via <c>ncclCommInitAll</c>
-/// (single-process, one driving thread), collectives issued inside a NCCL group on each rank backend's
-/// compute stream, then stream-synced. Requires one DISTINCT CUDA device per rank — NCCL auto-selects the
-/// transport per pair (NVLink → PCIe P2P → SHM), so this works on the no-P2P consumer box too.
-/// Construct via <see cref="CollectiveComm.Create"/>, which falls back to <see cref="HostStagedComm"/> when
-/// NCCL is unavailable.</summary>
+/// <summary>NCCL-backed <see cref="ICollectiveComm"/>: one communicator per rank via <c>ncclCommInitAll</c> (single-process, one driving thread), collectives issued inside a NCCL group on each rank backend's compute stream, then stream-synced. Requires one DISTINCT CUDA device per rank — NCCL auto-selects the transport per pair (NVLink → PCIe P2P → SHM), so this works on the no-P2P consumer box too. Construct via <see cref="CollectiveComm.Create"/>, which falls back to <see cref="HostStagedComm"/> when NCCL is unavailable.</summary>
 public sealed unsafe class NcclComm : ICollectiveComm
 {
     private readonly CudaBackend[] _backends;

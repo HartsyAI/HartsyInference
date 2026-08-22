@@ -16,16 +16,11 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed LTX-Video pipeline driven against the native <see cref="VideoRequest"/>. Encodes the prompt
-/// pair with T5-XXL (zeroing the rows past the real tokens — the engine's LTX path has no context attention mask) and
-/// feeds <see cref="VideoRequest.Fps"/> to the pipeline itself, which uses it for RoPE interpolation the same way
-/// Comfy injects <c>LTXVConditioning.frame_rate</c>. Mirrors the SwarmUI backend's <c>LtxVideoLoader.Generate</c>.</summary>
+/// <summary>A constructed LTX-Video pipeline driven against the native <see cref="VideoRequest"/>. Encodes the prompt pair with T5-XXL (zeroing the rows past the real tokens — the engine's LTX path has no context attention mask) and feeds <see cref="VideoRequest.Fps"/> to the pipeline itself, which uses it for RoPE interpolation the same way Comfy injects <c>LTXVConditioning.frame_rate</c>. Mirrors the SwarmUI backend's <c>LtxVideoLoader.Generate</c>.</summary>
 public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
 {
     private readonly IBackend _backend;
-    /// <summary>Backend the T5-XXL prompt encoder runs on — separable from <see cref="_backend"/> because the
-    /// embeddings are host-materialized (SliceBatchElementPrefix is a host loop) before the denoiser consumes
-    /// them, so moving the ~5 GB encoder off the denoiser GPU costs nothing.</summary>
+    /// <summary>Backend the T5-XXL prompt encoder runs on — separable from <see cref="_backend"/> because the embeddings are host-materialized (SliceBatchElementPrefix is a host loop) before the denoiser consumes them, so moving the ~5 GB encoder off the denoiser GPU costs nothing.</summary>
     private readonly IBackend _textBackend;
     /// <summary>Backend <see cref="_vaeEncoder"/> (Tier 3.4 I2V) runs on — same device the VAE decoder uses.</summary>
     private readonly IBackend _vaeBackend;
@@ -34,15 +29,12 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     private readonly T5Tokenizer _tokenizer;
     private readonly T5TextEncoder _t5;
     private readonly LtxVideoTransformer _transformer;
-    /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only —
-    /// see <see cref="LtxVideoRecipe.SupportsFor"/>); <see cref="Generate"/> refuses an init image in that case
-    /// via <c>VideoService.RejectUnsupported</c> before this pipeline is even reached.</summary>
+    /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only — see <see cref="LtxVideoRecipe.SupportsFor"/>); <see cref="Generate"/> refuses an init image in that case via <c>VideoService.RejectUnsupported</c> before this pipeline is even reached.</summary>
     private readonly LtxVideoVaeEncoder? _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
-    /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable.
-    /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
+    /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable. <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, LtxVideoPipeline pipeline, LtxVideoConfig config,
         T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {

@@ -809,12 +809,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         return (frames, pixW, pixH, seed);
     }
 
-    /// <summary>Builds the <c>[1, tp+z, T, H, W]</c> I2V conditioning <c>[mask(tp), cond-latent(z)]</c>: the VAE-encoded
-    /// first frame occupies latent frame 0 (and <paramref name="frameLast"/>, when given, the last latent frame for
-    /// first-last-frame I2V), the rest are zero; the mask channels are 1 on the known frame(s) and 0 elsewhere — a
-    /// structural stand-in for diffusers' temporal mask interleave (validation-gated).</summary>
-    /// <summary>Padded conditioning pixel clip <c>[1, 3, numFrames, H, W]</c> in [-1, 1]: frame 0 = the init image,
-    /// middle frames = mid-gray (0), last frame = <paramref name="lastRgb24"/> when present (FLF2V).</summary>
+    /// <summary>Padded conditioning pixel clip <c>[1, 3, numFrames, H, W]</c> in [-1, 1]: frame 0 = the init image, middle frames = mid-gray (0), last frame = <paramref name="lastRgb24"/> when present (FLF2V).</summary>
     private static Tensor BuildCondClip(ReadOnlySpan<byte> condRgb24, byte[]? lastRgb24, int width, int height, int numFrames)
     {
         Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, height, width]), DType.F32);
@@ -835,6 +830,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         return clip;
     }
 
+    /// <summary>Builds the <c>[1, tp+z, T, H, W]</c> I2V conditioning <c>[mask(tp), cond-latent(z)]</c>: the VAE-encoded first frame occupies latent frame 0 (and, when <paramref name="hasLastFrame"/>, the last latent frame for first-last-frame I2V), the rest are zero; the mask channels are 1 on the known frame(s) and 0 elsewhere — a structural stand-in for diffusers' temporal mask interleave (validation-gated).</summary>
     private static Tensor BuildI2VCondition(Tensor condLatent, bool hasLastFrame, int latentCh, int temporalFactor,
         int tLat, int hLat, int wLat)
     {

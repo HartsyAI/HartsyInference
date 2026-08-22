@@ -6,12 +6,7 @@ using HartsyInference.World.Pipelines;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>A world session over DIAMOND. Unlike <see cref="OasisWorldSession"/>, this is a genuinely
-/// per-frame-interactive loop: each queued action produces exactly one real <see cref="DiamondWorldPipeline.GenerateNextFrame"/>
-/// call (a full EDM sample), not a fixed-size batch. <see cref="SendAction"/> queues one action; <see cref="StreamAsync"/>
-/// drains the queue one action at a time, rolling the conditioning history forward after each frame (mirrors
-/// <c>DiamondGenPerfTests.Roll</c>). The session owns its history/seed state; the pipeline stays owned by the service
-/// that handed it over.</summary>
+/// <summary>A world session over DIAMOND. Unlike <see cref="OasisWorldSession"/>, this is a genuinely per-frame-interactive loop: each queued action produces exactly one real <see cref="DiamondWorldPipeline.GenerateNextFrame"/> call (a full EDM sample), not a fixed-size batch. <see cref="SendAction"/> queues one action; <see cref="StreamAsync"/> drains the queue one action at a time, rolling the conditioning history forward after each frame (mirrors <c>DiamondGenPerfTests.Roll</c>). The session owns its history/seed state; the pipeline stays owned by the service that handed it over.</summary>
 public sealed unsafe class DiamondWorldSession : IWorldSession
 {
     private readonly DiamondWorldPipeline _pipeline;
@@ -22,8 +17,7 @@ public sealed unsafe class DiamondWorldSession : IWorldSession
     private int _emitted;
     private bool _disposed;
 
-    /// <summary>Creates a session seeded by <paramref name="request"/>'s first frame, replicated across the
-    /// conditioning window (DIAMOND has no shorter real history to bootstrap from one image).</summary>
+    /// <summary>Creates a session seeded by <paramref name="request"/>'s first frame, replicated across the conditioning window (DIAMOND has no shorter real history to bootstrap from one image).</summary>
     internal DiamondWorldSession(DiamondWorldPipeline pipeline, WorldRequest request)
     {
         ImageData init = request.InitImage
@@ -81,8 +75,7 @@ public sealed unsafe class DiamondWorldSession : IWorldSession
         Buffer.MemoryCopy((float*)next.DataPointer, dst + (long)c * (k - 1) * size * size, frameLen * sizeof(float), frameLen * sizeof(float));
     }
 
-    /// <summary>Parses an action token into a discrete Atari action id: a raw integer in range, one of the
-    /// standard Breakout names (noop/fire/left/right), or a no-op (with a warning) for anything else.</summary>
+    /// <summary>Parses an action token into a discrete Atari action id: a raw integer in range, one of the standard Breakout names (noop/fire/left/right), or a no-op (with a warning) for anything else.</summary>
     private static int ParseAction(string action, int numActions)
     {
         string a = (action ?? "").Trim();

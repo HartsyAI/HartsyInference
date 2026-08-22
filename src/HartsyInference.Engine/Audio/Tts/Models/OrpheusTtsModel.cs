@@ -47,11 +47,7 @@ internal static class OrpheusTtsModel
         public float[] Synthesize(IBackend backend, TtsJob job)
             => pipeline.Synthesize(backend, AudioTextFrontend.OrpheusText(job.Text), seed: job.Seed);
 
-        /// <summary>Runs the windowed-decode generator (<see cref="OrpheusPipeline.SynthesizeStreamChunks"/>) on a
-        /// background thread and pushes each already-decoded PCM chunk through an <see cref="AudioStreamer"/> —
-        /// simpler than Kyutai/CSM's <c>StreamingCodecDecoder</c> wiring because the windowing/redistribution/
-        /// decode work all happens inside the pipeline itself; this layer only bridges sync-iterator to
-        /// async-stream.</summary>
+        /// <summary>Runs the windowed-decode generator (<see cref="OrpheusPipeline.SynthesizeStreamChunks"/>) on a background thread and pushes each already-decoded PCM chunk through an <see cref="AudioStreamer"/> — simpler than Kyutai/CSM's <c>StreamingCodecDecoder</c> wiring because the windowing/redistribution/ decode work all happens inside the pipeline itself; this layer only bridges sync-iterator to async-stream.</summary>
         public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
         {
             int[] textTokenIds = AudioTextFrontend.OrpheusText(job.Text);

@@ -9,16 +9,13 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>NeuTTS Air (neuphonic/neutts-air) — a Qwen2.5-0.5B LM that emits a single NeuCodec FSQ stream, decoded to
-/// 24 kHz. Text is espeak-phonemized to IPA and framed in the upstream chat template; when a reference clip is
-/// supplied it is encoded to FSQ codes that prime generation and its transcript's phones are prepended.</summary>
+/// <summary>NeuTTS Air (neuphonic/neutts-air) — a Qwen2.5-0.5B LM that emits a single NeuCodec FSQ stream, decoded to 24 kHz. Text is espeak-phonemized to IPA and framed in the upstream chat template; when a reference clip is supplied it is encoded to FSQ codes that prime generation and its transcript's phones are prepended.</summary>
 internal static class NeuTtsModel
 {
     private const string BackboneRepo = "neuphonic/neutts-air";
     private const string CodecRepo = "neuphonic/neucodec";
     private const string EspeakLanguage = "en-us";   // upstream BACKBONE_LANGUAGE_MAP["neuphonic/neutts-air"]
 
-    /// <summary>The NeuTTS Air descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : BackboneRepo,

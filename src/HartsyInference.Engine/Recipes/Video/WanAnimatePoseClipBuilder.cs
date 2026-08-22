@@ -5,14 +5,10 @@ using HartsyInference.Vision.Detection;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Builds Wan-Animate's pose driving clip by running YOLO11-pose per driving frame and rendering an
-/// OpenPose-18 skeleton (<see cref="OpenPoseRenderer"/>) — the DWPose/ControlNet convention the checkpoint's
-/// <c>pose_patch_embedding</c> was trained on. Feeding the raw driving RGB instead is out-of-distribution and
-/// weakens motion following. Ported from the SwarmUI extension's <c>WanAnimatePosePreprocessor</c>.</summary>
+/// <summary>Builds Wan-Animate's pose driving clip by running YOLO11-pose per driving frame and rendering an OpenPose-18 skeleton (<see cref="OpenPoseRenderer"/>) — the DWPose/ControlNet convention the checkpoint's <c>pose_patch_embedding</c> was trained on. Feeding the raw driving RGB instead is out-of-distribution and weakens motion following. Ported from the SwarmUI extension's <c>WanAnimatePosePreprocessor</c>.</summary>
 internal static class WanAnimatePoseClipBuilder
 {
-    /// <summary>Returns the <c>[1, 3, T, H, W]</c> pose-skeleton clip in [-1, 1] (black background, colored OpenPose
-    /// limbs/joints) for <c>T = frames.Count</c>; frames are interleaved HWC RGB24 at <paramref name="width"/>×<paramref name="height"/>.</summary>
+    /// <summary>Returns the <c>[1, 3, T, H, W]</c> pose-skeleton clip in [-1, 1] (black background, colored OpenPose limbs/joints) for <c>T = frames.Count</c>; frames are interleaved HWC RGB24 at <paramref name="width"/>×<paramref name="height"/>.</summary>
     internal static Tensor Build(IBackend backend, YoloPosePipeline pose, IReadOnlyList<byte[]> frames,
         int width, int height, CancellationToken cancel)
     {
@@ -50,9 +46,7 @@ internal static class WanAnimatePoseClipBuilder
         return VideoRecipeUtils.PackRgbFramesToClip(skeletons, width, height);
     }
 
-    /// <summary>Writes the rendered skeletons as PPMs under <c>HARTSY_ANIMATE_POSE_DUMP</c>. The pose clip is the one
-    /// driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as
-    /// a model failure.</summary>
+    /// <summary>Writes the rendered skeletons as PPMs under <c>HARTSY_ANIMATE_POSE_DUMP</c>. The pose clip is the one driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as a model failure.</summary>
     private static void DumpSkeletons(byte[][] skeletons, int width, int height)
     {
         string? dir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_POSE_DUMP");

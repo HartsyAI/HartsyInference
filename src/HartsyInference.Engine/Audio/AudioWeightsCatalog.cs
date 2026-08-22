@@ -2,9 +2,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>The ACE-Step 1.5 and YuE weight tables, ported from the extension's audio weights registry onto the
-/// Engine's <see cref="ModelAsset"/> + <see cref="ModelDownloader"/> machinery (per-target lock, SHA-256 verify,
-/// atomic move). Every ACE-Step variant is a DISTINCT checkpoint with its own verified hash — never alias them.</summary>
+/// <summary>The ACE-Step 1.5 and YuE weight tables, ported from the extension's audio weights registry onto the Engine's <see cref="ModelAsset"/> + <see cref="ModelDownloader"/> machinery (per-target lock, SHA-256 verify, atomic move). Every ACE-Step variant is a DISTINCT checkpoint with its own verified hash — never alias them.</summary>
 public static class AudioWeightsCatalog
 {
     /// <summary>Catalog id of the ACE-Step music family.</summary>
@@ -32,8 +30,7 @@ public static class AudioWeightsCatalog
         Sha256 = SilenceLatentSha,
     };
 
-    /// <summary>Alternate sources, keyed by the primary asset's save name: tried only when the primary download
-    /// fails, so an install prefers a small pre-converted repack but still succeeds off the canonical source.</summary>
+    /// <summary>Alternate sources, keyed by the primary asset's save name: tried only when the primary download fails, so an install prefers a small pre-converted repack but still succeeds off the canonical source.</summary>
     private static readonly Dictionary<string, ModelAsset> _fallbacks = new(StringComparer.Ordinal)
     {
         ["xcodec.safetensors"] = new ModelAsset
@@ -46,8 +43,7 @@ public static class AudioWeightsCatalog
         },
     };
 
-    /// <summary>The shared X-Codec acoustic decoder: a pre-converted decode-only repack (~0.8 GB), falling back to
-    /// the canonical torch checkpoint which the YuE loader converts once on first load.</summary>
+    /// <summary>The shared X-Codec acoustic decoder: a pre-converted decode-only repack (~0.8 GB), falling back to the canonical torch checkpoint which the YuE loader converts once on first load.</summary>
     private static readonly ModelAsset YueXCodec = new ModelAsset
     {
         Repo = "HartsyAI/YuE-xcodec-mini-safetensors",
@@ -96,16 +92,11 @@ public static class AudioWeightsCatalog
         },
     };
 
-    /// <summary>Whether the family's checkpoint is a multi-file FOLDER (sharded weights + sidecars) rather than a
-    /// single safetensors — its load path resolves to the variant directory.</summary>
+    /// <summary>Whether the family's checkpoint is a multi-file FOLDER (sharded weights + sidecars) rather than a single safetensors — its load path resolves to the variant directory.</summary>
     public static bool IsFolderCheckpoint(string familyId) =>
         string.Equals(familyId, YueId, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Resolves the effective variant for a family: a bare model spec ("-m yue", no colon) makes
-    /// <see cref="AudioModelSelector.Parse"/> hand the whole token through as the variant, so the literal
-    /// family id (and the empty string) must map to the family's default registered variant — otherwise a
-    /// bare id resolves to a nonexistent "{family}/{family}" checkpoint path (the 2026-07-24 audio sweep's
-    /// YuE failure; same trap FxCatalog documents for bare "demucs").</summary>
+    /// <summary>Resolves the effective variant for a family: a bare model spec ("-m yue", no colon) makes <see cref="AudioModelSelector.Parse"/> hand the whole token through as the variant, so the literal family id (and the empty string) must map to the family's default registered variant — otherwise a bare id resolves to a nonexistent "{family}/{family}" checkpoint path (the 2026-07-24 audio sweep's YuE failure; same trap FxCatalog documents for bare "demucs").</summary>
     public static string NormalizeVariant(string familyId, string? variant)
     {
         string value = (variant ?? string.Empty).Trim();
@@ -138,8 +129,7 @@ public static class AudioWeightsCatalog
         return assets.Count > 0 ? assets[0] : null;
     }
 
-    /// <summary>Downloads the variant's whole file set, honoring the per-asset alternate source. Already-present
-    /// files are skipped by the downloader's own presence check.</summary>
+    /// <summary>Downloads the variant's whole file set, honoring the per-asset alternate source. Already-present files are skipped by the downloader's own presence check.</summary>
     internal static async Task EnsureAsync(string familyId, string variant, CancellationToken cancel)
     {
         variant = NormalizeVariant(familyId, variant);
@@ -164,8 +154,7 @@ public static class AudioWeightsCatalog
         }
     }
 
-    /// <summary>The 3-file set for a single-file 2B ACE-Step variant: sha-pinned weights + the variant's config.json
-    /// (small, non-LFS, unhashed) + the shared silence latent.</summary>
+    /// <summary>The 3-file set for a single-file 2B ACE-Step variant: sha-pinned weights + the variant's config.json (small, non-LFS, unhashed) + the shared silence latent.</summary>
     private static ModelAsset[] AceStep15Variant(string repo, string variant, string weightsSha, string subdir = "") =>
     [
         new ModelAsset
@@ -188,8 +177,7 @@ public static class AudioWeightsCatalog
         AceSilenceLatent,
     ];
 
-    /// <summary>XL variants (4B DiT, ~10 GB): weights are Comfy-Org's single-file bf16 merge (the official repos ship
-    /// 4x5 GB shards); config.json is the official repo's (it carries the encoder_* dims the Engine needs).</summary>
+    /// <summary>XL variants (4B DiT, ~10 GB): weights are Comfy-Org's single-file bf16 merge (the official repos ship 4x5 GB shards); config.json is the official repo's (it carries the encoder_* dims the Engine needs).</summary>
     private static ModelAsset[] AceStep15XlVariant(string variant, string weightsSha) =>
     [
         new ModelAsset
@@ -212,8 +200,7 @@ public static class AudioWeightsCatalog
         AceSilenceLatent,
     ];
 
-    /// <summary>YuE Stage-1 (7B, ~12.5 GB): the m-a-p folder — 3 sharded safetensors + index + configs + tokenizer,
-    /// landing in a per-variant subfolder — plus the shared X-Codec decoder.</summary>
+    /// <summary>YuE Stage-1 (7B, ~12.5 GB): the m-a-p folder — 3 sharded safetensors + index + configs + tokenizer, landing in a per-variant subfolder — plus the shared X-Codec decoder.</summary>
     private static ModelAsset[] YueVariant(string variant)
     {
         string[] files =

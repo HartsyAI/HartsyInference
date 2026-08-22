@@ -1,10 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Looks a word up in the compiled dictionary word list, ported from <c>TransposeAlphabet</c> +
-/// <c>HashDictionary</c> + <c>LookupDict2</c> in espeak-ng dictionary.c. For Latin languages the key is first
-/// transposed (a-&gt;1, b-&gt;2, ...) and packed 6 bits per letter, exactly as the dictionary compiler stored it, then
-/// hashed into the word-list buckets. A match returns the stored phoneme code bytes plus the dictionary flag sets that
-/// drive stress placement and special-attribute handling.</summary>
+/// <summary>Looks a word up in the compiled dictionary word list, ported from <c>TransposeAlphabet</c> + <c>HashDictionary</c> + <c>LookupDict2</c> in espeak-ng dictionary.c: for Latin languages the key is first transposed (a-&gt;1, b-&gt;2, ...) and packed 6 bits per letter, exactly as the dictionary compiler stored it, then hashed into the word-list buckets. A match returns the stored phoneme code bytes plus the dictionary flag sets that drive stress placement and special-attribute handling.</summary>
 internal sealed class EspeakWordLookup
 {
     private const int TransposeMin = 0x60;
@@ -39,8 +35,7 @@ internal sealed class EspeakWordLookup
         _dictCondition = dictCondition;
     }
 
-    /// <summary>Looks up <paramref name="word"/> (already lowercased, no surrounding spaces). On a hit, returns true
-    /// and fills <paramref name="result"/> with the stored phoneme codes and flag sets; otherwise false.</summary>
+    /// <summary>Looks up <paramref name="word"/> (already lowercased, no surrounding spaces); on a hit, returns true and fills <paramref name="result"/> with the stored phoneme codes and flag sets, otherwise false.</summary>
     public bool Lookup(string word, out EspeakLookupResult result)
     {
         result = default;

@@ -142,7 +142,6 @@ public sealed class HuggingFaceModelIndex
             }
         }
 
-        // Check for YOLO-specific fields
         if (configJson.TryGetProperty("backbone", out JsonElement _)
             && configJson.TryGetProperty("nc", out JsonElement _))
         {

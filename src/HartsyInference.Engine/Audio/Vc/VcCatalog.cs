@@ -11,8 +11,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>The voice-conversion model registry. RVC re-voices a source clip with a user-placed trained voice model
-/// using the engine's HuBERT/ContentVec content encoder plus YIN pitch; OpenVoice does tone-color transfer.</summary>
+/// <summary>The voice-conversion model registry. RVC re-voices a source clip with a user-placed trained voice model using the engine's HuBERT/ContentVec content encoder plus YIN pitch; OpenVoice does tone-color transfer.</summary>
 internal static class VcCatalog
 {
     /// <summary>Category folder RVC voice models are placed in: <c>{models}/audio/clone/rvc</c>.</summary>
@@ -49,8 +48,7 @@ internal static class VcCatalog
             + "(pass the RVC voice name as 'rvc:myvoice').");
     }
 
-    /// <summary>RVC v2 — a user-placed voice model plus the shared ContentVec encoder; re-voices the source audio in
-    /// the model's voice (speaker id 0). The HuBERT content encoder and YIN F0 both run on 16 kHz source.</summary>
+    /// <summary>RVC v2 — a user-placed voice model plus the shared ContentVec encoder; re-voices the source audio in the model's voice (speaker id 0). The HuBERT content encoder and YIN F0 both run on 16 kHz source.</summary>
     internal static VcModelDescriptor Rvc { get; } = new VcModelDescriptor
     {
         ManagesOwnWeights = false,
@@ -69,8 +67,7 @@ internal static class VcCatalog
         ["openvoice"] = OpenVoiceModel.Descriptor,
     };
 
-    /// <summary>Resolves the RVC voice checkpoint: an explicit local path wins, else the variant name under the RVC
-    /// weights folder with the accepted extensions.</summary>
+    /// <summary>Resolves the RVC voice checkpoint: an explicit local path wins, else the variant name under the RVC weights folder with the accepted extensions.</summary>
     private static string ResolveRvcModel(AudioModelSelector selector)
     {
         if (!string.IsNullOrEmpty(selector.LocalPath) && File.Exists(selector.LocalPath))
@@ -125,9 +122,7 @@ internal static class VcCatalog
             hubertLoader, rvcLoader, rmvpeLoader, rvc, rmvpe);
     }
 
-    /// <summary>Ensures the shared ContentVec encoder exists as <c>contentvec.safetensors</c>: on first use the
-    /// HF-transformers ContentVec pickle is fetched and re-saved as safetensors (a straight passthrough — its keys
-    /// already match the engine's Hubert layout).</summary>
+    /// <summary>Ensures the shared ContentVec encoder exists as <c>contentvec.safetensors</c>: on first use the HF-transformers ContentVec pickle is fetched and re-saved as safetensors (a straight passthrough — its keys already match the engine's Hubert layout).</summary>
     private static async Task EnsureContentVecAsync(string contentVecPath, CancellationToken cancel)
     {
         if (File.Exists(contentVecPath))
@@ -141,9 +136,7 @@ internal static class VcCatalog
         Logs.Info($"[Audio][RVC] {ContentVecFile} ready.");
     }
 
-    /// <summary>Ensures the shared RMVPE pitch extractor exists as <c>rmvpe.safetensors</c>: on first use the
-    /// RVC-WebUI pickle is fetched and re-saved as safetensors (a straight passthrough — its keys already match
-    /// <see cref="RvcRmvpe"/>'s layout).</summary>
+    /// <summary>Ensures the shared RMVPE pitch extractor exists as <c>rmvpe.safetensors</c>: on first use the RVC-WebUI pickle is fetched and re-saved as safetensors (a straight passthrough — its keys already match <see cref="RvcRmvpe"/>'s layout).</summary>
     private static async Task EnsureRmvpeAsync(string rmvpePath, CancellationToken cancel)
     {
         if (File.Exists(rmvpePath))
@@ -156,8 +149,7 @@ internal static class VcCatalog
         Logs.Info($"[Audio][RVC] {RmvpeFile} ready.");
     }
 
-    /// <summary>Picks the RVC config from the first upsample-kernel width: the ConvTranspose1d kernel is 24 for
-    /// 48 kHz and 16 for 40 kHz. weight-norm models store <c>weight_v</c>; pre-fused models store <c>weight</c>.</summary>
+    /// <summary>Picks the RVC config from the first upsample-kernel width: the ConvTranspose1d kernel is 24 for 48 kHz and 16 for 40 kHz. weight-norm models store <c>weight_v</c>; pre-fused models store <c>weight</c>.</summary>
     private static RvcConfig DetectRvcConfig(IReadOnlyDictionary<string, Tensor> weights)
     {
         Tensor? upsample0 = weights.TryGetValue("dec.ups.0.weight_v", out Tensor? weightV) ? weightV
@@ -197,8 +189,7 @@ internal static class VcCatalog
         }
     }
 
-    /// <summary>Nearest-neighbour 2x upsample of the content along time (<c>[1, C, T] → [1, C, 2T]</c>), matching
-    /// RVC's interpolate before the synthesizer.</summary>
+    /// <summary>Nearest-neighbour 2x upsample of the content along time (<c>[1, C, T] → [1, C, 2T]</c>), matching RVC's interpolate before the synthesizer.</summary>
     private static Tensor Interpolate2xNearest(Tensor content)
     {
         int channels = (int)content.Shape[1];

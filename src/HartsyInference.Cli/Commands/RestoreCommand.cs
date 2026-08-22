@@ -8,9 +8,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Restores a degraded video or image with SeedVR2, saving PNG frames plus an MP4 for video
-/// input. The target is an AREA (--width × --height, aspect preserved by the model's bicubic
-/// area-resize) — SeedVR2 has no scale factor; --scale is sugar that computes the area from the input.</summary>
+/// <summary>Restores a degraded video or image with SeedVR2, saving PNG frames plus an MP4 for video input; the target is an AREA (--width × --height) since SeedVR2 has no scale factor.</summary>
 public sealed class RestoreCommand : Command<RestoreCommand.Settings>
 {
     /// <summary>Options for <c>hartsy restore</c>.</summary>

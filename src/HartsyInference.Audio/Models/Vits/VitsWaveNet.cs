@@ -3,10 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS WaveNet residual stack (the <c>WN</c> module shared by the flow's coupling layers and the
-/// posterior encoder). N dilated gated layers: <c>in_layer</c> (dilated Conv1d → 2·hidden) → fused
-/// tanh·sigmoid gate → <c>res_skip_layer</c>; residual feeds the next layer, skips accumulate. Speaker
-/// conditioning (<c>g</c>) is deferred (single-speaker path). Channels-first <c>[1, hidden, T]</c>.</summary>
+/// <summary>VITS WaveNet residual stack (the <c>WN</c> module shared by the flow's coupling layers and the posterior encoder): N dilated gated layers — <c>in_layer</c> (dilated Conv1d → 2·hidden) → fused tanh·sigmoid gate → <c>res_skip_layer</c>; residual feeds the next layer, skips accumulate; optional speaker conditioning (<c>g</c>) is projected once and added per layer.</summary>
 public sealed unsafe class VitsWaveNet
 {
     private readonly int _hidden, _layers, _kernel, _dilationRate;
@@ -36,9 +33,8 @@ public sealed unsafe class VitsWaveNet
         }
     }
 
-    /// <summary>Runs the stack over <paramref name="x"/> <c>[1, hidden, T]</c>. <paramref name="g"/> is the
-    /// optional speaker embedding <c>[1, gin, 1]</c> (multispeaker), projected once and sliced per layer into
-    /// the gate. Returns the masked skip sum.</summary>
+    /// <summary>Runs the stack over <paramref name="x"/> <c>[1, hidden, T]</c>; <paramref name="g"/> is the optional speaker embedding <c>[1, gin, 1]</c> (multispeaker), projected once and sliced per layer into the gate.</summary>
+    /// <returns>The accumulated skip sum.</returns>
     public Tensor Forward(IBackend backend, Tensor x, int t, Tensor? g = null)
     {
         int h = _hidden;

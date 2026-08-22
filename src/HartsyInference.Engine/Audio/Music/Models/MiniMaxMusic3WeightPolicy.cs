@@ -14,8 +14,7 @@ namespace HartsyInference.Engine.Audio;
 /// the parity baseline.</para></summary>
 internal static class MiniMaxMusic3WeightPolicy
 {
-    /// <summary>Applies the language model's quantization, returning the weights to load and (when quantizing) the
-    /// GGUF mapping that owns them — keep it alive for the model's lifetime.</summary>
+    /// <summary>Applies the language model's quantization, returning the weights to load and (when quantizing) the GGUF mapping that owns them — keep it alive for the model's lifetime.</summary>
     internal static IReadOnlyDictionary<string, Tensor> PrepareLanguageModel(
         IReadOnlyDictionary<string, Tensor> weights, string repo, string? quant, out IDisposable? cache)
     {
@@ -73,8 +72,7 @@ internal static class MiniMaxMusic3WeightPolicy
             ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
             : $"{repo.Replace('/', '_')}-{component}-{quant.ToLowerInvariant()}.gguf");
 
-    /// <summary>Quantizes the <paramref name="quantizable"/> subset of <paramref name="weights"/> into a disk-cached
-    /// GGUF (written once, on the first run) and returns it merged back over the untouched remainder.</summary>
+    /// <summary>Quantizes the <paramref name="quantizable"/> subset of <paramref name="weights"/> into a disk-cached GGUF (written once, on the first run) and returns it merged back over the untouched remainder.</summary>
     private static IReadOnlyDictionary<string, Tensor> QuantizeToCache(
         IReadOnlyDictionary<string, Tensor> weights, Func<string, bool> quantizable, GgufQuantPolicy policy,
         string cachePath, string label, DType backbone, out IDisposable? cache)
@@ -123,8 +121,7 @@ internal static class MiniMaxMusic3WeightPolicy
         return merged;
     }
 
-    /// <summary>Casts the F32 transformer to BF16 on the quantized variants — 9.6 GB does not fit alongside the
-    /// vocoder on a 12 GB card. Returns the source untouched otherwise.</summary>
+    /// <summary>Casts the F32 transformer to BF16 on the quantized variants — 9.6 GB does not fit alongside the vocoder on a 12 GB card. Returns the source untouched otherwise.</summary>
     internal static IReadOnlyDictionary<string, Tensor> PrepareTransformer(
         IReadOnlyDictionary<string, Tensor> weights, string? quant, out IDisposable? owned)
     {
@@ -159,9 +156,7 @@ internal static class MiniMaxMusic3WeightPolicy
             name.Contains("norm", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".bias", StringComparison.Ordinal),
     };
 
-    /// <summary>Same mix for the depth decoder, whose attention weights are named <c>to_v</c>/<c>to_out</c> rather
-    /// than <c>v_proj</c>/<c>o_proj</c>. Nothing precision-sensitive reaches this policy — the caller only offers it
-    /// the projections — so there is no keep-at-F16 set.</summary>
+    /// <summary>Same mix for the depth decoder, whose attention weights are named <c>to_v</c>/<c>to_out</c> rather than <c>v_proj</c>/<c>o_proj</c>. Nothing precision-sensitive reaches this policy — the caller only offers it the projections — so there is no keep-at-F16 set.</summary>
     private static GgufQuantPolicy DepthPolicyFor(DType backbone) => new()
     {
         BackboneDType = backbone,

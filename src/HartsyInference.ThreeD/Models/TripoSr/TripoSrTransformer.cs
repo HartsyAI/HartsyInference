@@ -6,11 +6,7 @@ using HartsyInference.Vision;
 
 namespace HartsyInference.ThreeD.Models.TripoSr;
 
-/// <summary>TripoSR backbone: the learned <c>Triplane1DTokenizer</c> embeddings (<c>[3,C,P,P]</c>) are run
-/// through a diffusers <c>Transformer1D</c> (GroupNorm → proj_in → 16× <see cref="TripoSrBlock"/> → proj_out
-/// → residual) cross-attending to the DINO image tokens, detokenized to a <c>[3,C,P,P]</c> triplane, then
-/// upsampled per-plane by a ConvTranspose2d (k2/s2) into the final <c>[3, TriplaneChannels, 2P, 2P]</c>
-/// <see cref="Triplane"/>. Feed-forward — no timestep. Mirrors <c>tsr.system.TSR.forward</c>.</summary>
+/// <summary>TripoSR backbone: runs the learned triplane-tokenizer embeddings through a diffusers <c>Transformer1D</c> cross-attending to DINO image tokens, then upsamples per-plane into the final <see cref="Triplane"/>.</summary>
 public sealed unsafe class TripoSrTransformer
 {
     private readonly TripoSrConfig _cfg;
@@ -117,8 +113,7 @@ public sealed unsafe class TripoSrTransformer
     }
 }
 
-/// <summary>One diffusers <c>BasicTransformerBlock</c>: pre-norm (affine LayerNorm) self-attention + cross-
-/// attention to image tokens + GEGLU feed-forward, each with a residual. Biasless q/k/v; biased output proj.</summary>
+/// <summary>One diffusers <c>BasicTransformerBlock</c>: pre-norm self-attention + cross-attention to image tokens + GEGLU feed-forward, each with a residual; biasless q/k/v but biased output proj.</summary>
 internal sealed unsafe class TripoSrBlock
 {
     private readonly TripoSrConfig _cfg;

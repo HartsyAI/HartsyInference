@@ -7,10 +7,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Builds a <see cref="ConditioningSchedule"/> for ComfyUI-style prompt weighting and <c>&lt;break&gt;</c>
-/// chunking on CLIP pipelines whose denoise loop consumes a batched <c>[2, seqLen, hidden]</c> (negative, positive)
-/// tensor. Returns null when neither prompt uses weighting syntax, so ordinary prompts keep the byte-identical
-/// plain-encode path at zero cost.</summary>
+/// <summary>Builds a <see cref="ConditioningSchedule"/> for ComfyUI-style prompt weighting and <c>&lt;break&gt;</c> chunking on CLIP pipelines whose denoise loop consumes a batched <c>[2, seqLen, hidden]</c> (negative, positive) tensor. Returns null when neither prompt uses weighting syntax, so ordinary prompts keep the byte-identical plain-encode path at zero cost.</summary>
 public static class WeightedConditioning
 {
     /// <summary>Cheap pre-check for weighting <c>( )</c>, alternation/scheduling <c>[ ]</c>, or <c>&lt;break&gt;</c>.</summary>
@@ -32,8 +29,7 @@ public static class WeightedConditioning
         return false;
     }
 
-    /// <summary>Single-CLIP (SD 1.5) weighted conditioning: a one-variant schedule holding <c>[2, 77*chunks, hidden]</c>
-    /// (negative, positive), or null when there's no weighting syntax. <paramref name="layersFromEnd"/> is CLIP-skip (1 = last layer).</summary>
+    /// <summary>Single-CLIP (SD 1.5) weighted conditioning: a one-variant schedule holding <c>[2, 77*chunks, hidden]</c> (negative, positive), or null when there's no weighting syntax. <paramref name="layersFromEnd"/> is CLIP-skip (1 = last layer).</summary>
     public static ConditioningSchedule? BuildSingleClip(
         IBackend backend, ClipTextEncoder encoder, ClipTokenizer tokenizer,
         string? positive, string? negative, int layersFromEnd)
@@ -67,10 +63,7 @@ public static class WeightedConditioning
         };
     }
 
-    /// <summary>Dual-CLIP (SDXL) weighted conditioning: <c>[2, 77*chunks, 2048]</c> (negative, positive) — penultimate
-    /// CLIP-L (768) concatenated with penultimate CLIP-G (1280) on the last dim, matching the SDXL pipeline's plain
-    /// textEmbeddings. Both encoders share SDXL's single BPE tokenizer, so the per-chunk seqLens align without padding.
-    /// The pooled vector is left to the pipeline's own plain encode. <paramref name="layersFromEnd"/> is 2 by SDXL spec.</summary>
+    /// <summary>Dual-CLIP (SDXL) weighted conditioning: <c>[2, 77*chunks, 2048]</c> (negative, positive) — penultimate CLIP-L (768) concatenated with penultimate CLIP-G (1280) on the last dim, matching the SDXL pipeline's plain textEmbeddings. Both encoders share SDXL's single BPE tokenizer, so the per-chunk seqLens align without padding. The pooled vector is left to the pipeline's own plain encode. <paramref name="layersFromEnd"/> is 2 by SDXL spec.</summary>
     public static ConditioningSchedule? BuildDualClip(
         IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
         string? positive, string? negative, int layersFromEnd)
@@ -115,8 +108,7 @@ public static class WeightedConditioning
         };
     }
 
-    /// <summary>Weighted penultimate hidden states for one prompt; the pooled output is discarded because the SDXL
-    /// pipeline sources pooled from its own plain encode.</summary>
+    /// <summary>Weighted penultimate hidden states for one prompt; the pooled output is discarded because the SDXL pipeline sources pooled from its own plain encode.</summary>
     private static Tensor EncodePenultimateHidden(IBackend backend, ClipTextEncoder encoder,
         IReadOnlyList<int[]> ids, IReadOnlyList<float[]> weights, int layersFromEnd)
     {
@@ -125,8 +117,7 @@ public static class WeightedConditioning
         return hidden;
     }
 
-    /// <summary>Pads the shorter of (positive, negative) with empty SOT..EOT chunks so both have the same chunk count —
-    /// required before stacking into one <c>[2, …]</c> tensor.</summary>
+    /// <summary>Pads the shorter of (positive, negative) with empty SOT..EOT chunks so both have the same chunk count — required before stacking into one <c>[2, …]</c> tensor.</summary>
     private static void EqualizeChunkCount(
         ClipTokenizer tokenizer,
         ref IReadOnlyList<int[]> posIds, ref IReadOnlyList<float[]> posW,

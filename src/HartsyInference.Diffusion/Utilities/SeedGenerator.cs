@@ -37,6 +37,6 @@ public static class SeedGenerator
         return noise;
     }
 
-    /// <summary>Generates a random seed.</summary>
+    /// <summary>A non-negative seed from the thread-safe shared RNG, for requests that don't pin one explicitly.</summary>
     public static int RandomSeed() => Random.Shared.Next();
 }

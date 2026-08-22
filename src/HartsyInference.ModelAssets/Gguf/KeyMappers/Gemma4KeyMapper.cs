@@ -1,13 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for Gemma-4 (<c>gemma4</c>). Shares the Gemma-2/3 sandwich-norm dialect (see
-/// <see cref="GemmaKeyMapper"/>) plus three additions unique to Gemma-4: per-layer embeddings (PLE, a
-/// Gemma-3n-lineage mechanism — a top-level per-layer token table/projection/norm plus each layer's own
-/// gate/proj/post-norm), an optional learned per-layer output scale, and — on the 26B-A4B MoE checkpoint only —
-/// a routed-expert branch with its own pre/post norms that runs IN PARALLEL WITH the dense FFN (summed, not
-/// routed-instead-of). See <see cref="HartsyInference.LLM.Transformer.GgufConfigFactory"/>'s <c>isGemma4</c>
-/// branch and <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/>'s PLE/dual-branch-MoE handling
-/// for how these tensors are consumed.</summary>
+/// <summary>GGUF mapper for Gemma-4 (<c>gemma4</c>). Shares the Gemma-2/3 sandwich-norm dialect (see <see cref="GemmaKeyMapper"/>) plus three additions unique to Gemma-4: per-layer embeddings (PLE, a Gemma-3n-lineage mechanism — a top-level per-layer token table/projection/norm plus each layer's own gate/proj/post-norm), an optional learned per-layer output scale, and — on the 26B-A4B MoE checkpoint only — a routed-expert branch with its own pre/post norms that runs IN PARALLEL WITH the dense FFN (summed, not routed-instead-of). See <see cref="HartsyInference.LLM.Transformer.GgufConfigFactory"/>'s <c>isGemma4</c> branch and <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/>'s PLE/dual-branch-MoE handling for how these tensors are consumed.</summary>
 public sealed class Gemma4KeyMapper : IGgufKeyMapper
 {
     public string Architecture => "gemma4";

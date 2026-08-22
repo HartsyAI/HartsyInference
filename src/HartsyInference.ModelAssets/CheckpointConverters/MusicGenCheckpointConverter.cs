@@ -5,27 +5,14 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads MusicGen / AudioGen checkpoints (<c>facebook/musicgen-{small,medium,large}</c>,
-/// <c>facebook/encodec_32khz</c>) for the <c>MusicGenDecoder</c> / <c>EnCodec</c> classes.
+/// <summary>Loads MusicGen / AudioGen checkpoints (<c>facebook/musicgen-{small,medium,large}</c>, <c>facebook/encodec_32khz</c>) for the <c>MusicGenDecoder</c> / <c>EnCodec</c> classes.
 ///
-/// <para><b>Decoder</b> — handles both HF exports by prefix probing: the combined
-/// <c>MusicgenForConditionalGeneration</c> file (<c>decoder.model.decoder.*</c> / <c>decoder.lm_heads.*</c> /
-/// top-level <c>enc_to_dec_proj.*</c>, with <c>text_encoder.*</c> + <c>audio_encoder.*</c> siblings dropped) and a
-/// standalone <c>MusicgenForCausalLM</c> dump (<c>model.decoder.*</c> / <c>lm_heads.*</c>, pass-through). The
-/// sinusoidal <c>embed_positions</c> buffer is dropped — the engine recomputes positions.</para>
+/// <para><b>Decoder</b> — handles both HF exports by prefix probing: the combined <c>MusicgenForConditionalGeneration</c> file (<c>decoder.model.decoder.*</c> / <c>decoder.lm_heads.*</c> / top-level <c>enc_to_dec_proj.*</c>, with <c>text_encoder.*</c> + <c>audio_encoder.*</c> siblings dropped) and a standalone <c>MusicgenForCausalLM</c> dump (<c>model.decoder.*</c> / <c>lm_heads.*</c>, pass-through). The sinusoidal <c>embed_positions</c> buffer is dropped — the engine recomputes positions.</para>
 ///
-/// <para><b>EnCodec</b> — maps the HF <c>transformers</c> <c>EncodecModel</c> naming (<c>encoder.layers.{i}.conv.*</c>,
-/// <c>quantizer.layers.{q}.codebook.embed</c>) to the Meta AudioCraft naming the engine expects
-/// (<c>encoder.model.{i}.conv.conv.*</c>, <c>quantizer.vq.layers.{q}._codebook.embed</c>,
-/// <c>decoder.model.{i}.convtr.convtr.*</c>). Transpose convs are detected per-module from the <c>weight_g</c> shape
-/// (PyTorch weight-norms <c>ConvTranspose1d</c> on dim=1 → <c>[1, C_out, 1]</c> vs <c>[C_out, 1, 1]</c> for
-/// <c>Conv1d</c>). Weight-norm pairs stay RAW (no fusion) — <c>SeaNetEncoder</c>/<c>SeaNetDecoder</c> fuse them via
-/// <c>WeightNormFusion</c> at <c>LoadWeights</c> time, unlike the ACE-Step vocoder path which fuses in the converter.
-/// Meta-named dumps and the EnCodec embedded in a combined MusicGen file (<c>audio_encoder.*</c>) also load.</para></summary>
+/// <para><b>EnCodec</b> — maps the HF <c>transformers</c> <c>EncodecModel</c> naming (<c>encoder.layers.{i}.conv.*</c>, <c>quantizer.layers.{q}.codebook.embed</c>) to the Meta AudioCraft naming the engine expects (<c>encoder.model.{i}.conv.conv.*</c>, <c>quantizer.vq.layers.{q}._codebook.embed</c>, <c>decoder.model.{i}.convtr.convtr.*</c>). Transpose convs are detected per-module from the <c>weight_g</c> shape (PyTorch weight-norms <c>ConvTranspose1d</c> on dim=1 → <c>[1, C_out, 1]</c> vs <c>[C_out, 1, 1]</c> for <c>Conv1d</c>). Weight-norm pairs stay RAW (no fusion) — <c>SeaNetEncoder</c>/<c>SeaNetDecoder</c> fuse them via <c>WeightNormFusion</c> at <c>LoadWeights</c> time, unlike the ACE-Step vocoder path which fuses in the converter. Meta-named dumps and the EnCodec embedded in a combined MusicGen file (<c>audio_encoder.*</c>) also load.</para></summary>
 public sealed unsafe class MusicGenCheckpointConverter
 {
-    /// <summary>Pure decoder key mapping (testable without files). Returns <c>null</c> for keys the decoder never
-    /// consumes (T5 text encoder, embedded EnCodec, sinusoidal position buffer).</summary>
+    /// <summary>Pure decoder key mapping (testable without files). Returns <c>null</c> for keys the decoder never consumes (T5 text encoder, embedded EnCodec, sinusoidal position buffer).</summary>
     public static string? MapDecoderKey(string key)
     {
         if (key.StartsWith("text_encoder.", StringComparison.Ordinal) ||
@@ -36,8 +23,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return CodecKeyUtils.StripPrefix(key, "decoder.");
     }
 
-    /// <summary>Loads the MusicGen decoder safetensors (combined or standalone layout). Caller owns the loader.
-    /// For AudioGen (which ships PyTorch <c>.bin</c> pickles, not safetensors) use <see cref="LoadDecoderAny"/>.</summary>
+    /// <summary>Loads the MusicGen decoder safetensors (combined or standalone layout). Caller owns the loader. For AudioGen (which ships PyTorch <c>.bin</c> pickles, not safetensors) use <see cref="LoadDecoderAny"/>.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadDecoder(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -45,8 +31,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return (MapDecoderWeights(loader.GetAllTensors(), castToF32), loader);
     }
 
-    /// <summary>Loads an EnCodec safetensors — either <c>facebook/encodec_32khz</c> standalone or the
-    /// <c>audio_encoder.*</c> subset of a combined MusicGen file. Caller owns the loader.</summary>
+    /// <summary>Loads an EnCodec safetensors — either <c>facebook/encodec_32khz</c> standalone or the <c>audio_encoder.*</c> subset of a combined MusicGen file. Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadEnCodec(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -54,11 +39,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return (MapEnCodecWeights(loader.GetAllTensors(), castToF32), loader);
     }
 
-    /// <summary>Loads the T5-base text encoder weights — either the <c>text_encoder.*</c> subset of a combined
-    /// MusicGen / AudioGen file or a standalone HF T5 dump. Only the <c>text_encoder.</c> prefix is stripped; the
-    /// inner HF T5 key names (<c>shared.weight</c>, <c>encoder.block.{i}.layer.*</c>, <c>encoder.final_layer_norm.*</c>)
-    /// are what <c>T5TextEncoder.LoadWeights</c> already consumes for the standalone (Flux/SD3) path, so no further
-    /// remapping is needed. Caller owns the loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
+    /// <summary>Loads the T5-base text encoder weights — either the <c>text_encoder.*</c> subset of a combined MusicGen / AudioGen file or a standalone HF T5 dump. Only the <c>text_encoder.</c> prefix is stripped; the inner HF T5 key names (<c>shared.weight</c>, <c>encoder.block.{i}.layer.*</c>, <c>encoder.final_layer_norm.*</c>) are what <c>T5TextEncoder.LoadWeights</c> already consumes for the standalone (Flux/SD3) path, so no further remapping is needed. Caller owns the loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadTextEncoder(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -70,25 +51,21 @@ public sealed unsafe class MusicGenCheckpointConverter
     // AudioGen (facebook/audiogen-medium) and the standalone google/t5-base it pairs with ship as PyTorch pickles,
     // not safetensors. These dispatch by file extension and apply the same key mapping as the safetensors loaders.
 
-    /// <summary>Loads the MusicGen / AudioGen decoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle.
-    /// Caller owns (and must dispose) the returned loader.</summary>
+    /// <summary>Loads the MusicGen / AudioGen decoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle. Caller owns (and must dispose) the returned loader.</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadDecoderAny(string path, bool castToF32 = false)
     {
         (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
         return (MapDecoderWeights(raw, castToF32), loader);
     }
 
-    /// <summary>Loads EnCodec from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (AudioGen pairs with the
-    /// 16 kHz EnCodec). Caller owns (and must dispose) the returned loader.</summary>
+    /// <summary>Loads EnCodec from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (AudioGen pairs with the 16 kHz EnCodec). Caller owns (and must dispose) the returned loader.</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadEnCodecAny(string path, bool castToF32 = false)
     {
         (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
         return (MapEnCodecWeights(raw, castToF32), loader);
     }
 
-    /// <summary>Loads the T5-base text encoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (the
-    /// standalone <c>google/t5-base</c> AudioGen fetches separately ships a <c>pytorch_model.bin</c>). Caller owns
-    /// (and must dispose) the returned loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
+    /// <summary>Loads the T5-base text encoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (the standalone <c>google/t5-base</c> AudioGen fetches separately ships a <c>pytorch_model.bin</c>). Caller owns (and must dispose) the returned loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadTextEncoderAny(string path, bool castToF32 = false)
     {
         (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
@@ -108,10 +85,7 @@ public sealed unsafe class MusicGenCheckpointConverter
     private static Dictionary<string, Tensor>? _cachedRaw;
     private static RefCountedLoader? _cachedLoader;
 
-    /// <summary>Reads every tensor from a checkpoint file, choosing the reader by extension: <c>.safetensors</c> →
-    /// <see cref="SafeTensorsLoader"/>, otherwise (<c>.bin</c>/<c>.pt</c>/<c>.pth</c>) → <see cref="PytorchPickleLoader"/>.
-    /// Parses the file once per path across the back-to-back decoder/EnCodec/T5 calls (see the cache above); each
-    /// returned loader is an independent handle over one shared, reference-counted underlying loader.</summary>
+    /// <summary>Reads every tensor from a checkpoint file, choosing the reader by extension: <c>.safetensors</c> → <see cref="SafeTensorsLoader"/>, otherwise (<c>.bin</c>/<c>.pt</c>/<c>.pth</c>) → <see cref="PytorchPickleLoader"/>. Parses the file once per path across the back-to-back decoder/EnCodec/T5 calls (see the cache above); each returned loader is an independent handle over one shared, reference-counted underlying loader.</summary>
     private static (Dictionary<string, Tensor> Raw, IDisposable Loader) LoadAny(string path)
     {
         lock (_cacheLock)
@@ -156,9 +130,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return (pt.GetAllTensors(), pt);
     }
 
-    /// <summary>Wraps the one underlying loader shared by the combined-file consumers; the underlying loader is
-    /// disposed exactly once, when the reference count (one per live <see cref="Handle"/>) reaches zero. All
-    /// refcount mutations run under <see cref="_cacheLock"/>.</summary>
+    /// <summary>Wraps the one underlying loader shared by the combined-file consumers; the underlying loader is disposed exactly once, when the reference count (one per live <see cref="Handle"/>) reaches zero. All refcount mutations run under <see cref="_cacheLock"/>.</summary>
     private sealed class RefCountedLoader(IDisposable inner)
     {
         private readonly IDisposable _inner = inner;
@@ -173,8 +145,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         }
     }
 
-    /// <summary>Per-consumer disposable over a shared <see cref="RefCountedLoader"/>. Idempotent: disposing more than
-    /// once is a no-op, so a caller that hands the same handle to several owners can't over-release.</summary>
+    /// <summary>Per-consumer disposable over a shared <see cref="RefCountedLoader"/>. Idempotent: disposing more than once is a no-op, so a caller that hands the same handle to several owners can't over-release.</summary>
     private sealed class Handle(RefCountedLoader shared) : IDisposable
     {
         private RefCountedLoader? _shared = shared;
@@ -196,13 +167,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         }
     }
 
-    /// <summary>True for the big 2-D projection weights that the MusicGen decoder / T5 encoder consume ONLY via
-    /// <c>backend.Linear</c> (q/k/v/out projections, FFN fc1/fc2 &amp; T5 wi/wo, the K <c>lm_heads</c>, and
-    /// <c>enc_to_dec_proj</c>). These never touch host pointer-math, and the GPU GEMM casts a non-F32 weight itself,
-    /// so we keep them in their native (fp16) checkpoint dtype even when <paramref name="castToF32"/> is requested —
-    /// F32-upconverting them at load doubles host RAM and is what OOM'd AudioGen. Embeddings, norms, biases, the T5
-    /// relative-position table, and the EnCodec convs/codebooks are NOT matched here: they are read by host math and
-    /// still honor <c>castToF32</c> (and their own <c>LoadWeights</c> re-<c>EnsureF32</c>s the host-touched ones).</summary>
+    /// <summary>True for the big 2-D projection weights that the MusicGen decoder / T5 encoder consume ONLY via <c>backend.Linear</c> (q/k/v/out projections, FFN fc1/fc2 &amp; T5 wi/wo, the K <c>lm_heads</c>, and <c>enc_to_dec_proj</c>). These never touch host pointer-math, and the GPU GEMM casts a non-F32 weight itself, so we keep them in their native (fp16) checkpoint dtype even when <paramref name="castToF32"/> is requested — F32-upconverting them at load doubles host RAM and is what OOM'd AudioGen. Embeddings, norms, biases, the T5 relative-position table, and the EnCodec convs/codebooks are NOT matched here: they are read by host math and still honor <c>castToF32</c> (and their own <c>LoadWeights</c> re-<c>EnsureF32</c>s the host-touched ones).</summary>
     public static bool IsGpuMatmulWeight(string mappedKey)
     {
         if (mappedKey.EndsWith(".q_proj.weight", StringComparison.Ordinal) ||
@@ -226,11 +191,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return false;
     }
 
-    /// <summary>Honors <paramref name="castToF32"/> EXCEPT for the big <see cref="IsGpuMatmulWeight"/> projections,
-    /// which stay in their native (fp16) checkpoint dtype to halve host RAM — the fix that lets AudioGen's F32 load
-    /// fit. These weights are consumed only by <c>backend.Linear</c>, whose cuBLAS GEMM upconverts an fp16 weight and
-    /// writes an F32 output tensor, so no F16 activation ever reaches a host/elementwise op. (An earlier
-    /// "F16 reached T5's ReLU" crash was actually a stale-PTX CUDA→Vulkan fallback, not this path.)</summary>
+    /// <summary>Honors <paramref name="castToF32"/> EXCEPT for the big <see cref="IsGpuMatmulWeight"/> projections, which stay in their native (fp16) checkpoint dtype to halve host RAM — the fix that lets AudioGen's F32 load fit. These weights are consumed only by <c>backend.Linear</c>, whose cuBLAS GEMM upconverts an fp16 weight and writes an F32 output tensor, so no F16 activation ever reaches a host/elementwise op. (An earlier "F16 reached T5's ReLU" crash was actually a stale-PTX CUDA→Vulkan fallback, not this path.)</summary>
     private static Tensor MaybeCastKeepMatmulNative(string mappedKey, Tensor value, bool castToF32) =>
         CodecKeyUtils.MaybeCast(value, castToF32 && !IsGpuMatmulWeight(mappedKey));
 
@@ -247,15 +208,11 @@ public sealed unsafe class MusicGenCheckpointConverter
         return weights;
     }
 
-    /// <summary>True when <paramref name="raw"/> is a Meta AudioCraft single-file LM dump (AudioGen / MusicGen-large),
-    /// keyed by <c>emb.k.weight</c> + <c>transformer.layers.i.*</c> rather than HF <c>model.decoder.*</c> names.</summary>
+    /// <summary>True when <paramref name="raw"/> is a Meta AudioCraft single-file LM dump (AudioGen / MusicGen-large), keyed by <c>emb.k.weight</c> + <c>transformer.layers.i.*</c> rather than HF <c>model.decoder.*</c> names.</summary>
     public static bool IsAudioCraftDecoder(IReadOnlyDictionary<string, Tensor> raw) =>
         raw.ContainsKey("emb.0.weight") || raw.ContainsKey("transformer.layers.0.self_attn.in_proj_weight");
 
-    /// <summary>Remaps a Meta AudioCraft LM dump to the HF <c>MusicgenForCausalLM</c> names the engine
-    /// <c>MusicGenDecoder.LoadWeights(prefix:"model.decoder")</c> consumes. The fused
-    /// <c>self_attn/cross_attention.in_proj_weight</c> <c>[3d,d]</c> is split into q/k/v <c>[d,d]</c> row-blocks
-    /// (Q, K, V order — matching torch <c>nn.MultiheadAttention</c> and HF's <c>convert_musicgen_transformers.py</c>).</summary>
+    /// <summary>Remaps a Meta AudioCraft LM dump to the HF <c>MusicgenForCausalLM</c> names the engine <c>MusicGenDecoder.LoadWeights(prefix:"model.decoder")</c> consumes. The fused <c>self_attn/cross_attention.in_proj_weight</c> <c>[3d,d]</c> is split into q/k/v <c>[d,d]</c> row-blocks (Q, K, V order — matching torch <c>nn.MultiheadAttention</c> and HF's <c>convert_musicgen_transformers.py</c>).</summary>
     public static Dictionary<string, Tensor> ConvertAudioCraftDecoder(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
     {
         Dictionary<string, Tensor> o = new(raw.Count + 128);
@@ -274,9 +231,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return o;
     }
 
-    /// <summary>Pure AudioCraft → HF decoder key mapping (testable without files). Returns <c>null</c> for the fused
-    /// <c>in_proj_weight</c> keys (split separately by <see cref="ConvertAudioCraftDecoder"/>) and any key the decoder
-    /// never consumes (optional <c>in_proj_bias</c>, stray metadata).</summary>
+    /// <summary>Pure AudioCraft → HF decoder key mapping (testable without files). Returns <c>null</c> for the fused <c>in_proj_weight</c> keys (split separately by <see cref="ConvertAudioCraftDecoder"/>) and any key the decoder never consumes (optional <c>in_proj_bias</c>, stray metadata).</summary>
     public static string? MapAudioCraftDecoderKey(string key)
     {
         if (key.StartsWith("emb.", StringComparison.Ordinal) && key.EndsWith(".weight", StringComparison.Ordinal))
@@ -314,8 +269,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return $"model.decoder.layers.{idx}.{hfModule}";
     }
 
-    /// <summary>Splits a fused <c>in_proj_weight</c> <c>[3d,d]</c> into <c>{modulePrefix}.{q,k,v}_proj.weight</c>
-    /// <c>[d,d]</c> row-blocks (Q, K, V order).</summary>
+    /// <summary>Splits a fused <c>in_proj_weight</c> <c>[3d,d]</c> into <c>{modulePrefix}.{q,k,v}_proj.weight</c> <c>[d,d]</c> row-blocks (Q, K, V order).</summary>
     private static void SplitInProj(Tensor fused, string modulePrefix, Dictionary<string, Tensor> o)
     {
         // The q/k/v projections are big backend.Linear-only weights (IsGpuMatmulWeight) — keep them native fp16
@@ -326,8 +280,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         o[$"{modulePrefix}.v_proj.weight"] = RowSlice(fused, 2 * h, h);
     }
 
-    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of <paramref name="src"/> into a new owned tensor
-    /// (same dtype). A "row" is the product of all dims after dim-0.</summary>
+    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of <paramref name="src"/> into a new owned tensor (same dtype). A "row" is the product of all dims after dim-0.</summary>
     private static Tensor RowSlice(Tensor src, int startRow, int numRows)
     {
         long cols = src.Shape.Rank == 1 ? 1 : src.ElementCount / src.Shape[0];
@@ -339,8 +292,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return dst;
     }
 
-    /// <summary>Strips the combined <c>audio_encoder.</c> envelope (if present) then remaps EnCodec HF naming to
-    /// Meta naming via <see cref="ConvertEnCodec"/>. Source-format agnostic.</summary>
+    /// <summary>Strips the combined <c>audio_encoder.</c> envelope (if present) then remaps EnCodec HF naming to Meta naming via <see cref="ConvertEnCodec"/>. Source-format agnostic.</summary>
     public static Dictionary<string, Tensor> MapEnCodecWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
     {
         bool combined = raw.Keys.Any(k => k.StartsWith("audio_encoder.", StringComparison.Ordinal));
@@ -354,8 +306,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return ConvertEnCodec(stripped);
     }
 
-    /// <summary>Strips the combined <c>text_encoder.</c> envelope (if present); the inner HF T5 names are what
-    /// <c>T5TextEncoder.LoadWeights</c> consumes directly. Source-format agnostic.</summary>
+    /// <summary>Strips the combined <c>text_encoder.</c> envelope (if present); the inner HF T5 names are what <c>T5TextEncoder.LoadWeights</c> consumes directly. Source-format agnostic.</summary>
     public static Dictionary<string, Tensor> MapTextEncoderWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
     {
         bool combined = raw.Keys.Any(k => k.StartsWith("text_encoder.", StringComparison.Ordinal));
@@ -369,8 +320,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return weights;
     }
 
-    /// <summary>Converts an EnCodec weight dictionary from HF <c>transformers</c> naming to the Meta naming the engine
-    /// <c>EnCodec</c> loads; Meta-named dictionaries pass through. Weight-norm pairs are kept raw — the engine fuses.</summary>
+    /// <summary>Converts an EnCodec weight dictionary from HF <c>transformers</c> naming to the Meta naming the engine <c>EnCodec</c> loads; Meta-named dictionaries pass through. Weight-norm pairs are kept raw — the engine fuses.</summary>
     public static Dictionary<string, Tensor> ConvertEnCodec(Dictionary<string, Tensor> raw)
     {
         Dictionary<string, Tensor> normalized = new(raw.Count);
@@ -410,9 +360,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return result;
     }
 
-    /// <summary>True when <paramref name="key"/> is a top-level decoder conv parameter
-    /// (<c>decoder.layers.{i}.conv.*</c>, NOT a resnet-block <c>.block.</c> conv), parsing the Sequential index
-    /// <paramref name="idx"/>. Used to classify which top-level decoder convs are <c>ConvTranspose1d</c>.</summary>
+    /// <summary>True when <paramref name="key"/> is a top-level decoder conv parameter (<c>decoder.layers.{i}.conv.*</c>, NOT a resnet-block <c>.block.</c> conv), parsing the Sequential index <paramref name="idx"/>. Used to classify which top-level decoder convs are <c>ConvTranspose1d</c>.</summary>
     private static bool TryParseDecoderTopConvIndex(string key, out int idx)
     {
         idx = -1;
@@ -426,10 +374,7 @@ public sealed unsafe class MusicGenCheckpointConverter
         return rest[(dot + 1)..].StartsWith("conv.", StringComparison.Ordinal);
     }
 
-    /// <summary>Pure EnCodec key mapping (testable without files). <paramref name="transposeConv"/> marks the key's
-    /// conv module as a <c>ConvTranspose1d</c> (decoder upsamplers) → <c>convtr.convtr</c> instead of <c>conv.conv</c>.
-    /// Returns <c>null</c> for training-only quantizer buffers (<c>inited</c>/<c>cluster_size</c>/<c>embed_avg</c>);
-    /// keys not in the HF layout pass through unchanged.</summary>
+    /// <summary>Pure EnCodec key mapping (testable without files). <paramref name="transposeConv"/> marks the key's conv module as a <c>ConvTranspose1d</c> (decoder upsamplers) → <c>convtr.convtr</c> instead of <c>conv.conv</c>. Returns <c>null</c> for training-only quantizer buffers (<c>inited</c>/<c>cluster_size</c>/<c>embed_avg</c>); keys not in the HF layout pass through unchanged.</summary>
     public static string? MapEnCodecKey(string key, bool transposeConv = false)
     {
         key = CodecKeyUtils.NormalizeWeightNormKey(key);

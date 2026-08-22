@@ -2,8 +2,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Fetches a single non-HuggingFace asset (the public-domain CMU pronouncing dictionary) to a local path.
-/// Staged through a <c>.tmp</c> file and moved into place, so an interrupted fetch never looks complete.</summary>
+/// <summary>Fetches a single non-HuggingFace asset (the public-domain CMU pronouncing dictionary) to a local path. Staged through a <c>.tmp</c> file and moved into place, so an interrupted fetch never looks complete.</summary>
 internal static class AudioFileFetcher
 {
     /// <summary>Downloads <paramref name="url"/> to <paramref name="targetPath"/> unless it is already present.</summary>

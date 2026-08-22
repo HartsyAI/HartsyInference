@@ -4,9 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weights on a dedicated upload stream
-/// so the copy engine runs in parallel with compute SMs, gates the compute stream on completion via CUDA events,
-/// and frees on the compute stream so reclamation is naturally ordered after any prior reads.</summary>
+/// <summary>CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weights on a dedicated upload stream so the copy engine runs in parallel with compute SMs, gates the compute stream on completion via CUDA events, and frees on the compute stream so reclamation is naturally ordered after any prior reads.</summary>
 /// <remarks>Uploaded weights register in <see cref="GpuTransferHelper"/>'s shared cache so the existing
 /// <see cref="CudaBackend"/> fast path reuses the cached dptr; <see cref="EvictAsync"/> removes them.</remarks>
 public sealed class CudaStreamingWeightCache : IStreamingWeightCache
@@ -29,17 +27,13 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     private int _stagingIdx;
     private bool _stagingDead;   // allocation failed once — fall back to pageable direct uploads for the session
 
-    /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely
-    /// asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that
-    /// overlaps with nothing). Defaults to <c>false</c>.</summary>
+    /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that overlaps with nothing). Defaults to <c>false</c>.</summary>
     /// <remarks>Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the
     /// registration cost is not amortized. Requires the CPU weight tensors to stay resident (do not dispose them)
     /// for the lifetime of the stream.</remarks>
     public bool PinUploadSource { get; set; }
 
-    /// <summary>Constructs a streaming cache bound to a compute stream and upload
-    /// stream. Both streams should be created with <c>CU_STREAM_NON_BLOCKING</c>
-    /// so they can run independently of the legacy NULL stream and of each other.</summary>
+    /// <summary>Constructs a streaming cache bound to a compute stream and upload stream. Both streams should be created with <c>CU_STREAM_NON_BLOCKING</c> so they can run independently of the legacy NULL stream and of each other.</summary>
     public CudaStreamingWeightCache(CudaContext context, nint computeStream, nint uploadStream)
     {
         if (context is null) throw new ArgumentNullException(nameof(context));
@@ -60,12 +54,10 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         context.EnsureCurrent();
     }
 
-    /// <summary>The owning backend's transfer state; bound after registration so this cache's entry points can set
-    /// the ambient (two same-device backends share a context, so context identity cannot route these calls).</summary>
+    /// <summary>The owning backend's transfer state; bound after registration so this cache's entry points can set the ambient (two same-device backends share a context, so context identity cannot route these calls).</summary>
     private GpuTransferHelper.State? _state;
 
-    /// <summary>Binds the owning backend's transfer state. Called once by <see cref="CudaBackend"/> right after it
-    /// registers with <see cref="GpuTransferHelper"/>.</summary>
+    /// <summary>Binds the owning backend's transfer state. Called once by <see cref="CudaBackend"/> right after it registers with <see cref="GpuTransferHelper"/>.</summary>
     internal void BindState(GpuTransferHelper.State state) => _state = state;
 
     /// <summary>Entry-point guard: binds this cache's owning backend as the thread's ambient state, then the context.</summary>
@@ -154,9 +146,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         return new StreamingUploadToken(evt, this);
     }
 
-    /// <summary>Returns the current ring slot's pinned pointer (host-waiting on its prior uploads if still in
-    /// flight), growing the ring buffers if <paramref name="totalBytes"/> exceeds the slot size. Returns 0 (and
-    /// disables staging for the session) if pinned allocation fails — callers fall back to pageable uploads.</summary>
+    /// <summary>Returns the current ring slot's pinned pointer (host-waiting on its prior uploads if still in flight), growing the ring buffers if <paramref name="totalBytes"/> exceeds the slot size. Returns 0 (and disables staging for the session) if pinned allocation fails — callers fall back to pageable uploads.</summary>
     private nint AcquireStagingSlot(nuint totalBytes)
     {
         if (totalBytes > _stagingBytes)
@@ -262,8 +252,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         }
     }
 
-    /// <summary>Releases pinned host resources (the staging ring). Call before tearing down the backend so
-    /// page-locked memory is returned to the OS.</summary>
+    /// <summary>Releases pinned host resources (the staging ring). Call before tearing down the backend so page-locked memory is returned to the OS.</summary>
     public void UnregisterPinnedSources()
     {
         Enter();

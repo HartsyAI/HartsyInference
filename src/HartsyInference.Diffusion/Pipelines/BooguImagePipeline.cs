@@ -13,12 +13,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Boogu-Image-0.1 pipeline (Base / Turbo text-to-image and Edit text+image-to-image). Caller supplies the
-/// Qwen3-VL instruction embeddings (final hidden state <c>[1, T, 4096]</c>) — see
-/// <c>docs/Research/BOOGU_IMAGE.md §5/§7</c> for how those are produced (text-only for T2I; via the Qwen3-VL vision
-/// tower for edit). This mirrors the established <see cref="OmniGen2Pipeline"/> contract where the encoder forward is
-/// owned outside the pipeline.
-///
+/// <summary>Boogu-Image-0.1 pipeline (Base / Turbo text-to-image and Edit text+image-to-image). Caller supplies the Qwen3-VL instruction embeddings (final hidden state <c>[1, T, 4096]</c>) — see <c>docs/Research/BOOGU_IMAGE.md §5/§7</c> for how those are produced (text-only for T2I; via the Qwen3-VL vision tower for edit). This mirrors the established <see cref="OmniGen2Pipeline"/> contract where the encoder forward is owned outside the pipeline.
 /// <para>T2I uses single CFG <c>pred = neg + tg·(cond − neg)</c>. Edit uses Boogu double guidance
 /// <c>pred = cond + (tg − 1)·(cond − drop_text) + (ig − 1)·(drop_text − drop_all)</c> with three transformer passes per
 /// step (cond = text+ref, drop_text = neg+ref, drop_all = neg+no-ref). Sampling is the ascending v1
@@ -30,15 +25,12 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly BooguImageConfig _config;
 
-    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): the ~10 GB fp8 transformer
-    /// stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict
-    /// the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
+    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): the ~10 GB fp8 transformer stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
-    /// <summary>Frees the resident transformer weights (no-op when not resident). For the loader's TE ⇄ DiT
-    /// staging on a prompt-cache miss.</summary>
+    /// <summary>Frees the resident transformer weights (no-op when not resident). For the loader's TE ⇄ DiT staging on a prompt-cache miss.</summary>
     public void EvictResidentWeights()
     {
         if (!_ditResident) return;
@@ -47,8 +39,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         _ditResident = false;
     }
 
-    /// <summary>Creates a Boogu-Image pipeline. Pass <paramref name="vaeEncoder"/> to enable the edit path (it encodes
-    /// reference images into the DiT latent stream); null restricts the pipeline to T2I. Caller owns each component.</summary>
+    /// <summary>Creates a Boogu-Image pipeline. Pass <paramref name="vaeEncoder"/> to enable the edit path (it encodes reference images into the DiT latent stream); null restricts the pipeline to T2I. Caller owns each component.</summary>
     public BooguImagePipeline(IBackend backend, BooguImageTransformer transformer, VaeDecoder vaeDecoder,
         VaeEncoder? vaeEncoder, BooguImageConfig config)
         : base(backend)
@@ -59,10 +50,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Text-to-image. <paramref name="instructionEmbeddings"/> is the Qwen3-VL final hidden state
-    /// <c>[1, T, 4096]</c> for the (positive) instruction; <paramref name="negativeInstructionEmbeddings"/> is required
-    /// when <paramref name="textGuidanceScale"/> &gt; 1 (use the empty-string encode). Turbo: pass
-    /// <c>textGuidanceScale = 1</c> and ~4 steps.</summary>
+    /// <summary>Text-to-image. <paramref name="instructionEmbeddings"/> is the Qwen3-VL final hidden state <c>[1, T, 4096]</c> for the (positive) instruction; <paramref name="negativeInstructionEmbeddings"/> is required when <paramref name="textGuidanceScale"/> &gt; 1 (use the empty-string encode). Turbo: pass <c>textGuidanceScale = 1</c> and ~4 steps.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromEmbeddings(
         Tensor instructionEmbeddings,
         TextToImageRequest request,
@@ -168,8 +156,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Device CHW F32 → HWC u8 conversion (one 3-byte/pixel D2H instead of the 4-byte/channel host
-    /// loop; see Krea2/Z-Image).</summary>
+    /// <summary>Device CHW F32 → HWC u8 conversion (one 3-byte/pixel D2H instead of the 4-byte/channel host loop; see Krea2/Z-Image).</summary>
     private byte[] DeviceRgb(Tensor image)
     {
         int outH = (int)image.Shape[2], outW = (int)image.Shape[3];
@@ -185,12 +172,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         return rgb;
     }
 
-    /// <summary>Edit (text+image-to-image) with Boogu double guidance. The three instruction embeddings are produced by
-    /// the caller from the Qwen3-VL encoder: <paramref name="condEmbeddings"/> (positive instruction with the reference
-    /// image seen by the vision tower), <paramref name="dropTextEmbeddings"/> (negative instruction, image still seen)
-    /// and <paramref name="dropAllEmbeddings"/> (negative instruction, no image). Reference images are RGB tensors
-    /// <c>[1, 3, Hr, Wr]</c> in <c>[-1, 1]</c>; they are VAE-encoded into the DiT latent stream. When
-    /// <paramref name="imageGuidanceScale"/> ≤ 1 the drop-all pass is skipped (text-only guidance, reference kept).</summary>
+    /// <summary>Edit (text+image-to-image) with Boogu double guidance. The three instruction embeddings are produced by the caller from the Qwen3-VL encoder: <paramref name="condEmbeddings"/> (positive instruction with the reference image seen by the vision tower), <paramref name="dropTextEmbeddings"/> (negative instruction, image still seen) and <paramref name="dropAllEmbeddings"/> (negative instruction, no image). Reference images are RGB tensors <c>[1, 3, Hr, Wr]</c> in <c>[-1, 1]</c>; they are VAE-encoded into the DiT latent stream. When <paramref name="imageGuidanceScale"/> ≤ 1 the drop-all pass is skipped (text-only guidance, reference kept).</summary>
     public (byte[] rgbData, int width, int height, int seed) EditFromEmbeddings(
         Tensor condEmbeddings,
         Tensor dropTextEmbeddings,

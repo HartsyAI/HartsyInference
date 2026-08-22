@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS deterministic duration predictor (<c>DurationPredictor</c>, used when <c>use_sdp=False</c>):
-/// <c>conv_1 → channelLN → ReLU → conv_2 → channelLN → ReLU → proj</c> → log-duration <c>[T]</c>. (The
-/// stochastic spline variant is staged separately.) Channels-first <c>[1, hidden, T]</c>.</summary>
+/// <summary>VITS deterministic duration predictor (<c>DurationPredictor</c>, used when <c>use_sdp=False</c>): <c>conv_1 → channelLN → ReLU → conv_2 → channelLN → ReLU → proj</c> → log-duration <c>[T]</c>, channels-first <c>[1, hidden, T]</c>; the stochastic spline variant is staged separately.</summary>
 public sealed unsafe class VitsDurationPredictor
 {
     private readonly int _in, _filter, _kernel;
@@ -27,9 +25,7 @@ public sealed unsafe class VitsDurationPredictor
         { _condW = VitsWeights.Conv(w, $"{prefix}.cond"); _condB = VitsWeights.Bias(w, $"{prefix}.cond"); }
     }
 
-    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c> → <c>float[T]</c>. When a
-    /// speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and a <c>cond</c> layer are present, <c>x = x +
-    /// cond(g)</c> is added before the conv stack (MeloTTS/Bert-VITS2).</summary>
+    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c>; when a speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and a <c>cond</c> layer are present, <c>x = x + cond(g)</c> is added before the conv stack (MeloTTS/Bert-VITS2).</summary>
     public float[] Forward(IBackend backend, Tensor x, int t, Tensor? g = null)
     {
         int pad = (_kernel - 1) / 2;

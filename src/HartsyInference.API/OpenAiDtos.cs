@@ -3,8 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace HartsyInference.API;
 
-/// <summary>OpenAI-compatible request/response DTOs. Field names use snake_case via attributes to match
-/// the OpenAI Images / error wire format so the official client SDKs interoperate.</summary>
+/// <summary>OpenAI-compatible request/response DTOs. Field names use snake_case via attributes to match the OpenAI Images / error wire format so the official client SDKs interoperate.</summary>
 public sealed class ImageGenerationRequest
 {
     /// <summary>Text prompt.</summary>
@@ -57,9 +56,7 @@ public sealed class ModelEntry
     [JsonPropertyName("id")] public required string Id { get; init; }
     [JsonPropertyName("object")] public string Object => "model";
 
-    /// <summary>Unix seconds. OpenAI's schema expects a real per-model creation date; this catalog doesn't
-    /// track one, so it reports the server process's start time instead (same value for every entry, every
-    /// request) — cosmetic schema-shape compliance, not a real timestamp claim.</summary>
+    /// <summary>Unix seconds. OpenAI's schema expects a real per-model creation date; this catalog doesn't track one, so it reports the server process's start time instead (same value for every entry, every request) — cosmetic schema-shape compliance, not a real timestamp claim.</summary>
     [JsonPropertyName("created")] public required long Created { get; init; }
     [JsonPropertyName("owned_by")] public string OwnedBy => "hartsyinference";
 }
@@ -83,16 +80,14 @@ public sealed class ChatMessageDto
 {
     [JsonPropertyName("role")] public string Role { get; set; } = "user";
 
-    /// <summary>Null when this message carries only <see cref="ToolCalls"/> (OpenAI sets content null on an
-    /// assistant turn whose <c>finish_reason</c> is <c>tool_calls</c>).</summary>
+    /// <summary>Null when this message carries only <see cref="ToolCalls"/> (OpenAI sets content null on an assistant turn whose <c>finish_reason</c> is <c>tool_calls</c>).</summary>
     [JsonPropertyName("content")] public string? Content { get; set; } = "";
 
     /// <summary>Populated on an assistant message that invoked one or more tools.</summary>
     [JsonPropertyName("tool_calls")] public List<ChatToolCallDto>? ToolCalls { get; set; }
 }
 
-/// <summary>One tool definition a client may offer the model, OpenAI wire shape. Only <c>"type":"function"</c>
-/// is recognized (OpenAI has no other tool type today).</summary>
+/// <summary>One tool definition a client may offer the model, OpenAI wire shape. Only <c>"type":"function"</c> is recognized (OpenAI has no other tool type today).</summary>
 public sealed class ChatToolDto
 {
     [JsonPropertyName("type")] public string Type { get; set; } = "function";
@@ -104,8 +99,7 @@ public sealed class ChatToolFunctionDto
     [JsonPropertyName("name")] public required string Name { get; set; }
     [JsonPropertyName("description")] public string Description { get; set; } = "";
 
-    /// <summary>Raw JSON-schema object for the tool's arguments — kept as a <see cref="JsonElement"/> and
-    /// re-serialized to a string for the native <c>ToolDefinition.JsonSchema</c>, not parsed/validated here.</summary>
+    /// <summary>Raw JSON-schema object for the tool's arguments — kept as a <see cref="JsonElement"/> and re-serialized to a string for the native <c>ToolDefinition.JsonSchema</c>, not parsed/validated here.</summary>
     [JsonPropertyName("parameters")] public JsonElement Parameters { get; set; }
 }
 
@@ -124,9 +118,7 @@ public sealed class ChatToolCallFunctionDto
     [JsonPropertyName("arguments")] public string? Arguments { get; init; }
 }
 
-/// <summary>OpenAI chat-completions request. Sampling fields beyond temperature/top_p/max_tokens are
-/// HartsyInference extensions (top_k, min_p, repetition_penalty, seed), matching what
-/// <c>SamplingOptions</c> supports.</summary>
+/// <summary>OpenAI chat-completions request. Sampling fields beyond temperature/top_p/max_tokens are HartsyInference extensions (top_k, min_p, repetition_penalty, seed), matching what <c>SamplingOptions</c> supports.</summary>
 public sealed class ChatCompletionRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }
@@ -138,23 +130,14 @@ public sealed class ChatCompletionRequest
     [JsonPropertyName("top_k")] public int? TopK { get; set; }
     [JsonPropertyName("min_p")] public float? MinP { get; set; }
     [JsonPropertyName("repetition_penalty")] public float? RepetitionPenalty { get; set; }
-    /// <summary>OpenAI JSON-mode: <c>{"type":"json_object"}</c> forces every generated token to keep the
-    /// output syntactically valid JSON (see <c>JsonGrammarStep</c>). Only <c>json_object</c> is supported —
-    /// the richer <c>json_schema</c> mode (constraining to a specific schema, not just "valid JSON") is a
-    /// separate, larger feature and is rejected with a clear error rather than silently ignored.</summary>
+    /// <summary>OpenAI JSON-mode: <c>{"type":"json_object"}</c> forces every generated token to keep the output syntactically valid JSON (see <c>JsonGrammarStep</c>). Only <c>json_object</c> is supported — the richer <c>json_schema</c> mode (constraining to a specific schema, not just "valid JSON") is a separate, larger feature and is rejected with a clear error rather than silently ignored.</summary>
     [JsonPropertyName("response_format")] public ResponseFormatDto? ResponseFormat { get; set; }
     [JsonPropertyName("seed")] public ulong? Seed { get; set; }
 
-    /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified
-    /// (name/description/JSON-schema) — the native tool-calling path is fully built; this is DTO plumbing.</summary>
+    /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified (name/description/JSON-schema) — the native tool-calling path is fully built; this is DTO plumbing.</summary>
     [JsonPropertyName("tools")] public List<ChatToolDto>? Tools { get; set; }
 
-    /// <summary>OpenAI's <c>tool_choice</c>: either a bare string (<c>"none"</c>/<c>"auto"</c>/<c>"required"</c>)
-    /// or <c>{"type":"function","function":{"name":...}}</c> to force one specific tool. Kept as a raw
-    /// <see cref="JsonElement"/> and parsed in <c>CompatEndpoints.ToTextRequest</c> rather than a custom
-    /// converter, since it's one call site. <c>"required"</c> (call SOME tool, model's choice) has no native
-    /// equivalent — <c>ForceToolId</c> forces one *specific* tool — so it best-effort maps to the same behavior
-    /// as <c>"auto"</c> rather than guessing which tool to force.</summary>
+    /// <summary>OpenAI's <c>tool_choice</c>: either a bare string (<c>"none"</c>/<c>"auto"</c>/<c>"required"</c>) or <c>{"type":"function","function":{"name":...}}</c> to force one specific tool. Kept as a raw <see cref="JsonElement"/> and parsed in <c>CompatEndpoints.ToTextRequest</c> rather than a custom converter, since it's one call site. <c>"required"</c> (call SOME tool, model's choice) has no native equivalent — <c>ForceToolId</c> forces one *specific* tool — so it best-effort maps to the same behavior as <c>"auto"</c> rather than guessing which tool to force.</summary>
     [JsonPropertyName("tool_choice")] public JsonElement? ToolChoice { get; set; }
 }
 
@@ -213,13 +196,7 @@ public sealed class ChatCompletionDelta
     [JsonPropertyName("tool_calls")] public List<ChatToolCallDto>? ToolCalls { get; init; }
 }
 
-/// <summary>OpenAI text-to-speech request. <c>voice</c> is passed straight through as the engine's built-in voice
-/// name (e.g. a Kokoro voice pack) rather than mapped from OpenAI's fixed voice enum (alloy/echo/fable/onyx/
-/// nova/shimmer) — those names don't correspond to anything this engine ships, so pass a real voice name from
-/// the target model's own catalog instead. <c>response_format</c> only accepts <c>"wav"</c> (the default,
-/// also used when omitted): <c>AudioResult.Data</c> is always a pre-encoded WAV container — there's no mp3/
-/// opus/aac encoder to produce anything else, so an unsupported format is rejected with a clear 400 rather
-/// than silently returning WAV bytes mislabeled as something else.</summary>
+/// <summary>OpenAI text-to-speech request. <c>voice</c> is passed straight through as the engine's built-in voice name (e.g. a Kokoro voice pack) rather than mapped from OpenAI's fixed voice enum (alloy/echo/fable/onyx/nova/shimmer) — those names don't correspond to anything this engine ships, so pass a real voice name from the target model's own catalog instead. <c>response_format</c> only accepts <c>"wav"</c> (the default, also used when omitted): <c>AudioResult.Data</c> is always a pre-encoded WAV container — there's no mp3/opus/aac encoder to produce anything else, so an unsupported format is rejected with a clear 400 rather than silently returning WAV bytes mislabeled as something else.</summary>
 public sealed class SpeechGenerationRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }
@@ -229,13 +206,7 @@ public sealed class SpeechGenerationRequest
     [JsonPropertyName("response_format")] public string ResponseFormat { get; set; } = "wav";
 }
 
-/// <summary>OpenAI embeddings request. <c>input</c> is kept as a raw <see cref="JsonElement"/> since OpenAI accepts
-/// either a single string or an array of strings — parsed in <c>CompatEndpoints</c> rather than a custom
-/// converter, since it's one call site. <c>encoding_format</c> only supports <c>"float"</c> (the default); OpenAI's
-/// <c>"base64"</c> option isn't implemented, so it's rejected rather than silently returning float arrays under a
-/// base64-shaped request. A <c>dimensions</c> request that doesn't match the model's real output width is
-/// rejected too — no truncation, since Matryoshka-style truncate-and-renormalize correctness hasn't been verified
-/// for the embedding models this engine actually ships.</summary>
+/// <summary>OpenAI embeddings request. <c>input</c> is kept as a raw <see cref="JsonElement"/> since OpenAI accepts either a single string or an array of strings — parsed in <c>CompatEndpoints</c> rather than a custom converter, since it's one call site. <c>encoding_format</c> only supports <c>"float"</c> (the default); OpenAI's <c>"base64"</c> option isn't implemented, so it's rejected rather than silently returning float arrays under a base64-shaped request. A <c>dimensions</c> request that doesn't match the model's real output width is rejected too — no truncation, since Matryoshka-style truncate-and-renormalize correctness hasn't been verified for the embedding models this engine actually ships.</summary>
 public sealed class EmbeddingsRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }

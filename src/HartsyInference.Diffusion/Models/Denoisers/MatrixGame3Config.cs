@@ -16,13 +16,11 @@ public sealed record MatrixGame3Config
     /// <summary>Per-head dim (fixed 128 across Wan2.2 variants).</summary>
     public int HeadDim { get; init; } = 128;
 
-    /// <summary>Inner model dim.</summary>
     public int InnerDim => NumHeads * HeadDim;
 
     /// <summary>VAE latent channels (Wan2.2 z=48).</summary>
     public int InChannels { get; init; } = 48;
 
-    /// <summary>Output channels.</summary>
     public int OutChannels { get; init; } = 48;
 
     /// <summary>umT5-XXL feature width.</summary>
@@ -37,7 +35,6 @@ public sealed record MatrixGame3Config
     /// <summary>Number of DiT blocks (<c>config.json num_layers</c>).</summary>
     public int NumLayers { get; init; } = 30;
 
-    /// <summary>Norm epsilon.</summary>
     public float Eps { get; init; } = 1e-6f;
 
     /// <summary>Main DiT RoPE θ (Wan2.2 default; the ActionModule uses its own θ=256).</summary>
@@ -89,10 +86,8 @@ public sealed record MatrixGame3Config
     /// <summary>Latent frames per subsequent segment (40 RGB frames).</summary>
     public int SegmentLatents { get; init; } = 10;
 
-    /// <summary>VAE spatial compression.</summary>
     public int VaeSpatialCompression { get; init; } = 16;
 
-    /// <summary>VAE temporal compression.</summary>
     public int VaeTemporalCompression { get; init; } = 4;
 
     /// <summary>Flow-matching timestep shift (<c>sample_shift</c>).</summary>

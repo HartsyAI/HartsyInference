@@ -4,10 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>Optimal-Transport Conditional Flow Matching solver (speech-token-mel → target mel). Wraps
-/// an <see cref="ICfmEstimator"/> velocity network in a first-order Euler ODE from <c>x0 ~ N(0, I)</c>
-/// at <c>t=0</c> to the predicted mel at <c>t=1</c>, with classifier-free guidance. Mirrors
-/// <c>cosyvoice/flow/flow_matching.py:CausalConditionalCFM.solve_euler</c>:
+/// <summary>Optimal-Transport Conditional Flow Matching solver (speech-token-mel → target mel): wraps an <see cref="ICfmEstimator"/> velocity network in a first-order Euler ODE with classifier-free guidance.</summary>
+/// <remarks>Mirrors <c>cosyvoice/flow/flow_matching.py:CausalConditionalCFM.solve_euler</c>, integrating from <c>x0 ~ N(0, I)</c> at <c>t=0</c> to the predicted mel at <c>t=1</c>:
 ///
 /// <code>
 ///   x = x0
@@ -21,7 +19,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// </code>
 ///
 /// <para>Vanilla Euler — no sway-sampling / omega-shift (the mel operating dimension is small). NFE 10,
-/// CFG 0.7 by default. Deterministic for a fixed seed.</para></summary>
+/// CFG 0.7 by default. Deterministic for a fixed seed.</para></remarks>
 public sealed unsafe class ConditionalCfm
 {
     private readonly ICfmEstimator _estimator;
@@ -33,7 +31,8 @@ public sealed unsafe class ConditionalCfm
         _melBins = melBins;
     }
 
-    /// <summary>Solves the flow ODE to produce a mel <c>[1, melBins, T]</c>. <paramref name="mu"/> is the
+    /// <summary>Solves the flow ODE to produce a mel <c>[1, melBins, T]</c>.</summary>
+    /// <remarks><paramref name="mu"/> is the
     /// token-conditioning mel (<c>[1, melBins, T]</c>); <paramref name="spk"/> is the mel-projected
     /// speaker vector broadcast over time; <paramref name="cond"/> is the reference-mel prefix (zeros
     /// outside the prompt region). Pass <c>cfgRate ≤ 0</c> to disable CFG.
@@ -43,7 +42,7 @@ public sealed unsafe class ConditionalCfm
     /// noise from the same integer seed on every chunk call would give each chunk's target frames a
     /// DIFFERENT random draw than the one the corresponding frames get in a monolithic call (the RNG stream
     /// position depends on how many frames precede it in THIS call, which varies chunk to chunk) — the fix is
-    /// to draw noise ONCE for the whole utterance and slice the caller's own absolute-position sub-range.</summary>
+    /// to draw noise ONCE for the whole utterance and slice the caller's own absolute-position sub-range.</remarks>
     public Tensor Solve(IBackend backend, Tensor mu, Tensor spk, Tensor cond,
         int numSteps, float cfgRate, int seed, Tensor? attnMask = null, Tensor? x0Override = null)
     {
@@ -107,10 +106,7 @@ public sealed unsafe class ConditionalCfm
         return x;
     }
 
-    /// <summary>Draws the FULL <c>[1, channels, totalT]</c> Gaussian noise buffer once, for chunked callers to
-    /// slice contiguous absolute-position sub-ranges from (see <see cref="Solve"/>'s <c>x0Override</c> doc).
-    /// Identical bit-for-bit to what a monolithic <see cref="Solve"/> call over <c>totalT</c> frames would
-    /// draw internally — same seed, same sequential consumption.</summary>
+    /// <summary>Draws the FULL <c>[1, channels, totalT]</c> Gaussian noise buffer once, for chunked callers to slice contiguous absolute-position sub-ranges from (see <see cref="Solve"/>'s <c>x0Override</c> doc); identical bit-for-bit to what a monolithic <see cref="Solve"/> call over <c>totalT</c> frames would draw internally.</summary>
     public static Tensor DrawFullNoise(int channels, int totalT, int seed) => RandNormal(channels, totalT, seed);
 
     /// <summary>Returns a fresh copy of the <c>[1, channels, len]</c> slice <c>full[:, :, start..start+len)</c>.</summary>

@@ -4,22 +4,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>HeartCodec decoder (48 kHz, 12.5 Hz, 8-codebook RVQ). The real architecture (upstream
-/// <c>heartlib.heartcodec</c>) is a <b>flow-matching</b> codec, not a WaveNet:
-/// <list type="number">
-///   <item><see cref="HeartCodecRvq"/> — ResidualVQ decode: code grid <c>[8,T]</c> → summed quantized vectors
-///   → <c>project_out</c> → <c>[1,T,512]</c>.</item>
-///   <item><c>cond_feature_emb</c> (Linear 512→512) + nearest 2× upsample → conditioning <c>mu [1,2T,512]</c>.</item>
-///   <item><see cref="HeartCodecEstimator"/> velocity net integrated by a fixed Euler CFM ODE (10 steps,
-///   guidance 1.25, classifier-free with a zeroed-conditioning negative branch) from Gaussian noise to the
-///   codec latent <c>[1,2T,256]</c>.</item>
-///   <item>reshape <c>[1,2T,256]→[2,2T,128]</c> (the 256-D latent is two 128-D channels) then
-///   <see cref="HeartCodecScalarModel"/> decodes each to a 48 kHz waveform (1920× per frame), yielding a
-///   2-channel (stereo) output.</item>
-/// </list>
-///
-/// <para>Keys (HeartCodec checkpoint, prefix usually <c>""</c>): <c>flow_matching.vq_embed.*</c>,
-/// <c>flow_matching.cond_feature_emb.*</c>, <c>flow_matching.estimator.*</c>, <c>scalar_model.*</c>.</para></summary>
+/// <summary>HeartCodec decoder (48 kHz, 12.5 Hz, 8-codebook RVQ) — the real architecture (upstream <c>heartlib.heartcodec</c>) is a flow-matching codec, not a WaveNet.</summary>
+// Pipeline: (1) HeartCodecRvq ResidualVQ decode: code grid [8,T] → summed quantized vectors →
+// project_out → [1,T,512]. (2) cond_feature_emb (Linear 512→512) + nearest 2x upsample → conditioning mu
+// [1,2T,512]. (3) HeartCodecEstimator velocity net integrated by a fixed Euler CFM ODE (10 steps,
+// guidance 1.25, classifier-free with a zeroed-conditioning negative branch) from Gaussian noise to the
+// codec latent [1,2T,256]. (4) reshape [1,2T,256]→[2,2T,128] (the 256-D latent is two 128-D channels)
+// then HeartCodecScalarModel decodes each to a 48 kHz waveform (1920x per frame), yielding a 2-channel
+// (stereo) output.
+// Keys (HeartCodec checkpoint, prefix usually ""): flow_matching.vq_embed.*,
+// flow_matching.cond_feature_emb.*, flow_matching.estimator.*, scalar_model.*.
 public sealed unsafe class HeartCodecDecoder : IDisposable
 {
     private const int CondDim = 512;
@@ -54,8 +48,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
         _scalar.LoadWeights(w, $"{p}scalar_model");
     }
 
-    /// <summary>Decodes an 8-codebook grid <c>[NumCodebooks, T]</c> into a mono 48 kHz waveform (the two codec
-    /// channels averaged). Use <see cref="DecodeStereo"/> for the raw 2-channel output.</summary>
+    /// <summary>Decodes an 8-codebook grid <c>[NumCodebooks, T]</c> into a mono 48 kHz waveform (the two codec channels averaged); use <see cref="DecodeStereo"/> for the raw 2-channel output.</summary>
     public float[] Decode(IBackend backend, int[,] codes, int seed)
     {
         float[][] stereo = DecodeStereo(backend, codes, seed);
@@ -74,10 +67,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
     private const int OvlpLatent = 104;    // 52 * 2 — latent frames carried as in-context
     private const int SegLatent = 744;     // int(29.76 * 25) — latent frames per window
 
-    /// <summary>Full upstream <c>detokenize</c>: codes are tiled up to the fixed 372-frame window (the DiT is
-    /// trained at latent length 744), long grids decode as overlapping windows whose last 104 latent frames seed
-    /// the next window's in-context region, waveforms crossfade over the overlap, and the result is truncated to
-    /// the true code duration. → 2-channel waveform <c>float[2][]</c>.</summary>
+    /// <summary>Full upstream <c>detokenize</c>: codes are tiled up to the fixed 372-frame window (the DiT is trained at latent length 744), long grids decode as overlapping windows whose last 104 latent frames seed the next window's in-context region, waveforms crossfade over the overlap, and the result is truncated to the true code duration.</summary>
     public float[][] DecodeStereo(IBackend backend, int[,] codes, int seed)
     {
         ThrowIfDisposed();
@@ -158,8 +148,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
         return outp;
     }
 
-    /// <summary>Single-segment decode with caller-supplied init noise <c>[2T,256]</c> (no tiling/windowing) —
-    /// the deterministic path the parity test compares against the Python oracle.</summary>
+    /// <summary>Single-segment decode with caller-supplied init noise <c>[2T,256]</c> (no tiling/windowing) — the deterministic path the parity test compares against the Python oracle.</summary>
     public float[][] DecodeSegmentStereo(IBackend backend, int[,] codes, Tensor initNoise)
     {
         ThrowIfDisposed();
@@ -271,10 +260,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
         return x;
     }
 
-    /// <summary>Fixed-Euler OT-CFM ODE (upstream <c>FlowMatching.solve_euler</c>) with classifier-free guidance.
-    /// Integrates from <paramref name="initNoise"/> (t=0) to the codec latent (t=1) in <see cref="NumSteps"/> steps.
-    /// When <paramref name="incontextLen"/> &gt; 0 the first rows are re-blended each step
-    /// (<c>x = (1-(1-1e-6)t)·noise + t·incontext</c>) and pinned to the in-context latents at the end.</summary>
+    /// <summary>Fixed-Euler OT-CFM ODE (upstream <c>FlowMatching.solve_euler</c>) with classifier-free guidance, integrating from <paramref name="initNoise"/> (t=0) to the codec latent (t=1) in <see cref="NumSteps"/> steps; when <paramref name="incontextLen"/> &gt; 0 the first rows are re-blended each step and pinned to the in-context latents at the end.</summary>
     public Tensor SolveEulerCfg(IBackend backend, Tensor mu, int t2, Tensor initNoise, Tensor? incontext, int incontextLen)
     {
         // x starts as a copy of the init noise; the original is kept for the per-step in-context blend.

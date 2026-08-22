@@ -47,20 +47,13 @@ public sealed unsafe class Tensor : IDisposable
     /// (see <see cref="PendingFinalizerGpuCleanup"/>).</remarks>
     internal nint _gpuCleanupContext;
 
-    /// <summary>Bindings past the first when MORE THAN ONE backend holds a device copy of this host tensor (shared
-    /// model caches — Redux/TAESD encoders, audio converters — promoted on two GPUs). Before this existed the
-    /// second backend's promotion overwrote the first's demote hook in the single slot above: the first backend's
-    /// device copy then never demoted on host mutation and its cleanup routed into the wrong context bucket.
-    /// Null in the overwhelmingly common single-owner case. Guarded by <c>lock (this)</c> — internal type, no
-    /// external lockers, and a dedicated lock object would cost 8 bytes on every tensor for a rare case.</summary>
+    /// <summary>Bindings past the first when MORE THAN ONE backend holds a device copy of this host tensor (shared model caches — Redux/TAESD encoders, audio converters — promoted on two GPUs). Before this existed the second backend's promotion overwrote the first's demote hook in the single slot above: the first backend's device copy then never demoted on host mutation and its cleanup routed into the wrong context bucket. Null in the overwhelmingly common single-owner case. Guarded by <c>lock (this)</c> — internal type, no external lockers, and a dedicated lock object would cost 8 bytes on every tensor for a rare case.</summary>
     private List<GpuBinding>? _extraGpuBindings;
 
     /// <summary>One backend's (sync, dispose, owner-key) triple for <see cref="_extraGpuBindings"/>.</summary>
     private readonly record struct GpuBinding(nint Key, Action Sync, Action Dispose);
 
-    /// <summary>Registers backend callbacks for this tensor's device copy, keyed by the owning backend's cleanup
-    /// key. First owner takes the fast single-slot fields; a DIFFERENT owner lands in the overflow list instead of
-    /// overwriting; a repeat plant by the same owner replaces its own entry (the pre-existing semantics).</summary>
+    /// <summary>Registers backend callbacks for this tensor's device copy, keyed by the owning backend's cleanup key. First owner takes the fast single-slot fields; a DIFFERENT owner lands in the overflow list instead of overwriting; a repeat plant by the same owner replaces its own entry (the pre-existing semantics).</summary>
     internal void SetGpuBinding(nint key, Action sync, Action dispose)
     {
         bool disposeImmediately = false;
@@ -96,9 +89,7 @@ public sealed unsafe class Tensor : IDisposable
             dispose();
     }
 
-    /// <summary>Removes ONLY <paramref name="key"/>'s binding, leaving other backends' bindings intact — a bulk
-    /// eviction on one backend must not strip a sibling's demote hook. Promotes the first overflow entry into the
-    /// fast slot so the single-owner invariant is restored.</summary>
+    /// <summary>Removes ONLY <paramref name="key"/>'s binding, leaving other backends' bindings intact — a bulk eviction on one backend must not strip a sibling's demote hook. Promotes the first overflow entry into the fast slot so the single-owner invariant is restored.</summary>
     internal void ClearGpuBinding(nint key)
     {
         lock (this)
@@ -154,13 +145,7 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Claims (and clears) the primary-slot sync callback under the same lock <see cref="SetGpuBinding"/>/
-    /// <see cref="ClearGpuBinding"/> use, then returns it for the caller to invoke OUTSIDE the lock (mirrors
-    /// <see cref="TakeExtraBindings"/> twelve lines up). Without this, two threads racing <c>EnsureCpuData</c> on a
-    /// tensor shared by two backends (a weight promoted on both, mid-CFG-parallel-step) could both read the same
-    /// non-null callback before either clears it and both invoke it — a double D2H-sync / double-free of the same
-    /// GPU pointer. The unlocked null-check first keeps the overwhelmingly common no-GPU-shadow case a plain field
-    /// read.</summary>
+    /// <summary>Claims (and clears) the primary-slot sync callback under the same lock <see cref="SetGpuBinding"/>/<see cref="ClearGpuBinding"/> use, then returns it for the caller to invoke OUTSIDE the lock (mirrors <see cref="TakeExtraBindings"/> twelve lines up). Without this, two threads racing <c>EnsureCpuData</c> on a tensor shared by two backends (a weight promoted on both, mid-CFG-parallel-step) could both read the same non-null callback before either clears it and both invoke it — a double D2H-sync / double-free of the same GPU pointer. The unlocked null-check first keeps the overwhelmingly common no-GPU-shadow case a plain field read.</summary>
     private Action? ClaimPrimarySync()
     {
         if (_gpuSyncCallback is null)
@@ -252,8 +237,7 @@ public sealed unsafe class Tensor : IDisposable
         PendingFinalizerGpuCleanup.TryRemove(ownerKey, out _);
     }
 
-    /// <summary>Permanently retires a process-unique backend key, dropping its current bucket and suppressing any
-    /// late tensor finalizer that races backend teardown from recreating an undrainable static queue.</summary>
+    /// <summary>Permanently retires a process-unique backend key, dropping its current bucket and suppressing any late tensor finalizer that races backend teardown from recreating an undrainable static queue.</summary>
     internal static void RetireFinalizerGpuCleanup(nint ownerKey)
     {
         RetiredFinalizerGpuCleanupKeys[ownerKey] = 0;
@@ -301,19 +285,13 @@ public sealed unsafe class Tensor : IDisposable
         _ownsLazy = false;
     }
 
-    /// <summary>Roots <paramref name="owner"/> for this tensor's lifetime (see <see cref="_keepAlive"/>). Used by
-    /// borrowing loaders to pin the backing store (e.g. an <c>MmapHandle</c>) against premature GC/finalization.</summary>
+    /// <summary>Roots <paramref name="owner"/> for this tensor's lifetime (see <see cref="_keepAlive"/>). Used by borrowing loaders to pin the backing store (e.g. an <c>MmapHandle</c>) against premature GC/finalization.</summary>
     internal void SetKeepAlive(object? owner) => _keepAlive = owner;
 
     /// <summary>The owner object (if any) kept alive for this tensor's lifetime. See <see cref="SetKeepAlive"/>.</summary>
     internal object? KeepAliveOwner => _keepAlive;
 
-    /// <summary>
-    /// Returns whether this tensor and <paramref name="other"/> have overlapping materialized host-storage
-    /// ranges, without allocating a host buffer or invoking either tensor's GPU sync callback. Object identity is
-    /// always an alias; two distinct lazy GPU-only tensors are not, because backends cache their device storage by
-    /// tensor identity. Reshapes and borrowed subranges already have host pointers, so their overlap is detected.
-    /// </summary>
+    /// <summary>Returns whether this tensor and <paramref name="other"/> have overlapping materialized host-storage ranges, without allocating a host buffer or invoking either tensor's GPU sync callback. Object identity is always an alias; two distinct lazy GPU-only tensors are not, because backends cache their device storage by tensor identity. Reshapes and borrowed subranges already have host pointers, so their overlap is detected.</summary>
     /// <remarks>
     /// Callers must validate both byte counts before using this helper. Keeping the check here is important: no
     /// backend contract should read <see cref="DataPointer"/> merely to validate aliasing, since that would turn a
@@ -384,12 +362,10 @@ public sealed unsafe class Tensor : IDisposable
     /// Same units as <see cref="Fp8ScaleFactor"/>: real value = <c>fp8_byte_decoded * scale</c>.</remarks>
     public float Fp8InputScaleFactor { get; set; }
 
-    /// <summary>Packed-quantization companions (per-row scales, ConvRot group size) when this tensor is a weight the
-    /// backend consumes without dequantizing; null for dense and <c>fp8_scaled</c> weights.</summary>
+    /// <summary>Packed-quantization companions (per-row scales, ConvRot group size) when this tensor is a weight the backend consumes without dequantizing; null for dense and <c>fp8_scaled</c> weights.</summary>
     public QuantWeightInfo? QuantInfo { get; set; }
 
-    /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise
-    /// the owned host buffer is allocated (zeroed) on first access.</summary>
+    /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -447,8 +423,7 @@ public sealed unsafe class Tensor : IDisposable
         return view;
     }
 
-    /// <summary>Creates a view over the same bytes under a different dtype and shape — no copy, no reinterpretation
-    /// of the bytes themselves, only of what they are declared to mean.</summary>
+    /// <summary>Creates a view over the same bytes under a different dtype and shape — no copy, no reinterpretation of the bytes themselves, only of what they are declared to mean.</summary>
     /// <remarks>The case this exists for is a sub-byte packed weight arriving under a storage dtype: nvfp4 ships as
     /// U8 <c>[N, K/2]</c>, and every consumer that derives <c>K</c> from <c>Shape[1]</c> — <c>IBackend.Linear</c>
     /// first among them — would then run the whole GEMM at half the true inner dimension. Relabelling it
@@ -493,19 +468,13 @@ public sealed unsafe class Tensor : IDisposable
             "host-staged otherwise), or CopyTo for host<->device moves within one backend.");
     }
 
-    /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs
-    /// thousands of tiny casts (biases, norms, scalars) where the <see cref="Parallel.For"/> dispatch — measured at 22µs
-    /// for 16 chunks on a 16-core box — costs more than the whole conversion. At 2^20 even the cheapest conversion here
-    /// (BF16→F32) is ~500µs serial, so the dispatch is under 5% and the win is 4-6×; below the threshold the code path is
-    /// byte-for-byte the pre-existing serial loop.</summary>
+    /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs thousands of tiny casts (biases, norms, scalars) where the <see cref="Parallel.For"/> dispatch — measured at 22µs for 16 chunks on a 16-core box — costs more than the whole conversion. At 2^20 even the cheapest conversion here (BF16→F32) is ~500µs serial, so the dispatch is under 5% and the win is 4-6×; below the threshold the code path is byte-for-byte the pre-existing serial loop.</summary>
     private const long ParallelCastMinElements = 1L << 20;
 
-    /// <summary>Minimum elements per chunk, so a barely-over-threshold cast fans out to a few fat slices rather than
-    /// <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    /// <summary>Minimum elements per chunk, so a barely-over-threshold cast fans out to a few fat slices rather than <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
     private const long ParallelCastChunkElements = 1L << 18;
 
-    /// <summary>Splits <paramref name="count"/> elements into per-core chunks and invokes <paramref name="body"/>(start, length)
-    /// on each.</summary>
+    /// <summary>Splits <paramref name="count"/> elements into per-core chunks and invokes <paramref name="body"/>(start, length) on each.</summary>
     /// <remarks>Every elementwise conversion below is a pure <c>dst[i] = f(src[i])</c> with no loop-carried state, so
     /// chunking produces bit-identical output to the serial loop. The <see cref="AggregateException"/> unwrap preserves the
     /// serial contract that an unsupported dtype pair surfaces as <c>HartsyInferenceException</c>.</remarks>
@@ -754,9 +723,7 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Computes the total byte size for a tensor of the given shape and dtype.</summary>
     public static long ComputeByteSize(TensorShape shape, DType dtype) => dtype.ComputeByteCount(shape.ElementCount);
 
-    /// <summary>If GPU data is cached on this tensor, syncs it to CPU and clears the callbacks — for EVERY owning
-    /// backend: host access is about to read (or mutate) the host buffer, so each backend's device copy must sync
-    /// or demote, not just the first owner's.</summary>
+    /// <summary>If GPU data is cached on this tensor, syncs it to CPU and clears the callbacks — for EVERY owning backend: host access is about to read (or mutate) the host buffer, so each backend's device copy must sync or demote, not just the first owner's.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureCpuData()
     {
@@ -863,9 +830,7 @@ public sealed unsafe class Tensor : IDisposable
         return upper;
     }
 
-    /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data (on every owning backend)
-    /// without D2H copy. Borrowed tensors are no-ops. Every independent owner is attempted even if an earlier
-    /// backend callback fails; the first cleanup error is rethrown only after the host buffer is released.</summary>
+    /// <summary>Frees owned memory via atomic pointer exchange; frees cached GPU data (on every owning backend) without D2H copy. Borrowed tensors are no-ops. Every independent owner is attempted even if an earlier backend callback fails; the first cleanup error is rethrown only after the host buffer is released.</summary>
     public void Dispose()
     {
         Action? gpuDispose;

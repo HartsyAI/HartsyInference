@@ -5,20 +5,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>Reference-clip front-ends for S3Gen-style conditioning (CosyVoice 2's zero-shot frontend and
-/// Chatterbox's <c>embed_ref</c>). Each input encoder was trained on a DIFFERENT acoustic feature — a 128-bin
-/// Whisper log-mel @16 kHz for the S3 speech tokenizer, an 80-bin Kaldi fbank (+CMN) @16 kHz for CAM++, and an
-/// 80-bin matcha mel @24 kHz for the flow's reference conditioning — so they are computed independently rather
-/// than reusing one mel. Shared by <see cref="Pipelines.CosyVoicePipeline"/> and
-/// <see cref="Pipelines.ChatterboxPipeline"/>.</summary>
+/// <summary>Reference-clip front-ends for S3Gen-style conditioning (CosyVoice 2's zero-shot frontend and Chatterbox's <c>embed_ref</c>). Each input encoder was trained on a DIFFERENT acoustic feature — a 128-bin Whisper log-mel @16 kHz for the S3 speech tokenizer, an 80-bin Kaldi fbank (+CMN) @16 kHz for CAM++, and an 80-bin matcha mel @24 kHz for the flow's reference conditioning — so they are computed independently rather than reusing one mel. Shared by <see cref="Pipelines.CosyVoicePipeline"/> and <see cref="Pipelines.ChatterboxPipeline"/>.</summary>
 public static class S3GenReference
 {
     /// <summary>Polyphase-resamples <paramref name="audio"/>; pass-through copy when the rates match.</summary>
     public static float[] Resample(ReadOnlySpan<float> audio, int inRate, int outRate)
         => inRate == outRate ? audio.ToArray() : Resampler.Create(inRate, outRate).Resample(audio);
 
-    /// <summary>Tokenizes a 16 kHz reference into 25 Hz S3 speech tokens via the Whisper-style 128-bin log-mel
-    /// front-end (center=True → reflect-pad n_fft/2).</summary>
+    /// <summary>Tokenizes a 16 kHz reference into 25 Hz S3 speech tokens via the Whisper-style 128-bin log-mel front-end (center=True → reflect-pad n_fft/2).</summary>
     public static int[] SpeechTokens(IBackend backend, S3Tokenizer s3, ReadOnlySpan<float> audio16k)
     {
         MelSpectrogramExtractor s3Mel = new(MelSpectrogramExtractor.WhisperConfig(128));
@@ -27,8 +21,7 @@ public static class S3GenReference
         return s3.Forward(backend, feat);
     }
 
-    /// <summary>Derives the CAM++ x-vector <c>[1, 192]</c> from a 16 kHz reference via Kaldi fbank
-    /// (snip_edges, no padding) + per-bin cepstral mean normalization.</summary>
+    /// <summary>Derives the CAM++ x-vector <c>[1, 192]</c> from a 16 kHz reference via Kaldi fbank (snip_edges, no padding) + per-bin cepstral mean normalization.</summary>
     public static Tensor SpeakerEmbedding(IBackend backend, CamPlusSpeakerEncoder speakerEncoder, ReadOnlySpan<float> audio16k)
     {
         KaldiFbankExtractor fbank = new(16_000, 80);
@@ -36,8 +29,7 @@ public static class S3GenReference
         return speakerEncoder.Forward(backend, feat);
     }
 
-    /// <summary>Computes the flow's reference-conditioning mel <c>[1, 80, T]</c> from a 24 kHz reference
-    /// (matcha mel, center=False → reflect-pad (n_fft-hop)/2).</summary>
+    /// <summary>Computes the flow's reference-conditioning mel <c>[1, 80, T]</c> from a 24 kHz reference (matcha mel, center=False → reflect-pad (n_fft-hop)/2).</summary>
     public static Tensor FlowMel(ReadOnlySpan<float> audio24k)
     {
         MelSpectrogramExtractor flowMelExt = new(MelSpectrogramExtractor.CosyVoice2FlowConfig());
@@ -46,8 +38,7 @@ public static class S3GenReference
         return ChannelMajorTensor(flowMelExt.Compute(centered));
     }
 
-    /// <summary>PyTorch <c>reflect</c> padding (reflects around the edge sample without repeating it), used to
-    /// emulate the reference STFT's center padding.</summary>
+    /// <summary>PyTorch <c>reflect</c> padding (reflects around the edge sample without repeating it), used to emulate the reference STFT's center padding.</summary>
     private static float[] ReflectPad(ReadOnlySpan<float> x, int pad)
     {
         if (pad <= 0) return x.ToArray();
@@ -72,8 +63,7 @@ public static class S3GenReference
         return t;
     }
 
-    /// <summary>Wraps a <c>[frames, bins]</c> fbank as a time-major tensor <c>[1, frames, bins]</c> after
-    /// per-bin cepstral mean normalization (subtract each bin's mean over time), as CosyVoice does before CAM++.</summary>
+    /// <summary>Wraps a <c>[frames, bins]</c> fbank as a time-major tensor <c>[1, frames, bins]</c> after per-bin cepstral mean normalization (subtract each bin's mean over time), as CosyVoice does before CAM++.</summary>
     private static Tensor TimeMajorTensorWithCmn(float[,] fbank)
     {
         int frames = fbank.GetLength(0), bins = fbank.GetLength(1);

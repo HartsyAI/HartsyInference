@@ -4,14 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>The Qwen2.5-VL vision tower + patch-merger, loaded from llama.cpp's <c>mmproj-*.gguf</c>. Unlike the
-/// SigLIP/CLIP towers (<see cref="SiglipVlmEncoder"/>), Qwen2.5-VL uses: a Conv3D patch embed (2 temporal frames),
-/// 2D rotary position embeddings (no learned position table), window attention (full attention only on layers
-/// 7/15/23/31), RMSNorm (no bias), a SwiGLU MLP, and a 2×2 patch-merger. Patches are processed in merge-block
-/// order and reordered into window-contiguous groups for the windowed layers.
-///
-/// <para>The 2D-RoPE application, window partitioning, and merge-block patchify run host-side (one-time, off the
-/// decode hot path); the heavy matmuls/attention run through <see cref="IBackend"/>.</para></summary>
+/// <summary>The Qwen2.5-VL vision tower + patch-merger, loaded from llama.cpp's <c>mmproj-*.gguf</c>; unlike the SigLIP/CLIP towers, it uses a Conv3D patch embed, 2D rotary position embeddings (no learned position table), window attention (full attention only on layers 7/15/23/31), RMSNorm, a SwiGLU MLP, and a 2×2 patch-merger.</summary>
+/// <remarks>Patches are processed in merge-block order and reordered into window-contiguous groups for the windowed layers. The 2D-RoPE application, window partitioning, and merge-block patchify run host-side (one-time, off the decode hot path); the heavy matmuls/attention run through <see cref="IBackend"/>.</remarks>
 public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -219,8 +213,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>Vision-tower norm: RMSNorm (Qwen2.5-VL) or LayerNorm with bias (Qwen2-VL), keyed by
-    /// <paramref name="prefix"/> (<c>.weight</c>/<c>.bias</c>).</summary>
+    /// <summary>Vision-tower norm: RMSNorm (Qwen2.5-VL) or LayerNorm with bias (Qwen2-VL), keyed by <paramref name="prefix"/> (<c>.weight</c>/<c>.bias</c>).</summary>
     private void Norm(IBackend backend, Tensor outp, Tensor inp, string prefix)
     {
         if (UseRmsNorm) backend.RmsNorm(outp, inp, W($"{prefix}.weight"), Eps);
@@ -334,8 +327,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         sin[pos * hd + e] = MathF.Sin(ang);
     }
 
-    /// <summary>Window index in merge-units (matches HF Qwen2.5-VL get_window_index): returns the merge-unit
-    /// permutation and the cumulative patch-level window boundaries (cu_seqlens) for the block-diagonal mask.</summary>
+    /// <summary>Window index in merge-units (matches HF Qwen2.5-VL get_window_index): returns the merge-unit permutation and the cumulative patch-level window boundaries (cu_seqlens) for the block-diagonal mask.</summary>
     private (int[] winIdx, int[] cuWin) WindowIndex(int gh, int gw)
     {
         int m = Merge, vw = WindowPatches;     // merged units per window side (4)
@@ -388,8 +380,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return o;
     }
 
-    /// <summary>Builds a [1,1,np,np] additive attention mask (0 visible, -inf masked). Full attention if
-    /// <paramref name="full"/>, else block-diagonal over the window boundaries <paramref name="cuWin"/>.</summary>
+    /// <summary>Builds a [1,1,np,np] additive attention mask (0 visible, -inf masked): full attention if <paramref name="full"/>, else block-diagonal over the window boundaries <paramref name="cuWin"/>.</summary>
     private static Tensor BuildMask(int np, int[] cuWin, bool full)
     {
         Tensor mask = new(new TensorShape(1, 1, np, np), DType.F32);

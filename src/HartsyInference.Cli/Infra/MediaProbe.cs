@@ -3,9 +3,7 @@ using System.Globalization;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Reads media dimensions via <c>ffprobe</c> (works for both video containers and still images) —
-/// used by <c>hartsy restore --scale</c>, which needs the input size before dispatch to compute the target
-/// area. Full decoding still happens once, later, in the dispatch path.</summary>
+/// <summary>Reads media dimensions via <c>ffprobe</c> (video or still image) — used by <c>hartsy restore --scale</c> to compute the target area before dispatch.</summary>
 public static class MediaProbe
 {
     /// <summary>Returns (width, height) of the first video/image stream.</summary>

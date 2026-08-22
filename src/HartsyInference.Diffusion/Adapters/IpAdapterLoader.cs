@@ -6,14 +6,10 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Opens an IP-Adapter checkpoint (safetensors, or the torch-pickle <c>.bin</c> the FaceID releases
-/// ship), detects the variant (Standard / Plus / FaceID) and base model from key signatures and tensor shapes,
-/// and returns the parsed weight dictionary plus a derived config. Pickle checkpoints are flattened from their
-/// nested <c>{image_proj: {…}, ip_adapter: {…}}</c> layout into the same dotted keys safetensors files use.</summary>
+/// <summary>Opens an IP-Adapter checkpoint (safetensors, or the torch-pickle <c>.bin</c> the FaceID releases ship), detects the variant (Standard / Plus / FaceID) and base model from key signatures and tensor shapes, and returns the parsed weight dictionary plus a derived config. Pickle checkpoints are flattened from their nested <c>{image_proj: {…}, ip_adapter: {…}}</c> layout into the same dotted keys safetensors files use.</summary>
 public static class IpAdapterLoader
 {
-    /// <summary>Loads an IP-Adapter checkpoint with auto-detection. Supports <c>.safetensors</c> plus torch
-    /// <c>.bin</c>/<c>.pt</c>/<c>.pth</c> pickle containers (the h94 FaceID release format).</summary>
+    /// <summary>Loads an IP-Adapter checkpoint with auto-detection. Supports <c>.safetensors</c> plus torch <c>.bin</c>/<c>.pt</c>/<c>.pth</c> pickle containers (the h94 FaceID release format).</summary>
     public static IpAdapterFile Load(string filePath)
     {
         bool isPickle = filePath.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)
@@ -76,8 +72,7 @@ public static class IpAdapterLoader
         }
     }
 
-    /// <summary>Detects (baseModel, isPlus, isFaceId, isFaceIdV2) from the filename and weight-key signatures.
-    /// Public so the detection logic is unit-testable against synthetic key sets.</summary>
+    /// <summary>Detects (baseModel, isPlus, isFaceId, isFaceIdV2) from the filename and weight-key signatures. Public so the detection logic is unit-testable against synthetic key sets.</summary>
     public static (IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, bool isFaceIdV2) Detect(string filePath, IReadOnlyDictionary<string, Tensor> weights)
     {
         string lowered = Path.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
@@ -132,8 +127,7 @@ public static class IpAdapterLoader
         throw new HartsyInferenceException($"Could not detect IP-Adapter base model from key signatures. Sample keys: {string.Join(", ", sample)}");
     }
 
-    /// <summary>Derives the variant config from the detected flags and projection tensor shapes. Public so the
-    /// shape-derivation logic is unit-testable against synthetic weight dicts.</summary>
+    /// <summary>Derives the variant config from the detected flags and projection tensor shapes. Public so the shape-derivation logic is unit-testable against synthetic weight dicts.</summary>
     public static IpAdapterConfig BuildConfig(IpAdapterBaseModel baseModel, bool isPlus, bool isFaceId, IReadOnlyDictionary<string, Tensor> weights, bool isFaceIdV2 = false)
     {
         int crossDim = baseModel switch

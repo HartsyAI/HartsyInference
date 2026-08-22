@@ -84,7 +84,6 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         new BooguImageSingleBlock(c.HiddenSize, c.NumAttentionHeads, c.NumKvHeads, c.HeadDim, ffn, cond, modulation,
             c.NormEps, c.QkNormEps);
 
-    /// <summary>Config accessor.</summary>
     public BooguImageConfig Config => _config;
 
     /// <summary>Loads weights from a diffusers-style key dict (prefix already stripped to bare keys).</summary>

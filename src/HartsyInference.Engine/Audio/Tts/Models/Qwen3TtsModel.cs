@@ -7,9 +7,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Qwen3-TTS (Qwen/Qwen3-TTS-12Hz-*) — 12 Hz talker (semantic codebook-0) + MTP code predictor (codebooks
-/// 1..15) + Snake/ConvNeXt vocoder → 24 kHz. The variant hint encodes the size and mode: <c>*-CustomVoice</c> →
-/// preset speakers, <c>*-VoiceDesign</c> → instruct text, anything else → the Base checkpoint's voice clone.</summary>
+/// <summary>Qwen3-TTS (Qwen/Qwen3-TTS-12Hz-*) — 12 Hz talker (semantic codebook-0) + MTP code predictor (codebooks 1..15) + Snake/ConvNeXt vocoder → 24 kHz. The variant hint encodes the size and mode: <c>*-CustomVoice</c> → preset speakers, <c>*-VoiceDesign</c> → instruct text, anything else → the Base checkpoint's voice clone.</summary>
 internal static class Qwen3TtsModel
 {
     private const string DefaultRepo = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice";
@@ -20,7 +18,6 @@ internal static class Qwen3TtsModel
     /// <summary>English codec-space language id (LanguageIdBase 2050) used to condition voice_clone.</summary>
     private const int EnglishLanguageId = 2050;
 
-    /// <summary>The Qwen3-TTS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = ResolveRepo,
@@ -66,10 +63,7 @@ internal static class Qwen3TtsModel
         },
     };
 
-    /// <summary>Maps a CustomVoice speaker NAME to its codec-space token. Only four ids are verified against
-    /// the checkpoint (Ryan, Serena, Ono_Anna, Sohee); the other five documented voices have unverified
-    /// placeholder ids in the config, so an unrecognized or unverified name falls back to the default rather
-    /// than emitting a token that would synthesize the wrong voice.</summary>
+    /// <summary>Maps a CustomVoice speaker NAME to its codec-space token. Only four ids are verified against the checkpoint (Ryan, Serena, Ono_Anna, Sohee); the other five documented voices have unverified placeholder ids in the config, so an unrecognized or unverified name falls back to the default rather than emitting a token that would synthesize the wrong voice.</summary>
     private static int ResolveSpeakerToken(string? speaker) => (speaker ?? string.Empty).Trim() switch
     {
         "Ryan" => 3_061,

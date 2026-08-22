@@ -2,15 +2,10 @@ using HartsyInference.Core.Backends;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>A resolved tensor-parallel plan for one model: one backend per rank plus the collective that sums
-/// per-rank partials at the two per-layer reduce seams. Sibling of the layer-split <see cref="LlmPlacement"/> —
-/// the two are mutually exclusive (TP replicates the layer STACK on every rank and splits each layer's
-/// attention heads / FFN columns; the layer split assigns whole layers to stages). The communicator is
-/// borrowed, not owned: whoever created it (e.g. <c>CollectiveComm.Create</c>) disposes it.</summary>
+/// <summary>A resolved tensor-parallel plan for one model: one backend per rank plus the collective that sums per-rank partials at the two per-layer reduce seams. Sibling of the layer-split <see cref="LlmPlacement"/> — the two are mutually exclusive (TP replicates the layer STACK on every rank and splits each layer's attention heads/FFN columns; the layer split assigns whole layers to stages). The communicator is borrowed, not owned: whoever created it disposes it.</summary>
 public sealed record TpPlacement
 {
-    /// <summary>Rank-ordered backends; rank r's weight shard and KV slice live on entry r. Rank 0 additionally
-    /// owns the final norm, the lm_head, and the returned hidden state.</summary>
+    /// <summary>Rank-ordered backends; rank r's weight shard and KV slice live on entry r. Rank 0 additionally owns the final norm, the lm_head, and the returned hidden state.</summary>
     public IReadOnlyList<IBackend> RankBackends { get; }
 
     /// <summary>Collective for the two per-layer AllReduceSum seams (attention-out and down_proj).</summary>

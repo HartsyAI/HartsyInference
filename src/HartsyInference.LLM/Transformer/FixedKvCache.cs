@@ -3,21 +3,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Fixed-capacity device KV cache: each layer holds a single pre-allocated <c>[1, num_kv_heads,
-/// maxSeq, head_dim]</c> buffer that new K/V are written into <b>in place</b> (<see cref="IBackend.KvCacheAppend"/>).
-/// Unlike the <see cref="KvCache"/> (which grows via <c>Concat</c>, reallocating + copying the whole prefix
-/// every token — O(n²) total), appends here are O(tNew) and VRAM is bounded by maxSeq up front. The buffer's
-/// sequence stride (maxSeq) exceeds the valid length, so FlashAttention is given the valid key count separately
-/// and reads the stride from the tensor shape.
-///
-/// <para>This is the single-sequence step toward block-paged KV + continuous batching: it removes the O(n²)
-/// growth and fixes the footprint. Multi-sequence block paging builds on this.</para>
-///
-/// <para>The full cap is allocated up front on purpose. Growing the buffer in chunks instead was built and
-/// measured on 2026-08-17: it cost ~4 GB of peak VRAM and ~20% of the decode stage, because the device mempool
-/// runs at a keep-everything release threshold and so retains every intermediate buffer size. Use
-/// <see cref="PagedKvCache"/> if a bounded footprint is needed — uniform page sizes are what that pool rewards.
-/// </para></summary>
+/// <summary>Fixed-capacity device KV cache: each layer holds a single pre-allocated buffer that new K/V are written into <b>in place</b>, so appends here are O(tNew) and VRAM is bounded by maxSeq up front — unlike the <see cref="KvCache"/>, which grows via <c>Concat</c>, reallocating + copying the whole prefix every token (O(n²) total).</summary>
+/// <remarks>
+/// <para>This is the single-sequence step toward block-paged KV + continuous batching: it removes the O(n²) growth and fixes the footprint. Multi-sequence block paging builds on this.</para>
+/// <para>The full cap is allocated up front on purpose. Growing the buffer in chunks instead was built and measured on 2026-08-17: it cost ~4 GB of peak VRAM and ~20% of the decode stage, because the device mempool runs at a keep-everything release threshold and so retains every intermediate buffer size. Use <see cref="PagedKvCache"/> if a bounded footprint is needed — uniform page sizes are what that pool rewards.</para>
+/// </remarks>
 public sealed class FixedKvCache : IKvCache, IDisposable
 {
     private readonly Tensor?[] _k;
@@ -26,10 +16,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     private readonly int[] _capacity;
     private readonly DType _dtype;
     private int _currentLength;
-    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that
-    /// layer. Under multi-device layer-split placement this puts every layer's KV on its stage's device with no
-    /// placement API at all; it also stops shared-KV-slot layers (Gemma-4) from ever going device-resident, since
-    /// nothing appends to them.</summary>
+    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that layer, which puts every layer's KV on its stage's device under multi-device layer-split placement with no placement API at all, and stops shared-KV-slot layers (Gemma-4) from ever going device-resident since nothing appends to them.</summary>
     private readonly bool[] _residentLayer;
     private int _disposed;
 
@@ -43,27 +30,16 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     public int CurrentLength { get { ThrowIfDisposed(); return _currentLength; } }
 
 
-    /// <summary>Tokens layer <paramref name="layer"/> currently has room for; equals
-    /// <see cref="MaxSequenceLength"/> unless the cache grows on demand.</summary>
+    /// <summary>Tokens layer <paramref name="layer"/> currently has room for; equals <see cref="MaxSequenceLength"/> unless the cache grows on demand.</summary>
     public int LayerCapacity(int layer) { ThrowIfDisposed(); return _capacity[layer]; }
 
-    /// <summary>Allocates per-layer fixed buffers sized for <paramref name="maxSequenceLength"/> tokens, all
-    /// layers sharing one <paramref name="headDim"/> (every architecture except Gemma-4).</summary>
+    /// <summary>Allocates per-layer fixed buffers sized for <paramref name="maxSequenceLength"/> tokens, all layers sharing one <paramref name="headDim"/> (every architecture except Gemma-4).</summary>
     public FixedKvCache(int numLayers, int batch, int numKvHeads, int headDim, int maxSequenceLength,
         DType? kvDtype = null)
         : this(numLayers, batch, numKvHeads, UniformHeadDims(numLayers, headDim), maxSequenceLength, kvDtype) { }
 
-    /// <summary>Allocates per-layer fixed buffers with a PER-LAYER head dimension (Gemma-4: local/SWA layers are
-    /// narrower than global layers). <paramref name="headDimPerLayer"/> must have <paramref name="numLayers"/>
-    /// entries — a layer that shares another layer's KV cache slot (see <see cref="TransformerConfig.HasOwnKv"/>)
-    /// still gets an entry here (simplest to allocate and just never write/read it) sized to its OWN head dim,
-    /// even though nothing ever appends to it.</summary>
-    /// <param name="kvDtype">Storage dtype for the K/V buffers. Default F32 (unchanged behavior). F16 halves
-    /// the cache's VRAM footprint (K/V straight out of the projection stay F32 — <see cref="IBackend.KvCacheAppend"/>
-    /// converts on write; <see cref="IBackend.FlashAttention"/> upconverts back to F32 on read, so compute is
-    /// unaffected — only storage is narrower). Opt-in: the CUDA kernels support it (v1: monolithic FlashAttention
-    /// only, not the split-K or graph-decode fast paths, which fall back to the monolithic kernel automatically),
-    /// but this isn't the default until it's soaked — same reasoning as <c>DeviceGate</c>'s concurrent-mode flag.</param>
+    /// <summary>Allocates per-layer fixed buffers with a PER-LAYER head dimension (Gemma-4: local/SWA layers are narrower than global layers); <paramref name="headDimPerLayer"/> must have <paramref name="numLayers"/> entries — a layer that shares another layer's KV cache slot (see <see cref="TransformerConfig.HasOwnKv"/>) still gets an entry here sized to its OWN head dim, even though nothing ever appends to it.</summary>
+    /// <param name="kvDtype">Storage dtype for the K/V buffers; default F32. F16 halves the cache's VRAM footprint (K/V straight out of the projection stay F32 — <see cref="IBackend.KvCacheAppend"/> converts on write, <see cref="IBackend.FlashAttention"/> upconverts back to F32 on read, so only storage is narrower). Opt-in: the CUDA kernels support it (v1: monolithic FlashAttention only, split-K/graph-decode fall back automatically), but isn't the default until it's soaked.</param>
     public FixedKvCache(int numLayers, int batch, int numKvHeads, int[] headDimPerLayer, int maxSequenceLength,
         DType? kvDtype = null)
     {
@@ -126,8 +102,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     }
 
 
-    /// <summary>The layer's K buffer <c>[1, num_kv_heads, capacity, head_dim]</c>; valid keys are the first
-    /// <see cref="CurrentLength"/> (+ the just-appended step). FlashAttention is told the valid length.</summary>
+    /// <summary>The layer's K buffer <c>[1, num_kv_heads, capacity, head_dim]</c>; valid keys are the first <see cref="CurrentLength"/> (+ the just-appended step). FlashAttention is told the valid length.</summary>
     public Tensor KeyPrefix(int layer) { ThrowIfDisposed(); return Buffer(_k, layer); }
 
     public Tensor ValuePrefix(int layer) { ThrowIfDisposed(); return Buffer(_v, layer); }
@@ -142,10 +117,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         _currentLength += by;
     }
 
-    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection). No physical
-    /// erasure needed: the buffer is a single fixed array written in place, and every read already scopes
-    /// itself to <see cref="CurrentLength"/> via the caller-supplied valid-length, so shrinking the counter
-    /// is sufficient — a subsequent <see cref="AppendStep"/> simply overwrites whatever was beyond it.</summary>
+    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection); no physical erasure needed since every read already scopes itself to <see cref="CurrentLength"/> via the caller-supplied valid-length, so a subsequent <see cref="AppendStep"/> simply overwrites whatever was beyond it.</summary>
     public void Truncate(int newLength)
     {
         ThrowIfDisposed();

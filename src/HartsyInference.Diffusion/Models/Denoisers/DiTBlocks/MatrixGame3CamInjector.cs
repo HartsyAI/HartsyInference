@@ -35,8 +35,7 @@ public sealed unsafe class MatrixGame3CamInjector
             if (t is not null) yield return t;
     }
 
-    /// <summary>Modulates <paramref name="hidden"/> <c>[S, dim]</c> in place given the shared per-token Plücker
-    /// embedding <paramref name="pluckerEmb"/> <c>[S, dim]</c>.</summary>
+    /// <summary>Modulates <paramref name="hidden"/> <c>[S, dim]</c> in place given the shared per-token Plücker embedding <paramref name="pluckerEmb"/> <c>[S, dim]</c>.</summary>
     public void Apply(IBackend backend, Tensor hidden, Tensor pluckerEmb)
     {
         int s = (int)hidden.Shape[0];

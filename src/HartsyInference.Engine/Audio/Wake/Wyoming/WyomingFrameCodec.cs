@@ -21,8 +21,7 @@ namespace HartsyInference.Engine.Audio.Wake.Wyoming;
 /// accepts inline <c>data</c>, an out-of-line block, or both (block wins per key), so all three are supported.</para></summary>
 public sealed class WyomingFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
 {
-    /// <summary>Reference-library version advertised in every header we write. Peers ignore it; it is emitted
-    /// because the reference writer always does, and an absent key is a cheap way to look like a stranger.</summary>
+    /// <summary>Reference-library version advertised in every header we write. Peers ignore it; it is emitted because the reference writer always does, and an absent key is a cheap way to look like a stranger.</summary>
     public const string ProtocolVersion = "1.10.0";
 
     private const byte Newline = (byte)'\n';
@@ -112,8 +111,7 @@ public sealed class WyomingFrameCodec(Stream stream, int maxPayloadBytes = 1 << 
     public Task WriteAsync(string type, ReadOnlyMemory<byte> dataJson, CancellationToken cancel) =>
         WriteAsync(type, dataJson, ReadOnlyMemory<byte>.Empty, cancel);
 
-    /// <summary>Serializes a <c>data</c> object; <paramref name="write"/> emits the properties, the braces are
-    /// supplied here.</summary>
+    /// <summary>Serializes a <c>data</c> object; <paramref name="write"/> emits the properties, the braces are supplied here.</summary>
     public static byte[] BuildData(Action<Utf8JsonWriter> write)
     {
         ArrayBufferWriter<byte> buffer = new(128);
@@ -150,8 +148,7 @@ public sealed class WyomingFrameCodec(Stream stream, int maxPayloadBytes = 1 << 
     private static int ReadLength(JsonElement root, string key) =>
         root.TryGetProperty(key, out JsonElement value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int length) ? length : 0;
 
-    /// <summary>Combines the inline <c>data</c> object with the out-of-line block, the block winning per key —
-    /// the reference reader's <c>dict.update</c> order.</summary>
+    /// <summary>Combines the inline <c>data</c> object with the out-of-line block, the block winning per key — the reference reader's <c>dict.update</c> order.</summary>
     private static JsonDocument? MergeData(JsonElement inline, JsonDocument? block)
     {
         bool hasInline = inline.ValueKind == JsonValueKind.Object;

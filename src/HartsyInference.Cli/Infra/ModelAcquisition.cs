@@ -86,8 +86,7 @@ public static class ModelAcquisition
         return primary is not null ? spec with { LocalPath = primary } : spec;
     }
 
-    /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the
-    /// <c>Models/&lt;subdir&gt;</c> tree — these must never be pulled via <see cref="ModelDownloader"/>.</summary>
+    /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the <c>Models/&lt;subdir&gt;</c> tree.</summary>
     internal static bool UsesAudioCache(CatalogEntry cat, Modality modality)
         => AudioCacheModalities.Contains(modality) && !StandardDownloadMusicIds.Contains(cat.Id);
 
@@ -147,8 +146,7 @@ public static class ModelAcquisition
     /// for HF-backed models, so <c>TargetSubdir</c>/<c>TargetName</c> on these catalog entries are display-only.</remarks>
     private static string AudioAssetPath(ModelAsset a, string category) => Path.Combine(AudioModelCache.GetRepoDirectory(a.Repo, category), a.RepoPath);
 
-    /// <summary>Maps a CLI modality to the <see cref="AudioModelCache"/> category folder — mirrors
-    /// <c>AudioWeights.CategorySubfolder</c> (SwarmUI extension) for the audio-cache-backed modalities.</summary>
+    /// <summary>Maps a CLI modality to the <see cref="AudioModelCache"/> category folder, mirroring <c>AudioWeights.CategorySubfolder</c> in the SwarmUI extension.</summary>
     private static string AudioCategoryFor(Modality modality) => modality switch
     {
         Modality.Speech => "tts",

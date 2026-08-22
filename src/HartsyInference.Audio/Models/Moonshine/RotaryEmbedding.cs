@@ -2,46 +2,38 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>Rotary Position Embedding (RoPE) — **interleaved (GPT-J) convention**, with
-/// optional partial rotation. Moonshine uses this convention (verified against
-/// <c>transformers/models/moonshine/modeling_moonshine.py</c>) — pairs of consecutive
-/// dims share a frequency:
-/// <code>
-///   for d in 0 .. rotary_dim, step 2:
-///     i = d / 2
-///     c, s = cos(p * inv_freq[i]), sin(p * inv_freq[i])
-///     q'[d]   = q[d]   * c - q[d+1] * s
-///     q'[d+1] = q[d+1] * c + q[d]   * s
-///   q'[rotary_dim..head_dim]  =  q[rotary_dim..head_dim]    (pass-through)
-/// </code>
-/// This is the GPT-J / Phi convention. Llama / GPT-NeoX use the alternative
-/// "split-halves" form (used by <c>WhisperOps</c> if we ever add it). They are NOT
-/// interchangeable — picking the wrong one produces fluent-looking but degenerate
-/// transcriptions (we found this the hard way on the first Moonshine run).
-///
-/// <para><b>Table layout:</b> we store only the <c>rotary_dim/2</c> unique cos / sin
-/// values per position, indexed by frequency pair. Apply reads <c>cos[pos][i]</c>
-/// once and uses it for both <c>q[2i]</c> and <c>q[2i+1]</c>.</para></summary>
-/// <summary>Llama-3 "NTK-by-parts" RoPE scaling parameters (HF <c>rope_scaling</c> with <c>rope_type: "llama3"</c>).
-/// Rescales the base inverse frequencies so a model trained at <see cref="OriginalMaxPos"/> extrapolates to longer
-/// context: high-frequency pairs are untouched, low-frequency pairs are divided by <see cref="Factor"/>, and the
-/// medium band is smoothly interpolated between the two. Used by Chatterbox's T3 (theta 500000, factor 8) and the
-/// Llama-3 family (CSM, Orpheus).</summary>
+/// <summary>Llama-3 "NTK-by-parts" RoPE scaling parameters (HF <c>rope_scaling</c> with <c>rope_type: "llama3"</c>), rescaling the base inverse frequencies so a model trained at <see cref="OriginalMaxPos"/> extrapolates to longer context.</summary>
+// High-frequency pairs are untouched, low-frequency pairs are divided by Factor, and the medium band is
+// smoothly interpolated between the two. Used by Chatterbox's T3 (theta 500000, factor 8) and the Llama-3
+// family (CSM, Orpheus).
 internal readonly record struct RopeScaling(float Factor, float LowFreqFactor, float HighFreqFactor, int OriginalMaxPos)
 {
     /// <summary>Standard Llama-3 / Llama-3.1 defaults (factor 8, low 1, high 4, original context 8192).</summary>
     public static RopeScaling Llama3 => new(8f, 1f, 4f, 8192);
 }
 
+/// <summary>Rotary Position Embedding (RoPE) using the interleaved (GPT-J) convention, with optional partial rotation.</summary>
+// Moonshine uses this convention (verified against transformers/models/moonshine/modeling_moonshine.py) —
+// pairs of consecutive dims share a frequency:
+//   for d in 0 .. rotary_dim, step 2:
+//     i = d / 2
+//     c, s = cos(p * inv_freq[i]), sin(p * inv_freq[i])
+//     q'[d]   = q[d]   * c - q[d+1] * s
+//     q'[d+1] = q[d+1] * c + q[d]   * s
+//   q'[rotary_dim..head_dim]  =  q[rotary_dim..head_dim]    (pass-through)
+// This is the GPT-J / Phi convention. Llama / GPT-NeoX use the alternative "split-halves" form (used by
+// WhisperOps if we ever add it). They are NOT interchangeable — picking the wrong one produces fluent-
+// looking but degenerate transcriptions (we found this the hard way on the first Moonshine run).
+//
+// Table layout: we store only the rotary_dim/2 unique cos/sin values per position, indexed by frequency
+// pair. Apply reads cos[pos][i] once and uses it for both q[2i] and q[2i+1].
 internal static class RotaryEmbedding
 {
     private static readonly Dictionary<(int RotaryDim, float Theta, int MaxPos), (float[] Cos, float[] Sin)> _cache = new();
     private static readonly Dictionary<(int RotaryDim, float Theta, int MaxPos, float F, float Lo, float Hi, int Orig), (float[] Cos, float[] Sin)> _scaledCache = new();
     private static readonly object _cacheLock = new();
 
-    /// <summary>Returns cos / sin tables of shape <c>[maxPos, rotaryDim/2]</c>. Each
-    /// row holds the <c>rotaryDim/2</c> unique frequencies for that position; the
-    /// apply step pairs them with consecutive q/k dims (interleaved convention).</summary>
+    /// <summary>Returns cos / sin tables of shape <c>[maxPos, rotaryDim/2]</c>; the apply step pairs each row's frequencies with consecutive q/k dims (interleaved convention).</summary>
     public static (float[] Cos, float[] Sin) GetTables(int rotaryDim, float theta, int maxPos)
     {
         (int RotaryDim, float Theta, int MaxPos) key = (rotaryDim, theta, maxPos);
@@ -62,9 +54,7 @@ internal static class RotaryEmbedding
         }
     }
 
-    /// <summary>Same as <see cref="GetTables(int,float,int)"/>, but applies Llama-3 NTK-by-parts scaling to the
-    /// base inverse frequencies when <paramref name="scaling"/> is non-null. With null scaling this is bit-identical
-    /// to the unscaled overload.</summary>
+    /// <summary>Same as <see cref="GetTables(int,float,int)"/>, but applies Llama-3 NTK-by-parts scaling to the base inverse frequencies when <paramref name="scaling"/> is non-null; bit-identical to the unscaled overload when null.</summary>
     public static (float[] Cos, float[] Sin) GetTables(int rotaryDim, float theta, int maxPos, RopeScaling? scaling)
     {
         if (scaling is null) return GetTables(rotaryDim, theta, maxPos);
@@ -127,9 +117,7 @@ internal static class RotaryEmbedding
         return (cos, sin);
     }
 
-    /// <summary>Applies interleaved partial RoPE in-place to a tensor of shape
-    /// <c>[1, H, S, D]</c>. The first <paramref name="rotaryDim"/> dims of each head
-    /// are rotated in adjacent pairs <c>(2i, 2i+1)</c>; remaining dims pass through.</summary>
+    /// <summary>Applies interleaved partial RoPE in-place to a tensor of shape <c>[1, H, S, D]</c>: the first <paramref name="rotaryDim"/> dims of each head rotate in adjacent pairs <c>(2i, 2i+1)</c>; remaining dims pass through.</summary>
     public static unsafe void ApplyInPlace(Tensor t, int numHeads, int seqLen, int headDim, int rotaryDim, int posStart, float[] cosTable, float[] sinTable)
     {
         if (rotaryDim == 0) return;

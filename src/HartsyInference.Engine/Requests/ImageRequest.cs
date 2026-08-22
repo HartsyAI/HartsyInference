@@ -1,9 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native, transport-agnostic text-to-image request. Flat common props cover the everyday knobs; the nullable
-/// composition objects add LoRA/ControlNet/IP-Adapter/Refiner/img2img/inpaint/regional/variation-seed; and
-/// <see cref="Extra"/> carries arch-specific or host-registered params the flat contract does not name. Transports
-/// (HTTP, CLI, the SwarmUI backend) map their own inputs onto this — it is the single contract image generation accepts.</summary>
+/// <summary>Native, transport-agnostic text-to-image request. Flat common props cover the everyday knobs; the nullable composition objects add LoRA/ControlNet/IP-Adapter/Refiner/img2img/inpaint/regional/variation-seed; and <see cref="Extra"/> carries arch-specific or host-registered params the flat contract does not name. Transports (HTTP, CLI, the SwarmUI backend) map their own inputs onto this — it is the single contract image generation accepts.</summary>
 public sealed record ImageRequest
 {
     /// <summary>The positive prompt.</summary>
@@ -24,20 +21,13 @@ public sealed record ImageRequest
     /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale (1.0 for distilled models).</summary>
     public float? CfgScale { get; init; }
 
-    /// <summary>CFG-Rescale strength, 0..1; null/0 = off. Pulls a high-CFG guided prediction back toward the
-    /// conditional's magnitude to reduce oversaturation/burnt highlights. Only consumed by recipes that wire it
-    /// in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
+    /// <summary>CFG-Rescale strength, 0..1; null/0 = off. Pulls a high-CFG guided prediction back toward the conditional's magnitude to reduce oversaturation/burnt highlights. Only consumed by recipes that wire it in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
 
-    /// <summary>TCFG (Tangential Damping CFG) toggle; null/false = off. Filters the tangential component out of
-    /// the unconditional prediction before the CFG combine (https://huggingface.co/papers/2503.18137). Composes
-    /// with <see cref="CfgRescale"/>. Only consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored
-    /// elsewhere.</summary>
+    /// <summary>TCFG (Tangential Damping CFG) toggle; null/false = off. Filters the tangential component out of the unconditional prediction before the CFG combine (https://huggingface.co/papers/2503.18137). Composes with <see cref="CfgRescale"/>. Only consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
     public bool? Tcfg { get; init; }
 
-    /// <summary>Seamless-tileable axis: <c>null</c>/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/
-    /// <c>"Y-Only"</c> = one axis. Same vocabulary as SwarmUI core's shared <c>SeamlessTileable</c> param. Only
-    /// consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
+    /// <summary>Seamless-tileable axis: <c>null</c>/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis. Same vocabulary as SwarmUI core's shared <c>SeamlessTileable</c> param. Only consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
     public string? SeamlessTiling { get; init; }
 
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>

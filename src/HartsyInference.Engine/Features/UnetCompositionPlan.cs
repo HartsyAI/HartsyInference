@@ -9,9 +9,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Everything the UNet-family pipelines (SD 1.5, SDXL) need resolved for one generation: ControlNet layers,
-/// IP-Adapter conditioning, the img2img/inpaint init, and any weighted-prompt conditioning
-/// schedule. Built once per request and disposed after the pipeline call — every tensor here is owned by the plan.</summary>
+/// <summary>Everything the UNet-family pipelines (SD 1.5, SDXL) need resolved for one generation: ControlNet layers, IP-Adapter conditioning, the img2img/inpaint init, and any weighted-prompt conditioning schedule. Built once per request and disposed after the pipeline call — every tensor here is owned by the plan.</summary>
 public sealed class UnetCompositionPlan : IDisposable
 {
     /// <summary>Resolved ControlNet layers, or null when the request set none.</summary>
@@ -26,9 +24,7 @@ public sealed class UnetCompositionPlan : IDisposable
     /// <summary>Weighted-prompt conditioning schedule, or null when the prompts carry no weighting syntax.</summary>
     public ConditioningSchedule? Conditioning { get; private init; }
 
-    /// <summary>Resolves every composition object on <paramref name="request"/> against a UNet-family pipeline.
-    /// <paramref name="conditioningFactory"/> supplies the architecture's weighted-conditioning build (single- or
-    /// dual-CLIP); the IP-Adapter cache callbacks are owned by the calling pipeline.</summary>
+    /// <summary>Resolves every composition object on <paramref name="request"/> against a UNet-family pipeline. <paramref name="conditioningFactory"/> supplies the architecture's weighted-conditioning build (single- or dual-CLIP); the IP-Adapter cache callbacks are owned by the calling pipeline.</summary>
     public static UnetCompositionPlan Build(
         ImageRequest request,
         IBackend backend,

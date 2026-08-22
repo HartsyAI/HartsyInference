@@ -181,7 +181,7 @@ public static class WavFile
         WriteMono16(fs, samples, sampleRate);
     }
 
-    /// <summary>Writes a mono 16-bit PCM WAV stream.</summary>
+    /// <summary>Writes a fixed 44-byte-header mono 16-bit PCM WAV to <paramref name="stream"/>, rounding and clamping each sample from [-1, 1] to <see cref="short"/> range.</summary>
     public static void WriteMono16(Stream stream, ReadOnlySpan<float> samples, int sampleRate)
     {
         int dataBytes = samples.Length * 2;

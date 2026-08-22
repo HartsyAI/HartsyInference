@@ -3,16 +3,9 @@ using System.Text.Json;
 
 namespace HartsyInference.ModelAssets.Quant;
 
-/// <summary>A ComfyUI <c>{layer}.comfy_quant</c> blob: a tiny U8 tensor holding the UTF-8 JSON that declares how that
-/// one layer was quantized.</summary>
-/// <remarks><para>The per-layer blob is authoritative, not the file-level <c>__metadata__._quantization_metadata</c>
-/// mirror: re-quants of the same model skip different layer sets (the official Lightricks LTX 2.5 build and
-/// <c>DmitryDB/LTX-2.5-ComfyUI-Quants</c> disagree), and a loader that reads the file-level copy would apply one
-/// layer's format to another's weight.</para>
-/// <para>Observed shapes: <c>{"format":"float8_e4m3fn"}</c>,
-/// <c>{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256,"per_row":true}</c>,
-/// <c>{"format":"nvfp4"}</c>. ComfyUI also reads <c>convrot</c>/<c>convrot_groupsize</c> out of a nested
-/// <c>params</c> object, so both spellings are accepted.</para></remarks>
+/// <summary>A ComfyUI <c>{layer}.comfy_quant</c> blob: a tiny U8 tensor holding the UTF-8 JSON that declares how that one layer was quantized.</summary>
+/// <remarks><para>The per-layer blob is authoritative, not the file-level <c>__metadata__._quantization_metadata</c> mirror: re-quants of the same model skip different layer sets (the official Lightricks LTX 2.5 build and <c>DmitryDB/LTX-2.5-ComfyUI-Quants</c> disagree), and a loader that reads the file-level copy would apply one layer's format to another's weight.</para>
+/// <para>Observed shapes: <c>{"format":"float8_e4m3fn"}</c>, <c>{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256,"per_row":true}</c>, <c>{"format":"nvfp4"}</c>. ComfyUI also reads <c>convrot</c>/<c>convrot_groupsize</c> out of a nested <c>params</c> object, so both spellings are accepted.</para></remarks>
 public sealed record ComfyQuantDescriptor
 {
     /// <summary>Key suffix carrying the descriptor.</summary>
@@ -25,8 +18,7 @@ public sealed record ComfyQuantDescriptor
     public int ConvRotGroupSize { get; init; }
 
     /// <summary>The layer opts out of the quantized GEMM and must be dequantized first.</summary>
-    /// <remarks>ComfyUI honours this per layer (<c>ops.py</c> <c>_full_precision_mm_config</c>); MiniMax-H3's
-    /// <c>mlp.fc2</c> is the known case, and dropping it silently costs accuracy with no error.</remarks>
+    /// <remarks>ComfyUI honours this per layer (<c>ops.py</c> <c>_full_precision_mm_config</c>); MiniMax-H3's <c>mlp.fc2</c> is the known case, and dropping it silently costs accuracy with no error.</remarks>
     public bool FullPrecisionMatMul { get; init; }
 
     /// <summary>Parses the blob, or returns null when it is not a descriptor tensor or its JSON is unreadable.</summary>

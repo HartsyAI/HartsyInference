@@ -87,15 +87,8 @@ public sealed class Proto
             strideH: 2, strideW: 2, padH: 0, padW: 0);
         a.Dispose();
 
-        // Apply SiLU after the ConvTranspose. (Ultralytics' Proto.forward applies the standard
-        // Conv act on the upsample output; nn.ConvTranspose2d itself has no activation, but the
-        // module's surrounding flow makes cv2's input the activated upsample output. Verified
-        // by reading Proto.forward in Ultralytics: the upsample is NOT wrapped in a Conv block
-        // so there is NO SiLU after it. We pass straight to cv2.)
-        // ↑ Note: Ultralytics' `Proto.forward` literally writes
-        //   `return self.cv3(self.cv2(self.upsample(self.cv1(x))))` — no SiLU between upsample
-        //   and cv2. The convtranspose output goes straight into cv2.
-
+        // No activation between upsample and cv2: Ultralytics' Proto.forward is
+        // `cv3(cv2(upsample(cv1(x))))` — the ConvTranspose2d output feeds cv2 directly.
         Tensor b = _cv2.Forward(backend, upsampled);
         upsampled.Dispose();
         Tensor c = _cv3.Forward(backend, b);

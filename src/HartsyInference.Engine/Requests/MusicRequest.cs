@@ -1,8 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native text-to-music request. Flat fields cover the common and ACE-Step/HeartMuLa knobs; the LM-planner
-/// block drives ACE-Step's 5 Hz planner; and the continuation/repaint/cover inputs select the editing mode over a
-/// supplied source clip (null on all three = plain text-to-music).</summary>
+/// <summary>Native text-to-music request. Flat fields cover the common and ACE-Step/HeartMuLa knobs; the LM-planner block drives ACE-Step's 5 Hz planner; and the continuation/repaint/cover inputs select the editing mode over a supplied source clip (null on all three = plain text-to-music).</summary>
 public sealed record MusicRequest
 {
     /// <summary>The music description prompt.</summary>
@@ -35,8 +33,7 @@ public sealed record MusicRequest
     /// <summary>Nucleus sampling threshold (YuE); null uses the pipeline default.</summary>
     public double? TopP { get; init; }
 
-    /// <summary>Repetition penalty (YuE); null uses the pipeline default. Below 1 it would reward repetition —
-    /// YuE loops into instrumental phrases without it, so the loader floors it at 1.</summary>
+    /// <summary>Repetition penalty (YuE); null uses the pipeline default. Below 1 it would reward repetition — YuE loops into instrumental phrases without it, so the loader floors it at 1.</summary>
     public double? RepetitionPenalty { get; init; }
 
     /// <summary>BPM meta (ACE-Step prompt template); null = "N/A".</summary>
@@ -54,16 +51,13 @@ public sealed record MusicRequest
     /// <summary>ODE (default) or SDE diffusion solver (ACE-Step base/sft).</summary>
     public string InferMethod { get; init; } = "";
 
-    /// <summary>Use ADG guidance instead of the default APG (ACE-Step base/sft CFG). Deprecated in favor of
-    /// <see cref="GuidanceType"/>; honored only when that is empty.</summary>
+    /// <summary>Use ADG guidance instead of the default APG (ACE-Step base/sft CFG). Deprecated in favor of <see cref="GuidanceType"/>; honored only when that is empty.</summary>
     public bool UseAdg { get; init; }
 
-    /// <summary>ACE-Step guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg". Empty falls
-    /// back to <see cref="UseAdg"/> for callers that predate this field.</summary>
+    /// <summary>ACE-Step guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg". Empty falls back to <see cref="UseAdg"/> for callers that predate this field.</summary>
     public string GuidanceType { get; init; } = "";
 
-    /// <summary>ACE-Step v1 ERG: weaken (rather than zero) the null TEXT embedding for the uncond branch.
-    /// Null = the model default (upstream defaults true). ACE-Step 1.5 has no ERG and refuses explicit values.</summary>
+    /// <summary>ACE-Step v1 ERG: weaken (rather than zero) the null TEXT embedding for the uncond branch. Null = the model default (upstream defaults true). ACE-Step 1.5 has no ERG and refuses explicit values.</summary>
     public bool? UseErgTag { get; init; }
 
     /// <summary>ACE-Step v1 ERG: the uncond context keeps the lyrics with a weakened lyric encoder. Null = default (true).</summary>
@@ -99,16 +93,13 @@ public sealed record MusicRequest
     /// <summary>LM planner negative prompt.</summary>
     public string LmNegativePrompt { get; init; } = "";
 
-    /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests
-    /// take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3
-    /// consumes these today.</summary>
+    /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3 consumes these today.</summary>
     public LoraStack? Loras { get; init; }
 
     /// <summary>Continuation seed audio: extend this clip forward. Null for none.</summary>
     public AudioClip? Continuation { get; init; }
 
-    /// <summary>Repaint (inpaint) source audio: regenerate the [<see cref="RepaintStart"/>, <see cref="RepaintEnd"/>]
-    /// span while preserving the rest. Null for none.</summary>
+    /// <summary>Repaint (inpaint) source audio: regenerate the [<see cref="RepaintStart"/>, <see cref="RepaintEnd"/>] span while preserving the rest. Null for none.</summary>
     public AudioClip? Repaint { get; init; }
 
     /// <summary>Repaint span start in seconds (used when <see cref="Repaint"/> is set).</summary>
@@ -123,26 +114,18 @@ public sealed record MusicRequest
     /// <summary>Cover conditioning strength (0 keeps the source, 1 fully re-renders).</summary>
     public double CoverStrength { get; init; } = 0.5;
 
-    /// <summary>Reference audio for in-context learning: the generation continues this clip's style/voice rather than
-    /// starting cold (YuE's <c>--use_audio_prompt</c>). Encoded to codec tokens and spliced into the first segment's
-    /// prompt. Ignored when <see cref="ReferenceVocal"/> and <see cref="ReferenceInstrumental"/> are both set — a
-    /// dual-track reference wins, matching upstream's branch order. Null for none.</summary>
+    /// <summary>Reference audio for in-context learning: the generation continues this clip's style/voice rather than starting cold (YuE's <c>--use_audio_prompt</c>). Encoded to codec tokens and spliced into the first segment's prompt. Ignored when <see cref="ReferenceVocal"/> and <see cref="ReferenceInstrumental"/> are both set — a dual-track reference wins, matching upstream's branch order. Null for none.</summary>
     public AudioClip? ReferenceAudio { get; init; }
 
-    /// <summary>Isolated vocal stem of a dual-track reference (YuE's <c>--vocal_track_prompt_path</c>). Must be paired
-    /// with <see cref="ReferenceInstrumental"/> and cover the same span; the two are interleaved into the prompt so the
-    /// model reads them as its own two output tracks. Null for none.</summary>
+    /// <summary>Isolated vocal stem of a dual-track reference (YuE's <c>--vocal_track_prompt_path</c>). Must be paired with <see cref="ReferenceInstrumental"/> and cover the same span; the two are interleaved into the prompt so the model reads them as its own two output tracks. Null for none.</summary>
     public AudioClip? ReferenceVocal { get; init; }
 
-    /// <summary>Isolated instrumental stem of a dual-track reference (YuE's <c>--instrumental_track_prompt_path</c>).
-    /// Pairs with <see cref="ReferenceVocal"/>. Null for none.</summary>
+    /// <summary>Isolated instrumental stem of a dual-track reference (YuE's <c>--instrumental_track_prompt_path</c>). Pairs with <see cref="ReferenceVocal"/>. Null for none.</summary>
     public AudioClip? ReferenceInstrumental { get; init; }
 
     /// <summary>Start second of the span taken from the reference audio (YuE's <c>--prompt_start_time</c>).</summary>
     public double ReferenceStartSeconds { get; init; }
 
-    /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream
-    /// default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every
-    /// generated segment.</summary>
+    /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every generated segment.</summary>
     public double ReferenceEndSeconds { get; init; } = 30;
 }

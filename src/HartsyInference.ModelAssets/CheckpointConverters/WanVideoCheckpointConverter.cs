@@ -5,33 +5,15 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads Wan-Video DiT checkpoints (Wan2.2 TI2V-5B and family) into the diffusers state-dict names that
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers.WanVideoTransformer"/> expects.
+/// <summary>Loads Wan-Video DiT checkpoints (Wan2.2 TI2V-5B and family) into the diffusers state-dict names that <see cref="HartsyInference.Diffusion.Models.Denoisers.WanVideoTransformer"/> expects.
 ///
-/// <para>Two real-world layouts are handled: (1) the <c>Wan-AI/*-Diffusers</c> repos, whose <c>transformer/</c> shards are
-/// already in diffusers naming (pass-through after prefix strip + FP8 scale folding); (2) original/ComfyUI repackaged
-/// single files (e.g. <c>wan2.2_ti2v_5B_fp16.safetensors</c>) in the original Wan naming (<c>blocks.{i}.self_attn.q</c>,
-/// <c>time_embedding.0</c>, <c>head.head</c>, …), which are renamed via the ordered rule table ported verbatim from
-/// diffusers <c>scripts/convert_wan_to_diffusers.py</c> — including the <c>norm2</c>/<c>norm3</c> swap (original
-/// <c>norm3</c> is the cross-attn norm = diffusers <c>norm2</c>).</para>
+/// <para>Two real-world layouts are handled: (1) the <c>Wan-AI/*-Diffusers</c> repos, whose <c>transformer/</c> shards are already in diffusers naming (pass-through after prefix strip + FP8 scale folding); (2) original/ComfyUI repackaged single files (e.g. <c>wan2.2_ti2v_5B_fp16.safetensors</c>) in the original Wan naming (<c>blocks.{i}.self_attn.q</c>, <c>time_embedding.0</c>, <c>head.head</c>, …), which are renamed via the ordered rule table ported verbatim from diffusers <c>scripts/convert_wan_to_diffusers.py</c> — including the <c>norm2</c>/<c>norm3</c> swap (original <c>norm3</c> is the cross-attn norm = diffusers <c>norm2</c>).</para>
 ///
-/// <para><b>VAE note:</b> the TI2V-5B VAE is the already-built <c>Wan22VaeDecoder</c> (original Wan naming) — load it
-/// with <see cref="LanceCheckpointConverter.LoadVae"/> (same <c>wan2.2_vae.safetensors</c> Lance uses). The diffusers
-/// <c>vae/</c> folder layout (<c>AutoencoderKLWan</c> naming) is NOT supported.</para>
+/// <para><b>VAE note:</b> the TI2V-5B VAE is the already-built <c>Wan22VaeDecoder</c> (original Wan naming) — load it with <see cref="LanceCheckpointConverter.LoadVae"/> (same <c>wan2.2_vae.safetensors</c> Lance uses). The diffusers <c>vae/</c> folder layout (<c>AutoencoderKLWan</c> naming) is NOT supported.</para>
 ///
-/// <para><b>Wan2.2-Animate:</b> the animate-specific keys (<c>pose_patch_embedding.*</c>,
-/// <c>motion_encoder.enc.net_app.convs.{i}.*</c> / <c>enc.fc.{i}.*</c> / <c>dec.direction.weight</c>,
-/// <c>face_encoder.conv{1_local,2,3}.conv.*</c> / <c>out_proj.*</c> / <c>padding_tokens</c>,
-/// <c>face_adapter.fuser_blocks.{i}.*</c>, <c>ref_conv.*</c>) match NO rename rule and pass through unchanged —
-/// <c>WanAnimateTransformer.LoadWeights</c> expects them under their original names (pinned by
-/// <c>WanVideoCheckpointConverterTests.MapKey_AnimateKeys_PassThroughUnchanged</c>). The base i2v keys
-/// (<c>img_emb.proj.*</c>, <c>cross_attn.k_img</c>/<c>v_img</c>/<c>norm_k_img</c>) convert to the diffusers names as
-/// usual.</para>
+/// <para><b>Wan2.2-Animate:</b> the animate-specific keys (<c>pose_patch_embedding.*</c>, <c>motion_encoder.enc.net_app.convs.{i}.*</c> / <c>enc.fc.{i}.*</c> / <c>dec.direction.weight</c>, <c>face_encoder.conv{1_local,2,3}.conv.*</c> / <c>out_proj.*</c> / <c>padding_tokens</c>, <c>face_adapter.fuser_blocks.{i}.*</c>, <c>ref_conv.*</c>) match NO rename rule and pass through unchanged — <c>WanAnimateTransformer.LoadWeights</c> expects them under their original names (pinned by <c>WanVideoCheckpointConverterTests.MapKey_AnimateKeys_PassThroughUnchanged</c>). The base i2v keys (<c>img_emb.proj.*</c>, <c>cross_attn.k_img</c>/<c>v_img</c>/<c>norm_k_img</c>) convert to the diffusers names as usual.</para>
 ///
-/// <para><b>Wan-Animate-2:</b> the checkpoint IS a Wan2.1 I2V-14B one — same 40 blocks, same <c>img_emb</c>, none of
-/// the V1 pose/face surface — so it renames through the same rules and is recognised only by its <c>__metadata__</c>
-/// (<see cref="IsAnimate2Metadata"/>). Its int8-convrot quantization needs no arm of its own: the <c>.weight_scale</c>
-/// / <c>.comfy_quant</c> companions ride the shared <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> pass.</para></summary>
+/// <para><b>Wan-Animate-2:</b> the checkpoint IS a Wan2.1 I2V-14B one — same 40 blocks, same <c>img_emb</c>, none of the V1 pose/face surface — so it renames through the same rules and is recognised only by its <c>__metadata__</c> (<see cref="IsAnimate2Metadata"/>). Its int8-convrot quantization needs no arm of its own: the <c>.weight_scale</c> / <c>.comfy_quant</c> companions ride the shared <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> pass.</para></summary>
 public sealed class WanVideoCheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];
@@ -92,9 +74,7 @@ public sealed class WanVideoCheckpointConverter
     /// <summary><c>__metadata__</c> entry whose JSON value carries the ComfyUI model type.</summary>
     private const string ConfigMetadataKey = "config";
 
-    /// <summary>Reads <c>__metadata__["config"] = {"transformer": {"model_type": "animate2"}}</c>. This is the ONLY
-    /// reliable Animate-2 discriminator: its key set is byte-for-byte a Wan2.1 I2V-14B one, so
-    /// <see cref="HasAnimate2Structure"/> can validate the claim but can never make it.</summary>
+    /// <summary>Reads <c>__metadata__["config"] = {"transformer": {"model_type": "animate2"}}</c>. This is the ONLY reliable Animate-2 discriminator: its key set is byte-for-byte a Wan2.1 I2V-14B one, so <see cref="HasAnimate2Structure"/> can validate the claim but can never make it.</summary>
     public static bool IsAnimate2Metadata(IReadOnlyDictionary<string, string>? metadata)
     {
         if (metadata is null || !metadata.TryGetValue(ConfigMetadataKey, out string? config))
@@ -110,10 +90,7 @@ public sealed class WanVideoCheckpointConverter
         catch (JsonException) { return false; }
     }
 
-    /// <summary>True when a (prefix-stripped, original-naming) key set is shaped like Animate-2: the i2v CLIP
-    /// <c>img_emb</c> is present and none of the Animate-V1 conditioning surface is. Never a classifier on its own —
-    /// a plain Wan2.1 I2V-14B checkpoint satisfies it too; it only rejects a file that claims to be Animate-2 and
-    /// carries the V1 pose/face modules (which <c>WanAnimate2Transformer</c> would silently drop).</summary>
+    /// <summary>True when a (prefix-stripped, original-naming) key set is shaped like Animate-2: the i2v CLIP <c>img_emb</c> is present and none of the Animate-V1 conditioning surface is. Never a classifier on its own — a plain Wan2.1 I2V-14B checkpoint satisfies it too; it only rejects a file that claims to be Animate-2 and carries the V1 pose/face modules (which <c>WanAnimate2Transformer</c> would silently drop).</summary>
     public static bool HasAnimate2Structure(IEnumerable<string> keys)
     {
         ArgumentNullException.ThrowIfNull(keys);
@@ -151,9 +128,7 @@ public sealed class WanVideoCheckpointConverter
         return false;
     }
 
-    /// <summary>Pure key mapping (testable without files): strips the single-file prefix and, when
-    /// <paramref name="fromOriginalNaming"/>, applies the ordered original→diffusers renames. Returns <c>null</c> for
-    /// keys the transformer never consumes (FP8 scale metadata is folded separately in <see cref="Convert"/>).</summary>
+    /// <summary>Pure key mapping (testable without files): strips the single-file prefix and, when <paramref name="fromOriginalNaming"/>, applies the ordered original→diffusers renames. Returns <c>null</c> for keys the transformer never consumes (FP8 scale metadata is folded separately in <see cref="Convert"/>).</summary>
     public static string? MapKey(string key, bool fromOriginalNaming)
     {
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
@@ -165,8 +140,7 @@ public sealed class WanVideoCheckpointConverter
         return mapped;
     }
 
-    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer
-    /// bucket. <paramref name="metadata"/> is the file's <c>__metadata__</c>, read only for the Animate-2 declaration.</summary>
+    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer bucket. <paramref name="metadata"/> is the file's <c>__metadata__</c>, read only for the Animate-2 declaration.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, IReadOnlyDictionary<string, string>? metadata = null)
     {
         bool animate2 = IsAnimate2Metadata(metadata);
@@ -190,8 +164,7 @@ public sealed class WanVideoCheckpointConverter
         return new ConvertedWeights { Transformer = transformer, IsAnimate2 = animate2 };
     }
 
-    /// <summary>Loads a single safetensors file and converts. The caller owns the loader and disposes it once the
-    /// weights are no longer referenced.</summary>
+    /// <summary>Loads a single safetensors file and converts. The caller owns the loader and disposes it once the weights are no longer referenced.</summary>
     public static (ConvertedWeights Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
     {
         if (!File.Exists(checkpointPath))

@@ -340,14 +340,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
-    /// <summary>Debug switches, read once at type init rather than per tensor: <see cref="Probe"/> and
-    /// <see cref="Dump"/> are called several times per denoise STEP, so an environment lookup each time is a
-    /// per-generation cost paid to answer a question that cannot change while the process runs.</summary>
+    /// <summary>Debug switches, read once at type init rather than per tensor: <see cref="Probe"/> and <see cref="Dump"/> are called several times per denoise step, so a per-call environment lookup would be wasted work.</summary>
     private static readonly bool ProbeEnabled = Environment.GetEnvironmentVariable("HARTSY_H3_PROBE") == "1";
 
     private static readonly string? DumpDir = Environment.GetEnvironmentVariable("HARTSY_H3_DUMP");
 
+    /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
     private static void Probe(string label, Tensor t)
     {
         if (!ProbeEnabled)

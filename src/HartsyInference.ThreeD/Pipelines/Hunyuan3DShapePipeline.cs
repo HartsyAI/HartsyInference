@@ -13,13 +13,7 @@ using HartsyInference.Vision.Dinov2;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
-/// <summary>Hunyuan3D-2 single-image → mesh pipeline: DINOv2 encodes the conditioning image, a flow-match
-/// DiT denoises a VecSet shape latent (2-way CFG), the ShapeVAE decodes a dense occupancy field, and
-/// marching cubes extracts a watertight mesh. Reuses the diffusion flow-match helpers
-/// (<see cref="LancePipelineCommon"/>, <see cref="SeedGenerator"/>) and the 3D foundation
-/// (<see cref="MarchingCubes"/>, <see cref="MeshOps"/>).
-/// <para><b>Numerics validation-pending</b> — produces a real, watertight mesh structurally; per-checkpoint
-/// fidelity awaits the reference-diff pass (see the research doc).</para></summary>
+/// <summary>Hunyuan3D-2 single-image → mesh pipeline: DINOv2 encodes the image, a flow-match DiT denoises a VecSet shape latent (2-way CFG), the ShapeVAE decodes an occupancy field, and marching cubes extracts a watertight mesh.</summary>
 public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
 {
     private readonly Dinov2VisionEncoder _dino;
@@ -39,14 +33,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         _preprocessor = new Dinov2ImagePreprocessor(dino.Preset.ImageSize);
     }
 
-    /// <summary>Loads a Hunyuan3D-2 shape pipeline from a local checkpoint path (a directory of
-    /// <c>.safetensors</c> shards, or a single file). Merges all shards, splits them with
-    /// <see cref="Hunyuan3DCheckpointConverter"/>, and builds the DINOv2 encoder + DiT + ShapeVAE. The
-    /// memory-mapped weights stay alive for the pipeline's lifetime and are released on
-    /// <see cref="Dispose"/>.
-    /// <para>Defaults to <see cref="Hunyuan3DConfig.Hunyuan3D2"/> and <see cref="Dinov2Preset.Large"/>;
-    /// pass explicit values for other variants. <b>Numerics validation-pending</b> — the converter key
-    /// tables and these dims are validation-gated.</para></summary>
+    /// <summary>Loads a Hunyuan3D-2 shape pipeline from a local checkpoint path, merging all shards and keeping the memory-mapped weights alive for the pipeline's lifetime until <see cref="Dispose"/>.</summary>
     public static Hunyuan3DShapePipeline LoadFromPath(
         IBackend backend, string modelPath, Hunyuan3DConfig? cfg = null, Dinov2Preset? dinoPreset = null)
     {

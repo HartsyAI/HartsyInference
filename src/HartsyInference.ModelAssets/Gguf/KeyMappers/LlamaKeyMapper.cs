@@ -19,8 +19,7 @@ namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 /// <item><c>blk.{i}.ffn_norm.weight</c> → <c>model.layers.{i}.post_attention_layernorm.weight</c></item>
 /// <item><c>blk.{i}.ffn_gate.weight</c> → <c>model.layers.{i}.mlp.gate_proj.weight</c></item>
 /// <item><c>blk.{i}.ffn_up.weight</c> → <c>model.layers.{i}.mlp.up_proj.weight</c></item>
-/// <item><c>blk.{i}.ffn_down.weight</c> → <c>model.layers.{i}.mlp.down_proj.weight</c></item>
-/// </list></summary>
+/// <item><c>blk.{i}.ffn_down.weight</c> → <c>model.layers.{i}.mlp.down_proj.weight</c></item></list></summary>
 public sealed class LlamaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "llama";

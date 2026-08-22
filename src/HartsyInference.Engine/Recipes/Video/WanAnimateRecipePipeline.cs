@@ -18,14 +18,7 @@ using HartsyInference.Vision.Clip;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan-Animate pipeline driven against the native <see cref="VideoRequest"/>:
-/// <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) is the driving
-/// pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and
-/// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference
-/// latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's
-/// <c>WanAnimateLoader.Generate</c>. <see cref="VideoRequest.AnimateTotalFrames"/> turns the single generation into a
-/// chunk loop, each chunk conditioned on the tail of the previous one (ComfyUI <c>continue_motion</c>) and assembled
-/// here so trim/boomerang still apply once, to the whole video.</summary>
+/// <summary>A constructed Wan-Animate pipeline driven against the native <see cref="VideoRequest"/>: <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) is the driving pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's <c>WanAnimateLoader.Generate</c>. <see cref="VideoRequest.AnimateTotalFrames"/> turns the single generation into a chunk loop, each chunk conditioned on the tail of the previous one (ComfyUI <c>continue_motion</c>) and assembled here so trim/boomerang still apply once, to the whole video.</summary>
 public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image.</summary>
@@ -277,8 +270,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Keeps a chunk-0 conditioning for the next generation with identical inputs, disposing whatever it
-    /// replaces; anything else (a continuation chunk) is disposed outright.</summary>
+    /// <summary>Keeps a chunk-0 conditioning for the next generation with identical inputs, disposing whatever it replaces; anything else (a continuation chunk) is disposed outright.</summary>
     private void StoreConditioning(bool cacheable, string key, WanAnimateConditioning conditioning)
     {
         if (!cacheable)
@@ -295,9 +287,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         _conditioningCacheKey = key;
     }
 
-    /// <summary>Content key for the cross-generation conditioning cache — every input the VAE + motion encode reads.
-    /// A hit derives its geometry from the cached pose latent, so anything that can move the geometry or the encoded
-    /// pixels must be in here or a stale entry would silently generate at the wrong size.</summary>
+    /// <summary>Content key for the cross-generation conditioning cache — every input the VAE + motion encode reads. A hit derives its geometry from the cached pose latent, so anything that can move the geometry or the encoded pixels must be in here or a stale entry would silently generate at the wrong size.</summary>
     private static string BuildConditioningKey(VideoRequest request, ImageData reference, int width, int height, int frames)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

@@ -112,7 +112,6 @@ public static class AttentionKernels
                         // Step 4: attnRow @ V -> output row
                         float* oRow = oHead + qi * D;
 
-                        // Zero the output row
                         NativeMemory.Clear(oRow, (nuint)(D * sizeof(float)));
 
                         for (long vi = 0; vi < Skv; vi++)
@@ -166,7 +165,6 @@ public static class AttentionKernels
         }
     }
 
-    /// <summary>Computes the dot product of two float vectors using SIMD acceleration.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe float VectorizedDot(float* a, float* b, int count)
     {

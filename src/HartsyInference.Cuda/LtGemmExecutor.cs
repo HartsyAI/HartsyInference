@@ -6,8 +6,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>General-precision cuBLASLt GEMM with epilogue fusion (bias and/or activation folded into the
-/// matmul).</summary>
+/// <summary>General-precision cuBLASLt GEMM with epilogue fusion (bias and/or activation folded into the matmul).</summary>
 /// <remarks>
 /// <para>Layout matches <see cref="CudaBackend.Linear"/>: row-major
 /// <c>output[M, N] = input[M, K] * weight^T[N, K]</c>, dispatched as cuBLAS <c>OP_T</c> on the weight and
@@ -52,9 +51,7 @@ public sealed unsafe class LtGemmExecutor : IDisposable
     private static long _livePlanCountForTests;
     private static long _liveContextLeaseCountForTests;
 
-    /// <summary>The complete identity of a reusable plan under this executor's fixed TN, non-batched,
-    /// host-scalar contract. Device addresses are represented only by the alignment class visible to the
-    /// heuristic; the actual bias address is patched per submission.</summary>
+    /// <summary>The complete identity of a reusable plan under this executor's fixed TN, non-batched, host-scalar contract. Device addresses are represented only by the alignment class visible to the heuristic; the actual bias address is patched per submission.</summary>
     internal readonly record struct PlanKey(
         int M, int N, int K,
         int AbType, int DType, int ComputeType, int ScaleType,
@@ -126,13 +123,10 @@ public sealed unsafe class LtGemmExecutor : IDisposable
         long Evictions,
         int LastComputeType);
 
-    /// <summary>Whether a cuBLASLt handle is available. The workspace may be zero bytes after a recoverable
-    /// allocation failure; in that case the heuristic can still select a zero-workspace plan.</summary>
+    /// <summary>Whether a cuBLASLt handle is available. The workspace may be zero bytes after a recoverable allocation failure; in that case the heuristic can still select a zero-workspace plan.</summary>
     public bool IsSupported { get; }
 
-    /// <summary>Creates an executor that binds to the first stream passed to <see cref="TryRun"/>. Subsequent
-    /// calls must use that same stream because the executor owns one shared workspace. The calling thread must
-    /// have an active registered CUDA backend so teardown can retain and rebind the exact owning context.</summary>
+    /// <summary>Creates an executor that binds to the first stream passed to <see cref="TryRun"/>. Subsequent calls must use that same stream because the executor owns one shared workspace. The calling thread must have an active registered CUDA backend so teardown can retain and rebind the exact owning context.</summary>
     public LtGemmExecutor()
         : this(ResolveAmbientOwnerContext(), ownerStream: 0, bindOwnerStream: false,
             DefaultPlanCacheCapacity, backendAdopted: false)
@@ -315,8 +309,7 @@ public sealed unsafe class LtGemmExecutor : IDisposable
         }
     }
 
-    /// <summary>Compatibility wrapper for direct callers. Backend dispatch should use <see cref="TryRun"/> and
-    /// pass its resolved compute policy explicitly.</summary>
+    /// <summary>Compatibility wrapper for direct callers. Backend dispatch should use <see cref="TryRun"/> and pass its resolved compute policy explicitly.</summary>
     public void Run(ulong weight, ulong input, ulong outPtr, int m, int n, int k, float alpha,
         int abType, int dType, ulong biasPtr, int epilogue, nint stream)
     {
@@ -329,9 +322,7 @@ public sealed unsafe class LtGemmExecutor : IDisposable
         }
     }
 
-    /// <summary>Attempts <c>output = alpha * input * weight^T + bias</c>. Returns <c>false</c> only when cuBLASLt
-    /// or an algorithm for this exact contract is unavailable, allowing the caller to run GemmEx plus BiasAdd.
-    /// Binding errors and execution/context failures still throw.</summary>
+    /// <summary>Attempts <c>output = alpha * input * weight^T + bias</c>. Returns <c>false</c> only when cuBLASLt or an algorithm for this exact contract is unavailable, allowing the caller to run GemmEx plus BiasAdd. Binding errors and execution/context failures still throw.</summary>
     public bool TryRun(ulong weight, ulong input, ulong outPtr, int m, int n, int k, float alpha,
         int abType, int dType, int computeType, ulong biasPtr, int epilogue, nint stream)
     {

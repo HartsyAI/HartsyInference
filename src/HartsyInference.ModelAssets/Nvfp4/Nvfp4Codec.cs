@@ -4,25 +4,16 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.Nvfp4;
 
-/// <summary>Dequantizer for NVFP4 (4-bit, `nvfp4`) weights as packaged by ComfyUI (e.g. the GPT-OSS text
-/// encoder <c>Comfy-Org/Lens/text_encoders/gpt_oss_20b_nvfp4.safetensors</c>).
+/// <summary>Dequantizer for NVFP4 (4-bit, `nvfp4`) weights as packaged by ComfyUI (e.g. the GPT-OSS text encoder <c>Comfy-Org/Lens/text_encoders/gpt_oss_20b_nvfp4.safetensors</c>).
 ///
-/// <para><b>Format</b> (from <c>comfy.float.stochastic_round_quantize_nvfp4_by_block</c>): two-level
-/// scaling over E2M1 4-bit elements.
+/// <para><b>Format</b> (from <c>comfy.float.stochastic_round_quantize_nvfp4_by_block</c>): two-level scaling over E2M1 4-bit elements.
 /// <list type="bullet">
-/// <item><c>{name}.weight</c> — U8, two FP4 (E2M1) values per byte, <b>high nibble = even element, low
-/// nibble = odd element</b> (opposite of MXFP4). Shape <c>[E, out, in/2]</c>.</item>
-/// <item><c>{name}.weight_scale</c> — FP8 E4M3 per-block scales, group size 16 along the input dim,
-/// stored per-expert in NVIDIA's swizzled <see cref="BlockScaleSwizzle">blocked layout</see>
-/// <c>[E, 128·ceil(out/128), 4·ceil((in/16)/4)]</c>.</item>
+/// <item><c>{name}.weight</c> — U8, two FP4 (E2M1) values per byte, <b>high nibble = even element, low nibble = odd element</b> (opposite of MXFP4). Shape <c>[E, out, in/2]</c>.</item>
+/// <item><c>{name}.weight_scale</c> — FP8 E4M3 per-block scales, group size 16 along the input dim, stored per-expert in NVIDIA's swizzled <see cref="BlockScaleSwizzle">blocked layout</see> <c>[E, 128·ceil(out/128), 4·ceil((in/16)/4)]</c>.</item>
 /// <item><c>{name}.weight_scale_2</c> — F32 per-expert global scale, shape <c>[E]</c>.</item>
 /// <item><c>{name}.comfy_quant</c> — JSON metadata (skipped).</item>
 /// </list>
-/// Dequant: <c>w[o,i] = e2m1(nibble) · global[e] · decode_e4m3(block_scale)</c>. The on-disk per-expert
-/// matrix is <c>[out, in]</c>; the runtime <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/>
-/// expects <c>[E, in, out]</c> (gate_up → <c>[E, hidden, 2·intermediate]</c>, down → <c>[E, intermediate,
-/// hidden]</c>), so this codec bakes the last-two-axis transpose into the output. Verified against
-/// <c>comfy.float</c> (swizzle round-trip exact; reconstruction error at FP4 noise level).</summary>
+/// Dequant: <c>w[o,i] = e2m1(nibble) · global[e] · decode_e4m3(block_scale)</c>. The on-disk per-expert matrix is <c>[out, in]</c>; the runtime <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> expects <c>[E, in, out]</c> (gate_up → <c>[E, hidden, 2·intermediate]</c>, down → <c>[E, intermediate, hidden]</c>), so this codec bakes the last-two-axis transpose into the output. Verified against <c>comfy.float</c> (swizzle round-trip exact; reconstruction error at FP4 noise level).</summary>
 public static unsafe class Nvfp4Codec
 {
     /// <summary>Elements per E4M3 block scale.</summary>
@@ -35,26 +26,14 @@ public static unsafe class Nvfp4Codec
         -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
     ];
 
-    /// <summary>Relabels a packed NVFP4 Linear weight so a backend can keep it RESIDENT — U8 <c>[N, K/2]</c> becomes a
-    /// <see cref="DType.F4E2M1"/> <c>[N, K]</c> view over the same bytes with its scale companions attached through
-    /// <see cref="Tensor.QuantInfo"/>. Returns false, writing <paramref name="packed"/> straight through, when the
-    /// weight is not one this can serve; the caller then falls back to an eager dequant.
+    /// <summary>Relabels a packed NVFP4 Linear weight so a backend can keep it RESIDENT — U8 <c>[N, K/2]</c> becomes a <see cref="DType.F4E2M1"/> <c>[N, K]</c> view over the same bytes with its scale companions attached through <see cref="Tensor.QuantInfo"/>. Returns false, writing <paramref name="packed"/> straight through, when the weight is not one this can serve; the caller then falls back to an eager dequant.
     ///
-    /// <para>This is the memory lever for nvfp4 DiTs: unpacked at load, the official 18.72 GB LTX-2.5 distilled
-    /// transformer is 42 GB and cannot be placed on a 24 GB card at all. Resident it stays at 0.5 byte/param and each
-    /// GEMM unpacks one weight transiently. It is <b>not</b> a speed win — no consumer Ada or Ampere part has FP4
-    /// tensor cores, so the GEMM still runs in F16/BF16 off the unpacked copy.</para>
+    /// <para>This is the memory lever for nvfp4 DiTs: unpacked at load, the official 18.72 GB LTX-2.5 distilled transformer is 42 GB and cannot be placed on a 24 GB card at all. Resident it stays at 0.5 byte/param and each GEMM unpacks one weight transiently. It is <b>not</b> a speed win — no consumer Ada or Ampere part has FP4 tensor cores, so the GEMM still runs in F16/BF16 off the unpacked copy.</para>
     ///
-    /// <para><b>Relabelling is not cosmetic.</b> <c>IBackend.Linear</c> derives <c>K</c> from <c>Shape[1]</c>; left as
-    /// U8 <c>[N, K/2]</c> the whole GEMM would silently run at half the true inner dimension.</para>
+    /// <para><b>Relabelling is not cosmetic.</b> <c>IBackend.Linear</c> derives <c>K</c> from <c>Shape[1]</c>; left as U8 <c>[N, K/2]</c> the whole GEMM would silently run at half the true inner dimension.</para>
     ///
-    /// <para><b>Lifetime.</b> The view borrows the packed tensor's bytes and roots it, and the returned
-    /// <see cref="QuantWeightInfo"/> roots the two companions — so a converter may drop the companion KEYS from its
-    /// output dictionary, but must not dispose the packed weight or the companions, and must store the view (not the
-    /// original) under the weight's key.</para></summary>
-    /// <param name="hasPreQuantScale">True when the weight ships an AWQ <c>pre_quant_scale</c> over the input dim.
-    /// Those are refused: the scale has to multiply the ACTIVATION (<c>x·Wᵀ = (x⊙s)·(W/s)ᵀ</c>) and no backend Linear
-    /// path applies one, so such a layer must take the eager dequant that folds it in.</param>
+    /// <para><b>Lifetime.</b> The view borrows the packed tensor's bytes and roots it, and the returned <see cref="QuantWeightInfo"/> roots the two companions — so a converter may drop the companion KEYS from its output dictionary, but must not dispose the packed weight or the companions, and must store the view (not the original) under the weight's key.</para></summary>
+    /// <param name="hasPreQuantScale">True when the weight ships an AWQ <c>pre_quant_scale</c> over the input dim. Those are refused: the scale has to multiply the ACTIVATION (<c>x·Wᵀ = (x⊙s)·(W/s)ᵀ</c>) and no backend Linear path applies one, so such a layer must take the eager dequant that folds it in.</param>
     public static bool TryAttachResident(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale,
         out Tensor resident)
     {
@@ -88,11 +67,8 @@ public static unsafe class Nvfp4Codec
         return true;
     }
 
-    /// <summary>Dequantizes one NVFP4 expert bank to F32 <c>[E, in, out]</c> (dequant of the on-disk
-    /// <c>[E, out, in]</c> per-expert matrices plus the runtime transpose).
-    /// <para><b>Memory note:</b> materializes the WHOLE bank at F32 — for the 20B GPT-OSS encoder that is
-    /// ~76 GB across all layers and OOM-kills 64 GB hosts. Production loads keep the bank packed and use
-    /// <see cref="DequantExpertSlice"/> one expert at a time instead.</para></summary>
+    /// <summary>Dequantizes one NVFP4 expert bank to F32 <c>[E, in, out]</c> (dequant of the on-disk <c>[E, out, in]</c> per-expert matrices plus the runtime transpose).
+    /// <para><b>Memory note:</b> materializes the WHOLE bank at F32 — for the 20B GPT-OSS encoder that is ~76 GB across all layers and OOM-kills 64 GB hosts. Production loads keep the bank packed and use <see cref="DequantExpertSlice"/> one expert at a time instead.</para></summary>
     /// <param name="weight">U8 packed FP4, shape <c>[E, out, in/2]</c>.</param>
     /// <param name="blockScale">FP8 E4M3 swizzled per-block scales, shape <c>[E, paddedRows, paddedCols]</c>.</param>
     /// <param name="globalScale">F32 per-expert global scale, shape <c>[E]</c>.</param>
@@ -119,11 +95,7 @@ public static unsafe class Nvfp4Codec
         return output;
     }
 
-    /// <summary>Dequantizes ONE expert of an NVFP4 bank into a caller-provided F32 <c>[out, in]</c> tensor
-    /// — the on-disk row-major orientation, which is exactly the <c>[N, K]</c> weight layout
-    /// <c>IBackend.Linear</c> consumes, so no transpose is needed. This is the memory-bounded
-    /// forward-time path: the packed bank stays mmap-backed and only one expert (~100 MB for
-    /// GPT-OSS-20B) is ever resident at F32.</summary>
+    /// <summary>Dequantizes ONE expert of an NVFP4 bank into a caller-provided F32 <c>[out, in]</c> tensor — the on-disk row-major orientation, which is exactly the <c>[N, K]</c> weight layout <c>IBackend.Linear</c> consumes, so no transpose is needed. This is the memory-bounded forward-time path: the packed bank stays mmap-backed and only one expert (~100 MB for GPT-OSS-20B) is ever resident at F32.</summary>
     /// <param name="weight">U8 packed FP4, shape <c>[E, out, in/2]</c>.</param>
     /// <param name="blockScale">FP8 E4M3 swizzled per-block scales, shape <c>[E, paddedRows, paddedCols]</c>.</param>
     /// <param name="globalScale">F32 per-expert global scale, shape <c>[E]</c>.</param>
@@ -157,9 +129,7 @@ public static unsafe class Nvfp4Codec
             (float*)destination.DataPointer);
     }
 
-    /// <summary>Row-major slice dequant: on-disk <c>[out, in]</c> → F32 <c>[out, in]</c>. Both the
-    /// packed reads and the F32 writes are sequential; the per-16-element block scale is decoded once
-    /// per group. Parallel over on-disk rows.</summary>
+    /// <summary>Row-major slice dequant: on-disk <c>[out, in]</c> → F32 <c>[out, in]</c>. Both the packed reads and the F32 writes are sequential; the per-16-element block scale is decoded once per group. Parallel over on-disk rows.</summary>
     private static void DequantExpertSliceRowMajorCore(byte* w, byte* bs, float scaleFactor, float global,
         long outDim, long inHalf, long paddedCols, float* dst)
     {
@@ -183,17 +153,10 @@ public static unsafe class Nvfp4Codec
         });
     }
 
-    /// <summary>Rows per dequant tile: 64 rows × 1440 packed bytes (GPT-OSS dims) ≈ 90 KB stays
-    /// L2-resident while the tile's column-major walk makes the transposed writes sequential.</summary>
+    /// <summary>Rows per dequant tile: 64 rows × 1440 packed bytes (GPT-OSS dims) ≈ 90 KB stays L2-resident while the tile's column-major walk makes the transposed writes sequential.</summary>
     private const int RowTile = 64;
 
-    /// <summary>Dequantizes one expert matrix (on-disk <c>[out, in]</c>) into <paramref name="dst"/> as
-    /// transposed <c>[in, out]</c>. E4M3 block scales are LUT-decoded on the fly (× the tensor-level
-    /// <paramref name="scaleFactor"/>, matching the <c>CastTo(F32)</c> semantics) — no transient
-    /// full-bank F32 scale copy. Parallel over <see cref="RowTile"/>-row tiles; within a tile the
-    /// per-(row, group) scales are decoded once (each covers 16 elements) and the walk is column-major
-    /// so both the packed reads (tile stays in L2) and the transposed stores (sequential runs of
-    /// <c>tileRows</c> floats) are cache-friendly.</summary>
+    /// <summary>Dequantizes one expert matrix (on-disk <c>[out, in]</c>) into <paramref name="dst"/> as transposed <c>[in, out]</c>. E4M3 block scales are LUT-decoded on the fly (× the tensor-level <paramref name="scaleFactor"/>, matching the <c>CastTo(F32)</c> semantics) — no transient full-bank F32 scale copy. Parallel over <see cref="RowTile"/>-row tiles; within a tile the per-(row, group) scales are decoded once (each covers 16 elements) and the walk is column-major so both the packed reads (tile stays in L2) and the transposed stores (sequential runs of <c>tileRows</c> floats) are cache-friendly.</summary>
     private static void DequantExpertCore(byte* w, byte* bs, float scaleFactor, float global,
         long outDim, long inHalf, long paddedCols, float* dst)
     {
@@ -249,17 +212,9 @@ public static unsafe class Nvfp4Codec
                 nameof(blockScale));
     }
 
-    /// <summary>Finds every NVFP4 GPT-OSS expert (<c>…experts.gate_up_proj.weight</c> /
-    /// <c>…experts.down_proj.weight</c> U8 with <c>.weight_scale</c> + <c>.weight_scale_2</c> companions),
-    /// dequantizes it to the forward-ready transposed F32 layout under the bare
-    /// <c>…experts.gate_up_proj</c> / <c>…experts.down_proj</c> key, and removes the companions plus the
-    /// <c>.comfy_quant</c> blob. Returns the number of expert banks dequantized.
+    /// <summary>Finds every NVFP4 GPT-OSS expert (<c>…experts.gate_up_proj.weight</c> / <c>…experts.down_proj.weight</c> U8 with <c>.weight_scale</c> + <c>.weight_scale_2</c> companions), dequantizes it to the forward-ready transposed F32 layout under the bare <c>…experts.gate_up_proj</c> / <c>…experts.down_proj</c> key, and removes the companions plus the <c>.comfy_quant</c> blob. Returns the number of expert banks dequantized.
     ///
-    /// <para><b>Memory note:</b> dequant-at-load expands the ~13 GB NVFP4 encoder to ~76 GB of F32 —
-    /// that OOM-kills 64 GB hosts, so the production Lens load path no longer calls this. It keeps the
-    /// packed bank mmap-backed instead and <c>GptOssMoeFfn</c> streams experts through
-    /// <see cref="DequantExpertSlice"/> at forward time. Kept for tooling/tests that want an eager
-    /// full-bank dequant of a small bank.</para></summary>
+    /// <para><b>Memory note:</b> dequant-at-load expands the ~13 GB NVFP4 encoder to ~76 GB of F32 — that OOM-kills 64 GB hosts, so the production Lens load path no longer calls this. It keeps the packed bank mmap-backed instead and <c>GptOssMoeFfn</c> streams experts through <see cref="DequantExpertSlice"/> at forward time. Kept for tooling/tests that want an eager full-bank dequant of a small bank.</para></summary>
     public static int DequantGptOssExpertsInPlace(Dictionary<string, Tensor> weights)
     {
         List<string> weightKeys = new();

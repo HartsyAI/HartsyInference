@@ -58,7 +58,7 @@ public sealed class SwiGluFfn
         if (_w3Bias is not null) yield return _w3Bias;
     }
 
-    /// <summary>Forward pass. Input: [B, seqLen, hiddenSize] → Output: [B, seqLen, hiddenSize].</summary>
+    /// <summary>Dispatches to the SwiGLU or GELU path per the weights that were loaded. Input/output: [B, seqLen, hiddenSize].</summary>
     public Tensor Forward(IBackend backend, Tensor input, int batch, int seqLen)
     {
         if (_useGeluMode)

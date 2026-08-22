@@ -23,7 +23,6 @@ internal static class CosyVoiceModel
     private const string Repo = "FunAudioLLM/CosyVoice2-0.5B";
     private const string FrozenRepo = "ResembleAI/chatterbox";
 
-    /// <summary>The CosyVoice 2 descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
@@ -95,9 +94,7 @@ internal static class CosyVoiceModel
         },
     };
 
-    /// <summary>Plans the Qwen2.5-0.5B backbone's layer split across the context's shard devices (explicit ratios
-    /// win, else proportional to live free VRAM) and binds each stage to its resolved backend. Mirrors
-    /// <c>YueMusicModel.BuildStage1Placement</c>.</summary>
+    /// <summary>Plans the Qwen2.5-0.5B backbone's layer split across the context's shard devices (explicit ratios win, else proportional to live free VRAM) and binds each stage to its resolved backend. Mirrors <c>YueMusicModel.BuildStage1Placement</c>.</summary>
     private static LlmPlacement BuildLlmPlacement(TtsLoadContext context, CosyVoiceQwenLm lm, CosyVoiceConfig config)
     {
         int layers = config.Llm.NumHiddenLayers;

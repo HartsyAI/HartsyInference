@@ -8,16 +8,10 @@ public enum MaskBroadcastLayout
     /// <summary><c>target/source/noise=[B,C,H,W]</c>, <c>mask=[B,1,H,W]</c>; mask broadcasts over C.</summary>
     DenseNchwBroadcast,
 
-    /// <summary>
-    /// <c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=C·P</c>; feature
-    /// <c>f=c·P+p</c> uses mask entry <c>p</c>.
-    /// </summary>
+    /// <summary><c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=C·P</c>; feature <c>f=c·P+p</c> uses mask entry <c>p</c>.</summary>
     PackedChannelOuter,
 
-    /// <summary>
-    /// <c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=P·C</c>; feature
-    /// <c>f=p·C+c</c> uses mask entry <c>p</c>.
-    /// </summary>
+    /// <summary><c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=P·C</c>; feature <c>f=p·C+c</c> uses mask entry <c>p</c>.</summary>
     PackedChannelInner,
 }
 

@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>The kind of a streamed <see cref="TextChunk"/>, preserving the provider event vocabulary
-/// (chunk / result / status / stopReason / native_tool_call).</summary>
+/// <summary>The kind of a streamed <see cref="TextChunk"/>, preserving the provider event vocabulary (chunk / result / status / stopReason / native_tool_call).</summary>
 public enum TextChunkKind
 {
     /// <summary>Incremental text to append to the buffer.</summary>

@@ -4,18 +4,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Causal ConvTranspose1D with streaming-cache support. Used only by the
-/// acoustic decoder (6 upsample stages with strides <c>[8, 5, 5, 4, 2, 2]</c>).
-///
-/// <para>Streaming convention (matches Python <c>SConvTranspose1d._forward_streaming</c>):
+/// <summary>Causal ConvTranspose1D with streaming-cache support; used only by the acoustic decoder (6 upsample stages with strides <c>[8, 5, 5, 4, 2, 2]</c>).</summary>
+/// <remarks>Streaming convention (matches Python <c>SConvTranspose1d._forward_streaming</c>):
 /// the per-layer cache holds the last <c>context_size = kernel - 1</c> INPUT samples. Each
 /// chunk re-runs the underlying transpose conv on <c>cache + new_input</c> and returns
 /// only the trailing <c>T_new * stride</c> output samples (the "new" portion). The first
-/// chunk has no cache and returns the full output.</para>
+/// chunk has no cache and returns the full output.
 ///
-/// <para>Non-streaming forward applies the right-trim of <c>kernel - stride</c> samples
-/// inside <see cref="VibeVoiceOps.CausalConvTranspose1d"/> directly (matches
-/// <c>trim_right_ratio=1.0</c>).</para></summary>
+/// <para>Non-streaming forward applies the right-trim of <c>kernel - stride</c> samples directly via
+/// <see cref="IBackend.ConvTranspose1d"/> (matches <c>trim_right_ratio=1.0</c>; the same formula also exists,
+/// unused, as <see cref="VibeVoiceOps.CausalConvTranspose1d"/>).</para></remarks>
 internal sealed unsafe class SConvTranspose1d
 {
     public string LayerId { get; }
@@ -49,10 +47,7 @@ internal sealed unsafe class SConvTranspose1d
         if (Bias) _bias = WhisperOps.EnsureF32(w[$"{prefix}.convtr.convtr.bias"]);
     }
 
-    /// <summary>Non-streaming forward. Input <c>[B, C_in, T_in]</c> →
-    /// <c>[B, C_out, T_in * stride]</c> after the causal right-trim. Routed to
-    /// <see cref="IBackend.ConvTranspose1d"/> with <c>padLeft=0, padRight=K-stride</c>
-    /// (trim_right_ratio=1.0), which yields exactly <c>T_in·stride</c> output samples.</summary>
+    /// <summary>Non-streaming forward, routed to <see cref="IBackend.ConvTranspose1d"/> with <c>padLeft=0, padRight=K-stride</c> (trim_right_ratio=1.0) so output is exactly <c>[B, C_out, T_in * stride]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor input, int batch, int tIn)
     {
         if (_weight is null) throw new InvalidOperationException($"SConvTranspose1d '{LayerId}' weights not loaded.");
@@ -62,8 +57,7 @@ internal sealed unsafe class SConvTranspose1d
         return output;
     }
 
-    /// <summary>Streaming forward — returns only the output samples produced by this
-    /// chunk's new input.</summary>
+    /// <summary>Streaming forward — returns only the output samples produced by this chunk's new input.</summary>
     public Tensor ForwardStreaming(IBackend backend, Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
     {
         if (_weight is null) throw new InvalidOperationException($"SConvTranspose1d '{LayerId}' weights not loaded.");

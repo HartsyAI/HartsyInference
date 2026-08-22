@@ -28,10 +28,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     private readonly float _bnEps;
     private readonly int[] _hiddenLayers;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen
-    /// re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small
-    /// (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this
-    /// pipeline stages weights at all. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this pipeline stages weights at all. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -72,20 +69,16 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             (config.TextEncoderType == Flux2TextEncoderType.Mistral ? [10, 20, 30] : [9, 18, 27]);
     }
 
-    /// <summary>Encodes one region's prompt text with the SAME text encoder + multi-layer hidden-state taps the
-    /// base prompt uses (<see cref="LlamaStyleEncoder.EncodeMultiLayer"/>), so the region conditioning lands at
-    /// the identical raw dim <see cref="Flux2Transformer"/>'s own <c>_contextEmbedWeight</c> Linear projects from.
-    /// Used by the recipe-layer regional-prompting wiring (Tier 3.7).</summary>
+    /// <summary>Encodes one region's prompt text with the SAME text encoder + multi-layer hidden-state taps the base prompt uses (<see cref="LlamaStyleEncoder.EncodeMultiLayer"/>), so the region conditioning lands at the identical raw dim <see cref="Flux2Transformer"/>'s own <c>_contextEmbedWeight</c> Linear projects from. Used by the recipe-layer regional-prompting wiring (Tier 3.7).</summary>
     public Tensor EncodeRegionText(int[] tokenIds) =>
         _textEncoder.EncodeMultiLayer(Backend, [tokenIds], _hiddenLayers);
 
     /// <summary>Generates an image from pre-tokenized prompt input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
-    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image.</item>
-    /// <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
-    /// <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step packed-latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="FluxPipeline"/>).</item>
-    /// </list>
-    /// </summary>
+    ///   <item>Plain <see cref="TextToImageRequest"/> → text-to-image.</item>
+    ///   <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
+    ///   <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step packed-latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="FluxPipeline"/>).</item>
+    /// </list></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         TextToImageRequest request,

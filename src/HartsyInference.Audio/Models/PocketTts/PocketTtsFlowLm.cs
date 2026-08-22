@@ -181,7 +181,6 @@ internal sealed unsafe class PocketTtsFlowLm
             int total = tText + seqLen;
             Tensor full = new(new TensorShape(1, total, Dim), DType.F32);
             float* fp = (float*)full.DataPointer;
-            // text prefix
             for (int i = 0; i < tText * Dim; i++) fp[i] = tep[i];
             // input_linear([bos, latents...])
             for (int j = 0; j < seqLen; j++)
@@ -207,7 +206,6 @@ internal sealed unsafe class PocketTtsFlowLm
             backend.LayerNorm(normed, tout, _outNormW!, _outNormB!, 1e-5f);
             tout.Dispose();
 
-            // last position hidden
             float[] hidden = new float[Dim];
             float* np = (float*)normed.DataPointer;
             long lastBase = (long)(total - 1) * Dim;
@@ -222,7 +220,6 @@ internal sealed unsafe class PocketTtsFlowLm
             latents[f] = latent;
         }
 
-        // assemble [1, 32, N]
         Tensor outLat = new(new TensorShape(1, Ldim, n), DType.F32);
         float* op = (float*)outLat.DataPointer;
         for (int c = 0; c < Ldim; c++)

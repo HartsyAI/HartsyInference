@@ -15,10 +15,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan VACE pipeline driven against the native <see cref="VideoRequest"/>. The control clip
-/// comes from <see cref="VideoRequest.InitImage"/> (tiled to the frame count — the extension's still-image control
-/// branch), the prompt pair is umT5-encoded with the pad rows zeroed, and the whole thing goes through
-/// <see cref="WanVacePipeline.GenerateFromControl"/>. Mirrors the SwarmUI backend's <c>WanVaceLoader.Generate</c>.</summary>
+/// <summary>A constructed Wan VACE pipeline driven against the native <see cref="VideoRequest"/>. The control clip comes from <see cref="VideoRequest.InitImage"/> (tiled to the frame count — the extension's still-image control branch), the prompt pair is umT5-encoded with the pad rows zeroed, and the whole thing goes through <see cref="WanVacePipeline.GenerateFromControl"/>. Mirrors the SwarmUI backend's <c>WanVaceLoader.Generate</c>.</summary>
 public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Uniform control-hint scale passed to every VACE layer (ComfyUI hard-codes 1.0).</summary>

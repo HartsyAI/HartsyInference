@@ -5,10 +5,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC residual unit. Structurally identical to <see cref="DacResidualUnit"/>:
-/// <c>Snake → Conv1d(k=7, dilation) → Snake → Conv1d(k=1) → residual add</c>. Kept as a
-/// SNAC-namespaced class so the codecs stay independently maintainable; the math is
-/// identical and weights load with the same key conventions.</summary>
+/// <summary>SNAC residual unit. Structurally identical to <see cref="DacResidualUnit"/>: <c>Snake → Conv1d(k=7, dilation) → Snake → Conv1d(k=1) → residual add</c>. Kept as a SNAC-namespaced class so the codecs stay independently maintainable; the math is identical and weights load with the same key conventions.</summary>
 internal sealed unsafe class SnacResidualUnit
 {
     private readonly string _prefix;

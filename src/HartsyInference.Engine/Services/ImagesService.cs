@@ -5,18 +5,11 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Image-generation service: detects the checkpoint's architecture, resolves its recipe from the
-/// <see cref="RecipeRegistry"/>, constructs (and caches) the pipeline, and generates. Every composition object the
-/// request sets is mapped to an <see cref="ImageFeatures"/> bit and checked against the resolved recipe's
-/// <see cref="IArchitectureRecipe.Supports"/>, so an unwired feature is rejected by name rather than silently ignored.
-/// Every tunable the caller left null is filled from the resolved recipe's <see cref="ImageDefaults"/> before the
-/// pipeline is driven, so each family runs at its creator's recommended settings unless the caller overrides them.</summary>
+/// <summary>Image-generation service: detects the checkpoint's architecture, resolves its recipe from the <see cref="RecipeRegistry"/>, constructs (and caches) the pipeline, and generates. Every composition object the request sets is mapped to an <see cref="ImageFeatures"/> bit and checked against the resolved recipe's <see cref="IArchitectureRecipe.Supports"/>, so an unwired feature is rejected by name rather than silently ignored. Every tunable the caller left null is filled from the resolved recipe's <see cref="ImageDefaults"/> before the pipeline is driven, so each family runs at its creator's recommended settings unless the caller overrides them.</summary>
 public sealed class ImagesService : IImagesService
 {
     private readonly InferenceEngine _engine;
-    /// <summary>Tier 3.2 segment refinement's CLIPSeg backend — a service-owned cache (mirrors
-    /// <c>VisionService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;segment:&gt;</c>
-    /// parts never loads it, and a repeat segment query on the same generation reuses the loaded weights.</summary>
+    /// <summary>Tier 3.2 segment refinement's CLIPSeg backend — a service-owned cache (mirrors <c>VisionService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;segment:&gt;</c> parts never loads it, and a repeat segment query on the same generation reuses the loaded weights.</summary>
     private readonly Vision.ClipSegSegmenter _clipSeg = new();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -74,12 +67,7 @@ public sealed class ImagesService : IImagesService
             cancel);
     }
 
-    /// <summary>Which bit an init image asks for, given the caller's <see cref="Img2ImgMode"/> and what the family can
-    /// actually do. Under <see cref="Img2ImgMode.Auto"/> a family that offers only reference editing gets
-    /// <see cref="ImageFeatures.RefEdit"/>, one that offers only classic img2img gets <see cref="ImageFeatures.Img2Img"/>,
-    /// and one offering both prefers classic — an <c>Init Image</c> plus a <c>Creativity</c> value conventionally means
-    /// a strength-based denoise. An explicit mode is honoured as written so the refusal names the mode the caller asked
-    /// for rather than silently doing the other thing.</summary>
+    /// <summary>Which bit an init image asks for, given the caller's <see cref="Img2ImgMode"/> and what the family can actually do. Under <see cref="Img2ImgMode.Auto"/> a family that offers only reference editing gets <see cref="ImageFeatures.RefEdit"/>, one that offers only classic img2img gets <see cref="ImageFeatures.Img2Img"/>, and one offering both prefers classic — an <c>Init Image</c> plus a <c>Creativity</c> value conventionally means a strength-based denoise. An explicit mode is honoured as written so the refusal names the mode the caller asked for rather than silently doing the other thing.</summary>
     private static ImageFeatures Img2ImgBit(Img2Img img2img, ImageFeatures supported) => img2img.Mode switch
     {
         Img2ImgMode.Denoise => ImageFeatures.Img2Img,
@@ -89,8 +77,7 @@ public sealed class ImagesService : IImagesService
             : ImageFeatures.Img2Img,
     };
 
-    /// <summary>The features <paramref name="request"/> asks for, one bit per composition object actually set.
-    /// <paramref name="supported"/> only disambiguates the init-image mode; it never widens what is requested.</summary>
+    /// <summary>The features <paramref name="request"/> asks for, one bit per composition object actually set. <paramref name="supported"/> only disambiguates the init-image mode; it never widens what is requested.</summary>
     private static ImageFeatures RequestedFeatures(ImageRequest request, ImageFeatures supported)
     {
         ImageFeatures features = ImageFeatures.None;

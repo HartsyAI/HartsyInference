@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>The Bert-VITS2 <c>TransformerCouplingBlock</c> flow (used by MeloTTS-English-v3): N mean-only
-/// <c>TransformerCouplingLayer</c>s, each interleaved with a channel <c>Flip</c>. Every coupling splits the 192
-/// latent channels in half, runs a <see cref="VitsFftBlock"/> (3-layer FFT, FFN kernel 5, speaker-conditioned) over
-/// <c>pre(x0)</c>, and shifts <c>x1</c> by the projected output (no scale). Inference runs the stack in reverse.
-/// Channels-first <c>[1, 192, T]</c>.</summary>
+/// <summary>The Bert-VITS2 <c>TransformerCouplingBlock</c> flow (used by MeloTTS-English-v3): N mean-only <c>TransformerCouplingLayer</c>s, each interleaved with a channel <c>Flip</c>; every coupling splits the 192 latent channels in half, runs a <see cref="VitsFftBlock"/> (3-layer FFT, FFN kernel 5, speaker-conditioned) over <c>pre(x0)</c>, and shifts <c>x1</c> by the projected output (no scale); inference runs the stack in reverse.</summary>
 public sealed unsafe class VitsTransformerFlow
 {
     private readonly int _channels, _half;
@@ -28,8 +24,7 @@ public sealed unsafe class VitsTransformerFlow
         for (int i = 0; i < _flows.Length; i++) _flows[i].LoadWeights(w, $"{prefix}.flows.{2 * i}");
     }
 
-    /// <summary>Reverse pass: z_p → z. Iterates the [coupling, flip] stack backwards, each coupling in reverse mode
-    /// (<c>x1 -= m</c>). Returns a new tensor; <paramref name="zP"/> is consumed.</summary>
+    /// <summary>Reverse pass: z_p → z, iterating the [coupling, flip] stack backwards, each coupling in reverse mode (<c>x1 -= m</c>); <paramref name="zP"/> is consumed.</summary>
     public Tensor Reverse(IBackend backend, Tensor zP, int t, Tensor? g = null)
     {
         Tensor x = zP;

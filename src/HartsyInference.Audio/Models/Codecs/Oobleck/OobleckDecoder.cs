@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Oobleck decoder (diffusers <c>OobleckDecoder</c>):
+/// <summary>Oobleck decoder (diffusers <c>OobleckDecoder</c>) — stem conv, N upsample+residual blocks, final conv, no tanh (unbounded PCM).</summary>
+/// <remarks>
 /// <code>
 ///   conv1: WNConv1d(latent_dim → channels·mult[-1], k=7, padding=3)
 ///   for stride in reversed(downsampling_ratios):
@@ -14,7 +15,7 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// </code>
 /// All strides published so far are even, so each transpose conv exactly multiplies T by its stride
 /// (T_out = T·s with padLeft = padRight = s/2) and the full stack expands T by the hop length.
-/// No final tanh — Stable-Audio-family decoders emit unbounded PCM that callers clamp.</summary>
+/// No final tanh — Stable-Audio-family decoders emit unbounded PCM that callers clamp.</remarks>
 internal sealed class OobleckDecoder
 {
     private readonly OobleckConfig _cfg;

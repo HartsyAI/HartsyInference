@@ -315,10 +315,7 @@ public sealed class VulkanDevice : IDisposable
         finally { Marshal.FreeHGlobal(block); }
     }
 
-    /// <summary>Confirms the device's enumerated cooperative-matrix configurations include the
-    /// one the <c>matmul_coopmat</c> shader uses: 16x16x16, FP16 A and B, FP32 accumulate
-    /// (C and Result), subgroup scope, non-saturating. The property query is a physical-device
-    /// extension command, so it is loaded via <c>vkGetInstanceProcAddr</c>.</summary>
+    /// <summary>Confirms the device's enumerated cooperative-matrix configurations include the one the <c>matmul_coopmat</c> shader uses: 16x16x16, FP16 A and B, FP32 accumulate (C and Result), subgroup scope, non-saturating. The property query is a physical-device extension command, so it is loaded via <c>vkGetInstanceProcAddr</c>.</summary>
     private static unsafe bool CoopMatShapeSupported(nint instance, nint pd)
     {
         nint fp = VulkanApi.vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
@@ -347,12 +344,7 @@ public sealed class VulkanDevice : IDisposable
         return false;
     }
 
-    /// <summary>Confirms the device's enumerated <c>VK_NV_cooperative_matrix2</c> "flexible dimensions"
-    /// configurations include a usable one: FP16 A and B, FP32 accumulate (C and Result), WORKGROUP
-    /// scope (not subgroup — this is the architectural difference from coopmat1), non-saturating.
-    /// Unlike coopmat1's fixed 16x16x16 shape, this reports granularities (M/N/K tile dims used by a
-    /// kernel must be multiples of these) and the exact workgroup invocation count the driver expects
-    /// for this configuration, both needed to size the <c>matmul_coopmat2</c> shader correctly.</summary>
+    /// <summary>Confirms the device's enumerated <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configurations include a usable one: FP16 A and B, FP32 accumulate (C and Result), WORKGROUP scope (not subgroup — this is the architectural difference from coopmat1), non-saturating. Unlike coopmat1's fixed 16x16x16 shape, this reports granularities (M/N/K tile dims used by a kernel must be multiples of these) and the exact workgroup invocation count the driver expects for this configuration, both needed to size the <c>matmul_coopmat2</c> shader correctly.</summary>
     private static unsafe bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
     {
         mGranularity = nGranularity = kGranularity = workgroupInvocations = 0;

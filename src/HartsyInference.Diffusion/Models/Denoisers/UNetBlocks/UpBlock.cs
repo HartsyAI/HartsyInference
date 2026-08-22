@@ -128,17 +128,14 @@ public sealed class UpBlock
             Tensor skip = skips[^1];
             skips.RemoveAt(skips.Count - 1);
 
-            // Concatenate hidden + skip along channel dimension
             Tensor concatenated = ConcatChannels(backend, hidden, skip);
             if (hidden != input) hidden.Dispose();
             skip.Dispose();
 
-            // ResNet
             Tensor resOut = _resnets[i].Forward(backend, concatenated, temb);
             concatenated.Dispose();
             hidden = resOut;
 
-            // Cross-attention (with optional IPA injection)
             if (_hasAttention && _attentions[i] is not null)
             {
                 Tensor attnOut = _attentions[i]!.Forward(backend, hidden, context,
@@ -149,7 +146,6 @@ public sealed class UpBlock
             }
         }
 
-        // Upsample
         if (_hasUpsample)
         {
             int batch = (int)hidden.Shape[0];

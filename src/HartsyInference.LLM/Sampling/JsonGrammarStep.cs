@@ -2,23 +2,11 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Hard structural constraint that masks every candidate token whose decoded text would make the
-/// accumulated output an invalid prefix of some JSON document — the model can only ever emit syntactically
-/// valid JSON. One instance is scoped to a single generation (constructed fresh per request by
-/// <see cref="SamplerChain.FromOptions"/>, mirroring every other sampler step); its internal
-/// <see cref="JsonGrammarState"/> advances incrementally as tokens are committed, so re-validating already-
-/// accepted history is O(1) amortized rather than re-parsing from scratch every step.
-///
-/// <para><b>Cost</b>: unlike the elementwise steps (temperature, min-p, ...), this one is O(vocab size) per
-/// generated token — for each candidate id it clones the current grammar state and trial-feeds that token's
-/// decoded text. This is the accepted cost of constrained decoding in general (llama.cpp's GBNF grammar
-/// sampler has the same complexity); it only runs when <see cref="SamplingOptions.JsonMode"/> is set, so it
-/// never affects unconstrained requests.</para>
-///
-/// <para><b>Vocab-text cache</b>: decoding every token id to text is done ONCE per tokenizer instance (i.e.
-/// once per loaded model, not once per request) via <see cref="JsonVocabText"/>, shared with
-/// <see cref="SentinelJsonGrammarStep"/> — the table is immutable per-model data, safe to share across
-/// concurrently-served requests.</para></summary>
+/// <summary>Hard structural constraint that masks every candidate token whose decoded text would make the accumulated output an invalid prefix of some JSON document; its internal <see cref="JsonGrammarState"/> advances incrementally as tokens are committed, so re-validating already-accepted history is O(1) amortized rather than re-parsing from scratch every step.</summary>
+/// <remarks>
+/// <para><b>Cost</b>: unlike the elementwise steps (temperature, min-p, ...), this one is O(vocab size) per generated token — for each candidate id it clones the current grammar state and trial-feeds that token's decoded text, the accepted cost of constrained decoding in general (llama.cpp's GBNF grammar sampler has the same complexity); it only runs when <see cref="SamplingOptions.JsonMode"/> is set.</para>
+/// <para><b>Vocab-text cache</b>: decoding every token id to text is done ONCE per tokenizer instance via <see cref="JsonVocabText"/>, shared with <see cref="SentinelJsonGrammarStep"/> — the table is immutable per-model data, safe to share across concurrently-served requests.</para>
+/// </remarks>
 public sealed class JsonGrammarStep : ISamplerStep
 {
     private readonly string[] _vocabText;

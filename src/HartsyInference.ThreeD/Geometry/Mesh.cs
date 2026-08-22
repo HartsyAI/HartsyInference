@@ -1,10 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry;
 
-/// <summary>A triangle mesh in object space: flat interleaved arrays (x,y,z per vertex; three vertex
-/// indices per triangle). The universal output of the mesh-producing 3D pipelines (Hunyuan3D, TripoSR);
-/// written out via <see cref="Io.GlbWriter"/> / <see cref="Io.ObjWriter"/> / <see cref="Io.PlyWriter"/>.
-/// <para>Optional channels (<see cref="Normals"/>, <see cref="Uvs"/>, <see cref="VertexColors"/>) are
-/// null until computed/produced. <see cref="Normals"/> are filled by <see cref="Ops.MeshOps.ComputeVertexNormals"/>.</para></summary>
+/// <summary>A triangle mesh in object space: flat interleaved vertex/index arrays produced by the mesh pipelines (Hunyuan3D, TripoSR), with normals filled in later by <see cref="Ops.MeshOps.ComputeVertexNormals"/>.</summary>
 public sealed class Mesh
 {
     /// <summary>Vertex positions, length <c>3 * VertexCount</c> (x,y,z interleaved).</summary>

@@ -485,11 +485,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         backend.AffineMix(output, source, noise, 1.0f - sigma, sigma);
     }
 
-    /// <summary>
-    /// Keeps an SD3 inpaint latent's unmasked region on the source trajectory at <paramref name="nextStep"/>.
-    /// Nonterminal steps reproduce the established <c>seed + nextStep</c> fresh-noise sequence; the terminal step
-    /// passes a null noise tensor with zero noise scale and therefore blends the clean source.
-    /// </summary>
+    /// <summary> Keeps an SD3 inpaint latent's unmasked region on the source trajectory at <paramref name="nextStep"/>. Nonterminal steps reproduce the established <c>seed + nextStep</c> fresh-noise sequence; the terminal step passes a null noise tensor with zero noise scale and therefore blends the clean source. </summary>
     internal static void BlendMaskedSourceTrajectory(
         IBackend backend,
         FlowMatchEulerDiscreteScheduler scheduler,
@@ -586,9 +582,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         return (context, pooled);
     }
 
-    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the
-    /// non-sharded path — <see cref="Sd3Transformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the non-sharded path — <see cref="Sd3Transformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
     private Tensor RunForward(Tensor latent, float timestep, Tensor context, Tensor pooled, Utilities.DeviceFeatureCache? stepCache = null)
     {
         if (DitShardBackend is not null)

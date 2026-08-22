@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Dac;
 
-/// <summary>DAC encoder. Mirrors the descript-audio-codec encoder:
+/// <summary>DAC encoder — mirrors the descript-audio-codec encoder architecture.</summary>
+/// <remarks>
 /// <code>
 ///   stem: WNConv1d(1 → encoder_dim, k=7, padding=3)        [seq idx 0]
 ///   for stride in encoder_rates:
@@ -23,7 +24,8 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 ///
 /// <para>State-dict prefix is <c>encoder.block.*</c>. The <see cref="DacResidualUnit"/>
 /// instances under each EncoderBlock pick up their own nested keys via the per-block
-/// <c>.block.</c> Sequential path.</para></summary>
+/// <c>.block.</c> Sequential path.</para>
+/// </remarks>
 internal sealed unsafe class DacEncoder
 {
     private readonly DacConfig _cfg;
@@ -99,8 +101,7 @@ internal sealed unsafe class DacEncoder
         _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 2}.bias"]);
     }
 
-    /// <summary>Forward — <paramref name="pcm"/> channels-first <c>[B, 1, T_pcm]</c> →
-    /// <c>[B, latent_dim, T_pcm/hop]</c>.</summary>
+    /// <summary>Forward — <paramref name="pcm"/> channels-first <c>[B, 1, T_pcm]</c> → <c>[B, latent_dim, T_pcm/hop]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
         if (_stemW is null) throw new InvalidOperationException("DacEncoder weights not loaded.");
@@ -115,7 +116,6 @@ internal sealed unsafe class DacEncoder
         int t = tStem;
         int dim = _cfg.EncoderDim;
 
-        // Encoder stages.
         for (int i = 0; i < _nStages; i++)
         {
             int innerDim = dim;     // current channel count before the downsample step
@@ -128,7 +128,6 @@ internal sealed unsafe class DacEncoder
                 t = (int)x.Shape[2];
             }
 
-            // Snake activation.
             Tensor snk = new(x.Shape, DType.F32);
             backend.Snake(snk, x, _downsampleSnakeAlpha[i]!, null);
             x.Dispose();
@@ -149,7 +148,6 @@ internal sealed unsafe class DacEncoder
             dim = dimOut;
         }
 
-        // Final snake + projection.
         Tensor preProj = new(x.Shape, DType.F32);
         backend.Snake(preProj, x, _finalSnakeAlpha!, null);
         x.Dispose();

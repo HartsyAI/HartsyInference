@@ -4,16 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Config-driven dense decoder transformer — the reusable spine for LLM text generation. One forward
-/// path serves Qwen2, Qwen3, and Llama-lineage models; the differences (QKV bias, per-head Q/K RMSNorm,
-/// decoupled head dimension, tied head) are <see cref="TransformerConfig"/> flags.
-///
-/// <para>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on
-/// the host mid-forward, weights are the raw loaded tensors (stable references) handed to
-/// <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and
-/// K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders.</para>
-///
-/// <para>Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</para></summary>
+/// <summary>Config-driven dense decoder transformer — the reusable spine for LLM text generation: one forward path serves Qwen2, Qwen3, and Llama-lineage models, the differences (QKV bias, per-head Q/K RMSNorm, decoupled head dimension, tied head) being <see cref="TransformerConfig"/> flags.</summary>
+/// <remarks>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on the host mid-forward, weights are the raw loaded tensors (stable references) handed to <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders. Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</remarks>
 public sealed unsafe class GenericTransformer : IDisposable
 {
     private readonly TransformerConfig _cfg;
@@ -59,18 +51,14 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
     // (rare for norms; possible for the embed table) so loading never throws on a quant dtype.
-    /// <summary>Projection dispatch. Float weights always take cuBLAS <see cref="IBackend.Linear"/>. Quantized
-    /// weights take the low-VRAM <see cref="IBackend.QuantizedMatMul"/> when <paramref name="lowVram"/> is set
-    /// (weight stays compressed, transient dequant), else the faster <see cref="IBackend.Linear"/> path (which
-    /// dequants + caches an F16 weight).</summary>
+    /// <summary>Projection dispatch: float weights always take cuBLAS <see cref="IBackend.Linear"/>; quantized weights take the low-VRAM <see cref="IBackend.QuantizedMatMul"/> when <paramref name="lowVram"/> is set (weight stays compressed, transient dequant), else the faster <see cref="IBackend.Linear"/> path (dequants + caches an F16 weight).</summary>
     internal static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool lowVram)
     {
         if (weight.DType.IsQuantized && lowVram) backend.QuantizedMatMul(output, input, weight, bias);
         else backend.Linear(output, input, weight, bias);
     }
 
-    /// <summary>F32 view-or-copy: dequantizes quantized tensors, casts 16-bit floats, returns the SAME
-    /// reference when already F32 (callers check <c>ReferenceEquals</c> before disposing).</summary>
+    /// <summary>F32 view-or-copy: dequantizes quantized tensors, casts 16-bit floats, returns the SAME reference when already F32 (callers check <c>ReferenceEquals</c> before disposing).</summary>
     internal static Tensor EnsureF32(Tensor t)
     {
         if (t.DType == DType.F32) return t;
@@ -78,12 +66,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return t.CastTo(DType.F32);
     }
 
-    /// <summary>Concatenates weight (<c>[N,K]</c>) or bias (<c>[N]</c>) tensors along dim 0 (output rows) via a
-    /// plain byte-level copy — correct for any dtype, including block-quantized formats, because a GGUF/our
-    /// quant block never spans two output rows (each row is an independent whole number of blocks; confirmed
-    /// against every fused-GEMV kernel's block-layout assumption). Load-time only (called once per layer while
-    /// building the layer's weights, not on the decode hot path) — used to fuse separate Q/K/V or gate/up
-    /// projections into a single larger GEMV dispatch. All parts must share dtype and (for 2D) K.</summary>
+    /// <summary>Concatenates weight (<c>[N,K]</c>) or bias (<c>[N]</c>) tensors along dim 0 (output rows) via a plain byte-level copy — correct for any dtype, including block-quantized formats, since a GGUF/our quant block never spans two output rows. Load-time only, used to fuse separate Q/K/V or gate/up projections into a single larger GEMV dispatch. All parts must share dtype and (for 2D) K.</summary>
     private static Tensor ConcatRows(params Tensor[] parts)
     {
         DType dt = parts[0].DType;
@@ -107,9 +90,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return result;
     }
 
-    /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a
-    /// fresh tensor (so the runtime norm op is the standard one and no borrowed GGUF mmap / cached weight is
-    /// mutated in place).</summary>
+    /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a fresh tensor so the runtime norm op is the standard one and no borrowed GGUF mmap/cached weight is mutated in place.</summary>
     private static Tensor LoadNorm(Tensor t, bool addOne)
     {
         Tensor f = EnsureF32(t);
@@ -123,8 +104,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return outp;
     }
 
-    /// <summary>A zeroed bias vector of length <paramref name="n"/> for the LayerNorm path (models that use
-    /// LayerNorm but ship no norm bias, e.g. Cohere).</summary>
+    /// <summary>A zeroed bias vector of length <paramref name="n"/> for the LayerNorm path (models that use LayerNorm but ship no norm bias, e.g. Cohere).</summary>
     private static Tensor ZeroBias(int n)
     {
         Tensor b = new(new TensorShape(n), DType.F32);
@@ -133,13 +113,11 @@ public sealed unsafe class GenericTransformer : IDisposable
         return b;
     }
 
-    /// <summary>Loads a LayerNorm bias (F32) under <paramref name="key"/>, or a zeroed length-<paramref name="n"/>
-    /// vector when the checkpoint ships none (Cohere has no norm bias; StableLM / GPT-2-lineage do).</summary>
+    /// <summary>Loads a LayerNorm bias (F32) under <paramref name="key"/>, or a zeroed length-<paramref name="n"/> vector when the checkpoint ships none (Cohere has no norm bias; StableLM/GPT-2-lineage do).</summary>
     private static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, int n)
         => w.TryGetValue(key, out Tensor? b) ? EnsureF32(b) : ZeroBias(n);
 
-    /// <summary>A zeroed tensor of the given shape (used to pad MLA's value heads up to the q/k head dim so the
-    /// shared FlashAttention kernel, which assumes equal k/v dims, can be reused).</summary>
+    /// <summary>A zeroed tensor of the given shape (used to pad MLA's value heads up to the q/k head dim so the shared FlashAttention kernel, which assumes equal k/v dims, can be reused).</summary>
     private static Tensor ZeroTensor(TensorShape shape)
     {
         Tensor z = new(shape, DType.F32);
@@ -149,8 +127,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return z;
     }
 
-    /// <summary>Returns an owned copy of <paramref name="hidden"/> (used to pass a layer through unchanged, e.g. an
-    /// mllama cross-attention layer with no image present).</summary>
+    /// <summary>Returns an owned copy of <paramref name="hidden"/> (used to pass a layer through unchanged, e.g. an mllama cross-attention layer with no image present).</summary>
     private static Tensor CopyHidden(IBackend backend, Tensor hidden)
     {
         Tensor copy = new(hidden.Shape, DType.F32);
@@ -158,16 +135,14 @@ public sealed unsafe class GenericTransformer : IDisposable
         return copy;
     }
 
-    /// <summary>Normalizes <paramref name="input"/> with <paramref name="weight"/> using LayerNorm (mean-centered,
-    /// Cohere) or RMSNorm (everything else).</summary>
+    /// <summary>Normalizes <paramref name="input"/> with <paramref name="weight"/> using LayerNorm (mean-centered, Cohere) or RMSNorm (everything else).</summary>
     private static void Normalize(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool layerNorm, float eps)
     {
         if (layerNorm) backend.LayerNorm(output, input, weight, bias!, eps);
         else backend.RmsNorm(output, input, weight, eps);
     }
 
-    /// <summary>Loads weights from an HF-style key dict. <paramref name="prefix"/> is everything up to (not
-    /// including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
+    /// <summary>Loads weights from an HF-style key dict; <paramref name="prefix"/> is everything up to (not including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string? lmHeadKey = null)
     {
         ThrowIfDisposed();
@@ -200,10 +175,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (!_cfg.TieWordEmbeddings) _lmHead = w[lmHeadKey ?? "lm_head.weight"];
     }
 
-    /// <summary>Loads a headless transformer body — decoder layers + final RMSNorm only, no
-    /// <c>embed_tokens</c> / <c>lm_head</c>. Used when an outer model owns the embedding table(s) and output
-    /// head(s) and drives the body via <see cref="ForwardEmbeds"/> (e.g. Sesame CSM, Kyutai, Qwen3-TTS).
-    /// Do not call <see cref="Forward"/> or <see cref="ProjectLogits"/> on a headless instance.</summary>
+    /// <summary>Loads a headless transformer body — decoder layers + final RMSNorm only, no <c>embed_tokens</c>/<c>lm_head</c> — used when an outer model owns the embedding table(s) and output head(s) and drives the body via <see cref="ForwardEmbeds"/> (e.g. Sesame CSM, Kyutai, Qwen3-TTS). Do not call <see cref="Forward"/> or <see cref="ProjectLogits"/> on a headless instance.</summary>
     public void LoadWeightsHeadless(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         ThrowIfDisposed();
@@ -212,11 +184,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
-    /// <summary>Loads <c>embed_tokens</c> + decoder layers + final norm — no <c>lm_head</c>. For a sub-stack
-    /// whose output is consumed by something other than a vocabulary projection (VibeVoice-Realtime's
-    /// 20-layer TTS backbone: its last hidden state feeds a diffusion head and a binary EOS classifier, never
-    /// a <c>lm_head</c> — the checkpoint has none). Same idea as <see cref="LoadWeightsNoFinalNorm"/> one
-    /// tensor over.</summary>
+    /// <summary>Loads <c>embed_tokens</c> + decoder layers + final norm — no <c>lm_head</c>. For a sub-stack whose output is consumed by something other than a vocabulary projection (VibeVoice-Realtime's 20-layer TTS backbone: its last hidden state feeds a diffusion head and a binary EOS classifier, never a <c>lm_head</c>). Same idea as <see cref="LoadWeightsNoFinalNorm"/> one tensor over.</summary>
     public void LoadWeightsNoLmHead(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         ThrowIfDisposed();
@@ -227,12 +195,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
-    /// <summary>Loads <c>embed_tokens</c> + decoder layers only — no final norm, no <c>lm_head</c>. For a
-    /// sub-stack genuinely trained without a final norm (VibeVoice-Realtime's 4-layer text encoder, whose
-    /// checkpoint has no <c>norm.weight</c> key at all — its own reference implementation runs it through
-    /// <c>nn.Identity()</c>). Always call <see cref="ForwardEmbeds"/> with <c>applyFinalNorm: false</c> on an
-    /// instance loaded this way — <see cref="_finalNorm"/> stays null, which is safe only because
-    /// <c>ForwardEmbeds</c> never reads it when <c>applyFinalNorm</c> is false.</summary>
+    /// <summary>Loads <c>embed_tokens</c> + decoder layers only — no final norm, no <c>lm_head</c>. For a sub-stack genuinely trained without a final norm (VibeVoice-Realtime's 4-layer text encoder, whose checkpoint has no <c>norm.weight</c> key at all — its reference implementation runs it through <c>nn.Identity()</c>). Always call <see cref="ForwardEmbeds"/> with <c>applyFinalNorm: false</c> on an instance loaded this way, since <see cref="_finalNorm"/> stays null.</summary>
     public void LoadWeightsNoFinalNorm(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         ThrowIfDisposed();
@@ -241,8 +204,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
-    /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
-    /// <see cref="IBackend.FreeWeights"/>.</summary>
+    /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.</summary>
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true)
     {
         // The embedding table is gathered host-side. Upload it to the GPU only when it doubles as the (tied)
@@ -267,10 +229,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor t in l.EnumerateWeights(includeRedundantSplits)) yield return t;
     }
 
-    /// <summary>The weight subset one pipeline stage needs resident on ITS backend: the layer range's tensors,
-    /// plus (first stage) the embedding norm and (last stage) the tied/untied head, final norm, and PLE
-    /// projection. The union over a full contiguous stage tiling equals <see cref="EnumerateWeights"/> exactly —
-    /// unit-asserted, since a dropped tensor here silently becomes a per-op PCIe re-upload.</summary>
+    /// <summary>The weight subset one pipeline stage needs resident on ITS backend: the layer range's tensors, plus (first stage) the embedding norm and (last stage) the tied/untied head, final norm, and PLE projection. The union over a full contiguous stage tiling equals <see cref="EnumerateWeights"/> exactly — unit-asserted, since a dropped tensor here silently becomes a per-op PCIe re-upload.</summary>
     public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
         bool includeRedundantSplits = true)
     {
@@ -294,18 +253,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor t in _layers[i].EnumerateWeights(includeRedundantSplits)) yield return t;
     }
 
-    /// <summary>Runs the full stack across a layer-split placement: one <see cref="ForwardEmbeds"/> call per
-    /// stage on that stage's backend, final norm and cache advance only on the last, and a HOST-staged hidden
-    /// handoff between stages (the read fires the producing backend's lazy D2H; the next stage re-uploads —
-    /// ~T×hidden F32 per boundary, 16-32 KB at decode). Works on any hardware; a direct
-    /// <c>CopyFromPeer</c> boundary is a measured follow-up. Not supported for Gemma-4 PLE (per-layer inputs are
-    /// computed against the full stack). <paramref name="crossStates"/> (mllama gated cross-attention) is
-    /// produced once by the caller — presumed resident/computed on stage 0's backend — and peer-copied fresh
-    /// onto every OTHER stage that owns a cross-attention layer via <see cref="IBackend.CopyFromPeer"/> (mirrors
-    /// <c>QwenImageTransformer.ForwardSharded</c>'s <c>temb</c> handoff: copied fresh from the master at each
-    /// boundary, not chained stage-to-stage, since it never changes within one call). Paid on every call
-    /// (prefill + each decode step) that reaches a cross-attention-owning stage — a persistent per-stage cache is
-    /// a measured follow-up, same status as the host-staged hidden handoff above.</summary>
+    /// <summary>Runs the full stack across a layer-split placement: one <see cref="ForwardEmbeds"/> call per stage on that stage's backend, final norm and cache advance only on the last, and a HOST-staged hidden handoff between stages. Not supported for Gemma-4 PLE (per-layer inputs are computed against the full stack).</summary>
+    /// <remarks>The host-staged handoff (the read fires the producing backend's lazy D2H; the next stage re-uploads — ~T×hidden F32 per boundary, 16-32 KB at decode) works on any hardware; a direct <c>CopyFromPeer</c> boundary is a measured follow-up. <paramref name="crossStates"/> (mllama gated cross-attention) is produced once by the caller — presumed resident/computed on stage 0's backend — and peer-copied fresh onto every OTHER stage that owns a cross-attention layer via <see cref="IBackend.CopyFromPeer"/> (mirrors <c>QwenImageTransformer.ForwardSharded</c>'s <c>temb</c> handoff, copied fresh from the master at each boundary since it never changes within one call). Paid on every call that reaches a cross-attention-owning stage — a persistent per-stage cache is a measured follow-up.</remarks>
     public Tensor ForwardEmbedsStaged(LlmPlacement placement, Tensor embeds, int t, int posStart, IKvCache cache,
         ReadOnlySpan<int> tokenIds = default, Tensor? crossStates = null, int crossLen = 0)
     {
@@ -360,9 +309,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return hidden;
     }
 
-    /// <summary>True when any layer in <paramref name="stage"/>'s range is a gated cross-attention layer
-    /// (mllama) — determines whether <see cref="ForwardEmbedsStaged"/> needs to peer-copy the vision features
-    /// onto that stage's backend.</summary>
+    /// <summary>True when any layer in <paramref name="stage"/>'s range is a gated cross-attention layer (mllama) — determines whether <see cref="ForwardEmbedsStaged"/> needs to peer-copy the vision features onto that stage's backend.</summary>
     private bool StageHasCrossAttn(LlmStage stage)
     {
         for (int i = stage.StartLayer; i < stage.EndLayer; i++)
@@ -384,8 +331,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer.
-    /// Returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
+    /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer; returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
     {
         ThrowIfDisposed();
@@ -397,15 +343,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Embedding-in path. Runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack)
-    /// and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/>
-    /// is true (else the raw last-layer hidden). <paramref name="posStart"/> = <see cref="IKvCache.CurrentLength"/>.
-    /// The cache advances once per call (after the layers run), matching the reference decoder — UNLESS
-    /// <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE
-    /// shared cache, and only the final stage may advance, or the write cursor moves stages× per token.
-    /// <paramref name="tokenIds"/> is required (throws otherwise) when <see cref="TransformerConfig.PerLayerEmbeddingDim"/>
-    /// is set (Gemma-4): its per-layer embedding mixing needs the actual token ids, not just their embedding —
-    /// every other architecture ignores it.</summary>
+    /// <summary>Embedding-in path: runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack) and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/> is true.</summary>
+    /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.</remarks>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null,
         Tensor? crossStates = null, int crossLen = 0, ReadOnlySpan<int> tokenIds = default,
@@ -534,12 +473,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
-    /// <summary>Gemma-4 per-layer embeddings (PLE): for each layer, mixes a small extra embedding derived two
-    /// ways — a direct per-token gather from the top-level <see cref="_perLayerTokEmbd"/> table, and a projection
-    /// of the (already embedding-scaled) main hidden state through <see cref="_perLayerModelProj"/> — averaged
-    /// (via a fixed 1/√2 scale, not learned) after each is independently normalized/scaled. Returns one
-    /// <c>[1, T, PerLayerEmbeddingDim]</c> tensor per layer; each is consumed (disposed) by its layer's
-    /// <see cref="Layer.Forward"/>. Ported from llama.cpp's <c>build_inp_per_layer</c> / <c>project_per_layer_inputs</c>.</summary>
+    /// <summary>Gemma-4 per-layer embeddings (PLE): for each layer, mixes a small extra embedding derived two ways — a direct per-token gather from <see cref="_perLayerTokEmbd"/>, and a projection of the main hidden state through <see cref="_perLayerModelProj"/> — averaged via a fixed 1/√2 scale after each is independently normalized/scaled. Returns one <c>[1, T, PerLayerEmbeddingDim]</c> tensor per layer, each consumed (disposed) by its layer's <see cref="Layer.Forward"/>. Ported from llama.cpp's <c>build_inp_per_layer</c>/<c>project_per_layer_inputs</c>.</summary>
     private unsafe Tensor[] ComputePerLayerInputs(IBackend backend, Tensor embeds, ReadOnlySpan<int> tokenIds, int t)
     {
         int ple = _cfg.PerLayerEmbeddingDim;
@@ -593,15 +527,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         return result;
     }
 
-    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm
-    /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models), INCLUDING (since 2026-07-22)
-    /// the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.
-    /// Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention,
-    /// attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2),
-    /// BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale
-    /// (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it
-    /// once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no
-    /// scale param.</summary>
+    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.</summary>
+    /// <remarks>Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2), BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</remarks>
     public bool SupportsGraphDecode(IBackend backend)
     {
         bool ok = SupportsGraphDecodeCore(backend);
@@ -639,12 +566,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         // run a q-only path against the donor layer's cache) are all graph-supported now.
         && (_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K);
 
-    /// <summary>Ensures the embedding table is GPU-resident (permanent weight-cache, like any other weight) and
-    /// returns it — <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather needs this; untied models
-    /// normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there.
-    /// When <see cref="TransformerConfig.EmbeddingScale"/> isn't 1.0 (Granite/MiniCPM), returns a separate,
-    /// lazily-built, pre-scaled GPU copy instead — the plain <c>_embed</c> table stays unscaled for
-    /// <see cref="EmbedLookup"/>'s own per-call host scale. Call once before entering a graph-decode session.</summary>
+    /// <summary>Ensures the embedding table is GPU-resident and returns it for <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather (untied models normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there). When <see cref="TransformerConfig.EmbeddingScale"/> isn't 1.0 (Granite/MiniCPM), returns a separate, lazily-built, pre-scaled GPU copy instead, since the plain <c>_embed</c> table stays unscaled for <see cref="EmbedLookup"/>'s own per-call host scale. Call once before entering a graph-decode session.</summary>
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
@@ -658,22 +580,15 @@ public sealed unsafe class GenericTransformer : IDisposable
         return _graphDecodeEmbedScaled;
     }
 
-    /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE
-    /// gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
+    /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
     public void EnsurePleResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
         if (_perLayerTokEmbdRaw is not null) backend.PreloadWeights([_perLayerTokEmbdRaw, _perLayerModelProj!, _perLayerProjNorm!]);
     }
 
-    /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/>
-    /// exceeds what's already built) it via <see cref="IBackend.BuildRopeTableDevice"/>. Cached on this
-    /// instance. A rebuild disposes the orphaned old tensors instead of leaking them — safe because a rebuild
-    /// only replaces THIS field; any graph that already captured the old tensors' address keeps them alive by
-    /// reference regardless of what this field points to next, and (for the scheduler's graph-decode retrofit
-    /// specifically) a new capture can only happen while zero other graph-sessioned sequences are active — see
-    /// <see cref="Generation.DynamicBatchScheduler"/>'s admission-time solo gate — so there is never a LIVE
-    /// captured graph still depending on the table being replaced here.</summary>
+    /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/> exceeds what's already built) it via <see cref="IBackend.BuildRopeTableDevice"/>, cached on this instance.</summary>
+    /// <remarks>A rebuild disposes the orphaned old tensors instead of leaking them — safe because a rebuild only replaces THIS field; any graph that already captured the old tensors' address keeps them alive by reference regardless of what this field points to next, and a new capture can only happen while zero other graph-sessioned sequences are active (see <see cref="Generation.DynamicBatchScheduler"/>'s admission-time solo gate), so there is never a LIVE captured graph still depending on the table being replaced here.</remarks>
     public (Tensor cos, Tensor sin) EnsureRopeTableForGraphDecode(IBackend backend, int minCapacity)
     {
         ThrowIfDisposed();
@@ -701,19 +616,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         return (_graphDecodeCos!, _graphDecodeSin!);
     }
 
-    /// <summary>One full decode step (embed → every layer → final norm → logits → [repetition penalty] →
-    /// greedy argmax) using the device-indexed graph-decode ops throughout, so the entire step is capturable
-    /// into one CUDA graph and replayed with a single launch. <paramref name="deviceTokenId"/> is read at the
-    /// start (this step's input token) and written at the end (the sampled next token) — the SAME buffer, so
-    /// replaying the captured graph repeatedly chains greedy decode entirely on-device (no D2H between steps;
-    /// the caller reads it back only when it needs the token for streaming/detokenization/stop-checking).
-    /// When <paramref name="repetitionPenalty"/> != 1.0 (and <paramref name="history"/>/<paramref name="historyCount"/>
-    /// are non-zero device buffers), the current input token is appended to the on-device history and repetition
-    /// penalty is applied to the logits before argmax — replicating <c>RepetitionPenaltyStep</c>, the only sampler
-    /// stage that can change greedy's picked token (temperature/top-k/top-p/min-p never remove the argmax
-    /// survivor, so graph decode doesn't need them). Caller guarantees <see cref="SupportsGraphDecode"/> and that
-    /// <paramref name="devicePos"/>/<paramref name="deviceTokenId"/> were refreshed (outside any capture region)
-    /// for this step.</summary>
+    /// <summary>One full decode step (embed → every layer → final norm → logits → [repetition penalty] → greedy argmax) using the device-indexed graph-decode ops throughout, so the entire step is capturable into one CUDA graph and replayed with a single launch.</summary>
+    /// <remarks><paramref name="deviceTokenId"/> is read at the start (this step's input token) and written at the end (the sampled next token) — the SAME buffer, so replaying the captured graph repeatedly chains greedy decode entirely on-device. When <paramref name="repetitionPenalty"/> != 1.0 (and <paramref name="history"/>/<paramref name="historyCount"/> are non-zero device buffers), the current input token is appended to the on-device history and repetition penalty is applied to the logits before argmax — replicating <c>RepetitionPenaltyStep</c>, the only sampler stage that can change greedy's picked token. Caller guarantees <see cref="SupportsGraphDecode"/> and that <paramref name="devicePos"/>/<paramref name="deviceTokenId"/> were refreshed (outside any capture region) for this step.</remarks>
     public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, IKvCache cache,
         Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId,
         ulong history = 0, ulong historyCount = 0, float repetitionPenalty = 1.0f)
@@ -783,16 +687,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         logits.Dispose();
     }
 
-    /// <summary>Graph-capturable single-token body step for embedding-driven callers (Sesame CSM's backbone and
-    /// depth decoder), where the input is a host-built embedding — not a token id — and the output hidden feeds a
-    /// separate head + a second transformer rather than an on-device argmax. Reads the step's input from the
-    /// fixed-address <paramref name="inEmbed"/> <c>[1,1,H]</c> (the caller refreshes its contents OUTSIDE the
-    /// capture region, like <see cref="ForwardGraphDecodeStep"/>'s device token id) and writes the post-final-norm
-    /// hidden into the fixed-address <paramref name="outHidden"/> <c>[1,1,H]</c> (read back after the launch). Every
-    /// layer uses the device-position graph-step ops, so the whole call captures into one graph and replays with a
-    /// single launch. Neither <paramref name="inEmbed"/> nor <paramref name="outHidden"/> is disposed — both are the
-    /// caller's persistent buffers whose baked addresses the graph reuses across replays. Caller guarantees
-    /// <see cref="SupportsGraphDecode"/> and a refreshed <paramref name="devicePos"/> for this step.</summary>
+    /// <summary>Graph-capturable single-token body step for embedding-driven callers (Sesame CSM's backbone and depth decoder), where the input is a host-built embedding — not a token id — and the output hidden feeds a separate head + a second transformer rather than an on-device argmax.</summary>
+    /// <remarks>Reads the step's input from the fixed-address <paramref name="inEmbed"/> <c>[1,1,H]</c> (the caller refreshes its contents OUTSIDE the capture region) and writes the post-final-norm hidden into the fixed-address <paramref name="outHidden"/> <c>[1,1,H]</c> (read back after the launch). Every layer uses the device-position graph-step ops, so the whole call captures into one graph and replays with a single launch. Neither <paramref name="inEmbed"/> nor <paramref name="outHidden"/> is disposed — both are the caller's persistent buffers whose baked addresses the graph reuses across replays. Caller guarantees <see cref="SupportsGraphDecode"/> and a refreshed <paramref name="devicePos"/> for this step.</remarks>
     public void ForwardGraphDecodeStepEmbeds(IBackend backend, Tensor inEmbed, IKvCache cache,
         Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
     {
@@ -808,11 +704,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();
     }
 
-    /// <summary>True when this architecture can run the two-stream shared-position graph decode step
-    /// (<see cref="ForwardGraphDecodeStepDualEmbeds"/>): everything <see cref="SupportsGraphDecode"/> requires,
-    /// minus the features <see cref="Layer.ForwardGraphStepDual"/> doesn't implement (per-layer SWA head dims,
-    /// dual local/global RoPE tables, KV-sharing, per-layer embeddings, V-norm, LayerNorm/full-dim QK-norm).
-    /// CSM/HeartMuLa's Llama backbone satisfies all of these.</summary>
+    /// <summary>True when this architecture can run the two-stream shared-position graph decode step (<see cref="ForwardGraphDecodeStepDualEmbeds"/>): everything <see cref="SupportsGraphDecode"/> requires, minus the features <see cref="Layer.ForwardGraphStepDual"/> doesn't implement (per-layer SWA head dims, dual local/global RoPE tables, KV-sharing, per-layer embeddings, V-norm, LayerNorm/full-dim QK-norm). CSM/HeartMuLa's Llama backbone satisfies all of these.</summary>
     public bool SupportsDualGraphDecode(IBackend backend) =>
         SupportsGraphDecodeCore(backend)
         && _cfg.KvSharedFromLayer == 0
@@ -822,16 +714,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         && !_cfg.VNorm
         && !(_cfg.QkNorm && (_cfg.QkNormFullDim || _cfg.UseLayerNorm));
 
-    /// <summary>Two-stream variant of <see cref="ForwardGraphDecodeStepEmbeds"/> for CSM/HeartMuLa's CFG decode:
-    /// <paramref name="inEmbed"/> is <c>[1,2,H]</c> (row 0 = conditional, row 1 = unconditional), the rows are
-    /// POSITION-ALIGNED (both streams append at the same absolute position, so ONE shared <paramref name="devicePos"/>
-    /// serves RoPE, both KV scatters, and both attention calls), and each row writes into its OWN cache
-    /// (<paramref name="cacheA"/>/<paramref name="cacheB"/>). Deliberately a separate method — NOT a batch parameter
-    /// on <see cref="ForwardGraphDecodeStepEmbeds"/> — because the text-LLM fleet replays that path's captured
-    /// graphs and it is verified byte-stable; it must not gain new dispatch branches. Same fixed-buffer contract:
-    /// refresh <paramref name="inEmbed"/> and <paramref name="devicePos"/> outside any capture, read both rows'
-    /// post-final-norm hiddens from <paramref name="outHidden"/> <c>[1,2,H]</c> after the launch. Caller guarantees
-    /// <see cref="SupportsDualGraphDecode"/>.</summary>
+    /// <summary>Two-stream variant of <see cref="ForwardGraphDecodeStepEmbeds"/> for CSM/HeartMuLa's CFG decode: <paramref name="inEmbed"/> is <c>[1,2,H]</c> (row 0 = conditional, row 1 = unconditional), the rows are POSITION-ALIGNED so ONE shared <paramref name="devicePos"/> serves RoPE/KV scatters/attention for both, and each row writes into its OWN cache (<paramref name="cacheA"/>/<paramref name="cacheB"/>).</summary>
+    /// <remarks>Deliberately a separate method — NOT a batch parameter on <see cref="ForwardGraphDecodeStepEmbeds"/> — because the text-LLM fleet replays that path's captured graphs and it is verified byte-stable, so it must not gain new dispatch branches. Same fixed-buffer contract: refresh <paramref name="inEmbed"/> and <paramref name="devicePos"/> outside any capture, read both rows' post-final-norm hiddens from <paramref name="outHidden"/> <c>[1,2,H]</c> after the launch. Caller guarantees <see cref="SupportsDualGraphDecode"/>.</remarks>
     public void ForwardGraphDecodeStepDualEmbeds(IBackend backend, Tensor inEmbed, IKvCache cacheA, IKvCache cacheB,
         Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
     {
@@ -847,12 +731,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();
     }
 
-    /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c>
-    /// (one decode token per active sequence), <paramref name="positions"/>[b] is sequence b's absolute position
-    /// (== its KV length), and <paramref name="caches"/>[b] is sequence b's own KV cache. Returns the post-norm
-    /// hidden state <c>[1, B, hidden]</c>; ready for <see cref="ProjectLogits"/> (rows = B). The heavy
-    /// projections/MLP run as one batched GEMM over all B tokens; attention is per-sequence (each token attends
-    /// only its own prefix). Advances each cache by 1.</summary>
+    /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c> (one decode token per active sequence), <paramref name="positions"/>[b] is sequence b's absolute position, and <paramref name="caches"/>[b] is sequence b's own KV cache. Returns the post-norm hidden state, ready for <see cref="ProjectLogits"/>; the heavy projections/MLP run as one batched GEMM over all B tokens while attention is per-sequence. Advances each cache by 1.</summary>
     public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, IKvCache[] caches)
     {
         ThrowIfDisposed();
@@ -901,8 +780,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
-    /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b]
-    /// (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
+    /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b] (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
     private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
         int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
@@ -1000,9 +878,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
-    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>,
-    /// <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of
-    /// <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2 / Qwen3 / Llama).</summary>
+    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
     internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
         // Partial rotary: build the table for the first rotaryDim dims (half = rotaryDim/2 duplicated), leaving the
@@ -1041,8 +917,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         _graphDecodeEmbedScaled?.Dispose(); _graphDecodeEmbedScaled = null;
     }
 
-    /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual
-    /// → RMSNorm → SwiGLU → residual. All <see cref="IBackend"/> ops.</summary>
+    /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual → RMSNorm → SwiGLU → residual; all <see cref="IBackend"/> ops.</summary>
     private sealed class Layer
     {
         private readonly TransformerConfig _cfg;
@@ -1251,11 +1126,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return v;
         }
 
-        /// <summary>Loads the per-layer FFN: the MoE block on MoE layers, the dense gated/non-gated projections
-        /// otherwise. Gemma-4's <see cref="TransformerConfig.ParallelDenseMoeBranch"/> MoE layers load BOTH — the
-        /// dense projections back the "shared"/dense branch (reusing the plain <c>ffn_gate</c>/<c>ffn_up</c>/
-        /// <c>ffn_down</c> tensor names, unlike every other MoE arch's dedicated <c>shared_expert.*</c> tensors)
-        /// plus that branch's own post-norm, and the MoE branch's own pre-norm/post-norm/router-input-scale.</summary>
+        /// <summary>Loads the per-layer FFN: the MoE block on MoE layers, the dense gated/non-gated projections otherwise. Gemma-4's <see cref="TransformerConfig.ParallelDenseMoeBranch"/> MoE layers load BOTH — the dense projections back the "shared"/dense branch (reusing the plain <c>ffn_gate</c>/<c>ffn_up</c>/<c>ffn_down</c> tensor names) plus that branch's own post-norm, and the MoE branch's own pre-norm/post-norm/router-input-scale.</summary>
         private void LoadFfn(IReadOnlyDictionary<string, Tensor> w, string prefix, int layerIndex)
         {
             bool moeLayer = _cfg.IsMoeLayer(layerIndex);
@@ -1308,8 +1179,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
         }
 
-        /// <summary>Applies the configured FFN activation to <paramref name="inp"/> into <paramref name="outp"/>
-        /// (same shape): SiLU (SwiGLU), tanh-GELU (GeGLU / GPT-2-lineage), ReLU, or ReLU² (Nemotron).</summary>
+        /// <summary>Applies the configured FFN activation to <paramref name="inp"/> into <paramref name="outp"/> (same shape): SiLU (SwiGLU), tanh-GELU (GeGLU/GPT-2-lineage), ReLU, or ReLU² (Nemotron).</summary>
         private void Activate(IBackend backend, Tensor outp, Tensor inp)
         {
             switch (_cfg.Activation)
@@ -1324,11 +1194,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
         }
 
-        /// <summary>FFN: routes to the dense SwiGLU/GeGLU, the non-gated MLP, or the MoE block. Consumes (disposes)
-        /// <paramref name="preMlp"/> <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>. On a
-        /// Gemma-4 <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layer this is still the MoE block ONLY
-        /// (the parallel dense branch is handled separately by <see cref="GemmaMoeFfn"/>, which calls
-        /// <see cref="DenseFfn"/> directly instead of going through here).</summary>
+        /// <summary>FFN: routes to the dense SwiGLU/GeGLU, the non-gated MLP, or the MoE block. Consumes (disposes) <paramref name="preMlp"/> and returns the FFN output. On a Gemma-4 <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layer this is still the MoE block ONLY (the parallel dense branch is handled separately by <see cref="GemmaMoeFfn"/>, which calls <see cref="DenseFfn"/> directly instead of going through here).</summary>
         private Tensor Mlp(IBackend backend, Tensor preMlp, int n, bool emitQ = false)
         {
             if (_moe is not null)
@@ -1340,10 +1206,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return DenseFfn(backend, preMlp, n, emitQ);
         }
 
-        /// <summary>The dense gated (SwiGLU/GeGLU) or non-gated FFN only — never the MoE block. Consumes
-        /// (disposes) <paramref name="preMlp"/>. Used by <see cref="Mlp"/> for every non-MoE layer, and directly
-        /// by <see cref="GemmaMoeFfn"/> for Gemma-4's parallel dense/"shared" branch (which has a live
-        /// <see cref="_moe"/> on the SAME layer, so it cannot go through <see cref="Mlp"/>'s dispatch).</summary>
+        /// <summary>The dense gated (SwiGLU/GeGLU) or non-gated FFN only — never the MoE block. Consumes (disposes) <paramref name="preMlp"/>. Used by <see cref="Mlp"/> for every non-MoE layer, and directly by <see cref="GemmaMoeFfn"/> for Gemma-4's parallel dense/"shared" branch (which has a live <see cref="_moe"/> on the SAME layer, so it cannot go through <see cref="Mlp"/>'s dispatch).</summary>
         private Tensor DenseFfn(IBackend backend, Tensor preMlp, int n, bool emitQ = false)
         {
             // Derived from the loaded weight's own shape, not _cfg.IntermediateSize — Gemma-4's KV-sharing
@@ -1400,10 +1263,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return mlpOut;
         }
 
-        /// <summary>Projects gate+up, using the fused <see cref="_gateUpW"/> dispatch when available (one GEMV
-        /// instead of two — see its doc comment), falling back to two separate calls otherwise. Splitting back
-        /// apart is <see cref="IBackend.SliceLastDim"/> (gate offset 0, up offset nGate) — a real device copy,
-        /// not a zero-cost view, but tiny relative to the GEMV bandwidth the fusion saves.</summary>
+        /// <summary>Projects gate+up, using the fused <see cref="_gateUpW"/> dispatch when available (one GEMV instead of two), falling back to two separate calls otherwise. Splitting back apart is <see cref="IBackend.SliceLastDim"/> — a real device copy, not a zero-cost view, but tiny relative to the GEMV bandwidth the fusion saves.</summary>
         private void ProjectGateUp(IBackend backend, Tensor gate, Tensor up, Tensor preMlp, int n, bool lowVram)
         {
             if (_gateUpW is not null)
@@ -1420,12 +1280,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, up, preMlp, _upW!, _upB, lowVram);
         }
 
-        /// <summary>Gemma-4's parallel dense+MoE FFN (only on <see cref="TransformerConfig.ParallelDenseMoeBranch"/>
-        /// layers): the dense/"shared" branch and the routed-expert branch each read <paramref name="attnOut"/>
-        /// through their OWN pre-norm, are each normed again after their own FFN, then summed. Neither branch's
-        /// norm is <see cref="_postFfnNorm"/> — that shared norm is applied by the caller (<see cref="Forward"/>)
-        /// to the sum, exactly like every other architecture's single FFN output. Does not consume
-        /// <paramref name="attnOut"/> (the caller still needs it for the residual add).</summary>
+        /// <summary>Gemma-4's parallel dense+MoE FFN (only on <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layers): the dense/"shared" branch and the routed-expert branch each read <paramref name="attnOut"/> through their OWN pre-norm, are each normed again after their own FFN, then summed. Neither branch's norm is <see cref="_postFfnNorm"/> — that shared norm is applied by the caller (<see cref="Forward"/>) to the sum. Does not consume <paramref name="attnOut"/> (the caller still needs it for the residual add).</summary>
         private Tensor GemmaMoeFfn(IBackend backend, Tensor attnOut, int n)
         {
             TensorShape flat = new(1, n, _cfg.HiddenSize);
@@ -1459,9 +1314,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return summed;
         }
 
-        /// <summary>Gemma-4 per-layer embedding mixing (see <see cref="GenericTransformer.ComputePerLayerInputs"/>
-        /// for how <paramref name="perLayerInput"/> is built). Consumes (disposes) both <paramref name="cur"/>
-        /// (this layer's output before mixing) and <paramref name="perLayerInput"/>; returns the mixed result.</summary>
+        /// <summary>Gemma-4 per-layer embedding mixing (see <see cref="GenericTransformer.ComputePerLayerInputs"/> for how <paramref name="perLayerInput"/> is built); consumes (disposes) both <paramref name="cur"/> and <paramref name="perLayerInput"/>, returning the mixed result.</summary>
         private Tensor ApplyPerLayerEmbedding(IBackend backend, Tensor cur, Tensor perLayerInput, int n)
         {
             TensorShape flat = new(1, n, _cfg.HiddenSize);
@@ -1513,28 +1366,18 @@ public sealed unsafe class GenericTransformer : IDisposable
                 foreach (Tensor? t in redundant) if (t is not null) yield return t;
         }
 
-        /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features
-        /// (<c>[1, L, hidden]</c>) instead of the causal text K/V. Used at the cross-attention layer indices; the
-        /// self-attention <see cref="Forward"/> path is bypassed for these layers.</summary>
+        /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features instead of the causal text K/V; used at the cross-attention layer indices, where the self-attention <see cref="Forward"/> path is bypassed.</summary>
         public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen)
             => _crossAttn!.Forward(backend, hidden, t, vision, visionLen);
 
-        /// <summary>Pre-sublayer norm: for pre-norm models (Llama/Qwen/Gemma) normalizes <paramref name="inp"/>
-        /// into <paramref name="outp"/>; for post-norm models (OLMo-2) the sublayer reads the raw residual, so this
-        /// copies through unchanged (the norm is applied to the sublayer <i>output</i> instead, via PostSublayer).</summary>
+        /// <summary>Pre-sublayer norm: for pre-norm models (Llama/Qwen/Gemma) normalizes <paramref name="inp"/> into <paramref name="outp"/>; for post-norm models (OLMo-2) the sublayer reads the raw residual, so this copies through unchanged (the norm applies to the sublayer <i>output</i> instead, via PostSublayer).</summary>
         private void PreSublayer(IBackend backend, Tensor outp, Tensor inp, Tensor? norm, Tensor? bias)
         {
             if (_cfg.NormPlacement == NormPlacement.PostNorm) backend.CopyTo(outp, inp);
             else Normalize(backend, outp, inp, norm!, bias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
         }
 
-        /// <summary>Projects Q/K/V, using the fused <see cref="_qkvW"/> dispatch when available (one GEMV
-        /// instead of three — see its doc comment) — QK-norm, if any, is applied by the caller AFTER this
-        /// returns, exactly as it was applied after the separate projections before; fusion only changes how
-        /// the projection itself dispatches. Falls back to three separate calls when there's no fused weight
-        /// (KV-sharing layers, MLA, the mixed-dtype edge case) or no K/V this layer owns. <paramref name="q"/>/
-        /// <paramref name="k"/>/<paramref name="v"/> must already be allocated at their target shape by the
-        /// caller (unchanged from the pre-fusion calling convention).</summary>
+        /// <summary>Projects Q/K/V, using the fused <see cref="_qkvW"/> dispatch when available (one GEMV instead of three) — QK-norm, if any, is applied by the caller AFTER this returns. Falls back to three separate calls when there's no fused weight (KV-sharing layers, MLA, the mixed-dtype edge case) or no K/V this layer owns. <paramref name="q"/>/<paramref name="k"/>/<paramref name="v"/> must already be allocated at their target shape by the caller.</summary>
         private void ProjectQkv(IBackend backend, Tensor q, Tensor? k, Tensor? v, Tensor pre, int t, bool hasOwnKv, bool lowVram)
         {
             if (_qkvW is not null && hasOwnKv && k is not null && v is not null)
@@ -1750,12 +1593,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             return result;
         }
 
-        /// <summary>Single-token decode step for CUDA-graph capture/replay: identical math to <see cref="Forward"/>
-        /// (t=1, non-parallel-residual, pre-norm path) but RoPE/KV-append/attention read their position from a
-        /// device buffer instead of host ints, so the whole layer is graph-capturable. Caller (<see cref="GenericTransformer"/>'s
-        /// graph-decode eligibility check) guarantees this layer has none of the config this doesn't handle
-        /// (MLA, MoE, cross-attention, sliding window, softcap, sink, ALiBi, parallel residual, sandwich norm) —
-        /// this method does not re-check, it assumes the plain GQA/RoPE decoder shape.</summary>
+        /// <summary>Single-token decode step for CUDA-graph capture/replay: identical math to <see cref="Forward"/> (t=1, non-parallel-residual, pre-norm path) but RoPE/KV-append/attention read their position from a device buffer instead of host ints, so the whole layer is graph-capturable.</summary>
+        /// <remarks>Caller (<see cref="GenericTransformer"/>'s graph-decode eligibility check) guarantees this layer has none of the config this doesn't handle (MLA, MoE, cross-attention, sliding window, softcap, sink, ALiBi, parallel residual, sandwich norm) — this method does not re-check, it assumes the plain GQA/RoPE decoder shape.</remarks>
         public Tensor ForwardGraphStep(IBackend backend, Tensor hidden, IKvCache cache, int layerIndex,
             Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor? perLayerInput = null)
         {
@@ -1976,16 +1815,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             return result;
         }
 
-        /// <summary>Two-stream (B=2, shared-position) variant of <see cref="ForwardGraphStep"/> for CSM/HeartMuLa's
-        /// CFG decode: the two rows of <paramref name="hidden"/> <c>[1,2,H]</c> are one decode token per stream at
-        /// the SAME absolute position (one shared <paramref name="devicePos"/>), each stream appending into its own
-        /// KV cache. The heavy batched parts (norms, QKV/o-proj/FFN projections) run ONCE over both rows — each
-        /// weight matrix streams from HBM once per frame instead of twice, which is the entire win of the CFG-batched
-        /// path — while RoPE+KV-scatter and attention run per row against that row's cache. Copy-adapted from
-        /// <see cref="ForwardGraphStep"/> rather than parameterizing it: the text-LLM fleet replays that method's
-        /// captured graphs and it must stay bit-identical. Caller guarantees
-        /// <see cref="GenericTransformer.SupportsDualGraphDecode"/> (plain pre-norm GQA/RoPE, every layer owns its
-        /// KV, single RoPE table, no PLE / V-norm / LayerNorm- or full-dim QK-norm).</summary>
+        /// <summary>Two-stream (B=2, shared-position) variant of <see cref="ForwardGraphStep"/> for CSM/HeartMuLa's CFG decode: the two rows of <paramref name="hidden"/> <c>[1,2,H]</c> are one decode token per stream at the SAME absolute position (one shared <paramref name="devicePos"/>), each stream appending into its own KV cache.</summary>
+        /// <remarks>The heavy batched parts (norms, QKV/o-proj/FFN projections) run ONCE over both rows — each weight matrix streams from HBM once per frame instead of twice, the entire win of the CFG-batched path — while RoPE+KV-scatter and attention run per row against that row's cache. Copy-adapted from <see cref="ForwardGraphStep"/> rather than parameterizing it, since the text-LLM fleet replays that method's captured graphs and it must stay bit-identical. Caller guarantees <see cref="GenericTransformer.SupportsDualGraphDecode"/>.</remarks>
         public Tensor ForwardGraphStepDual(IBackend backend, Tensor hidden, IKvCache cacheA, IKvCache cacheB,
             int layerIndex, Tensor cosTable, Tensor sinTable, ulong devicePos)
         {
@@ -2128,11 +1959,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return result;
         }
 
-        /// <summary>Multi-head Latent Attention forward (DeepSeek-V2/V3). Q is projected directly (V2-Lite);
-        /// K/V come from a compressed latent (down-proj → RMSNorm → up-proj) plus a shared RoPE key. Each head's
-        /// Q/K is [no-position | rope] (rope applied only to the rope part); scores use the full qk head dim while
-        /// values use v_head_dim. To reuse the equal-dim FlashAttention kernel, V is zero-padded up to the qk head
-        /// dim and the output sliced back. (Naive decode: caches the per-head decompressed K/V.)</summary>
+        /// <summary>Multi-head Latent Attention forward (DeepSeek-V2/V3): Q is projected directly (V2-Lite); K/V come from a compressed latent (down-proj → RMSNorm → up-proj) plus a shared RoPE key. Each head's Q/K is [no-position | rope] (rope applied only to the rope part); scores use the full qk head dim while values use v_head_dim. To reuse the equal-dim FlashAttention kernel, V is zero-padded up to the qk head dim and the output sliced back (naive decode: caches the per-head decompressed K/V).</summary>
         public Tensor MlaForward(IBackend backend, Tensor hidden, int t, int posStart,
             IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
         {
@@ -2248,9 +2075,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return result;
         }
 
-        /// <summary>Post-processes a sublayer output before it is added to the residual stream: Gemma's sandwich
-        /// RMSNorm (when <paramref name="norm"/> is set) followed by Granite's residual multiplier (when not 1).
-        /// Both are no-ops for plain Qwen/Llama. Consumes/returns the (possibly replaced) tensor.</summary>
+        /// <summary>Post-processes a sublayer output before it is added to the residual stream: Gemma's sandwich RMSNorm (when <paramref name="norm"/> is set) followed by Granite's residual multiplier (when not 1); both are no-ops for plain Qwen/Llama. Consumes/returns the (possibly replaced) tensor.</summary>
         private Tensor PostSublayer(IBackend backend, Tensor x, Tensor? norm, TensorShape shape)
         {
             if (norm is not null)
@@ -2264,9 +2089,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             return x;
         }
 
-        /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B
-        /// tokens; attention is looped per sequence (each token attends only its own KV prefix via the scalar
-        /// FlashAttention). <paramref name="hidden"/> is <c>[1, B, hidden]</c>.</summary>
+        /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B tokens; attention is looped per sequence (each token attends only its own KV prefix via the scalar FlashAttention). <paramref name="hidden"/> is <c>[1, B, hidden]</c>.</summary>
         public Tensor ForwardBatchDecode(IBackend backend, Tensor hidden, int b, ReadOnlySpan<int> positions,
             Tensor cos, Tensor sin, IKvCache[] caches, int layerIndex)
         {

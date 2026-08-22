@@ -28,7 +28,7 @@ namespace HartsyInference.Audio.Pipelines;
 ///   for (t, dt) in zip(sigmas[:-1], deltas):
 ///     v_cond  = dit(x_cond_audio_text)
 ///     v_uncond = dit(x_drop_audio_drop_text)
-///     v       = v_uncond + cfg_scale * (v_cond - v_uncond)
+///     v       = v_cond + cfg_scale * (v_cond - v_uncond)
 ///     x       = x + dt * v        # update ONLY the target portion
 ///
 ///   # x[T_ref:] is the generated mel
@@ -417,8 +417,8 @@ public sealed record F5TtsOptions
     /// <summary>Sway sampling coefficient. -1.0 default (biases toward noise end).</summary>
     public float SwayCoef { get; init; } = -1.0f;
 
-    /// <summary>CFG strength. Convention: <c>v = v_uncond + cfg * (v_cond - v_uncond)</c>.
-    /// F5-TTS upstream calls this <c>cfg_strength=2.0</c> for their default.</summary>
+    /// <summary>CFG strength for the cond-anchored formula <c>v = v_cond + cfg * (v_cond - v_uncond)</c> (see
+    /// <see cref="F5TtsPipeline.ApplyCfgAndStep"/>); F5-TTS upstream default is <c>cfg_strength=2.0</c>.</summary>
     public float CfgStrength { get; init; } = 2.0f;
 
     /// <summary>Speech speed multiplier. 1.0 = natural. Larger = faster (shorter target duration).</summary>

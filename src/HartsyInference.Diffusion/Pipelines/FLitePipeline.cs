@@ -13,7 +13,6 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>F-Lite pipeline (Freepik / Fal.ai). T5-XXL layer-17 conditioning + 16-channel Flux Schnell VAE + 40-block single-stream cross-attention DiT with V-residual. CFG via batch-of-2 forward (single transformer call instead of dual-pass — saves a forward at the cost of 2× peak activation memory).
-///
 /// <para><b>Inline scheduler</b>: F-Lite uses a custom dynamic-shift flow-match integrator with <c>alpha = 2 * sqrt(image_token_count / (64 * 64))</c>. Per the reference pipeline, the loop is implemented inline rather than through an <see cref="HartsyInference.Core.Schedulers.IScheduler"/> — this avoids a 3-line scheduler shell and keeps the integration close to the reference for first-run debugging.</para>
 ///
 /// <para><b>Status (2026-05-06)</b>: implementation tracked against [`F_LITE_ARCHITECTURE.md`](../../../docs/Research/F_LITE_ARCHITECTURE.md). End-to-end visual validation against the actual `Freepik/F-Lite` checkpoint is pending download. Expect 1-3 first-run bugs to surface (typical for a new model port; see SD3.5 / Z-Image debug histories in PHASE_3_DEVIATIONS.md).</para></summary>
@@ -44,11 +43,7 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
     {
     }
 
-    /// <summary>Creates an F-Lite pipeline with both VAE halves loaded — required for img2img / inpaint (pass an
-    /// <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with
-    /// <see cref="VaeConfig.Flux"/> so its output is already normalized (<c>(mu − shift) · scale</c>) into the
-    /// transformer's latent space — the inverse of the <c>latent / scale + shift</c> this pipeline applies before
-    /// decode.</summary>
+    /// <summary>Creates an F-Lite pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with <see cref="VaeConfig.Flux"/> so its output is already normalized (<c>(mu − shift) · scale</c>) into the transformer's latent space — the inverse of the <c>latent / scale + shift</c> this pipeline applies before decode.</summary>
     public FLitePipeline(IBackend backend, T5TextEncoder t5, FLiteTransformer transformer,
         VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, FLiteConfig config,
         float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
@@ -317,8 +312,7 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>F-Lite's dynamic-shift time at loop index <paramref name="stepIndex"/>: <c>t = shift((steps−i)/steps)</c>
-    /// with <c>shift(u) = u·alpha / (1 + (alpha−1)·u)</c>. t(0) = 1 (pure noise), t(steps) = 0 (clean).</summary>
+    /// <summary>F-Lite's dynamic-shift time at loop index <paramref name="stepIndex"/>: <c>t = shift((steps−i)/steps)</c> with <c>shift(u) = u·alpha / (1 + (alpha−1)·u)</c>. t(0) = 1 (pure noise), t(steps) = 0 (clean).</summary>
     private static float ShiftedTime(int stepIndex, int steps, float alpha)
     {
         float tNorm = (steps - stepIndex) / (float)steps;

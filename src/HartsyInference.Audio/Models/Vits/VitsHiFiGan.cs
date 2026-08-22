@@ -3,10 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS HiFi-GAN decoder (<c>Generator</c>): <c>conv_pre</c> → N upsample stages (ConvTranspose1d +
-/// multi-receptive-field ResBlock fusion) → <c>conv_post</c> → tanh. Plain HiFi-GAN (no NSF/F0 path — VITS
-/// gets pitch from the flow latent). Speaker conditioning deferred (single-speaker). Input is the flow latent
-/// <c>[1, inter, T]</c>; output is mono PCM <c>float[]</c>.</summary>
+/// <summary>VITS HiFi-GAN decoder (<c>Generator</c>): <c>conv_pre</c> → N upsample stages (ConvTranspose1d + multi-receptive-field ResBlock fusion) → <c>conv_post</c> → tanh, mapping the flow latent <c>[1, inter, T]</c> to mono PCM; plain HiFi-GAN (no NSF/F0 path — VITS gets pitch from the flow latent).</summary>
 public sealed unsafe class VitsHiFiGan
 {
     private const float LeakySlope = 0.1f;

@@ -5,9 +5,8 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>YuE Stage-2 residual upsampler — a ~1.5B LLaMA decoder (reuses <see cref="Qwen2Model"/>, same
-/// body as Stage-1) that takes one track's codebook-0 stream and autoregressively predicts residual
-/// codebooks 1..7, yielding the full 8-codebook grid X-Codec decodes to waveform. Faithful port of
+/// <summary>YuE Stage-2 residual upsampler — a ~1.5B LLaMA decoder (reuses <see cref="Qwen2Model"/>, same body as Stage-1) that predicts residual codebooks 1..7 from one track's codebook-0 stream, yielding the full 8-codebook grid X-Codec decodes to waveform.</summary>
+/// <remarks>Faithful port of
 /// upstream <c>infer.py:stage2_generate</c> (m-a-p/YuE, <c>YuE-s2-1B-general</c>).
 ///
 /// <para><b>xcodec token layout</b> (mm_tokenizer_v0.2): codebook k's index i maps to absolute id
@@ -21,7 +20,7 @@ namespace HartsyInference.Audio.Models.Music;
 /// The trailing partial window (&lt;300 frames) is handled the same way. We reproduce that per-window.</para>
 ///
 /// <para><b>Sampling</b>: greedy argmax (upstream <c>generate</c> passes no temperature/top_p and forces
-/// exactly 7 new tokens → HF greedy). No repetition penalty / CFG in Stage-2.</para></summary>
+/// exactly 7 new tokens → HF greedy). No repetition penalty / CFG in Stage-2.</para></remarks>
 public sealed unsafe class YueStage2Lm : IDisposable
 {
     // xcodec offset math (CodecManipulator("xcodec"): global_offset=45334, codebook_size=1024).
@@ -52,9 +51,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "model")
         => _lm.LoadWeights(w, prefix);
 
-    /// <summary>Upsamples one track's codebook-0 stream (<paramref name="cb0Indices"/>, raw indices in
-    /// [0,1023]) to a full <c>[8][T]</c> codebook grid (row 0 = the input cb0). Runs the LM per 300-frame
-    /// window; invalid residuals are patched to the per-row mode (upstream's "fix invalid codes").</summary>
+    /// <summary>Upsamples one track's codebook-0 stream (<paramref name="cb0Indices"/>, raw indices in [0,1023]) to a full <c>[8][T]</c> codebook grid (row 0 = the input cb0). Runs the LM per 300-frame window; invalid residuals are patched to the per-row mode (upstream's "fix invalid codes").</summary>
     public int[][] Upsample(IBackend backend, ReadOnlySpan<int> cb0Indices)
     {
         ThrowIfDisposed();
@@ -99,10 +96,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
     // out-of-range + FixInvalidCodes must be byte-for-byte).
     // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Upsamples BOTH tracks (vocal + accompaniment) together as a decode batch of 2, halving Stage-2
-    /// wall-clock versus two sequential <see cref="Upsample"/> passes. Numerically identical: each track keeps its
-    /// own KV cache and per-sequence attention; only the projections/MLP run as one batched GEMM. Requires equal
-    /// track lengths (their windows advance in lockstep); falls back to two sequential passes otherwise.</summary>
+    /// <summary>Upsamples BOTH tracks (vocal + accompaniment) together as a decode batch of 2, halving Stage-2 wall-clock versus two sequential <see cref="Upsample"/> passes. Numerically identical: each track keeps its own KV cache and per-sequence attention; only the projections/MLP run as one batched GEMM. Requires equal track lengths (their windows advance in lockstep); falls back to two sequential passes otherwise.</summary>
     public (int[][] vocalCodes, int[][] accompCodes) UpsampleBoth(IBackend backend, ReadOnlySpan<int> vocalCb0, ReadOnlySpan<int> accompCb0)
     {
         ThrowIfDisposed();
@@ -133,10 +127,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
         return (vCodes, aCodes);
     }
 
-    /// <summary>One window for both tracks as a B=2 batch. Prefills each track's own prompt into its own
-    /// <see cref="FixedKvCache"/> (prompts differ since cb0 differs, but lengths match), then runs the per-frame +
-    /// 7-residual loop batched via <see cref="Qwen2Model.ForwardBatchDecode"/>. Mirrors <see cref="UpsampleWindow"/>
-    /// exactly per track (same feed order, argmax, out-of-range marking).</summary>
+    /// <summary>One window for both tracks as a B=2 batch. Prefills each track's own prompt into its own <see cref="FixedKvCache"/> (prompts differ since cb0 differs, but lengths match), then runs the per-frame + 7-residual loop batched via <see cref="Qwen2Model.ForwardBatchDecode"/>. Mirrors <see cref="UpsampleWindow"/> exactly per track (same feed order, argmax, out-of-range marking).</summary>
     private void UpsampleWindowBoth(IBackend backend, ReadOnlySpan<int> vCb0, ReadOnlySpan<int> aCb0,
         int[][] vCodes, int[][] aCodes, int frameOffset)
     {
@@ -210,8 +201,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
         }
     }
 
-    /// <summary>Greedy argmax over the residual range [<see cref="ResidualLo"/>,<see cref="ResidualHi"/>) for row
-    /// <paramref name="row"/> of a <c>[1, B, vocab]</c> logits buffer (same tie-break as the sequential path).</summary>
+    /// <summary>Greedy argmax over the residual range [<see cref="ResidualLo"/>,<see cref="ResidualHi"/>) for row <paramref name="row"/> of a <c>[1, B, vocab]</c> logits buffer (same tie-break as the sequential path).</summary>
     private static int ArgmaxResidual(float* logits, int row, int vocab)
     {
         float* r = logits + (long)row * vocab;
@@ -234,9 +224,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
         return prompt;
     }
 
-    /// <summary>One independent window: prime <c>[SOA][stage_1] + cb0(window) + [stage_2]</c>, then for each
-    /// frame feed its cb0 token and greedily emit the 7 residual tokens (cb1..cb7). Uses an incremental KV
-    /// cache — numerically identical to upstream's re-prefill-per-frame loop, O(T) instead of O(T²).</summary>
+    /// <summary>One independent window: prime <c>[SOA][stage_1] + cb0(window) + [stage_2]</c>, then for each frame feed its cb0 token and greedily emit the 7 residual tokens (cb1..cb7). Uses an incremental KV cache — numerically identical to upstream's re-prefill-per-frame loop, O(T) instead of O(T²).</summary>
     private void UpsampleWindow(IBackend backend, ReadOnlySpan<int> cb0, int[][] codes, int frameOffset)
     {
         int wlen = cb0.Length;
@@ -291,8 +279,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
         }
     }
 
-    /// <summary>Upstream "fix invalid codes": any residual marked invalid (-1) is replaced with the most
-    /// frequent valid value in its codebook row (falling back to 0 for an all-invalid row).</summary>
+    /// <summary>Upstream "fix invalid codes": any residual marked invalid (-1) is replaced with the most frequent valid value in its codebook row (falling back to 0 for an all-invalid row).</summary>
     private void FixInvalidCodes(int[][] codes)
     {
         Span<int> counts = stackalloc int[CodebookSize];

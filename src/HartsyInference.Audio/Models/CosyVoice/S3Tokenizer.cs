@@ -5,17 +5,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>S3 speech tokenizer (CosyVoice2 <c>speech_tokenizer_v2_25hz</c>) — converts a reference clip's
-/// 128-bin mel into the discrete 25 Hz FSQ token stream the LM/flow consume. A Whisper-style encoder (two
+/// <summary>S3 speech tokenizer (CosyVoice2 <c>speech_tokenizer_v2_25hz</c>) — converts a reference clip's 128-bin mel into the discrete 25 Hz FSQ token stream the LM/flow consume. Inference / encode only.</summary>
+/// <remarks>A Whisper-style encoder (two
 /// stride-2 Conv1d layers, 4× subsample 100→25 Hz, then 6 pre-norm Transformer blocks with rotate-half RoPE
 /// and an FSMN memory branch) feeds an 8-channel Finite Scalar Quantizer that packs to <c>3^8 = 6561</c> codes.
-/// Inference / encode only.
 ///
 /// <para>Faithful to the upstream <c>s3tokenizer</c> <c>S3TokenizerV2</c> (which is token-identical to
 /// CosyVoice2's bundled <c>speech_tokenizer_v2.onnx</c>). Weights load from that model's clean state-dict names
 /// (<c>encoder.*</c> / <c>quantizer._codebook.project_down.*</c>); the anonymized ONNX export can be converted
 /// to a clean checkpoint with the <c>s3tokenizer</c> package. Convs / attention / norms route through
-/// <see cref="IBackend"/>; RoPE, the FSMN residual, and the FSQ packing are CPU sweeps (one-shot reference pass).</para></summary>
+/// <see cref="IBackend"/>; RoPE, the FSMN residual, and the FSQ packing are CPU sweeps (one-shot reference pass).</para></remarks>
 public sealed unsafe class S3Tokenizer : IDisposable
 {
     private const int NState = 1280;
@@ -97,9 +96,7 @@ public sealed unsafe class S3Tokenizer : IDisposable
         return o;
     }
 
-    /// <summary>FSQ pack (<c>S3TokenizerV2</c>): per frame <c>token = Σ_j (round(0.999·tanh(z_j)) + (L-1)/2)·L^j</c>.
-    /// <paramref name="z"/> is the projected latent <c>[1, T, dim]</c>; returns one base-<paramref name="levels"/>
-    /// code per frame. The 0.999 scale and round are verbatim from the level-3 FSQ codebook.</summary>
+    /// <summary>FSQ pack (<c>S3TokenizerV2</c>): per frame <c>token = Σ_j (round(0.999·tanh(z_j)) + (L-1)/2)·L^j</c>. <paramref name="z"/> is the projected latent <c>[1, T, dim]</c>; returns one base-<paramref name="levels"/> code per frame. The 0.999 scale and round are verbatim from the level-3 FSQ codebook.</summary>
     public static int[] PackFsqTokens(Tensor z, int dim, int levels)
     {
         int t = (int)z.Shape[1];
@@ -152,9 +149,7 @@ public sealed unsafe class S3Tokenizer : IDisposable
     }
 }
 
-/// <summary>One <c>S3TokenizerV2</c> encoder block: pre-norm FSMN multi-head self-attention (<c>out(wv) +
-/// fsmn(value)</c>, rotate-half RoPE on q/k, attention scale <c>1/√headDim</c>) then a pre-norm GELU MLP,
-/// both residual. Channels-last <c>[1, T, 1280]</c>.</summary>
+/// <summary>One <c>S3TokenizerV2</c> encoder block: pre-norm FSMN multi-head self-attention (<c>out(wv) + fsmn(value)</c>, rotate-half RoPE on q/k, attention scale <c>1/√headDim</c>) then a pre-norm GELU MLP, both residual. Channels-last <c>[1, T, 1280]</c>.</summary>
 internal sealed unsafe class S3Block
 {
     private const int NState = 1280, NHead = 20, HeadDim = 64, FsmnKernel = 31;
@@ -226,8 +221,7 @@ internal sealed unsafe class S3Block
         return f2;
     }
 
-    /// <summary>FSMN memory branch: depthwise Conv1d (k31, 'same' pad 15/15, groups = channels) over the value
-    /// stream plus a residual. Operates channels-last <c>[1, T, 1280]</c> via a transpose round-trip.</summary>
+    /// <summary>FSMN memory branch: depthwise Conv1d (k31, 'same' pad 15/15, groups = channels) over the value stream plus a residual. Operates channels-last <c>[1, T, 1280]</c> via a transpose round-trip.</summary>
     private Tensor Fsmn(IBackend backend, Tensor v, int t)
     {
         Tensor vt = new(new TensorShape(1, NState, t), DType.F32);
@@ -243,8 +237,7 @@ internal sealed unsafe class S3Block
         return outT;
     }
 
-    /// <summary>Rotate-half RoPE on a <c>[1, H, T, 64]</c> tensor in place: for pair (j, j+32),
-    /// <c>x[j], x[j+32] ← x[j]·c - x[j+32]·s, x[j+32]·c + x[j]·s</c>, c/s indexed by (t, j).</summary>
+    /// <summary>Rotate-half RoPE on a <c>[1, H, T, 64]</c> tensor in place: for pair (j, j+32), <c>x[j], x[j+32] ← x[j]·c - x[j+32]·s, x[j+32]·c + x[j]·s</c>, c/s indexed by (t, j).</summary>
     private static void RopeHalf(Tensor x, int t, float[] cos, float[] sin)
     {
         int half = HeadDim / 2;     // 32

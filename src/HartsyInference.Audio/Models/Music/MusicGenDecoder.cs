@@ -4,13 +4,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>MusicGen causal decoder: K codebook embeddings (summed) + sinusoidal positions → a stack of
-/// pre-norm blocks (causal self-attention + cross-attention to the T5 text states + GELU MLP) → K parallel
-/// output heads. Reuses the WhisperOps attention helpers (`ProjectLinear`, multi-head reshape, SDPA).
+/// <summary>MusicGen causal decoder: K codebook embeddings (summed) + sinusoidal positions → a stack of pre-norm blocks (causal self-attention + cross-attention to the T5 text states + GELU MLP) → K parallel output heads.</summary>
+/// <remarks>Reuses the WhisperOps attention helpers (`ProjectLinear`, multi-head reshape, SDPA).
 /// AR decoding is incremental: <see cref="CreateCache"/> pre-projects the cross-attn K/V once, then one
 /// cache-capturing prefill <see cref="Forward"/> plus O(T) per-frame <see cref="ForwardStep"/> calls against
 /// the <see cref="MusicGenKvCache"/>. Cross-attn states are the caller-projected T5 features
-/// <c>[1, T_text, hidden]</c>.</summary>
+/// <c>[1, T_text, hidden]</c>.</remarks>
 public sealed unsafe class MusicGenDecoder : IDisposable
 {
     private readonly MusicGenConfig _cfg;
@@ -52,16 +51,14 @@ public sealed unsafe class MusicGenDecoder : IDisposable
             _heads[i] = w[$"lm_heads.{i}.weight"];
     }
 
-    /// <summary>Projects raw T5 states <c>[1, T_text, textDim]</c> to the decoder's cross-attn space
-    /// <c>[1, T_text, hidden]</c> (the once-per-generation <c>enc_to_dec_proj</c>).</summary>
+    /// <summary>Projects raw T5 states <c>[1, T_text, textDim]</c> to the decoder's cross-attn space <c>[1, T_text, hidden]</c> (the once-per-generation <c>enc_to_dec_proj</c>).</summary>
     public Tensor ProjectText(IBackend backend, Tensor t5States)
     {
         int tt = (int)t5States.Shape[1];
         return WhisperOps.ProjectLinear(backend, t5States, _encToDecW!, _encToDecB, 1, tt, _cfg.TextDim, _cfg.Hidden);
     }
 
-    /// <summary>Embeds a sequence of K-codebook frames (sum of the per-codebook embeddings) + sinusoidal
-    /// positions → <c>[1, T, hidden]</c>. <paramref name="frames"/> is <c>[T, K]</c>.</summary>
+    /// <summary>Embeds a sequence of K-codebook frames (sum of the per-codebook embeddings) + sinusoidal positions → <c>[1, T, hidden]</c>. <paramref name="frames"/> is <c>[T, K]</c>.</summary>
     public Tensor EmbedFrames(int[,] frames)
     {
         int t = frames.GetLength(0);
@@ -82,10 +79,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         return outT;
     }
 
-    /// <summary>Runs the decoder stack and returns the K next-step logits <c>[K][codebookSize]</c> from
-    /// the last position. <paramref name="cross"/> is the projected T5 states. Pass <paramref name="cache"/>
-    /// to capture every layer's self-attn K/V for the prompt (prefill), enabling incremental continuation
-    /// via <see cref="ForwardStep"/>.</summary>
+    /// <summary>Runs the decoder stack and returns the K next-step logits <c>[K][codebookSize]</c> from the last position; <paramref name="cross"/> is the projected T5 states, and passing <paramref name="cache"/> captures every layer's self-attn K/V for the prompt (prefill), enabling incremental continuation via <see cref="ForwardStep"/>.</summary>
     public float[][] Forward(IBackend backend, Tensor inputEmbeds, Tensor cross, MusicGenKvCache? cache = null)
     {
         int t = (int)inputEmbeds.Shape[1];
@@ -120,9 +114,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         return logits;
     }
 
-    /// <summary>Creates a K/V cache sized to <paramref name="capacity"/> positions, pre-projecting each
-    /// layer's cross-attn K/V from <paramref name="cross"/> once (they depend only on the text states,
-    /// never per step). For use with <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/>.</summary>
+    /// <summary>Creates a K/V cache sized to <paramref name="capacity"/> positions, pre-projecting each layer's cross-attn K/V from <paramref name="cross"/> once (they depend only on the text states, never per step). For use with <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/>.</summary>
     public MusicGenKvCache CreateCache(IBackend backend, Tensor cross, int capacity)
     {
         int b = (int)cross.Shape[0];   // 1 (no CFG) or 2 (CFG: [0]=cond text, [1]=null/zeros)
@@ -137,12 +129,8 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         return cache;
     }
 
-    /// <summary>Incremental decode: embeds one K-codebook <paramref name="frame"/> at position
-    /// <see cref="MusicGenKvCache.Length"/>, steps the stack against the cache (appending its K/V there),
-    /// and returns the K next-step logits. Equivalent to the last position of a full causal
-    /// <see cref="Forward"/> over the cached prefix plus this frame, at O(T) instead of O(T²).
-    /// <paramref name="advance"/>=false leaves <c>Length</c> unchanged so the same row can be rewritten —
-    /// probe a provisional frame for logits, then commit the sampled one over it.</summary>
+    /// <summary>Incremental decode: embeds one K-codebook <paramref name="frame"/> at position <see cref="MusicGenKvCache.Length"/>, steps the stack against the cache, and returns the K next-step logits — equivalent to the last position of a full <see cref="Forward"/> pass but at O(T) instead of O(T²).</summary>
+    /// <remarks><paramref name="advance"/>=false leaves <c>Length</c> unchanged so the same row can be rewritten — probe a provisional frame for logits, then commit the sampled one over it.</remarks>
     public float[][] ForwardStep(IBackend backend, int[] frame, MusicGenKvCache cache, bool advance = true)
     {
         int pos = cache.Length;
@@ -194,8 +182,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
             _logitsFixed[cb] = new Tensor(new TensorShape(batch, 1, _cfg.CodebookSize), DType.F32);
     }
 
-    /// <summary>Refreshes the fixed batched embedding buffer for one step (host build + CopyInto). Call OUTSIDE
-    /// capture. Both batch rows get the SAME embedding (cond and uncond feed the same sampled token).</summary>
+    /// <summary>Refreshes the fixed batched embedding buffer for one step (host build + CopyInto). Call OUTSIDE capture. Both batch rows get the SAME embedding (cond and uncond feed the same sampled token).</summary>
     public void PrepareEmbed(IBackend backend, int[] frame, int pos, int batch)
     {
         Tensor e = EmbedFrameBatched(frame, pos, batch);
@@ -203,9 +190,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         e.Dispose();
     }
 
-    /// <summary>The CAPTURABLE batched body: reads the fixed embedding, runs the block stack against the batched
-    /// <paramref name="cache"/> (self-attn position from <c>cache.DevicePos</c>), and lands the K head logits in
-    /// the fixed buffers via CopyInto — no host reads, no fresh fixed-address allocations.</summary>
+    /// <summary>The CAPTURABLE batched body: reads the fixed embedding, runs the block stack against the batched <paramref name="cache"/> (self-attn position from <c>cache.DevicePos</c>), and lands the K head logits in the fixed buffers via CopyInto — no host reads, no fresh fixed-address allocations.</summary>
     public void RunBatchedIntoFixed(IBackend backend, MusicGenKvCache cache)
     {
         int b = cache.Batch;
@@ -229,8 +214,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         normed.Dispose();
     }
 
-    /// <summary>Reads back the batched K logits after a launch (non-freeing DtoH, so the fixed buffers keep their
-    /// baked addresses). Returns <c>[batch][K][codebookSize]</c>; index 0 = conditional stream, 1 = unconditional.</summary>
+    /// <summary>Reads back the batched K logits after a launch (non-freeing DtoH, so the fixed buffers keep their baked addresses). Returns <c>[batch][K][codebookSize]</c>; index 0 = conditional stream, 1 = unconditional.</summary>
     public float[][][] ReadBatchedLogits(IBackend backend, int batch)
     {
         int cs = _cfg.CodebookSize;
@@ -258,8 +242,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         _graphBatch = 0;
     }
 
-    /// <summary>Batched frame embedding: <c>[batch, 1, hidden]</c> with every row the same (cond+uncond share the
-    /// input token). Reuses the single-frame host build then replicates across the batch.</summary>
+    /// <summary>Batched frame embedding: <c>[batch, 1, hidden]</c> with every row the same (cond+uncond share the input token). Reuses the single-frame host build then replicates across the batch.</summary>
     private Tensor EmbedFrameBatched(int[] frame, int pos, int batch)
     {
         int h = _cfg.Hidden;

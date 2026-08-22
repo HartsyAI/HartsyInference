@@ -186,14 +186,10 @@ public sealed class VulkanMemoryAllocator : IDisposable
     private long _vkAllocateMemoryCallCount;
     private double _vkAllocateMemoryTotalMs;
 
-    /// <summary>Cumulative <c>vkAllocateMemory</c> call count and host-wall-clock time spent inside it
-    /// (including any OOM-retry re-attempt) since construction — isolates driver allocation cost from
-    /// everything else a GEMM call pays for.</summary>
+    /// <summary>Cumulative <c>vkAllocateMemory</c> call count and host-wall-clock time spent inside it (including any OOM-retry re-attempt) since construction — isolates driver allocation cost from everything else a GEMM call pays for.</summary>
     public (long CallCount, double TotalMs) VkAllocateMemoryStats => (_vkAllocateMemoryCallCount, _vkAllocateMemoryTotalMs);
 
-    /// <summary>Diagnostic snapshot of every live block's pooling state — lets a caller tell empty-and-idle
-    /// blocks (reclaimable) apart from blocks pinned by a live sub-allocation (not reclaimable by eviction
-    /// alone; see the placement question in TROUBLESHOOTING.md).</summary>
+    /// <summary>Diagnostic snapshot of every live block's pooling state — lets a caller tell empty-and-idle blocks (reclaimable) apart from blocks pinned by a live sub-allocation (not reclaimable by eviction alone; see the placement question in TROUBLESHOOTING.md).</summary>
     public IReadOnlyList<(bool IsDedicated, int LiveAllocations, ulong Size)> SnapshotBlocks()
     {
         (bool, int, ulong)[] snapshot = new (bool, int, ulong)[_blocks.Count];
@@ -202,16 +198,10 @@ public sealed class VulkanMemoryAllocator : IDisposable
         return snapshot;
     }
 
-    /// <summary>Optional callback fired on OOM allocation — used by VulkanBackend to flush the
-    /// command stream and drain the deferred-free list before retrying. Set after the stream is
-    /// constructed (chicken-and-egg: allocator created before stream).</summary>
+    /// <summary>Optional callback fired on OOM allocation — used by VulkanBackend to flush the command stream and drain the deferred-free list before retrying. Set after the stream is constructed (chicken-and-egg: allocator created before stream).</summary>
     public Action? OnOutOfMemory { get; set; }
 
-    /// <summary>Optional callback producing a human-readable VRAM breakdown, logged right before a
-    /// genuine (post-retry) OOM is thrown — the allocator's own byte/block counters don't cover
-    /// weight/activation caches or step-graph-retained buffers (those live in VulkanGpuTransferHelper),
-    /// so VulkanBackend wires this up to include the full picture. Diagnostic only; adds no cost on the
-    /// success path.</summary>
+    /// <summary>Optional callback producing a human-readable VRAM breakdown, logged right before a genuine (post-retry) OOM is thrown — the allocator's own byte/block counters don't cover weight/activation caches or step-graph-retained buffers (those live in VulkanGpuTransferHelper), so VulkanBackend wires this up to include the full picture. Diagnostic only; adds no cost on the success path.</summary>
     public Func<string>? OnOutOfMemoryDiagnostic { get; set; }
 
     public VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemoryProperties memProps)
@@ -312,9 +302,7 @@ public sealed class VulkanMemoryAllocator : IDisposable
         return new VulkanMemoryBlock(_device, mem, size, typeIdx, mt.heapIndex, mt.propertyFlags, mapped, _nextBlockId++, dedicated);
     }
 
-    /// <summary>Returns a sub-allocated region to its owning block's free-list. The block itself (dedicated
-    /// or slab) is kept alive even when it empties — see the pooling note on the class doc comment — and is
-    /// only actually destroyed by <see cref="ReleaseEmptySlabs"/> under memory pressure.</summary>
+    /// <summary>Returns a sub-allocated region to its owning block's free-list. The block itself (dedicated or slab) is kept alive even when it empties — see the pooling note on the class doc comment — and is only actually destroyed by <see cref="ReleaseEmptySlabs"/> under memory pressure.</summary>
     public void Free(VulkanAllocation a)
     {
         if (a.IsEmpty) return;
@@ -328,8 +316,7 @@ public sealed class VulkanMemoryAllocator : IDisposable
         }
     }
 
-    /// <summary>Releases every slab block that has zero live allocations. Called from the OOM
-    /// retry path to reclaim memory held by empty slabs that haven't been touched recently.</summary>
+    /// <summary>Releases every slab block that has zero live allocations. Called from the OOM retry path to reclaim memory held by empty slabs that haven't been touched recently.</summary>
     public int ReleaseEmptySlabs()
     {
         int released = 0;
@@ -441,16 +428,7 @@ public sealed class VulkanBuffer : IDisposable
     }
 }
 
-/// <summary>Diagnostic-only counters for per-<see cref="VulkanBuffer"/> object overhead (<c>vkCreateBuffer</c>/
-/// <c>vkGetBufferMemoryRequirements</c>/<c>vkBindBufferMemory</c>/<c>vkDestroyBuffer</c>) — separate from
-/// <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/>, which only measures the underlying
-/// <c>vkAllocateMemory</c> block calls. A tensor pays this cost on every create/destroy regardless of
-/// whether its memory came from a pooled block or a fresh one, so it can dominate even when block-pooling
-/// is working perfectly. Process-wide (not per-backend) since <see cref="VulkanBufferFactory"/> is static;
-/// diff two snapshots around the region being measured. Counts are always on (a `long` increment is free,
-/// same convention as <c>VulkanBackend</c>'s GEMM engagement counters); the per-call <see cref="Stopwatch"/>
-/// timing is gated on <c>HARTSYINFERENCE_VK_PROFILE=1</c> since this runs on every tensor create/destroy
-/// in every model, not just diagnostic benchmarks.</summary>
+/// <summary>Diagnostic-only counters for per-<see cref="VulkanBuffer"/> object overhead (<c>vkCreateBuffer</c>/<c>vkGetBufferMemoryRequirements</c>/<c>vkBindBufferMemory</c>/<c>vkDestroyBuffer</c>) — separate from <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/>, which only measures the underlying <c>vkAllocateMemory</c> block calls. A tensor pays this cost on every create/destroy regardless of whether its memory came from a pooled block or a fresh one, so it can dominate even when block-pooling is working perfectly. Process-wide (not per-backend) since <see cref="VulkanBufferFactory"/> is static; diff two snapshots around the region being measured. Counts are always on (a `long` increment is free, same convention as <c>VulkanBackend</c>'s GEMM engagement counters); the per-call <see cref="Stopwatch"/> timing is gated on <c>HARTSYINFERENCE_VK_PROFILE=1</c> since this runs on every tensor create/destroy in every model, not just diagnostic benchmarks.</summary>
 public static class VulkanBufferDiagnostics
 {
     internal static readonly bool TimingEnabled = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE") == "1";

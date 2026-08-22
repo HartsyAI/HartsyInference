@@ -11,11 +11,7 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Reference recipe: SDXL (dual-CLIP). The architecture every other family is measured against, and the
-/// worked example the lifted per-family recipes follow. Loads and converts the LDM checkpoint itself (rather than
-/// through <see cref="PipelineFactory.LoadSdxl"/>) so it can merge the request's LoRA stack into the UNet/CLIP weights,
-/// build the VAE <em>encoder</em> that img2img and inpaint need, and hand the text encoders to
-/// <see cref="SdxlRecipePipeline"/> for weighted-prompt conditioning.</summary>
+/// <summary>Reference recipe: SDXL (dual-CLIP). The architecture every other family is measured against, and the worked example the lifted per-family recipes follow. Loads and converts the LDM checkpoint itself (rather than through <see cref="PipelineFactory.LoadSdxl"/>) so it can merge the request's LoRA stack into the UNet/CLIP weights, build the VAE <em>encoder</em> that img2img and inpaint need, and hand the text encoders to <see cref="SdxlRecipePipeline"/> for weighted-prompt conditioning.</summary>
 public sealed class SdxlRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>

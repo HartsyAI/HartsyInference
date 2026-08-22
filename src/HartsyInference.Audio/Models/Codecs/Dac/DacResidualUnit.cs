@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Dac;
 
-/// <summary>DAC residual unit. Two-conv stack with snake activations interleaved:
+/// <summary>DAC residual unit — two-conv stack with snake activations interleaved.</summary>
+/// <remarks>
 /// <code>
 ///   r = x
 ///   y = Snake1d(x)                                  # per-channel alpha-snake
@@ -28,7 +29,8 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 ///   <item><c>{prefix}.block.1.weight_g</c> / <c>.weight_v</c> / <c>.bias</c> — first WNConv1d</item>
 ///   <item><c>{prefix}.block.2.alpha</c> — second Snake1d</item>
 ///   <item><c>{prefix}.block.3.weight_g</c> / <c>.weight_v</c> / <c>.bias</c> — second WNConv1d (kernel=1)</item>
-/// </list></para></summary>
+/// </list></para>
+/// </remarks>
 internal sealed unsafe class DacResidualUnit
 {
     private readonly string _prefix;
@@ -63,8 +65,7 @@ internal sealed unsafe class DacResidualUnit
         _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.block.3.bias"]);
     }
 
-    /// <summary>Forward — channels-first <c>[B, dim, T]</c>. Returns a fresh tensor.
-    /// Input is NOT disposed.</summary>
+    /// <summary>Forward — channels-first <c>[B, dim, T]</c>. Returns a fresh tensor. Input is NOT disposed.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int batch, int t)
     {
         if (_conv1W is null) throw new InvalidOperationException($"DacResidualUnit '{_prefix}' weights not loaded.");
@@ -126,9 +127,7 @@ internal sealed unsafe class DacResidualUnit
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
-    /// <summary>Loads a weight-normed conv weight. DAC uses bare <c>nn.Conv1d</c> wrapped
-    /// with <c>weight_norm</c>, so the keys live directly on the layer (no nested
-    /// <c>.conv.conv</c> like EnCodec's SConv1d wrapper).</summary>
+    /// <summary>Loads a weight-normed conv weight. DAC uses bare <c>nn.Conv1d</c> wrapped with <c>weight_norm</c>, so the keys live directly on the layer (no nested <c>.conv.conv</c> like EnCodec's SConv1d wrapper).</summary>
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         return WeightNormFusion.Compose(w, prefix);

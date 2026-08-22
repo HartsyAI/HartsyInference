@@ -23,8 +23,7 @@ public sealed record MiniMaxH3Assets
 
     public required string TextEncoder { get; init; }
 
-    /// <summary>Folder holding <c>vocab.json</c> + <c>merges.txt</c>; null falls back to the embedded Qwen BPE, which
-    /// the flat layout has no tokenizer files for.</summary>
+    /// <summary>Folder holding <c>vocab.json</c> + <c>merges.txt</c>; null falls back to the embedded Qwen BPE, which the flat layout has no tokenizer files for.</summary>
     public string? TokenizerDir { get; init; }
 
     /// <summary>True when the components came from a vendor folder tree rather than the flat repack.</summary>
@@ -145,9 +144,7 @@ public sealed record MiniMaxH3Assets
         };
     }
 
-    /// <summary>Searches each root's component folders for a <c>minimax_h3</c> file also matching one of
-    /// <paramref name="hints"/>. Prefers the smallest match, which picks the quantized variant when several are
-    /// staged side by side.</summary>
+    /// <summary>Searches each root's component folders for a <c>minimax_h3</c> file also matching one of <paramref name="hints"/>. Prefers the smallest match, which picks the quantized variant when several are staged side by side.</summary>
     private static string? FindFlat(List<string> roots, string[] folders, string[] hints)
     {
         foreach (string root in roots)

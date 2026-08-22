@@ -1,11 +1,11 @@
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>Configuration for <see cref="NeuCodecEncoder"/> — the X-Codec2 encode path of NeuCodec (HF
-/// <c>NeuCodecModel</c>, transformers PR #47143). Two parallel branches at 16 kHz → 50 Hz:
+/// <summary>Configuration for <see cref="NeuCodecEncoder"/> — the X-Codec2 encode path of NeuCodec (HF <c>NeuCodecModel</c>, transformers PR #47143).</summary>
+/// <remarks>Two parallel branches at 16 kHz → 50 Hz:
 /// an acoustic BigVGAN-style SnakeBeta conv encoder (<c>acoustic_encoder.*</c>) and a semantic
 /// Wav2Vec2-BERT conformer (<c>semantic_encoder.*</c>, 16 layers, relative-key attention). Their features
 /// are concatenated <c>[semantic, acoustic]</c>, mixed by <c>fc_encoder</c> (2048→2048) and FSQ-quantized
-/// (<c>quantizer.project_in</c> 2048→8, levels <c>[4]^8</c> = 65536 codes).</summary>
+/// (<c>quantizer.project_in</c> 2048→8, levels <c>[4]^8</c> = 65536 codes).</remarks>
 public sealed record NeuCodecEncoderConfig
 {
     public int InputSampleRate { get; init; } = 16_000;

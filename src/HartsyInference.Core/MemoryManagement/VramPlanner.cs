@@ -14,8 +14,7 @@ public enum PhasePlacement
     Streamed = 1,
 }
 
-/// <summary>Decides, per generation phase, whether a component's weights fit resident or must be streamed — and says so
-/// in the log with the numbers behind the decision.</summary>
+/// <summary>Decides, per generation phase, whether a component's weights fit resident or must be streamed — and says so in the log with the numbers behind the decision.</summary>
 /// <remarks>Before this existed, each pipeline hand-rolled the same query against
 /// <see cref="IStreamingWeightCache.QueryAvailableWeightCacheBytes"/> with its own reserve estimate, and only two of
 /// roughly twenty-five image pipelines did it at all — which is why a 12 GB card OOM'd on models ComfyUI streamed
@@ -29,11 +28,8 @@ public sealed class VramPlanner
     private readonly string _modelName;
     private readonly IBackend? _backend;
 
-    /// <summary>Creates a planner for one generation. Pass the backend's <see cref="IBackend.StreamingCache"/>; a null
-    /// cache (CPU, Vulkan) forces <see cref="PhasePlacement.Resident"/> for every phase, matching today's behavior on
-    /// backends that have no notion of a device weight cache.</summary>
-    /// <param name="backend">Optional, but strongly recommended — see <see cref="TrimBeforeQuery"/>. Without it the
-    /// planner can badly under-estimate free VRAM and stream a model that would have fit resident.</param>
+    /// <summary>Creates a planner for one generation. Pass the backend's <see cref="IBackend.StreamingCache"/>; a null cache (CPU, Vulkan) forces <see cref="PhasePlacement.Resident"/> for every phase, matching today's behavior on backends that have no notion of a device weight cache.</summary>
+    /// <param name="backend">Optional, but strongly recommended — see <see cref="TrimBeforeQuery"/>; without it the planner can badly under-estimate free VRAM and stream a model that would have fit resident.</param>
     public VramPlanner(IStreamingWeightCache? cache, string modelName, IBackend? backend = null)
         : this(cache, modelName, LowVramPolicy.Resolve(backend), backend)
     {
@@ -51,8 +47,7 @@ public sealed class VramPlanner
         _backend = backend;
     }
 
-    /// <summary>Returns the stream-ordered pool's reservations to the driver so the availability query below measures
-    /// what is really free, not what the allocator happens to be holding.</summary>
+    /// <summary>Returns the stream-ordered pool's reservations to the driver so the availability query below measures what is really free, not what the allocator happens to be holding.</summary>
     /// <remarks><b>This is load-bearing, not hygiene.</b> Weights freed moments earlier — a text encoder released just
     /// before the denoise phase, say — go back via <c>cuMemFreeAsync</c>, and with <c>HARTSY_MEMPOOL_KEEP</c> (on by
     /// default) the pool keeps those bytes reserved. <c>QueryAvailableWeightCacheBytes</c> then reports them as
@@ -74,14 +69,8 @@ public sealed class VramPlanner
     /// <param name="phase">Phase name for the log, e.g. "text-encode", "denoise", "vae-decode".</param>
     /// <param name="weightBytes">Total bytes of the weights this phase needs resident.</param>
     /// <param name="activationReserveBytes">Bytes this phase's activations and workspace will need alongside those weights.</param>
-    /// <param name="alreadyResident">True when these weights are ALREADY on the device (HARTSY_KEEP_MODELS). Must be
-    /// honored: the availability query cannot see past weights that are themselves occupying the space it measures, so
-    /// asking about a resident model reports "does not fit" and flips warm generations between resident and streamed on
-    /// alternate runs.</param>
-    /// <param name="canStream">Whether the caller's denoiser actually exposes an <see cref="IStreamingBlock"/>
-    /// decomposition AND the caller is wired to drive it. Required rather than defaulted: as streaming is rolled out
-    /// across denoisers, a pipeline that asks the planner before it has a streaming path would otherwise be handed
-    /// <see cref="PhasePlacement.Streamed"/> and silently do the wrong thing.</param>
+    /// <param name="alreadyResident">True when these weights are ALREADY on the device (HARTSY_KEEP_MODELS). Must be honored: the availability query cannot see past weights that are themselves occupying the space it measures, so asking about a resident model reports "does not fit" and flips warm generations between resident and streamed on alternate runs.</param>
+    /// <param name="canStream">Whether the caller's denoiser actually exposes an <see cref="IStreamingBlock"/> decomposition AND the caller is wired to drive it. Required rather than defaulted: as streaming is rolled out across denoisers, a pipeline that asks the planner before it has a streaming path would otherwise be handed <see cref="PhasePlacement.Streamed"/> and silently do the wrong thing.</param>
     public PhasePlacement PlanPhase(
         string phase,
         long weightBytes,
@@ -129,8 +118,7 @@ public sealed class VramPlanner
         return PhasePlacement.Streamed;
     }
 
-    /// <summary>True when an upcoming phase cannot get <paramref name="requiredBytes"/> of headroom without evicting
-    /// what a previous phase left resident.</summary>
+    /// <summary>True when an upcoming phase cannot get <paramref name="requiredBytes"/> of headroom without evicting what a previous phase left resident.</summary>
     /// <remarks>This is the cross-phase half of low-VRAM handling, and the half ComfyUI gets most of its 12 GB-card
     /// advantage from: peak VRAM spans text-encode → denoise → VAE-decode as <i>sequential</i> phases, so dropping the
     /// previous phase's weights is often the difference between fitting and OOM-ing. Returns false under
@@ -168,8 +156,7 @@ public sealed class VramPlanner
             "reduce this — lower the resolution, or use a device with more VRAM.");
     }
 
-    /// <summary>Splits the phase's footprint into the part streaming can move (weights) and the part it cannot
-    /// (activations plus workspace), so a log line distinguishes "needs a sliding window" from "needs a smaller tile".</summary>
+    /// <summary>Splits the phase's footprint into the part streaming can move (weights) and the part it cannot (activations plus workspace), so a log line distinguishes "needs a sliding window" from "needs a smaller tile".</summary>
     private static string Describe(long weightBytes, long activationReserveBytes)
         => $"weights {Mb(weightBytes)} + activations/workspace {Mb(activationReserveBytes)} = {Mb(weightBytes + activationReserveBytes)}";
 

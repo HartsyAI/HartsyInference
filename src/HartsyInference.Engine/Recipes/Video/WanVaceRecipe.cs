@@ -14,11 +14,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan2.1 VACE recipe (Video All-in-one Creation and Editing) — the plain Wan backbone plus a parallel control
-/// branch (<c>vace_patch_embedding</c> + <c>vace_blocks.*</c>) that conditions every denoise step on a VAE-encoded
-/// pose/depth/edge/sketch control clip. Lifted from the SwarmUI backend's <c>WanVaceLoader</c>: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>) and the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>); VACE is
-/// text+control only, so there is no CLIP image encoder.</summary>
+/// <summary>Wan2.1 VACE recipe (Video All-in-one Creation and Editing) — the plain Wan backbone plus a parallel control branch (<c>vace_patch_embedding</c> + <c>vace_blocks.*</c>) that conditions every denoise step on a VAE-encoded pose/depth/edge/sketch control clip. Lifted from the SwarmUI backend's <c>WanVaceLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>) and the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>); VACE is text+control only, so there is no CLIP image encoder.</summary>
 public sealed class WanVaceRecipe : IVideoRecipe
 {
     private readonly string _familyId;

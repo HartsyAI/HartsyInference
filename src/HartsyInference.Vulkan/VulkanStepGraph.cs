@@ -1,12 +1,6 @@
 namespace HartsyInference.Vulkan;
 
-/// <summary>Vulkan-native analog of <c>HartsyInference.Cuda.CudaGraph</c>: records a fixed op sequence into a
-/// single, persistent <c>VkCommandBuffer</c> once, then replays it with a plain resubmit — collapsing the
-/// per-op host dispatch/descriptor/submit overhead of a hand-written-kernel backend into one host call per
-/// step. See <c>docs/Checklists/ROADMAP.md</c>'s Phase 6e/7 entries for why this needed real design work
-/// (a pool-allocated descriptor set can be invalidated by a later pool reset while a replayed command buffer
-/// still references it — undefined behavior) rather than a direct port of CUDA Graph capture (which has no
-/// descriptor-binding concept at all, and whose allocation-node semantics have no Vulkan equivalent).</summary>
+/// <summary>Vulkan-native analog of <c>HartsyInference.Cuda.CudaGraph</c>: records a fixed op sequence into a single, persistent <c>VkCommandBuffer</c> once, then replays it with a plain resubmit — collapsing the per-op host dispatch/descriptor/submit overhead of a hand-written-kernel backend into one host call per step. See <c>docs/Checklists/ROADMAP.md</c>'s Phase 6e/7 entries for why this needed real design work (a pool-allocated descriptor set can be invalidated by a later pool reset while a replayed command buffer still references it — undefined behavior) rather than a direct port of CUDA Graph capture (which has no descriptor-binding concept at all, and whose allocation-node semantics have no Vulkan equivalent).</summary>
 /// <remarks>
 /// <para><b>Descriptor safety</b>: every dispatch recorded during capture uses <c>vkCmdPushDescriptorSet</c>
 /// (via <see cref="VulkanDescriptorManager.PushSet"/>, always, regardless of the process's default eager-mode
@@ -142,9 +136,7 @@ public sealed unsafe class VulkanStepGraph : IDisposable
         VulkanApi.vkWaitForFences(_device, 1, (nint)(&fence), 1, ulong.MaxValue).ThrowOnError("vkWaitForFences (step-graph)");
     }
 
-    /// <summary>Aborts an in-flight capture (if any) and drops the captured graph. Does NOT free retained
-    /// buffers — the caller (<c>VulkanBackend.StepGraphReset</c>) does that via
-    /// <see cref="VulkanGpuTransferHelper.ReleaseStepGraphRetained"/> after this returns.</summary>
+    /// <summary>Aborts an in-flight capture (if any) and drops the captured graph. Does NOT free retained buffers — the caller (<c>VulkanBackend.StepGraphReset</c>) does that via <see cref="VulkanGpuTransferHelper.ReleaseStepGraphRetained"/> after this returns.</summary>
     public void Reset()
     {
         if (_recording)

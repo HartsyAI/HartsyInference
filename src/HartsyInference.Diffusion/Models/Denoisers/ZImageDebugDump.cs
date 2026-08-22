@@ -62,7 +62,6 @@ internal static unsafe class ZImageDebugDump
         }
         else
         {
-            // Cast through F32 for diff comparison.
             using Tensor cast = t.CastTo(DType.F32);
             byte[] buffer = new byte[count * sizeof(float)];
             fixed (byte* dst = buffer)

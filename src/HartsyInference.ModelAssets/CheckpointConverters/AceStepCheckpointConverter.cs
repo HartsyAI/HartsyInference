@@ -4,22 +4,10 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads ACE-Step v1 checkpoints (<c>ACE-Step/ACE-Step-v1-3.5B</c>, diffusers folder layout) for the
-/// <c>AceStepDit</c> / <c>MusicDcaeDecoder</c> / <c>AdaMosHiFiGanV1</c> classes. The HF repo splits components into
-/// <c>ace_step_transformer/</c>, <c>music_dcae_f8c8/</c>, <c>music_vocoder/</c>, and <c>umt5-base/</c> folders —
-/// load each safetensors with the matching method here. DiT: passthrough that drops the training-only SSL alignment
-/// heads (<c>projectors.*</c>). DCAE: passthrough (already <c>encoder./decoder.</c> named). Vocoder: fuses PyTorch
-/// weight-norm pairs (<c>weight_g/weight_v → weight = g·v/‖v‖</c>, per-output-channel norm) and strips an optional
-/// <c>generator.</c> prefix. The lyric tokenizer needs a one-time <c>vocab.json</c> + <c>merges.txt</c> export from
-/// the repo's HF <c>tokenizer.json</c> (<c>python -c "import json; t=json.load(open('tokenizer.json'));
-/// json.dump(t['model']['vocab'], open('vocab.json','w')); open('merges.txt','w').write('\n'.join(' '.join(m) if
-/// isinstance(m, list) else m for m in t['model']['merges']))"</c>).</summary>
+/// <summary>Loads ACE-Step v1 checkpoints (<c>ACE-Step/ACE-Step-v1-3.5B</c>, diffusers folder layout) for the <c>AceStepDit</c> / <c>MusicDcaeDecoder</c> / <c>AdaMosHiFiGanV1</c> classes. The HF repo splits components into <c>ace_step_transformer/</c>, <c>music_dcae_f8c8/</c>, <c>music_vocoder/</c>, and <c>umt5-base/</c> folders — load each safetensors with the matching method here. DiT: passthrough that drops the training-only SSL alignment heads (<c>projectors.*</c>). DCAE: passthrough (already <c>encoder./decoder.</c> named). Vocoder: fuses PyTorch weight-norm pairs (<c>weight_g/weight_v → weight = g·v/‖v‖</c>, per-output-channel norm) and strips an optional <c>generator.</c> prefix. The lyric tokenizer needs a one-time <c>vocab.json</c> + <c>merges.txt</c> export from the repo's HF <c>tokenizer.json</c> (<c>python -c "import json; t=json.load(open('tokenizer.json')); json.dump(t['model']['vocab'], open('vocab.json','w')); open('merges.txt','w').write('\n'.join(' '.join(m) if isinstance(m, list) else m for m in t['model']['merges']))"</c>).</summary>
 public sealed class AceStepCheckpointConverter
 {
-    /// <summary>Loads the DiT safetensors, dropping training-only keys. With <paramref name="castToF32"/> every
-    /// tensor is materialized as F32 (required for CPU inference — the BF16 checkpoint is ~13 GB in F32; without it
-    /// tensors borrow the mmap and stay BF16, which is fine for key/shape validation and GPU paths with F16 kernels).
-    /// Caller owns the loader.</summary>
+    /// <summary>Loads the DiT safetensors, dropping training-only keys. With <paramref name="castToF32"/> every tensor is materialized as F32 (required for CPU inference — the BF16 checkpoint is ~13 GB in F32; without it tensors borrow the mmap and stay BF16, which is fine for key/shape validation and GPU paths with F16 kernels). Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadTransformer(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -44,8 +32,7 @@ public sealed class AceStepCheckpointConverter
         return (weights, loader);
     }
 
-    /// <summary>Loads the ADaMoS vocoder safetensors with weight-norm fusion. Fused tensors are freshly allocated;
-    /// the caller owns the loader for the rest.</summary>
+    /// <summary>Loads the ADaMoS vocoder safetensors with weight-norm fusion. Fused tensors are freshly allocated; the caller owns the loader for the rest.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadVocoder(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -56,13 +43,7 @@ public sealed class AceStepCheckpointConverter
         return (FuseWeightNorm(raw), loader);
     }
 
-    /// <summary>Loads the ACE-Step <b>v1.5</b> turbo main safetensors (<c>ACE-Step/Ace-Step1.5</c>,
-    /// <c>acestep-v15-turbo/model.safetensors</c>, 677 BF16 keys) — one file holds the DiT (<c>decoder.*</c>, for
-    /// <c>AceStep15Dit</c>) and the condition encoders (<c>encoder.*</c>, for <c>AceStep15ConditionEncoder</c>);
-    /// both classes pick their prefixes from this single dict. Passthrough: the FSQ <c>tokenizer.*</c> /
-    /// <c>detokenizer.*</c> hint path and <c>null_condition_emb</c> (phase 2 / CFG-only) are kept but unused by the
-    /// turbo text-to-music path. The Oobleck VAE is a separate file loaded straight into <c>OobleckVae</c>
-    /// (it fuses its own weight norm). Caller owns the loader.</summary>
+    /// <summary>Loads the ACE-Step <b>v1.5</b> turbo main safetensors (<c>ACE-Step/Ace-Step1.5</c>, <c>acestep-v15-turbo/model.safetensors</c>, 677 BF16 keys) — one file holds the DiT (<c>decoder.*</c>, for <c>AceStep15Dit</c>) and the condition encoders (<c>encoder.*</c>, for <c>AceStep15ConditionEncoder</c>); both classes pick their prefixes from this single dict. Passthrough: the FSQ <c>tokenizer.*</c> / <c>detokenizer.*</c> hint path and <c>null_condition_emb</c> (phase 2 / CFG-only) are kept but unused by the turbo text-to-music path. The Oobleck VAE is a separate file loaded straight into <c>OobleckVae</c> (it fuses its own weight norm). Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadModel15(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
@@ -73,15 +54,11 @@ public sealed class AceStepCheckpointConverter
         return (weights, loader);
     }
 
-    /// <summary>True when the header is a Comfy-repackaged ACE-Step v1 all-in-one
-    /// (<c>Comfy-Org/ACE-Step_ComfyUI_repackaged</c> <c>all_in_one/ace_step_v1_3.5b.safetensors</c>).</summary>
+    /// <summary>True when the header is a Comfy-repackaged ACE-Step v1 all-in-one (<c>Comfy-Org/ACE-Step_ComfyUI_repackaged</c> <c>all_in_one/ace_step_v1_3.5b.safetensors</c>).</summary>
     public static bool IsV1AllInOne(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors) =>
         descriptors.ContainsKey("model.diffusion_model.lyric_embs.weight");
 
-    /// <summary>Splits the v1 all-in-one file into the four component dictionaries the existing classes consume:
-    /// the DiT (bare keys, same as <see cref="LoadTransformer"/>, <c>projectors.*</c> skipped), the Music-DCAE,
-    /// the ADaMoS vocoder (weight-norm fused only when the file still ships <c>_g/_v</c> pairs), and the UMT5-base
-    /// text encoder (<c>encoder.block…</c>/<c>shared.weight</c>; <c>logit_scale</c> dropped). Caller owns the loader.</summary>
+    /// <summary>Splits the v1 all-in-one file into the four component dictionaries the existing classes consume: the DiT (bare keys, same as <see cref="LoadTransformer"/>, <c>projectors.*</c> skipped), the Music-DCAE, the ADaMoS vocoder (weight-norm fused only when the file still ships <c>_g/_v</c> pairs), and the UMT5-base text encoder (<c>encoder.block…</c>/<c>shared.weight</c>; <c>logit_scale</c> dropped). Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Transformer, Dictionary<string, Tensor> Dcae,
         Dictionary<string, Tensor> Vocoder, Dictionary<string, Tensor> TextEncoder, SafeTensorsLoader Loader)
         LoadV1AllInOne(string path, bool castToF32 = false)
@@ -132,8 +109,7 @@ public sealed class AceStepCheckpointConverter
     private static Tensor MaybeCast(Tensor t, bool castToF32) =>
         castToF32 && t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
-    /// <summary>Fuses <c>*.weight_g/*.weight_v</c> pairs into plain <c>*.weight</c> (PyTorch <c>weight_norm</c>,
-    /// dim=0: per-output-channel L2 over the remaining dims). Non-paired keys pass through.</summary>
+    /// <summary>Fuses <c>*.weight_g/*.weight_v</c> pairs into plain <c>*.weight</c> (PyTorch <c>weight_norm</c>, dim=0: per-output-channel L2 over the remaining dims). Non-paired keys pass through.</summary>
     public static unsafe Dictionary<string, Tensor> FuseWeightNorm(Dictionary<string, Tensor> raw)
     {
         Dictionary<string, Tensor> result = new();

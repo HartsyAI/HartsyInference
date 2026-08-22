@@ -20,9 +20,9 @@ public sealed class ChromaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _t5Loader;
     private readonly SafeTensorsLoader _vaeLoader;
 
-    /// <summary>Wraps the constructed Chroma pipeline plus its tokenizer, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Chroma pipeline plus its tokenizer, taking ownership of every disposable.</summary>
     public ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

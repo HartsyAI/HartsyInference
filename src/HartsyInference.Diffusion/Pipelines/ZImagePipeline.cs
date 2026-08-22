@@ -23,14 +23,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly ZImageConfig _config;
 
-    /// <summary>Keeps lazily promoted DiT weights and fused-attention plans resident across generations.
-    /// A prompt-cache miss still evicts them before a same-device Qwen encode because the 8 GB encoder and
-    /// 6.2 GB Z-Image transformer cannot coexist on a 12 GB card.</summary>
+    /// <summary>Keeps lazily promoted DiT weights and fused-attention plans resident across generations. A prompt-cache miss still evicts them before a same-device Qwen encode because the 8 GB encoder and 6.2 GB Z-Image transformer cannot coexist on a 12 GB card.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
 
-    /// <summary>Explicit bring-up probe. Each scan deliberately materializes a prediction on the host, so it is
-    /// disabled in production; use it to localize non-finite Base outputs before the CFG combine.</summary>
+    /// <summary>Explicit bring-up probe. Each scan deliberately materializes a prediction on the host, so it is disabled in production; use it to localize non-finite Base outputs before the CFG combine.</summary>
     private static readonly bool PredictionStatsEnabled =
         EnvSwitch.IsEnabled("HARTSY_ZIMAGE_PRED_STATS", defaultOn: false);
 
@@ -55,10 +52,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 
     /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
-    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = fresh Gaussian noise scaled by initSigma; denoise from step 0).</item>
-    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux/Z-Image VAE and combined with fresh noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
-    /// </list>
-    /// </summary>
+    ///   <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = fresh Gaussian noise scaled by initSigma; denoise from step 0).</item>
+    ///   <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux/Z-Image VAE and combined with fresh noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
+    /// </list></summary>
     /// <param name="captionEmbeddings">Last-hidden-state output of Qwen3-4B for the prompt [B, capLen, 2560]. The Z-Image system prompt + chat template should already be applied upstream.</param>
     /// <param name="request">Generation parameters (Width, Height, Steps, Seed). Pass an <see cref="ImageToImageRequest"/> for img2img.</param>
     /// <param name="cfgScale">Classifier-free guidance scale. Use 1.0 for Turbo (no CFG, single forward per step). Use 3.0–5.0 for Base when a negative-prompt embedding is also provided.</param>
@@ -579,14 +575,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Whether the denoise loop can remain in packed token space. The latent's origin is deliberately
-    /// irrelevant: a plain img2img latent has already completed VAE encode + flow-noise mixing before this decision.
-    /// Masks require per-step source blending in pixel latent space; regional prompts require the regional forward.</summary>
+    /// <summary>Whether the denoise loop can remain in packed token space. The latent's origin is deliberately irrelevant: a plain img2img latent has already completed VAE encode + flow-noise mixing before this decision. Masks require per-step source blending in pixel latent space; regional prompts require the regional forward.</summary>
     internal static bool CanUsePackedDenoise(bool isMaskedInpaint, RegionalPlan? regionalPlan) =>
         !isMaskedInpaint && (regionalPlan is null || regionalPlan.Regions.Count == 0);
 
-    /// <summary>Across-step reuse is currently calibrated only for single-pass packed t2i. Img2img starts from
-    /// a source-conditioned trajectory and remains excluded until a dedicated quality A/B establishes safe gates.</summary>
+    /// <summary>Across-step reuse is currently calibrated only for single-pass packed t2i. Img2img starts from a source-conditioned trajectory and remains excluded until a dedicated quality A/B establishes safe gates.</summary>
     internal static bool CanUseStepCache(bool packedDenoise, bool isImg2Img, bool useCfg) =>
         packedDenoise && !isImg2Img && !useCfg;
 
@@ -680,9 +673,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Releases only Z-Image's resident denoiser state before a same-device text-encoder phase or when
-    /// <c>HARTSY_KEEP_MODELS=0</c>. The model intentionally remains lazily promoted; this method is the exact
-    /// teardown mirror and also invalidates graph/attention plans that contain device addresses.</summary>
+    /// <summary>Releases only Z-Image's resident denoiser state before a same-device text-encoder phase or when <c>HARTSY_KEEP_MODELS=0</c>. The model intentionally remains lazily promoted; this method is the exact teardown mirror and also invalidates graph/attention plans that contain device addresses.</summary>
     public void EvictResidentWeights()
     {
         Exception? firstError = null;
@@ -702,9 +693,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Reclaims this recipe's VAE device state before a text encoder is staged on the same device.
-    /// Successful generations deliberately keep the decoder warm, but an 8 GB Qwen preload takes priority at
-    /// this explicit phase boundary. Every independent owner is attempted before an error is reported.</summary>
+    /// <summary>Reclaims this recipe's VAE device state before a text encoder is staged on the same device. Successful generations deliberately keep the decoder warm, but an 8 GB Qwen preload takes priority at this explicit phase boundary. Every independent owner is attempted before an error is reported.</summary>
     public void EvictVaeDeviceState()
     {
         Exception? firstError = null;
@@ -725,8 +714,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Best-effort targeted rollback for an interrupted generation. Do not let cleanup replace the
-    /// cancellation/runtime exception the caller needs to diagnose, and do not sweep unrelated backend weights.</summary>
+    /// <summary>Best-effort targeted rollback for an interrupted generation. Do not let cleanup replace the cancellation/runtime exception the caller needs to diagnose, and do not sweep unrelated backend weights.</summary>
     private void CleanupFailedGeneration()
     {
         TryCleanup("DiT state", EvictResidentWeights);
@@ -753,14 +741,10 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Releases device-side copies owned by this pipeline. Injected component objects remain caller-owned
-    /// per <see cref="DiffusionPipelineBase"/>; <c>ZImageRecipePipeline</c> disposes those host owners afterwards.</summary>
+    /// <summary>Releases device-side copies owned by this pipeline. Injected component objects remain caller-owned per <see cref="DiffusionPipelineBase"/>; <c>ZImageRecipePipeline</c> disposes those host owners afterwards.</summary>
     protected override void DisposeCore() => CleanupFailedGeneration();
 
-    /// <summary>Returns the endpoint label ("black (0)" / "white (255)") when the entire RGB frame sits at a
-    /// single byte endpoint, else null. Endpoint collapse alone is NOT proof of failure — a legitimate prompt or
-    /// an inpaint over a solid source can genuinely produce one — so the caller disambiguates by checking the
-    /// decoded F32 tensor for NaN/Inf before rejecting.</summary>
+    /// <summary>Returns the endpoint label ("black (0)" / "white (255)") when the entire RGB frame sits at a single byte endpoint, else null. Endpoint collapse alone is NOT proof of failure — a legitimate prompt or an inpaint over a solid source can genuinely produce one — so the caller disambiguates by checking the decoded F32 tensor for NaN/Inf before rejecting.</summary>
     internal static string? DetectEndpointCollapse(ReadOnlySpan<byte> rgb)
     {
         if (rgb.IsEmpty)
@@ -778,8 +762,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         return anyNonBlack ? "white (255)" : "black (0)";
     }
 
-    /// <summary>Rejects a tensor containing NaN/Inf. Device backends with a resident reduction read back only the
-    /// scalar result; other backends use the diagnostic host scan.</summary>
+    /// <summary>Rejects a tensor containing NaN/Inf. Device backends with a resident reduction read back only the scalar result; other backends use the diagnostic host scan.</summary>
     internal static void ValidateFiniteTensor(IBackend backend, Tensor tensor, string label)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -794,8 +777,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         ValidatePredictionFinite(tensor, label, logStats: false);
     }
 
-    /// <summary>Host diagnostic used by HARTSY_ZIMAGE_PRED_STATS=1. This intentionally forces a D2H sync and must
-    /// not be enabled for performance measurements.</summary>
+    /// <summary>Host diagnostic used by HARTSY_ZIMAGE_PRED_STATS=1. This intentionally forces a D2H sync and must not be enabled for performance measurements.</summary>
     internal static void ValidatePredictionFinite(Tensor tensor, string label, bool logStats)
     {
         ArgumentNullException.ThrowIfNull(tensor);
@@ -871,9 +853,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Tracks only tensors created by the current generation. Borrowed inputs and transformer-owned
-    /// graph buffers are never registered. Removing an owner before disposal prevents the failure sweep from
-    /// double-disposing a tensor whose normal teardown itself threw.</summary>
+    /// <summary>Tracks only tensors created by the current generation. Borrowed inputs and transformer-owned graph buffers are never registered. Removing an owner before disposal prevents the failure sweep from double-disposing a tensor whose normal teardown itself threw.</summary>
     private sealed class TensorOwnership
     {
         private readonly List<(Tensor Tensor, string Name)> _owned = [];
@@ -943,13 +923,8 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level.
-    /// Used to bracket the pre/post VAE state when tracking down all-black output bugs —
-    /// healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5,
-    /// mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0.
-    /// Outside those bands means the model or VAE saturated.</summary>
-    /// <summary>Diagnostic gate for the per-channel latent/VAE stats (HARTSY_ZIMAGE_STATS=1). Unconditional stats
-    /// forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
+    /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level. Used to bracket the pre/post VAE state when tracking down all-black output bugs — healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5, mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0. Outside those bands means the model or VAE saturated.</summary>
+    /// <summary>Diagnostic gate for the per-channel latent/VAE stats (HARTSY_ZIMAGE_STATS=1). Unconditional stats forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
     private static readonly bool LatentStatsEnabled =
         Environment.GetEnvironmentVariable("HARTSY_ZIMAGE_STATS") == "1";
 

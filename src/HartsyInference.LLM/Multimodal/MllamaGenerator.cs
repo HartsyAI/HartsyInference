@@ -6,12 +6,7 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>End-to-end generation for Llama-3.2-Vision (mllama). Unlike the splice-token VLMs, mllama does NOT
-/// insert image embeddings into the token sequence: the <see cref="MllamaVisionEncoder"/> produces
-/// <c>cross_attention_states</c> that the interleaved gated cross-attention decoder layers
-/// (<see cref="MllamaCrossAttentionLayer"/>) read, while the text sequence carries a single <c>&lt;|image|&gt;</c>
-/// placeholder token. The vision states are threaded through every <see cref="GenericTransformer.ForwardEmbeds"/>
-/// call (prefill + each decode step) so the cross-attention layers always see the image.</summary>
+/// <summary>End-to-end generation for Llama-3.2-Vision (mllama): unlike the splice-token VLMs, the text sequence carries a single <c>&lt;|image|&gt;</c> placeholder while <see cref="MllamaVisionEncoder"/>'s <c>cross_attention_states</c> are threaded through every <see cref="GenericTransformer.ForwardEmbeds"/> call (prefill + each decode step) for the interleaved gated cross-attention layers (<see cref="MllamaCrossAttentionLayer"/>) to read.</summary>
 public sealed class MllamaGenerator
 {
     private readonly GgufLanguageModel _text;
@@ -19,14 +14,10 @@ public sealed class MllamaGenerator
     private readonly IBackend _backend;
     private readonly LlmPlacement? _placement;
 
-    /// <summary>True when a genuine multi-stage layer-split placement is active — the cross-attention states
-    /// then need a per-stage peer copy (see <see cref="GenericTransformer.ForwardEmbedsStaged"/>).</summary>
+    /// <summary>True when a genuine multi-stage layer-split placement is active — the cross-attention states then need a per-stage peer copy (see <see cref="GenericTransformer.ForwardEmbedsStaged"/>).</summary>
     private bool Staged => _placement is not null && !_placement.IsSingle;
 
-    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps
-    /// the single-backend path byte-identical. When set, <paramref name="backend"/> must be the placement's LAST
-    /// stage backend (final norm/lm_head/logits live there) — mirrors <see cref="Generation.TextGenerationPipeline"/>'s
-    /// contract.</summary>
+    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling), or null keeps the single-backend path byte-identical; when set, <paramref name="backend"/> must be the placement's LAST stage backend (final norm/lm_head/logits live there).</summary>
     public MllamaGenerator(GgufLanguageModel text, MllamaVisionEncoder vision, IBackend backend, LlmPlacement? placement = null)
     {
         _text = text; _vision = vision; _placement = placement;
@@ -60,9 +51,7 @@ public sealed class MllamaGenerator
         catch (Exception ex) { HartsyInference.Core.Logging.Logs.Warning($"mllama weight preload failed (continuing lazy): {ex.Message}"); }
     }
 
-    /// <summary>Generates a reply to <paramref name="question"/> about the image (<paramref name="pixelValues"/> =
-    /// normalized <c>[1, 3, 560, 560]</c>). Llama-3 chat prompt with a single <c>&lt;|image|&gt;</c> token before
-    /// the question.</summary>
+    /// <summary>Generates a reply to <paramref name="question"/> about the image (<paramref name="pixelValues"/> = normalized <c>[1, 3, 560, 560]</c>) using a Llama-3 chat prompt with a single <c>&lt;|image|&gt;</c> token before the question.</summary>
     public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
@@ -126,9 +115,7 @@ public sealed class MllamaGenerator
         return sb.ToString();
     }
 
-    /// <summary>The hidden-state forward for one step (prefill or one decode token): staged across the
-    /// placement (cross-attention states peer-copied per stage) when sharded, else the plain single-backend
-    /// cross-attention path.</summary>
+    /// <summary>The hidden-state forward for one step (prefill or one decode token): staged across the placement (cross-attention states peer-copied per stage) when sharded, else the plain single-backend cross-attention path.</summary>
     private Tensor Forward(GenericTransformer model, Tensor embeds, int t, int posStart, IKvCache cache,
         Tensor crossStates, int visLen) =>
         Staged

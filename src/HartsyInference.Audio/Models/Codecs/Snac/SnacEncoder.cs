@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC encoder, matching the official hubertsiuzdak/snac <c>Encoder</c> (snac/layers.py):
+/// <summary>SNAC encoder, matching the official hubertsiuzdak/snac <c>Encoder</c> (snac/layers.py).</summary>
+/// <remarks>
 /// <code>
 ///   block.0          : WNConv1d(1 -> encoder_dim, k7, pad3)
 ///   block.{i+1}      : EncoderBlock(stride) = 3 x ResidualUnit(groups) + Snake + WNConv1d down
@@ -15,7 +16,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 /// conv uses groups = block input dim, and the final conv uses groups = d_model.
 ///
 /// PARITY-TODO: only used for the encode (audio -> codes) path; verify against real snac_24khz weights
-/// (Orpheus uses decode only, and <see cref="Snac"/> loads this tolerantly).</summary>
+/// (Orpheus uses decode only, and <see cref="Snac"/> loads this tolerantly).</remarks>
 internal sealed unsafe class SnacEncoder
 {
     private readonly SnacConfig _cfg;

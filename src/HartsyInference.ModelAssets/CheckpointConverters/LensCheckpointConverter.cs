@@ -94,9 +94,7 @@ public sealed class LensCheckpointConverter
     // NVFP4-quantized experts). These methods produce the same per-component dicts as Convert.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>Loads + converts the three ComfyUI Lens files (DiT, GPT-OSS text encoder, Flux.2 VAE).
-    /// Returns the converted weights plus the open loaders (keep them alive — passthrough tensors are
-    /// memory-mapped views into the files).</summary>
+    /// <summary>Loads + converts the three ComfyUI Lens files (DiT, GPT-OSS text encoder, Flux.2 VAE). Returns the converted weights plus the open loaders (keep them alive — passthrough tensors are memory-mapped views into the files).</summary>
     public static (ConvertedWeights weights, SafeTensorsLoader[] loaders) LoadAndConvertComfy(
         string ditPath, string textEncoderPath, string vaePath)
     {
@@ -118,8 +116,7 @@ public sealed class LensCheckpointConverter
             Vae = vae,
         };
 
-    /// <summary>Converts the ComfyUI DiT file: dequantizes MXFP8 linears to BF16 (no-op on the BF16 file),
-    /// then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
+    /// <summary>Converts the ComfyUI DiT file: dequantizes MXFP8 linears to BF16 (no-op on the BF16 file), then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
     public static Dictionary<string, Tensor> ConvertComfyDit(Dictionary<string, Tensor> dit)
     {
         int dq = Mxfp8Codec.DequantInPlace(dit);
@@ -134,16 +131,8 @@ public sealed class LensCheckpointConverter
         return transformer;
     }
 
-    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: renames the ComfyUI expert biases
-    /// (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF form the encoder loads, prepends
-    /// the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU encoder GEMM is F32-only), and drops
-    /// the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.
-    /// <para><b>NVFP4 MoE expert banks pass through PACKED</b> (U8 nibbles + F8E4M3 swizzled block
-    /// scales + F32 per-expert globals, all still mmap-backed views into the file):
-    /// <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> dequantizes one expert
-    /// at a time transiently at forward time via <see cref="Nvfp4Codec.DequantExpertSlice"/>. Eagerly
-    /// materializing the 20B-parameter expert bank at F32 costs ~76 GB of host RAM and gets the process
-    /// OOM-killed on 64 GB hosts.</para></summary>
+    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: renames the ComfyUI expert biases (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF form the encoder loads, prepends the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU encoder GEMM is F32-only), and drops the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.
+    /// <para><b>NVFP4 MoE expert banks pass through PACKED</b> (U8 nibbles + F8E4M3 swizzled block scales + F32 per-expert globals, all still mmap-backed views into the file): <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> dequantizes one expert at a time transiently at forward time via <see cref="Nvfp4Codec.DequantExpertSlice"/>. Eagerly materializing the 20B-parameter expert bank at F32 costs ~76 GB of host RAM and gets the process OOM-killed on 64 GB hosts.</para></summary>
     public static Dictionary<string, Tensor> ConvertComfyTextEncoder(Dictionary<string, Tensor> textEncoder)
     {
         Dictionary<string, Tensor> output = new(textEncoder.Count);
@@ -163,8 +152,7 @@ public sealed class LensCheckpointConverter
         return output;
     }
 
-    /// <summary>True for the three NVFP4 expert-bank tensors (<c>experts.*.weight</c> U8 packed nibbles,
-    /// <c>.weight_scale</c>, <c>.weight_scale_2</c>) that must stay in their quantized on-disk form.</summary>
+    /// <summary>True for the three NVFP4 expert-bank tensors (<c>experts.*.weight</c> U8 packed nibbles, <c>.weight_scale</c>, <c>.weight_scale_2</c>) that must stay in their quantized on-disk form.</summary>
     private static bool IsPackedNvfp4ExpertTensor(string key, Tensor tensor)
     {
         if (!key.Contains("experts.", StringComparison.Ordinal))

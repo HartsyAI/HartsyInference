@@ -4,12 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Encoder side of the VibeVoice VAEs. 7 stages of (down-conv + ConvNeXt-block
-/// chain) on channels-first <c>[B, 1, T_pcm]</c> input, followed by an optional pre-head
-/// norm (disabled in the published checkpoints) and a 1×1 projection to the latent
-/// dimension. Used by both the acoustic VAE (vae_dim=64) and the semantic VAE
-/// (vae_dim=128).
-///
+/// <summary>Encoder side of the VibeVoice VAEs: 7 stages of (down-conv + ConvNeXt-block chain) on channels-first <c>[B, 1, T_pcm]</c> input, an optional pre-head norm, then a 1×1 projection to the latent dimension; used by both the acoustic VAE (vae_dim=64) and the semantic VAE (vae_dim=128).</summary>
+/// <remarks>
 /// <para>Channel chain on the published checkpoints (encoder_n_filters=32,
 /// encoder_ratios=[8,5,5,4,2,2] reversed in-forward to [2,2,4,5,5,8]):
 /// <code>
@@ -22,7 +18,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 ///   stage 6: down SConv1d(1024 → 2048, k=16, s=8)    + 8 × Block1D(dim=2048)
 ///   head: SConv1d(2048 → vae_dim, k=7, s=1)
 /// </code>
-/// Total temporal downsample = <c>2*2*4*5*5*8 = 3200</c> → 7.5 Hz on 24 kHz input.</para></summary>
+/// Total temporal downsample = <c>2*2*4*5*5*8 = 3200</c> → 7.5 Hz on 24 kHz input.</para></remarks>
 internal sealed class VibeVoiceTokenizerEncoder
 {
     private readonly VibeVoiceTokenizerConfig _config;
@@ -107,10 +103,7 @@ internal sealed class VibeVoiceTokenizerEncoder
             _lastNormW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
     }
 
-    /// <summary>Forward — input <c>[batch, channels=1, T_pcm]</c>, output
-    /// <c>[batch, vae_dim, T_pcm / hop]</c> where <c>hop = product(encoder_ratios) = 3200</c>
-    /// for the published configs. Non-streaming when <paramref name="cache"/> is null;
-    /// streaming otherwise.</summary>
+    /// <summary>Forward, input <c>[batch, channels=1, T_pcm]</c> to output <c>[batch, vae_dim, T_pcm / hop]</c> where <c>hop = product(encoder_ratios) = 3200</c> for the published configs; streams when <paramref name="cache"/> is non-null.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int batch, int tIn,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {

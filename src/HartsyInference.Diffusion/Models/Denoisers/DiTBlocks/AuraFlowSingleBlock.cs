@@ -160,7 +160,6 @@ public sealed unsafe class AuraFlowSingleBlock
         return result;
     }
 
-    /// <summary>Yields all weight tensors for GPU preloading.</summary>
     /// <summary>See note on <c>AuraFlowJointBlock.GetOrFakeOnes</c>.</summary>
     private static Tensor GetOrFakeOnes(IReadOnlyDictionary<string, Tensor> weights, string key, int headDim)
     {
@@ -176,6 +175,7 @@ public sealed unsafe class AuraFlowSingleBlock
         return ones;
     }
 
+    /// <summary>Yields all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _modulation.EnumerateWeights()) yield return t;

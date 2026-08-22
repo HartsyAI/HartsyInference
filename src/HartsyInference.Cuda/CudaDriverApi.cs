@@ -2,8 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for the CUDA Driver API. Library name "cuda" is resolved at runtime by
-/// CudaLibraryResolver to nvcuda.dll (Windows) or libcuda.so.1 (Linux).</summary>
+/// <summary>P/Invoke bindings for the CUDA Driver API. Library name "cuda" is resolved at runtime by CudaLibraryResolver to nvcuda.dll (Windows) or libcuda.so.1 (Linux).</summary>
 internal static partial class CudaDriverApi
 {
     private const string LibName = "cuda";
@@ -13,8 +12,7 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuInit(uint flags);
 
-    /// <summary>The latest CUDA version the installed DRIVER supports (e.g. 13020 → CUDA 13.2). Used to pick and
-    /// version-guard the matching cuDNN build.</summary>
+    /// <summary>The latest CUDA version the installed DRIVER supports (e.g. 13020 → CUDA 13.2). Used to pick and version-guard the matching cuDNN build.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuDriverGetVersion(out int driverVersion);
 
@@ -158,13 +156,11 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuDeviceCanAccessPeer(out int canAccessPeer, int dev, int peerDev);
 
-    /// <summary>Queries a CU_DEVICE_P2P_ATTRIBUTE_* value for the directed pair src→dst. Query-only — never
-    /// changes context state.</summary>
+    /// <summary>Queries a CU_DEVICE_P2P_ATTRIBUTE_* value for the directed pair src→dst. Query-only — never changes context state.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuDeviceGetP2PAttribute(out int value, int attrib, int srcDevice, int dstDevice);
 
-    /// <summary>Grants the CURRENT context direct access to <paramref name="peerContext"/>'s memory. Flags must be 0.
-    /// Returns CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED (=704) on repeat — treat as success.</summary>
+    /// <summary>Grants the CURRENT context direct access to <paramref name="peerContext"/>'s memory. Flags must be 0. Returns CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED (=704) on repeat — treat as success.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuCtxEnablePeerAccess(nint peerContext, uint flags);
 
@@ -204,27 +200,20 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuStreamQuery(nint stream);
 
-    /// <summary>Makes <paramref name="stream"/> wait until <paramref name="hEvent"/>
-    /// has been recorded. The host thread does not block — only subsequent work
-    /// queued on <paramref name="stream"/> is gated. <paramref name="flags"/> = 0 is
-    /// always the right value (CU_EVENT_WAIT_DEFAULT).</summary>
+    /// <summary>Makes <paramref name="stream"/> wait until <paramref name="hEvent"/> has been recorded. The host thread does not block — only subsequent work queued on <paramref name="stream"/> is gated. <paramref name="flags"/> = 0 is always the right value (CU_EVENT_WAIT_DEFAULT).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuStreamWaitEvent(nint stream, nint hEvent, uint flags);
 
     // ── Event Management ────────────────────────────────────────────────
 
-    /// <summary>Creates a CUDA event. <c>CU_EVENT_DISABLE_TIMING</c> (=2) is the right
-    /// flag for sync-only events; we never need the timing data and disabling it
-    /// avoids a tiny bit of driver bookkeeping.</summary>
+    /// <summary>Creates a CUDA event. <c>CU_EVENT_DISABLE_TIMING</c> (=2) is the right flag for sync-only events; we never need the timing data and disabling it avoids a tiny bit of driver bookkeeping.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuEventCreate(out nint phEvent, uint flags);
 
     [LibraryImport(LibName)]
     internal static partial int cuEventDestroy(nint hEvent);
 
-    /// <summary>Records the event when <paramref name="hStream"/> reaches this point
-    /// in its queue. The event is "complete" once all preceding work on that stream
-    /// finishes; other streams can wait on it via <see cref="cuStreamWaitEvent"/>.</summary>
+    /// <summary>Records the event when <paramref name="hStream"/> reaches this point in its queue. The event is "complete" once all preceding work on that stream finishes; other streams can wait on it via <see cref="cuStreamWaitEvent"/>.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuEventRecord(nint hEvent, nint hStream);
 
@@ -261,20 +250,15 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphLaunch(nint graphExec, nint stream);
 
-    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the
-    /// count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is
-    /// returned. Diagnostic use only (HARTSY_GRAPH_DUMP).</summary>
+    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is returned. Diagnostic use only (HARTSY_GRAPH_DUMP).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuGraphGetNodes(nint graph, [In, Out] nint[]? nodes, ref nuint numNodes);
 
-    /// <summary>Returns a node's CUgraphNodeType (0=kernel, 1=memcpy, 2=memset, 3=host, 4=child graph,
-    /// 5=empty, 6=wait event, 7=event record, 8=ext-sem signal, 9=ext-sem wait, 10=mem alloc, 11=mem free,
-    /// 12=batch memop, 13=conditional). Diagnostic use only.</summary>
+    /// <summary>Returns a node's CUgraphNodeType (0=kernel, 1=memcpy, 2=memset, 3=host, 4=child graph, 5=empty, 6=wait event, 7=event record, 8=ext-sem signal, 9=ext-sem wait, 10=mem alloc, 11=mem free, 12=batch memop, 13=conditional). Diagnostic use only.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuGraphNodeGetType(nint node, out int nodeType);
 
-    /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns
-    /// CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
+    /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
     [LibraryImport(LibName, EntryPoint = "cuGraphExecUpdate_v2")]
     internal static partial int cuGraphExecUpdate(nint graphExec, nint graph, nint resultInfo);
 
@@ -284,24 +268,18 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphDestroy(nint graph);
 
-    /// <summary>Writes a DOT-format dump of the graph's nodes (kernels, memcpys, alloc/free nodes with their
-    /// parameters when flags=1 VERBOSE). Diagnostic only.</summary>
+    /// <summary>Writes a DOT-format dump of the graph's nodes (kernels, memcpys, alloc/free nodes with their parameters when flags=1 VERBOSE). Diagnostic only.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int cuGraphDebugDotPrint(nint graph, string path, uint flags);
 
-    /// <summary>Returns the device's graph-memory-pool reserves to the OS. Memory allocated by captured
-    /// allocation nodes (stream-ordered allocs recorded during graph capture) lives in a per-device GRAPH pool
-    /// that <c>cuGraphExecDestroy</c> does NOT release and <c>cuMemPoolTrimTo</c> does not touch — without this
-    /// call a destroyed multi-GB step graph keeps its whole working set reserved (invisible to the allocator,
-    /// fatal for the next model's load on a full card).</summary>
+    /// <summary>Returns the device's graph-memory-pool reserves to the OS. Memory allocated by captured allocation nodes (stream-ordered allocs recorded during graph capture) lives in a per-device GRAPH pool that <c>cuGraphExecDestroy</c> does NOT release and <c>cuMemPoolTrimTo</c> does not touch — without this call a destroyed multi-GB step graph keeps its whole working set reserved (invisible to the allocator, fatal for the next model's load on a full card).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuDeviceGraphMemTrim(int device);
 
     internal const int CU_GRAPH_MEM_ATTR_USED_MEM_CURRENT = 0;
     internal const int CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT = 2;
 
-    /// <summary>Reads a graph-memory-pool attribute (USED = live graph-owned allocations, RESERVED = pool
-    /// footprint including cached-but-free memory).</summary>
+    /// <summary>Reads a graph-memory-pool attribute (USED = live graph-owned allocations, RESERVED = pool footprint including cached-but-free memory).</summary>
     [LibraryImport(LibName)]
     internal static unsafe partial int cuDeviceGetGraphMemAttribute(int device, int attr, void* value);
 
@@ -311,8 +289,7 @@ internal static partial class CudaDriverApi
 
     // ── Memory Info ─────────────────────────────────────────────────────
 
-    /// <summary>Returns the free and total amount of memory available for allocation
-    /// by the CUDA context. Reports the values for the calling context's device.</summary>
+    /// <summary>Returns the free and total amount of memory available for allocation by the CUDA context. Reports the values for the calling context's device.</summary>
     [LibraryImport(LibName, EntryPoint = "cuMemGetInfo_v2")]
     internal static partial int cuMemGetInfo(out nuint free, out nuint total);
 
@@ -338,28 +315,19 @@ internal static partial class CudaDriverApi
     // an eager-allocation phase (e.g. transformer-streaming → VAE-decode-eager) so the
     // VAE sees the memory the streamer just freed.
 
-    /// <summary>Gets the default memory pool of the specified device — used by
-    /// cuMemAllocAsync / cuMemFreeAsync when no explicit pool is given.</summary>
+    /// <summary>Gets the default memory pool of the specified device — used by cuMemAllocAsync / cuMemFreeAsync when no explicit pool is given.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuDeviceGetDefaultMemPool(out nint pool, int dev);
 
-    /// <summary>Releases memory back to the OS until the pool's reserved size is
-    /// at most <paramref name="minBytesToKeep"/>. Pass 0 to release everything not
-    /// currently in use by an in-flight async allocation.</summary>
+    /// <summary>Releases memory back to the OS until the pool's reserved size is at most <paramref name="minBytesToKeep"/>. Pass 0 to release everything not currently in use by an in-flight async allocation.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuMemPoolTrimTo(nint pool, nuint minBytesToKeep);
 
-    /// <summary>Sets a memory pool attribute. Used to configure
-    /// <c>CU_MEMPOOL_ATTR_RELEASE_THRESHOLD</c> to 0 so the pool releases reserved
-    /// memory back to the driver on every stream sync — without this, the default
-    /// behaviour on some drivers is to hold pool memory indefinitely, starving
-    /// subsequent sync <c>cuMemAlloc</c> calls.</summary>
+    /// <summary>Sets a memory pool attribute. Used to configure <c>CU_MEMPOOL_ATTR_RELEASE_THRESHOLD</c> to 0 so the pool releases reserved memory back to the driver on every stream sync — without this, the default behaviour on some drivers is to hold pool memory indefinitely, starving subsequent sync <c>cuMemAlloc</c> calls.</summary>
     [LibraryImport(LibName)]
     internal static unsafe partial int cuMemPoolSetAttribute(nint pool, int attr, void* value);
 
-    /// <summary>Memory pool attribute: amount of reserved memory in bytes to hold
-    /// onto before trying to release back to the OS on the next sync. Value type
-    /// is <c>cuuint64_t</c> (a 64-bit unsigned integer). Set to 0 to be aggressive.</summary>
+    /// <summary>Memory pool attribute: amount of reserved memory in bytes to hold onto before trying to release back to the OS on the next sync. Value type is <c>cuuint64_t</c> (a 64-bit unsigned integer). Set to 0 to be aggressive.</summary>
     internal const int CU_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4;
 
     // ── Error Handling ──────────────────────────────────────────────────

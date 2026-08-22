@@ -45,9 +45,7 @@ internal static class Values
         _ => throw new InvalidOperationException($"Value is not iterable: {v.GetType().Name}"),
     };
 
-    /// <summary>Serializes a value to compact JSON for the <c>tojson</c> filter (used by the tool-calling blocks
-    /// of the Qwen/Llama templates). Handles the value graph the engine produces: null / bool / long / double /
-    /// string / List / Dictionary.</summary>
+    /// <summary>Serializes a value to compact JSON for the <c>tojson</c> filter (used by tool-calling blocks in Qwen/Llama templates); handles the value graph the engine produces: null/bool/long/double/string/List/Dictionary.</summary>
     public static string ToJson(object? v)
     {
         StringBuilder sb = new();
@@ -173,10 +171,7 @@ internal sealed class UnaryNotExpr(Expr inner) : Expr
     public override object? Eval(JinjaEngine.Scope scope) => !Values.Truthy(inner.Eval(scope));
 }
 
-/// <summary>Python-style <c>target[start:stop:step]</c>. <paramref name="step"/> is null for the common
-/// <c>[start:stop]</c> two-part form; a real chat template (Qwen3.5's, reversing history with
-/// <c>messages[::-1]</c>) uses the full three-part form with a negative step, so that case is handled
-/// explicitly rather than just falling back to a step-1 slice.</summary>
+/// <summary>Python-style <c>target[start:stop:step]</c>; <paramref name="step"/> is null for the common two-part form, but negative steps (Qwen3.5's <c>messages[::-1]</c> history reversal) are handled explicitly rather than falling back to a step-1 slice.</summary>
 internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop, Expr? step) : Expr
 {
     public override object? Eval(JinjaEngine.Scope scope)
@@ -245,8 +240,7 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
     }
 }
 
-/// <summary>Unary <c>-x</c> — negates a numeric operand (long, matching <see cref="BinaryExpr"/>'s integer
-/// arithmetic; every Jinja number literal here is a long).</summary>
+/// <summary>Unary <c>-x</c> — negates as a long, matching <see cref="BinaryExpr"/>'s integer arithmetic (every Jinja number literal here is a long).</summary>
 internal sealed class UnaryMinusExpr(Expr operand) : Expr
 {
     public override object? Eval(JinjaEngine.Scope scope) => -(long)Values.ToD(operand.Eval(scope));
@@ -288,8 +282,7 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
     }
 }
 
-/// <summary>A keyword argument <c>name=value</c> in a call. Evaluates to its value so positional consumers work;
-/// <see cref="CallExpr"/> for <c>namespace(...)</c> inspects the name.</summary>
+/// <summary>A keyword argument <c>name=value</c> in a call; evaluates to its value so positional consumers work, while <see cref="CallExpr"/> for <c>namespace(...)</c> inspects the name.</summary>
 internal sealed class NamedArgExpr(string name, Expr value) : Expr
 {
     public string Name => name;
@@ -380,11 +373,7 @@ internal static class ExprParser
         return e;
     }
 
-    /// <summary>Parses a <c>{% for x in SEQ [if FILTER] %}</c> tag's iterable: the sequence expression at the
-    /// <c>or_expr</c> level (deliberately NOT <see cref="ParseTernary"/> — real Jinja disallows a bare ternary
-    /// here specifically because <c>a if c else b</c> and <c>seq if filter</c> would otherwise be ambiguous),
-    /// then an optional trailing <c>if</c> filter clause (no <c>else</c> — that's what distinguishes it from a
-    /// ternary).</summary>
+    /// <summary>Parses a <c>{% for x in SEQ [if FILTER] %}</c> tag's iterable at the <c>or_expr</c> level, deliberately NOT <see cref="ParseTernary"/> — real Jinja disallows a bare ternary here since <c>a if c else b</c> and <c>seq if filter</c> would otherwise be ambiguous.</summary>
     public static (Expr seq, Expr? filter) ParseForIterable(string src)
     {
         Tokenizer tz = new(src);
@@ -466,8 +455,7 @@ internal static class ExprParser
         return e;
     }
 
-    /// <summary>Multiplicative level (binds tighter than +/-): <c>*</c>, <c>//</c> (int div), <c>/</c>, <c>%</c>
-    /// (modulo — used by chat templates like Gemma's <c>loop.index0 % 2</c>). <c>//</c> is tried before <c>/</c>.</summary>
+    /// <summary>Multiplicative level (binds tighter than +/-): <c>*</c>, <c>//</c> (int div), <c>/</c>, <c>%</c> (modulo — used by chat templates like Gemma's <c>loop.index0 % 2</c>); <c>//</c> is tried before <c>/</c>.</summary>
     private static Expr ParseMulDiv(Tokenizer t)
     {
         Expr e = ParseUnary(t);
@@ -482,9 +470,7 @@ internal static class ExprParser
         return e;
     }
 
-    /// <summary>Unary <c>-</c>/<c>+</c> (e.g. a literal <c>-1</c> arg to <c>range(x, -1, -1)</c> — a real
-    /// construct in Gemma-4's tool-calling chat template). Binds tighter than <c>*</c>/<c>/</c>, matching
-    /// Python/Jinja precedence; right-recursive so <c>--x</c> parses (harmless, just unusual).</summary>
+    /// <summary>Unary <c>-</c>/<c>+</c> (e.g. the literal <c>-1</c> arg to <c>range(x, -1, -1)</c> in Gemma-4's tool-calling template); binds tighter than <c>*</c>/<c>/</c> matching Python/Jinja precedence, right-recursive so <c>--x</c> parses.</summary>
     private static Expr ParseUnary(Tokenizer t)
     {
         if (t.TrySymbol("-")) return new UnaryMinusExpr(ParseUnary(t));
@@ -597,8 +583,7 @@ internal sealed class ListLiteralExpr(List<Expr> items) : Expr
     public override object? Eval(JinjaEngine.Scope scope) => items.Select(e => e.Eval(scope)).ToList();
 }
 
-/// <summary>Jinja <c>is</c> tests: <c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>
-/// (with optional <c>not</c>). <c>defined</c> uses scope membership so a missing variable reads as undefined.</summary>
+/// <summary>Jinja <c>is</c> tests (<c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>, ...), with optional <c>not</c>; <c>defined</c> uses scope membership so a missing variable reads as undefined.</summary>
 internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
 {
     public override object? Eval(JinjaEngine.Scope scope)

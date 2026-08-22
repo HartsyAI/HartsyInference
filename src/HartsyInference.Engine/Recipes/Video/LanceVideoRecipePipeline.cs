@@ -10,10 +10,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Lance text-to-video pipeline driven against the native <see cref="VideoRequest"/>. Tokenizes
-/// the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls
-/// <see cref="LanceVideoPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c>
-/// text-to-video branch.</summary>
+/// <summary>A constructed Lance text-to-video pipeline driven against the native <see cref="VideoRequest"/>. Tokenizes the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls <see cref="LanceVideoPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c> text-to-video branch.</summary>
 public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Total downscale between pixels and transformer tokens (VAE 16x, latent patch (1,1,1) per the real checkpoint).</summary>

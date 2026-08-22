@@ -2,14 +2,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>Low-level helpers used across F5-TTS modules. All operate on F32 tensors via
-/// unsafe pointer math. New ops here (relative to <c>WhisperOps</c>): Mish activation,
-/// SiLU activation, Global Response Normalization (GRN, from ConvNeXt-V2), AdaLN-Zero
-/// modulation, and a grouped Conv1D path for <see cref="F5ConvPosEmbed"/>.</summary>
+/// <summary>Low-level helpers used across F5-TTS modules, operating on F32 tensors via unsafe pointer math; new ops here relative to <c>WhisperOps</c> are Mish, SiLU, Global Response Normalization (GRN, from ConvNeXt-V2), AdaLN-Zero modulation, and a grouped Conv1D path for <see cref="F5ConvPosEmbed"/>.</summary>
 internal static unsafe class F5Ops
 {
-    /// <summary>Mish activation, in place: <c>x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))</c>.
-    /// Used by F5-TTS's ConvPositionEmbedding between the two grouped Conv1D layers.</summary>
+    /// <summary>Mish activation, in place: <c>x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))</c>, used by F5-TTS's ConvPositionEmbedding between the two grouped Conv1D layers.</summary>
     public static void MishInPlace(Tensor t)
     {
         float* p = (float*)t.DataPointer;
@@ -24,9 +20,7 @@ internal static unsafe class F5Ops
         }
     }
 
-    /// <summary>Tanh-approximation GELU in place (<c>nn.GELU(approximate="tanh")</c>) — the variant F5-TTS's
-    /// FeedForward uses: <c>0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))</c>. (The ConvNeXt text stem uses the
-    /// exact erf GELU instead.)</summary>
+    /// <summary>Tanh-approximation GELU in place (<c>nn.GELU(approximate="tanh")</c>) — the variant F5-TTS's FeedForward uses (the ConvNeXt text stem uses the exact erf GELU instead).</summary>
     public static void TanhGeluInPlace(Tensor t)
     {
         const float c = 0.7978845608028654f;   // sqrt(2/pi)
@@ -51,15 +45,7 @@ internal static unsafe class F5Ops
         }
     }
 
-    /// <summary>Global Response Normalization (ConvNeXt-V2 Eq. 4). Operates on the
-    /// channel-last layout <c>[B, T, D]</c>:
-    /// <code>
-    ///   Gx = ||x||_2 along time axis (dim=1)            shape [B, 1, D]
-    ///   Nx = Gx / (mean(Gx, dim=-1, keepdim=True) + eps) shape [B, 1, D]
-    ///   out = gamma * (x * Nx) + beta + x
-    /// </code>
-    /// <paramref name="gamma"/> and <paramref name="beta"/> are <c>[1, 1, D]</c>
-    /// learnable parameters (loaded directly with that shape).</summary>
+    /// <summary>Global Response Normalization (ConvNeXt-V2 Eq. 4) on the channel-last layout <c>[B, T, D]</c>: <c>out = gamma * (x * Gx/(mean(Gx)+eps)) + beta + x</c> where <c>Gx = ||x||_2</c> along the time axis.</summary>
     public static void Grn(Tensor x, Tensor gamma, Tensor beta, int batch, int t, int dim)
     {
         float* xp = (float*)x.DataPointer;
@@ -121,10 +107,7 @@ internal static unsafe class F5Ops
         }
     }
 
-    /// <summary>Grouped 1D convolution for <see cref="F5ConvPosEmbed"/>. Splits the
-    /// channel dim into <paramref name="groups"/> groups; each group has its own
-    /// <c>(in_per_group, kernel)</c> weight slice. Input/output layout: <c>[B, C, T]</c>.
-    /// Pad with zeros on both sides.</summary>
+    /// <summary>Grouped 1D convolution for <see cref="F5ConvPosEmbed"/> over <c>[B, C, T]</c>, zero-padded on both sides; splits the channel dim into <paramref name="groups"/> groups, each with its own <c>(in_per_group, kernel)</c> weight slice.</summary>
     public static void GroupedConv1D(
         Tensor output, Tensor input, Tensor weight, Tensor bias,
         int batch, int channels, int t, int kernel, int padding, int groups)
@@ -168,11 +151,7 @@ internal static unsafe class F5Ops
         }
     }
 
-    /// <summary>AdaLayerNorm-Zero modulation step. Given a hidden tensor <c>x [B, T, D]</c>
-    /// pre-normalized (LayerNorm with no affine), and modulation parameters
-    /// <c>(shift, scale)</c> each of shape <c>[B, D]</c>, computes
-    /// <c>x * (1 + scale[B, 1, D]) + shift[B, 1, D]</c> in place. Used by every DiT
-    /// block before attention and before FF.</summary>
+    /// <summary>AdaLayerNorm-Zero modulation: given a pre-normalized (affine-free LayerNorm) hidden tensor <c>x [B, T, D]</c> and per-batch <c>(shift, scale) [B, D]</c>, computes <c>x * (1 + scale) + shift</c> in place; used by every DiT block before attention and before FF.</summary>
     public static void AdaLnZeroModulate(Tensor x, float* shift, float* scale, int batch, int t, int dim)
     {
         float* xp = (float*)x.DataPointer;
@@ -190,9 +169,7 @@ internal static unsafe class F5Ops
         }
     }
 
-    /// <summary>AdaLN-Zero gated residual add: <c>out = x + gate[B, 1, D] * h</c>.
-    /// <paramref name="gate"/> is a per-batch [D] vector that scales the contribution of the
-    /// sub-block output before adding back to the residual.</summary>
+    /// <summary>AdaLN-Zero gated residual add: <c>out = x + gate[B, 1, D] * h</c>, where <paramref name="gate"/> is a per-batch [D] vector scaling the sub-block output before adding back to the residual.</summary>
     public static void AdaLnZeroGatedAdd(Tensor output, Tensor x, Tensor h, float* gate, int batch, int t, int dim)
     {
         float* op = (float*)output.DataPointer;

@@ -29,13 +29,10 @@ public sealed record RopeScaling
     /// <summary>YaRN slow-rotation boundary (HF <c>beta_slow</c>, default 1).</summary>
     public double BetaSlow { get; init; } = 1.0;
 
-    /// <summary>DeepSeek YaRN <c>mscale_all_dim</c> (GGUF <c>rope.scaling.yarn_log_multiplier</c>): the attention
-    /// mscale is <c>1 + YarnLogMultiplier·ln(factor)</c> and enters the attention <i>score</i> scale squared
-    /// (DeepSeek-V2/V3 MLA). 0 (default) means the standard YaRN mscale. Not used by the cos/sin layout itself.</summary>
+    /// <summary>DeepSeek YaRN <c>mscale_all_dim</c> (GGUF <c>rope.scaling.yarn_log_multiplier</c>): the attention mscale is <c>1 + YarnLogMultiplier·ln(factor)</c> and enters the attention <i>score</i> scale squared (DeepSeek-V2/V3 MLA). 0 (default) means the standard YaRN mscale. Not used by the cos/sin layout itself.</summary>
     public double YarnLogMultiplier { get; init; }
 
-    /// <summary>Explicit attention scaling (mscale) baked into cos/sin. <c>NaN</c> = infer per-type
-    /// (YaRN: 0.1·ln(factor)+1; others: 1).</summary>
+    /// <summary>Explicit attention scaling (mscale) baked into cos/sin. <c>NaN</c> = infer per-type (YaRN: 0.1·ln(factor)+1; others: 1).</summary>
     public double AttentionFactor { get; init; } = double.NaN;
 
     /// <summary>LongRope short-context per-dimension factors (length D/2), used when seqLen ≤ original context.</summary>
@@ -44,8 +41,6 @@ public sealed record RopeScaling
     /// <summary>LongRope long-context per-dimension factors (length D/2), used when seqLen &gt; original context.</summary>
     public IReadOnlyList<double>? LongFactor { get; init; }
 
-    /// <summary>Optional explicit per-frequency multiplier (length D/2). When set, it is applied directly to the
-    /// base inverse frequencies and the formula is skipped — this is the GGUF <c>rope_freqs.weight</c> path
-    /// (llama.cpp precomputes Llama-3 scaling into this tensor).</summary>
+    /// <summary>Optional explicit per-frequency multiplier (length D/2). When set, it is applied directly to the base inverse frequencies and the formula is skipped — this is the GGUF <c>rope_freqs.weight</c> path (llama.cpp precomputes Llama-3 scaling into this tensor).</summary>
     public IReadOnlyList<float>? InvFreqFactors { get; init; }
 }

@@ -16,14 +16,9 @@ public static class KohyaFluxMapper
     private static readonly Regex _doubleBlock = new(@"^double_blocks_(\d+)_(img|txt)_(attn_qkv|attn_proj|mlp_0|mlp_2|mod_lin)$", RegexOptions.Compiled);
     private static readonly Regex _singleBlock = new(@"^single_blocks_(\d+)_(linear1|linear2|modulation_lin)$", RegexOptions.Compiled);
 
-    /// <summary>Parses every LoRA layer in the file.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader) => ParseLayers(loader, dottedBflRoots: false);
 
-    /// <summary>Same parse, but <paramref name="dottedBflRoots"/> accepts ComfyUI-style roots: DOTTED original BFL
-    /// module names under a <c>diffusion_model.</c> prefix (e.g. <c>diffusion_model.double_blocks.0.img_attn.qkv</c>,
-    /// how Chroma/Flux LoRAs trained against ComfyUI checkpoints ship). The dotted body underscore-normalizes to
-    /// exactly the kohya body this mapper already translates — fused-QKV splits included — so the whole BFL→diffusers
-    /// mapping table is shared rather than duplicated.</summary>
+    /// <summary>Same parse, but <paramref name="dottedBflRoots"/> accepts ComfyUI-style roots: DOTTED original BFL module names under a <c>diffusion_model.</c> prefix (e.g. <c>diffusion_model.double_blocks.0.img_attn.qkv</c>, how Chroma/Flux LoRAs trained against ComfyUI checkpoints ship). The dotted body underscore-normalizes to exactly the kohya body this mapper already translates — fused-QKV splits included — so the whole BFL→diffusers mapping table is shared rather than duplicated.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool dottedBflRoots)
     {
         Dictionary<(LoraTarget, string), GroupBuffer> groups = [];

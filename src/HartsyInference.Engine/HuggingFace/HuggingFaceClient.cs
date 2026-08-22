@@ -126,10 +126,7 @@ public sealed class HuggingFaceClient : IDisposable
         return info;
     }
 
-    /// <summary>Downloads a single file from a model repository to the specified local path, reporting progress as a
-    /// fraction from 0.0 to 1.0. Stages to a <c>.tmp</c> file, optionally verifies its SHA-256 against
-    /// <paramref name="sha256"/> (a corrupt mid-flight download is deleted and the call fails), then atomically moves
-    /// it into place.</summary>
+    /// <summary>Downloads a single file from a model repository to the specified local path, reporting progress as a fraction from 0.0 to 1.0. Stages to a <c>.tmp</c> file, optionally verifies its SHA-256 against <paramref name="sha256"/> (a corrupt mid-flight download is deleted and the call fails), then atomically moves it into place.</summary>
     public async Task DownloadFileAsync(
         string repoId,
         string fileName,

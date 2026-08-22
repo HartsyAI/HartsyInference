@@ -168,7 +168,7 @@ public sealed unsafe class LensTransformerBlock
     // GPU-concatenated joint [img, txt] sequence on the PRE-permute [B, S, H, D] layout (per-row independent, so
     // identical to the old per-stream post-permute host pass); the cos/sin tables are position-only and cached
     // across blocks/steps. Batch is always 1 in the pipeline (CFG runs as two batch-1 passes); the batch>1
-    /// fallback ropes via the host LensRope.ApplyJoint after the head permute.
+    // fallback ropes via the host LensRope.ApplyJoint after the head permute.
     public (Tensor text, Tensor image) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         LensRope rope, int imgPackedH, int imgPackedW, int txtPositionStart)
     {

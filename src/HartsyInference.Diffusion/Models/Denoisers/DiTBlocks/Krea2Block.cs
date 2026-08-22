@@ -33,8 +33,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         _attn = new Krea2Attention(hidden, numHeads, numKvHeads, eps);
     }
 
-    /// <summary>Loads <c>{prefix}.scale_shift_table</c>, <c>{prefix}.norm1/norm2.weight</c>,
-    /// <c>{prefix}.attn.*</c>, and <c>{prefix}.ff.gate/up/down.weight</c>.</summary>
+    /// <summary>Loads <c>{prefix}.scale_shift_table</c>, <c>{prefix}.norm1/norm2.weight</c>, <c>{prefix}.attn.*</c>, and <c>{prefix}.ff.gate/up/down.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
         // Store the [6, hidden] table flattened to [1, 6·hidden] so the whole modulation split is one device Add
@@ -74,8 +73,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         if (_ffDown is not null) yield return _ffDown;
     }
 
-    /// <summary>Runs one block. <paramref name="tembMod"/> is the shared <c>[B, 6·hidden]</c> modulation;
-    /// <paramref name="rope"/> is precomputed for the joint sequence.</summary>
+    /// <summary>Runs one block. <paramref name="tembMod"/> is the shared <c>[B, 6·hidden]</c> modulation; <paramref name="rope"/> is precomputed for the joint sequence.</summary>
     // GPU-residency rewrite (mirrors the verified Flux/SD3/Hunyuan ports): the modulation split, the two
     // (1+scale)·norm+shift affines, and the two gated residuals all run as IBackend ops so the activation stays
     // device-resident — no per-op DataPointer D2H sync barriers around the attention/FFN GEMMs. AffineScaleShift →
@@ -115,9 +113,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         return outp;
     }
 
-    /// <summary>Splits <c>tembMod [B, 6·hidden] + table [6, hidden]</c> into 6 <c>[B, hidden]</c> modulation vectors.
-    /// B=1 (the only case pipelines exercise) runs device-resident: each mod[i] is the i-th <c>hidden</c>-wide chunk
-    /// of <paramref name="tembMod"/> (SliceRows) plus table row i (SliceRows) added on-device.</summary>
+    /// <summary>Splits <c>tembMod [B, 6·hidden] + table [6, hidden]</c> into 6 <c>[B, hidden]</c> modulation vectors. B=1 (the only case pipelines exercise) runs device-resident: each mod[i] is the i-th <c>hidden</c>-wide chunk of <paramref name="tembMod"/> (SliceRows) plus table row i (SliceRows) added on-device.</summary>
     private Tensor[] SplitModulation(IBackend backend, Tensor tembMod, Tensor table, int batch)
     {
         if (batch != 1)

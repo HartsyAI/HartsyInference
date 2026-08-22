@@ -5,10 +5,7 @@ using RequestConditioning = HartsyInference.Engine.Requests.ControlNetConditioni
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Qwen-Image DiT counterpart of <see cref="FluxControlNetResolver"/>: resolves the request's
-/// ControlNet layers into <see cref="QwenImageControlNetConditioning"/>s. Per-slot checkpoint load, hint
-/// packing to <c>[1, 3, H, W]</c> in <c>[-1, 1]</c>, strength + start/end wiring. Hint preprocessing is
-/// host-side, so the image arrives as the finished control map — the union checkpoint takes it as-is.</summary>
+/// <summary>Qwen-Image DiT counterpart of <see cref="FluxControlNetResolver"/>: resolves the request's ControlNet layers into <see cref="QwenImageControlNetConditioning"/>s. Per-slot checkpoint load, hint packing to <c>[1, 3, H, W]</c> in <c>[-1, 1]</c>, strength + start/end wiring. Hint preprocessing is host-side, so the image arrives as the finished control map — the union checkpoint takes it as-is.</summary>
 public static class QwenImageControlNetResolver
 {
     /// <summary>One generation's resolved Qwen ControlNet state: owns the adapters and the control tensors.</summary>
@@ -37,8 +34,7 @@ public static class QwenImageControlNetResolver
         }
     }
 
-    /// <summary>Resolves every layer, or null when there are none. Throws when a slot names a ControlNet for a
-    /// different base family.</summary>
+    /// <summary>Resolves every layer, or null when there are none. Throws when a slot names a ControlNet for a different base family.</summary>
     public static ResolvedSpec? Resolve(
         IReadOnlyList<RequestConditioning>? controlNets, int targetW, int targetH, Action<string> log)
     {

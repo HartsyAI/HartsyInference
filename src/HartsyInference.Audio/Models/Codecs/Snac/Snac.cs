@@ -4,10 +4,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>Top-level SNAC codec. Unlike EnCodec / DAC the codes are a variable-length
-/// list rather than a rectangular tensor — each codebook emits codes at its own
-/// temporal rate per <see cref="SnacConfig.VqStrides"/>.
-///
+/// <summary>Top-level SNAC codec. Unlike EnCodec / DAC the codes are a variable-length list rather than a rectangular tensor — each codebook emits codes at its own temporal rate per <see cref="SnacConfig.VqStrides"/>.</summary>
+/// <remarks>
 /// <para>State-dict roots match <c>hubertsiuzdak/snac_24khz</c>:</para>
 /// <list type="bullet">
 ///   <item><c>encoder.block.*</c></item>
@@ -15,7 +13,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 ///   <item><c>decoder.model.*</c></item>
 /// </list>
 ///
-/// <para>Used by Orpheus TTS (the SNAC 24 kHz variant) and forks.</para></summary>
+/// <para>Used by Orpheus TTS (the SNAC 24 kHz variant) and forks.</para></remarks>
 public sealed class Snac
 {
     public SnacConfig Config { get; }
@@ -63,10 +61,7 @@ public sealed class Snac
         }
     }
 
-    /// <summary>Encodes PCM to hierarchical codes. <paramref name="pcm"/> is
-    /// <c>[B, 1, T_pcm]</c>; output is an array of length <see cref="NCodebooks"/> where
-    /// entry <c>i</c> has shape <c>[B, T_frames / VqStrides[i]]</c> Int32. Caller owns
-    /// disposal of every returned tensor.</summary>
+    /// <summary>Encodes PCM to hierarchical codes. <paramref name="pcm"/> is <c>[B, 1, T_pcm]</c>; output is an array of length <see cref="NCodebooks"/> where entry <c>i</c> has shape <c>[B, T_frames / VqStrides[i]]</c> Int32. Caller owns disposal of every returned tensor.</summary>
     public Tensor[] Encode(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
         if (!_encoderLoaded)
@@ -78,10 +73,7 @@ public sealed class Snac
         return codes;
     }
 
-    /// <summary>Decodes hierarchical codes to PCM. <paramref name="codes"/> must have
-    /// length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T_frames / VqStrides[i]]</c>.
-    /// <paramref name="callSeed"/> — see <see cref="SnacDecoder.Forward"/>; only matters for the
-    /// windowed-decode streaming path, default preserves today's monolithic-decode output exactly.</summary>
+    /// <summary>Decodes hierarchical codes to PCM. <paramref name="codes"/> must have length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T_frames / VqStrides[i]]</c>. <paramref name="callSeed"/> — see <see cref="SnacDecoder.Forward"/>; only matters for the windowed-decode streaming path, default preserves today's monolithic-decode output exactly.</summary>
     public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> codes, int batch, int callSeed = 0)
     {
         Tensor latent = _quantizer.Decode(backend, codes, batch);
@@ -91,9 +83,7 @@ public sealed class Snac
         return pcm;
     }
 
-    /// <summary>Maps torch >= 2.1 <c>*.parametrizations.weight.original0/1</c> weight-norm keys (the format the
-    /// real hubertsiuzdak/snac checkpoints ship) to the classic <c>weight_g</c>/<c>weight_v</c> pair the
-    /// encoder/decoder loaders expect. No-op when the dict already uses the classic names.</summary>
+    /// <summary>Maps torch >= 2.1 <c>*.parametrizations.weight.original0/1</c> weight-norm keys (the format the real hubertsiuzdak/snac checkpoints ship) to the classic <c>weight_g</c>/<c>weight_v</c> pair the encoder/decoder loaders expect. No-op when the dict already uses the classic names.</summary>
     private static IReadOnlyDictionary<string, Tensor> NormalizeKeys(IReadOnlyDictionary<string, Tensor> w)
     {
         bool needs = false;

@@ -6,20 +6,16 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>One compute device's loaded LLM state owned by <see cref="TextService"/>. A single model/backend/pipeline
-/// is not safe for concurrent use, so each slot carries its own lock — but two different slots (e.g. cuda:0 + cpu) can
-/// generate at the same time. Exactly one of <see cref="Model"/> / <see cref="SsmModel"/> is set once loaded.</summary>
+/// <summary>One compute device's loaded LLM state owned by <see cref="TextService"/>. A single model/backend/pipeline is not safe for concurrent use, so each slot carries its own lock — but two different slots (e.g. cuda:0 + cpu) can generate at the same time. Exactly one of <see cref="Model"/> / <see cref="SsmModel"/> is set once loaded.</summary>
 internal sealed class TextDeviceSlot
 {
     /// <summary>Serializes generation on this slot; different slots run concurrently.</summary>
     public SemaphoreSlim Lock { get; } = new SemaphoreSlim(1, 1);
 
-    /// <summary>The compute backend (CPU/CUDA) bound to this slot's device. For a layer-split load this is the
-    /// LAST stage's backend (logits/sampling live there).</summary>
+    /// <summary>The compute backend (CPU/CUDA) bound to this slot's device. For a layer-split load this is the LAST stage's backend (logits/sampling live there).</summary>
     public IBackend? Backend { get; set; }
 
-    /// <summary>The other stage backends of a layer-split load (everything except <see cref="Backend"/>).
-    /// Slot-owned: disposed with the slot, exactly like <see cref="Backend"/>.</summary>
+    /// <summary>The other stage backends of a layer-split load (everything except <see cref="Backend"/>). Slot-owned: disposed with the slot, exactly like <see cref="Backend"/>.</summary>
     public List<IBackend>? ExtraStageBackends { get; set; }
 
     /// <summary>The active layer-split plan, or null for a single-device load.</summary>
@@ -31,16 +27,13 @@ internal sealed class TextDeviceSlot
     /// <summary>The generation pipeline built for <see cref="Model"/> on <see cref="Backend"/>.</summary>
     public TextGenerationPipeline? Pipeline { get; set; }
 
-    /// <summary>Tensor-parallel transformer (<c>TensorParallelDegree</c> &gt; 1), or null. Rank backends reuse
-    /// the layer-split fields: <see cref="Backend"/> = rank 0 (logits/sampling), <see cref="ExtraStageBackends"/>
-    /// = ranks 1.. — so every existing slot-backend disposal path covers TP unchanged.</summary>
+    /// <summary>Tensor-parallel transformer (<c>TensorParallelDegree</c> &gt; 1), or null. Rank backends reuse the layer-split fields: <see cref="Backend"/> = rank 0 (logits/sampling), <see cref="ExtraStageBackends"/> = ranks 1.. — so every existing slot-backend disposal path covers TP unchanged.</summary>
     public TensorParallelTransformer? TpTransformer { get; set; }
 
     /// <summary>The TP collective communicator (owned; disposed with the slot's model).</summary>
     public ICollectiveComm? TpComm { get; set; }
 
-    /// <summary>The TP checkpoint (weight dict + mmap + tokenizer/template) — must outlive
-    /// <see cref="TpTransformer"/>, whose rank slices were copied from (and whose embed gathers read) it.</summary>
+    /// <summary>The TP checkpoint (weight dict + mmap + tokenizer/template) — must outlive <see cref="TpTransformer"/>, whose rank slices were copied from (and whose embed gathers read) it.</summary>
     public GgufLanguageModel.TpCheckpoint? TpCheckpoint { get; set; }
 
     /// <summary>The loaded GGUF state-space model (mamba/mamba2/rwkv6/rwkv7), or null for a transformer.</summary>

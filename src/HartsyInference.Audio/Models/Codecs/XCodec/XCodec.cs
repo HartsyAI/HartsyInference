@@ -7,8 +7,9 @@ using HubertModel = HartsyInference.Audio.Models.Hubert.Hubert;
 
 namespace HartsyInference.Audio.Models.Codecs.XCodec;
 
-/// <summary>XCodec — YuE's neural audio codec (the upstream <c>SoundStream</c> in
-/// <c>soundstream_hubert_new.py</c>). The real decode path YuE Stage-1 needs is:
+/// <summary>XCodec — YuE's neural audio codec (the upstream <c>SoundStream</c> in <c>soundstream_hubert_new.py</c>).</summary>
+/// <remarks>
+/// The real decode path YuE Stage-1 needs is:
 /// <code>
 ///   code indices [n_q, B, T]
 ///     -> quantizer.decode  (EMA-VQ ResidualVectorQuantization: F.embedding lookup + sum)  -> [B, 1024, T]
@@ -40,7 +41,7 @@ namespace HartsyInference.Audio.Models.Codecs.XCodec;
 ///     ├─ acoustic:  dac2.Encoder(64, [8,5,4,2], 256)                                                [1, 256, T]
 ///     ├─ cat([acoustic, semantic]) -> fc_prior (1024 -> 1024 over channels)                         [1, 1024, T]
 ///     └─ quantizer.encode                                                                           [n_q, 1, T]
-/// </code></para></summary>
+/// </code></para></remarks>
 public sealed unsafe class XCodec
 {
     public XCodecConfig Config { get; }
@@ -63,8 +64,7 @@ public sealed unsafe class XCodec
     private Tensor? _fcPriorW;   // [latent, latent, 1] — fc_prior reshaped as a 1x1 conv weight
     private Tensor? _fcPriorB;
 
-    /// <summary>Whether the encode path (HuBERT + <c>encoder_semantic</c> + acoustic <c>encoder</c> + <c>fc_prior</c>)
-    /// was present in the loaded weights.</summary>
+    /// <summary>Whether the encode path (HuBERT + <c>encoder_semantic</c> + acoustic <c>encoder</c> + <c>fc_prior</c>) was present in the loaded weights.</summary>
     public bool CanEncode => _fcPriorW is not null;
 
     public XCodec(XCodecConfig cfg)
@@ -91,15 +91,11 @@ public sealed unsafe class XCodec
         _decoder.LoadWeights(w);
     }
 
-    /// <summary>Decodes code indices to a 16 kHz waveform. <paramref name="codes"/> may be channels-first
-    /// integer indices either as <c>[B, n_q, T]</c> (pipeline-style, F32 or I32) — see
-    /// <see cref="DecodeFromCodes"/>. This overload takes the EMA codes laid out <c>[n_q, B, T]</c> I32.</summary>
-    /// <summary>Decodes codes to the raw 1024-dim quantizer latent <c>[B, 1024, T]</c> (EMA-VQ lookup + sum) — the
-    /// fused (256 acoustic + 768 semantic) representation the YuE per-stem Vocos vocoders consume in place of the
-    /// SeaNet/DAC decode. Caller owns the returned tensor.</summary>
+    /// <summary>Decodes codes to the raw 1024-dim quantizer latent <c>[B, 1024, T]</c> (EMA-VQ lookup + sum) — the fused (256 acoustic + 768 semantic) representation the YuE per-stem Vocos vocoders consume in place of the SeaNet/DAC decode. Caller owns the returned tensor.</summary>
     public Tensor DecodeToLatent(IBackend backend, Tensor codes, int batch, int tFrames)
         => _quantizer.Decode(backend, codes, batch, tFrames);
 
+    /// <summary>Decodes code indices to a 16 kHz waveform. <paramref name="codes"/> is the EMA codes layout <c>[n_q, B, T]</c> I32.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {
         if (_fcPost2W is null) throw new InvalidOperationException("XCodec weights not loaded.");
@@ -119,8 +115,7 @@ public sealed unsafe class XCodec
         return pcm;
     }
 
-    /// <summary>Decodes from a single-codebook (cb0) index list — the YuE Stage-1 vocal stream. Builds the
-    /// <c>[n_q=1, B=1, T]</c> I32 grid the EMA decode expects and runs the full codec.</summary>
+    /// <summary>Decodes from a single-codebook (cb0) index list — the YuE Stage-1 vocal stream. Builds the <c>[n_q=1, B=1, T]</c> I32 grid the EMA decode expects and runs the full codec.</summary>
     public Tensor DecodeCb0(IBackend backend, ReadOnlySpan<int> cb0Indices)
     {
         int t = cb0Indices.Length;
@@ -136,10 +131,7 @@ public sealed unsafe class XCodec
         return pcm;
     }
 
-    /// <summary>Adds the encode branch to an already-loaded decode-only codec, so the ~95M-param HuBERT/RepCodec/DAC
-    /// encoder stack is paid for only by callers that actually supply reference audio. No-op once
-    /// <see cref="CanEncode"/>. <paramref name="w"/> must come from a converter load with <c>forEncode: true</c>; if it
-    /// still lacks the encode roots the codec stays decode-only and this returns false.</summary>
+    /// <summary>Adds the encode branch to an already-loaded decode-only codec, so the ~95M-param HuBERT/RepCodec/DAC encoder stack is paid for only by callers that actually supply reference audio. No-op once <see cref="CanEncode"/>. <paramref name="w"/> must come from a converter load with <c>forEncode: true</c>; if it still lacks the encode roots the codec stays decode-only and this returns false.</summary>
     public bool TryLoadEncodeWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         if (CanEncode) return true;
@@ -147,8 +139,7 @@ public sealed unsafe class XCodec
         return CanEncode;
     }
 
-    /// <summary>Builds the encode branch when the weights carry it. Absent <c>fc_prior.weight</c> the codec stays
-    /// decode-only and none of the ~95M-param semantic branch is constructed.</summary>
+    /// <summary>Builds the encode branch when the weights carry it. Absent <c>fc_prior.weight</c> the codec stays decode-only and none of the ~95M-param semantic branch is constructed.</summary>
     private void LoadEncodeWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         if (!w.ContainsKey("fc_prior.weight")) return;
@@ -169,17 +160,13 @@ public sealed unsafe class XCodec
         _fcPriorB = WhisperOps.EnsureF32(w["fc_prior.bias"]);
     }
 
-    /// <summary>Every encode stage boundary. All tensors are owned by the caller; <see cref="Dispose"/> them via
-    /// <see cref="XCodecEncodeStages.Dispose"/>.</summary>
+    /// <summary>Every encode stage boundary. All tensors are owned by the caller; <see cref="Dispose"/> them via <see cref="XCodecEncodeStages.Dispose"/>.</summary>
     internal readonly record struct XCodecEncodeStages(Tensor Acoustic, Tensor Semantic, Tensor Prior, int Frames, bool UsedPadFallback)
     {
         public void Dispose() { Acoustic.Dispose(); Semantic.Dispose(); Prior.Dispose(); }
     }
 
-    /// <summary>Runs the encode path up to (and including) <c>fc_prior</c>, exposing each stage boundary.
-    /// <paramref name="pcm"/> is 16 kHz mono channels-first <c>[1, 1, S]</c>, raw float — the HuBERT branch takes
-    /// the waveform UNNORMALIZED (the checkpoint's <c>preprocessor_config.json</c> claims <c>do_normalize</c>, but
-    /// <c>get_regress_target</c> never builds a feature extractor).</summary>
+    /// <summary>Runs the encode path up to (and including) <c>fc_prior</c>, exposing each stage boundary. <paramref name="pcm"/> is 16 kHz mono channels-first <c>[1, 1, S]</c>, raw float — the HuBERT branch takes the waveform UNNORMALIZED (the checkpoint's <c>preprocessor_config.json</c> claims <c>do_normalize</c>, but <c>get_regress_target</c> never builds a feature extractor).</summary>
     internal XCodecEncodeStages EncodeStages(IBackend backend, Tensor pcm, int tPcm)
     {
         if (_fcPriorW is null) throw new InvalidOperationException("XCodec encode weights not loaded.");
@@ -228,8 +215,7 @@ public sealed unsafe class XCodec
         return new XCodecEncodeStages(acoustic, semantic, prior, t, fallback);
     }
 
-    /// <summary>Encodes 16 kHz mono PCM <c>[1, 1, S]</c> to RVQ code indices <c>[nQ, 1, T]</c> I32.
-    /// YuE's ICL path uses <c>target_bw = 0.5</c> ⇒ <c>nQ = 1</c> (codebook 0 only).</summary>
+    /// <summary>Encodes 16 kHz mono PCM <c>[1, 1, S]</c> to RVQ code indices <c>[nQ, 1, T]</c> I32. YuE's ICL path uses <c>target_bw = 0.5</c> ⇒ <c>nQ = 1</c> (codebook 0 only).</summary>
     public Tensor Encode(IBackend backend, Tensor pcm, int tPcm, int nQ = 1)
     {
         XCodecEncodeStages stages = EncodeStages(backend, pcm, tPcm);
@@ -243,8 +229,7 @@ public sealed unsafe class XCodec
         }
     }
 
-    /// <summary>Zero-pads the sample axis of a channels-first <c>[1, 1, S]</c> waveform by <paramref name="pad"/>
-    /// on each side (<c>F.pad(x[:,0,:], (160,160))</c>).</summary>
+    /// <summary>Zero-pads the sample axis of a channels-first <c>[1, 1, S]</c> waveform by <paramref name="pad"/> on each side (<c>F.pad(x[:,0,:], (160,160))</c>).</summary>
     private static Tensor ZeroPad(Tensor pcm, int tPcm, int pad)
     {
         Tensor padded = new(new TensorShape(1, 1, tPcm + 2 * pad), DType.F32);
@@ -289,8 +274,7 @@ public sealed record XCodecConfig
     /// <summary>Acoustic encoder stem filter count (<c>dac2.Encoder</c> <c>d_model</c>).</summary>
     public int EncoderDim { get; init; } = 64;
 
-    /// <summary>Acoustic encoder downsample factors — the SAME encoder-order list as <see cref="DecoderRates"/>,
-    /// not its reverse (confirmed by <c>encoder.block.1.block.4.weight_v [128,64,16]</c> ⇒ k = 2·8).</summary>
+    /// <summary>Acoustic encoder downsample factors — the SAME encoder-order list as <see cref="DecoderRates"/>, not its reverse (confirmed by <c>encoder.block.1.block.4.weight_v [128,64,16]</c> ⇒ k = 2·8).</summary>
     public IReadOnlyList<int> EncoderRates { get; init; } = [8, 5, 4, 2];
 
     /// <summary>HuBERT semantic-branch waveform pad (samples per side) applied before <c>get_regress_target</c>.</summary>
@@ -316,15 +300,10 @@ public sealed record XCodecConfig
 
     public static XCodecConfig XCodec16kHz => new();
 
-    /// <summary>Lifts this XCodec config into a <see cref="DacConfig"/> so the existing
-    /// <see cref="DacDecoder"/> drives the <c>decoder_2</c> (dac2.Decoder) verbatim. The decoder input
-    /// channels = <see cref="AcousticDim"/>; initial channels = <see cref="DecoderDim"/>; the transposed
-    /// convs use descript's dim-0 weight-norm and the final tanh is disabled (upstream commented it out).</summary>
-    /// <summary>The <c>semantic_model.*</c> HuBERT-base config (<c>semantic_ckpts/hf_1_325000/config.json</c>):
-    /// identical to the engine default — 768/12/12/3072, bias-free group-normed conv extractor, post-LN encoder,
-    /// pos-conv k128 g16.</summary>
+    /// <summary>The <c>semantic_model.*</c> HuBERT-base config (<c>semantic_ckpts/hf_1_325000/config.json</c>): identical to the engine default — 768/12/12/3072, bias-free group-normed conv extractor, post-LN encoder, pos-conv k128 g16.</summary>
     public HubertConfig ToHubertConfig() => new() { SampleRate = SampleRate };
 
+    /// <summary>Lifts this XCodec config into a <see cref="DacConfig"/> so the existing <see cref="DacDecoder"/> drives the <c>decoder_2</c> (dac2.Decoder) verbatim. The decoder input channels = <see cref="AcousticDim"/>; initial channels = <see cref="DecoderDim"/>; the transposed convs use descript's dim-0 weight-norm and the final tanh is disabled (upstream commented it out).</summary>
     public DacConfig ToDacConfig() => new()
     {
         SampleRate = SampleRate,

@@ -82,11 +82,11 @@ public sealed unsafe class HtDemucs
         _downBt = Bias(w, "channel_downsampler_t.bias");
     }
 
-    /// <summary>Separates a stereo waveform into 4 stereo stems. Input waveform <c>[1, C, L]</c> (channels-first,
-    /// C = <c>AudioChannels</c>); returns <c>[1, NumSources, C, L]</c>.</summary>
     /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
     public Action<string, Tensor>? DebugHook { get; set; }
 
+    /// <summary>Separates a stereo waveform into 4 stereo stems. Input waveform <c>[1, C, L]</c> (channels-first,
+    /// C = <c>AudioChannels</c>); returns <c>[1, NumSources, C, L]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor wav, int length)
     {
         int channels = _cfg.AudioChannels;

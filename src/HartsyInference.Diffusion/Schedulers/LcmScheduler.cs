@@ -24,13 +24,13 @@ public sealed unsafe class LcmScheduler : IScheduler
     /// <summary>Seed for the per-step noise re-injection. Set to the generation seed before sampling for reproducibility; each step derives a distinct deterministic stream from it.</summary>
     public int Seed { get; set; }
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "lcm";
 
-    /// <summary>Number of configured inference steps.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
-    /// <summary>The computed timestep schedule.</summary>
+    /// <inheritdoc/>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
     /// <summary>Initial noise sigma (always 1.0 for LCM).</summary>

@@ -1,8 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>A successful dictionary word-list match: the stored phoneme code bytes plus the two dictionary flag sets
-/// espeak tracks (<c>dictionary_flags</c> and <c>dictionary_flags2</c>), which carry the explicit stress level and
-/// special-attribute bits used when placing stress on the word.</summary>
+/// <summary>A successful dictionary word-list match: the stored phoneme code bytes plus the two dictionary flag sets espeak tracks (<c>dictionary_flags</c> and <c>dictionary_flags2</c>), which carry the explicit stress level and special-attribute bits used when placing stress on the word.</summary>
 internal readonly struct EspeakLookupResult
 {
     public EspeakLookupResult(List<byte> phonemes, uint flags, uint flags2)

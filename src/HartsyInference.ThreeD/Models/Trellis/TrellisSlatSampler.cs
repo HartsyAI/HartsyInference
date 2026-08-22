@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>FlowEuler guidance-interval sampler for the TRELLIS stage-2 structured-latent (SLAT) flow (same schedule
-/// as the stage-1 sampler, over a <see cref="SparseTensor"/> of active voxels). Defaults: 25 steps, cfg 5.0,
-/// interval [0.5,1.0], rescale_t 3.0.</summary>
+/// <summary>FlowEuler guidance-interval sampler for the TRELLIS stage-2 structured-latent (SLAT) flow, running the same schedule as the stage-1 sampler over a <see cref="SparseTensor"/> of active voxels.</summary>
 public sealed unsafe class TrellisSlatSampler
 {
     /// <summary>Denoises <paramref name="noise"/> (SparseTensor with random feats at the active coords) to the SLAT.</summary>
@@ -34,8 +32,7 @@ public sealed unsafe class TrellisSlatSampler
         return x;
     }
 
-    /// <summary>Denormalizes the sampled SLAT: <c>slat = slat·std + mean</c> (per-channel, <paramref name="mean"/>/
-    /// <paramref name="std"/> are <c>[8]</c>).</summary>
+    /// <summary>Denormalizes the sampled SLAT: <c>slat = slat·std + mean</c>, applied per-channel.</summary>
     public static void Denormalize(SparseTensor slat, Tensor mean, Tensor std)
     {
         int n = slat.Count, c = slat.Channels;

@@ -4,10 +4,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Kyutai Pocket-TTS — a continuous-latent flow-LM (Helium-style backbone at 12.5 Hz → Mimi → 24 kHz). A
-/// voice is REQUIRED: the model conditions on a pre-primed speaker KV state and ends into near-silence without one;
-/// predefined English voices (default <c>alba</c>) ship as per-layer KV-cache safetensors. Arbitrary voice cloning
-/// lives behind separate weights and is not wired.</summary>
+/// <summary>Kyutai Pocket-TTS — a continuous-latent flow-LM (Helium-style backbone at 12.5 Hz → Mimi → 24 kHz). A voice is REQUIRED: the model conditions on a pre-primed speaker KV state and ends into near-silence without one; predefined English voices (default <c>alba</c>) ship as per-layer KV-cache safetensors. Arbitrary voice cloning lives behind separate weights and is not wired.</summary>
 internal static class PocketTtsModel
 {
     private const string Repo = "kyutai/pocket-tts-without-voice-cloning";
@@ -17,7 +14,6 @@ internal static class PocketTtsModel
     private const string SpmFile = "tokenizer.model";
     private const string DefaultVoice = "alba";
 
-    /// <summary>The Pocket-TTS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,

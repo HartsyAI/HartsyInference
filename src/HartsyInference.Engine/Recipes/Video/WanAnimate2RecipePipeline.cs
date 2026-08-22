@@ -17,22 +17,11 @@ using HartsyInference.Vision.Clip;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan-Animate-2 pipeline driven against the native <see cref="VideoRequest"/>.
-/// <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) supplies the driving
-/// motion as <b>raw RGB</b> — there is no pose render, no face crop and no retargeting, so the pose/face/background/
-/// mask override clips V1 accepts are refused here by name rather than silently dropped.
-/// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, whose aspect ratio (not the request's)
-/// shapes the output; <c>--width</c>/<c>--height</c> are an AREA BUDGET, exactly as upstream's
-/// <c>resize_by_area</c> treats them.
-///
-/// <para>Two umT5 prompts are encoded: <see cref="VideoRequest.Prompt"/> describes the character's appearance and
-/// background (upstream tells you NOT to describe motion there), and <c>Extra["AnimateDrivingPrompt"]</c> describes
-/// the driving video, defaulting to upstream's boilerplate. The negative prompt applies to the generation stream
-/// only — the driving stream is built once, outside the guidance loop.</para></summary>
+/// <summary>A constructed Wan-Animate-2 pipeline driven against the native <see cref="VideoRequest"/>. <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) supplies the driving motion as <b>raw RGB</b> — there is no pose render, no face crop and no retargeting, so the pose/face/background/mask override clips V1 accepts are refused here by name rather than silently dropped. <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, whose aspect ratio (not the request's) shapes the output; <c>--width</c>/<c>--height</c> are an AREA BUDGET, exactly as upstream's <c>resize_by_area</c> treats them.</summary>
+/// <remarks>Two umT5 prompts are encoded: <see cref="VideoRequest.Prompt"/> describes the character's appearance and background (upstream tells you NOT to describe motion there), and <c>Extra["AnimateDrivingPrompt"]</c> describes the driving video, defaulting to upstream's boilerplate. The negative prompt applies to the generation stream only — the driving stream is built once, outside the guidance loop.</remarks>
 public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image, shared with the
-    /// V1 recipe so a caller wiring both does not need two keys.</summary>
+    /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image, shared with the V1 recipe so a caller wiring both does not need two keys.</summary>
     public const string ReferenceImageKey = WanAnimateRecipePipeline.ReferenceImageKey;
 
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the driving stream's own umT5 prompt.</summary>
@@ -41,12 +30,10 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     /// <summary>Upstream's default <c>prompt_ref</c> — "reference video of the character's motion".</summary>
     public const string DefaultDrivingPrompt = "人物动作的参考视频";
 
-    /// <summary>Output dimensions are multiples of this (upstream <c>resize_by_area(divisor=16)</c>), which is also
-    /// the VAE stride times the patch size, so the token grid is exact.</summary>
+    /// <summary>Output dimensions are multiples of this (upstream <c>resize_by_area(divisor=16)</c>), which is also the VAE stride times the patch size, so the token grid is exact.</summary>
     private const int SizeDivisor = 16;
 
-    /// <summary>Source frames decoded per output frame requested, before fps resampling. Bounds the decode of a long
-    /// driving video: a source above this multiple of the target rate is truncated rather than materialized.</summary>
+    /// <summary>Source frames decoded per output frame requested, before fps resampling. Bounds the decode of a long driving video: a source above this multiple of the target rate is truncated rather than materialized.</summary>
     private const int MaxSourceFpsRatio = 6;
 
     private readonly IBackend _backend;
@@ -265,9 +252,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Rejects, by name, every conditioning object Animate-2 physically cannot consume. V1 accepted these
-    /// because it had a pose/face/background/mask pathway; Animate-2 deleted all of it, so accepting them would
-    /// produce a plausible clip with the user's input discarded.</summary>
+    /// <summary>Rejects, by name, every conditioning object Animate-2 physically cannot consume. V1 accepted these because it had a pose/face/background/mask pathway; Animate-2 deleted all of it, so accepting them would produce a plausible clip with the user's input discarded.</summary>
     private static void Validate(VideoRequest request)
     {
         if (request.DrivingVideo is null && request.InitImage is null)
@@ -360,9 +345,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return DefaultDrivingPrompt;
     }
 
-    /// <summary>Decodes the driving video (or tiles the init-image still) into raw RGB frames at
-    /// <paramref name="targetFps"/>, letterboxed into the output geometry. No skeleton, no face crop — the frames go
-    /// straight to the VAE.</summary>
+    /// <summary>Decodes the driving video (or tiles the init-image still) into raw RGB frames at <paramref name="targetFps"/>, letterboxed into the output geometry. No skeleton, no face crop — the frames go straight to the VAE.</summary>
     private static List<byte[]> ResolveDrivingFrames(VideoRequest request, int width, int height, int chunkLen,
         int targetFps, CancellationToken cancel)
     {
@@ -402,9 +385,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return resampled;
     }
 
-    /// <summary>Upstream's <c>get_frame_indices</c>: a nearest-frame resample, <c>idx = round(i / targetFps · srcFps)</c>
-    /// clamped into range, over <c>floor(count / srcFps · targetFps)</c> output frames. A non-positive or unknown
-    /// source rate passes the frames through 1:1.</summary>
+    /// <summary>Upstream's <c>get_frame_indices</c>: a nearest-frame resample, <c>idx = round(i / targetFps · srcFps)</c> clamped into range, over <c>floor(count / srcFps · targetFps)</c> output frames. A non-positive or unknown source rate passes the frames through 1:1.</summary>
     internal static List<byte[]> ResampleToFps(List<byte[]> frames, double sourceFps, int targetFps)
     {
         ArgumentNullException.ThrowIfNull(frames);
@@ -426,9 +407,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return output;
     }
 
-    /// <summary>Snaps a chunk down onto the causal VAE's <c>step·n + 1</c> grid. Upstream's <c>zigzag_padding</c>
-    /// instead pads the tail up by ping-ponging through the frames; both only affect frames that get trimmed, and
-    /// ComfyUI takes the same snap-and-hold route.</summary>
+    /// <summary>Snaps a chunk down onto the causal VAE's <c>step·n + 1</c> grid. Upstream's <c>zigzag_padding</c> instead pads the tail up by ping-ponging through the frames; both only affect frames that get trimmed, and ComfyUI takes the same snap-and-hold route.</summary>
     internal static int SnapChunkLength(int frames, int temporalStep) =>
         frames < 1 ? 0 : 1 + (frames - 1) / temporalStep * temporalStep;
 
@@ -443,9 +422,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return 1 + (int)Math.Ceiling((totalFrames - chunkLen) / (double)stride);
     }
 
-    /// <summary>Upstream's <c>calculate_new_size</c>: the largest <c>(w, h)</c> whose product fits
-    /// <paramref name="areaBudget"/>, both multiples of 16, minimising the deviation from the SOURCE aspect ratio.
-    /// This is why <c>--width 720 --height 1280</c> means "budget 921600 px" and not "produce 720x1280".</summary>
+    /// <summary>Upstream's <c>calculate_new_size</c>: the largest <c>(w, h)</c> whose product fits <paramref name="areaBudget"/>, both multiples of 16, minimising the deviation from the SOURCE aspect ratio. This is why <c>--width 720 --height 1280</c> means "budget 921600 px" and not "produce 720x1280".</summary>
     internal static (int Width, int Height) ShapeToAreaBudget(long areaBudget, int sourceWidth, int sourceHeight)
     {
         if (areaBudget < SizeDivisor * SizeDivisor || sourceWidth < 1 || sourceHeight < 1)
@@ -479,8 +456,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return (bestW, bestH);
     }
 
-    /// <summary>CLIP-ViT-H penultimate hidden state of one RGB24 frame, host-materialized — 257 image tokens that get
-    /// prepended to that stream's umT5 context.</summary>
+    /// <summary>CLIP-ViT-H penultimate hidden state of one RGB24 frame, host-materialized — 257 image tokens that get prepended to that stream's umT5 context.</summary>
     private Tensor EncodeClipVision(byte[] rgb24, int width, int height)
     {
         _backend.PreloadWeights(_clipVision.EnumerateWeights());

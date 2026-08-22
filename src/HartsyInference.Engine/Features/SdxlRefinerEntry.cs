@@ -4,8 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>A loaded SDXL refiner UNet plus the safetensors loader backing its weights, cached per refiner checkpoint
-/// so repeat generations do not re-read the ~6 GB file.</summary>
+/// <summary>A loaded SDXL refiner UNet plus the safetensors loader backing its weights, cached per refiner checkpoint so repeat generations do not re-read the ~6 GB file.</summary>
 public sealed class SdxlRefinerEntry : IDisposable
 {
     /// <summary>Path the refiner was loaded from; the cache key.</summary>

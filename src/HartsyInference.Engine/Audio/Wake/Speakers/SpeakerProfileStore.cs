@@ -44,10 +44,7 @@ public sealed class SpeakerProfileStore
     private readonly string _root;
     private float _threshold;
 
-    /// <summary>Loads every profile already on disk. <paramref name="directory"/> defaults to
-    /// <c>{models}/audio/wake/speakers</c>; pass the wake service's own model root plus <c>speakers</c> when it has
-    /// been overridden. A profile that fails to load is logged and skipped, never fatal — one corrupt sidecar must
-    /// not take the whole household down.</summary>
+    /// <summary>Loads every profile already on disk. <paramref name="directory"/> defaults to <c>{models}/audio/wake/speakers</c>; pass the wake service's own model root plus <c>speakers</c> when it has been overridden. A profile that fails to load is logged and skipped, never fatal — one corrupt sidecar must not take the whole household down.</summary>
     public SpeakerProfileStore(string? directory = null, float matchThreshold = DefaultMatchThreshold)
     {
         _root = string.IsNullOrWhiteSpace(directory) ? DefaultDirectory() : Path.GetFullPath(directory);
@@ -104,11 +101,7 @@ public sealed class SpeakerProfileStore
         }
     }
 
-    /// <summary>Stores a speaker model built from <paramref name="embeddings"/>, replacing any profile of the same
-    /// name, and writes it to disk before returning. Pass <paramref name="phrase"/> when the utterances were
-    /// repetitions of the wake phrase — text-dependent enrollment is what makes verification at wake-phrase length
-    /// usable, and recording which phrase it was keeps a later reader from scoring the profile on unrelated speech
-    /// and wondering why it underperforms.</summary>
+    /// <summary>Stores a speaker model built from <paramref name="embeddings"/>, replacing any profile of the same name, and writes it to disk before returning. Pass <paramref name="phrase"/> when the utterances were repetitions of the wake phrase — text-dependent enrollment is what makes verification at wake-phrase length usable, and recording which phrase it was keeps a later reader from scoring the profile on unrelated speech and wondering why it underperforms.</summary>
     public SpeakerProfile Enroll(string name, IReadOnlyList<float[]> embeddings, string? phrase = null)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -184,8 +177,7 @@ public sealed class SpeakerProfileStore
         return true;
     }
 
-    /// <summary>Re-reads every profile from disk, discarding in-memory state. For a host that lets an operator drop
-    /// sidecars in by hand.</summary>
+    /// <summary>Re-reads every profile from disk, discarding in-memory state. For a host that lets an operator drop sidecars in by hand.</summary>
     public void Reload()
     {
         lock (_gate)
@@ -216,13 +208,10 @@ public sealed class SpeakerProfileStore
         }
     }
 
-    /// <summary>Nearest enrolled centroid by cosine similarity, accepted only above <see cref="MatchThreshold"/>.
-    /// The embedding need not be normalized. See <see cref="SpeakerMatch"/> — the nearest name and its score come
-    /// back on a rejection too.</summary>
+    /// <summary>Nearest enrolled centroid by cosine similarity, accepted only above <see cref="MatchThreshold"/>. The embedding need not be normalized. See <see cref="SpeakerMatch"/> — the nearest name and its score come back on a rejection too.</summary>
     public SpeakerMatch Identify(ReadOnlySpan<float> embedding) => Identify(embedding, MatchThreshold);
 
-    /// <summary>As <see cref="Identify(ReadOnlySpan{float})"/> but with a per-call threshold, for calibration sweeps
-    /// and for a wake word that wants to be stricter than the household default.</summary>
+    /// <summary>As <see cref="Identify(ReadOnlySpan{float})"/> but with a per-call threshold, for calibration sweeps and for a wake word that wants to be stricter than the household default.</summary>
     public SpeakerMatch Identify(ReadOnlySpan<float> embedding, float threshold)
     {
         if (embedding.Length == 0)
@@ -260,9 +249,7 @@ public sealed class SpeakerProfileStore
     /// <summary>The default location, <c>{models}/audio/wake/speakers</c>.</summary>
     public static string DefaultDirectory() => Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake", "speakers");
 
-    /// <summary>Writes the binary first and the JSON index second, each via a temp file and an atomic move, so a
-    /// crash mid-enroll leaves either the old profile or a mismatch that <see cref="Read"/> rejects — never a
-    /// profile whose centroid silently belongs to somebody else.</summary>
+    /// <summary>Writes the binary first and the JSON index second, each via a temp file and an atomic move, so a crash mid-enroll leaves either the old profile or a mismatch that <see cref="Read"/> rejects — never a profile whose centroid silently belongs to somebody else.</summary>
     private void Write(string stem, SpeakerProfile profile)
     {
         System.IO.Directory.CreateDirectory(_root);
@@ -371,8 +358,7 @@ public sealed class SpeakerProfileStore
         };
     }
 
-    /// <summary>File stem for a name: the one already in use if this speaker is being re-enrolled, else a sanitized
-    /// slug uniquified against the stems other speakers hold (two names can sanitize to the same slug).</summary>
+    /// <summary>File stem for a name: the one already in use if this speaker is being re-enrolled, else a sanitized slug uniquified against the stems other speakers hold (two names can sanitize to the same slug).</summary>
     private string ResolveStem(string name)
     {
         if (_stems.TryGetValue(name, out string? existing))

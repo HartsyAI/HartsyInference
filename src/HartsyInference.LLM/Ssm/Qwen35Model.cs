@@ -6,17 +6,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model:
-/// most layers are Gated DeltaNet (a delta-rule linear attention: causal Conv1d over a fused QKV projection,
-/// then a per-head recurrent state update <c>S_t = α_t·S_{t-1} + β_t(v_t - S_{t-1}k_t)k_t^T</c>, readout
-/// <c>o_t = S_t·q_t</c>), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal
-/// self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection
-/// unique to this arch). Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE
-/// (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for
-/// non-multimodal input — no M-RoPE machinery needed here. Ported from llama.cpp's
-/// <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation
-/// time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side,
-/// matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</summary>
+/// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model: most layers are Gated DeltaNet (a delta-rule linear attention), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection unique to this arch).</summary>
+/// <remarks>Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
 public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -117,8 +108,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         _kvCache = new FixedKvCache(layers, 1, numKvHeads, attnHeadDim, MaxAttnSeqLen);
     }
 
-    /// <summary>Zeroes every layer's carried state (Gated DeltaNet matrices + conv history) and the KV cache —
-    /// call before the first <see cref="ForwardLastLogits"/> of a new generation.</summary>
+    /// <summary>Zeroes every layer's carried state (Gated DeltaNet matrices + conv history) and the KV cache — call before the first <see cref="ForwardLastLogits"/> of a new generation.</summary>
     public void ResetState()
     {
         foreach (float[]? h in _convHistory) if (h is not null) Array.Clear(h);
@@ -127,9 +117,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         _pos = 0;
     }
 
-    /// <summary>Gathers token embeddings for <paramref name="ids"/> into <paramref name="dst"/>
-    /// (<c>[1, ids.Count, DModel]</c>, host F32) from the F32 embedding copy — the text-token half of a VLM's
-    /// spliced <c>[pre][image][post]</c> embedding sequence (image rows are memcpy'd in by the caller).</summary>
+    /// <summary>Gathers token embeddings for <paramref name="ids"/> into <paramref name="dst"/> (<c>[1, ids.Count, DModel]</c>, host F32) from the F32 embedding copy — the text-token half of a VLM's spliced <c>[pre][image][post]</c> embedding sequence (image rows are memcpy'd in by the caller).</summary>
     public void EmbedLookup(Tensor dst, IReadOnlyList<int> ids)
     {
         int d = DModel;
@@ -147,11 +135,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return outp;
     }
 
-    /// <summary>Maps one qwen35moe layer's raw GGUF MoE tensors (<c>blk.N.ffn_gate_inp</c>, stacked
-    /// <c>ffn_{gate,up,down}_exps</c>, shared <c>ffn_*_shexp</c> + <c>ffn_gate_inp_shexp</c>) to the HF-style names
-    /// <see cref="MoeFeedForward.LoadWeights"/> expects (<c>{prefix}.mlp.gate</c>, <c>.mlp.experts.{i}.*_proj</c>,
-    /// <c>.mlp.shared_expert.*_proj</c>, <c>.mlp.shared_expert_gate</c>), splitting the stacked experts into
-    /// per-expert quant views. Reuses the same [E·out, in] flatten + byte-range slice as the transformer path.</summary>
+    /// <summary>Maps one qwen35moe layer's raw GGUF MoE tensors to the HF-style names <see cref="MoeFeedForward.LoadWeights"/> expects, splitting the stacked experts into per-expert quant views (reuses the same [E·out, in] flatten + byte-range slice as the transformer path).</summary>
     private static Dictionary<string, Tensor> BuildMoeLayerWeights(IReadOnlyDictionary<string, Tensor> w, int li, int e, int inter, int hidden)
     {
         string b = $"blk.{li}";
@@ -172,10 +156,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return lw;
     }
 
-    /// <summary>Splits one stacked expert tensor (<c>[E, outDim, inDim]</c> ggml layout → flat <c>[E·outDim, inDim]</c>)
-    /// into <paramref name="e"/> per-expert <c>[outDim, inDim]</c> quant views keyed by <paramref name="targetFormat"/>
-    /// (with a <c>{0}</c> expert-index placeholder). A row is contiguous in both float and block-quant layouts, so
-    /// each view is a plain byte-range over the borrowed GGUF mmap — no dequant, no copy.</summary>
+    /// <summary>Splits one stacked expert tensor (<c>[E, outDim, inDim]</c> ggml layout → flat <c>[E·outDim, inDim]</c>) into <paramref name="e"/> per-expert <c>[outDim, inDim]</c> quant views keyed by <paramref name="targetFormat"/>; each view is a plain byte-range over the borrowed GGUF mmap — no dequant, no copy.</summary>
     private static void SplitExpertsInto(Dictionary<string, Tensor> dst, IReadOnlyDictionary<string, Tensor> w,
         string stackedKey, string targetFormat, int e, int outDim, int inDim)
     {
@@ -313,11 +294,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return ForwardFromHidden(backend, h, seq);
     }
 
-    /// <summary>VLM prefill entry point: runs the decoder over a precomputed embedding sequence
-    /// <paramref name="embeds"/> (<c>[1, seq, DModel]</c>, host F32) — i.e. text-token embeddings with image
-    /// embeddings already spliced in — and returns last-position logits. Carries Gated-DeltaNet state / KV /
-    /// <c>_pos</c> forward identically to the ids-in path, so subsequent single-token
-    /// <see cref="ForwardLastLogits"/> calls continue the same generation. Call <see cref="ResetState"/> first.</summary>
+    /// <summary>VLM prefill entry point: runs the decoder over a precomputed embedding sequence <paramref name="embeds"/> (text-token embeddings with image embeddings already spliced in) and returns last-position logits, carrying Gated-DeltaNet state/KV/<c>_pos</c> forward identically to the ids-in path. Call <see cref="ResetState"/> first.</summary>
     public float[] ForwardEmbedsLastLogits(IBackend backend, Tensor embeds, int seq)
     {
         int d = DModel;
@@ -326,10 +303,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return ForwardFromHidden(backend, h, seq);
     }
 
-    /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (<c>[1, seq, DModel]</c>,
-    /// owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the
-    /// last position to vocab logits. The ids-in and embeds-in entry points differ only in how <paramref name="h"/>
-    /// is seeded.</summary>
+    /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the last position to vocab logits; the ids-in and embeds-in entry points differ only in how <paramref name="h"/> is seeded.</summary>
     private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq)
     {
         int d = DModel;
@@ -366,13 +340,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return outv;
     }
 
-    /// <summary>Regular causal self-attention layer: GQA + partial RoPE + KV cache, Qwen3-style per-head QK-norm,
-    /// and a fused query+gate projection (wq outputs <c>[query | gate]</c>, double width — the gate sigmoid-gates
-    /// the attention output before <c>wo</c>, unique to this arch's full-attention layers).</summary>
-    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer
-    /// D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the
-    /// per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled
-    /// copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
+    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
     private Tensor BlockAttnDeviceStep(IBackend backend, Tensor hIn, int i, Tensor stepCos, Tensor stepSin)
     {
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
@@ -449,6 +417,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return result;
     }
 
+    /// <summary>Regular causal self-attention layer: GQA + partial RoPE + KV cache, Qwen3-style per-head QK-norm, and a fused query+gate projection (wq outputs <c>[query | gate]</c>, double width — the gate sigmoid-gates the attention output before <c>wo</c>, unique to this arch's full-attention layers).</summary>
     private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null)
     {
         if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && !_isMoe
@@ -536,9 +505,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return result;
     }
 
-    /// <summary>Splits the fused <c>[query | gate]</c> projection into two <c>[1,seq,hq,hd]</c> tensors — each
-    /// head's output row is <c>[query_0..query_{hd-1}, gate_0..gate_{hd-1}]</c> (query first, gate second),
-    /// so this is a per-head strided de-interleave, not a contiguous slice.</summary>
+    /// <summary>Splits the fused <c>[query | gate]</c> projection into two <c>[1,seq,hq,hd]</c> tensors — each head's output row is <c>[query_0..query_{hd-1}, gate_0..gate_{hd-1}]</c>, a per-head strided de-interleave, not a contiguous slice.</summary>
     private static void SplitInterleavedQueryGate(Tensor qgFull, Tensor q, Tensor gate, int seq, int hq, int hd)
     {
         float* src = (float*)qgFull.DataPointer;
@@ -580,11 +547,6 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         }
     }
 
-    /// <summary>Gated DeltaNet layer: fused QKV projection → causal depthwise Conv1d+SiLU → per-head L2-norm on
-    /// Q/K → sequential delta-rule recurrence per token (<c>S_t = α_t·S_{t-1} + β_t(v_t − S_{t-1}k_t)k_t^T</c>,
-    /// <c>o_t = S_t·q_t</c>) → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and
-    /// norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as
-    /// <see cref="Mamba2Model"/>'s SSD scan).</summary>
     // Graph-decode session state (transformer playbook): full-position rope tables + the F32 embed
     // table device-resident, built once per model lifetime.
     private Tensor? _graphCos, _graphSin;
@@ -604,11 +566,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return (_graphCos!, _graphSin!, embed);
     }
 
-    /// <summary>One full graph-capturable decode step: device embed gather → every layer (recurrent
-    /// layers are position-free; attention layers rope/append/attend via <paramref name="devicePos"/>)
-    /// → final norm → head → greedy argmax written back into <paramref name="deviceTokenId"/>. The
-    /// recurrent conv/delta states and the KV cache mutate in place on their captured device buffers,
-    /// so replaying the captured graph chains decode entirely on-device.</summary>
+    /// <summary>One full graph-capturable decode step: device embed gather → every layer → final norm → head → greedy argmax written back into <paramref name="deviceTokenId"/>. The recurrent conv/delta states and the KV cache mutate in place on their captured device buffers, so replaying the captured graph chains decode entirely on-device.</summary>
     public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, Tensor cosTable, Tensor sinTable,
         ulong devicePos, ulong deviceTokenId)
     {
@@ -635,9 +593,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         logits.Dispose();
     }
 
-    /// <summary>Attention layer for the captured step: identical to <see cref="BlockAttnDeviceStep"/>
-    /// except rope/append/attention read the position from the device buffer (the decode rope kernel is
-    /// head-major, so the relabel copies disappear too).</summary>
+    /// <summary>Attention layer for the captured step: identical to <see cref="BlockAttnDeviceStep"/> except rope/append/attention read the position from the device buffer (the decode rope kernel is head-major, so the relabel copies disappear too).</summary>
     private Tensor BlockAttnGraphStep(IBackend backend, Tensor hIn, int i, Tensor cosTable, Tensor sinTable, ulong devicePos)
     {
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
@@ -704,8 +660,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return result;
     }
 
-    /// <summary>Advances the host position counter after a graph-decode session (the replay loop moved
-    /// the device position; host bookkeeping must follow for any subsequent prefill).</summary>
+    /// <summary>Advances the host position counter after a graph-decode session (the replay loop moved the device position; host bookkeeping must follow for any subsequent prefill).</summary>
     public void AdvancePosition(int tokens) => _pos += tokens;
 
     public int CurrentPosition => _pos;
@@ -735,10 +690,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         _stateOnDevice[i] = false;
     }
 
-    /// <summary>Device-side seq=1 decode step for a gated-DeltaNet layer — replaces the per-layer host
-    /// conv/recurrence/gated-norm round-trip (a per-layer Sync + PCIe ping-pong that capped decode at
-    /// ~26 tok/s). Reductions reorder float sums vs the host loops, so outputs are tolerance-equivalent
-    /// (dp4a numerics class), not byte-identical.</summary>
+    /// <summary>Device-side seq=1 decode step for a gated-DeltaNet layer — replaces the per-layer host conv/recurrence/gated-norm round-trip (a per-layer Sync + PCIe ping-pong that capped decode at ~26 tok/s). Reductions reorder float sums vs the host loops, so outputs are tolerance-equivalent (dp4a numerics class), not byte-identical.</summary>
     private Tensor BlockLinearDeviceStep(IBackend backend, Tensor hIn, int i)
     {
         int d = DModel;
@@ -789,6 +741,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return result;
     }
 
+    /// <summary>Gated DeltaNet layer: fused QKV projection → causal depthwise Conv1d+SiLU → per-head L2-norm on Q/K → sequential delta-rule recurrence per token → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as <see cref="Mamba2Model"/>'s SSD scan).</summary>
     private Tensor BlockLinear(IBackend backend, Tensor hIn, int i, int seq)
     {
         if (seq == 1 && backend.GraphDecodeSupported && !_isMoe
@@ -966,8 +919,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         return result;
     }
 
-    /// <summary>L2-normalizes each head's <paramref name="dim"/>-wide slice in place (no learned scale — Qwen3.5
-    /// applies this to Q/K after the conv, ggml's <c>ggml_l2_norm</c>).</summary>
+    /// <summary>L2-normalizes each head's <paramref name="dim"/>-wide slice in place (no learned scale — Qwen3.5 applies this to Q/K after the conv, ggml's <c>ggml_l2_norm</c>).</summary>
     private static void L2NormalizePerHead(float[] arr, int seq, int heads, int dim, float eps)
     {
         for (int s = 0; s < seq; s++)
@@ -981,15 +933,11 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
             }
     }
 
-    /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU. On MoE
-    /// models the device/graph decode fast paths are disabled (see the <c>!_isMoe</c> gates), so this only runs the
-    /// host block path — <see cref="MoeFeedForward.Forward"/>'s host top-k routing is fine there, just not inside a
-    /// captured CUDA graph.</summary>
+    /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU; on MoE models the device/graph decode fast paths are disabled (see the <c>!_isMoe</c> gates), so this only runs the host block path.</summary>
     private Tensor Ffn(IBackend backend, Tensor preFfn, string p, int layer, int seq)
         => _moe[layer] is { } ff ? ff.Forward(backend, preFfn, seq) : DenseSwiGlu(backend, preFfn, p, seq);
 
-    /// <summary>Dense SwiGLU FFN: <c>down(silu(gate(x)) · up(x))</c>. The dense tier (0.8B-9B) uses it on every
-    /// layer; the MoE tier (<c>qwen35moe</c>) uses it only if a layer is not MoE (none are, currently).</summary>
+    /// <summary>Dense SwiGLU FFN: <c>down(silu(gate(x)) · up(x))</c>; the dense tier (0.8B-9B) uses it on every layer, the MoE tier (<c>qwen35moe</c>) only if a layer is not MoE (none are, currently).</summary>
     private Tensor DenseSwiGlu(IBackend backend, Tensor preFfn, string p, int seq)
     {
         int ffWidth = (int)W($"{p}.ffn_up.weight").Shape[0];   // Shape[0] = outDim (post-relabel [out,in])

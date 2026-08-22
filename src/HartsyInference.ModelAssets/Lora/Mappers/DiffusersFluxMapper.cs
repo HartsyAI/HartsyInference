@@ -15,12 +15,9 @@ public static class DiffusersFluxMapper
     private const string KohyaDownSuffix = ".lora_down.weight";
     private const string KohyaUpSuffix = ".lora_up.weight";
 
-    /// <summary>Parses every LoRA layer in the file.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader) => ParseLayers(loader, bareRoots: false);
 
-    /// <summary>Same parse, but <paramref name="bareRoots"/> accepts a root with NO wrapper prefix as a transformer
-    /// target — the root is then already the canonical weight name. Shares this parser rather than getting its own
-    /// because the two formats differ only in that one rule.</summary>
+    /// <summary>Same parse, but <paramref name="bareRoots"/> accepts a root with NO wrapper prefix as a transformer target — the root is then already the canonical weight name. Shares this parser rather than getting its own because the two formats differ only in that one rule.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool bareRoots)
     {
         Dictionary<(LoraTarget, string), GroupBuffer> groups = [];

@@ -3,23 +3,19 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
 
-/// <summary>Fuses PyTorch's <c>weight_norm</c> reparametrization (<c>weight_g</c> +
-/// <c>weight_v</c>) into a single weight tensor at load time. EnCodec, Vocos, HiFiGAN,
-/// BigVGAN, and most SEANet-style codecs ship with weight-norm applied throughout — we
-/// pay the fusion cost once during model construction and store the fused tensor.
-///
+/// <summary>Fuses PyTorch's <c>weight_norm</c> reparametrization (<c>weight_g</c> + <c>weight_v</c>) into a single weight tensor at load time, paying the fusion cost once during model construction.</summary>
+/// <remarks>
 /// <para>Math (per-output-channel): <c>weight[oc, ...] = weight_g[oc] * weight_v[oc, ...] / ||weight_v[oc, ...]||_2</c>
 /// where the L2 norm is taken over every axis except axis 0 (out_channels). Works for
 /// any rank: Conv1d <c>[oc, ic, k]</c>, Conv2d <c>[oc, ic, kh, kw]</c>, Linear <c>[oc, ic]</c>.</para>
 ///
 /// <para>The returned tensor is freshly allocated and owned by the caller. Original
 /// <paramref name="weightG"/> / <paramref name="weightV"/> are not modified or
-/// disposed.</para></summary>
+/// disposed.</para>
+/// </remarks>
 public static unsafe class WeightNormFusion
 {
-    /// <summary>Loads a (possibly weight-normed) conv weight at <paramref name="prefix"/>: fuses
-    /// <c>weight_g</c>+<c>weight_v</c> when present, otherwise returns the already-fused <c>weight</c>
-    /// (checkpoints with weight-norm removed, e.g. the HuggingFace <c>descript/dac_44khz</c> export).</summary>
+    /// <summary>Loads a (possibly weight-normed) conv weight at <paramref name="prefix"/>: fuses <c>weight_g</c>+<c>weight_v</c> when present, otherwise returns the already-fused <c>weight</c> (checkpoints with weight-norm removed, e.g. the HuggingFace <c>descript/dac_44khz</c> export).</summary>
     public static Tensor Compose(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g))

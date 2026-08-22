@@ -23,15 +23,7 @@ public sealed class SamplerChain
         _rngState = state == 0 ? DefaultSeed : state;
     }
 
-    /// <summary>Builds the ordered chain (JSON grammar, repetition penalty, temperature, top-k, top-p, min-p)
-    /// including only the steps that are active for the given options. The grammar step goes FIRST — it's a
-    /// hard structural constraint (a token either can or can't extend valid JSON), not a probability-shaping
-    /// setting, so it must exclude invalid tokens before anything else narrows the candidate set (though
-    /// order doesn't actually change correctness here: -infinity logits stay excluded through every
-    /// downstream elementwise transform regardless of where the mask is applied — first is just clearest).
-    /// <paramref name="tokenizer"/>/<paramref name="vocabSize"/> are required when
-    /// <see cref="SamplingOptions.JsonMode"/> or <see cref="SamplingOptions.JsonModeSentinel"/> is set (the
-    /// grammar step must decode candidate token ids to text) and otherwise unused.</summary>
+    /// <summary>Builds the ordered chain (JSON grammar, repetition penalty, temperature, top-k, top-p, min-p), including only the steps active for the given options; the grammar step goes FIRST as a hard structural constraint (though order doesn't actually affect correctness here). <paramref name="tokenizer"/>/<paramref name="vocabSize"/> are required only when <see cref="SamplingOptions.JsonMode"/> or <see cref="SamplingOptions.JsonModeSentinel"/> is set.</summary>
     public static SamplerChain FromOptions(SamplingOptions options, ILlmTokenizer? tokenizer = null, int vocabSize = 0)
     {
         if (options is null)

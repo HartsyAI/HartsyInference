@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS <c>ModulatedTransformerCrossBlock</c>: modulated self-attn (adaLN scale/shift + gate, per-head
-/// QK-RMSNorm) → cross-attn to cond (affine norm2, ungated) → modulated tanh-GELU MLP. adaLN chunks 6 as
-/// shift/scale/gate ×{msa,mlp}. norm1/norm3 non-affine (eps 1e-6), norm2 affine. All F32.</summary>
+/// <summary>TRELLIS <c>ModulatedTransformerCrossBlock</c>: modulated self-attn (adaLN scale/shift + gate, per-head QK-RMSNorm) → cross-attn to cond (affine norm2, ungated) → modulated tanh-GELU MLP.</summary>
 internal sealed unsafe class SsFlowBlock
 {
     private const int W = 1024, H = 16, Hd = 64, Mlp = 4096;

@@ -5,10 +5,7 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
 
-/// <summary>Writes a <see cref="Mesh"/> to binary glTF 2.0 (<c>.glb</c>) — the standard interchange format
-/// read by Blender, three.js, Windows 3D Viewer, and SwarmUI's 3D output. Pure managed C# (System.Text.Json
-/// + manual chunk framing), no external dependencies. Exports POSITION, optional NORMAL, and triangle
-/// indices as a single mesh/primitive.</summary>
+/// <summary>Writes a <see cref="Mesh"/> to binary glTF 2.0 (<c>.glb</c>) via manual chunk framing, exporting POSITION, optional NORMAL, and triangle indices as a single mesh/primitive.</summary>
 public static class GlbWriter
 {
     private const uint Magic = 0x46546C67;      // "glTF"

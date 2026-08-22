@@ -14,21 +14,14 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with
-/// diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/>
-/// preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>,
-/// already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side
-/// models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through
-/// <see cref="MageFlowRecipePipeline"/>.
-/// <para><b>Quant-native</b>: a GGUF (Q4/Q5) or fp8 DiT loads without upcasting so a 4B backbone streams onto a 12 GB
-/// card — the official repo only ships bf16, but the community quant/GGUF path is what you run on smaller GPUs.</para></summary>
+/// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/> preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>, already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through <see cref="MageFlowRecipePipeline"/>.</summary>
+/// <remarks><b>Quant-native</b>: a GGUF (Q4/Q5) or fp8 DiT loads without upcasting so a 4B backbone streams onto a 12 GB card — the official repo only ships bf16, but the community quant/GGUF path is what you run on smaller GPUs.</remarks>
 public sealed class MageFlowRecipe : IArchitectureRecipe
 {
     public string Name => "mage-flow";
     public bool Matches(string familyId) => string.Equals(familyId, "mage-flow", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to
-    /// in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
+    /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
     /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.

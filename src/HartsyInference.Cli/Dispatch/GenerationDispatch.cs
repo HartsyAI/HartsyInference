@@ -550,11 +550,7 @@ public static class GenerationDispatch
             : ["forward"];
     }
 
-    /// <summary>Writes a frame sequence to disk and describes it, previewing the first frame inline.</summary>
-    /// <summary>Video/image restoration through <see cref="IRestoreService"/>; the CLI's "prompt" is the input
-    /// file path. Video inputs are decoded ONCE here (ffmpeg subprocess) so the service skips the container
-    /// round-trip and the source fps is known for the MP4 remux; still images ride the t==1 branch. Output is
-    /// the standard PNG frame sequence plus an H.264 MP4 when the input was a video.</summary>
+    /// <summary>Video/image restoration through <see cref="IRestoreService"/>; video inputs are decoded ONCE here (ffmpeg subprocess) so the source fps is known for the MP4 remux.</summary>
     private static async Task<GeneratedArtifact> RestoreAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir,
         bool quiet, CancellationToken cancel)
@@ -626,6 +622,7 @@ public static class GenerationDispatch
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
+    /// <summary>Writes a frame sequence to disk and describes it, previewing the first frame inline.</summary>
     private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label,
         AudioBuffer? audio = null, int fps = 24)
     {
@@ -763,10 +760,7 @@ public static class GenerationDispatch
         }
     }
 
-    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
-    /// <remarks>Typed requests take pixels, not the file path the CLI accepts.</remarks>
-    /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c>, or null for text-to-image. Each knob is
-    /// applied only when the user set it, so an omitted flag keeps the request record's own default.</summary>
+    /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c>, or null for text-to-image.</summary>
     private static Img2Img? BuildImg2Img(ParamState parameters)
     {
         string? initPath = parameters.GetStringOrNull("init-image");
@@ -844,8 +838,7 @@ public static class GenerationDispatch
         return new LoraStack { Entries = entries };
     }
 
-    /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip. A missing entry leaves
-    /// that clip silent rather than shifting the pairing onto the wrong video.</summary>
+    /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip; a missing entry leaves that clip silent rather than shifting the pairing.</summary>
     private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)
     {
         string[]? paths = SplitPaths(parameters.GetStringOrNull("ref-videos"));
@@ -886,6 +879,7 @@ public static class GenerationDispatch
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
+    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');
