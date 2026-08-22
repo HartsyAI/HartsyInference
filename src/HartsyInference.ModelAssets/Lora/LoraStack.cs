@@ -6,7 +6,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.Lora;
 
-/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path. Full-weight .diff/.diff_b deltas (Comfy-style Wan repacks) merge through the same pass as W' = W + strength·diff.</summary>
+/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path; an int8_tensorwise (± ConvRot) target takes the same dequant-merge-requant round trip with a fresh per-row scale, so it stays packed on the resident IMMA path instead of doubling to BF16. Full-weight .diff/.diff_b deltas (Comfy-style Wan repacks) merge through the same pass as W' = W + strength·diff.</summary>
 public sealed class LoraStack : IDisposable
 {
     private readonly List<Entry> _entries = [];
@@ -116,19 +116,7 @@ public sealed class LoraStack : IDisposable
                 continue;
             }
 
-            if (baseW.DType.IsQuantized && !baseW.DType.IsFp8)
-            {
-                // GGUF K-quant blocks: dequantizing is possible but requantizing a merged result back into
-                // block form is not implemented, so the merge would silently change the model's size/precision.
-                // Refuse with the fix named rather than surfacing the internal dequantizer error.
-                throw new NotSupportedException(
-                    $"LoRA weights can't be merged into a GGUF-quantized checkpoint (weight '{canonicalKey}' is "
-                    + $"{baseW.DType.Name}). Use a safetensors build of this model (fp16/bf16/fp8) with LoRAs, or "
-                    + "remove the LoRA.");
-            }
-
-            // CastTo folds Fp8ScaleFactor into the values and returns factor 1.0, so the merge below stays quant-unaware.
-            Tensor accumF32 = baseW.CastTo(DType.F32); // owned copy, will be mutated in place
+            Tensor accumF32 = DequantForMerge(baseW, canonicalKey);
             try
             {
                 foreach ((LoraLayer layer, float strength) in deltas)
@@ -136,23 +124,7 @@ public sealed class LoraStack : IDisposable
                     AccumulateDelta(backend, accumF32, layer, strength);
                 }
 
-                Tensor finalTensor;
-                if (originalDtype.IsFp8)
-                {
-                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, canonicalKey);
-                    // A weight-side LoRA must not change activation scaling: the input scale is carried, not recomputed.
-                    finalTensor.Fp8InputScaleFactor = baseW.Fp8InputScaleFactor;
-                }
-                else
-                {
-                    finalTensor = originalDtype == DType.F32 ? accumF32 : accumF32.CastTo(originalDtype);
-                }
-                if (!ReferenceEquals(finalTensor, accumF32))
-                {
-                    accumF32.Dispose();
-                }
-                _ownedMerged.Add(finalTensor);
-                weights[canonicalKey] = finalTensor;
+                weights[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
                 merged++;
             }
             catch
@@ -165,7 +137,6 @@ public sealed class LoraStack : IDisposable
         foreach ((string fusedKey, List<(int SliceIndex, int SliceCount, LoraLayer Layer, float Strength)> slices) in fusedPending)
         {
             Tensor fusedBase = weights[fusedKey];
-            DType fusedDtype = fusedBase.DType;
             long sliceRows = fusedBase.Shape[0] / slices[0].SliceCount;
             bool anyBad = slices.Exists(sl =>
                 fusedBase.Shape.Rank != 2
@@ -178,29 +149,14 @@ public sealed class LoraStack : IDisposable
                 skippedShape++;
                 continue;
             }
-            Tensor accumF32 = fusedBase.CastTo(DType.F32);
+            Tensor accumF32 = DequantForMerge(fusedBase, fusedKey);
             try
             {
                 foreach ((int sliceIndex, int _, LoraLayer layer, float strength) in slices)
                 {
                     AccumulateDeltaIntoRows(backend, accumF32, layer, strength, sliceIndex * sliceRows);
                 }
-                Tensor finalTensor;
-                if (fusedDtype.IsFp8)
-                {
-                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, fusedKey);
-                    finalTensor.Fp8InputScaleFactor = fusedBase.Fp8InputScaleFactor;
-                }
-                else
-                {
-                    finalTensor = fusedDtype == DType.F32 ? accumF32 : accumF32.CastTo(fusedDtype);
-                }
-                if (!ReferenceEquals(finalTensor, accumF32))
-                {
-                    accumF32.Dispose();
-                }
-                _ownedMerged.Add(finalTensor);
-                weights[fusedKey] = finalTensor;
+                weights[fusedKey] = FinalizeMerged(accumF32, fusedBase, fusedKey);
                 merged++;
             }
             catch
@@ -250,15 +206,7 @@ public sealed class LoraStack : IDisposable
                 skippedShape++;
                 continue;
             }
-            if (baseW.DType.IsQuantized && !baseW.DType.IsFp8)
-            {
-                throw new NotSupportedException(
-                    $"LoRA weights can't be merged into a GGUF-quantized checkpoint (weight '{canonicalKey}' is "
-                    + $"{baseW.DType.Name}). Use a safetensors build of this model (fp16/bf16/fp8) with LoRAs, or "
-                    + "remove the LoRA.");
-            }
-
-            Tensor accumF32 = baseW.CastTo(DType.F32);
+            Tensor accumF32 = DequantForMerge(baseW, canonicalKey);
             try
             {
                 foreach ((Tensor diff, float strength) in deltas)
@@ -275,22 +223,7 @@ public sealed class LoraStack : IDisposable
                     }
                 }
 
-                Tensor finalTensor;
-                if (originalDtype.IsFp8)
-                {
-                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, canonicalKey);
-                    finalTensor.Fp8InputScaleFactor = baseW.Fp8InputScaleFactor;
-                }
-                else
-                {
-                    finalTensor = originalDtype == DType.F32 ? accumF32 : accumF32.CastTo(originalDtype);
-                }
-                if (!ReferenceEquals(finalTensor, accumF32))
-                {
-                    accumF32.Dispose();
-                }
-                _ownedMerged.Add(finalTensor);
-                weights[canonicalKey] = finalTensor;
+                weights[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
                 merged++;
             }
             catch
@@ -308,6 +241,121 @@ public sealed class LoraStack : IDisposable
             Logs.Info($"Merged {merged} of {grouped.Count + diffGrouped.Count} LoRA-targeted weights into {target}{skipped}.");
         }
         return merged;
+    }
+
+    /// <summary>Whether this weight is a packed ComfyUI <c>int8_tensorwise</c> Linear (± ConvRot) that can take the dequant-merge-requant round trip.</summary>
+    private static bool IsInt8Tensorwise(Tensor weight) =>
+        weight.DType == DType.I8 && weight.QuantInfo is { Format: "int8_tensorwise", RowScale: not null };
+
+    /// <summary>Produces the owned F32 accumulator a merge mutates in place, refusing by name any quantized format that cannot be requantized afterwards.</summary>
+    private static Tensor DequantForMerge(Tensor baseW, string canonicalKey)
+    {
+        if (IsInt8Tensorwise(baseW))
+        {
+            QuantWeightInfo info = baseW.QuantInfo!;
+            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(baseW, info.RowScale!, info.ConvRotGroupSize);
+            return bf16.CastTo(DType.F32);
+        }
+        if (baseW.DType == DType.I8)
+        {
+            // DType.I8 has IsQuantized false, so without this the merge dies in CastTo's raw "I8 → F32" throw.
+            throw new NotSupportedException(
+                $"LoRA weights can't be merged into int8 weight '{canonicalKey}': it carries "
+                + (baseW.QuantInfo is null
+                    ? "no quantization descriptor, so its dequant scale is unknowable."
+                    : $"unsupported quantization format '{baseW.QuantInfo.Format}'.")
+                + " Use a BF16/fp8_scaled build of this model with LoRAs, or remove the LoRA.");
+        }
+        if (baseW.DType.IsQuantized && !baseW.DType.IsFp8)
+        {
+            // GGUF K-quant blocks: dequantizing is possible but requantizing a merged result back into
+            // block form is not implemented, so the merge would silently change the model's size/precision.
+            // Refuse with the fix named rather than surfacing the internal dequantizer error.
+            throw new NotSupportedException(
+                $"LoRA weights can't be merged into a GGUF-quantized checkpoint (weight '{canonicalKey}' is "
+                + $"{baseW.DType.Name}). Use a safetensors build of this model (fp16/bf16/fp8) with LoRAs, or "
+                + "remove the LoRA.");
+        }
+        // CastTo folds Fp8ScaleFactor into the values and returns factor 1.0, so the merge stays quant-unaware.
+        return baseW.CastTo(DType.F32);
+    }
+
+    /// <summary>Converts the merged F32 accumulator back to the base weight's storage form, registers the result (and any companion scale) as stack-owned, and disposes the accumulator when it is not itself the result.</summary>
+    private Tensor FinalizeMerged(Tensor accumF32, Tensor baseW, string canonicalKey)
+    {
+        Tensor finalTensor;
+        if (IsInt8Tensorwise(baseW))
+        {
+            finalTensor = RequantizeF32ToInt8ConvRot(accumF32, baseW.QuantInfo!);
+        }
+        else if (baseW.DType.IsFp8)
+        {
+            finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, canonicalKey);
+            // A weight-side LoRA must not change activation scaling: the input scale is carried, not recomputed.
+            finalTensor.Fp8InputScaleFactor = baseW.Fp8InputScaleFactor;
+        }
+        else
+        {
+            finalTensor = baseW.DType == DType.F32 ? accumF32 : accumF32.CastTo(baseW.DType);
+        }
+        if (!ReferenceEquals(finalTensor, accumF32))
+        {
+            accumF32.Dispose();
+        }
+        _ownedMerged.Add(finalTensor);
+        return finalTensor;
+    }
+
+    /// <summary>Re-rotates the merged rows back into ConvRot storage order and row-quantizes them to I8 with a freshly recomputed absmax/127 scale — the inverse of <see cref="Int8ConvRotCodec.DequantToBf16"/>. The scale must be recomputed, not carried: the delta moves each row's absmax, and requantizing against the old scale clips every value the LoRA pushed past it. The new RowScale is stack-owned (the base weight's is borrowed from the loader) and always per-row, which every consumer already accepts for a formerly per-tensor scale.</summary>
+    private unsafe Tensor RequantizeF32ToInt8ConvRot(Tensor accumF32, QuantWeightInfo info)
+    {
+        long rows = accumF32.Shape[0];
+        long cols = accumF32.Shape[1];
+        Tensor quantized = new Tensor(new TensorShape(rows, cols), DType.I8);
+        Tensor rowScale = new Tensor(new TensorShape(rows), DType.F32);
+        try
+        {
+            float* accum = (float*)accumF32.DataPointer;
+            sbyte* destination = (sbyte*)quantized.DataPointer;
+            float* scales = (float*)rowScale.DataPointer;
+            int groupSize = info.ConvRotGroupSize;
+            Parallel.For(0, (int)rows, row =>
+            {
+                Span<float> rowSpan = new Span<float>(accum + row * cols, (int)cols);
+                if (groupSize > 0)
+                {
+                    // H is symmetric and orthogonal, so the same rotation that un-packed the weight re-packs it.
+                    Int8ConvRotCodec.ApplyRotationInPlace(rowSpan, groupSize);
+                }
+                float absmax = 0f;
+                foreach (float value in rowSpan)
+                {
+                    absmax = MathF.Max(absmax, MathF.Abs(value));
+                }
+                float scale = absmax > 0f ? absmax / 127f : 1.0f;
+                scales[row] = scale;
+                sbyte* destinationRow = destination + row * cols;
+                for (int column = 0; column < (int)cols; column++)
+                {
+                    destinationRow[column] = (sbyte)Math.Clamp((int)MathF.Round(rowSpan[column] / scale), -127, 127);
+                }
+            });
+            quantized.QuantInfo = new QuantWeightInfo
+            {
+                Format = info.Format,
+                RowScale = rowScale,
+                ConvRotGroupSize = info.ConvRotGroupSize,
+                FullPrecisionMatMul = info.FullPrecisionMatMul,
+            };
+            _ownedMerged.Add(rowScale);
+            return quantized;
+        }
+        catch
+        {
+            rowScale.Dispose();
+            quantized.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Whether this layer's <c>up @ down</c> product is the shape of the weight it would be added to.</summary>
