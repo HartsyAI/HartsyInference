@@ -104,10 +104,6 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         return name.Contains("distill", StringComparison.OrdinalIgnoreCase) ? DistillLogScale : 0f;
     }
 
-    /// <summary>Scales the driving V at splice time; see <see cref="WanAnimate2SelfAttnContext.PoseStrength"/>.
-    /// 1.0 reproduces the reference.</summary>
-    public float PoseStrength { get; set; } = 1.0f;
-
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
     private readonly WanImageEmbedder _imgEmbedder;
@@ -268,7 +264,8 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// reference-image slot, which is denoised and then discarded by the caller.</summary>
     /// <param name="unconditional">The negative branch, which skips block <see cref="UncondSkipBlockIndex"/>.</param>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep,
-        WanAnimate2DrivingCache driving, Tensor? clipImageEmbeds = null, bool unconditional = false)
+        WanAnimate2DrivingCache driving, Tensor? clipImageEmbeds = null, bool unconditional = false,
+        float poseStrength = 1.0f, float referenceImageStrength = 1.0f)
     {
         ArgumentNullException.ThrowIfNull(driving);
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -295,7 +292,8 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             TokensPerFrame = hw,
             LogScaleBiasGen = biasGen,
             LogScaleBiasSpliced = biasSpliced,
-            PoseStrength = PoseStrength,
+            PoseStrength = poseStrength,
+            ReferenceImageStrength = referenceImageStrength,
             KeyBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
             ValueBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
         };

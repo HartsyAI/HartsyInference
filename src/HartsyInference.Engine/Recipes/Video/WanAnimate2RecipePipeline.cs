@@ -196,6 +196,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         Seed = baseSeed + chunkIndex,
                         FlowShift = request.FlowShift ?? WanAnimate2Pipeline.DefaultFlowShift,
                         Animate2Bf16DrivingCache = bf16DrivingCache,
+                        AnimatePoseStrength = (float?)request.AnimatePoseStrength,
+                        AnimateReferenceImageStrength = (float?)request.AnimateReferenceImageStrength,
                     };
                     (byte[][] frames, int chunkW, int chunkH, int _) = _pipeline.GenerateChunk(
                         promptEmbeds, negEmbeds, drivingEmbeds, referenceRgb, drivingClip, inner,

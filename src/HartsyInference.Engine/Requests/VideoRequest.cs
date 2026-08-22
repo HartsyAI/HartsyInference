@@ -103,6 +103,12 @@ public sealed record VideoRequest
     /// <summary>Wan-Animate chunked extension: strength (0..1) of the per-chunk colour correction — every chunk after the first is Lab mean/std-matched to the reference image so colour drift cannot compound through the carried-frame chain. Null = 1 (fully matched); 0 disables. Chunk 0 is never touched, so single-chunk generations are unaffected at any value.</summary>
     public double? AnimateColorCorrection { get; init; }
 
+    /// <summary>Wan-Animate-2 only: scales the driving stream's attention values (ComfyUI <c>pose_strength</c>) — above 1 over-drives the motion, below 1 under-drives it. Null = 1.0, the trained behaviour. Wan-Animate (V1) has no such pathway and refuses a non-default value by name.</summary>
+    public double? AnimatePoseStrength { get; init; }
+
+    /// <summary>Wan-Animate-2 only: scales the reference-image slot's attention values (ComfyUI <c>reference_image_strength</c>) — the weight of the character identity image in every block. Null = 1.0, the trained behaviour. Wan-Animate (V1) has no such pathway and refuses a non-default value by name.</summary>
+    public double? AnimateReferenceImageStrength { get; init; }
+
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }
 

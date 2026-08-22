@@ -53,7 +53,13 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     /// and cfg 1, which renders hazy at any length and only looks acceptable on a short one. At 40 steps and
     /// guidance 3.0 the driver reaches the output at the full 77-frame length with this left at 1.0. Keep it at
     /// 1.0 unless a user deliberately wants over- or under-driven motion.</para></summary>
-    public float PoseStrength { get; set; } = 1.0f;
+    public float PoseStrength { get; init; } = 1.0f;
+
+    /// <summary>Scales the reference-image slot's V — generation latent frame 0's rows <c>[0, hw)</c> — once per
+    /// block before the splice-buffer writes. Mirrors ComfyUI's <c>reference_image_strength</c>. 1.0 is the trained
+    /// behaviour and skips the scale entirely; like <see cref="PoseStrength"/>, this is a deliberate over- or
+    /// under-weighting knob, not a fix for washed-out output.</summary>
+    public float ReferenceImageStrength { get; init; } = 1.0f;
 
     /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving input are all
     /// owned by longer-lived caches and are borrowed here for the duration of one forward.</summary>

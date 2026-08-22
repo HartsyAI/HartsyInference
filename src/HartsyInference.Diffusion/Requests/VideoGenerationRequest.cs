@@ -14,4 +14,10 @@ public record VideoGenerationRequest : TextToImageRequest
 
     /// <summary>Wan-Animate-2 only: store the driving cache in BF16 (<c>true</c>) or F32 (<c>false</c>); <c>null</c> = resolve at the decision point (env override, else the low-VRAM auto policy). The Animate-2 recipe resolves once per generation and relays the answer here so a chunked video cannot mix cache dtypes.</summary>
     public bool? Animate2Bf16DrivingCache { get; init; }
+
+    /// <summary>Wan-Animate-2 only: scales the driving stream's attention values (ComfyUI <c>pose_strength</c>); <c>null</c> = 1.0, the trained behaviour, which skips the scale entirely.</summary>
+    public float? AnimatePoseStrength { get; init; }
+
+    /// <summary>Wan-Animate-2 only: scales the reference-image slot's attention values (ComfyUI <c>reference_image_strength</c>); <c>null</c> = 1.0, the trained behaviour, which skips the scale entirely.</summary>
+    public float? AnimateReferenceImageStrength { get; init; }
 }

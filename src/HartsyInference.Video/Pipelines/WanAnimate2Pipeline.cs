@@ -201,6 +201,8 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         bool useCfg = UsesCfgBranch(guidance);
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? DefaultFlowShift;
+        float poseStrength = (request as VideoGenerationRequest)?.AnimatePoseStrength ?? 1.0f;
+        float referenceImageStrength = (request as VideoGenerationRequest)?.AnimateReferenceImageStrength ?? 1.0f;
         string samplerName = ResolveSampler(sampler);
 
         Logs.Info($"Wan-Animate-2: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, "
@@ -208,6 +210,10 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             + $"{(continuation ? ", continuation chunk" : "")}, log_scale={_config.Animate2LogScale}).");
         string? settingsWarning = SettingsMismatchWarning(_config.Animate2LogScale != 0f, steps, guidance);
         if (settingsWarning is not null) Logs.Warning(settingsWarning);
+        if (poseStrength != 1.0f || referenceImageStrength != 1.0f)
+        {
+            Logs.Info($"Wan-Animate-2 strengths: pose={poseStrength}, reference_image={referenceImageStrength} (1.0 is the trained behaviour).");
+        }
         if (samplerName == AlternateSampler)
         {
             Logs.Warning("[WanAnimate2] UniPC was requested. Its sigma grid floors at 1/1000 where get_sampling_sigmas "
@@ -279,7 +285,6 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 
             // The driving stream sits outside the guidance loop entirely — it never sees the negative prompt, and it
             // is built once per chunk rather than once per step.
-            _transformer.PoseStrength = (float)EnvSwitch.GetLong("HARTSY_ANIMATE2_POSE_STRENGTH_X100", 100) / 100f;
             driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid,
                 bf16Cache: bf16Cache);
             long drivingTokens = (long)driving.Frames * driving.TokensPerFrame;
@@ -305,12 +310,14 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 Stopwatch sw = Stopwatch.StartNew();
                 float tEmb = timesteps[k];
                 Tensor modelInput = WanAnimate2Conditioning.ConcatChannels(latents, conditioning);
-                Tensor vCond = _transformer.Forward(Backend, modelInput, promptEmbeds, tEmb, driving, referenceClipEmbeds);
+                Tensor vCond = _transformer.Forward(Backend, modelInput, promptEmbeds, tEmb, driving, referenceClipEmbeds,
+                    poseStrength: poseStrength, referenceImageStrength: referenceImageStrength);
                 if (useCfg)
                 {
                     // Strictly after the positive branch: the transformer's caches are unsynchronized.
                     Tensor vUncond = _transformer.Forward(Backend, modelInput, negativeEmbeds, tEmb, driving,
-                        referenceClipEmbeds, unconditional: true);
+                        referenceClipEmbeds, unconditional: true,
+                        poseStrength: poseStrength, referenceImageStrength: referenceImageStrength);
                     LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
                     vUncond.Dispose();
                 }

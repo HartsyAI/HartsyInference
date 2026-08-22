@@ -241,6 +241,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         if (ctx.PoseStrength != 1.0f) backend.Scale(drivingV, drivingV, ctx.PoseStrength);
         backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
 
+        ScaleReferenceRows(backend, v, hw, _dim, ctx.ReferenceImageStrength);
         Tensor kGen = ToBhsd(backend, kn, s);
         Tensor vGen = ToBhsd(backend, v, s);
         backend.ScatterSeqHeadMajor(ctx.KeyBuffer, kGen, 0);
@@ -291,6 +292,17 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     }
 
     /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>
+    /// <summary>ComfyUI Animate-2's <c>v[:, :hw] *= ref_strength</c>: scales the reference-image slot's V rows
+    /// <c>[0, hw)</c> in place, leaving every other row untouched; exact no-op at 1.0.</summary>
+    internal static void ScaleReferenceRows(IBackend backend, Tensor v, int hw, int dim, float strength)
+    {
+        if (strength == 1.0f) return;
+        using Tensor rows = new Tensor(new TensorShape(hw, dim), DType.F32);
+        backend.SliceRows(rows, v, 0);
+        backend.Scale(rows, rows, strength);
+        backend.ScatterRowsGeneric(v, rows, 0);
+    }
+
     private void ScatterDrivingFrame(IBackend backend, Tensor buffer, Tensor source, int frame, int hw, int tailOffset)
     {
         using Tensor rows = new Tensor(new TensorShape(hw, _dim), DType.F32);

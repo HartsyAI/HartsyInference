@@ -80,6 +80,17 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 $"Wan-Animate samples with UniPC and has no '{request.Sampler}' implementation — upstream's other "
                 + "choice, dpm++ (FlowDPMSolverMultistep), isn't ported. Clear the sampler or set it to 'unipc'.");
         }
+        // Refused by name at any non-default value, not silently ignored: these scale attention pathways only the
+        // Animate-2 frame-local attention has.
+        List<string> unsupportedStrengths = [];
+        if (request.AnimatePoseStrength is double ps && ps != 1.0) unsupportedStrengths.Add($"{nameof(VideoRequest.AnimatePoseStrength)}={ps}");
+        if (request.AnimateReferenceImageStrength is double rs && rs != 1.0) unsupportedStrengths.Add($"{nameof(VideoRequest.AnimateReferenceImageStrength)}={rs}");
+        if (unsupportedStrengths.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"Wan-Animate (V1) has no pose or reference-image attention-strength pathway — {string.Join(", ", unsupportedStrengths)} "
+                + "are Wan-Animate-2 controls and cannot be applied here. Leave them at 1.0 (or untoggled), or select an Animate-2 checkpoint.");
+        }
         // A sigma schedule needs the Euler seam to re-space; UniPC owns its own spacing, so a named schedule cannot
         // be honored here either and is refused rather than dropped.
         if (!string.IsNullOrWhiteSpace(request.Scheduler))
