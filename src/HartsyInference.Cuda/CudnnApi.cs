@@ -150,4 +150,20 @@ internal static partial class CudnnApi
     // cudnnBackendHeurMode_t
     internal const int CUDNN_HEUR_MODE_A = 3;
     internal const int CUDNN_HEUR_MODE_FALLBACK = 2;
+
+    /// <summary>Sets a backend-descriptor attribute, throwing on any non-success status.</summary>
+    internal static unsafe void SetAttr(nint desc, int attr, int type, long count, void* vals)
+    {
+        int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
+        if (st != CUDNN_STATUS_SUCCESS)
+            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
+    }
+
+    /// <summary>Throws <see cref="CudnnStatusException"/> when <paramref name="st"/> is not success.</summary>
+    internal static void Check(int st, string what)
+    {
+        if (st != CUDNN_STATUS_SUCCESS)
+            throw new CudnnStatusException(st, what);
+    }
+
 }

@@ -168,7 +168,7 @@ internal sealed class CudnnConv : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            (nint exec, long wsBytes) = BuildExecutionPlan(graph, owned);
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv");
             return new Plan
             {
                 Execution = exec,
@@ -182,96 +182,6 @@ internal sealed class CudnnConv : IDisposable
         }
     }
 
-    private unsafe (nint exec, long wsBytes) BuildExecutionPlan(nint graph, List<nint> owned)
-    {
-        foreach (int mode in new[] { CUDNN_HEUR_MODE_A, CUDNN_HEUR_MODE_FALLBACK })
-        {
-            nint heur;
-            if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR, out heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-            owned.Add(heur);
-            void* gp = (void*)graph;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &gp);
-            int m = mode;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_MODE, CUDNN_TYPE_HEUR_MODE, 1, &m);
-            if (cudnnBackendFinalize(heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-
-            const int maxCfgs = 32;
-            nint[] cfgs = new nint[maxCfgs];
-            for (int i = 0; i < maxCfgs; i++)
-                cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR, out cfgs[i]);
-            long returned;
-            fixed (nint* cfgPtr = cfgs)
-            {
-                int gst = cudnnBackendGetAttribute(heur, CUDNN_ATTR_ENGINEHEUR_RESULTS,
-                    CUDNN_TYPE_BACKEND_DESCRIPTOR, maxCfgs, out returned, cfgPtr);
-                if (gst != CUDNN_STATUS_SUCCESS) returned = 0;
-            }
-            // See CudnnSdpa.BuildExecutionPlan's identical pattern for why this try/finally exists: TryPlan
-            // can throw (SetAttr failure) instead of returning ok=false, and without this, an exception
-            // mid-loop would leak up to 32 backend descriptors — worsening exactly the kind of
-            // resource-pressure condition that causes such a throw.
-            bool[] destroyed = new bool[maxCfgs];
-            try
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                {
-                    if (i < returned)
-                    {
-                        (nint exec, long ws, bool ok) = TryPlan(cfgs[i]);
-                        if (ok && ws > MaxWorkspaceBytes)
-                        {
-                            cudnnBackendDestroyDescriptor(exec);
-                            ok = false;
-                        }
-                        if (ok)
-                        {
-                            for (int j = 0; j < maxCfgs; j++)
-                            {
-                                if (!destroyed[j]) { cudnnBackendDestroyDescriptor(cfgs[j]); destroyed[j] = true; }
-                            }
-                            return (exec, ws);
-                        }
-                    }
-                    cudnnBackendDestroyDescriptor(cfgs[i]);
-                    destroyed[i] = true;
-                }
-            }
-            finally
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                    if (!destroyed[i]) cudnnBackendDestroyDescriptor(cfgs[i]);
-            }
-        }
-        throw new InvalidOperationException("cuDNN conv: no engine config produced a valid execution plan");
-    }
-
-    private unsafe (nint exec, long ws, bool ok) TryPlan(nint cfg)
-    {
-        if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR, out nint p) != CUDNN_STATUS_SUCCESS)
-            return (0, 0, false);
-        try
-        {
-            void* hp = (void*)_handle;
-            void* cp = (void*)cfg;
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &cp);
-        }
-        catch
-        {
-            cudnnBackendDestroyDescriptor(p);
-            throw;
-        }
-        if (cudnnBackendFinalize(p) != CUDNN_STATUS_SUCCESS)
-        {
-            cudnnBackendDestroyDescriptor(p);
-            return (0, 0, false);
-        }
-        long ws = 0;
-        Check(cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws), "workspace size get");
-        return (p, ws, true);
-    }
 
     private unsafe nint Tensor(List<nint> owned, long uid, long* dims, long* strides, int dtype)
     {
@@ -291,18 +201,6 @@ internal sealed class CudnnConv : IDisposable
         return t;
     }
 
-    private static unsafe void SetAttr(nint desc, int attr, int type, long count, void* vals)
-    {
-        int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
-    }
-
-    private static void Check(int st, string what)
-    {
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, what);
-    }
 
     public void Dispose()
     {
