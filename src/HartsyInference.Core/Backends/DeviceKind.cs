@@ -6,12 +6,6 @@ public readonly record struct DeviceKind(DeviceType Type, int Ordinal = 0)
     /// <summary>CPU device.</summary>
     public static readonly DeviceKind Cpu = new(DeviceType.Cpu, 0);
 
-    /// <summary>First CUDA GPU (device 0).</summary>
-    public static readonly DeviceKind Cuda0 = new(DeviceType.Cuda, 0);
-
-    /// <summary>First Vulkan GPU (device 0).</summary>
-    public static readonly DeviceKind Vulkan0 = new(DeviceType.Vulkan, 0);
-
     /// <summary>Creates a CUDA device with the specified ordinal.</summary>
     public static DeviceKind Cuda(int ordinal = 0) => new(DeviceType.Cuda, ordinal);
 

@@ -390,7 +390,6 @@ public static class GgufConfigFactory
         // branch in FromGguf), so here we leave the cos/sin mscale neutral (attn_factor = 1) for it.
         double betaFast = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_fast", 32f);
         double betaSlow = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_slow", 1f);
-        double yarnLogMul = metadata.GetFloat32($"{arch}.rope.scaling.yarn_log_multiplier", 0f);
         bool isDeepseek = arch == "deepseek2";
         return type switch
         {
@@ -398,7 +397,7 @@ public static class GgufConfigFactory
             "yarn" => new RopeScaling
             {
                 Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx,
-                BetaFast = betaFast, BetaSlow = betaSlow, YarnLogMultiplier = yarnLogMul,
+                BetaFast = betaFast, BetaSlow = betaSlow,
                 AttentionFactor = isDeepseek ? 1.0 : attn,
             },
             _ => RopeScaling.None,
