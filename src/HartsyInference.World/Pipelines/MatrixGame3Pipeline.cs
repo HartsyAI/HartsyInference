@@ -153,7 +153,7 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
                         frames[i] = e.Latent;
                         memIndices[i] = e.FrameIndex;
                     }
-                    memLatents = ConcatFrames(frames, hLat, wLat);
+                    memLatents = MatrixGameOps.ConcatFrames(frames, hLat, wLat);
                 }
 
                 // Per-frame RoPE indices: memory keeps historical positions, past+current continue globally.
@@ -173,8 +173,8 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
 
                 // Action rows covering the non-memory frames: past overlap repeats the earliest needed rows.
                 int pastRgb = past * _config.VaeTemporalCompression;
-                Tensor mouseRows = ActionRows(mouse, rgbCursor - pastRgb, pastRgb + rgbThisSegment, 2);
-                Tensor kbdRows = ActionRows(keyboard, rgbCursor - pastRgb, pastRgb + rgbThisSegment, 6);
+                Tensor mouseRows = MatrixGameOps.ActionRows(mouse, rgbCursor - pastRgb, pastRgb + rgbThisSegment, 2, mouse.Length);
+                Tensor kbdRows = MatrixGameOps.ActionRows(keyboard, rgbCursor - pastRgb, pastRgb + rgbThisSegment, 6, keyboard.Length);
 
                 Tensor current = SeedGenerator.CreateNoise(new TensorShape([1L, _config.InChannels, tLat, hLat, wLat]), actualSeed + seg);
                 scheduler.SetTimesteps(steps, _config.SampleShift);
@@ -186,7 +186,7 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
                     float ts = scheduler.Timesteps[k];
                     for (int i = 0; i < tTotal; i++) frameTs[i] = i < mem + past ? 0f : ts;
 
-                    Tensor input = ConcatFrames([memLatents, pastLatents, current], hLat, wLat);
+                    Tensor input = MatrixGameOps.ConcatFrames([memLatents, pastLatents, current], hLat, wLat);
                     Tensor vCond = _transformer.Forward(Backend, input, promptEmbeds, frameTs, ropeIdx, mem, tLat,
                         mouseRows, kbdRows, plucker);
                     ZeroLeadingFrames(input, mem, hLat, wLat);   // null path disables memory
@@ -214,7 +214,7 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
 
                 for (int i = 0; i < tLat; i++)
                 {
-                    Tensor frame = SliceFrame(current, i, hLat, wLat);
+                    Tensor frame = MatrixGameOps.SliceFrame(current, i, hLat, wLat);
                     int rgbIdx = Math.Min(rgbCursor + (i + 1) * _config.VaeTemporalCompression - 1, poses.Length - 1);
                     history.Add(frame, poses[rgbIdx], globalLatentIndex + i);
                     frame.Dispose();
@@ -267,41 +267,6 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
         return o;
     }
 
-    /// <summary>Concatenates latent clips <c>[1, C, T_i, H, W]</c> along the temporal axis.</summary>
-    private Tensor ConcatFrames(IReadOnlyList<Tensor> clips, int h, int w)
-    {
-        int c = _config.InChannels;
-        int tTotal = 0;
-        foreach (Tensor clip in clips) tTotal += (int)clip.Shape[2];
-        Tensor o = new Tensor(new TensorShape([1L, c, tTotal, h, w]), DType.F32);
-        float* dst = (float*)o.DataPointer;
-        long frame = (long)h * w;
-        for (int ci = 0; ci < c; ci++)
-        {
-            int fOut = 0;
-            foreach (Tensor clip in clips)
-            {
-                int tc = (int)clip.Shape[2];
-                float* src = (float*)clip.DataPointer;
-                Buffer.MemoryCopy(src + (long)ci * tc * frame, dst + ((long)ci * tTotal + fOut) * frame, (long)tc * frame * 4, (long)tc * frame * 4);
-                fOut += tc;
-            }
-        }
-        return o;
-    }
-
-    private Tensor SliceFrame(Tensor clip, int frameIndex, int h, int w)
-    {
-        int c = _config.InChannels, t = (int)clip.Shape[2];
-        Tensor o = new Tensor(new TensorShape([1L, c, 1, h, w]), DType.F32);
-        float* src = (float*)clip.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        long frame = (long)h * w;
-        for (int ci = 0; ci < c; ci++)
-            Buffer.MemoryCopy(src + ((long)ci * t + frameIndex) * frame, dst + (long)ci * frame, frame * 4, frame * 4);
-        return o;
-    }
-
     private Tensor LastFrames(Tensor clip, int count, int h, int w)
     {
         int c = _config.InChannels, t = (int)clip.Shape[2];
@@ -328,19 +293,6 @@ public sealed unsafe class MatrixGame3Pipeline : DiffusionPipelineBase
         Tensor o = new Tensor(t.Shape, DType.F32);
         long bytes = t.Shape.ElementCount * 4;
         Buffer.MemoryCopy((float*)t.DataPointer, (float*)o.DataPointer, bytes, bytes);
-        return o;
-    }
-
-    /// <summary>RGB-rate action rows <c>[count, dim]</c> starting at <paramref name="start"/> (negative indices clamp to row 0).</summary>
-    private static Tensor ActionRows(float[][] rows, int start, int count, int dim)
-    {
-        Tensor o = new Tensor(new TensorShape(count, dim), DType.F32);
-        float* p = (float*)o.DataPointer;
-        for (int i = 0; i < count; i++)
-        {
-            float[] row = rows[Math.Clamp(start + i, 0, rows.Length - 1)];
-            for (int d = 0; d < dim; d++) p[(long)i * dim + d] = row[d];
-        }
         return o;
     }
 

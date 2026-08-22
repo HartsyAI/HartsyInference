@@ -154,7 +154,7 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
                     }
                 }
 
-                for (int f = 0; f < blockSize; f++) generated.Add(SliceFrame(current, f, hLat, wLat));
+                for (int f = 0; f < blockSize; f++) generated.Add(MatrixGameOps.SliceFrame(current, f, hLat, wLat));
                 current.Dispose();
                 mouseRows.Dispose();
                 kbdRows.Dispose();
@@ -165,7 +165,7 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
             Backend.Sync();
             Backend.FreeWeights(_transformer.EnumerateWeights());
 
-            Tensor allLatents = ConcatFrames(generated, hLat, wLat);
+            Tensor allLatents = MatrixGameOps.ConcatFrames(generated, hLat, wLat);
             Tensor rgb = _vae.Decode(Backend, allLatents);
             allLatents.Dispose();
             int frames = (int)rgb.Shape[2];
@@ -199,9 +199,6 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
         {
             int globalFrame = firstFrame + i;
             // Latent channels 0..15.
-            float* src = i < ctxCount
-                ? (float*)generated[globalFrame].DataPointer
-                : (float*)current.DataPointer + (long)(i - ctxCount) * frame;   // per-channel offset added below
             for (int c = 0; c < 16; c++)
             {
                 long dst = ((long)c * included + i) * frame;
@@ -210,7 +207,6 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
                     : (float*)current.DataPointer + ((long)c * blockSize + (i - ctxCount)) * frame;
                 Buffer.MemoryCopy(channelSrc, ip + dst, frame * 4, frame * 4);
             }
-            _ = src;
             // Mask channels 16..19: 1 on global frame 0.
             if (globalFrame == 0)
                 for (int c = 16; c < 20; c++)
@@ -234,39 +230,9 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
     private Tensor BuildActionRows(float[][]? rows, int firstFrame, int includedFrames, int dim, int planLength)
     {
         int count = includedFrames * _config.VaeTemporalCompression;
-        Tensor o = new Tensor(new TensorShape(count, dim), DType.F32);
-        float* p = (float*)o.DataPointer;
-        if (rows is null) return o;   // zeros (mouse-disabled variants)
+        if (rows is null) return new Tensor(new TensorShape(count, dim), DType.F32);   // zeros (mouse-disabled variants)
         int start = firstFrame * _config.VaeTemporalCompression;
-        for (int i = 0; i < count; i++)
-        {
-            float[] row = rows[Math.Clamp(start + i, 0, Math.Min(planLength, rows.Length) - 1)];
-            for (int d = 0; d < dim && d < row.Length; d++) p[(long)i * dim + d] = row[d];
-        }
-        return o;
+        return MatrixGameOps.ActionRows(rows, start, count, dim, Math.Min(planLength, rows.Length));
     }
 
-    private static Tensor SliceFrame(Tensor block, int frameIndex, int h, int w)
-    {
-        int c = (int)block.Shape[1], t = (int)block.Shape[2];
-        Tensor o = new Tensor(new TensorShape([1L, c, 1, h, w]), DType.F32);
-        float* src = (float*)block.DataPointer;
-        float* dst = (float*)o.DataPointer;
-        long frame = (long)h * w;
-        for (int ci = 0; ci < c; ci++)
-            Buffer.MemoryCopy(src + ((long)ci * t + frameIndex) * frame, dst + (long)ci * frame, frame * 4, frame * 4);
-        return o;
-    }
-
-    private static Tensor ConcatFrames(List<Tensor> frames, int h, int w)
-    {
-        int c = (int)frames[0].Shape[1], t = frames.Count;
-        Tensor o = new Tensor(new TensorShape([1L, c, t, h, w]), DType.F32);
-        float* dst = (float*)o.DataPointer;
-        long frame = (long)h * w;
-        for (int ci = 0; ci < c; ci++)
-            for (int f = 0; f < t; f++)
-                Buffer.MemoryCopy((float*)frames[f].DataPointer + (long)ci * frame, dst + ((long)ci * t + f) * frame, frame * 4, frame * 4);
-        return o;
-    }
 }
