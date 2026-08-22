@@ -89,6 +89,21 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// <summary>Timestep the driving stream is anchored to, independent of the denoise loop's.</summary>
     public const float DrivingTimestep = 1.0f;
 
+    /// <summary>The distillation build's <c>log_scale</c> (<c>infer/wan_animate_2_distillation.yaml</c>). The base
+    /// build ships 0, which takes the unmasked attention path.</summary>
+    public const float DistillLogScale = -1.3f;
+
+    /// <summary>Resolves <see cref="WanVideoConfig.Animate2LogScale"/> for a checkpoint. The two builds are
+    /// key-for-key identical and their <c>__metadata__</c> carries only <c>model_type: "animate2"</c>, so the
+    /// FILE NAME is the only discriminator that exists — upstream ships the distillation weights as
+    /// <c>wan_animate_2_bf16_distillation.safetensors</c>. Anything else is treated as the base build, whose 0
+    /// leaves the score bias off entirely.</summary>
+    public static float ResolveLogScale(string? checkpointPath)
+    {
+        string name = Path.GetFileNameWithoutExtension(checkpointPath ?? string.Empty);
+        return name.Contains("distill", StringComparison.OrdinalIgnoreCase) ? DistillLogScale : 0f;
+    }
+
     /// <summary>Scales the driving V at splice time; see <see cref="WanAnimate2SelfAttnContext.PoseStrength"/>.
     /// 1.0 reproduces the reference.</summary>
     public float PoseStrength { get; set; } = 1.0f;

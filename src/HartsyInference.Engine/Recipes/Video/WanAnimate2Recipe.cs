@@ -36,8 +36,9 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate-2", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an
-    /// 81-frame clip at 24 fps. The distillation build's 10 steps at guidance 1.0 are NOT selectable yet — nothing in
-    /// the checkpoint distinguishes the two, and no filename routing is wired.</summary>
+    /// 81-frame clip at 24 fps. The distillation build wants 10 steps at guidance 1.0 instead; only its
+    /// <c>log_scale</c> is routed automatically (<see cref="WanAnimate2Transformer.ResolveLogScale"/>) — the step
+    /// count and guidance stay the caller's, because a filename is too weak a signal to override them on.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 40, CfgScale = 3.0f, Frames = 81, Fps = 24 };
 
     /// <inheritdoc/>
@@ -65,7 +66,13 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
                     $"'{context.CheckpointPath}' has no i2v CLIP image embedder after conversion — Wan-Animate-2 prepends a "
                     + "257-token image context to BOTH streams and cannot run without it.");
             }
-            WanVideoConfig config = WanConfigDetector.Detect(conv.Transformer, isAnimate2: true);
+            // log_scale is a config fact the weights cannot carry: the base and distillation builds are key-for-key
+            // identical and both declare only model_type 'animate2'. Without this the distillation build silently
+            // ran the base build's 0 and lost the score bias upstream trains it with.
+            WanVideoConfig config = WanConfigDetector.Detect(conv.Transformer, isAnimate2: true) with
+            {
+                Animate2LogScale = WanAnimate2Transformer.ResolveLogScale(context.CheckpointPath),
+            };
             if (config.InChannels != 36)
             {
                 throw new InvalidOperationException(

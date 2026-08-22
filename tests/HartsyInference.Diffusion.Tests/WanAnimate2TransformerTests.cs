@@ -260,4 +260,19 @@ public unsafe class WanAnimate2TransformerTests
         using Tensor wrongGrid = Random(new TensorShape([1L, c.InChannels, GenFrames, GridH * 2, GridW * 4]), 56);
         Assert.Throws<ArgumentException>(() => dit.Forward(backend, wrongGrid, encoder, 500f, cache, clip));
     }
+
+    /// <summary>The two Animate-2 builds are key-for-key identical and both declare only
+    /// <c>model_type: "animate2"</c>, so the distillation build's <c>log_scale = -1.3</c> can only come from the file
+    /// name. It never reached the config at all before: <c>WanConfigDetector</c> set <c>IsAnimate2</c> and left the
+    /// score bias at the base build's 0, so a distillation checkpoint silently ran without the bias it was trained
+    /// with, and <c>LogScaleBias</c> took the null/unmasked path.</summary>
+    [Theory]
+    [InlineData("wan_animate_2_bf16_distillation.safetensors", -1.3f)]
+    [InlineData("/models/Wan/Animate2/WAN_ANIMATE_2_DISTILL.safetensors", -1.3f)]
+    [InlineData("wan_animate_2_bf16.safetensors", 0f)]
+    [InlineData("wan_animate_2_int8_convrot.safetensors", 0f)]
+    public void ResolveLogScale_RoutesTheDistillationBuildByName(string path, float expected)
+    {
+        Assert.Equal(expected, WanAnimate2Transformer.ResolveLogScale(path));
+    }
 }

@@ -89,11 +89,25 @@ suspects #1 and #2 name.** Frame index alone is not it either: frame 20 is sharp
    `[false,true,true]` temporal-downsample layout.
 5. **A per-frame-index VAE decode decay.** Output frame 20 is sharp at T=7 and mush at T=12.
 
-**Upstream settings, read from the repo (`infer/wan_animate_2*.yaml`, `wan_animate_2_demo.py`):**
-base = 40 steps / guidance 3.0 / `log_scale 0.0`; distillation = 10 steps / guidance 1.0 / `log_scale -1.3`.
-Both yamls sample at shift 5.0. Our checkpoint renders excellently at 6 steps / cfg 1, which is distillation
-behaviour — so `Animate2LogScale` may well be live rather than inert here. `__metadata__` carries only
-`{"transformer": {"model_type": "animate2"}}`; there is no distill marker in the file.
+### The settings we have been running are not a supported configuration
+
+**Upstream (`infer/wan_animate_2*.yaml`, `wan_animate_2_demo.py`):** base = 40 steps / guidance 3.0 /
+`log_scale 0.0`; distillation = 10 steps / guidance 1.0 / `log_scale -1.3`. Both sample at shift 5.0.
+
+**ComfyUI's shipped template for THIS checkpoint** (`comfyui_workflow_templates_json/video_wan_animate2.json`)
+runs `wan_animate_2_int8_convrot` at 6 steps, `lcm`, `simple`, cfg 1, `ModelSamplingSD3` shift 5 — **with
+`LoraLoaderModelOnly(lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16, 1.0)`**. The few-step behaviour is
+the LoRA's. The checkpoint itself is the **base** build, so `log_scale = 0` is correct for it.
+
+⇒ **"Best known settings: 6 steps, cfg 1" reproduced that template with its load-bearing LoRA removed.** A raw
+base Wan-14B at 6 steps with no guidance is expected to render hazy; a short clip masks it because the
+reference latent frame carries proportionally more of the result. That alone predicts the whole T curve
+without any engine defect, so it has to be excluded before any layer-diff.
+
+⚠️ **We cannot apply that LoRA at all**: `LoraApplier` throws `Unsupported dtype conversion: I8 → F32` on the
+int8-convrot checkpoint, and the Wan LoRA reader additionally **skips every `diff`/`diff_b` full-weight key
+with a warning** — lightx2v is full of bias and norm diffs. Two real gaps, and together they are why the
+supported configuration has never been run here.
 
 ⚠️ **Every failing datapoint so far was collected with two non-reference switches ON in the service unit:**
 `HARTSY_ANIMATE2_BF16_DRIVING_CACHE=1` and `HARTSY_ANIMATE2_POSE_STRENGTH_X100=120`. The BF16 driving cache has
