@@ -4,6 +4,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -112,6 +113,21 @@ internal static class VideoRecipeUtils
             result.Add(new VideoFrame { Rgb = edited[i], Width = width, Height = height, Index = i });
         }
         return result;
+    }
+
+    /// <summary>Colour-matches every frame of a continuation chunk to the static reference image's Lab stats in place, so drift cannot compound through the carried-frame chain. Chunk 0 is never touched — single-chunk generations stay byte-identical — and <paramref name="strength"/> &lt;= 0 is a no-op.</summary>
+    internal static void CorrectContinuationChunk(byte[][] frames, int width, int height, int chunkIndex,
+        in VideoColorMatch.LabStats referenceStats, float strength)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        if (chunkIndex <= 0 || strength <= 0f)
+        {
+            return;
+        }
+        foreach (byte[] frame in frames)
+        {
+            VideoColorMatch.MatchToReference(frame, width, height, referenceStats, strength);
+        }
     }
 
     /// <summary>Bilinear-resamples an <see cref="ImageData"/> to interleaved HWC RGB24 at the target size (the

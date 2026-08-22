@@ -159,6 +159,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                     + $"{chunkLen}f with a {WanAnimate2Pipeline.ChunkOverlapFrames}-frame carry.");
             }
 
+            // Anti-drift stats come from the reference image's OWN pixels — content only, never the letterboxed
+            // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
+            float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
+            VideoColorMatch.LabStats refColorStats = colorStrength > 0f
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
+                : default;
+
             List<byte[]> assembled = new List<byte[]>();
             byte[]? carriedFrame = null;
             int start = 0, chunkIndex = 0, outW = width, outH = height;
@@ -209,6 +216,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         carriedRgbFrame: carriedTensor, sampler: request.Sampler, onProgress: bridge);
                     outW = chunkW;
                     outH = chunkH;
+                    // Before the trim/append, so the emitted frames and the carried anchor are fixed in one pass.
+                    VideoRecipeUtils.CorrectContinuationChunk(frames, chunkW, chunkH, chunkIndex, refColorStats, colorStrength);
                     // Chunk > 0 re-renders the carried frame; upstream drops exactly first_num leading frames.
                     int trim = chunkIndex == 0 ? 0 : WanAnimate2Pipeline.ChunkOverlapFrames;
                     for (int i = trim; i < frames.Length; i++)

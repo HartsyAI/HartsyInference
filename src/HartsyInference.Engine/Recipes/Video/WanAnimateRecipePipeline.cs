@@ -157,6 +157,13 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 FlowShift = request.FlowShift ?? DefaultFlowShift,
             };
 
+            // Anti-drift stats come from the reference image's OWN pixels — content only, never the letterboxed
+            // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
+            float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
+            VideoColorMatch.LabStats refColorStats = colorStrength > 0f
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
+                : default;
+
             List<byte[]> assembled = new List<byte[]>();
             int chunkLen = numFrames;
             int totalFrames = numFrames;
@@ -226,6 +233,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                     StoreConditioning(cacheable, cacheKey, used);
                     outW = chunkW;
                     outH = chunkH;
+                    // Before the trim/append, so the emitted frames and the carried motion prefix are fixed in one pass.
+                    VideoRecipeUtils.CorrectContinuationChunk(frames, chunkW, chunkH, chunkIndex, refColorStats, colorStrength);
                     for (int i = trimImage; i < frames.Length; i++)
                     {
                         assembled.Add(frames[i]);

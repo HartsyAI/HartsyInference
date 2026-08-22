@@ -109,6 +109,9 @@ public sealed record VideoRequest
     /// costs that many re-rendered frames per chunk.</summary>
     public int AnimateContinueMotionFrames { get; init; } = 5;
 
+    /// <summary>Wan-Animate chunked extension: strength (0..1) of the per-chunk colour correction — every chunk after the first is Lab mean/std-matched to the reference image so colour drift cannot compound through the carried-frame chain. Null = 1 (fully matched); 0 disables. Chunk 0 is never touched, so single-chunk generations are unaffected at any value.</summary>
+    public double? AnimateColorCorrection { get; init; }
+
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }
 
