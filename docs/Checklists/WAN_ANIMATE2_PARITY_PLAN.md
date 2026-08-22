@@ -46,7 +46,7 @@ Three changes, all in the engine (not the recipe):
    transient cuDNN failure does land mid-generation.
 
 **Measured 2026-08-22, RTX 4090 (nvidia-smi index 1), distill checkpoint, 6 steps / cfg 1 / seed 424650,
-`ref_dany_portrait.png` + `drive_half.mp4`:** 480x800 / 61 frames completes in 169 s at **22285 MiB peak**, no
+`ref_dany_portrait.png` + `drive_half.mp4`:** 480x800 / 61 frames completes in 142 s at **22093 MiB peak** (169 s before the VAE-encode host-round-trip fix `07439663`), no
 OOM, `[cuDNN SDPA] fused flash-attention engaged (D=128)` and no `permanently disabled` line in the journal.
 Frames 2 / 30 / 58 at full resolution are sharp — fabric weave and background props legible, identity held,
 and the subject genuinely turns through the clip rather than holding a smeared portrait.
@@ -73,3 +73,11 @@ for this model" at load. Pooling the 3060's 12 GB was not needed to fit this geo
 
 Neither of these has a home yet in `MODEL_STATUS_VIDEO.md` (which currently has no Wan-Animate-2 entry at
 all) — add one there rather than letting this file be the only record.
+
+## Driving-cache dtype is now automatic (`9db28bf5`)
+
+The BF16 driving cache is no longer a machine-local env drop-in. `HARTSY_ANIMATE2_BF16_DRIVING_CACHE`
+accepts `auto` (default when unset) / `on` / `off`; auto honours the global low-VRAM policy, then measures
+free VRAM (trim-first) and keeps F32 only when it fits beside the weight plan. Resolved once per
+generation in the recipe and relayed per-request. A pre-flight check refuses infeasible geometry before
+any VAE encode, naming the largest frame count that fits.

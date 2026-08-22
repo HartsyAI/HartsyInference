@@ -45,6 +45,16 @@ LTX-2.5 **quality** measurement taken before that deploy sampled a different sch
 It does **not** void the perf rows: the stretch changes the sigma values, not the step count or the per-step
 work, so wall-clock and ms/step figures taken before it stand.
 
+## Wan-Animate-2
+
+| config | hardware | wall | peak VRAM | date |
+|---|---|---|---|---|
+| distill int8_convrot, 480x800, 61f, 6 steps, cfg 1 | RTX 4090 | **142.1 s** | 22093 MiB | 2026-08-22 |
+
+Auto BF16 driving cache (policy `9db28bf5`), colour-drift correction on (`70d2c251`, single-chunk
+byte-identical). 77f chunked 720x1200 (4x21f): 433.9 s / 23822 MiB with correction — cost vs strength-0 is
+noise-level.
+
 ## Findings that must not be re-discovered
 
 Distilled from the LTX-2.5 perf/quality investigation (2026-08-12 through 2026-08-15). The full session-by-session
