@@ -53,16 +53,37 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     private readonly IWanVaeEncoder _encoder;
     private readonly WanVideoConfig _config;
 
-    /// <summary>Opt-in halving of the driving cache to BF16. Off because the rest of the forward is F32, so it is a
-    /// divergence from the reference and from ComfyUI alike, and it has had no real-weight quality run.</summary>
-    public const string Bf16DrivingCacheSwitch = "HARTSY_ANIMATE2_BF16_DRIVING_CACHE";
+    /// <summary>Explicit driving-cache dtype override; unset = auto. See <see cref="WanAnimate2DrivingCachePolicy"/>,
+    /// which owns the resolution.</summary>
+    public const string Bf16DrivingCacheSwitch = WanAnimate2DrivingCachePolicy.EnvironmentVariable;
 
     /// <summary>Measured per-token activation slope of the Animate denoise loop, reused here — the block internals
     /// are the same Wan i2v ones, and the binding constraint is activations rather than weights.</summary>
     private const long ActivationBytesPerToken = 671_089;
 
     /// <summary>Allowance for cuBLAS workspace, the prefetch window and pool slack, on top of the token-scaled term.</summary>
-    private const long FixedHeadroomBytes = 1L << 30;
+    public const long FixedHeadroomBytes = 1L << 30;
+
+    /// <summary>Activation + workspace headroom a chunk at <paramref name="tokenLoad"/> reserves before weights are
+    /// placed — the exact quantity <see cref="GenerateChunk"/> hands to <see cref="BlockStreamingScope"/>, shared so
+    /// the recipe's up-front dtype decision and the chunk's placement cannot disagree.</summary>
+    public static long ActivationReserveBytes(long tokenLoad) =>
+        Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
+            tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
+
+    /// <summary>Weights that must sit on the device even with every block streamed: the shared (non-block) weights
+    /// plus the prefetch window. The floor a feasibility check charges against free VRAM.</summary>
+    public static long StreamedWeightFloorBytes(WanAnimate2Transformer transformer)
+    {
+        ArgumentNullException.ThrowIfNull(transformer);
+        long shared = 0;
+        foreach (Tensor t in transformer.EnumerateSharedWeights())
+        {
+            shared += t.DType.ComputeByteCount(t.ElementCount);
+        }
+        const int prefetchWindowBlocks = 3;   // BlockStreamingOptions.PrefetchAhead default (2) + the active block
+        return shared + prefetchWindowBlocks * transformer.GetBlock(0).EstimatedWeightBytes;
+    }
 
     public WanAnimate2Pipeline(IBackend backend, WanAnimate2Transformer transformer, IWanVaeDecoder vae,
         IWanVaeEncoder encoder, WanVideoConfig config)
@@ -233,13 +254,18 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             (int pt, int ph, int pw) = _config.PatchSize;
             (int T, int H, int W) genGrid = (tTotal / pt, hLat / ph, wLat / pw);
             long tokenLoad = (long)genGrid.T * genGrid.H * genGrid.W;
-            bool bf16Cache = EnvSwitch.IsEnabled(Bf16DrivingCacheSwitch, false);
+            // The recipe resolves the dtype once per generation and relays it here, so a chunked video cannot mix
+            // cache dtypes as free VRAM shifts between chunks; the fallback is for direct GenerateChunk callers.
+            bool bf16Cache = (request as VideoGenerationRequest)?.Animate2Bf16DrivingCache
+                ?? WanAnimate2DrivingCachePolicy.Resolve(Backend,
+                    _transformer.DrivingCacheBytes(genGrid, bf16Cache: false),
+                    _transformer.DrivingCacheBytes(genGrid, bf16Cache: true),
+                    ActivationReserveBytes(tokenLoad), StreamedWeightFloorBytes(_transformer));
             // The driving cache is built after this placement is chosen but outlives every step of it, so it is
             // headroom, not activation churn. Omitting it let the planner keep all 40 blocks resident and then OOM
             // on the cache with the card genuinely full.
             long drivingCacheBytes = _transformer.DrivingCacheBytes(genGrid, bf16Cache);
-            long headroomBytes = Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
-                tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes) + drivingCacheBytes;
+            long headroomBytes = ActivationReserveBytes(tokenLoad) + drivingCacheBytes;
             // Opened before the prepass, not just around the loop: EncodeDriving is a full 40-block forward and
             // needs the same streaming budget the denoise steps do.
             stream = BlockStreamingScope.Open(new BlockStreamingOptions

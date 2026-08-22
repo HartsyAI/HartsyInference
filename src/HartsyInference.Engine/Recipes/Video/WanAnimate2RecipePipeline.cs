@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -108,6 +109,9 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         {
             throw new InvalidOperationException($"Wan-Animate-2 needs at least 5 frames per chunk; got {chunkLen}.");
         }
+        // Once per generation, before any encode: refuses infeasible geometry and fixes the driving-cache dtype
+        // for every chunk (per-chunk resolution could mix dtypes as free VRAM shifts between chunks).
+        bool bf16DrivingCache = PlanDrivingCache(width, height, chunkLen);
 
         string negative = string.IsNullOrWhiteSpace(request.NegativePrompt)
             ? WanVideoRecipe.DefaultNegativePrompt
@@ -197,6 +201,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         CfgScale = cfgScale,
                         Seed = baseSeed + chunkIndex,
                         FlowShift = request.FlowShift ?? WanAnimate2Pipeline.DefaultFlowShift,
+                        Animate2Bf16DrivingCache = bf16DrivingCache,
                     };
                     (byte[][] frames, int chunkW, int chunkH, int _) = _pipeline.GenerateChunk(
                         promptEmbeds, negEmbeds, drivingEmbeds, referenceRgb, drivingClip, inner,
@@ -276,6 +281,65 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         // Refuse an unrunnable sampler up front, not after the text encoder and VAE have already run.
         WanAnimate2Pipeline.ResolveSampler(request.Sampler);
     }
+
+    /// <summary>One trim + one free-VRAM query serving two decisions: refuses a geometry that cannot fit even with the BF16 cache and a fully-streamed DiT (naming the largest chunk length that would), then resolves the driving-cache dtype for the whole generation via <see cref="WanAnimate2DrivingCachePolicy"/>. Runs before any encode, so an infeasible request costs nothing. Backends reporting no VRAM (CPU) skip the refusal and resolve to F32.</summary>
+    /// <remarks>The feasibility floor deliberately excludes the per-token activation reserve: that reserve is a
+    /// planning allowance the streaming scope clamps against, and it over-predicts the measured peak — charging it
+    /// here would refuse geometries that demonstrably run (480x800/61f). The BF16 cache is the immovable resident
+    /// object; activations are elastic under per-step frees.</remarks>
+    private bool PlanDrivingCache(int width, int height, int chunkLen)
+    {
+        (int T, int H, int W) genGrid = GenerationGrid(width, height, chunkLen);
+        long tokenLoad = (long)genGrid.T * genGrid.H * genGrid.W;
+        long f32Cache = _transformer.DrivingCacheBytes(genGrid, bf16Cache: false);
+        long bf16Cache = _transformer.DrivingCacheBytes(genGrid, bf16Cache: true);
+        long weightFloor = WanAnimate2Pipeline.StreamedWeightFloorBytes(_transformer);
+        // Pooled frees under-report until trimmed — the VramPlanner.TrimBeforeQuery rationale.
+        _backend.TrimMemoryPool();
+        (long freeBytes, _) = _backend.GetVramInfo();
+        long floorBytes = bf16Cache + WanAnimate2Pipeline.FixedHeadroomBytes + weightFloor;
+        if (freeBytes > 0 && floorBytes > freeBytes)
+        {
+            int feasible = LargestFeasibleChunkFrames(width, height, chunkLen, freeBytes - weightFloor);
+            string advice = feasible > 0
+                ? $" At {width}x{height} the longest chunk that fits is {feasible} frames — lower --frames (or "
+                    + "animatetotalframes chunking will still need --frames at or below that)."
+                : $" Not even the shortest chunk fits at {width}x{height} — lower the resolution.";
+            throw new OutOfVramException(
+                $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the BF16 driving cache "
+                + $"({Mb(bf16Cache)}) plus workspace ({Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
+                + $"streamed DiT ({Mb(weightFloor)}) needs {Mb(floorBytes)}, but only {Mb(freeBytes)} is free."
+                + advice);
+        }
+        return WanAnimate2DrivingCachePolicy.Resolve(_backend, f32Cache, bf16Cache,
+            WanAnimate2Pipeline.ActivationReserveBytes(tokenLoad), weightFloor, measuredFreeBytes: freeBytes);
+    }
+
+    /// <summary>The generation stream's token grid for a chunk — the same divisions <c>GenerateChunk</c> performs, so the up-front decision and the chunk placement cannot drift apart.</summary>
+    private (int T, int H, int W) GenerationGrid(int width, int height, int chunkFrames)
+    {
+        (int pt, int ph, int pw) = _config.PatchSize;
+        int sp = _config.VaeSpatialCompression;
+        int tTotal = WanAnimate2Pipeline.GenerationLatentFrames(chunkFrames, _config.VaeTemporalCompression);
+        return (tTotal / pt, height / sp / ph, width / sp / pw);
+    }
+
+    /// <summary>The longest chunk whose BF16 cache + workspace fits <paramref name="budgetBytes"/>, walking the causal-VAE frame grid down from the request; 0 = the resolution is the problem, not the length.</summary>
+    private int LargestFeasibleChunkFrames(int width, int height, int chunkLen, long budgetBytes)
+    {
+        for (int candidate = chunkLen - _config.VaeTemporalCompression; candidate >= 5;
+            candidate -= _config.VaeTemporalCompression)
+        {
+            long bytes = _transformer.DrivingCacheBytes(GenerationGrid(width, height, candidate), bf16Cache: true);
+            if (bytes + WanAnimate2Pipeline.FixedHeadroomBytes <= budgetBytes)
+            {
+                return candidate;
+            }
+        }
+        return 0;
+    }
+
+    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 
     /// <summary>The driving stream's umT5 prompt, or upstream's boilerplate when the caller supplied none.</summary>
     private static string ResolveDrivingPrompt(VideoRequest request)
