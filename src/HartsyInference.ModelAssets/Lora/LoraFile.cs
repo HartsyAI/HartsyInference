@@ -20,6 +20,9 @@ public sealed class LoraFile : IDisposable
     /// <summary>Parsed LoRA layers, each pairing a canonical target weight key with its down/up matrices.</summary>
     public required IReadOnlyList<LoraLayer> Layers { get; init; }
 
+    /// <summary>Full-weight <c>.diff</c>/<c>.diff_b</c> deltas (Comfy-style Wan repacks); empty for formats without them.</summary>
+    public IReadOnlyList<LoraFullWeightDiff> FullWeightDiffs { get; init; } = [];
+
     /// <summary>Optional per-file training metadata extracted from the safetensors __metadata__ dictionary (e.g. ss_network_module, ss_network_alpha). Null when the file has no metadata block.</summary>
     public IReadOnlyDictionary<string, string>? Metadata { get; init; }
 
@@ -38,6 +41,7 @@ public sealed class LoraFile : IDisposable
                     $"Could not detect LoRA format for '{filePath}'. Sample keys: {string.Join(", ", sample)}");
             }
 
+            IReadOnlyList<LoraFullWeightDiff> fullWeightDiffs = [];
             IReadOnlyList<LoraLayer> layers = format switch
             {
                 LoraFormat.KohyaSd15 or LoraFormat.KohyaSdxl => KohyaSdMapper.ParseLayers(loader, format),
@@ -46,17 +50,19 @@ public sealed class LoraFile : IDisposable
                 LoraFormat.DiffusersFlux => DiffusersFluxMapper.ParseLayers(loader),
                 LoraFormat.DiffusersBareDit => DiffusersFluxMapper.ParseLayers(loader, bareRoots: true),
                 LoraFormat.ComfyBflDit => KohyaFluxMapper.ParseLayers(loader, dottedBflRoots: true),
-                LoraFormat.KohyaWan or LoraFormat.DiffusersWan => WanLoraMapper.ParseLayers(loader, format),
+                LoraFormat.KohyaWan or LoraFormat.DiffusersWan => WanLoraMapper.ParseLayers(loader, format, out fullWeightDiffs),
                 _ => throw new NotSupportedException($"LoRA format {format} parsing not implemented."),
             };
 
-            Logs.Info($"Loaded LoRA '{Path.GetFileName(filePath)}' (format={format}, layers={layers.Count}).");
+            string diffNote = fullWeightDiffs.Count > 0 ? $", fullWeightDiffs={fullWeightDiffs.Count}" : "";
+            Logs.Info($"Loaded LoRA '{Path.GetFileName(filePath)}' (format={format}, layers={layers.Count}{diffNote}).");
 
             LoraFile file = new()
             {
                 FilePath = filePath,
                 Format = format,
                 Layers = layers,
+                FullWeightDiffs = fullWeightDiffs,
                 Metadata = null,
             };
             file._loader = loader;

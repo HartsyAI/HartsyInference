@@ -6,7 +6,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.Lora;
 
-/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path.</summary>
+/// <summary>Composes one or more LoRAs into a single weight-space delta and merges it into a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path. Full-weight .diff/.diff_b deltas (Comfy-style Wan repacks) merge through the same pass as W' = W + strength·diff.</summary>
 public sealed class LoraStack : IDisposable
 {
     private readonly List<Entry> _entries = [];
@@ -210,12 +210,102 @@ public sealed class LoraStack : IDisposable
             }
         }
 
+        // Full-weight .diff/.diff_b deltas (Comfy-style Wan repacks): W' = W + strength·diff, no decomposition.
+        // Bias and weight diffs on the same module carry different canonical keys, so they never collide here, and a
+        // key can never collide with the low-rank pass above (.weight low-rank targets are linears, .weight diffs
+        // are norms). No fused-QKV fallback: Wan checkpoints keep attention split, and a miss warns by name.
+        Dictionary<string, List<(Tensor Diff, float Strength)>> diffGrouped = [];
+        foreach (Entry entry in _entries)
+        {
+            foreach (LoraFullWeightDiff diff in entry.File.FullWeightDiffs)
+            {
+                if (diff.Target != target) continue;
+                if (!diffGrouped.TryGetValue(diff.TargetKey, out List<(Tensor, float)>? list))
+                {
+                    list = [];
+                    diffGrouped[diff.TargetKey] = list;
+                }
+                list.Add((diff.Diff, entry.Strength));
+            }
+        }
+        foreach ((string canonicalKey, List<(Tensor Diff, float Strength)> deltas) in diffGrouped)
+        {
+            if (!weights.TryGetValue(canonicalKey, out Tensor? baseW))
+            {
+                Logs.Warning($"LoRA full-weight diff target '{canonicalKey}' not present in {target} weights; skipping.");
+                continue;
+            }
+            DType originalDtype = baseW.DType;
+            if (originalDtype.IsFp8 && baseW.Shape.Rank != 2)
+            {
+                throw new HartsyInferenceException(
+                    $"LoRA cannot merge into fp8 weight '{canonicalKey}': requantizing against a per-tensor scale needs "
+                    + $"a 2-D Linear weight, got {baseW.Shape} ({originalDtype}).");
+            }
+            if (deltas.Exists(d => d.Diff.Shape != baseW.Shape))
+            {
+                Logs.Warning($"LoRA full-weight diff for '{canonicalKey}' does not match the checkpoint's weight shape "
+                    + $"{baseW.Shape} — this LoRA was trained against a different build of this architecture; "
+                    + "skipping this weight.");
+                skippedShape++;
+                continue;
+            }
+            if (baseW.DType.IsQuantized && !baseW.DType.IsFp8)
+            {
+                throw new NotSupportedException(
+                    $"LoRA weights can't be merged into a GGUF-quantized checkpoint (weight '{canonicalKey}' is "
+                    + $"{baseW.DType.Name}). Use a safetensors build of this model (fp16/bf16/fp8) with LoRAs, or "
+                    + "remove the LoRA.");
+            }
+
+            Tensor accumF32 = baseW.CastTo(DType.F32);
+            try
+            {
+                foreach ((Tensor diff, float strength) in deltas)
+                {
+                    Tensor diffF32 = diff.CastTo(DType.F32);
+                    try
+                    {
+                        backend.Scale(diffF32, diffF32, strength);
+                        backend.Add(accumF32, accumF32, diffF32);
+                    }
+                    finally
+                    {
+                        diffF32.Dispose();
+                    }
+                }
+
+                Tensor finalTensor;
+                if (originalDtype.IsFp8)
+                {
+                    finalTensor = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(accumF32, canonicalKey);
+                    finalTensor.Fp8InputScaleFactor = baseW.Fp8InputScaleFactor;
+                }
+                else
+                {
+                    finalTensor = originalDtype == DType.F32 ? accumF32 : accumF32.CastTo(originalDtype);
+                }
+                if (!ReferenceEquals(finalTensor, accumF32))
+                {
+                    accumF32.Dispose();
+                }
+                _ownedMerged.Add(finalTensor);
+                weights[canonicalKey] = finalTensor;
+                merged++;
+            }
+            catch
+            {
+                accumF32.Dispose();
+                throw;
+            }
+        }
+
         if (merged > 0 || skippedShape > 0)
         {
             // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
             // silent skip reads as success while the LoRA does only part of its job.
             string skipped = skippedShape > 0 ? $" ({skippedShape} skipped on shape mismatch)" : "";
-            Logs.Info($"Merged {merged} of {grouped.Count} LoRA-targeted weights into {target}{skipped}.");
+            Logs.Info($"Merged {merged} of {grouped.Count + diffGrouped.Count} LoRA-targeted weights into {target}{skipped}.");
         }
         return merged;
     }
