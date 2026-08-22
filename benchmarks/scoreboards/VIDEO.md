@@ -50,10 +50,14 @@ work, so wall-clock and ms/step figures taken before it stand.
 | config | hardware | wall | peak VRAM | date |
 |---|---|---|---|---|
 | distill int8_convrot, 480x800, 61f, 6 steps, cfg 1 | RTX 4090 | **142.1 s** | 22093 MiB | 2026-08-22 |
+| distill int8_convrot, 720x1200, 77f chunked 4x21f, 6 steps, cfg 1 | RTX 4090 | **436.3 s** | 24019 MiB | 2026-08-22 |
+| base int8_convrot + lightx2v LoRA merge, 480x800, 61f, 6 steps, cfg 1 | RTX 4090 | **208.6 s** (61 s of it LoRA merge, cold) | 23286 MiB | 2026-08-22 |
 
 Auto BF16 driving cache (policy `9db28bf5`), colour-drift correction on (`70d2c251`, single-chunk
 byte-identical). 77f chunked 720x1200 (4x21f): 433.9 s / 23822 MiB with correction — cost vs strength-0 is
-noise-level.
+noise-level. 720x1200 single-shot tops out below the pre-flight's estimate: 81f refuses naming 57f, but
+57f then OOMs for real inside `EncodeDriving` (2669 MB short) — chunked `animatetotalframes` is the working
+route at this resolution.
 
 ## Findings that must not be re-discovered
 
