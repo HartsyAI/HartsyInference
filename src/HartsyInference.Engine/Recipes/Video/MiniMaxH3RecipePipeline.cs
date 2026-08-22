@@ -102,12 +102,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         // over different deltas — video over -dSigma, audio over -dSigma scaled by the schedule map's derivative —
         // whereas ISampler.Step advances a single latent per evaluation. Splitting it into two samplers would double
         // the forwards, which is the whole cost of the generation.
-        if (FlowMatchSampling.IsNonDefault(request.Sampler))
+        if (FlowMatchSampling.IsNonDefault(request.Sampler) || FlowMatchSampling.IsAnySelection(request.Scheduler))
         {
             throw new NotSupportedException(
-                $"Sampler/schedule '{request.Sampler}' is not available on MiniMax-H3: one DiT forward drives both the "
-                + "video and the audio latent on different schedules, which the single-latent sampler seam cannot "
-                + "express. Leave the sampler unset.");
+                $"Sampler/schedule '{request.Sampler ?? request.Scheduler}' is not available on MiniMax-H3: one DiT "
+                + "forward drives both the video and the audio latent on different schedules, which the single-latent "
+                + "sampler seam cannot express. Leave the sampler and schedule unset.");
         }
         // Tier 3.8: <refcrop:N,query[,threshold]> auto-crops reference image N to a CLIPSeg-matched region before
         // it reaches EncodeReferences below. Must run before request.Prompt is read anywhere (line ~191's text

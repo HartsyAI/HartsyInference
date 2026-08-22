@@ -46,12 +46,50 @@ public static class SamplingParamResolver
     public static string? ResolveSchedulerName(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        string? requested = !string.IsNullOrWhiteSpace(request.Sampler) ? request.Sampler
-            : !string.IsNullOrWhiteSpace(request.Scheduler) ? request.Scheduler
-            : null;
-        if (requested is null)
+        return Resolve(request.Sampler, request.Scheduler);
+    }
+
+    /// <summary>The video overload. Same contract as the image one; video families that cannot honor a selection refuse
+    /// by name from inside their pipeline rather than substituting their own solver.</summary>
+    /// <exception cref="NotSupportedException">The requested sampler or sigma schedule is not available.</exception>
+    public static string? ResolveSchedulerName(VideoRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return Resolve(request.Sampler, request.Scheduler);
+    }
+
+    /// <summary>Combines the two orthogonal selections a SwarmUI/ComfyUI host sends — an integrator and a sigma schedule,
+    /// chosen from separate dropdowns — into the single string the pipelines split back apart.
+    ///
+    /// <para>The two are independent, so all four combinations must resolve: sampler alone, schedule alone
+    /// (<c>euler</c> is implied, which is what the host's own default means), both, and neither. A sampler value that
+    /// already carries its own suffix (a compound pasted out of a shared workflow) wins over a separately-named
+    /// schedule, because that spelling is the more specific statement of intent.</para></summary>
+    private static string? Resolve(string? sampler, string? schedule)
+    {
+        bool hasSampler = !string.IsNullOrWhiteSpace(sampler);
+        bool hasSchedule = !string.IsNullOrWhiteSpace(schedule);
+        if (!hasSampler && !hasSchedule)
         {
             return null;
+        }
+
+        string requested;
+        if (!hasSampler)
+        {
+            // Schedule-only: name Euler explicitly so the value round-trips through SplitCompound as a compound.
+            requested = $"euler_{schedule!.Trim()}";
+        }
+        else if (!hasSchedule || SamplerRegistry.SplitCompound(sampler).Schedule is not null)
+        {
+            requested = sampler!;
+        }
+        else
+        {
+            string scheduleKey = schedule!.Trim().ToLowerInvariant();
+            // "normal" is the identity schedule and is NOT a recognized suffix (SplitCompound skips it deliberately),
+            // so appending it would produce a name nothing can split.
+            requested = scheduleKey is "normal" or "default" ? sampler! : $"{sampler!.Trim()}_{scheduleKey}";
         }
 
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(requested);

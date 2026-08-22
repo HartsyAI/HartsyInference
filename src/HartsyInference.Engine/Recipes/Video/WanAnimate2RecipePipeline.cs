@@ -275,6 +275,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
         // Refuse an unrunnable sampler up front, not after the text encoder and VAE have already run.
         WanAnimate2Pipeline.ResolveSampler(request.Sampler);
+        // Both of this family's solvers own their sigma spacing, so a named schedule has nothing to re-space.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{request.Scheduler}' is not available on Wan-Animate-2 — its solvers sample over "
+                + "get_sampling_sigmas and own their own spacing. Leave the schedule unset.");
+        }
     }
 
     /// <summary>The driving stream's umT5 prompt, or upstream's boilerplate when the caller supplied none.</summary>

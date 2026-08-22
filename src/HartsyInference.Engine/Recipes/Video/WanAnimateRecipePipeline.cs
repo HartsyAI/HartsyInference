@@ -87,6 +87,14 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 $"Wan-Animate samples with UniPC and has no '{request.Sampler}' implementation — upstream's other "
                 + "choice, dpm++ (FlowDPMSolverMultistep), isn't ported. Clear the sampler or set it to 'unipc'.");
         }
+        // A sigma schedule needs the Euler seam to re-space; UniPC owns its own spacing, so a named schedule cannot
+        // be honored here either and is refused rather than dropped.
+        if (!string.IsNullOrWhiteSpace(request.Scheduler))
+        {
+            throw new NotSupportedException(
+                $"Sigma schedule '{request.Scheduler}' is not available on Wan-Animate — the family samples with "
+                + "UniPC, which owns its own sigma spacing. Leave the schedule unset.");
+        }
         ImageData reference = ResolveReference(request)
             ?? throw new InvalidOperationException(
                 $"Wan-Animate needs a character identity image in VideoRequest.Extra[\"{ReferenceImageKey}\"] (an ImageData) — "

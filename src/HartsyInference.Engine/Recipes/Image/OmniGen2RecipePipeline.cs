@@ -83,6 +83,9 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
             Steps = steps,
             CfgScale = cfg,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),
+            // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+            // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+            Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
 
         Action<GenerationProgress> bridge = p =>

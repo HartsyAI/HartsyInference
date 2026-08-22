@@ -102,6 +102,122 @@ public sealed class SamplingParamResolverTests
         Assert.DoesNotContain("Scheduler = request.Sampler ?? request.Scheduler", sdxl, StringComparison.Ordinal);
     }
 
+    /// <summary>EVERY inner-request construction in the recipe layer must set <c>Scheduler</c>. This is a source read
+    /// rather than a behavioural test because the failure it guards is a silent omission: a recipe that simply never
+    /// assigns the field compiles, runs, and produces a perfectly good image with the user's sampler discarded. That
+    /// is how 22 of 26 image families came to ignore the sampler seam entirely after it was built.
+    ///
+    /// <para>Asserted per construction site, not per file — several pipelines build one request for text-to-image and
+    /// another for their img2img or chunked path, and covering only the first leaves the second silently dropping.</para></summary>
+    [Fact]
+    public void EveryRecipeInnerRequest_SetsTheResolvedScheduler()
+    {
+        // The Wan-Animate pair is exempt BY DESIGN, not by omission: they pick between ported upstream solvers
+        // ('unipc', 'dpm++2m'), and 'unipc' is a name the generic resolver refuses outright as not-yet-implemented.
+        // Routing them through it would reject their own supported value, so each carries its own allow-list guard
+        // instead — asserted by CapabilityTable_AgreesWithTheRecipeRefusalGuards.
+        HashSet<string> ownAllowList =
+            ["WanAnimateRecipePipeline.cs", "WanAnimate2RecipePipeline.cs"];
+        List<string> offenders = [];
+        foreach (string path in RecipeSources())
+        {
+            if (ownAllowList.Contains(Path.GetFileName(path)))
+            {
+                continue;
+            }
+            string source = File.ReadAllText(path);
+            int constructions = CountOccurrences(source, "new TextToImageRequest")
+                + CountOccurrences(source, "new VideoGenerationRequest")
+                + CountOccurrences(source, "new SdxlRefinerRequest");
+            if (constructions == 0)
+            {
+                continue;
+            }
+            int assignments = CountOccurrences(source, "Scheduler = ");
+            if (assignments < constructions)
+            {
+                offenders.Add($"{Path.GetFileName(path)} ({constructions} request(s), {assignments} Scheduler assignment(s))");
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "Recipe pipelines build an inner request without setting Scheduler, so the user's sampler choice is "
+                + $"silently dropped there: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>Every recipe-pipeline source file in the Engine's image and video recipe folders.</summary>
+    private static IEnumerable<string> RecipeSources()
+        => Directory.GetFiles(RepoFile("Recipes/Image"), "*.cs")
+            .Concat(Directory.GetFiles(RepoFile("Recipes/Video"), "*.cs"));
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0;
+        for (int i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+            i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>The two selections are independent dropdowns in a SwarmUI/ComfyUI host, so all four combinations have
+    /// to resolve. Schedule-alone is the one that used to throw: <c>karras</c> is not a sampler name, and the resolver
+    /// checked the sampler slot first.</summary>
+    [Theory]
+    [InlineData("dpmpp_2m", "karras", "dpmpp_2m_karras")]
+    [InlineData("dpmpp_2m_sde", "karras", "dpmpp_2m_sde_karras")]
+    [InlineData(null, "karras", "euler_karras")]
+    [InlineData("dpmpp_2m", null, "dpmpp_2m")]
+    [InlineData("euler", "beta", "euler_beta")]
+    public void SamplerAndSchedule_CombineIntoOneSelection(string? sampler, string? schedule, string expected)
+    {
+        Assert.Equal(expected, SamplingParamResolver.ResolveSchedulerName(Request(sampler, schedule)));
+    }
+
+    /// <summary>An alias in the sampler slot still composes with a schedule. The alias is only resolved AFTER the
+    /// compound is split, so composing first and splitting later has to leave the alias intact.</summary>
+    [Fact]
+    public void AliasedSampler_ComposesWithASchedule()
+    {
+        Assert.Equal("dpm++2m_karras", SamplingParamResolver.ResolveSchedulerName(Request("dpm++2m", "karras")));
+    }
+
+    /// <summary><c>normal</c> is the identity schedule and is deliberately NOT a recognized compound suffix, so it must
+    /// compose to nothing. Appending it would build a name that no longer splits.</summary>
+    [Theory]
+    [InlineData("normal")]
+    [InlineData("default")]
+    public void TheIdentitySchedule_AddsNoSuffix(string schedule)
+    {
+        Assert.Equal("dpmpp_2m", SamplingParamResolver.ResolveSchedulerName(Request("dpmpp_2m", schedule)));
+    }
+
+    /// <summary>A compound pasted into the sampler slot is the more specific statement of intent, so it wins over a
+    /// separately-selected schedule rather than being double-suffixed into something unsplittable.</summary>
+    [Fact]
+    public void ACompoundSamplerWins_OverASeparateSchedule()
+    {
+        Assert.Equal("dpmpp_2m_karras", SamplingParamResolver.ResolveSchedulerName(Request("dpmpp_2m_karras", "beta")));
+    }
+
+    /// <summary>An unknown schedule is refused by name whichever slot it arrives in.</summary>
+    [Fact]
+    public void AnUnknownSchedule_IsRefused()
+    {
+        Assert.Throws<NotSupportedException>(() => SamplingParamResolver.ResolveSchedulerName(Request(null, "align_your_steps")));
+        Assert.Throws<NotSupportedException>(() => SamplingParamResolver.ResolveSchedulerName(Request("dpmpp_2m", "turbo")));
+    }
+
+    /// <summary>The video overload shares the image contract — a video host sends the same two dropdowns.</summary>
+    [Fact]
+    public void TheVideoOverload_CombinesIdentically()
+    {
+        VideoRequest request = new VideoRequest { Prompt = "test", Sampler = "dpmpp_2m", Scheduler = "karras" };
+        Assert.Equal("dpmpp_2m_karras", SamplingParamResolver.ResolveSchedulerName(request));
+    }
+
     /// <summary>Locates an Engine source file from the test binary, walking up to the repo root.</summary>
     private static string RepoFile(string relative)
     {

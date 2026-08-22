@@ -111,6 +111,9 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
                 Steps = preset.NumSteps,
                 CfgScale = 7.0f,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
+                // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
+                // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
+                Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             },
             img2img);
 
