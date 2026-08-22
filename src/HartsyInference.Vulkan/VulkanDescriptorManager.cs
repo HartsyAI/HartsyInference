@@ -192,44 +192,14 @@ public sealed class VulkanDescriptorManager : IDisposable
 
     /// <summary>Records descriptor writes directly into the command buffer via <c>vkCmdPushDescriptorSet</c>. No descriptor set allocation, no pool, no <c>vkUpdateDescriptorSets</c> round-trip. Active when <see cref="PushDescriptorActive"/> is true (set at construction). Safe to call from any recorded dispatch — the descriptors are valid for the next dispatch only, which matches the per-op binding pattern we use.</summary>
     public unsafe void PushSet(nint commandBuffer, ulong pipelineLayout, ReadOnlySpan<ulong> bufferHandles)
-    {
-        int n = bufferHandles.Length;
-        Span<VkDescriptorBufferInfo> infos = stackalloc VkDescriptorBufferInfo[n];
-        Span<VkWriteDescriptorSet> writes = stackalloc VkWriteDescriptorSet[n];
-        for (int i = 0; i < n; i++)
-        {
-            infos[i] = new VkDescriptorBufferInfo
-            {
-                buffer = bufferHandles[i],
-                offset = 0,
-                range = VkConstants.WholeSize,
-            };
-        }
-        fixed (VkDescriptorBufferInfo* pInfos = infos)
-        {
-            for (int i = 0; i < n; i++)
-            {
-                writes[i] = new VkWriteDescriptorSet
-                {
-                    sType = VkStructureType.WriteDescriptorSet,
-                    dstSet = 0,                                       // ignored for push descriptors
-                    dstBinding = (uint)i,
-                    descriptorCount = 1,
-                    descriptorType = VkDescriptorType.StorageBuffer,
-                    pBufferInfo = (nint)(pInfos + i),
-                };
-            }
-            fixed (VkWriteDescriptorSet* pWrites = writes)
-            {
-                delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void> pushFn =
-                    (delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void>)PushDescriptorSetFn();
-                pushFn(commandBuffer, VkPipelineBindPoint.Compute, pipelineLayout, 0, (uint)n, (nint)pWrites);
-            }
-        }
-    }
+        => BindStorageBuffers(bufferHandles, dstSet: 0, push: true, commandBuffer, pipelineLayout);
 
     /// <summary>Writes the bindings for a fresh set: one storage-buffer descriptor per <paramref name="bufferHandles"/>. Buffer offset = 0, range = WHOLE_SIZE.</summary>
     public unsafe void WriteSet(ulong dstSet, ReadOnlySpan<ulong> bufferHandles)
+        => BindStorageBuffers(bufferHandles, dstSet, push: false, commandBuffer: 0, pipelineLayout: 0);
+
+    /// <summary>One storage-buffer descriptor per handle (offset 0, WHOLE_SIZE), delivered either as push descriptors on <paramref name="commandBuffer"/> or as a vkUpdateDescriptorSets write to <paramref name="dstSet"/>.</summary>
+    private unsafe void BindStorageBuffers(ReadOnlySpan<ulong> bufferHandles, ulong dstSet, bool push, nint commandBuffer, ulong pipelineLayout)
     {
         int n = bufferHandles.Length;
         Span<VkDescriptorBufferInfo> infos = stackalloc VkDescriptorBufferInfo[n];
@@ -250,7 +220,7 @@ public sealed class VulkanDescriptorManager : IDisposable
                 writes[i] = new VkWriteDescriptorSet
                 {
                     sType = VkStructureType.WriteDescriptorSet,
-                    dstSet = dstSet,
+                    dstSet = push ? 0 : dstSet,                       // ignored for push descriptors
                     dstBinding = (uint)i,
                     descriptorCount = 1,
                     descriptorType = VkDescriptorType.StorageBuffer,
@@ -259,7 +229,16 @@ public sealed class VulkanDescriptorManager : IDisposable
             }
             fixed (VkWriteDescriptorSet* pWrites = writes)
             {
-                VulkanApi.vkUpdateDescriptorSets(_device, (uint)n, (nint)pWrites, 0, 0);
+                if (push)
+                {
+                    delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void> pushFn =
+                        (delegate* unmanaged<nint, VkPipelineBindPoint, ulong, uint, uint, nint, void>)PushDescriptorSetFn();
+                    pushFn(commandBuffer, VkPipelineBindPoint.Compute, pipelineLayout, 0, (uint)n, (nint)pWrites);
+                }
+                else
+                {
+                    VulkanApi.vkUpdateDescriptorSets(_device, (uint)n, (nint)pWrites, 0, 0);
+                }
             }
         }
     }
