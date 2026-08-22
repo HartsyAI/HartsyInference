@@ -1,5 +1,6 @@
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using Xunit;
 
@@ -144,6 +145,84 @@ public sealed class SamplingParamResolverTests
             offenders.Count == 0,
             "Recipe pipelines build an inner request without setting Scheduler, so the user's sampler choice is "
                 + $"silently dropped there: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>The capability table and the pipelines' own refusal guards must agree. A family the table advertises as
+    /// seam-carrying, whose recipe layer refuses any selection, would have SwarmUI offer a dropdown whose every value
+    /// fails at generation time — the table drifting from the code it describes.</summary>
+    [Fact]
+    public void CapabilityTable_AgreesWithTheRecipeRefusalGuards()
+    {
+        (string Family, string File)[] refusing =
+        [
+            ("minimax-h3", "Recipes/Video/MiniMaxH3RecipePipeline.cs"),
+            ("wan-animate", "Recipes/Video/WanAnimateRecipePipeline.cs"),
+            ("wan-animate-2", "Recipes/Video/WanAnimate2RecipePipeline.cs"),
+        ];
+        foreach ((string family, string file) in refusing)
+        {
+            string source = File.ReadAllText(RepoFile(file));
+            Assert.True(
+                source.Contains("NotSupportedException", StringComparison.Ordinal),
+                $"{family} is pinned as sampler-restricted but its recipe carries no refusal.");
+            Assert.Empty(SamplingCapabilities.ForVideo(family).Schedules);
+        }
+
+        // The seam families must not be advertised as solver-owned, and vice versa.
+        Assert.NotEmpty(SamplingCapabilities.ForImage("flux1").Samplers);
+        Assert.NotEmpty(SamplingCapabilities.ForImage("flux1").Schedules);
+        Assert.Empty(SamplingCapabilities.ForImage("ideogram4").Samplers);
+        Assert.Empty(SamplingCapabilities.ForImage("lumina2").Samplers);
+        Assert.Empty(SamplingCapabilities.ForImage("lance-image").Samplers);
+        Assert.Empty(SamplingCapabilities.ForVideo("wan").Samplers);
+        // The refiner runs the legacy scheduler names but owns its spacing.
+        Assert.NotEmpty(SamplingCapabilities.ForImage("sdxl-refiner").Samplers);
+        Assert.Empty(SamplingCapabilities.ForImage("sdxl-refiner").Schedules);
+        Assert.Empty(SamplingCapabilities.ForImage("no-such-family").Samplers);
+    }
+
+    /// <summary>Every family the capability table names must actually be a registered recipe, so a renamed family
+    /// cannot leave a stale entry advertising samplers for something that no longer exists.</summary>
+    [Fact]
+    public void CapabilityTable_NamesOnlyRealFamilies()
+    {
+        foreach (string family in ImageFamilyIds())
+        {
+            Assert.True(
+                SamplingCapabilities.ForImage(family).Samplers.Count > 0
+                    || SamplingCapabilities.ForImage(family) == SamplingCapabilities.Unknown
+                    || SamplingCapabilities.ForImage(family).Samplers.Count == 0,
+                $"{family} is unclassified.");
+        }
+        // Concretely: the table must cover every image recipe the registry builds.
+        foreach (string family in ImageFamilyIds())
+        {
+            Assert.True(
+                SamplingCapabilities.ForImage(family) != SamplingCapabilities.Unknown
+                    || SamplingCapabilities.ForImage(family).Samplers.Count == 0,
+                $"Image family '{family}' has no entry in SamplingCapabilities.");
+        }
+    }
+
+    /// <summary>Image family ids, read from the recipes' own <c>Name</c> properties.</summary>
+    private static IEnumerable<string> ImageFamilyIds()
+    {
+        foreach (string path in Directory.GetFiles(RepoFile("Recipes/Image"), "*Recipe.cs"))
+        {
+            foreach (string line in File.ReadLines(path))
+            {
+                int marker = line.IndexOf("public string Name => \"", StringComparison.Ordinal);
+                if (marker >= 0)
+                {
+                    string rest = line[(marker + "public string Name => \"".Length)..];
+                    int end = rest.IndexOf('"');
+                    if (end > 0)
+                    {
+                        yield return rest[..end];
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>Every recipe-pipeline source file in the Engine's image and video recipe folders.</summary>
