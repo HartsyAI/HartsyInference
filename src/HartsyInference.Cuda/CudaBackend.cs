@@ -52,7 +52,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
     /// <remarks>Exists so the classify/retry/backoff behavior can be tested deterministically — a real
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
-    internal Func<long, CudnnStatusException?>? TestCudnnSdpaFaultInjector { get; set; }
+    internal Func<long, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
 
     /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state.</summary>
     /// <remarks>Programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
@@ -6959,22 +6959,57 @@ public sealed class CudaBackend : IBackend
             (nuint freeBytes, _) = _context.GetMemoryInfo();
             if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || scoreBytesEst > (ulong)freeBytes / 2)
             {
-                SdpaTiledF32NoMask(output, query, key, value, scale);
+                SdpaTiledF32(output, query, key, value, scale);
+                return;
+            }
+        }
+
+        // A key-only bias (one [Skv] row broadcast over every query) is compatible with the query-tiled path, so
+        // a masked call whose score matrix would not fit is no longer forced into the full materialization. Without
+        // this, a single transient cuDNN failure mid-generation demotes to a [heads,Sq,Skv] allocation that is far
+        // larger than whatever the fused path could not get (Wan-Animate-2 at 480x800/61f: 5836 MB).
+        if (query.DType == DType.F32 && MaskIsKeyOnly(mask, sq))
+        {
+            ulong keyBiasScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
+            (nuint keyBiasFree, _) = _context.GetMemoryInfo();
+            if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
+            {
+                SdpaTiledF32(output, query, key, value, scale, mask);
                 return;
             }
         }
 
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
-        ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0;
+        ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0, pMaskBroadcast = 0, pMaskOnes = 0;
         bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
+            long maskElemCount = 0;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
+                maskElemCount = mask.ElementCount;
+                if (MaskIsKeyOnly(mask, sq))
+                {
+                    // This path indexes the mask per query row, so expand the stored [.., 1, Skv] into the
+                    // [.., Sq, Skv] it stands for. Only small/medium shapes reach here — the large ones took the
+                    // tiled branch above — so the expansion is bounded by the same budget as the score matrix.
+                    long maskBlocks = maskElemCount / skv;
+                    pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
+                    pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
+                    CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
+                    for (long blk = 0; blk < maskBlocks; blk++)
+                    {
+                        AccumulateKeyBias(
+                            pMaskBroadcast + (ulong)(blk * sq * skv * sizeof(float)),
+                            pMask + (ulong)(blk * skv * sizeof(float)),
+                            pMaskOnes, sq, skv, skv, beta: 0f);
+                    }
+                    maskElemCount = maskBlocks * sq * skv;
+                }
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
@@ -7028,7 +7063,7 @@ public sealed class CudaBackend : IBackend
 
             bool isF16 = opDtype == DType.F16;
             int elemSize = opDtype.SizeInBytes;
-            ulong opMask = pMask;
+            ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
             int maskElemSize = sizeof(float);
             if (mask is not null && isF16)
             {
@@ -7037,11 +7072,11 @@ public sealed class CudaBackend : IBackend
                 // conversion so common finite hard-mask sentinels such as -1e30 become -65504 rather than -Inf:
                 // an entirely masked row then retains the repository's finite-sentinel/uniform-row convention
                 // instead of evaluating -Inf - -Inf inside softmax and producing NaNs.
-                pMaskClamped = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(float)));
+                pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
                 _kernels!.LaunchClamp(
-                    pMaskClamped, pMask, -65_504f, 65_504f, (int)mask.ElementCount, _stream.Handle);
-                pMaskCast = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(ushort)));
-                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)mask.ElementCount, _stream.Handle);
+                    pMaskClamped, opMask, -65_504f, 65_504f, (int)maskElemCount, _stream.Handle);
+                pMaskCast = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(ushort)));
+                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)maskElemCount, _stream.Handle);
                 opMask = pMaskCast;
                 maskElemSize = sizeof(ushort);
             }
@@ -7183,6 +7218,8 @@ public sealed class CudaBackend : IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (pMaskCast != 0) CudaMemory.FreeAsync(pMaskCast, _stream.Handle);
             if (pMaskClamped != 0) CudaMemory.FreeAsync(pMaskClamped, _stream.Handle);
+            if (pMaskBroadcast != 0) CudaMemory.FreeAsync(pMaskBroadcast, _stream.Handle);
+            if (pMaskOnes != 0) CudaMemory.FreeAsync(pMaskOnes, _stream.Handle);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
             if (pQCast != 0) CudaMemory.FreeAsync(pQCast, _stream.Handle);
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
@@ -7335,19 +7372,31 @@ public sealed class CudaBackend : IBackend
 
         bool validMask = mask.Shape.Rank switch
         {
-            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
+            2 => (mask.Shape[0] == 1 || mask.Shape[0] == sq) && mask.Shape[1] == skv,
             3 => (mask.Shape[0] == 1 || mask.Shape[0] == h)
-                && mask.Shape[1] == sq && mask.Shape[2] == skv,
+                && (mask.Shape[1] == 1 || mask.Shape[1] == sq) && mask.Shape[2] == skv,
             4 => (mask.Shape[0] == 1 || mask.Shape[0] == b)
                 && (mask.Shape[1] == 1 || mask.Shape[1] == h)
-                && mask.Shape[2] == sq && mask.Shape[3] == skv,
+                && (mask.Shape[2] == 1 || mask.Shape[2] == sq) && mask.Shape[3] == skv,
             _ => false,
         };
         if (!validMask)
             throw new ArgumentException(
                 $"SDPA mask {mask.Shape} is not broadcastable to [{b},{h},{sq},{skv}]; "
-                + "expected [Sq,Skv], [1|H,Sq,Skv], or [1|B,1|H,Sq,Skv].");
+                + "expected [1|Sq,Skv], [1|H,1|Sq,Skv], or [1|B,1|H,1|Sq,Skv].");
     }
+
+    /// <summary>Query rows the additive mask actually stores. 1 means the mask depends only on the key and one
+    /// row is broadcast over every query — the [Sq,Skv] duplicate of it is what makes a masked call expensive.</summary>
+    internal static long MaskQueryRows(Tensor mask)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        return mask.Shape.Rank switch { 2 => mask.Shape[0], 3 => mask.Shape[1], _ => mask.Shape[2] };
+    }
+
+    /// <summary>True for a mask stored as one key row broadcast over more than one query row.</summary>
+    internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
+        => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
     /// <summary>Whether a mask can ride the cuDNN fused engine as an additive fp32 bias (no mask, or F32 broadcastable over heads).</summary>
     /// <remarks>Per-head ([B,H,Sq,Skv]) or non-F32 masks fall back to the materialized path.</remarks>
@@ -7356,11 +7405,11 @@ public sealed class CudaBackend : IBackend
         if (mask is null) return true;
         if (mask.DType != DType.F32) return false;
         if (mask.Shape.Rank == 2)
-            return mask.Shape[0] == sq && mask.Shape[1] == skv;
+            return (mask.Shape[0] == sq || mask.Shape[0] == 1) && mask.Shape[1] == skv;
         return mask.Shape.Rank == 4
             && (mask.Shape[0] == 1 || mask.Shape[0] == b)
             && mask.Shape[1] == 1
-            && mask.Shape[2] == sq
+            && (mask.Shape[2] == sq || mask.Shape[2] == 1)
             && mask.Shape[3] == skv;
     }
 
@@ -7410,17 +7459,19 @@ public sealed class CudaBackend : IBackend
             // ever succeeded, and a fault injected before that point would be indistinguishable from a
             // genuine init failure (permanent, session-wide), defeating the point of testing per-dim
             // retry/backoff/classification.
-            CudnnStatusException? injected = TestCudnnSdpaFaultInjector?.Invoke(d);
+            Exception? injected = TestCudnnSdpaFaultInjector?.Invoke(d);
             if (injected is not null) throw injected;
 
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            long biasB = 1;
+            long biasB = 1, biasSq = sq;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
-                biasB = mask.ElementCount / (sq * skv);
+                // From the SHAPE, not the element count: a key-only [1,Skv] bias divides to 0 that way.
+                biasSq = MaskQueryRows(mask);
+                biasB = mask.Shape.Rank == 4 ? mask.Shape[0] : 1;
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
@@ -7428,7 +7479,7 @@ public sealed class CudaBackend : IBackend
             if (query.DType == DType.F16)
             {
                 // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB);
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
             }
             else
             {
@@ -7440,7 +7491,7 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }
@@ -7462,7 +7513,7 @@ public sealed class CudaBackend : IBackend
         {
             // Init failure (lib missing) ⇒ session-dead — unconditional, this is never worth retrying (the
             // library either loads or it doesn't).
-            if (_cudnnSdpa is null)
+            if (_cudnnSdpa is null && ex is not OutOfVramException)
             {
                 _cudnnSdpaDead = true;
                 HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled for the session (init failed): {ex.Message}");
@@ -7476,7 +7527,15 @@ public sealed class CudaBackend : IBackend
             // a permanent kill: the resource pressure that causes it is typically external to this process
             // (other processes on the box) and does clear up. An exception we can't positively classify
             // (not a CudnnStatusException) stays conservative and is treated as permanent, same as today.
-            bool permanent = ex is not CudnnStatusException cse || cse.IsPermanent;
+            // A VRAM shortfall is the one failure class that is provably NOT structural: the fused path needs
+            // LESS memory than the materialized fallback it demotes to, so killing it on an OOM guarantees the
+            // next call asks for the [heads,Sq,Skv] score matrix and OOMs far harder. Always transient.
+            bool permanent = ex switch
+            {
+                OutOfVramException => false,
+                CudnnStatusException cse => cse.IsPermanent,
+                _ => true,
+            };
             if (permanent)
             {
                 _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
@@ -7699,7 +7758,8 @@ public sealed class CudaBackend : IBackend
     /// reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
     /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
     /// (override: <c>HARTSY_SDPA_TILE</c>).</remarks>
-    private unsafe void SdpaTiledF32NoMask(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
+        Tensor? keyBias = null)
     {
         EnterOp();
         EnsureKernels();
@@ -7708,13 +7768,14 @@ public sealed class CudaBackend : IBackend
         long skv = key.Shape[2];
         long totalHeads = b * h;
 
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0, pBias = 0, pOnes = 0;
         bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
+            if (keyBias is not null) pBias = GpuTransferHelper.CopyToDevice(keyBias);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
@@ -7729,6 +7790,11 @@ public sealed class CudaBackend : IBackend
                 Br = Math.Min(envBr, sq);
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+            if (pBias != 0)
+            {
+                pOnes = CudaMemory.Allocate((nuint)(totalHeads * Br * sizeof(float)));
+                CudaMemory.Fill32(pOnes, 0x3F80_0000u, (nuint)(totalHeads * Br));   // 1.0f
+            }
 
             long strideQ = sq * d, strideK = skv * d, strideV = skv * d, strideOut = sq * d;
             float alpha = scale, beta = 0f, one = 1f, zero = 0f;
@@ -7755,6 +7821,11 @@ public sealed class CudaBackend : IBackend
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
                         CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
+
+                // A key-only additive bias is the same [Skv] row for every query and head, so it lands on the
+                // whole packed tile in ONE rank-1 accumulate — no [Sq,Skv] duplicate of it is ever built.
+                if (pBias != 0)
+                    AccumulateKeyBias(scoresBuf, pBias, pOnes, totalHeads * curBr, skv, skv, beta: 1f);
 
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
                 _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);
@@ -7786,9 +7857,30 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
+            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
+            if (pOnes != 0) CudaMemory.FreeAsync(pOnes, _stream.Handle);
         }
+    }
+
+    /// <summary>Adds a key-only bias row to every row of a row-major <c>[rows, Skv]</c> F32 score block as a rank-1
+    /// GEMM (<c>ones ⊗ bias</c>) — no new kernel, and the bias stays stored once. <paramref name="beta"/> is 0 to
+    /// materialize the broadcast and 1 to accumulate onto existing scores. Plain FP32 compute (k = 1, so it costs
+    /// nothing) rather than TF32, so the bias value reaches the scores unrounded.</summary>
+    private unsafe void AccumulateKeyBias(ulong dst, ulong bias, ulong ones, long rows, long skv, long ldc, float beta)
+    {
+        float alpha = 1f;
+        CublasApi.cublasGemmEx(
+            _cublasHandle,
+            CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+            (int)skv, (int)rows, 1,
+            &alpha,
+            bias, CublasApi.CUDA_R_32F, (int)skv,
+            ones, CublasApi.CUDA_R_32F, 1,
+            &beta,
+            dst, CublasApi.CUDA_R_32F, (int)ldc,
+            CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
     }
 
     #endregion

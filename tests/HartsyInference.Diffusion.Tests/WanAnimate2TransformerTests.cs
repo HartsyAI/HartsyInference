@@ -194,8 +194,9 @@ public unsafe class WanAnimate2TransformerTests
         Assert.True(FrameDelta(cond, uncond, 1) > 1e-5f, "the uncond pass produced the same output as the cond pass.");
     }
 
-    /// <summary>The bias covers exactly the <c>[hw, 2hw)</c> key band — the keys of generation latent frame 1 — for
-    /// every query row, including frame 0's (the reference <c>score_mod</c> has no query-side condition).</summary>
+    /// <summary>The bias covers exactly the <c>[hw, 2hw)</c> key band — the keys of generation latent frame 1 — and
+    /// is stored as ONE row, because the reference <c>score_mod</c> has no query-side condition. The <c>[hw, keys]</c>
+    /// duplicate of it is what used to force every biased call onto the materialized score matrix.</summary>
     [Theory]
     [InlineData(6, 24)]
     [InlineData(6, 30)]
@@ -203,13 +204,10 @@ public unsafe class WanAnimate2TransformerTests
     {
         const float logScale = -1.3f;
         using Tensor bias = WanAnimate2Transformer.BuildLogScaleBias(hw, keys, logScale);
+        Assert.Equal(new TensorShape(1, keys), bias.Shape);
         float* p = (float*)bias.DataPointer;
-        for (int q = 0; q < hw; q++)
-            for (int k = 0; k < keys; k++)
-            {
-                float expected = k >= hw && k < 2 * hw ? logScale : 0f;
-                Assert.Equal(expected, p[(long)q * keys + k]);
-            }
+        for (int k = 0; k < keys; k++)
+            Assert.Equal(k >= hw && k < 2 * hw ? logScale : 0f, p[k]);
     }
 
     /// <summary>The base build's <c>log_scale = 0</c> must take the unmasked path, and the distillation build's

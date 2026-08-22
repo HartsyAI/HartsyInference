@@ -348,14 +348,17 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
 
     /// <summary>The <c>[hw, 2hw)</c> band of <paramref name="keys"/> gets <paramref name="logScale"/>, every other
     /// key 0. <paramref name="queries"/> is one latent frame's token count, which is also the band stride.</summary>
+    /// <remarks>Stored as ONE <c>[1, keys]</c> row, not the <c>[queries, keys]</c> duplicate of it: the reference
+    /// <c>score_mod</c> has no query-side condition, so every row is identical. The backends broadcast it, which is
+    /// what keeps the biased path off the materialized <c>[heads, Sq, Skv]</c> score matrix — at 480x800/61f that
+    /// matrix is 5836 MB and does not fit beside the resident DiT.</remarks>
     internal static Tensor BuildLogScaleBias(int queries, int keys, float logScale)
     {
-        Tensor bias = new Tensor(new TensorShape(queries, keys), DType.F32);
+        Tensor bias = new Tensor(new TensorShape(1, keys), DType.F32);
         float* p = (float*)bias.DataPointer;
-        new Span<float>(p, queries * keys).Clear();
+        new Span<float>(p, keys).Clear();
         int bandEnd = Math.Min(2 * queries, keys);
-        for (int q = 0; q < queries; q++)
-            for (int k = queries; k < bandEnd; k++) p[(long)q * keys + k] = logScale;
+        for (int k = queries; k < bandEnd; k++) p[k] = logScale;
         return bias;
     }
 
