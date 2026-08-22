@@ -57,7 +57,9 @@ Auto BF16 driving cache (policy `9db28bf5`), colour-drift correction on (`70d2c2
 byte-identical). 77f chunked 720x1200 (4x21f): 433.9 s / 23822 MiB with correction — cost vs strength-0 is
 noise-level. 720x1200 single-shot tops out below the pre-flight's estimate: 81f refuses naming 57f, but
 57f then OOMs for real inside `EncodeDriving` (2669 MB short) — chunked `animatetotalframes` is the working
-route at this resolution.
+route at this resolution. ⚠️ The base+lightx2v row is perf only: its output is much hazier than the same
+checkpoint+LoRA+prompt+sampler in ComfyUI (which is distill-sharp), so the engine's quantized-merge config has an
+open quality defect — verified not to be the prompt, the sampler, or log_scale (2026-08-22).
 
 ## Findings that must not be re-discovered
 
