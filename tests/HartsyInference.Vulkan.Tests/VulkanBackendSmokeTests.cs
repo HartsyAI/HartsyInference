@@ -178,6 +178,54 @@ public sealed class VulkanBackendSmokeTests
         a.Dispose(); b.Dispose(); c.Dispose();
     }
 
+    /// <summary>Per-batch weights ([B,K,N]) exercise the offset-dispatch path; a shared 2D weight exercises the flattened single-GEMM path.</summary>
+    [Fact]
+    public void Backend_BatchedMatMul_Matches_Scalar_Reference()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 3, M = 4, K = 5, N = 6;
+        Tensor a = new(new TensorShape(B, M, K), DType.F32);
+        Span<float> aS = a.AsSpan<float>();
+        for (int i = 0; i < aS.Length; i++) aS[i] = (i % 13) * 0.25f - 1.5f;
+
+        Tensor b3 = new(new TensorShape(B, K, N), DType.F32);
+        Span<float> b3S = b3.AsSpan<float>();
+        for (int i = 0; i < b3S.Length; i++) b3S[i] = (i % 7) * 0.125f - 0.375f;
+
+        Tensor c3 = new(new TensorShape(B, M, N), DType.F32);
+        backend.BatchedMatMul(c3, a, b3);
+        ReadOnlySpan<float> c3S = c3.AsReadOnlySpan<float>();
+        for (int bi = 0; bi < B; bi++)
+            for (int m = 0; m < M; m++)
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0.0f;
+                    for (int k = 0; k < K; k++) acc += aS[(bi * M + m) * K + k] * b3S[(bi * K + k) * N + n];
+                    Assert.InRange(c3S[(bi * M + m) * N + n] - acc, -1e-4f, 1e-4f);
+                }
+        c3.Dispose(); b3.Dispose();
+
+        Tensor b2 = new(new TensorShape(K, N), DType.F32);
+        Span<float> b2S = b2.AsSpan<float>();
+        for (int i = 0; i < b2S.Length; i++) b2S[i] = (i % 5) * 0.2f - 0.4f;
+
+        Tensor c2 = new(new TensorShape(B, M, N), DType.F32);
+        backend.BatchedMatMul(c2, a, b2);
+        ReadOnlySpan<float> c2S = c2.AsReadOnlySpan<float>();
+        for (int bi = 0; bi < B; bi++)
+            for (int m = 0; m < M; m++)
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0.0f;
+                    for (int k = 0; k < K; k++) acc += aS[(bi * M + m) * K + k] * b2S[k * N + n];
+                    Assert.InRange(c2S[(bi * M + m) * N + n] - acc, -1e-4f, 1e-4f);
+                }
+        c2.Dispose(); b2.Dispose(); a.Dispose();
+    }
+
     /// <summary>Compares Vulkan FP8 cast vs CPU CastTo by reading every byte value (0..255) via CastToF16 — both paths exercise the kernel.</summary>
     [Fact]
     public void Backend_FP8_Cast_Matches_Cpu_AllBytes()

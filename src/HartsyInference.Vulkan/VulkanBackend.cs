@@ -940,35 +940,79 @@ public sealed class VulkanBackend : IBackend
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
         long batch = a.Shape[0];
-        long M = a.Shape[1];
-        long K = a.Shape[2];
         bool bIs2D = b.Shape.Rank == 2;
-        long N = bIs2D ? b.Shape[1] : b.Shape[2];
-
-        // Fall back to per-batch matmul. Works correctly though slower than a single
-        // batched dispatch — Phase-4 optimization will fuse this.
-        for (long bi = 0; bi < batch; bi++)
+        if (bIs2D || batch == 1)
         {
-            // Slice through views/sub-tensors is non-trivial without TensorView ops here.
-            // Simplest correct approach: dispatch one matmul per batch using offset push constants.
-            DispatchMatmulBatched(output, a, b, bi, bIs2D);
+            // [B, M, K] @ [K, N] is exactly the flattened (B·M, K) @ (K, N) GEMM — one dispatch
+            // through the shared matmul path covers every batch.
+            DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+            return;
+        }
+
+        // Per-batch weight ([B, K, N]): one offset dispatch per slice into a shared output buffer.
+        long M = a.Shape[1], K = a.Shape[2], N = b.Shape[2];
+        if ((ulong)(batch * M * K) > uint.MaxValue || (ulong)(batch * K * N) > uint.MaxValue || (ulong)(batch * M * N) > uint.MaxValue)
+            throw new NotSupportedException("VulkanBackend.BatchedMatMul: operand exceeds the shader's uint element-offset range.");
+        DType gemmDtype = ResolveGemmDtype(output.DType);
+        VulkanBuffer aBuf = GetBuffer(a);
+        VulkanBuffer bBuf = GetBuffer(b);
+        (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, gemmDtype);
+        (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, gemmDtype);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * gemmDtype.SizeInBytes));
+        try
+        {
+            for (long bi = 0; bi < batch; bi++)
+            {
+                DispatchMatmulWithOffsets(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K,
+                    transposeA: false, transposeB: false, alpha: 1.0f, beta: 0.0f,
+                    aOffset: (uint)(bi * M * K), bOffset: (uint)(bi * K * N), cOffset: (uint)(bi * M * N),
+                    dtype: gemmDtype);
+            }
+            CacheOutputCastingFrom(output, outBuf, gemmDtype, "BatchedMatMul");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan BatchedMatMul dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (aOwned is not null) _xfer.FreeDevice(aOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
         }
     }
 
-    private void DispatchMatmulBatched(Tensor output, Tensor a, Tensor b, long batchIndex, bool bIs2D)
+    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype. Takes ownership of <paramref name="computed"/> (freed after a cast, cached otherwise).</summary>
+    private void CacheOutputCastingFrom(Tensor output, VulkanBuffer computed, DType computedDtype, string what)
     {
-        // For Phase-3.5 we promote each batch slice to a virtual matmul by bumping the offset
-        // baked into push-constants, but keep the same dispatch shape. Implemented by reusing
-        // DispatchMatmul on whole tensors — falls back to general kernel.
-        // (A truly batched kernel is a Phase-4 optimization.)
-        // The matmul shader uses lda/ldb/ldc; we set them so the tile loads from the right
-        // slice. Easiest: reuse non-batched path by treating the batched slice as a separate
-        // (M, N, K) GEMM. Since strides are baked in lda/ldb/ldc and we don't yet expose
-        // explicit offset push constants, we delegate to DispatchMatmul on the entire tensor,
-        // and rely on the kernel's bounds checks. This produces correct results when batch=1.
-        if (a.Shape[0] != 1)
-            throw new NotImplementedException("VulkanBackend.BatchedMatMul: batch > 1 needs a per-slice dispatch. Use the CPU backend or split the batch in the caller until the v2 path lands.");
-        DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+        if (output.DType == computedDtype)
+        {
+            CacheOutput(output, computed);
+            return;
+        }
+        ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
+        try
+        {
+            string castShader;
+            if (computedDtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
+            else if (computedDtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
+            else throw new NotSupportedException($"{what} dtype mismatch {computedDtype.Name}->{output.DType.Name}");
+
+            VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
+            Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)output.ElementCount);
+            Span<ulong> castBufs = stackalloc ulong[] { computed.Handle, finalBuf.Handle };
+            Dispatch(castK, castBufs, castPc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, finalBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Vulkan {what} output-dtype cast dispatch failed", ex);
+            finalBuf.Dispose();
+            throw;
+        }
+        _xfer.FreeDevice(computed);
     }
 
     /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
@@ -1793,35 +1837,7 @@ public sealed class VulkanBackend : IBackend
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, (uint)sq, (uint)hq, (uint)batch);
 
-            if (output.DType == dtype)
-            {
-                CacheOutput(output, outBuf);
-            }
-            else
-            {
-                ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-                VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
-                try
-                {
-                    string castShader;
-                    if (dtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
-                    else if (dtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
-                    else throw new NotSupportedException($"sdpa_flash dtype mismatch {dtype.Name}->{output.DType.Name}");
-
-                    VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
-                    Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)output.ElementCount);
-                    Span<ulong> castBufs = stackalloc ulong[] { outBuf.Handle, finalBuf.Handle };
-                    Dispatch(castK, castBufs, castPc, GroupCount(output.ElementCount, LocalX1D));
-                    CacheOutput(output, finalBuf);
-                }
-                catch (Exception ex)
-                {
-                    Logs.Error("Vulkan sdpa_flash output-dtype cast dispatch failed", ex);
-                    finalBuf.Dispose();
-                    throw;
-                }
-                _xfer.FreeDevice(outBuf);
-            }
+            CacheOutputCastingFrom(output, outBuf, dtype, "sdpa_flash");
         }
         catch (Exception ex)
         {
@@ -2045,37 +2061,7 @@ public sealed class VulkanBackend : IBackend
                 }
             }
 
-            // Cast result back to output dtype if needed (should match if model uses consistent dtype).
-            if (output.DType == dtype)
-            {
-                CacheOutput(output, outBufLocal);
-            }
-            else
-            {
-                // Cast outBufLocal (dtype) to output.DType
-                ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-                VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
-                try
-                {
-                    string shader;
-                    if (dtype == DType.F16 && output.DType == DType.F32) shader = "cast_f16_f32";
-                    else if (dtype == DType.F32 && output.DType == DType.F16) shader = "cast_f32_f16";
-                    else throw new NotSupportedException($"SDPA dtype mismatch {dtype.Name}->{output.DType.Name}");
-
-                    VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
-                    Span<byte> pc = stackalloc byte[4]; BinaryWriteUInt(pc, 0, (uint)output.ElementCount);
-                    Span<ulong> bufs = stackalloc ulong[] { outBufLocal.Handle, finalBuf.Handle };
-                    Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
-                    CacheOutput(output, finalBuf);
-                }
-                catch (Exception ex)
-                {
-                    Logs.Error("Vulkan SDPA output-dtype cast dispatch failed", ex);
-                    finalBuf.Dispose();
-                    throw;
-                }
-                _xfer.FreeDevice(outBufLocal);
-            }
+            CacheOutputCastingFrom(output, outBufLocal, dtype, "SDPA");
         }
         catch (Exception ex)
         {
@@ -3049,15 +3035,6 @@ public sealed class VulkanBackend : IBackend
             (VulkanBuffer cast, _) = CastIfNeeded(input, src, DType.F16);
             // CastIfNeeded returns owned=cast when a conversion happened; just promote to activation cache.
             CacheOutput(output, cast);
-            return;
-        }
-
-        // CPU fallback for paths the Vulkan kernel suite doesn't yet cover.
-        if (input.DType == DType.F32 && output.DType == DType.F16)
-        {
-            float* src = (float*)input.DataPointer;
-            Half* dst = (Half*)output.DataPointer;
-            for (long i = 0; i < input.ElementCount; i++) dst[i] = (Half)src[i];
             return;
         }
         throw new NotSupportedException($"VulkanBackend.CastToF16: {input.DType.Name} -> F16 not implemented.");
