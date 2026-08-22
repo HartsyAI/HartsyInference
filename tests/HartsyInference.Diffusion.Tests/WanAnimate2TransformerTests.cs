@@ -210,6 +210,30 @@ public unsafe class WanAnimate2TransformerTests
             Assert.Equal(k >= hw && k < 2 * hw ? logScale : 0f, p[k]);
     }
 
+    /// <summary>The bias must reproduce upstream's <c>_score_mod_impl</c> — <c>score + log_scale</c> exactly on the
+    /// key band <c>[hw, 2hw)</c>, the score untouched everywhere else, with no query-side condition — for the tiny
+    /// T=4 grid and a real T=21 480x800-sized grid, at both the gen (<c>hw*T</c>) and spliced (<c>hw*(T+1)</c>) key
+    /// lengths the transformer builds.</summary>
+    [Theory]
+    [InlineData(6, 4)]
+    [InlineData(1500, 21)]
+    public void BuildLogScaleBias_MatchesUpstreamScoreMod(int hw, int frames)
+    {
+        const float logScale = -1.3f;
+        foreach (int keys in new[] { hw * frames, hw * (frames + 1) })
+        {
+            using Tensor bias = WanAnimate2Transformer.BuildLogScaleBias(hw, keys, logScale);
+            Assert.Equal(new TensorShape(1, keys), bias.Shape);
+            float* p = (float*)bias.DataPointer;
+            for (int k = 0; k < keys; k++)
+            {
+                float score = 0.25f * (k % 7) - 0.5f;
+                float upstream = k >= hw && k < 2 * hw ? score + logScale : score;
+                Assert.Equal(upstream, score + p[k]);
+            }
+        }
+    }
+
     /// <summary>The base build's <c>log_scale = 0</c> must take the unmasked path, and the distillation build's
     /// <c>-1.3</c> must actually change the output — this is the ONLY difference between the two checkpoints.</summary>
     [Fact]
