@@ -202,14 +202,24 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             // One causal VAE encode per stream. The continuation frame goes over the HEAD of a mid-grey clip and is
             // encoded WITH it: the Wan VAE is temporally causal, so encoding the carried frame separately and
             // splicing latents is not the same tensor.
+            Stopwatch phase = Stopwatch.StartNew();
+            Backend.ResetOpProfile();
             Backend.PreloadWeights(_encoder.EnumerateWeights());
             Tensor referenceLatent = _encoder.Encode(Backend, referenceRgb);
+            Backend.Sync();
+            double tRefMs = phase.Elapsed.TotalMilliseconds;
             Tensor videoPixels = BuildContinuationPixels(carriedRgbFrame, pixT, pixH, pixW);
             Tensor videoLatent = _encoder.Encode(Backend, videoPixels);
             videoPixels.Dispose();
+            Backend.Sync();
+            double tGreyMs = phase.Elapsed.TotalMilliseconds - tRefMs;
             Tensor drivingLatentDev = _encoder.Encode(Backend, drivingRgbClip);
             Backend.Sync();
+            double tDriveMs = phase.Elapsed.TotalMilliseconds - tRefMs - tGreyMs;
             Backend.FreeWeights(_encoder.EnumerateWeights());
+            Backend.DumpOpProfile("animate2-vaeencode");
+            Logs.Info($"Wan-Animate-2 VAE encode: reference+preload {tRefMs / 1000.0:F1}s, continuation clip "
+                + $"{tGreyMs / 1000.0:F1}s, driving clip {tDriveMs / 1000.0:F1}s.");
 
             conditioning = WanAnimate2Conditioning.BuildGenerationChannels(referenceLatent, videoLatent, continuation);
             referenceLatent.Dispose();
@@ -252,6 +262,9 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 + $"{drivingTokens} tokens, {driving.StorageDType.Name}).");
             stream.EndStep();
             Backend.FreeActivations();
+            Logs.Info($"Wan-Animate-2 driving prepass: {phase.Elapsed.TotalMilliseconds / 1000.0 - tRefMs / 1000.0 - tGreyMs / 1000.0 - tDriveMs / 1000.0:F1}s (placement + EncodeDriving).");
+            Backend.DumpOpProfile("animate2-prepass");
+            phase.Restart();
 
             latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
             bool alternate = samplerName == AlternateSampler;
@@ -286,7 +299,11 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 });
                 Backend.FreeActivations();
                 stream.EndStep();
+                // Window the profiler onto the steady-state steps; step 0 carries the streaming window's warm-up.
+                if (k == 0) Backend.ResetOpProfile();
             }
+            Backend.DumpOpProfile($"animate2-denoise{Math.Max(1, steps - 1)}");
+            Logs.Info($"Wan-Animate-2 denoise: {steps} steps in {phase.Elapsed.TotalMilliseconds / 1000.0:F1}s.");
         }
         catch
         {
@@ -309,8 +326,12 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         Tensor video = WanAnimate2Conditioning.TrimReferenceFrame(latents!);
         latents!.Dispose();
         Tensor rgb;
+        Stopwatch decodeSw = Stopwatch.StartNew();
+        Backend.ResetOpProfile();
         try { rgb = _vae.Decode(Backend, video); }
         finally { video.Dispose(); }
+        Backend.DumpOpProfile("animate2-vaedecode");
+        Logs.Info($"Wan-Animate-2 VAE decode: {decodeSw.Elapsed.TotalMilliseconds / 1000.0:F1}s.");
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);

@@ -157,7 +157,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
                 parts.Add(EncodeChunk(backend, chunk, cache));
                 chunk.Dispose();
             }
-            Tensor joined = parts.Count == 1 ? parts[0] : Vae3dLayout.ConcatFrames(parts);
+            Tensor joined = parts.Count == 1 ? parts[0] : Vae3dLayout.ConcatFrames(backend, parts);
             if (parts.Count != 1) foreach (Tensor part in parts) part.Dispose();
             return FinishEncode(backend, joined);
         }
@@ -196,7 +196,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
         Tensor m1 = _midAttn!.Forward(backend, m0); m0.Dispose();
         Tensor cur = _midRes2!.Forward(backend, m1, cache); m1.Dispose();
 
-        Tensor hn = _headNorm!.Forward(cur);
+        Tensor hn = _headNorm!.Forward(backend, cur);
         cur.Dispose();
         backend.Silu(hn, hn);
         Tensor? hcc = cache?.StepConv(backend, hn);
