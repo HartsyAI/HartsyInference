@@ -24,7 +24,10 @@ namespace HartsyInference.Video.Pipelines;
 /// pipeline never accepts a <see cref="DiffusionPipelineBase.CfgParallelBackend"/> and its recipe warns when one is
 /// configured.</para>
 ///
-/// <para><b>Numerics unvalidated.</b> No real-weight generation has been run against this yet.</para></summary>
+/// <para><b>Sampling settings are build-specific and NOT interchangeable.</b> The base checkpoint wants 40 steps
+/// at guidance 3.0 (upstream's demo and yaml); the distillation checkpoint wants ~6-10 steps at guidance 1.0.
+/// Running the base build at the distillation build's settings renders hazy and progressively loses the clip as
+/// the frame count grows — which is not a defect in the driving splice, however much it looks like one.</para></summary>
 public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 {
     /// <summary>The reference's clip length: 81 pixel frames, of which the last-but-one chunk boundary carries
@@ -69,6 +72,40 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         _vae = vae;
         _encoder = encoder;
         _config = config;
+    }
+
+    /// <summary>Upstream's base-build sampling (`wan_animate_2_demo.py`): 40 steps at guidance 3.0.</summary>
+    public const int BaseBuildSteps = 40;
+
+    /// <inheritdoc cref="BaseBuildSteps"/>
+    public const float BaseBuildGuidance = 3.0f;
+
+    /// <summary>Upstream's distillation-build sampling (README): 10 steps at guidance 1.0.</summary>
+    public const int DistillBuildSteps = 10;
+
+    /// <summary>Fewest steps the base build is trusted at. Below this it renders progressively hazier as the clip
+    /// lengthens, which reads as the driving video being ignored rather than as under-denoising.</summary>
+    private const int BaseBuildMinSteps = 20;
+
+    /// <summary>The two builds want incompatible sampling settings and nothing in a checkpoint announces which one
+    /// it is except its file name, so a caller can silently run one at the other's settings and get a plausible
+    /// short clip and mush at full length. Returns the warning to log, or null when the settings suit the build.
+    /// <paramref name="distillBuild"/> is <see cref="WanVideoConfig.Animate2LogScale"/> being non-zero, which is
+    /// exactly what <c>WanAnimate2Transformer.ResolveLogScale</c> routed off the file name.</summary>
+    internal static string? SettingsMismatchWarning(bool distillBuild, int steps, float guidance)
+    {
+        if (distillBuild)
+        {
+            return guidance <= 1f ? null
+                : $"[WanAnimate2] This is the DISTILLATION build; it samples at guidance 1.0 and ~{DistillBuildSteps} "
+                    + $"steps. Guidance {guidance} will over-drive it.";
+        }
+        if (steps >= BaseBuildMinSteps && guidance > 1f) return null;
+        return $"[WanAnimate2] This is the BASE build, which upstream samples at {BaseBuildSteps} steps and guidance "
+            + $"{BaseBuildGuidance}; this request is {steps} steps at guidance {guidance}. Those are the DISTILLATION "
+            + "build's settings and the base weights render hazy at them — the haze grows with the frame count, so a "
+            + "short clip can look fine while a full-length one does not. Raise the steps and the guidance, or load "
+            + "the *_distill_* checkpoint.";
     }
 
     /// <summary>True when the denoise must run the negative branch at all. At or below 1.0 the CFG fold is the
@@ -148,6 +185,8 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         Logs.Info($"Wan-Animate-2: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, "
             + $"seed={seed}, sampler={samplerName} (gen latent {latentCh}x{tTotal}x{hLat}x{wLat}, driving {tTotal - 1} frame(s)"
             + $"{(continuation ? ", continuation chunk" : "")}, log_scale={_config.Animate2LogScale}).");
+        string? settingsWarning = SettingsMismatchWarning(_config.Animate2LogScale != 0f, steps, guidance);
+        if (settingsWarning is not null) Logs.Warning(settingsWarning);
         if (samplerName == AlternateSampler)
         {
             Logs.Warning("[WanAnimate2] UniPC was requested. Its sigma grid floors at 1/1000 where get_sampling_sigmas "

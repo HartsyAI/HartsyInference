@@ -151,4 +151,41 @@ public unsafe class WanAnimate2DrivingSensitivityTests
         Console.WriteLine($"[SENS-CUDA] mean|out|={mag:E3}  mean|diff|={diff:E3}  relative={diff / mag:P4}");
         Assert.True(diff > 1e-6, $"CUDA driving is INERT: difference {diff:E3} on mean|out| {mag:E3}");
     }
+
+    /// <summary>The sensitivity gate above fixes the sequence at 3 driving frames, which is a third of the shortest
+    /// live clip. The splice runs one attention call and two scatters per generation frame, so the loop is the one
+    /// part of it whose work scales with the frame count; this walks that scaling. (The live 77-frame haze that
+    /// prompted this scan turned out to be the base checkpoint sampled at the distillation build's 6 steps and
+    /// cfg 1, not a length defect — see the plan doc. The scan stays because nothing else covers long T on CPU.)</summary>
+    [Theory]
+    [InlineData(3)]
+    [InlineData(10)]
+    [InlineData(20)]
+    public void DrivingStaysLiveAsTheSequenceGrows(int drivingFrames)
+    {
+        WanVideoConfig c = Config(layers: 2);
+        Dictionary<string, Tensor> weights = WanSyntheticWeights.BuildTransformer(c);
+        using CpuBackend backend = new CpuBackend();
+        using WanAnimate2Transformer dit = new WanAnimate2Transformer(c);
+        dit.LoadWeights(weights);
+
+        (int T, int H, int W) genGrid = (drivingFrames + 1, GridH, GridW);
+        using Tensor latents = Random(new TensorShape([1L, c.InChannels, drivingFrames + 1, GridH * 2, GridW * 2]), 11);
+        using Tensor encoder = Random(new TensorShape(6, c.TextDim), 12);
+        using Tensor clip = Random(new TensorShape(5, c.ImageDim), 13);
+        using Tensor dA = Random(new TensorShape([1L, c.VaeLatentChannels, drivingFrames, GridH * 2, GridW * 2]), 101);
+        using Tensor dB = Random(new TensorShape([1L, c.VaeLatentChannels, drivingFrames, GridH * 2, GridW * 2]), 202);
+
+        using WanAnimate2DrivingCache cA = dit.EncodeDriving(backend, dA, encoder, clip, genGrid);
+        using Tensor oA = dit.Forward(backend, latents, encoder, 1000f, cA, clip);
+        using WanAnimate2DrivingCache cB = dit.EncodeDriving(backend, dB, encoder, clip, genGrid);
+        using Tensor oB = dit.Forward(backend, latents, encoder, 1000f, cB, clip);
+
+        double diff = MeanAbsDiff(oA, oB);
+        double mag = 0;
+        { float* pa = (float*)oA.DataPointer; for (long i = 0; i < oA.ElementCount; i++) mag += Math.Abs(pa[i]); }
+        mag /= oA.ElementCount;
+        Console.WriteLine($"[T-SCAN] drivingFrames={drivingFrames} genT={genGrid.T} mean|out|={mag:E3} mean|diff|={diff:E3} relative={diff / mag:P4}");
+        Assert.True(diff > 1e-6, $"driving went INERT at genT={genGrid.T}: diff {diff:E3}");
+    }
 }

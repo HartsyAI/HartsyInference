@@ -48,11 +48,11 @@ public sealed class WanAnimate2SelfAttnContext : IDisposable
     /// <summary>Scales the driving stream's V before it is spliced. 1.0 is the trained behaviour. Mirrors
     /// ComfyUI's <c>pose_strength</c>; like it, 0.0 does NOT mute the branch, because K still occupies the
     /// softmax denominator.
-    /// <para>⚠️ This was introduced to compensate for long clips not following the driver, on the theory that the
-    /// driving band's 1/(T+1) share of the softmax mass starved it. <b>That rationale is falsified</b>: the
-    /// reference's generation self-attention also spans the whole clip, so it dilutes identically and still needs
-    /// no amplification at its trained 81-frame length. Treat any value above 1.0 as a symptom patch over an
-    /// unfound defect — see <c>docs/Checklists/WAN_ANIMATE2_PARITY_PLAN.md</c>.</para></summary>
+    /// <para>⚠️ This was introduced to compensate for long clips not following the driver. There was no such
+    /// defect: the clips it was reaching for were the base checkpoint sampled at the distillation build's 6 steps
+    /// and cfg 1, which renders hazy at any length and only looks acceptable on a short one. At 40 steps and
+    /// guidance 3.0 the driver reaches the output at the full 77-frame length with this left at 1.0. Keep it at
+    /// 1.0 unless a user deliberately wants over- or under-driven motion.</para></summary>
     public float PoseStrength { get; set; } = 1.0f;
 
     /// <summary>Releases the splice buffers only. The rope tables, the log-scale bias and the driving input are all

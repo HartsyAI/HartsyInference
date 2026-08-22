@@ -56,7 +56,54 @@ pressure (pinned activations re-read by every block of every step beside a resid
 ⚠️ **"ComfyUI needs no amplification at 81 frames" is SECOND-HAND and load-bearing for this whole
 investigation. Tier 1's same-checkpoint/same-inputs protocol tests it for free — do not skip that read.**
 
-## TIER 1 RESULT (in progress) — the symptom was mis-stated, and every ranked suspect is dead
+## VERDICT — there is no length-dependent defect. Closed.
+
+**77 frames (latent T=21) at 384x640 renders sharp and follows the driver, once the checkpoint is sampled the
+way its build is meant to be sampled.** `wan_animate_2_int8_convrot` is the **base** build: upstream and the
+ComfyUI template both run the base at **40 steps / guidance 3.0**, and ComfyUI only reaches 6 steps by loading
+`lightx2v_I2V_14B_480p_cfg_step_distill` at 1.0. Our "best known settings" copied that template with its
+load-bearing LoRA removed, which is a raw base model at 6 steps with no guidance. A short clip hides that
+(the reference latent frame carries proportionally more of a 7-frame result); a long one cannot.
+
+| 384x640, `drive_half.mp4`, seed 424242, single chunk | result |
+|---|---|
+| 21f, 6 steps, cfg 1 | sharp |
+| 21f, 40 steps, cfg 3.0 | sharp |
+| 33f / 45f / 77f, 6 steps, cfg 1 | mush, worse toward the end of the clip |
+| 77f, 20 steps, cfg 1 | still mush |
+| **77f, 40 steps, cfg 3.0** | **sharp through frame 76** |
+
+**A/B at the corrected settings** (77f, 40 steps, cfg 3.0, seed 424242): dancing `drive_half.mp4` vs an
+81-frame still built from its frame 0. Different files (`b46620c3` vs `9c4ad0fd`), mean |A−B| 46/255, and
+mean frame-to-frame motion **19.12 vs 1.55** — the static driver holds the pose, the dancing one dances, both
+sharp. The driving stream reaches the output at the trained length.
+
+**The distillation build is the better answer for few-step work.** `wan_animate_2_distill_int8_convrot`
+(Comfy-Org ships it beside the base one) at **77f / 6 steps / cfg 1 / 384x640** renders sharp through frame 76
+in 2.5 minutes, against 14 for the base build's 40 steps — and its A/B is cleaner still: mean |A−B| 36/255,
+frame-to-frame motion **18.64 dancing vs 0.37 static**. That run is also the first time `log_scale = -1.3`
+has ever executed (the fix below routes it), and the biased-attention path holds up. 480x800 / 61f behaves the
+same.
+
+### Retracted
+
+- **"Best known settings: 6 steps, cfg 1"** — that is the *distillation* configuration. For this base
+  checkpoint use **40 steps at cfg 3.0**, or switch to `wan_animate_2_distill_int8_convrot`.
+- **"cfg > 1 renders hazy"** — falsified. cfg 3.0 produced the sharpest output at both 21 and 77 frames, with
+  the block-9 unconditional skip active the whole time. That retires the skip as a suspect too.
+- **`PoseStrength = 1.2`** — retracted. 1.0 reproduces the reference and the A/B above was measured at 1.0.
+- **The Tier 0 note that our checkpoint might be a distillation build** — it is not; `log_scale = 0` is
+  correct for it. Comfy-Org ships the distillation weights as a separate file.
+
+### Real gaps this uncovered (neither is the mush)
+
+1. **`Animate2LogScale` was never populated** — FIXED, `WanAnimate2Transformer.ResolveLogScale`.
+2. **A LoRA cannot be merged into an int8-convrot checkpoint**: `LoraApplier` throws
+   `Unsupported dtype conversion: I8 → F32`, and `WanLoraMapper` additionally **drops every `diff`/`diff_b`
+   full-weight key with a warning** — lightx2v is full of bias and norm diffs. Supporting it needs a
+   dequantize → add → requantize path per tensor plus full-weight-diff handling. Not done.
+
+## TIER 1 RESULT — the symptom was mis-stated, and every ranked suspect is dead
 
 **The symptom is not "ignores the driving video".** At 77 frames the subject moves plenty; the output is
 **hazy, smeared and mesh-textured**, worst in the later frames of the clip. "Doesn't follow the driver" was a
