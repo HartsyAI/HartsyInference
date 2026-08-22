@@ -1197,6 +1197,44 @@ public sealed class VulkanBackendSmokeTests
         a.Dispose(); b.Dispose(); c.Dispose();
     }
 
+    /// <summary>A key-only additive mask (one <c>[1, Skv]</c> row broadcast over every query — Wan-Animate-2's
+    /// log_scale band) must match the <c>[Sq, Skv]</c> duplicate of it. The mask_add dispatch adds a flat Sq·Skv
+    /// block at one offset and cannot broadcast a row, so the backend expands it; handing the shader the short
+    /// buffer instead would read past the allocation and go unnoticed.</summary>
+    [Fact]
+    public void Backend_SDPA_KeyOnlyMask_Matches_ExpandedMask()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
+        using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor k = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor v = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor broadcast = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor duplicate = new(new TensorShape(B, H, Sq, D), DType.F32);
+        Span<float> qS = q.AsSpan<float>(), kS = k.AsSpan<float>(), vS = v.AsSpan<float>();
+        for (int i = 0; i < B * H * Sq * D; i++) qS[i] = MathF.Sin(i * 0.11f);
+        for (int i = 0; i < B * H * Skv * D; i++) { kS[i] = MathF.Cos(i * 0.07f); vS[i] = MathF.Sin(i * 0.13f) * 0.5f; }
+
+        using Tensor row = new(new TensorShape(1, Skv), DType.F32);
+        using Tensor full = new(new TensorShape(Sq, Skv), DType.F32);
+        Span<float> rowS = row.AsSpan<float>(), fullS = full.AsSpan<float>();
+        for (int key = 0; key < Skv; key++) rowS[key] = key >= Sq && key < 2 * Sq ? -1.3f : 0f;
+        for (int query = 0; query < Sq; query++)
+            for (int key = 0; key < Skv; key++) fullS[query * Skv + key] = rowS[key];
+
+        float scale = 1.0f / MathF.Sqrt(D);
+        backend.ScaledDotProductAttention(broadcast, q, k, v, row, scale);
+        backend.ScaledDotProductAttention(duplicate, q, k, v, full, scale);
+
+        Span<float> a = broadcast.AsSpan<float>(), b = duplicate.AsSpan<float>();
+        float worst = 0f;
+        for (int i = 0; i < a.Length; i++) worst = MathF.Max(worst, MathF.Abs(a[i] - b[i]));
+        Assert.True(worst < 1e-5f, $"key-only mask diverged from the duplicate by {worst:E3}.");
+    }
+
     [Fact]
     public void Backend_SDPA_MultiHead_Matches_Cpu_Reference()
     {

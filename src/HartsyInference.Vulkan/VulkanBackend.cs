@@ -1810,6 +1810,14 @@ public sealed class VulkanBackend : IBackend
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
 
+        // A mask whose query axis is 1 stores one [Skv] row broadcast over every query (a bias that depends only
+        // on the key — Wan-Animate-2's log_scale band). Every shader below indexes it as [Sq, Skv], so expand it
+        // here; handing them the short buffer would read past the allocation and go unnoticed.
+        long sqRows = query.Shape[2], skvRows = key.Shape[2];
+        using Tensor? expandedMask = mask is not null && MaskQueryRows(mask) == 1 && sqRows > 1
+            ? ExpandKeyOnlyMask(mask, sqRows, skvRows) : null;
+        mask = expandedMask ?? mask;
+
         int hq = (int)query.Shape[1], hkv = (int)key.Shape[1], headDim = (int)query.Shape[3];
         if (headDim <= FlashMaxHeadDim && hkv > 0 && hq % hkv == 0)
         {
@@ -2000,6 +2008,23 @@ public sealed class VulkanBackend : IBackend
             return;
         }
         AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+    }
+
+    /// <summary>Query rows the additive mask stores; 1 means it depends only on the key.</summary>
+    private static long MaskQueryRows(Tensor mask)
+        => mask.Shape.Rank switch { 2 => mask.Shape[0], 3 => mask.Shape[1], _ => mask.Shape[2] };
+
+    /// <summary>Materializes the <c>[blocks·Sq, Skv]</c> duplicate of a key-only mask row, which is the layout the
+    /// mask_add dispatch indexes.</summary>
+    private static unsafe Tensor ExpandKeyOnlyMask(Tensor mask, long sq, long skv)
+    {
+        long blocks = mask.ElementCount / skv;
+        Tensor full = new Tensor(new TensorShape(blocks * sq, skv), DType.F32);
+        float* src = (float*)mask.DataPointer, dst = (float*)full.DataPointer;
+        for (long blk = 0; blk < blocks; blk++)
+            for (long q = 0; q < sq; q++)
+                Buffer.MemoryCopy(src + blk * skv, dst + (blk * sq + q) * skv, skv * 4, skv * 4);
+        return full;
     }
 
     private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
