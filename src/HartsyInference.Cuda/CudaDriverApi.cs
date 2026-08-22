@@ -56,9 +56,6 @@ internal static partial class CudaDriverApi
     // ── Module / PTX Loading ────────────────────────────────────────────
 
     [LibraryImport(LibName)]
-    internal static partial int cuModuleLoadData(out nint module, nint ptxImage);
-
-    [LibraryImport(LibName)]
     internal static partial int cuModuleLoadDataEx(
         out nint module, nint ptxImage,
         uint numOptions, nint options, nint optionValues);
@@ -165,9 +162,6 @@ internal static partial class CudaDriverApi
     internal static partial int cuCtxEnablePeerAccess(nint peerContext, uint flags);
 
     [LibraryImport(LibName)]
-    internal static partial int cuMemcpyPeer(ulong dstDevice, nint dstContext, ulong srcDevice, nint srcContext, nuint byteCount);
-
-    [LibraryImport(LibName)]
     internal static partial int cuMemcpyPeerAsync(ulong dstDevice, nint dstContext, ulong srcDevice, nint srcContext, nuint byteCount, nint hStream);
 
     // ── Pinned (page-locked) host memory ────────────────────────────────
@@ -218,9 +212,6 @@ internal static partial class CudaDriverApi
     internal static partial int cuEventRecord(nint hEvent, nint hStream);
 
     [LibraryImport(LibName)]
-    internal static partial int cuEventQuery(nint hEvent);
-
-    [LibraryImport(LibName)]
     internal static partial int cuEventSynchronize(nint hEvent);
 
     // ── Graph Management (capture / replay) ─────────────────────────────
@@ -259,8 +250,6 @@ internal static partial class CudaDriverApi
     internal static partial int cuGraphNodeGetType(nint node, out int nodeType);
 
     /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
-    [LibraryImport(LibName, EntryPoint = "cuGraphExecUpdate_v2")]
-    internal static partial int cuGraphExecUpdate(nint graphExec, nint graph, nint resultInfo);
 
     [LibraryImport(LibName)]
     internal static partial int cuGraphExecDestroy(nint graphExec);
@@ -275,13 +264,6 @@ internal static partial class CudaDriverApi
     /// <summary>Returns the device's graph-memory-pool reserves to the OS. Memory allocated by captured allocation nodes (stream-ordered allocs recorded during graph capture) lives in a per-device GRAPH pool that <c>cuGraphExecDestroy</c> does NOT release and <c>cuMemPoolTrimTo</c> does not touch — without this call a destroyed multi-GB step graph keeps its whole working set reserved (invisible to the allocator, fatal for the next model's load on a full card).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuDeviceGraphMemTrim(int device);
-
-    internal const int CU_GRAPH_MEM_ATTR_USED_MEM_CURRENT = 0;
-    internal const int CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT = 2;
-
-    /// <summary>Reads a graph-memory-pool attribute (USED = live graph-owned allocations, RESERVED = pool footprint including cached-but-free memory).</summary>
-    [LibraryImport(LibName)]
-    internal static unsafe partial int cuDeviceGetGraphMemAttribute(int device, int attr, void* value);
 
     internal const int CU_STREAM_CAPTURE_MODE_GLOBAL = 0;
     internal const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
@@ -362,9 +344,6 @@ internal static partial class CudaDriverApi
     internal const uint CU_STREAM_NON_BLOCKING = 1;
 
     // ── Event Flags ─────────────────────────────────────────────────────
-
-    /// <summary>Default event flag — events support timing (we don't need that).</summary>
-    internal const uint CU_EVENT_DEFAULT = 0;
 
     /// <summary>Sync-only event; saves a tiny bit of driver bookkeeping vs default.</summary>
     internal const uint CU_EVENT_DISABLE_TIMING = 2;

@@ -14,10 +14,8 @@ namespace HartsyInference.Cuda;
 /// chain qualifies; a pipeline step that interleaves CPU-side scheduler/CFG math cannot be captured wholesale
 /// without first hoisting that math out of the captured region.</para>
 ///
-/// <para><b>Re-capture vs update.</b> Buffer pointers and shapes are frozen at instantiation. When only scalar
-/// kernel parameters change between iterations (timestep, sigma, CFG scale), prefer re-capturing into a fresh
-/// graph and calling <see cref="TryUpdate"/> rather than re-instantiating, which is cheaper when the topology
-/// is identical.</para>
+/// <para><b>Buffer pointers and shapes are frozen at instantiation.</b> When parameters change between
+/// iterations, re-capture into a fresh graph and re-instantiate.</para>
 ///
 /// <para><b>Untested locally.</b> Written from the CUDA Driver API graph docs; not exercised on GPU in this
 /// environment. Validate on hardware before relying on it in a pipeline.</para>
@@ -116,43 +114,6 @@ public sealed class CudaGraph : IDisposable
         Logs.Info($"[CudaGraph] captured {count} nodes: {parts}");
     }
 
-    /// <summary>Re-captures <paramref name="recordWork"/> and updates the existing executable graph in place when the topology is unchanged (cheaper than re-instantiating).</summary>
-    /// <remarks>Falls back to a full re-instantiate when the topology differs. No-op-safe to call before the
-    /// first <see cref="Capture"/> (it just captures).</remarks>
-    public void TryUpdate(Action recordWork)
-    {
-        if (recordWork is null) throw new ArgumentNullException(nameof(recordWork));
-        ThrowIfDisposed();
-        if (_graphExec == 0)
-        {
-            Capture(recordWork);
-            return;
-        }
-
-        CudaDriverApi.cuStreamBeginCapture(_stream, CudaDriverApi.CU_STREAM_CAPTURE_MODE_GLOBAL).ThrowOnError();
-        recordWork();
-        CudaDriverApi.cuStreamEndCapture(_stream, out nint graph).ThrowOnError();
-        try
-        {
-            int rc = CudaDriverApi.cuGraphExecUpdate(_graphExec, graph, 0);
-            if (rc != 0)
-            {
-                // Topology changed — re-instantiate from the fresh graph.
-                DestroyExec();
-                CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
-            }
-        }
-        catch (Exception primary)
-        {
-            try { DestroyGraph(graph, throwOnError: true); }
-            catch (Exception cleanup)
-            {
-                throw new AggregateException("CUDA graph update and source-graph cleanup both failed.", primary, cleanup);
-            }
-            throw;
-        }
-        DestroyGraph(graph, throwOnError: true);
-    }
 
     /// <summary>Starts stream capture directly (the open-region twin of <see cref="Capture"/>, for callers whose captured work spans multiple methods). Pair with <see cref="EndCaptureAndInstantiate"/>; on any exception between the two, call <see cref="AbortCapture"/> so the stream doesn't stay in capture mode.</summary>
     public void BeginCapture()
