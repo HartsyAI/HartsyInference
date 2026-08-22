@@ -13,8 +13,8 @@ public sealed class BooguImageCheckpointConverter
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTransformer(string rootPath)
     {
         string dir = Path.Combine(rootPath, "transformer");
-        string[] shards = DiscoverShards(dir, rootPath, "transformer");
-        return LoadShards(shards, 2200, StripTransformerPrefix);
+        string[] shards = CheckpointConvertUtils.DiscoverShards(dir, rootPath, "transformer", "Boogu");
+        return CheckpointConvertUtils.LoadShards(shards, 2200, CheckpointConvertUtils.StripTransformerPrefix);
     }
 
     /// <summary>Loads the FLUX.1 VAE from <c>{root}/vae/</c>. Boogu ships the Comfy/ldm single-file VAE (<c>flux1_vae_bf16.safetensors</c>) with bare ldm keys (<c>decoder.mid.block_1.*</c>, <c>encoder.down.*</c>), so each key is remapped to the diffusers convention via <see cref="CheckpointConvertUtils.ConvertVaeKey"/> for <c>VaeEncoder</c>/<c>VaeDecoder</c> + <c>VaeConfig.Flux</c>.</summary>
@@ -27,123 +27,21 @@ public sealed class BooguImageCheckpointConverter
         if (shards.Length == 0)
             throw new FileNotFoundException($"No VAE .safetensors found under {dir}.");
         Array.Sort(shards);
-        return LoadShardsRemap(shards, 400, k => CheckpointConvertUtils.ConvertVaeKey(k));
+        return CheckpointConvertUtils.LoadShards(shards, 400, k => CheckpointConvertUtils.ConvertVaeKey(k));
     }
 
     /// <summary>Loads + remaps the Qwen3-VL-8B language tower from <c>{root}/mllm/</c> to the <c>LlamaStyleEncoder</c> convention (drops the vision tower and <c>lm_head</c>).</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTextEncoder(string rootPath)
     {
-        string[] shards = DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm");
-        return LoadShardsRemap(shards, 800, RemapQwenLanguageKey);
+        string[] shards = CheckpointConvertUtils.DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm", "Boogu");
+        return CheckpointConvertUtils.LoadShards(shards, 800, CheckpointConvertUtils.RemapQwenLanguageKey);
     }
 
     /// <summary>Loads the Qwen3-VL-8B vision tower from <c>{root}/mllm/</c> (the <c>visual.*</c> subtree), re-rooted to bare keys (<c>patch_embed.*</c>, <c>blocks.{i}.*</c>, <c>merger.*</c>) for the Boogu vision encoder.</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVisionTower(string rootPath)
     {
-        string[] shards = DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm");
-        return LoadShardsRemap(shards, 600, RemapQwenVisionKey);
-    }
-
-    private static string[] DiscoverShards(string preferredDir, string rootPath, string what)
-    {
-        if (Directory.Exists(preferredDir))
-        {
-            string[] s = Directory.GetFiles(preferredDir, "*.safetensors");
-            if (s.Length > 0) { Array.Sort(s); return s; }
-        }
-        string[] all = Directory.GetFiles(rootPath, "*.safetensors");
-        string[] match = Array.FindAll(all, f => Path.GetFileName(f).ToLowerInvariant().Contains(what));
-        if (match.Length == 0)
-            throw new FileNotFoundException($"No Boogu {what} .safetensors found under {preferredDir} or {rootPath}.");
-        Array.Sort(match);
-        return match;
-    }
-
-    private static (Dictionary<string, Tensor>, IReadOnlyList<SafeTensorsLoader>) LoadShards(
-        string[] shards, int capacity, Func<string, string> keyMap)
-    {
-        Dictionary<string, Tensor> merged = new(capacity);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
-        try
-        {
-            foreach (string shard in shards)
-            {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    merged[keyMap(kvp.Key)] = kvp.Value;
-                }
-            }
-            return (CheckpointConvertUtils.ApplyFp8ScaledDequant(merged), loaders);
-        }
-        catch
-        {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
-            throw;
-        }
-    }
-
-    private static (Dictionary<string, Tensor>, IReadOnlyList<SafeTensorsLoader>) LoadShardsRemap(
-        string[] shards, int capacity, Func<string, string?> keyMap)
-    {
-        Dictionary<string, Tensor> merged = new(capacity);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
-        try
-        {
-            foreach (string shard in shards)
-            {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    string? mapped = keyMap(kvp.Key);
-                    if (mapped is not null)
-                        merged[mapped] = kvp.Value;
-                }
-            }
-            return (CheckpointConvertUtils.ApplyFp8ScaledDequant(merged), loaders);
-        }
-        catch
-        {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
-            throw;
-        }
-    }
-
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
-            return key["model.diffusion_model.".Length..];
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
-            return key["diffusion_model.".Length..];
-        if (key.StartsWith("transformer.", StringComparison.Ordinal))
-            return key["transformer.".Length..];
-        return key;
-    }
-
-    /// <summary>Maps a Qwen3-VL language-tower key to the <c>LlamaStyleEncoder</c> convention, or null to drop (vision tower, <c>lm_head</c>). The language tower lives under <c>language_model.</c>; re-root it at <c>model.</c>.</summary>
-    private static string? RemapQwenLanguageKey(string key)
-    {
-        if (key.Contains(".visual.") || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
-        if (key.Contains("lm_head")) return null;
-
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal))
-            suffix = suffix["model.".Length..];
-
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
-        {
-            return "model." + suffix;
-        }
-        return null;
+        string[] shards = CheckpointConvertUtils.DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm", "Boogu");
+        return CheckpointConvertUtils.LoadShards(shards, 600, RemapQwenVisionKey);
     }
 
     /// <summary>Maps a Qwen3-VL vision-tower key to bare keys (strips <c>…visual.</c>), or null to drop non-vision keys.</summary>

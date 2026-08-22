@@ -197,78 +197,28 @@ public sealed class LensCheckpointConverter
         if (afterIdx == "attn.img_qkv.weight")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
         if (afterIdx == "attn.img_qkv.bias")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
         if (afterIdx == "attn.txt_qkv.weight")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
         if (afterIdx == "attn.txt_qkv.bias")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
 
         output[$"{prefix}.{afterIdx}"] = tensor;
-    }
-
-    private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * rowBytes;
-        TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-        Tensor qWeight = new Tensor(splitShape, fused.DType);
-        Tensor kWeight = new Tensor(splitShape, fused.DType);
-        Tensor vWeight = new Tensor(splitShape, fused.DType);
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.weight"] = qWeight;
-        output[$"{prefix}.{kName}.weight"] = kWeight;
-        output[$"{prefix}.{vName}.weight"] = vWeight;
-    }
-
-    private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        long elemBytes = fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * elemBytes;
-        TensorShape splitShape = new TensorShape(innerDim);
-
-        Tensor qBias = new Tensor(splitShape, fused.DType);
-        Tensor kBias = new Tensor(splitShape, fused.DType);
-        Tensor vBias = new Tensor(splitShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.bias"] = qBias;
-        output[$"{prefix}.{kName}.bias"] = kBias;
-        output[$"{prefix}.{vName}.bias"] = vBias;
     }
 }

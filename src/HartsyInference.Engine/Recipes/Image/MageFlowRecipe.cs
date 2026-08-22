@@ -52,11 +52,11 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             {
                 GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
                 ggufHandle = gguf;
-                ditWeights = Remap(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights), StripTransformerPrefix);
+                ditWeights = Remap(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights), CheckpointConvertUtils.StripTransformerPrefix);
             }
             else
             {
-                (ditWeights, SafeTensorsLoader ditLoader) = LoadComponent(context.CheckpointPath, StripTransformerPrefix, applyFp8Dequant: true);
+                (ditWeights, SafeTensorsLoader ditLoader) = LoadComponent(context.CheckpointPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
                 loaders.Add(ditLoader);
             }
             if (ditWeights.Count == 0)
@@ -73,7 +73,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = LoadComponent(encoderPath, RemapQwenKey, applyFp8Dequant: true);
+            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = LoadComponent(encoderPath, CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teLoader);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
@@ -130,27 +130,6 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             if (mapped is not null) merged[mapped] = kv.Value;
         }
         return merged;
-    }
-
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal)) return key["model.diffusion_model.".Length..];
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal)) return key["diffusion_model.".Length..];
-        if (key.StartsWith("transformer.", StringComparison.Ordinal)) return key["transformer.".Length..];
-        return key;
-    }
-
-    // Qwen3-VL → LlamaStyleEncoder: drop vision tower + lm_head, keep language_model.model.* as model.*.
-    private static string? RemapQwenKey(string key)
-    {
-        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
-        if (key.Contains("lm_head", StringComparison.Ordinal)) return null;
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal)) suffix = suffix["model.".Length..];
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal) || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal) || suffix == "norm.weight")
-            return "model." + suffix;
-        return null;
     }
 
     // Split a loaded MageVAE file: decoder keys are `pipeline.*` (minus the FLUX2 encoder side y_embedder.encoder/

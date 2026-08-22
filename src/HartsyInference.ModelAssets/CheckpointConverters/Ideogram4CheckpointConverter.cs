@@ -58,7 +58,7 @@ public sealed class Ideogram4CheckpointConverter
                 foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
                 {
                     if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    merged[StripTransformerPrefix(kvp.Key)] = kvp.Value;
+                    merged[CheckpointConvertUtils.StripTransformerPrefix(kvp.Key)] = kvp.Value;
                 }
             }
             Dictionary<string, Tensor> folded = CheckpointConvertUtils.ApplyFp8ScaledDequant(merged);
@@ -114,7 +114,7 @@ public sealed class Ideogram4CheckpointConverter
                 foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
                 {
                     if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    string? mapped = RemapQwenKey(kvp.Key);
+                    string? mapped = CheckpointConvertUtils.RemapQwenLanguageKey(kvp.Key);
                     if (mapped is not null)
                         merged[mapped] = kvp.Value;
                 }
@@ -161,39 +161,4 @@ public sealed class Ideogram4CheckpointConverter
         }
     }
 
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
-            return key["model.diffusion_model.".Length..];
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
-            return key["diffusion_model.".Length..];
-        if (key.StartsWith("transformer.", StringComparison.Ordinal))
-            return key["transformer.".Length..];
-        return key;
-    }
-
-    /// <summary>Maps a Qwen3-VL checkpoint key to the <c>LlamaStyleEncoder</c> convention, or returns null to drop it (vision tower, <c>lm_head</c>, non-text heads). The language tower lives under <c>language_model.</c> in HF Qwen3-VL; we re-root it at <c>model.</c>.</summary>
-    private static string? RemapQwenKey(string key)
-    {
-        // Drop the vision tower and any non-text generation heads.
-        if (key.Contains(".visual.") || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
-        if (key.Contains("lm_head")) return null;
-
-        // Find the language-tower suffix (everything after the last "language_model.").
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-
-        // Strip any residual "model." so we can re-root uniformly.
-        if (suffix.StartsWith("model.", StringComparison.Ordinal))
-            suffix = suffix["model.".Length..];
-
-        // Keep only the encoder-relevant trees.
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
-        {
-            return "model." + suffix;
-        }
-        return null;
-    }
 }

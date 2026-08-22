@@ -178,8 +178,8 @@ public static unsafe class HunyuanVideoCheckpointConverter
         if (Rename(key, "time_text_embed.text_embedder.linear_1", "vector_in.0", t, o)) return;
         if (Rename(key, "time_text_embed.text_embedder.linear_2", "vector_in.2", t, o)) return;
         if (key.StartsWith("context_embedder.", StringComparison.Ordinal)) { MapRefinerDiffusers(key, t, o); return; }
-        if (key == "norm_out.linear.weight") { o["final_layer.mod.weight"] = SwapHalves(t, (int)t.Shape[0] / 2); return; }
-        if (key == "norm_out.linear.bias") { o["final_layer.mod.bias"] = SwapHalves(t, (int)t.Shape[0] / 2); return; }
+        if (key == "norm_out.linear.weight") { o["final_layer.mod.weight"] = CheckpointConvertUtils.SwapScaleShiftHalves(t, castToF32: true); return; }
+        if (key == "norm_out.linear.bias") { o["final_layer.mod.bias"] = CheckpointConvertUtils.SwapScaleShiftHalves(t, castToF32: true); return; }
         if (key == "proj_out.weight") { o["final_layer.proj.weight"] = t; return; }
         if (key == "proj_out.bias") { o["final_layer.proj.bias"] = t; return; }
         if (key.StartsWith("transformer_blocks.", StringComparison.Ordinal))
@@ -324,19 +324,6 @@ public static unsafe class HunyuanVideoCheckpointConverter
         dst.Fp8ScaleFactor = src.Fp8ScaleFactor;
         long bytes = src.ElementCount * src.DType.SizeInBytes;
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)dst.DataPointer, bytes, bytes);
-        return dst;
-    }
-
-    /// <summary>Swaps the two halves along dim-0 of a modulation tensor: diffusers <c>norm_out</c> chunks <c>[scale, shift]</c>; the DiT's final <c>Modulate</c> reads <c>[shift, scale]</c>. F32 only (dequant runs first).</summary>
-    private static Tensor SwapHalves(Tensor src, int half)
-    {
-        Tensor f = src.DType == DType.F32 ? src : src.CastTo(DType.F32);
-        long cols = f.Shape.Rank == 1 ? 1 : f.ElementCount / f.Shape[0];
-        Tensor dst = new(f.Shape, DType.F32);
-        float* sp = (float*)f.DataPointer; float* dp = (float*)dst.DataPointer;
-        long block = half * cols;
-        Buffer.MemoryCopy(sp + block, dp, block * 4, block * 4);   // src second half (shift) → dst first half
-        Buffer.MemoryCopy(sp, dp + block, block * 4, block * 4);   // src first half  (scale) → dst second half
         return dst;
     }
 

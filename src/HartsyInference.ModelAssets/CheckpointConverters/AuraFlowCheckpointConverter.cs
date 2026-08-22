@@ -91,7 +91,7 @@ public sealed class AuraFlowCheckpointConverter
         if (key == "modF.1.weight")
         {
             // BFL native [shift, scale] → diffusers [scale, shift] for AuraFlowPreFinalBlock.
-            output["norm_out.linear.weight"] = SwapScaleShiftHalves(tensor);
+            output["norm_out.linear.weight"] = CheckpointConvertUtils.SwapScaleShiftHalves(tensor);
             return;
         }
         if (key == "cond_seq_linear.weight")
@@ -201,25 +201,4 @@ public sealed class AuraFlowCheckpointConverter
         output[$"{prefix}.{subKey}"] = tensor;
     }
 
-    /// <summary>Swaps the two halves of a tensor along dim 0 (BFL <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c>). Identical implementation to the one in <see cref="FluxCheckpointConverter"/>; kept inline rather than shared to avoid making this small utility part of a public API contract.</summary>
-    private static unsafe Tensor SwapScaleShiftHalves(Tensor input)
-    {
-        long firstDim = input.Shape[0];
-        if (firstDim % 2 != 0)
-            throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
-
-        long halfBytes = (input.ElementCount / 2) * input.DType.SizeInBytes;
-
-        Tensor swapped = new(input.Shape, input.DType)
-        {
-            Fp8ScaleFactor = input.Fp8ScaleFactor,
-        };
-
-        byte* src = (byte*)input.DataPointer;
-        byte* dst = (byte*)swapped.DataPointer;
-
-        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);              // 2nd half → 1st half
-        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);              // 1st half → 2nd half
-        return swapped;
-    }
 }

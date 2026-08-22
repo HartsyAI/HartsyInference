@@ -94,13 +94,13 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             // nvfp4ToFp8: the DiTs are ~93% nvfp4. Dequantizing to F16 would need 35.9 GB for the pair; folding the
             // block scale into an fp8 value (global scale on Fp8ScaleFactor) keeps them at 9.3 GB each.
             Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(context.CheckpointPath)}.");
-            Dictionary<string, Tensor> condWeights = LoadComponent(context.CheckpointPath, StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
+            Dictionary<string, Tensor> condWeights = LoadComponent(context.CheckpointPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
 
             Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(uncondPath)}.");
-            Dictionary<string, Tensor> uncondWeights = LoadComponent(uncondPath, StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
+            Dictionary<string, Tensor> uncondWeights = LoadComponent(uncondPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
 
             Logs.Info($"[Ideogram4Recipe] Loading Qwen3-VL-8B text encoder: {Path.GetFileName(encoderPath)}.");
-            Dictionary<string, Tensor> encoderWeights = LoadComponent(encoderPath, RemapQwenKey, applyFp8Dequant: true, nvfp4ToFp8: false, loaders);
+            Dictionary<string, Tensor> encoderWeights = LoadComponent(encoderPath, CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true, nvfp4ToFp8: false, loaders);
 
             Logs.Info($"[Ideogram4Recipe] Loading Flux.2 VAE: {Path.GetFileName(vaePath)}.");
             Dictionary<string, Tensor> vaeWeights = LoadComponent(vaePath, key => key, applyFp8Dequant: false, nvfp4ToFp8: false, loaders);
@@ -172,49 +172,5 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             }
         }
         return applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged, nvfp4ToFp8) : merged;
-    }
-
-    /// <summary>Strips an optional Comfy/diffusers wrapper prefix off a transformer key.</summary>
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["model.diffusion_model.".Length..];
-        }
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["diffusion_model.".Length..];
-        }
-        if (key.StartsWith("transformer.", StringComparison.Ordinal))
-        {
-            return key["transformer.".Length..];
-        }
-        return key;
-    }
-
-    /// <summary>Maps a Qwen3-VL checkpoint key to the <see cref="LlamaStyleEncoder"/> convention (<c>model.embed_tokens</c>, <c>model.layers.{i}.*</c>, <c>model.norm</c>), re-rooting the HF <c>language_model.</c> tower at <c>model.</c>; returns null to drop the vision tower and <c>lm_head</c>.</summary>
-    private static string? RemapQwenKey(string key)
-    {
-        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal))
-        {
-            return null;
-        }
-        if (key.Contains("lm_head", StringComparison.Ordinal))
-        {
-            return null;
-        }
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal))
-        {
-            suffix = suffix["model.".Length..];
-        }
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
-        {
-            return "model." + suffix;
-        }
-        return null;
     }
 }

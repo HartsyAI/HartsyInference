@@ -3,6 +3,7 @@ using System.Text;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Quant;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
@@ -72,6 +73,89 @@ public static unsafe class CheckpointConvertUtils
             2 => "mid_block.resnets.1." + ConvertResNetSubKey(rest),
             _ => null,
         };
+    }
+
+
+    // ── DiT Key Shared ──────────────────────────────────────────
+
+    /// <summary>Strips an optional Comfy/diffusers wrapper prefix (<c>model.diffusion_model.</c> / <c>diffusion_model.</c> / <c>transformer.</c>) off a transformer key.</summary>
+    public static string StripTransformerPrefix(string key)
+    {
+        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
+            return key["model.diffusion_model.".Length..];
+        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
+            return key["diffusion_model.".Length..];
+        if (key.StartsWith("transformer.", StringComparison.Ordinal))
+            return key["transformer.".Length..];
+        return key;
+    }
+
+    /// <summary>Maps a Qwen3-VL language-tower key to the <c>LlamaStyleEncoder</c> convention (<c>model.embed_tokens</c>, <c>model.layers.{i}.*</c>, <c>model.norm</c>), re-rooting the HF <c>language_model.</c> tower at <c>model.</c>; returns null to drop the vision tower, <c>lm_head</c>, and other non-encoder trees.</summary>
+    public static string? RemapQwenLanguageKey(string key)
+    {
+        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
+        if (key.Contains("lm_head", StringComparison.Ordinal)) return null;
+
+        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
+        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
+        if (suffix.StartsWith("model.", StringComparison.Ordinal))
+            suffix = suffix["model.".Length..];
+
+        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
+            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
+            || suffix == "norm.weight")
+        {
+            return "model." + suffix;
+        }
+        return null;
+    }
+
+
+    // ── Shard Loading ──────────────────────────────────────────
+
+    /// <summary>Finds .safetensors shards in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
+    public static string[] DiscoverShards(string preferredDir, string rootPath, string what, string modelName)
+    {
+        if (Directory.Exists(preferredDir))
+        {
+            string[] s = Directory.GetFiles(preferredDir, "*.safetensors");
+            if (s.Length > 0) { Array.Sort(s); return s; }
+        }
+        string[] all = Directory.GetFiles(rootPath, "*.safetensors");
+        string[] match = Array.FindAll(all, f => Path.GetFileName(f).ToLowerInvariant().Contains(what));
+        if (match.Length == 0)
+            throw new FileNotFoundException($"No {modelName} {what} .safetensors found under {preferredDir} or {rootPath}.");
+        Array.Sort(match);
+        return match;
+    }
+
+    /// <summary>Loads and merges shards, mapping each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers, and folding fp8_scaled companions via <see cref="ApplyFp8ScaledDequant"/>. On failure the loaders opened so far are disposed.</summary>
+    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadShards(
+        string[] shards, int capacity, Func<string, string?> keyMap)
+    {
+        Dictionary<string, Tensor> merged = new(capacity);
+        List<SafeTensorsLoader> loaders = new(shards.Length);
+        try
+        {
+            foreach (string shard in shards)
+            {
+                SafeTensorsLoader loader = new();
+                loader.Load(shard);
+                loaders.Add(loader);
+                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
+                {
+                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
+                    string? mapped = keyMap(kvp.Key);
+                    if (mapped is not null) merged[mapped] = kvp.Value;
+                }
+            }
+            return (ApplyFp8ScaledDequant(merged), loaders);
+        }
+        catch
+        {
+            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            throw;
+        }
     }
 
 
@@ -222,6 +306,96 @@ public static unsafe class CheckpointConvertUtils
 
 
     // ── Tensor Splitting ──────────────────────────────────────────
+
+    /// <summary>Byte count for a row-aligned slice of a fused tensor. GGUF block quants (Q4_K etc.) pack fixed-size blocks that never span rows, so any split along dim 0 is byte-exact as long as the row length is a whole number of blocks — which this validates.</summary>
+    public static long SliceByteCount(Tensor fused, long elementCount)
+    {
+        DType d = fused.DType;
+        if (d.IsQuantized && fused.Shape.Rank == 2 && fused.Shape[1] % d.BlockElementCount != 0)
+            throw new NotSupportedException(
+                $"Cannot split {d.Name} tensor with row length {fused.Shape[1]}: not a multiple of the {d.BlockElementCount}-element quant block.");
+        return d.ComputeByteCount(elementCount);
+    }
+
+    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three [innerDim, inDim] weights under <c>{prefix}.{qName}.weight</c> etc. Quant-aware via <see cref="SliceByteCount"/>; the fused tensor's per-tensor fp8 scale is carried onto every split.</summary>
+    public static void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
+        string qName, string kName, string vName, Dictionary<string, Tensor> output)
+    {
+        int inDim = (int)fused.Shape[1];
+        long chunkBytes = SliceByteCount(fused, (long)innerDim * inDim);
+        TensorShape splitShape = new TensorShape(innerDim, inDim);
+
+        Tensor qWeight = new Tensor(splitShape, fused.DType);
+        Tensor kWeight = new Tensor(splitShape, fused.DType);
+        Tensor vWeight = new Tensor(splitShape, fused.DType);
+        // The raw fp8 bytes alone are real_value/scale — dropping the factor runs every attention projection
+        // dozens of times too large → saturated softmax → pure-noise output.
+        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
+        byte* src = (byte*)fused.DataPointer;
+        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
+
+        output[$"{prefix}.{qName}.weight"] = qWeight;
+        output[$"{prefix}.{kName}.weight"] = kWeight;
+        output[$"{prefix}.{vName}.weight"] = vWeight;
+    }
+
+    /// <summary>Splits a fused QKV bias [3*innerDim] into three [innerDim] biases under <c>{prefix}.{qName}.bias</c> etc. Quant-aware via <see cref="SliceByteCount"/> (identical to <c>innerDim * SizeInBytes</c> for the plain dtypes biases ship in).</summary>
+    public static void SplitQkvBias(Tensor fused, int innerDim, string prefix,
+        string qName, string kName, string vName, Dictionary<string, Tensor> output)
+    {
+        long chunkBytes = SliceByteCount(fused, innerDim);
+        TensorShape splitShape = new TensorShape(innerDim);
+
+        Tensor qBias = new Tensor(splitShape, fused.DType);
+        Tensor kBias = new Tensor(splitShape, fused.DType);
+        Tensor vBias = new Tensor(splitShape, fused.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
+        byte* src = (byte*)fused.DataPointer;
+        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
+
+        output[$"{prefix}.{qName}.bias"] = qBias;
+        output[$"{prefix}.{kName}.bias"] = kBias;
+        output[$"{prefix}.{vName}.bias"] = vBias;
+    }
+
+    /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
+    /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
+    public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)
+    {
+        long firstDim = input.Shape[0];
+        if (firstDim % 2 != 0)
+            throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        Tensor source = castToF32 && input.DType != DType.F32 ? input.CastTo(DType.F32) : input;
+        try
+        {
+            long halfBytes = SliceByteCount(source, source.ElementCount / 2);
+            Tensor swapped = new Tensor(source.Shape, source.DType);
+            if (!castToF32)
+                swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
+
+            byte* src = (byte*)source.DataPointer;
+            byte* dst = (byte*)swapped.DataPointer;
+            Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
+            Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
+            return swapped;
+        }
+        finally
+        {
+            if (!ReferenceEquals(source, input)) source.Dispose();
+        }
+    }
 
     /// <summary>Splits a fused in_proj_weight [3*H, H] into separate q_proj, k_proj, v_proj weights [H, H] each.</summary>
     public static void SplitInProjWeight(Tensor inProj, int hiddenSize, string layerPrefix, Dictionary<string, Tensor> output)

@@ -214,13 +214,13 @@ public sealed class Sd3CheckpointConverter
             if (attnKey == "qkv.weight")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+                CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
                 return;
             }
             if (attnKey == "qkv.bias")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+                CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
                 return;
             }
             if (attnKey.StartsWith("proj."))
@@ -249,13 +249,13 @@ public sealed class Sd3CheckpointConverter
             if (attnKey == "qkv.weight")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvWeight(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
+                CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
                 return;
             }
             if (attnKey == "qkv.bias")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvBias(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
+                CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
                 return;
             }
             if (attnKey.StartsWith("proj."))
@@ -304,13 +304,13 @@ public sealed class Sd3CheckpointConverter
             if (attnKey == "qkv.weight")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+                CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
                 return;
             }
             if (attnKey == "qkv.bias")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
-                SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+                CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
                 return;
             }
 
@@ -345,66 +345,6 @@ public sealed class Sd3CheckpointConverter
             output[$"{prefix}.ff_context.net.2.{rest["mlp.fc2.".Length..]}"] = tensor;
             return;
         }
-    }
-
-
-    // ── QKV Splitting ──────────────────────────────────────────
-
-    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three separate [innerDim, inDim] weights.</summary>
-    private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * rowBytes;
-        TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-        Tensor qWeight = new Tensor(splitShape, fused.DType);
-        Tensor kWeight = new Tensor(splitShape, fused.DType);
-        Tensor vWeight = new Tensor(splitShape, fused.DType);
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
-
-        // fp8_scaled bundles (SD3.5-Large fp8): the fused QKV carries a per-tensor scale that MUST follow the
-        // split halves — the raw fp8 bytes alone are real_value/scale, so dropping it runs every attention
-        // projection dozens of times too large → saturated softmax → pure-noise output.
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        output[$"{prefix}.{qName}.weight"] = qWeight;
-        output[$"{prefix}.{kName}.weight"] = kWeight;
-        output[$"{prefix}.{vName}.weight"] = vWeight;
-    }
-
-    /// <summary>Splits a fused QKV bias [3*innerDim] into three separate [innerDim] biases.</summary>
-    private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        long elemBytes = fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * elemBytes;
-        TensorShape splitShape = new TensorShape(innerDim);
-
-        Tensor qBias = new Tensor(splitShape, fused.DType);
-        Tensor kBias = new Tensor(splitShape, fused.DType);
-        Tensor vBias = new Tensor(splitShape, fused.DType);
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
-
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        output[$"{prefix}.{qName}.bias"] = qBias;
-        output[$"{prefix}.{kName}.bias"] = kBias;
-        output[$"{prefix}.{vName}.bias"] = vBias;
     }
 
 
