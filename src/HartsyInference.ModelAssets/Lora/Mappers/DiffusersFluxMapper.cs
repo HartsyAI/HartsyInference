@@ -20,7 +20,7 @@ public static class DiffusersFluxMapper
     /// <summary>Same parse, but <paramref name="bareRoots"/> accepts a root with NO wrapper prefix as a transformer target — the root is then already the canonical weight name. Shares this parser rather than getting its own because the two formats differ only in that one rule.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool bareRoots)
     {
-        Dictionary<(LoraTarget, string), GroupBuffer> groups = [];
+        Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
 
         foreach (string key in loader.Descriptors.Keys)
         {
@@ -80,12 +80,7 @@ public static class DiffusersFluxMapper
             }
 
             string canonicalKey = body + ".weight";
-            (LoraTarget, string) gk = (target, canonicalKey);
-            if (!groups.TryGetValue(gk, out GroupBuffer? group))
-            {
-                group = new GroupBuffer { Target = target, FirstSourceKey = key };
-                groups[gk] = group;
-            }
+            LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, target, canonicalKey, key);
             switch (role)
             {
                 case LoraRole.Down: group.Down = loader.GetTensor(key); break;
@@ -94,38 +89,9 @@ public static class DiffusersFluxMapper
             }
         }
 
-        List<LoraLayer> layers = new(groups.Count);
-        foreach (((LoraTarget _, string canonicalKey), GroupBuffer group) in groups)
-        {
-            if (group.Down is null || group.Up is null)
-            {
-                Logs.Warning($"Diffusers Flux LoRA group '{group.FirstSourceKey}' missing down or up; skipping.");
-                continue;
-            }
-            int rank = (int)group.Down.Shape[0];
-            float alpha = group.Alpha ?? rank;
-            layers.Add(new LoraLayer
-            {
-                TargetKey = canonicalKey,
-                Target = group.Target,
-                LoraDown = group.Down,
-                LoraUp = group.Up,
-                Alpha = alpha,
-                Rank = rank,
-                Variant = LoraVariant.StandardLora,
-            });
-        }
-        return layers;
+        return LoraGroupBuffer.BuildLayers(groups,
+            sourceKey => $"Diffusers Flux LoRA group '{sourceKey}' missing down or up; skipping.");
     }
 
     private enum LoraRole { Down, Up, Alpha }
-
-    private sealed class GroupBuffer
-    {
-        public required LoraTarget Target { get; init; }
-        public required string FirstSourceKey { get; init; }
-        public Tensor? Down { get; set; }
-        public Tensor? Up { get; set; }
-        public float? Alpha { get; set; }
-    }
 }

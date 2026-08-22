@@ -21,7 +21,7 @@ public static class KohyaFluxMapper
     /// <summary>Same parse, but <paramref name="dottedBflRoots"/> accepts ComfyUI-style roots: DOTTED original BFL module names under a <c>diffusion_model.</c> prefix (e.g. <c>diffusion_model.double_blocks.0.img_attn.qkv</c>, how Chroma/Flux LoRAs trained against ComfyUI checkpoints ship). The dotted body underscore-normalizes to exactly the kohya body this mapper already translates — fused-QKV splits included — so the whole BFL→diffusers mapping table is shared rather than duplicated.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, bool dottedBflRoots)
     {
-        Dictionary<(LoraTarget, string), GroupBuffer> groups = [];
+        Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
             if (!TryClassifyRoleAndRoot(key, out LoraRole role, out string root))
@@ -52,16 +52,17 @@ public static class KohyaFluxMapper
             ProcessUnetKey(loader, key, role, body, groups);
         }
 
-        return BuildLayers(groups);
+        return LoraGroupBuffer.BuildLayers(groups,
+            sourceKey => $"Kohya Flux LoRA group '{sourceKey}' missing down or up; skipping.");
     }
 
-    private static void ProcessClipKey(SafeTensorsLoader loader, string sourceKey, LoraRole role, string body, Dictionary<(LoraTarget, string), GroupBuffer> groups)
+    private static void ProcessClipKey(SafeTensorsLoader loader, string sourceKey, LoraRole role, string body, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
         string canonicalKey = LoraKeyTransformer.UnderscoreToDot(body) + ".weight";
         AddSimple(loader, sourceKey, role, canonicalKey, LoraTarget.ClipL, groups);
     }
 
-    private static void ProcessUnetKey(SafeTensorsLoader loader, string sourceKey, LoraRole role, string body, Dictionary<(LoraTarget, string), GroupBuffer> groups)
+    private static void ProcessUnetKey(SafeTensorsLoader loader, string sourceKey, LoraRole role, string body, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
         Match m;
         if ((m = _doubleBlock.Match(body)).Success)
@@ -103,7 +104,7 @@ public static class KohyaFluxMapper
         _ => null,
     };
 
-    private static void HandleDoubleBlock(SafeTensorsLoader loader, string sourceKey, LoraRole role, int i, string stream, string sub, Dictionary<(LoraTarget, string), GroupBuffer> groups)
+    private static void HandleDoubleBlock(SafeTensorsLoader loader, string sourceKey, LoraRole role, int i, string stream, string sub, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
         bool isImg = stream == "img";
         string blockPrefix = $"transformer_blocks.{i}";
@@ -140,7 +141,7 @@ public static class KohyaFluxMapper
         }
     }
 
-    private static void HandleSingleBlock(SafeTensorsLoader loader, string sourceKey, LoraRole role, int i, string sub, Dictionary<(LoraTarget, string), GroupBuffer> groups)
+    private static void HandleSingleBlock(SafeTensorsLoader loader, string sourceKey, LoraRole role, int i, string sub, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
         string blockPrefix = $"single_transformer_blocks.{i}";
         switch (sub)
@@ -166,9 +167,9 @@ public static class KohyaFluxMapper
         }
     }
 
-    private static void AddSimple(SafeTensorsLoader loader, string sourceKey, LoraRole role, string canonicalKey, LoraTarget target, Dictionary<(LoraTarget, string), GroupBuffer> groups)
+    private static void AddSimple(SafeTensorsLoader loader, string sourceKey, LoraRole role, string canonicalKey, LoraTarget target, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
-        GroupBuffer group = GetOrCreate(groups, target, canonicalKey, sourceKey);
+        LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, target, canonicalKey, sourceKey);
         switch (role)
         {
             case LoraRole.Down: group.Down = loader.GetTensor(sourceKey); break;
@@ -177,7 +178,7 @@ public static class KohyaFluxMapper
         }
     }
 
-    private static unsafe void AddFusedSplit(SafeTensorsLoader loader, string sourceKey, LoraRole role, string[] canonicalKeys, Dictionary<(LoraTarget, string), GroupBuffer> groups, int splitWays)
+    private static unsafe void AddFusedSplit(SafeTensorsLoader loader, string sourceKey, LoraRole role, string[] canonicalKeys, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups, int splitWays)
     {
         // Fused QKV / linear1: lora_down is shared across all splits, lora_up is split along dim 0,
         // alpha is shared. Slices of lora_up borrow from the same mmap region.
@@ -216,7 +217,7 @@ public static class KohyaFluxMapper
                 long elements = sliceOuts[s] * rank;
                 byte* slicePtr = (byte*)source.DataPointer + offset * elemSize;
                 Tensor slice = new(slicePtr, new TensorShape(sliceOuts[s], rank), source.DType);
-                GroupBuffer group = GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
+                LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
                 group.Up = slice;
                 offset += elements;
             }
@@ -226,50 +227,13 @@ public static class KohyaFluxMapper
         // Down and Alpha: shared across all canonical keys
         for (int s = 0; s < splitWays; s++)
         {
-            GroupBuffer group = GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
+            LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
             switch (role)
             {
                 case LoraRole.Down: group.Down = source; break;
                 case LoraRole.Alpha: group.Alpha = ReadScalar(source); break;
             }
         }
-    }
-
-    private static GroupBuffer GetOrCreate(Dictionary<(LoraTarget, string), GroupBuffer> groups, LoraTarget target, string canonicalKey, string sourceKey)
-    {
-        (LoraTarget, string) gk = (target, canonicalKey);
-        if (!groups.TryGetValue(gk, out GroupBuffer? group))
-        {
-            group = new GroupBuffer { Target = target, FirstSourceKey = sourceKey };
-            groups[gk] = group;
-        }
-        return group;
-    }
-
-    private static IReadOnlyList<LoraLayer> BuildLayers(Dictionary<(LoraTarget, string), GroupBuffer> groups)
-    {
-        List<LoraLayer> layers = new(groups.Count);
-        foreach (((LoraTarget _, string canonicalKey), GroupBuffer group) in groups)
-        {
-            if (group.Down is null || group.Up is null)
-            {
-                Logs.Warning($"Kohya Flux LoRA group '{group.FirstSourceKey}' missing down or up; skipping.");
-                continue;
-            }
-            int rank = (int)group.Down.Shape[0];
-            float alpha = group.Alpha ?? rank;
-            layers.Add(new LoraLayer
-            {
-                TargetKey = canonicalKey,
-                Target = group.Target,
-                LoraDown = group.Down,
-                LoraUp = group.Up,
-                Alpha = alpha,
-                Rank = rank,
-                Variant = LoraVariant.StandardLora,
-            });
-        }
-        return layers;
     }
 
     private static bool TryClassifyRoleAndRoot(string key, out LoraRole role, out string root)
@@ -286,13 +250,4 @@ public static class KohyaFluxMapper
     private static unsafe float ReadScalar(Tensor t) => KohyaSdMapper.ReadScalar(t);
 
     private enum LoraRole { Down, Up, Alpha }
-
-    private sealed class GroupBuffer
-    {
-        public required LoraTarget Target { get; init; }
-        public required string FirstSourceKey { get; init; }
-        public Tensor? Down { get; set; }
-        public Tensor? Up { get; set; }
-        public float? Alpha { get; set; }
-    }
 }
