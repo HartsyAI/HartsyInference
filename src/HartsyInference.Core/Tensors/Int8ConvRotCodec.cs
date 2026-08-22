@@ -105,7 +105,7 @@ public static unsafe class Int8ConvRotCodec
             ushort* destinationRow = destination + row * inFeatures;
             for (long column = 0; column < inFeatures; column++)
             {
-                destinationRow[column] = ToBf16(scratch[column]);
+                destinationRow[column] = TensorCasts.F32ToBf16Bits(scratch[column]);
             }
             return scratch;
         }, static _ => { });
@@ -148,7 +148,4 @@ public static unsafe class Int8ConvRotCodec
             throw new ArgumentOutOfRangeException(nameof(size), size, "ConvRot group size must be a power of four (4, 16, 64, 256, …).");
     }
 
-    /// <summary>Truncating F32→BF16, matching <see cref="Tensor.CastTo"/> bit for bit.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ushort ToBf16(float value) => (ushort)(BitConverter.SingleToUInt32Bits(value) >> 16);
 }

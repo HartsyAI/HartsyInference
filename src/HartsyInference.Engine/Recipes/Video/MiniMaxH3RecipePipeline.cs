@@ -1,3 +1,4 @@
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -314,8 +315,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         deficit = floorBytes - availableForActivations;
         return new OutOfVramException(
             $"MiniMax-H3/{frames}f@{width}x{height} (seq~{seq}) cannot run on this device's {label} backend: it "
-            + $"needs at least {Mb(floorBytes)} of activations and workspace on top of {Mb(residentWeightBytes)} "
-            + $"of resident DiT weights, but only {Mb(freeBytes)} is free ({Mb(deficit)} short). Weight streaming "
+            + $"needs at least {ByteFormat.Mb(floorBytes)} of activations and workspace on top of {ByteFormat.Mb(residentWeightBytes)} "
+            + $"of resident DiT weights, but only {ByteFormat.Mb(freeBytes)} is free ({ByteFormat.Mb(deficit)} short). Weight streaming "
             + "cannot reduce this — lower the resolution or frame count, use a device with more VRAM, or adjust the "
             + "DiT shard split.");
     }
@@ -344,7 +345,6 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return 0;
     }
 
-    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 
     /// <summary>Frees a component's weights after use — unless placement put that component on a device the DiT does not use, in which case they stay resident so the next generation skips the re-upload. The opt-in is the placement itself: on the primary the free is load-bearing (the DiT needs that room back), and off it there is nothing competing for the space. Warm weights still go on <c>FreeMemory()</c>, model switch, and disposal, which release every backend's weight set regardless. Only WEIGHTS are held — activations are freed normally, so nothing a later generation faults back to host is kept alive by this.</summary>
     private void ReleaseComponentWeights(IBackend backend, IEnumerable<Tensor> weights)

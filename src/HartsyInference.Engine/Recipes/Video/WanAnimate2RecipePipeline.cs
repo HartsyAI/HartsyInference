@@ -1,3 +1,4 @@
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -310,8 +311,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 : $" Not even the shortest chunk fits at {width}x{height} — lower the resolution.";
             throw new OutOfVramException(
                 $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the BF16 driving cache "
-                + $"({Mb(bf16Cache)}) plus workspace ({Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
-                + $"streamed DiT ({Mb(weightFloor)}) needs {Mb(floorBytes)}, but only {Mb(freeBytes)} is free."
+                + $"({ByteFormat.Mb(bf16Cache)}) plus workspace ({ByteFormat.Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
+                + $"streamed DiT ({ByteFormat.Mb(weightFloor)}) needs {ByteFormat.Mb(floorBytes)}, but only {ByteFormat.Mb(freeBytes)} is free."
                 + advice);
         }
         return WanAnimate2DrivingCachePolicy.Resolve(_backend, f32Cache, bf16Cache,
@@ -342,7 +343,6 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return 0;
     }
 
-    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 
     /// <summary>The driving stream's umT5 prompt, or upstream's boilerplate when the caller supplied none.</summary>
     private static string ResolveDrivingPrompt(VideoRequest request)

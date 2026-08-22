@@ -1,3 +1,4 @@
+using HartsyInference.Core.MemoryManagement;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
 
@@ -82,11 +83,10 @@ public sealed class VulkanGpuTransferHelper : IDisposable
             foreach (VulkanBuffer b in inner.Values) { castBytes += (long)b.Size; castCount++; }
         (int retainedCount, long retainedBytes) = StepGraphRetainedStats();
 
-        static string Mb(long bytes) => $"{bytes / (1024.0 * 1024):F1} MB";
-        return $"  weight cache: {_weightCache.Count} tensors, {Mb(weightBytes)}\n" +
-               $"  activation cache: {_activationCache.Count} tensors, {Mb(activationBytes)}\n" +
-               $"  weight-cast cache: {castCount} casts, {Mb(castBytes)}\n" +
-               $"  step-graph-retained: {retainedCount} buffers, {Mb(retainedBytes)} (capturing={CapturingStepGraph})\n" +
+        return $"  weight cache: {_weightCache.Count} tensors, {ByteFormat.MbF1(weightBytes)}\n" +
+               $"  activation cache: {_activationCache.Count} tensors, {ByteFormat.MbF1(activationBytes)}\n" +
+               $"  weight-cast cache: {castCount} casts, {ByteFormat.MbF1(castBytes)}\n" +
+               $"  step-graph-retained: {retainedCount} buffers, {ByteFormat.MbF1(retainedBytes)} (capturing={CapturingStepGraph})\n" +
                $"  transient (in-flight, uncached) buffers: {_transientBuffers.Count}";
     }
 

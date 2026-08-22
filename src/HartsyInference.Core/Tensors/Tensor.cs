@@ -573,11 +573,7 @@ public sealed unsafe class Tensor : IDisposable
             ReadOnlySpan<float> src = new ReadOnlySpan<float>(srcPtr, (int)count);
             Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
             for (int i = 0; i < (int)count; i++)
-            {
-                // BF16: truncate lower 16 bits of F32
-                uint bits = BitConverter.SingleToUInt32Bits(src[i]);
-                dst[i] = (ushort)(bits >> 16);
-            }
+                dst[i] = TensorCasts.F32ToBf16Bits(src[i]);
         }
         else if (from == DType.BF16 && to == DType.F32)
         {
@@ -649,20 +645,14 @@ public sealed unsafe class Tensor : IDisposable
             ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(srcPtr, (int)count);
             Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
             for (int i = 0; i < (int)count; i++)
-            {
-                uint bits = BitConverter.SingleToUInt32Bits((float)src[i]);
-                dst[i] = (ushort)(bits >> 16);
-            }
+                dst[i] = TensorCasts.F32ToBf16Bits((float)src[i]);
         }
         else if (from == DType.F8E4M3 && to == DType.BF16)
         {
             ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(srcPtr, (int)count);
             Span<ushort> dst = new Span<ushort>(dstPtr, (int)count);
             for (int i = 0; i < (int)count; i++)
-            {
-                float f = Fp8E4M3ToFloat(src[i]) * fp8Scale;
-                dst[i] = (ushort)(BitConverter.SingleToUInt32Bits(f) >> 16);
-            }
+                dst[i] = TensorCasts.F32ToBf16Bits(Fp8E4M3ToFloat(src[i]) * fp8Scale);
         }
         else if (from == DType.F64 && to == DType.F32)
         {

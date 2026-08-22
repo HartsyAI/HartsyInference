@@ -22,7 +22,7 @@ public sealed class BlockStreamingScope : IDisposable
     private readonly BlockStreamingController? _streamer;
     private bool _disposed;
 
-    private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks, long blockBytes,
+    private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
         BlockStreamingController? streamer)
     {
         _backend = options.Backend;
@@ -31,7 +31,6 @@ public sealed class BlockStreamingScope : IDisposable
         _perStepTrim = options.PerStepTrim;
         _streamer = streamer;
         ResidentPrefixBlocks = residentPrefixBlocks;
-        BlockBytes = blockBytes;
     }
 
     /// <summary>Places <paramref name="options"/>'s denoiser on its backend and returns the scope that owns the placement until it is disposed.</summary>
@@ -51,7 +50,7 @@ public sealed class BlockStreamingScope : IDisposable
             backend.PreloadWeights(EnumerateAll(denoiser));
             Logs.Info($"[VRAM] {options.ModelName}/denoise: resident prefix {blockCount}, streamed 0 " +
                 $"({(cache is null ? "backend has no streaming cache" : $"{LowVramPolicy.EnvironmentVariable}=off")}).");
-            return new BlockStreamingScope(options, blockCount, 0, streamer: null);
+            return new BlockStreamingScope(options, blockCount, streamer: null);
         }
 
         IStreamingBlock[] blocks = new IStreamingBlock[blockCount];
@@ -70,9 +69,9 @@ public sealed class BlockStreamingScope : IDisposable
         }
         if (prefix >= blockCount)
         {
-            Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {Mb(blockBytes)}, " +
+            Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {ByteFormat.Mb(blockBytes)}, " +
                 $"resident prefix {blockCount}, streamed 0.");
-            return new BlockStreamingScope(options, blockCount, blockBytes, streamer: null);
+            return new BlockStreamingScope(options, blockCount, streamer: null);
         }
 
         IStreamingBlock[] streamed = new IStreamingBlock[blockCount - prefix];
@@ -82,11 +81,11 @@ public sealed class BlockStreamingScope : IDisposable
             backend: options.PerStepTrim ? backend : null);
         denoiser.BeforeBlockForward = i => { if (i >= prefix) streamer.BeforeBlockForward(i - prefix); };
         streamer.Prime();
-        Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {Mb(blockBytes)}, " +
+        Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {ByteFormat.Mb(blockBytes)}, " +
             $"resident prefix {prefix}{(options.Pin?.Resident == true ? " (persistent, no re-upload)" : "")}, " +
-            $"streamed {streamed.Length} ({Mb(streamed.Length * blockBytes)}/forward), " +
-            $"prefetchAhead={options.PrefetchAhead}, headroom {Mb(options.HeadroomBytes)}.");
-        return new BlockStreamingScope(options, prefix, blockBytes, streamer);
+            $"streamed {streamed.Length} ({ByteFormat.Mb(streamed.Length * blockBytes)}/forward), " +
+            $"prefetchAhead={options.PrefetchAhead}, headroom {ByteFormat.Mb(options.HeadroomBytes)}.");
+        return new BlockStreamingScope(options, prefix, streamer);
     }
 
     /// <summary>Blocks kept device-resident for the whole loop; the streamed suffix starts here.</summary>
@@ -98,9 +97,6 @@ public sealed class BlockStreamingScope : IDisposable
     /// <summary>True when any block is streamed.</summary>
     public bool Streaming => _streamer is not null;
 
-    /// <summary>Per-block weight bytes the sizing used; 0 when nothing was measured.</summary>
-    public long BlockBytes { get; }
-
     /// <summary>How many times <see cref="EndStep"/> has been called — the observable that makes a forgotten per-step trim a test failure rather than a VRAM climb nobody notices until step 17.</summary>
     public int StepsEnded { get; private set; }
 
@@ -110,10 +106,6 @@ public sealed class BlockStreamingScope : IDisposable
         foreach (Tensor t in _denoiser.EnumerateSharedWeights()) yield return t;
         foreach (Tensor t in BlockRangeWeights(_denoiser, 0, ResidentPrefixBlocks)) yield return t;
     }
-
-    /// <summary>The streamed suffix's weights.</summary>
-    public IEnumerable<Tensor> EnumerateStreamedWeights()
-        => BlockRangeWeights(_denoiser, ResidentPrefixBlocks, _denoiser.BlockCount);
 
     /// <summary>Call at the end of every denoise step. Returns the streamed path's pool reservations to the driver unless the caller opted out via <see cref="BlockStreamingOptions.PerStepTrim"/>.</summary>
     public void EndStep()
@@ -234,5 +226,4 @@ public sealed class BlockStreamingScope : IDisposable
         }
     }
 
-    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 }

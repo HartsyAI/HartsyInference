@@ -104,17 +104,17 @@ public sealed class VramPlanner
         if (_mode == LowVramMode.ForceOn)
         {
             Logs.Info($"[VRAM] {_modelName}/{phase}: streamed (HARTSY_LOWVRAM=on forces it). " +
-                $"{Describe(weightBytes, activationReserveBytes)}, available {Mb(available)}");
+                $"{Describe(weightBytes, activationReserveBytes)}, available {ByteFormat.Mb(available)}");
             return PhasePlacement.Streamed;
         }
         if (available >= weightBytes)
         {
-            Logs.Info($"[VRAM] {_modelName}/{phase}: resident — fits. {Describe(weightBytes, activationReserveBytes)}, available {Mb(available)}");
+            Logs.Info($"[VRAM] {_modelName}/{phase}: resident — fits. {Describe(weightBytes, activationReserveBytes)}, available {ByteFormat.Mb(available)}");
             return PhasePlacement.Resident;
         }
 
         Logs.Info($"[VRAM] {_modelName}/{phase}: streamed — does not fit resident. " +
-            $"{Describe(weightBytes, activationReserveBytes)}, available {Mb(available)}, short by {Mb(weightBytes - available)}");
+            $"{Describe(weightBytes, activationReserveBytes)}, available {ByteFormat.Mb(available)}, short by {ByteFormat.Mb(weightBytes - available)}");
         return PhasePlacement.Streamed;
     }
 
@@ -137,7 +137,7 @@ public sealed class VramPlanner
         {
             return false;
         }
-        Logs.Info($"[VRAM] {_modelName}/{phase}: evicting the previous phase's resident weights — needs {Mb(requiredBytes)} free.");
+        Logs.Info($"[VRAM] {_modelName}/{phase}: evicting the previous phase's resident weights — needs {ByteFormat.Mb(requiredBytes)} free.");
         return true;
     }
 
@@ -151,14 +151,13 @@ public sealed class VramPlanner
         ArgumentNullException.ThrowIfNull(phase);
         long available = _cache?.QueryAvailableWeightCacheBytes(0) ?? 0;
         throw new OutOfVramException(
-            $"{_modelName}/{phase} cannot run on this device: it needs at least {Mb(minimumWorkingSetBytes)} of " +
-            $"activations and workspace before any weights, but only {Mb(available)} is free. Weight streaming cannot " +
+            $"{_modelName}/{phase} cannot run on this device: it needs at least {ByteFormat.Mb(minimumWorkingSetBytes)} of " +
+            $"activations and workspace before any weights, but only {ByteFormat.Mb(available)} is free. Weight streaming cannot " +
             "reduce this — lower the resolution, or use a device with more VRAM.");
     }
 
     /// <summary>Splits the phase's footprint into the part streaming can move (weights) and the part it cannot (activations plus workspace), so a log line distinguishes "needs a sliding window" from "needs a smaller tile".</summary>
     private static string Describe(long weightBytes, long activationReserveBytes)
-        => $"weights {Mb(weightBytes)} + activations/workspace {Mb(activationReserveBytes)} = {Mb(weightBytes + activationReserveBytes)}";
+        => $"weights {ByteFormat.Mb(weightBytes)} + activations/workspace {ByteFormat.Mb(activationReserveBytes)} = {ByteFormat.Mb(weightBytes + activationReserveBytes)}";
 
-    private static string Mb(long bytes) => $"{bytes / (1024 * 1024)} MB";
 }
