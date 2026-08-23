@@ -175,7 +175,7 @@ public sealed class YoloV8FaceModel
 
         Tensor x10 = Upsample(backend, x9, 2);
         Tensor x11 = ConcatChannel(backend, x10, x6);
-        x10.Dispose();
+        x10.Dispose(); x6.Dispose();
         Tensor x12 = _layer12.Forward(backend, x11); x11.Dispose();
 
         Tensor x13 = Upsample(backend, x12, 2);

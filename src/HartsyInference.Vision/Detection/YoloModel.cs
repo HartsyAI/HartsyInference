@@ -180,7 +180,7 @@ public sealed class YoloModel : IYoloDetectModel
         // Neck — FPN top-down path.
         Tensor x10 = Upsample(backend, x9, scale: 2);
         Tensor x11 = ConcatChannel(backend, x10, x6);
-        x10.Dispose();
+        x10.Dispose(); x6.Dispose();
         Tensor x12 = _layer12.Forward(backend, x11); x11.Dispose();
 
         Tensor x13 = Upsample(backend, x12, scale: 2);
@@ -198,9 +198,6 @@ public sealed class YoloModel : IYoloDetectModel
         Tensor x20 = ConcatChannel(backend, x19, x9);
         x19.Dispose(); x9.Dispose();
         Tensor x21 = _layer21.Forward(backend, x20); x20.Dispose(); // P5 detect input
-
-        // Don't dispose x6 — still need it? No wait, x6 was consumed by ConcatChannel into x11
-        // which we already disposed. Same for x9. The graph is correct.
 
         // Detect head expects [P3, P4, P5] in that order.
         Tensor decoded = _detect.Forward(backend, [x15, x18, x21]);
