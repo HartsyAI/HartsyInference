@@ -448,7 +448,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 Tensor noisedSource;
                 if (nextStep < steps)
                 {
-                    Tensor freshPackedNoise = PackLatent(SeedGenerator.CreateNoise(latentShape, seed + nextStep), latentH, latentW);
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    Tensor freshPackedNoise = FluxPipeline.PackLatent(freshNoise, latentH, latentW);
+                    freshNoise.Dispose();
                     noisedSource = new Tensor(packedShape, DType.F32);
                     scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
                     freshPackedNoise.Dispose();
@@ -534,7 +536,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
         // LOAD-BEARING for VaeDevice placement: UnpackLatent is a host loop, so the latent crosses to the
         // host before whichever backend runs the decode uploads it.
-        Tensor unpackedLatent = UnpackLatent(packedLatent, latentH, latentW);
+        Tensor unpackedLatent = FluxPipeline.UnpackLatent(packedLatent, latentH, latentW);
         packedLatent.Dispose();
 
         // ── 6. VAE decode ────────────────────────────────────────────────
@@ -564,7 +566,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the initial packed latent for Chroma denoising. T2I: fresh (or caller-injected) noise packed and scaled by the scheduler's initial sigma. Img2img: VAE-encoded source (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.
+    /// <summary>Builds the initial packed latent for Chroma denoising. T2I: fresh (or caller-injected) noise packed and scaled by the scheduler's initial sigma. Img2img: VAE-encoded source (16 channels) packed via <see cref="FluxPipeline.PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the packed source latent is returned as the second tuple element for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
     private (Tensor packedLatent, Tensor? packedSourceLatent) BuildInitialPackedLatent(
         TextToImageRequest request,
@@ -575,12 +577,13 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         bool keepSourceLatent)
     {
         // Honor a caller-supplied initial noise tensor (fixed-seed reproduction) when present; otherwise
-        // sample fresh noise from the seed. The tensor is in unpacked latent layout [1, 16, latentH, latentW];
-        // PackLatent takes ownership and disposes it.
+        // sample fresh noise from the seed. The tensor is in unpacked latent layout [1, 16, latentH, latentW]
+        // and is only needed until it is packed.
         Tensor initialNoise = TakeOrCreateNoise(request, latentShape, seed);
         if (!initialNoise.Shape.Equals(latentShape))
             throw new ArgumentException($"InitialNoise shape {initialNoise.Shape} != expected {latentShape}.");
-        Tensor packedNoise = PackLatent(initialNoise, latentH, latentW);
+        Tensor packedNoise = FluxPipeline.PackLatent(initialNoise, latentH, latentW);
+        initialNoise.Dispose();
 
         if (request is ImageToImageRequest img2img)
         {
@@ -590,7 +593,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            Tensor sourcePacked = PackLatent(sourceUnpacked, latentH, latentW);
+            Tensor sourcePacked = FluxPipeline.PackLatent(sourceUnpacked, latentH, latentW);
+            sourceUnpacked.Dispose();
             Tensor result = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
             packedNoise.Dispose();
@@ -706,90 +710,5 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 ptr[baseOffset + i] = i <= textLen ? 1.0f : 0.0f;
         }
         return mask;
-    }
-
-    /// <summary>Packs a latent tensor [B, 16, H, W] → [B, H/2 * W/2, 64] (2x2 patchify, identical to Flux).</summary>
-    private static Tensor PackLatent(Tensor latent, int h, int w)
-    {
-        int batch = (int)latent.Shape[0];
-        int channels = (int)latent.Shape[1];
-        int hPacked = h / 2;
-        int wPacked = w / 2;
-        int patchDim = channels * 4;
-        int seqLen = hPacked * wPacked;
-
-        TensorShape packedShape = new TensorShape(batch, seqLen, patchDim);
-        Tensor packed = new Tensor(packedShape, DType.F32);
-
-        float* inPtr = (float*)latent.DataPointer;
-        float* outPtr = (float*)packed.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int ph = 0; ph < hPacked; ph++)
-            {
-                for (int pw = 0; pw < wPacked; pw++)
-                {
-                    int seqIdx = ph * wPacked + pw;
-                    int outBase = (b * seqLen + seqIdx) * patchDim;
-
-                    for (int c = 0; c < channels; c++)
-                    {
-                        int inChannelBase = (b * channels + c) * h * w;
-                        int patchBase = outBase + c * 4;
-
-                        outPtr[patchBase + 0] = inPtr[inChannelBase + (ph * 2 + 0) * w + (pw * 2 + 0)];
-                        outPtr[patchBase + 1] = inPtr[inChannelBase + (ph * 2 + 0) * w + (pw * 2 + 1)];
-                        outPtr[patchBase + 2] = inPtr[inChannelBase + (ph * 2 + 1) * w + (pw * 2 + 0)];
-                        outPtr[patchBase + 3] = inPtr[inChannelBase + (ph * 2 + 1) * w + (pw * 2 + 1)];
-                    }
-                }
-            }
-        }
-
-        latent.Dispose();
-        return packed;
-    }
-
-    /// <summary>Unpacks [B, S, 64] → [B, 16, H, W]. Inverse of <see cref="PackLatent"/>.</summary>
-    private static Tensor UnpackLatent(Tensor packed, int h, int w)
-    {
-        int batch = (int)packed.Shape[0];
-        int channels = 16;
-        int hPacked = h / 2;
-        int wPacked = w / 2;
-        int patchDim = channels * 4;
-        int seqLen = hPacked * wPacked;
-
-        TensorShape unpackedShape = new TensorShape(batch, channels, h, w);
-        Tensor unpacked = new Tensor(unpackedShape, DType.F32);
-
-        float* inPtr = (float*)packed.DataPointer;
-        float* outPtr = (float*)unpacked.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int ph = 0; ph < hPacked; ph++)
-            {
-                for (int pw = 0; pw < wPacked; pw++)
-                {
-                    int seqIdx = ph * wPacked + pw;
-                    int inBase = (b * seqLen + seqIdx) * patchDim;
-
-                    for (int c = 0; c < channels; c++)
-                    {
-                        int outChannelBase = (b * channels + c) * h * w;
-                        int patchBase = inBase + c * 4;
-
-                        outPtr[outChannelBase + (ph * 2 + 0) * w + (pw * 2 + 0)] = inPtr[patchBase + 0];
-                        outPtr[outChannelBase + (ph * 2 + 0) * w + (pw * 2 + 1)] = inPtr[patchBase + 1];
-                        outPtr[outChannelBase + (ph * 2 + 1) * w + (pw * 2 + 0)] = inPtr[patchBase + 2];
-                        outPtr[outChannelBase + (ph * 2 + 1) * w + (pw * 2 + 1)] = inPtr[patchBase + 3];
-                    }
-                }
-            }
-        }
-
-        return unpacked;
     }
 }

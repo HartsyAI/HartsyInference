@@ -612,7 +612,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
-            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_transformer.EnumerateSharedWeights());
             // Edit variants append packed reference tokens after the noise tokens, so the forward's real image-side
             // length is the latent's own — not imgSeqLen, which counts only the noise grid.
             int forwardImgSeqLen = (int)packedLatent.Shape[1] + (int)(packedEditRef?.Shape[1] ?? 0);
@@ -1284,17 +1284,6 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return packed;
     }
 
-    /// <summary>Inverse of <see cref="PackLatent"/>.</summary>
-    /// <summary>Sums a tensor set's true on-device footprint.</summary>
-    /// <remarks>Via <see cref="DType.ComputeByteCount"/> — block-quantized dtypes report <c>SizeInBytes == 0</c>, and
-    /// Qwen-Image's production checkpoint is a Q4_K GGUF, so the naive product would total to zero.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Per-forward activation/workspace estimate for one Qwen-Image pass over the joint [txt, img] sequence.</summary>
     /// <remarks>Same shape as <c>FluxPipeline.EstimateFluxActivationReserveBytes</c>. Dual-stream: image and text each
     /// carry their own QKV, modulation and FFN scratch, and joint attention concatenates them — so the per-block live
@@ -1315,6 +1304,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return scratch + 1024L * 1024 * 1024;
     }
 
+    /// <summary>Inverse of <see cref="PackLatent"/>.</summary>
     private static Tensor UnpackLatent(Tensor packed, int h, int w, int channels, int patchSize)
     {
         int batch = (int)packed.Shape[0];

@@ -231,7 +231,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
-            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_transformer.EnumerateSharedWeights());
             int txtSeqLen = (int)condHidden.Shape[1];
             long reserve = EstimateActivationReserveBytes(txtSeqLen, imageSeqLen, _config) + sharedBytes;
 
@@ -681,16 +681,6 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         {
             Backend.TrimMemoryPool();
         }
-    }
-
-    /// <summary>Sums a tensor set's true on-device footprint.</summary>
-    /// <remarks>Via <see cref="DType.ComputeByteCount"/> — block-quantized dtypes report <c>SizeInBytes == 0</c>, so
-    /// the naive product would total to zero and silently disable streaming.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
     }
 
     /// <summary>Per-forward activation/workspace estimate for one Krea 2 pass over the joint <c>[text, image]</c> sequence.</summary>

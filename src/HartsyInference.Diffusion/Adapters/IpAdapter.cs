@@ -84,11 +84,11 @@ public sealed unsafe class IpAdapter : IDisposable
             string suffix = rest[dotIdx..];
             if (suffix == toKSuffix)
             {
-                kByIdx[layerIdx] = EnsureF32(tensor);
+                kByIdx[layerIdx] = TensorCasts.EnsureF32(tensor);
             }
             else if (suffix == ".to_v_ip.weight")
             {
-                vByIdx[layerIdx] = EnsureF32(tensor);
+                vByIdx[layerIdx] = TensorCasts.EnsureF32(tensor);
             }
         }
 
@@ -151,8 +151,6 @@ public sealed unsafe class IpAdapter : IDisposable
         foreach (Tensor w in _toKIpWeights) if (w is not null) yield return w;
         foreach (Tensor w in _toVIpWeights) if (w is not null) yield return w;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     private void ThrowIfDisposed()
     {

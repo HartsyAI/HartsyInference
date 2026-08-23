@@ -26,9 +26,6 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
 
     public int NumTokens => _numTokens;
 
-    /// <summary>True for Plus-v2 checkpoints: the forward adds the MLP tokens back as a scaled shortcut.</summary>
-    public bool UseShortcut => _useShortcut;
-
     public IpAdapterFaceIdPlusProjection(int crossAttnDim, int numTokens, int clipEmbeddingDim, bool useShortcut)
     {
         if (crossAttnDim % HeadDim != 0)
@@ -50,12 +47,12 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
     {
         _mlp.LoadWeights(weights, prefix);
         string resampler = $"{prefix}.perceiver_resampler";
-        _projInWeight = EnsureF32(weights[$"{resampler}.proj_in.weight"]);
-        _projInBias = EnsureF32(weights[$"{resampler}.proj_in.bias"]);
-        _projOutWeight = EnsureF32(weights[$"{resampler}.proj_out.weight"]);
-        _projOutBias = EnsureF32(weights[$"{resampler}.proj_out.bias"]);
-        _normOutWeight = EnsureF32(weights[$"{resampler}.norm_out.weight"]);
-        _normOutBias = EnsureF32(weights[$"{resampler}.norm_out.bias"]);
+        _projInWeight = TensorCasts.EnsureF32(weights[$"{resampler}.proj_in.weight"]);
+        _projInBias = TensorCasts.EnsureF32(weights[$"{resampler}.proj_in.bias"]);
+        _projOutWeight = TensorCasts.EnsureF32(weights[$"{resampler}.proj_out.weight"]);
+        _projOutBias = TensorCasts.EnsureF32(weights[$"{resampler}.proj_out.bias"]);
+        _normOutWeight = TensorCasts.EnsureF32(weights[$"{resampler}.norm_out.weight"]);
+        _normOutBias = TensorCasts.EnsureF32(weights[$"{resampler}.norm_out.bias"]);
         if (_projInWeight.Shape[0] != _crossAttnDim || _projInWeight.Shape[1] != _clipEmbeddingDim)
         {
             throw new InvalidOperationException(
@@ -150,6 +147,4 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
             clone.ElementCount * sizeof(float), source.ElementCount * sizeof(float));
         return clone;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }

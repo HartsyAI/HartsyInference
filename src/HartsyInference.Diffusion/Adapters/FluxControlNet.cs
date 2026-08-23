@@ -278,8 +278,8 @@ public sealed unsafe class FluxControlNet : IDisposable
         foreach (Tensor? b in _cnSingleBlockBiases) if (b is not null) yield return b;
     }
 
-    /// <summary>Applies the per-block zero-init output Linear and the conditioning scale.</summary>
-    private static Tensor ProjectResidual(IBackend backend, Tensor blockImg, Tensor weight, Tensor? bias,
+    /// <summary>Applies the per-block zero-init output Linear and the conditioning scale. Shared with <see cref="QwenImageControlNet"/>, whose residual projection is identical.</summary>
+    internal static Tensor ProjectResidual(IBackend backend, Tensor blockImg, Tensor weight, Tensor? bias,
         float conditioningScale, TensorShape imgShape)
     {
         Tensor residual = new Tensor(imgShape, DType.F32);

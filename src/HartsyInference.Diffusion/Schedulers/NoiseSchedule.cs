@@ -1,8 +1,29 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Diffusion.Schedulers;
 
 /// <summary>Computes beta, alpha, and cumulative alpha schedules shared by all diffusion schedulers.</summary>
 public static class NoiseSchedule
 {
+    /// <summary>Forward diffusion for img2img starts, shared by the discrete VP schedulers: <c>noisy = sqrt(ᾱ_t)·sample + sqrt(1-ᾱ_t)·noise</c> with <c>t = timesteps[stepIndex]</c>.</summary>
+    public static unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise,
+        ReadOnlySpan<float> timesteps, float[] alphasCumprod, int stepIndex)
+    {
+        int timestep = (int)timesteps[stepIndex];
+        float sqrtAlphaCumprod = MathF.Sqrt(alphasCumprod[timestep]);
+        float sqrtOneMinusAlphaCumprod = MathF.Sqrt(1.0f - alphasCumprod[timestep]);
+
+        float* samplePtr = (float*)sample.DataPointer;
+        float* noisePtr = (float*)noise.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        int count = (int)sample.ElementCount;
+
+        for (int i = 0; i < count; i++)
+        {
+            outPtr[i] = sqrtAlphaCumprod * samplePtr[i] + sqrtOneMinusAlphaCumprod * noisePtr[i];
+        }
+    }
+
     /// <summary>Linear or, for <see cref="BetaScheduleType.ScaledLinear"/>, sqrt-interpolated-then-squared beta schedule, per <see cref="SchedulerConfig.BetaSchedule"/>.</summary>
     public static float[] ComputeBetas(SchedulerConfig config)
     {

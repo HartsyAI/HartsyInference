@@ -41,9 +41,6 @@ public sealed class ControlNetUnionFusion : IDisposable
         _controlAddEmbedding = new TimestepEmbedding(additionTimeEmbedDim * numControlTypes, timeDim);
     }
 
-    /// <summary>Number of rows in the checkpoint's task-embedding table (6 for the standard union revision, 8 for ProMax).</summary>
-    public int NumControlTypes => _numControlTypes;
-
     /// <summary>Loads the union modules from a diffusers-layout weight dictionary: <c>task_embedding</c>, <c>transformer_layes.{i}.*</c>, <c>spatial_ch_projs.*</c>, <c>control_add_embedding.*</c>. The fused <c>in_proj</c> QKV weights and the task-embedding rows are split into owned per-part tensors here (row-contiguous copies) so the forward pass can use plain <see cref="IBackend.Linear"/>/<see cref="IBackend.Add"/> calls.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {

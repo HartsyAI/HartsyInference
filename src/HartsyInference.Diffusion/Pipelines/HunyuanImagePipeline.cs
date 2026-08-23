@@ -330,7 +330,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             int imgSeqLen = hPacked * wPacked;
             long activationReserve = EstimateActivationReserveBytes(
                 txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio))
-                + SumBytes(_transformer.EnumerateSharedWeights());
+                + WeightBytes.Sum(_transformer.EnumerateSharedWeights());
 
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
@@ -579,14 +579,6 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // block N-1 is evicted. Cap at 2 — deeper burns VRAM without hiding more latency.
         int maxByBudget = (int)(avail / perBlockBytes) - 2;
         return Math.Clamp(maxByBudget, 0, 2);
-    }
-
-    /// <summary>Sums real device footprint. Uses <see cref="DType.ComputeByteCount"/> because K-quant dtypes report <c>SizeInBytes = 0</c> — the naive <c>ElementCount * SizeInBytes</c> product reports 0 for the GGUF checkpoints this arch ships as.</summary>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
     }
 
     /// <summary>Patchifies <c>[B, C, H, W]</c> -&gt; <c>[B, S, p²·C]</c> with channel-outer ordering inside each patch (matches the diffusers <c>einops.rearrange("B C (H p) (W q) -&gt; B (H W) (p q C)")</c>).</summary>

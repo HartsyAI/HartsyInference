@@ -144,7 +144,7 @@ public sealed class QwenImageControlNet : IDisposable
             txt.Dispose();
             img = newImg;
             txt = newTxt;
-            residuals[i] = ProjectResidual(backend, img, _cnBlockWeights[i]!, _cnBlockBiases[i], conditioningScale, imgShape);
+            residuals[i] = FluxControlNet.ProjectResidual(backend, img, _cnBlockWeights[i]!, _cnBlockBiases[i], conditioningScale, imgShape);
         }
 
         img.Dispose();
@@ -174,20 +174,6 @@ public sealed class QwenImageControlNet : IDisposable
         }
         foreach (Tensor? w in _cnBlockWeights) if (w is not null) yield return w;
         foreach (Tensor? b in _cnBlockBiases) if (b is not null) yield return b;
-    }
-
-    /// <summary>Applies the per-block zero-init output Linear and the conditioning scale.</summary>
-    private static Tensor ProjectResidual(IBackend backend, Tensor blockImg, Tensor weight, Tensor? bias,
-        float conditioningScale, TensorShape imgShape)
-    {
-        Tensor residual = new Tensor(imgShape, DType.F32);
-        backend.Linear(residual, blockImg, weight, bias);
-        if (MathF.Abs(conditioningScale - 1.0f) <= 1e-6f)
-            return residual;
-        Tensor scaled = new Tensor(imgShape, DType.F32);
-        backend.Scale(scaled, residual, conditioningScale);
-        residual.Dispose();
-        return scaled;
     }
 
     private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep)

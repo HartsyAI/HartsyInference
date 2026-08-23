@@ -55,13 +55,13 @@ public sealed unsafe class IpAdapterPlusResampler : IIpAdapterImageProjection
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {
-        _latents = EnsureF32(weights[$"{prefix}.latents"]);
-        _projInWeight = EnsureF32(weights[$"{prefix}.proj_in.weight"]);
-        _projInBias = EnsureF32(weights[$"{prefix}.proj_in.bias"]);
-        _projOutWeight = EnsureF32(weights[$"{prefix}.proj_out.weight"]);
-        _projOutBias = EnsureF32(weights[$"{prefix}.proj_out.bias"]);
-        _normOutWeight = EnsureF32(weights[$"{prefix}.norm_out.weight"]);
-        _normOutBias = EnsureF32(weights[$"{prefix}.norm_out.bias"]);
+        _latents = TensorCasts.EnsureF32(weights[$"{prefix}.latents"]);
+        _projInWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj_in.weight"]);
+        _projInBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj_in.bias"]);
+        _projOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj_out.weight"]);
+        _projOutBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj_out.bias"]);
+        _normOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.norm_out.weight"]);
+        _normOutBias = TensorCasts.EnsureF32(weights[$"{prefix}.norm_out.bias"]);
         for (int i = 0; i < _depth; i++)
         {
             _layers[i].LoadWeights(weights, $"{prefix}.layers.{i}");
@@ -134,8 +134,6 @@ public sealed unsafe class IpAdapterPlusResampler : IIpAdapterImageProjection
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>One resampler layer: PerceiverAttention(latents over [x, latents]) + residual; FeedForward(latents) + residual. PerceiverAttention is a cross-attention where Q comes from latents and K/V come from concatenating the input x with the latents themselves — letting the latents both gather information from the image patches and refine via self-attention in a single op.</summary>
@@ -168,17 +166,17 @@ internal sealed unsafe class ResamplerLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _norm1Weight = EnsureF32(weights[$"{prefix}.0.norm1.weight"]);
-        _norm1Bias = EnsureF32(weights[$"{prefix}.0.norm1.bias"]);
-        _norm2Weight = EnsureF32(weights[$"{prefix}.0.norm2.weight"]);
-        _norm2Bias = EnsureF32(weights[$"{prefix}.0.norm2.bias"]);
-        _toQWeight = EnsureF32(weights[$"{prefix}.0.to_q.weight"]);
-        _toKvWeight = EnsureF32(weights[$"{prefix}.0.to_kv.weight"]);
-        _toOutWeight = EnsureF32(weights[$"{prefix}.0.to_out.weight"]);
-        _ffNormWeight = EnsureF32(weights[$"{prefix}.1.0.weight"]);
-        _ffNormBias = EnsureF32(weights[$"{prefix}.1.0.bias"]);
-        _ffLinear1Weight = EnsureF32(weights[$"{prefix}.1.1.weight"]);
-        _ffLinear2Weight = EnsureF32(weights[$"{prefix}.1.3.weight"]);
+        _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm1.weight"]);
+        _norm1Bias = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm1.bias"]);
+        _norm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm2.weight"]);
+        _norm2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm2.bias"]);
+        _toQWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_q.weight"]);
+        _toKvWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_kv.weight"]);
+        _toOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_out.weight"]);
+        _ffNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.1.0.weight"]);
+        _ffNormBias = TensorCasts.EnsureF32(weights[$"{prefix}.1.0.bias"]);
+        _ffLinear1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.1.1.weight"]);
+        _ffLinear2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.1.3.weight"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -376,8 +374,6 @@ internal sealed unsafe class ResamplerLayer
         }
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>Linear projection helper for the IPA components. Mirrors <c>ClipTransformerLayer.ProjectLinear</c>'s shape contract: input <c>[B, S, inDim]</c>, weight <c>[outDim, inDim]</c> (PyTorch standard), optional bias <c>[outDim]</c>; output <c>[B, S, outDim]</c>. Internally transposes weight to <c>[inDim, outDim]</c> for <see cref="IBackend.BatchedMatMul"/>.</summary>

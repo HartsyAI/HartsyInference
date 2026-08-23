@@ -24,10 +24,10 @@ public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjecti
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {
-        _projWeight = EnsureF32(weights[$"{prefix}.proj.weight"]);
-        _projBias = EnsureF32(weights[$"{prefix}.proj.bias"]);
-        _normWeight = EnsureF32(weights[$"{prefix}.norm.weight"]);
-        _normBias = EnsureF32(weights[$"{prefix}.norm.bias"]);
+        _projWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj.weight"]);
+        _projBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj.bias"]);
+        _normWeight = TensorCasts.EnsureF32(weights[$"{prefix}.norm.weight"]);
+        _normBias = TensorCasts.EnsureF32(weights[$"{prefix}.norm.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -80,8 +80,6 @@ public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjecti
             rows: batch * _numTokens, dim: _crossAttnDim, eps: 1e-5f);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>Common interface implemented by both the standard MLP projection and the Plus Resampler. Pipelines stay agnostic to which one is loaded. Tensors are owned by the safetensors loader (mmap-backed) so projections themselves don't need disposal.</summary>

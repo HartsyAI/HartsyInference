@@ -233,7 +233,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
-            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_transformer.EnumerateSharedWeights());
             long reserve = EstimateActivationReserveBytes(
                 padHeight, padWidth, _config.NerfHidden, patch, (int)condContext.Shape[1]) + sharedBytes;
 
@@ -465,14 +465,6 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
     {
         int rem = n % multiple;
         return rem == 0 ? n : n + (multiple - rem);
-    }
-
-    /// <summary>Device bytes a weight set occupies, via <see cref="DType.ComputeByteCount"/> so block-quantized dtypes (which report <c>SizeInBytes == 0</c>) don't total to zero.</summary>
-    private static long SumBytes(IEnumerable<Tensor> weights)
-    {
-        long total = 0;
-        foreach (Tensor w in weights) total += w.DType.ComputeByteCount(w.ElementCount);
-        return total;
     }
 
     /// <summary>Activations + workspace the denoise phase needs alongside the weights, for <see cref="VramPlanner.PlanPhase"/>.</summary>

@@ -304,7 +304,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         {
             long condBytes = SumBlockBytes(_conditional);
             long uncondBytes = SumBlockBytes(_unconditional);
-            long sharedBytes = SumBytes(_conditional.EnumerateSharedWeights()) + SumBytes(_unconditional.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_conditional.EnumerateSharedWeights()) + WeightBytes.Sum(_unconditional.EnumerateSharedWeights());
             // The shared sets stay resident on both paths, so they are part of what the block budget must fit beside.
             long reserve = EstimateActivationReserveBytes(seqLen, _config.EmbDim, _config.IntermediateSize) + sharedBytes;
 
@@ -797,17 +797,6 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Unpatchifies the packed token latent <c>[1, nImg, patch²·aeC]</c> → <c>[1, aeC, gridH·patch, gridW·patch]</c> (upstream <c>view(B,gh,gw,p,p,ae).permute(0,5,1,3,2,4)</c>). For packed feature <c>f</c>: <c>ae = f % aeC, p2 = (f/aeC) % patch, p1 = f / (aeC·patch)</c>.</summary>
-    /// <summary>Sums a tensor set's true on-device footprint.</summary>
-    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c> — block-quantized
-    /// dtypes report <c>SizeInBytes == 0</c> and would total to zero, silently disabling the streamed path.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Total streamable (per-block) bytes for one transformer.</summary>
     private static long SumBlockBytes(Ideogram4Transformer transformer)
     {
@@ -854,6 +843,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return scratch + 1024L * 1024 * 1024;
     }
 
+    /// <summary>Unpatchifies the packed token latent <c>[1, nImg, patch²·aeC]</c> → <c>[1, aeC, gridH·patch, gridW·patch]</c> (upstream <c>view(B,gh,gw,p,p,ae).permute(0,5,1,3,2,4)</c>). For packed feature <c>f</c>: <c>ae = f % aeC, p2 = (f/aeC) % patch, p1 = f / (aeC·patch)</c>.</summary>
     private static Tensor Unpatchify(Tensor z, int gridH, int gridW, int patch)
     {
         int packedC = (int)z.Shape[2];

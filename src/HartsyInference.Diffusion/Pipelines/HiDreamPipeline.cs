@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
@@ -518,7 +519,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         (Tensor _, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchG, eosG);
 
         // Pooled = concat(clipL_pooled, clipG_pooled, dim=-1) -> [B, 2048]
-        Tensor pooled = ConcatPooled(clipLPooled!, clipGPooled!);
+        Tensor pooled = DiTUtils.ConcatPooled(clipLPooled!, clipGPooled!);
         clipLPooled?.Dispose();
         clipGPooled?.Dispose();
 
@@ -603,26 +604,5 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         long bytes = src.Shape.ElementCount * sizeof(float);
         Buffer.MemoryCopy((float*)src.DataPointer, (float*)dst.DataPointer, bytes, bytes);
         return dst;
-    }
-
-    /// <summary>Concatenates two pooled tensors [B, D1] and [B, D2] along the last dim → [B, D1+D2].</summary>
-    private static Tensor ConcatPooled(Tensor a, Tensor b)
-    {
-        int batch = (int)a.Shape[0];
-        int dimA = (int)a.Shape[1];
-        int dimB = (int)b.Shape[1];
-        int dimOut = dimA + dimB;
-        TensorShape outShape = new TensorShape(batch, dimOut);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int bIdx = 0; bIdx < batch; bIdx++)
-        {
-            Buffer.MemoryCopy(aPtr + bIdx * dimA, outPtr + bIdx * dimOut, dimA * sizeof(float), dimA * sizeof(float));
-            Buffer.MemoryCopy(bPtr + bIdx * dimB, outPtr + bIdx * dimOut + dimA, dimB * sizeof(float), dimB * sizeof(float));
-        }
-        return output;
     }
 }

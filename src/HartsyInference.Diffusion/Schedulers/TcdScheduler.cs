@@ -12,10 +12,8 @@ public sealed unsafe class TcdScheduler : IScheduler
 
     private readonly int _numTrainTimesteps;
     private readonly int _originalInferenceSteps;
-    private readonly float _betaStart;
-    private readonly float _betaEnd;
+    private readonly float[] _alphasCumprod;
     private float[] _timesteps = [];
-    private float[] _alphasCumprod = [];
     private int _numInferenceSteps;
 
     /// <summary>Stochasticity parameter (gamma) in [0, 1]. 0 = deterministic, 1 = LCM-equivalent full re-noise. The TCD paper's default sweet spot is ~0.3.</summary>
@@ -45,10 +43,16 @@ public sealed unsafe class TcdScheduler : IScheduler
         int originalInferenceSteps = 50)
     {
         _numTrainTimesteps = numTrainTimesteps;
-        _betaStart = betaStart;
-        _betaEnd = betaEnd;
         _originalInferenceSteps = originalInferenceSteps;
-        ComputeAlphasCumprod();
+
+        SchedulerConfig config = new SchedulerConfig
+        {
+            NumTrainTimesteps = numTrainTimesteps,
+            BetaStart = betaStart,
+            BetaEnd = betaEnd,
+            BetaSchedule = BetaScheduleType.ScaledLinear,
+        };
+        _alphasCumprod = NoiseSchedule.ComputeAlphasCumprod(NoiseSchedule.ComputeAlphas(NoiseSchedule.ComputeBetas(config)));
     }
 
     /// <summary>Sets the timestep schedule (descending) for the given number of inference steps, selecting a subset of the distilled origin schedule.</summary>
@@ -130,33 +134,5 @@ public sealed unsafe class TcdScheduler : IScheduler
 
     /// <summary>Adds noise to a clean sample (forward diffusion) for img2img starts.</summary>
     public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
-    {
-        int timestep = (int)_timesteps[stepIndex];
-        float sqrtAlphaCumprod = MathF.Sqrt(_alphasCumprod[timestep]);
-        float sqrtOneMinusAlphaCumprod = MathF.Sqrt(1.0f - _alphasCumprod[timestep]);
-
-        float* samplePtr = (float*)sample.DataPointer;
-        float* noisePtr = (float*)noise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)sample.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = sqrtAlphaCumprod * samplePtr[i] + sqrtOneMinusAlphaCumprod * noisePtr[i];
-        }
-    }
-
-    private void ComputeAlphasCumprod()
-    {
-        _alphasCumprod = new float[_numTrainTimesteps];
-        float cumprod = 1.0f;
-        for (int i = 0; i < _numTrainTimesteps; i++)
-        {
-            float t = (float)i / (_numTrainTimesteps - 1);
-            float sqrtBeta = MathF.Sqrt(_betaStart) + t * (MathF.Sqrt(_betaEnd) - MathF.Sqrt(_betaStart));
-            float beta = sqrtBeta * sqrtBeta;
-            cumprod *= 1.0f - beta;
-            _alphasCumprod[i] = cumprod;
-        }
-    }
+        => NoiseSchedule.AddNoise(output, sample, noise, _timesteps, _alphasCumprod, stepIndex);
 }

@@ -107,20 +107,6 @@ public sealed class DdimScheduler : IScheduler
     }
 
     /// <summary>Adds noise to a clean sample (forward diffusion process).</summary>
-    public unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
-    {
-        int timestep = (int)_timesteps[stepIndex];
-        float sqrtAlphaCumprod = MathF.Sqrt(_alphasCumprod[timestep]);
-        float sqrtOneMinusAlphaCumprod = MathF.Sqrt(1.0f - _alphasCumprod[timestep]);
-
-        float* samplePtr = (float*)sample.DataPointer;
-        float* noisePtr = (float*)noise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)sample.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = sqrtAlphaCumprod * samplePtr[i] + sqrtOneMinusAlphaCumprod * noisePtr[i];
-        }
-    }
+    public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
+        => NoiseSchedule.AddNoise(output, sample, noise, _timesteps, _alphasCumprod, stepIndex);
 }

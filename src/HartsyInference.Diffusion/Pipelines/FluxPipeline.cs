@@ -1533,8 +1533,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return packed;
     }
 
-    /// <summary>Unpacks a latent tensor from [B, H/2*W/2, C*4] back to [B, C, H, W].</summary>
-    private static Tensor UnpackLatent(Tensor packed, int h, int w)
+    /// <summary>Unpacks a latent tensor from [B, H/2*W/2, C*4] back to [B, C, H, W]. Does not dispose the input. Internal so <see cref="ChromaPipeline"/> shares the identical packed layout.</summary>
+    internal static Tensor UnpackLatent(Tensor packed, int h, int w)
     {
         int batch = (int)packed.Shape[0];
         int channels = 16; // Flux always uses 16 latent channels

@@ -26,12 +26,12 @@ public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {
-        _proj0Weight = EnsureF32(weights[$"{prefix}.proj.0.weight"]);
-        _proj0Bias = EnsureF32(weights[$"{prefix}.proj.0.bias"]);
-        _proj2Weight = EnsureF32(weights[$"{prefix}.proj.2.weight"]);
-        _proj2Bias = EnsureF32(weights[$"{prefix}.proj.2.bias"]);
-        _normWeight = EnsureF32(weights[$"{prefix}.norm.weight"]);
-        _normBias = EnsureF32(weights[$"{prefix}.norm.bias"]);
+        _proj0Weight = TensorCasts.EnsureF32(weights[$"{prefix}.proj.0.weight"]);
+        _proj0Bias = TensorCasts.EnsureF32(weights[$"{prefix}.proj.0.bias"]);
+        _proj2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.proj.2.weight"]);
+        _proj2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.proj.2.bias"]);
+        _normWeight = TensorCasts.EnsureF32(weights[$"{prefix}.norm.weight"]);
+        _normBias = TensorCasts.EnsureF32(weights[$"{prefix}.norm.bias"]);
         long expected = (long)_numTokens * _crossAttnDim;
         if (_proj2Weight.Shape[0] != expected)
         {
@@ -102,6 +102,4 @@ public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
