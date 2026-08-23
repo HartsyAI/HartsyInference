@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -117,7 +118,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         for (int step = 0; step < maxTokens; step++)
         {
             int t = (int)hidden.Shape[1];
-            Tensor last = SliceLastFrame(hidden, h);
+            Tensor last = VibeVoiceOps.SliceLastFrame(hidden, h);
             hidden.Dispose();
             Tensor logits = WhisperOps.ProjectLinear(headBackend, last, _llmDecoderW!, _llmDecoderB, 1, 1, h, _speechVocab);
             last.Dispose();
@@ -204,15 +205,6 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         float* sp = (float*)src.DataPointer + (long)srcRow * h;
         float* dp = (float*)dst.DataPointer + (long)dstRow * h;
         Buffer.MemoryCopy(sp, dp, (long)count * h * 4, (long)count * h * 4);
-    }
-
-    private static Tensor SliceLastFrame(Tensor hidden, int h)
-    {
-        int t = (int)hidden.Shape[1];
-        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* sp = (float*)hidden.DataPointer + (long)(t - 1) * h;
-        Buffer.MemoryCopy(sp, (void*)last.DataPointer, h * 4, h * 4);
-        return last;
     }
 
     public void Dispose()

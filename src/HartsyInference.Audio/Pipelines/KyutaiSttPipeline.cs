@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Audio.Models.Kyutai;
+using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
@@ -83,7 +84,7 @@ public sealed unsafe class KyutaiSttPipeline : IDisposable
             Tensor logits = _model.ProjectText(backend, hidden);
             hidden.Dispose();
 
-            int next = ArgMax(new Span<float>((void*)logits.DataPointer, _cfg.TextVocab));
+            int next = LogitSampling.ArgMax(new Span<float>((void*)logits.DataPointer, _cfg.TextVocab));
             logits.Dispose();
             if (next != _cfg.TextPad) tokens.Add(next);
             prevText = next;
@@ -99,15 +100,6 @@ public sealed unsafe class KyutaiSttPipeline : IDisposable
     {
         foreach (Tensor t in _model.EnumerateWeights()) yield return t;
         foreach (Tensor t in _codec.EnumerateWeights()) yield return t;
-    }
-
-    private static int ArgMax(ReadOnlySpan<float> v)
-    {
-        int best = 0;
-        float bv = v[0];
-        for (int i = 1; i < v.Length; i++)
-            if (v[i] > bv) { bv = v[i]; best = i; }
-        return best;
     }
 
     public void Dispose()

@@ -121,7 +121,7 @@ internal sealed unsafe class WavTokenizerEncoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _stemW = LoadFusedWeight(w, $"{_prefix}.block.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.block.0.bias"]);
 
         int dim = _cfg.EncoderDim;
@@ -134,13 +134,13 @@ internal sealed unsafe class WavTokenizerEncoder
             int snakeIdx = _cfg.ResidualDilations.Count;
             int convIdx = snakeIdx + 1;
             _downsampleSnakeAlpha[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{snakeIdx}.alpha"]).Reshape(new TensorShape(innerDim));
-            _downsampleW[i] = LoadFusedWeight(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
+            _downsampleW[i] = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
             _downsampleB[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{convIdx}.bias"]);
         }
 
         int finalDim = _cfg.EncoderDim * (1 << _nStages);
         _finalSnakeAlpha = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 1}.alpha"]).Reshape(new TensorShape(finalDim));
-        _finalProjW = LoadFusedWeight(w, $"{_prefix}.block.{_nStages + 2}");
+        _finalProjW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{_nStages + 2}");
         _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 2}.bias"]);
     }
 
@@ -207,13 +207,6 @@ internal sealed unsafe class WavTokenizerEncoder
         if (_finalSnakeAlpha is not null) yield return _finalSnakeAlpha;
         if (_finalProjW is not null) yield return _finalProjW;
         if (_finalProjB is not null) yield return _finalProjB;
-    }
-
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
     }
 }
 

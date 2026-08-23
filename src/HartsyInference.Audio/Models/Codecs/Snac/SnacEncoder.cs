@@ -70,7 +70,7 @@ internal sealed unsafe class SnacEncoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _stemW = LoadFusedWeight(w, $"{_prefix}.block.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.block.0.bias"]);
 
         int dim = _cfg.EncoderDim;
@@ -84,13 +84,13 @@ internal sealed unsafe class SnacEncoder
             int snakeIdx = _cfg.ResidualDilations.Count;
             int convIdx = snakeIdx + 1;
             _downsampleSnakeAlpha[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{snakeIdx}.alpha"]).Reshape(new TensorShape(innerDim));
-            _downsampleW[i] = LoadFusedWeight(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
+            _downsampleW[i] = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
             _downsampleB[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{convIdx}.bias"]);
         }
 
         // Final conv sits directly after the encoder blocks (no Snake). attn would shift this index by 1.
         int finalIdx = _nStages + 1;
-        _finalProjW = LoadFusedWeight(w, $"{_prefix}.block.{finalIdx}");
+        _finalProjW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{finalIdx}");
         _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{finalIdx}.bias"]);
     }
 
@@ -164,12 +164,5 @@ internal sealed unsafe class SnacEncoder
         }
         if (_finalProjW is not null) yield return _finalProjW;
         if (_finalProjB is not null) yield return _finalProjB;
-    }
-
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
     }
 }

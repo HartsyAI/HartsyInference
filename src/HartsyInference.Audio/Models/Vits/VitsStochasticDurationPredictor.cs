@@ -1,5 +1,6 @@
 using System;
 using HartsyInference.Audio.Dsp;
+using HartsyInference.Audio.Layers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -328,26 +329,11 @@ public sealed unsafe class VitsStochasticDurationPredictor
                 for (int c = 0; c < ch; c++)
                 {
                     float v = ((xp[(long)c * t + j] - (float)mean) * inv) * g[c] + be[c];
-                    xp[(long)c * t + j] = Gelu(v);
+                    // Exact erf GELU, not the tanh approximation — the latter biases the spline parameters
+                    // enough to shift durations.
+                    xp[(long)c * t + j] = Activations.ErfGelu(v);
                 }
             }
-        }
-
-        private static float Gelu(float x)
-        {
-            // Exact erf-based GELU to match PyTorch's default nn.GELU() (the tanh approximation biases the spline
-            // parameters enough to shift durations).
-            return 0.5f * x * (1f + Erf(x * 0.7071067811865476f));
-        }
-
-        // Abramowitz-Stegun 7.1.26 erf approximation (max abs error ~1.5e-7).
-        private static float Erf(float x)
-        {
-            float sign = MathF.Sign(x);
-            float ax = MathF.Abs(x);
-            float tt = 1f / (1f + 0.3275911f * ax);
-            float y = 1f - (((((1.061405429f * tt - 1.453152027f) * tt) + 1.421413741f) * tt - 0.284496736f) * tt + 0.254829592f) * tt * MathF.Exp(-ax * ax);
-            return sign * y;
         }
 
         private static unsafe void AddInPlace(Tensor dst, Tensor src)

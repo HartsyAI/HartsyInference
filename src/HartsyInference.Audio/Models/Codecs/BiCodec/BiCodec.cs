@@ -93,7 +93,7 @@ internal sealed unsafe class BiCodecSemanticEncoder
         _vqInProjW = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.in_proj.weight"]);
         _vqInProjB = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.in_proj.bias"]);
         _codebook = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.codebook.weight"]);
-        _codebookNorm = L2NormalizeRows(_codebook, _cfg.SemanticCodebookSize, _cfg.SemanticCodebookDim);
+        _codebookNorm = VqOps.L2NormalizeRows(_codebook, _cfg.SemanticCodebookSize, _cfg.SemanticCodebookDim);
     }
 
     /// <summary>Forward — features <c>[B, T, 1024]</c> → semantic codes <c>[B, T]</c>.</summary>
@@ -147,22 +147,6 @@ internal sealed unsafe class BiCodecSemanticEncoder
     {
         Tensor?[] all = [_projW, _projB, _vqInProjW, _vqInProjB, _codebook];
         foreach (Tensor? t in all) if (t is not null) yield return t;
-    }
-
-    private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
-    {
-        Tensor result = new(src.Shape, DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            double sumSq = 0d;
-            int rowBase = r * dim;
-            for (int d = 0; d < dim; d++) sumSq += (double)sp[rowBase + d] * sp[rowBase + d];
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-            for (int d = 0; d < dim; d++) dp[rowBase + d] = sp[rowBase + d] * invNorm;
-        }
-        return result;
     }
 }
 

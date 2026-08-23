@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;  // Reuse WhisperOps (Linear, MultiHead reshapes)
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -93,14 +94,14 @@ public sealed unsafe class MoonshineEncoder : IDisposable
         backend.Conv2D(c2Out, gn, _conv2Weight!, _conv2Bias, strideH: 1, strideW: _cfg.Conv2Stride, padH: 0, padW: 0);
         gn.Dispose();
         // GELU after conv2 (NOT tanh — the HF reference uses tanh only after conv1).
-        MoonshineOps.GeluInPlace(c2Out);
+        Activations.ErfGelu(c2Out);
 
         // Conv3: [1, 2*hidden, 1, T2] → [1, hidden, 1, T3].
         int t3 = (t2 - _cfg.Conv3Kernel) / _cfg.Conv3Stride + 1;
         Tensor c3Out = new(new TensorShape(1, _cfg.Conv3OutChannels, 1, t3), DType.F32);
         backend.Conv2D(c3Out, c2Out, _conv3Weight!, _conv3Bias, strideH: 1, strideW: _cfg.Conv3Stride, padH: 0, padW: 0);
         c2Out.Dispose();
-        MoonshineOps.GeluInPlace(c3Out);
+        Activations.ErfGelu(c3Out);
 
         // Drop H=1 axis and transpose [B, C, T] → [B, T, C].
         Tensor squeezed = c3Out.Reshape(new TensorShape(1, _cfg.HiddenSize, t3));

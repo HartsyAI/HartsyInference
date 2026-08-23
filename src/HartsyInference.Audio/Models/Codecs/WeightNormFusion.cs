@@ -27,6 +27,15 @@ public static unsafe class WeightNormFusion
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
+    /// <summary>Fuses the weight-normed conv weight at <paramref name="prefix"/>; unlike <see cref="Compose"/> this
+    /// requires <c>weight_g</c>/<c>weight_v</c> to be present and throws when the checkpoint is already fused.</summary>
+    public static Tensor LoadFused(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
+        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
+        return Fuse(g, v);
+    }
+
     public static Tensor Fuse(Tensor weightG, Tensor weightV)
     {
         // fp16 checkpoints (e.g. GPT-SoVITS s2) store weight_norm params in F16 — cast up before fusing.

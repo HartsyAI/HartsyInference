@@ -69,30 +69,10 @@ public sealed class CosyVoicePipeline : IDisposable
         // per-forward error accumulates over the decode loop and flips sampled argmaxes (verified on Zonos: TF32 →
         // babble, F32 → reference parity). Save/restore so we don't disturb the caller's backend state.
         // A layer-split LM runs each stage on its own backend, so every placement stage backend needs it too.
-        List<(IBackend Backend, bool Prev)> saved = new(4) { (backend, backend.HighPrecisionGemm) };
-        backend.HighPrecisionGemm = true;
-        if (_lm.Placement is { IsSingle: false } lmPlacement)
-        {
-            foreach (LlmStage stage in lmPlacement.Stages)
-            {
-                IBackend sb = stage.Backend;
-                bool seen = false;
-                for (int i = 0; i < saved.Count && !seen; i++) seen = ReferenceEquals(saved[i].Backend, sb);
-                if (seen) continue;
-                saved.Add((sb, sb.HighPrecisionGemm));
-                sb.HighPrecisionGemm = true;
-            }
-        }
-        try
-        {
-            PreloadWeights(backend);
-            return SynthesizeCore(backend, textTokenIds, speakerEmbed, referenceAudio, referenceSampleRate,
-                referenceTextTokens, seed, sw, chunkCausalSize);
-        }
-        finally
-        {
-            for (int i = saved.Count - 1; i >= 0; i--) saved[i].Backend.HighPrecisionGemm = saved[i].Prev;
-        }
+        using HighPrecisionGemmScope gemmScope = new(backend, _lm.Placement);
+        PreloadWeights(backend);
+        return SynthesizeCore(backend, textTokenIds, speakerEmbed, referenceAudio, referenceSampleRate,
+            referenceTextTokens, seed, sw, chunkCausalSize);
     }
 
     /// <summary>Bulk-uploads every component's weights to the device once (idempotent — the GPU weight cache keys by
@@ -251,20 +231,7 @@ public sealed class CosyVoicePipeline : IDisposable
         if (referenceAudio is null || referenceAudio.Length == 0)
             throw new ArgumentException("CosyVoice 2 streaming is zero-shot — provide referenceAudio.", nameof(referenceAudio));
 
-        List<(IBackend Backend, bool Prev)> saved = new(4) { (backend, backend.HighPrecisionGemm) };
-        backend.HighPrecisionGemm = true;
-        if (_lm.Placement is { IsSingle: false } lmPlacement)
-        {
-            foreach (LlmStage stage in lmPlacement.Stages)
-            {
-                IBackend sb = stage.Backend;
-                bool seen = false;
-                for (int i = 0; i < saved.Count && !seen; i++) seen = ReferenceEquals(saved[i].Backend, sb);
-                if (seen) continue;
-                saved.Add((sb, sb.HighPrecisionGemm));
-                sb.HighPrecisionGemm = true;
-            }
-        }
+        using HighPrecisionGemmScope gemmScope = new(backend, _lm.Placement);
 
         using AudioStreamer streamer = new();
         long sampleOffset = 0;
@@ -299,7 +266,6 @@ public sealed class CosyVoicePipeline : IDisposable
         finally
         {
             await producer.ConfigureAwait(false);
-            for (int i = saved.Count - 1; i >= 0; i--) saved[i].Backend.HighPrecisionGemm = saved[i].Prev;
         }
     }
 
@@ -385,5 +351,33 @@ public sealed class CosyVoicePipeline : IDisposable
     private void ThrowIfDisposed()
     {
         if (_disposed != 0) throw new ObjectDisposedException(nameof(CosyVoicePipeline));
+    }
+
+    /// <summary>Forces full-F32 GEMM on <paramref name="backend"/> and on every distinct layer-split stage backend,
+    /// restoring each one's previous setting on dispose so the caller's backend state is left untouched.</summary>
+    private readonly struct HighPrecisionGemmScope : IDisposable
+    {
+        private readonly List<(IBackend Backend, bool Prev)> _saved;
+
+        public HighPrecisionGemmScope(IBackend backend, LlmPlacement? placement)
+        {
+            _saved = new(4) { (backend, backend.HighPrecisionGemm) };
+            backend.HighPrecisionGemm = true;
+            if (placement is not { IsSingle: false }) return;
+            foreach (LlmStage stage in placement.Stages)
+            {
+                IBackend sb = stage.Backend;
+                bool seen = false;
+                for (int i = 0; i < _saved.Count && !seen; i++) seen = ReferenceEquals(_saved[i].Backend, sb);
+                if (seen) continue;
+                _saved.Add((sb, sb.HighPrecisionGemm));
+                sb.HighPrecisionGemm = true;
+            }
+        }
+
+        public void Dispose()
+        {
+            for (int i = _saved.Count - 1; i >= 0; i--) _saved[i].Backend.HighPrecisionGemm = _saved[i].Prev;
+        }
     }
 }

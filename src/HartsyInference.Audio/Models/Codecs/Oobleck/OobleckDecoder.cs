@@ -58,7 +58,7 @@ internal sealed class OobleckDecoder
         //   layers.{n+1}        = final Snake
         //   layers.{n+2}        = output WNConv1d (-> audio_channels, k=7, bias=False)
         // Inside a DecoderBlock: .layers.0 Snake, .layers.1 ConvTranspose, .layers.{2,3,4} ResUnits.
-        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.0.bias"]);
 
         int n = _strides.Length;
@@ -82,7 +82,7 @@ internal sealed class OobleckDecoder
         }
 
         (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.{n + 1}", _dims[^1]);
-        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.{n + 2}");   // bias=False upstream
+        _outW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.{n + 2}");   // bias=False upstream
     }
 
     /// <summary>Forward — latent <c>[B, latent_dim, T]</c> → PCM <c>[B, audio_channels, T · hop]</c>.</summary>

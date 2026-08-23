@@ -1,10 +1,9 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Io;
 using HartsyInference.ModelAssets.TextEncoders.Bert;
 using HartsyInference.Audio.Models.MeloTts;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.PyTorch;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -48,11 +47,11 @@ public sealed class MeloTts : IDisposable
         MeloTtsConfig cfg = config ?? MeloTtsConfig.EnglishV3;
         List<IDisposable> retain = new();
 
-        Dictionary<string, Tensor> meloRaw = LoadCheckpoint(meloCheckpointPath, retain);
+        Dictionary<string, Tensor> meloRaw = CheckpointLoader.Load(meloCheckpointPath, retain, recursiveFlatten: true);
         MeloTtsPipeline pipeline = new(cfg);
         pipeline.LoadWeights(NormalizeMeloKeys(meloRaw));
 
-        Dictionary<string, Tensor> bertRaw = LoadCheckpoint(bertModelPath, retain);
+        Dictionary<string, Tensor> bertRaw = CheckpointLoader.Load(bertModelPath, retain, recursiveFlatten: true);
         (Dictionary<string, Tensor> bertW, string bertPrefix) = NormalizeBertKeys(bertRaw);
         BertWordPieceTokenizer tokenizer = new(bertVocabPath, lowerCase: true);
         MeloTtsBertProvider bert = new(tokenizer, BertConfig.BaseUncased, bertW, bertPrefix);
@@ -91,22 +90,6 @@ public sealed class MeloTts : IDisposable
 
         return _pipeline.Synthesize(backend, r.PhoneIds, r.ToneIds, r.LangIds, bert, jaBert, speakerId,
             lengthScale, noiseScale, seed);
-    }
-
-    // Loads a checkpoint (safetensors mmap or torch pickle) and keeps the loader alive (the tensors borrow its memory).
-    private static Dictionary<string, Tensor> LoadCheckpoint(string path, List<IDisposable> retain)
-    {
-        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-        {
-            SafeTensorsLoader loader = new();
-            loader.Load(path);
-            retain.Add(loader);
-            return loader.GetAllTensors();
-        }
-        PytorchPickleLoader pickle = new();
-        pickle.Load(path, recursiveFlatten: true);
-        retain.Add(pickle);
-        return pickle.GetAllTensors();
     }
 
     // MeloTTS .pth nests the state dict under "model."; the posterior encoder (enc_q.*) is training-only.

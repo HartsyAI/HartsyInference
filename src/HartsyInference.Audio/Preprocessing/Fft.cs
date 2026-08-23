@@ -20,6 +20,14 @@ public static class Fft
     private static readonly object _twiddleLock = new();
     private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
 
+    /// <summary>Rounds <paramref name="n"/> up to a power of two, the size the radix-2 path needs.</summary>
+    public static int NextPow2(int n)
+    {
+        int p = 1;
+        while (p < n) p <<= 1;
+        return p;
+    }
+
     /// <summary>In-place complex FFT on <paramref name="re"/>/<paramref name="im"/> (each must be at least
     /// length <paramref name="n"/>); any <paramref name="n"/> works — power-of-two uses radix-2, other sizes
     /// fall back to a direct DFT or Bluestein. Pass freshly-allocated buffers if you need to keep the input.</summary>

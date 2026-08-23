@@ -14,14 +14,6 @@ internal static unsafe class OobleckOps
         return (alpha, beta);
     }
 
-    /// <summary>Fuses a weight-normed Conv1d's <c>{prefix}.weight_g</c> / <c>.weight_v</c>.</summary>
-    public static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
-    }
-
     /// <summary>Fuses a weight-normed ConvTranspose1d's <c>{prefix}.weight_g</c> / <c>.weight_v</c>.</summary>
     /// <remarks>diffusers wraps transpose convs with torch's DEFAULT dim-0 weight_norm, so the norm is per
     /// INPUT channel (g shape <c>[C_in, 1, 1]</c>, verified against the ACE-Step 1.5 vae safetensors

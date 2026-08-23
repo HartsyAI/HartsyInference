@@ -52,7 +52,7 @@ internal sealed class OobleckEncoder
         //   layers.{n+1}        = final Snake
         //   layers.{n+2}        = output WNConv1d (-> hidden = 2·latent, k=3)
         // Inside an EncoderBlock: .layers.{0,1,2} ResUnits, .layers.3 Snake, .layers.4 downsample conv.
-        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.0.bias"]);
 
         int n = _cfg.DownsamplingRatios.Length;
@@ -71,12 +71,12 @@ internal sealed class OobleckEncoder
                 _blockUnits[i][j].LoadWeights(w);
             }
             (_blockSnakeAlpha[i], _blockSnakeBeta[i]) = OobleckOps.LoadSnake(w, $"{blk}.layers.3", _dims[i]);
-            _blockDownW[i] = OobleckOps.LoadFusedWeight(w, $"{blk}.layers.4");
+            _blockDownW[i] = WeightNormFusion.LoadFused(w, $"{blk}.layers.4");
             _blockDownB[i] = WhisperOps.EnsureF32(w[$"{blk}.layers.4.bias"]);
         }
 
         (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.{n + 1}", _dims[^1]);
-        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.{n + 2}");
+        _outW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.{n + 2}");
         _outB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.{n + 2}.bias"]);
     }
 

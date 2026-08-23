@@ -3,6 +3,7 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.NeuTts;
+using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Backends;
@@ -88,7 +89,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         Tensor hidden = _lm.Forward(backend, prompt, batch: 1, posStart: 0, cache);
         for (int step = 0; step < maxTokens; step++)
         {
-            Tensor last = SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
+            Tensor last = VibeVoiceOps.SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
             hidden.Dispose();
             Tensor logitsT = _lm.ProjectLogits(backend, last, batch: 1, t: 1);
             last.Dispose();
@@ -128,15 +129,6 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         foreach (Tensor t in _lm.EnumerateWeights()) yield return t;
         foreach (Tensor t in _codec.EnumerateWeights()) yield return t;
         foreach (Tensor t in _encoder.EnumerateWeights()) yield return t;
-    }
-
-    private static Tensor SliceLastFrame(Tensor hidden, int h)
-    {
-        int t = (int)hidden.Shape[1];
-        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* sp = (float*)hidden.DataPointer + (long)(t - 1) * h;
-        Buffer.MemoryCopy(sp, (void*)last.DataPointer, h * 4, h * 4);
-        return last;
     }
 
     public void Dispose()

@@ -208,6 +208,7 @@ public sealed unsafe class DemucsPipeline : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _model.Dispose();
         GC.SuppressFinalize(this);
     }
 

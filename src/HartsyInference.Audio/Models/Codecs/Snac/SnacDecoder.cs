@@ -92,14 +92,14 @@ internal sealed unsafe class SnacDecoder
     {
         if (_depthwise)
         {
-            _initDwW = LoadFusedWeight(w, $"{_prefix}.model.0");
+            _initDwW = WeightNormFusion.LoadFused(w, $"{_prefix}.model.0");
             _initDwB = WhisperOps.EnsureF32(w[$"{_prefix}.model.0.bias"]);
-            _initW = LoadFusedWeight(w, $"{_prefix}.model.1");
+            _initW = WeightNormFusion.LoadFused(w, $"{_prefix}.model.1");
             _initB = WhisperOps.EnsureF32(w[$"{_prefix}.model.1.bias"]);
         }
         else
         {
-            _initW = LoadFusedWeight(w, $"{_prefix}.model.0");
+            _initW = WeightNormFusion.LoadFused(w, $"{_prefix}.model.0");
             _initB = WhisperOps.EnsureF32(w[$"{_prefix}.model.0.bias"]);
         }
 
@@ -111,7 +111,7 @@ internal sealed unsafe class SnacDecoder
             _stageUpW[i] = LoadFusedTransposeWeight(w, $"{_prefix}.model.{blockIdx}.block.1");
             _stageUpB[i] = WhisperOps.EnsureF32(w[$"{_prefix}.model.{blockIdx}.block.1.bias"]);
             if (_noise)
-                _noiseW[i] = LoadFusedWeight(w, $"{_prefix}.model.{blockIdx}.block.2.linear");   // bias-free k1 conv
+                _noiseW[i] = WeightNormFusion.LoadFused(w, $"{_prefix}.model.{blockIdx}.block.2.linear");   // bias-free k1 conv
 
             for (int j = 0; j < _cfg.ResidualDilations.Count; j++)
                 _stageUnits[i][j].LoadWeights(w);
@@ -121,7 +121,7 @@ internal sealed unsafe class SnacDecoder
 
         int finalSnakeIdx = _blockBase + _nStages;
         _finalSnakeAlpha = WhisperOps.EnsureF32(w[$"{_prefix}.model.{finalSnakeIdx}.alpha"]).Reshape(new TensorShape(dim));
-        _finalConvW = LoadFusedWeight(w, $"{_prefix}.model.{finalSnakeIdx + 1}");
+        _finalConvW = WeightNormFusion.LoadFused(w, $"{_prefix}.model.{finalSnakeIdx + 1}");
         _finalConvB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{finalSnakeIdx + 1}.bias"]);
     }
 
@@ -259,13 +259,6 @@ internal sealed unsafe class SnacDecoder
         if (_finalSnakeAlpha is not null) yield return _finalSnakeAlpha;
         if (_finalConvW is not null) yield return _finalConvW;
         if (_finalConvB is not null) yield return _finalConvB;
-    }
-
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
     }
 
     private static Tensor LoadFusedTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)

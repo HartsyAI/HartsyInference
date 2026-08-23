@@ -38,18 +38,10 @@ public static class S3GenReference
         return ChannelMajorTensor(flowMelExt.Compute(centered));
     }
 
-    /// <summary>PyTorch <c>reflect</c> padding (reflects around the edge sample without repeating it), used to emulate the reference STFT's center padding.</summary>
+    /// <summary>Reflect padding that leaves a reference shorter than the pad width unpadded — the flow mel
+    /// tolerates a short reference, but periodically reflecting one would fabricate content.</summary>
     private static float[] ReflectPad(ReadOnlySpan<float> x, int pad)
-    {
-        if (pad <= 0) return x.ToArray();
-        int n = x.Length;
-        if (n <= pad) return x.ToArray(); // too short to reflect; skip padding rather than throw
-        float[] y = new float[n + 2 * pad];
-        for (int i = 0; i < pad; i++) y[i] = x[pad - i];
-        for (int i = 0; i < n; i++) y[pad + i] = x[i];
-        for (int i = 0; i < pad; i++) y[pad + n + i] = x[n - 2 - i];
-        return y;
-    }
+        => pad <= 0 || x.Length <= pad ? x.ToArray() : SignalPadding.Reflect(x, pad);
 
     /// <summary>Wraps a <c>[channels, frames]</c> feature as a channel-major tensor <c>[1, channels, frames]</c>.</summary>
     private static Tensor ChannelMajorTensor(float[,] feat)

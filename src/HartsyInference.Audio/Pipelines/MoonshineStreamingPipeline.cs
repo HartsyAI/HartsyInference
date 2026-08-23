@@ -97,45 +97,9 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
         try
         {
             using MoonshineDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
-            return GreedyDecode(backend, state, opts);
+            return MoonshineGreedyDecoder.Decode(backend, _decoder.DecodeStep, state, _cfg, _tokenizer, opts);
         }
         finally { encoded.Dispose(); }
-    }
-
-    private string GreedyDecode(IBackend backend, MoonshineDecoder.DecodeState state, MoonshineOptions opts)
-    {
-        int[] prompt = [_cfg.BosTokenId];
-        Tensor logits = _decoder.DecodeStep(backend, prompt, state);
-        int nextToken = ArgMax(logits, _cfg.VocabSize);
-        logits.Dispose();
-
-        List<int> generated = new(opts.MaxNewTokens);
-        int[] singleBuf = new int[1];
-        for (int step = 0; step < opts.MaxNewTokens; step++)
-        {
-            if (nextToken == _cfg.EosTokenId) break;
-            generated.Add(nextToken);
-
-            singleBuf[0] = nextToken;
-            Tensor stepLogits = _decoder.DecodeStep(backend, singleBuf, state);
-            nextToken = ArgMax(stepLogits, _cfg.VocabSize);
-            stepLogits.Dispose();
-        }
-
-        return _tokenizer.Decode(generated.ToArray()).TrimStart();
-    }
-
-    private static unsafe int ArgMax(Tensor logits, int vocab)
-    {
-        float* p = (float*)logits.DataPointer;
-        int best = 0;
-        float bestV = float.NegativeInfinity;
-        for (int v = 0; v < vocab; v++)
-        {
-            float val = p[v];
-            if (val > bestV) { bestV = val; best = v; }
-        }
-        return best;
     }
 
     /// <summary>Infers a streaming <see cref="MoonshineConfig"/> preset from the repo name.</summary>

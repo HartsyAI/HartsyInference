@@ -45,10 +45,10 @@ internal sealed class OobleckResidualUnit
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         (_snake1Alpha, _snake1Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.0", _dim);
-        _conv1W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.1");
+        _conv1W = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.1");
         _conv1B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.1.bias"]);
         (_snake2Alpha, _snake2Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.2", _dim);
-        _conv2W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.3");
+        _conv2W = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.3");
         _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.3.bias"]);
     }
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Audio.Dsp;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Dia;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
@@ -65,30 +66,15 @@ public sealed unsafe class DiaPipeline : IDisposable
         DiaConfig cfg = config ?? DiaConfig.Dia1_6B;
         DiaPipeline p = new(cfg);
         List<IDisposable> retain = new();
-        IReadOnlyDictionary<string, Tensor> diaW = LoadAny(diaSafetensors, retain);
-        IReadOnlyDictionary<string, Tensor> dac = LoadAny(dacPath, retain);
+        // Non-recursive: the descript DAC .pth is a flat state_dict under a {state_dict, metadata} envelope, and
+        // recursive flatten KEEPS the `state_dict.` wrapper — keys came out as `state_dict.encoder.block.0.weight_g`
+        // and the weight-norm fuse missed them → KeyNotFound on `.weight`.
+        IReadOnlyDictionary<string, Tensor> diaW = CheckpointLoader.Load(diaSafetensors, retain, recursiveFlatten: false);
+        IReadOnlyDictionary<string, Tensor> dac = CheckpointLoader.Load(dacPath, retain, recursiveFlatten: false);
         p.LoadWeights(diaW, dac);
         // The pass-through weights (embeddings / norms) borrow the loaders' mmaps — keep them alive.
         p._retain = retain.ToArray();
         return p;
-    }
-
-    private static Dictionary<string, Tensor> LoadAny(string path, List<IDisposable> retain)
-    {
-        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-        {
-            HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader l = new();
-            l.Load(path);
-            retain.Add(l);
-            return l.GetAllTensors();
-        }
-        HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader pk = new();
-        // Non-recursive: the descript DAC .pth is a flat state_dict under a {state_dict, metadata} envelope.
-        // FlattenStateDict drops the `state_dict.` wrapper (recursive flatten KEEPS it, so keys came out as
-        // `state_dict.encoder.block.0.weight_g` and the weight-norm fuse missed them → KeyNotFound on `.weight`).
-        pk.Load(path, recursiveFlatten: false);
-        retain.Add(pk);
-        return pk.GetAllTensors();
     }
 
     /// <summary>Generates 44.1 kHz mono PCM from byte-level text token ids (UTF-8 bytes, speaker tags inline —

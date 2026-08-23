@@ -1,4 +1,3 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -13,8 +12,10 @@ namespace HartsyInference.Audio.Models.Demucs;
 /// Synthetic-forward / structural build — numeric parity vs the Python reference is validation-pending (the
 /// freq-collapse/merge and STFT padding are the bit-exact-risky parts). See
 /// <c>docs/Research/HTDEMUCS_ARCHITECTURE.md</c>.</summary>
-public sealed unsafe class HtDemucs
+public sealed unsafe class HtDemucs : IDisposable
 {
+    private readonly DemucsCastOwner _casts = new();
+    private int _disposed;
     private readonly HtDemucsConfig _cfg;
     private readonly int _depth;
     private readonly DemucsConvBlock[] _enc;     // freq encoders (2D)
@@ -70,16 +71,16 @@ public sealed unsafe class HtDemucs
             _tdec[i].LoadWeights(w, $"tdecoder.{i}");
         }
         _xf.LoadWeights(w, "crosstransformer");
-        if (w.TryGetValue("freq_emb.embedding.weight", out Tensor? fe)) _freqEmb = WhisperOps.EnsureF32(fe);
+        _freqEmb = _casts.Optional(w, "freq_emb.embedding.weight");
         // The channel (up/down)samplers are top-level modules in HTDemucs, NOT inside the crosstransformer.
-        _upW = WhisperOps.EnsureF32(w["channel_upsampler.weight"]);
-        _upB = Bias(w, "channel_upsampler.bias");
-        _downW = WhisperOps.EnsureF32(w["channel_downsampler.weight"]);
-        _downB = Bias(w, "channel_downsampler.bias");
-        _upWt = WhisperOps.EnsureF32(w["channel_upsampler_t.weight"]);
-        _upBt = Bias(w, "channel_upsampler_t.bias");
-        _downWt = WhisperOps.EnsureF32(w["channel_downsampler_t.weight"]);
-        _downBt = Bias(w, "channel_downsampler_t.bias");
+        _upW = _casts.F32(w, "channel_upsampler.weight");
+        _upB = _casts.Optional(w, "channel_upsampler.bias");
+        _downW = _casts.F32(w, "channel_downsampler.weight");
+        _downB = _casts.Optional(w, "channel_downsampler.bias");
+        _upWt = _casts.F32(w, "channel_upsampler_t.weight");
+        _upBt = _casts.Optional(w, "channel_upsampler_t.bias");
+        _downWt = _casts.F32(w, "channel_downsampler_t.weight");
+        _downBt = _casts.Optional(w, "channel_downsampler_t.bias");
     }
 
     /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
@@ -220,7 +221,6 @@ public sealed unsafe class HtDemucs
         foreach (Tensor? w in own) if (w is not null) yield return w;
     }
 
-
     private static (float Mean, float Std) TensorMeanStd(Tensor t)
     {
         float* p = (float*)t.DataPointer; long n = t.ElementCount;
@@ -284,6 +284,16 @@ public sealed unsafe class HtDemucs
         return o;
     }
 
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key)
-        => w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
+    /// <summary>Frees the F32 casts this model allocated at load time; the loader's own tensors are left alone.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        for (int i = 0; i < _depth; i++)
+        {
+            _enc[i].Dispose(); _tenc[i].Dispose(); _dec[i].Dispose(); _tdec[i].Dispose();
+        }
+        _xf.Dispose();
+        _casts.Dispose();
+        GC.SuppressFinalize(this);
+    }
 }

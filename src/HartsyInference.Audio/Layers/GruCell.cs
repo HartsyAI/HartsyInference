@@ -98,19 +98,12 @@ internal static unsafe class GruOps
             int outRow = b * hidden;
             for (int k = 0; k < hidden; k++)
             {
-                float r = SigmoidS(gip[gateRow + k] + ghp[gateRow + k]);
-                float z = SigmoidS(gip[gateRow + hidden + k] + ghp[gateRow + hidden + k]);
+                float r = Activations.SigmoidS(gip[gateRow + k] + ghp[gateRow + k]);
+                float z = Activations.SigmoidS(gip[gateRow + hidden + k] + ghp[gateRow + hidden + k]);
                 float n = MathF.Tanh(gip[gateRow + 2 * hidden + k] + r * ghp[gateRow + 2 * hidden + k]);
                 float hp = h0[outRow + k];
                 hOut[outRow + k] = (1f - z) * n + z * hp;
             }
         }
-    }
-
-    private static float SigmoidS(float x)
-    {
-        if (x >= 0f) return 1f / (1f + MathF.Exp(-x));
-        float ex = MathF.Exp(x);
-        return ex / (1f + ex);
     }
 }

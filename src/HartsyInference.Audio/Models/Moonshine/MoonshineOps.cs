@@ -37,35 +37,6 @@ internal static unsafe class MoonshineOps
         }
     }
 
-    /// <summary>Exact GELU (<c>0.5 * x * (1 + erf(x / sqrt(2)))</c>) in place, avoiding three extra <see cref="Tensor"/> allocations between the conv stem layers.</summary>
-    public static void GeluInPlace(Tensor t)
-    {
-        float* p = (float*)t.DataPointer;
-        long n = t.ElementCount;
-        const float invSqrt2 = 0.7071067811865475f;
-        for (long i = 0; i < n; i++)
-        {
-            float x = p[i];
-            p[i] = 0.5f * x * (1f + Erf(x * invSqrt2));
-        }
-    }
-
-    /// <summary>Abramowitz &amp; Stegun approximation of <c>erf(x)</c>, accurate to ~1.5e-7 — well below FP32 rounding error.</summary>
-    private static float Erf(float x)
-    {
-        float sign = x < 0 ? -1f : 1f;
-        x = MathF.Abs(x);
-        const float a1 = 0.254829592f;
-        const float a2 = -0.284496736f;
-        const float a3 = 1.421413741f;
-        const float a4 = -1.453152027f;
-        const float a5 = 1.061405429f;
-        const float p = 0.3275911f;
-        float t = 1f / (1f + p * x);
-        float y = 1f - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * MathF.Exp(-x * x);
-        return sign * y;
-    }
-
     /// <summary>Element-wise tanh, in place.</summary>
     public static void TanhInPlace(Tensor t)
     {

@@ -56,12 +56,12 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         for (int q = 0; q < NCodebooks; q++)
         {
             string p = $"{prefix}.quantizers.{q}";
-            _inProjW[q] = LoadFusedWeight(w, $"{p}.in_proj");
+            _inProjW[q] = WeightNormFusion.LoadFused(w, $"{p}.in_proj");
             _inProjB[q] = WhisperOps.EnsureF32(w[$"{p}.in_proj.bias"]);
-            _outProjW[q] = LoadFusedWeight(w, $"{p}.out_proj");
+            _outProjW[q] = WeightNormFusion.LoadFused(w, $"{p}.out_proj");
             _outProjB[q] = WhisperOps.EnsureF32(w[$"{p}.out_proj.bias"]);
             _codebooks[q] = WhisperOps.EnsureF32(w[$"{p}.codebook.weight"]);
-            _codebooksNorm[q] = L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
+            _codebooksNorm[q] = VqOps.L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
         }
     }
 
@@ -75,7 +75,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         Buffer.MemoryCopy((void*)latent.DataPointer, (void*)residual.DataPointer, bytes, bytes);
 
         Tensor[] result = new Tensor[NCodebooks];
-        Span<float> normalizedQuery = stackalloc float[CodebookDim];
 
         for (int q = 0; q < NCodebooks; q++)
         {
@@ -98,57 +97,13 @@ internal sealed unsafe class SnacResidualVectorQuantizer
             // Nearest-neighbor lookup.
             Tensor codes = new(new TensorShape(batch, tQuant), DType.I32);
             int* cp = (int*)codes.DataPointer;
-            float* pp = (float*)projected.DataPointer;
-            float* cbNorm = (float*)_codebooksNorm[q]!.DataPointer;
-
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    double sumSq = 0d;
-                    for (int d = 0; d < CodebookDim; d++)
-                    {
-                        float v = pp[(b * CodebookDim + d) * tQuant + ti];
-                        normalizedQuery[d] = v;
-                        sumSq += (double)v * v;
-                    }
-                    float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-                    for (int d = 0; d < CodebookDim; d++) normalizedQuery[d] *= invNorm;
-
-                    int bestIdx = 0;
-                    float bestDot = float.MinValue;
-                    for (int k = 0; k < CodebookSize; k++)
-                    {
-                        float dot = 0f;
-                        int rowBase = k * CodebookDim;
-                        for (int d = 0; d < CodebookDim; d++)
-                            dot += normalizedQuery[d] * cbNorm[rowBase + d];
-                        if (dot > bestDot)
-                        {
-                            bestDot = dot;
-                            bestIdx = k;
-                        }
-                    }
-                    cp[b * tQuant + ti] = bestIdx;
-                }
-            }
+            VqOps.NearestCodebookIndices((float*)projected.DataPointer, (float*)_codebooksNorm[q]!.DataPointer,
+                cp, batch, tQuant, CodebookDim, CodebookSize);
             projected.Dispose();
             result[q] = codes;
 
             // Reconstruct + out_proj + repeat-interleave + subtract from residual.
-            Tensor quantizedSmall = new(new TensorShape(batch, CodebookDim, tQuant), DType.F32);
-            float* qp = (float*)quantizedSmall.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    int idx = cp[b * tQuant + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * tQuant + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantizedSmall = VqOps.GatherCodebookVectors(_codebooks[q]!, cp, batch, tQuant, CodebookDim);
 
             Tensor reprojSmall = new(new TensorShape(batch, LatentDim, tQuant), DType.F32);
             backend.Conv1d(reprojSmall, quantizedSmall, _outProjW[q]!, _outProjB[q],
@@ -200,20 +155,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
             int tQuant = t / stride;
             int* cp = (int*)codes[q].DataPointer;
 
-            // Reconstruct codebook_dim quantized vector.
-            Tensor quantizedSmall = new(new TensorShape(batch, CodebookDim, tQuant), DType.F32);
-            float* qp = (float*)quantizedSmall.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    int idx = cp[b * tQuant + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * tQuant + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantizedSmall = VqOps.GatherCodebookVectors(_codebooks[q]!, cp, batch, tQuant, CodebookDim);
 
             Tensor reprojSmall = new(new TensorShape(batch, LatentDim, tQuant), DType.F32);
             backend.Conv1d(reprojSmall, quantizedSmall, _outProjW[q]!, _outProjB[q],
@@ -239,29 +181,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
             Tensor?[] all = [_inProjW[q], _inProjB[q], _outProjW[q], _outProjB[q], _codebooks[q]];
             foreach (Tensor? t in all) if (t is not null) yield return t;
         }
-    }
-
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
-    }
-
-    private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
-    {
-        Tensor result = new(src.Shape, DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            double sumSq = 0d;
-            int rowBase = r * dim;
-            for (int d = 0; d < dim; d++) sumSq += (double)sp[rowBase + d] * sp[rowBase + d];
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-            for (int d = 0; d < dim; d++) dp[rowBase + d] = sp[rowBase + d] * invNorm;
-        }
-        return result;
     }
 
     private static Tensor Clone(Tensor src)

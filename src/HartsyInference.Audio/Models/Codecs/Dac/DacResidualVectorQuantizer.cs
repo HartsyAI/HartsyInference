@@ -61,7 +61,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
             _outProjW[q] = LoadFusedWeight(w, $"{p}.out_proj");
             _outProjB[q] = WhisperOps.EnsureF32(w[$"{p}.out_proj.bias"]);
             _codebooks[q] = WhisperOps.EnsureF32(w[$"{p}.codebook.weight"]);
-            _codebooksNorm[q] = L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
+            _codebooksNorm[q] = VqOps.L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
         }
     }
 
@@ -82,11 +82,6 @@ internal sealed unsafe class DacResidualVectorQuantizer
         long bytes = latent.ElementCount * sizeof(float);
         Buffer.MemoryCopy((void*)latent.DataPointer, (void*)residual.DataPointer, bytes, bytes);
 
-        // Reusable scratch query buffer for the nearest-neighbor inner loop. Allocated
-        // once outside the codebook loop per CA2014 — CodebookDim is constant for the
-        // life of the quantizer (8 in every published DAC config) so reuse is safe.
-        Span<float> normalizedQuery = stackalloc float[CodebookDim];
-
         for (int q = 0; q < nQ; q++)
         {
             // in_proj: latent_dim → codebook_dim (1×1 conv).
@@ -94,63 +89,15 @@ internal sealed unsafe class DacResidualVectorQuantizer
             backend.Conv1d(projected, residual, _inProjW[q]!, _inProjB[q],
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
-            // Nearest-neighbor lookup in L2-normalized cosine space. Per (b, t):
-            //   query = projected[b, :, t] / ||projected[b, :, t]||
-            //   idx = argmax_k dot(query, codebookNorm[k, :])
-            float* pp = (float*)projected.DataPointer;
-            float* cbNorm = (float*)_codebooksNorm[q]!.DataPointer;
-
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < t; ti++)
-                {
-                    // Build [B, codebook_dim, T] is channels-first so query is at
-                    // index (b * codebook_dim + d) * t + ti for d in [0, codebook_dim).
-                    double sumSq = 0d;
-                    for (int d = 0; d < CodebookDim; d++)
-                    {
-                        float v = pp[(b * CodebookDim + d) * t + ti];
-                        normalizedQuery[d] = v;
-                        sumSq += (double)v * v;
-                    }
-                    float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-                    for (int d = 0; d < CodebookDim; d++) normalizedQuery[d] *= invNorm;
-
-                    // Find nearest codeword by maximum dot product.
-                    int bestIdx = 0;
-                    float bestDot = float.MinValue;
-                    for (int k = 0; k < CodebookSize; k++)
-                    {
-                        float dot = 0f;
-                        int rowBase = k * CodebookDim;
-                        for (int d = 0; d < CodebookDim; d++)
-                            dot += normalizedQuery[d] * cbNorm[rowBase + d];
-                        if (dot > bestDot)
-                        {
-                            bestDot = dot;
-                            bestIdx = k;
-                        }
-                    }
-                    cp[(q * batch + b) * t + ti] = bestIdx;
-                }
-            }
+            // Codes for codebook q occupy the [batch, t] plane at offset q in the [nQ, batch, T] output.
+            int* qCodes = cp + (long)q * batch * t;
+            VqOps.NearestCodebookIndices((float*)projected.DataPointer, (float*)_codebooksNorm[q]!.DataPointer,
+                qCodes, batch, t, CodebookDim, CodebookSize);
             projected.Dispose();
 
             // Reconstruct the quantized codebook_dim vector, run out_proj back to latent_dim,
             // subtract from residual.
-            Tensor quantized = new(new TensorShape(batch, CodebookDim, t), DType.F32);
-            float* qp = (float*)quantized.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < t; ti++)
-                {
-                    int idx = cp[(q * batch + b) * t + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * t + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantized = VqOps.GatherCodebookVectors(_codebooks[q]!, qCodes, batch, t, CodebookDim);
 
             Tensor reproj = new(new TensorShape(batch, LatentDim, t), DType.F32);
             backend.Conv1d(reproj, quantized, _outProjW[q]!, _outProjB[q],
@@ -184,20 +131,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
 
         for (int q = 0; q < nQ; q++)
         {
-            // Reconstruct quantized vector from codes.
-            Tensor quantized = new(new TensorShape(batch, CodebookDim, t), DType.F32);
-            float* qp = (float*)quantized.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < t; ti++)
-                {
-                    int idx = cp[(q * batch + b) * t + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * t + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantized = VqOps.GatherCodebookVectors(_codebooks[q]!, cp + (long)q * batch * t, batch, t, CodebookDim);
 
             // out_proj to latent space.
             Tensor reproj = new(new TensorShape(batch, LatentDim, t), DType.F32);
@@ -225,22 +159,5 @@ internal sealed unsafe class DacResidualVectorQuantizer
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         return WeightNormFusion.Compose(w, prefix);
-    }
-
-    /// <summary>L2-normalizes each row of a 2D codebook tensor. Cached once at load time so the cosine-similarity inner loop is a pure dot product.</summary>
-    private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
-    {
-        Tensor result = new(src.Shape, DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            double sumSq = 0d;
-            int rowBase = r * dim;
-            for (int d = 0; d < dim; d++) sumSq += (double)sp[rowBase + d] * sp[rowBase + d];
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-            for (int d = 0; d < dim; d++) dp[rowBase + d] = sp[rowBase + d] * invNorm;
-        }
-        return result;
     }
 }

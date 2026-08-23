@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -51,22 +52,6 @@ public sealed unsafe class Hubert : IDisposable
         _encNormW = WhisperOps.EnsureF32(w[$"{prefix}encoder.layer_norm.weight"]);
         _encNormB = WhisperOps.EnsureF32(w[$"{prefix}encoder.layer_norm.bias"]);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}encoder.layers.{i}");
-    }
-
-    /// <summary>Exact (erf-based) GELU in place: <c>0.5·x·(1 + erf(x/√2))</c> (Abramowitz-Stegun 7.1.26,
-    /// max abs error ≈ 1.5e-7). HuBERT/wav2vec2 use the exact GELU, not the tanh approximation.</summary>
-    internal static void ExactGelu(float* p, long n)
-    {
-        const float a1 = 0.254829592f, a2 = -0.284496736f, a3 = 1.421413741f, a4 = -1.453152027f, a5 = 1.061405429f, pp = 0.3275911f, invSqrt2 = 0.70710678f;
-        for (long i = 0; i < n; i++)
-        {
-            float x = p[i], z = x * invSqrt2;
-            float sign = z < 0 ? -1f : 1f, az = MathF.Abs(z);
-            float tt = 1f / (1f + pp * az);
-            float poly = ((((a5 * tt + a4) * tt + a3) * tt + a2) * tt + a1) * tt;
-            float erf = sign * (1f - poly * MathF.Exp(-az * az));
-            p[i] = 0.5f * x * (1f + erf);
-        }
     }
 
     /// <summary>Composes a <c>weight_norm(dim=2)</c> grouped Conv1d weight: for each kernel position k,
@@ -129,7 +114,7 @@ public sealed unsafe class Hubert : IDisposable
         backend.Conv1d(posOut, hcf, _posConvW!, _posConvB, 1, pad, pad, 1, _cfg.PosConvGroups);
         hcf.Dispose();
         // Drop the last element (wav2vec2 num_pad_remove=1 for even kernel) + exact GELU, add to h.
-        ExactGelu((float*)posOut.DataPointer, posOut.ElementCount);
+        Activations.ErfGelu(posOut);
         float* pp = (float*)posOut.DataPointer;
         float* hp = (float*)h.DataPointer;
         for (int c = 0; c < _cfg.Hidden; c++)
@@ -195,7 +180,7 @@ public sealed unsafe class Hubert : IDisposable
                 cur.Dispose(); cur = gn.Reshape(new TensorShape(1, outCh, outT));
             }
             // GELU activation after each conv (exact erf — HuBERT uses the exact GELU, not the tanh approx).
-            ExactGelu((float*)cur.DataPointer, cur.ElementCount);
+            Activations.ErfGelu(cur);
         }
         tFrames = curT;
         return cur;
@@ -260,7 +245,7 @@ public sealed unsafe class Hubert : IDisposable
             backend.LayerNorm(n1, afterAttn, _ln1W!, _ln1B!, _cfg.NormEps); afterAttn.Dispose();
 
             Tensor f1 = WhisperOps.ProjectLinear(backend, n1, _ff1W!, _ff1B, 1, t, h, _cfg.FfnDim);
-            ExactGelu((float*)f1.DataPointer, f1.ElementCount);   // exact erf GELU (HuBERT hidden_act="gelu")
+            Activations.ErfGelu(f1);   // exact erf GELU (HuBERT hidden_act="gelu")
             Tensor f2 = WhisperOps.ProjectLinear(backend, f1, _ff2W!, _ff2B, 1, t, _cfg.FfnDim, h); f1.Dispose();
             Tensor afterFf = new(x.Shape, DType.F32);
             backend.Add(afterFf, n1, f2); n1.Dispose(); f2.Dispose();
