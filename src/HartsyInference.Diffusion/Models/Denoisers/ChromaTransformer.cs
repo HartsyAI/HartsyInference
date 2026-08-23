@@ -328,9 +328,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         {
             // Split inside the double region: BOTH live streams MOVE; the per-step modTable is only COPIED —
             // the final-norm rows on A are still read after B's range.
-            modTableB = CopyAcross(backendB, backendA, modTable);
-            img = MoveAcross(backendB, backendA, img);
-            txt = MoveAcross(backendB, backendA, txt);
+            modTableB = DiTUtils.CopyAcross(backendB, backendA, modTable);
+            img = DiTUtils.MoveAcross(backendB, backendA, img);
+            txt = DiTUtils.MoveAcross(backendB, backendA, txt);
             ForwardDoubleRange(backendB, ref img, ref txt, modTableB, rope, maskB, doubleSplit, numDoubles);
             concatBackend = backendB;
         }
@@ -348,14 +348,14 @@ public sealed unsafe class ChromaTransformer : IDisposable
         {
             ForwardSingleRange(backendA, ref combined, modTable, rope, maskA, 0, singleSplit);
             // Split inside the single region: one concatenated stream MOVES, the modTable is COPIED.
-            modTableB = CopyAcross(backendB, backendA, modTable);
-            combined = MoveAcross(backendB, backendA, combined);
+            modTableB = DiTUtils.CopyAcross(backendB, backendA, modTable);
+            combined = DiTUtils.MoveAcross(backendB, backendA, combined);
             ForwardSingleRange(backendB, ref combined, modTableB, rope, maskB, singleSplit, numSingles);
         }
         modTableB?.Dispose();
 
         // Back to A: the text-prefix strip and the head (final norm + proj_out) live in the shared weights there.
-        combined = MoveAcross(backendA, backendB, combined);
+        combined = DiTUtils.MoveAcross(backendA, backendB, combined);
         Tensor imgOut = new Tensor(new TensorShape(batch, imgSeqLen, hidden), act);
         backendA.SliceRows(imgOut, combined, txtSeqLen);
         combined.Dispose();
@@ -383,22 +383,6 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
         ChromaDebugDump.DumpOutput(velocity);
         return velocity;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
-    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor moved = CopyAcross(dst, src, source);
-        source.Dispose();
-        return moved;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
-    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor copied = new Tensor(source.Shape, source.DType);
-        dst.CopyFromPeer(copied, source, src);
-        return copied;
     }
 
     /// <summary>Runs one full denoise step's transformer work: the cond pass and (for CFG) the uncond pass,

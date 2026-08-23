@@ -55,7 +55,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     {
         _projInW = w["proj_in.weight"]; w.TryGetValue("proj_in.bias", out _projInB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["time_embed.emb.timestep_embedder.linear_1.weight"]; w.TryGetValue("time_embed.emb.timestep_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["time_embed.emb.timestep_embedder.linear_2.weight"]; w.TryGetValue("time_embed.emb.timestep_embedder.linear_2.bias", out _timeEmb2B);
         _timeLinW = w["time_embed.linear.weight"]; w.TryGetValue("time_embed.linear.bias", out _timeLinB);
@@ -470,12 +470,6 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         backend.Linear(outVel, affined, _projOutW!, _projOutB);
         affined.Dispose();
         return outVel;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     public void Dispose()

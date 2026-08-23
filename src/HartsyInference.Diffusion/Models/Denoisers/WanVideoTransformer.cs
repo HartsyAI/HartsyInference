@@ -49,7 +49,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         _patchW2d = WanDitOps.Reshape2d(pw, _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -289,8 +289,6 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         Buffer.MemoryCopy((float*)src.DataPointer + (long)rowStart * cols, (float*)o.DataPointer, bytes, bytes);
         return o;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 
     public void Dispose()
     {

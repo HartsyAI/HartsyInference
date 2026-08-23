@@ -6,14 +6,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Shared utility methods for DiT/MMDiT transformers. Consolidates helpers duplicated across FluxTransformer, Sd3Transformer, and future DiT models.</summary>
 public static unsafe class DiTUtils
 {
-    /// <summary>The checkpoint tensor widened to F32 when needed; the caller owns any cast copy for its model's
-    /// lifetime (small per-channel vectors — norms, tables, biases).</summary>
-    public static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
     /// <summary>A [n] tensor of ones — the unit affine for RmsNorm calls where the checkpoint has no weight
     /// (IBackend has LayerNormNoAffine but no no-affine RmsNorm overload, so callers synthesize one).</summary>
     public static Tensor Ones(int n)
@@ -399,8 +391,8 @@ public static unsafe class DiTUtils
         return result;
     }
 
-    /// <summary>Inverse of <see cref="PatchifyNCHW"/>: <c>[B, (H/p)·(W/p), p²·C]</c> → <c>[B, C, H, W]</c>.</summary>
-    public static Tensor UnpatchifyToNCHW(Tensor tokens, int channels, int hPacked, int wPacked, int patch)
+    /// <summary>Inverse of <see cref="PatchifyNCHW"/>: <c>[B, (H/p)·(W/p), p²·C]</c> → <c>[B, C, H, W]</c>. Pass <paramref name="negate"/> to write <c>-value</c> instead (models that fold a final output negation into the unpatchify).</summary>
+    public static Tensor UnpatchifyToNCHW(Tensor tokens, int channels, int hPacked, int wPacked, int patch, bool negate = false)
     {
         int batch = (int)tokens.Shape[0];
         int height = hPacked * patch;
@@ -430,12 +422,31 @@ public static unsafe class DiTUtils
                         {
                             int dstCol = wp * patch + px;
                             for (int c = 0; c < channels; c++)
-                                batchDst[c * hwStride + dstRow * width + dstCol] = tokenSrc[srcIdx++];
+                            {
+                                float v = tokenSrc[srcIdx++];
+                                batchDst[c * hwStride + dstRow * width + dstCol] = negate ? -v : v;
+                            }
                         }
                     }
                 }
         }
         return result;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    public static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    public static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
     }
 
     /// <summary>Pads the last dimension with zeros: [B, S, currentDim] → [B, S, targetDim].</summary>

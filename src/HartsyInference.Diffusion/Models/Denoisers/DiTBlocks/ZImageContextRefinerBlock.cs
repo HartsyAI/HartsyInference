@@ -16,7 +16,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
 
-    // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see LoadSplitQkv.
+    // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see ZImageBlock.SplitQkv.
     private Tensor? _toQWeight, _toKWeight, _toVWeight;
     private Tensor? _attnOutWeight;
 
@@ -44,7 +44,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     /// <summary>Loads weights using Z-Image's Lumina-style naming under the given prefix (e.g., "context_refiner.0").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
+        (_toQWeight, _toKWeight, _toVWeight) = ZImageBlock.SplitQkv(weights[$"{prefix}.attention.qkv.weight"], _hiddenSize);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
@@ -176,27 +176,6 @@ public sealed unsafe class ZImageContextRefinerBlock
         postFfnNorm.Dispose();
 
         return result;
-    }
-
-    /// <summary>Splits the fused <c>attention.qkv.weight</c> [3H, H] into contiguous Q/K/V weights [H, H], sharing
-    /// the per-tensor scalar fp8 scale. See <c>ZImageBlock.LoadSplitQkv</c>.</summary>
-    private void LoadSplitQkv(Tensor qkv)
-    {
-        int h = _hiddenSize;
-        if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
-            throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
-
-        long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
-        TensorShape splitShape = new TensorShape(h, h);
-
-        _toQWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toKWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toVWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-
-        byte* src = (byte*)qkv.DataPointer;
-        Buffer.MemoryCopy(src, (void*)_toQWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)_toKWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)_toVWeight.DataPointer, chunkBytes, chunkBytes);
     }
 
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)

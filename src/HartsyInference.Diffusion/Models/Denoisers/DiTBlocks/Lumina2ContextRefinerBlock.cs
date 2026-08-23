@@ -51,8 +51,8 @@ public sealed unsafe class Lumina2ContextRefinerBlock
     /// <summary>Loads weights using Lumina 2.0's diffusers naming under the given prefix (e.g., "context_refiner.0").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _norm1Weight = LoadAsF32(weights, $"{prefix}.norm1.weight");
-        _norm2Weight = LoadAsF32(weights, $"{prefix}.norm2.weight");
+        _norm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.norm1.weight");
+        _norm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.norm2.weight");
 
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
         _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
@@ -62,8 +62,8 @@ public sealed unsafe class Lumina2ContextRefinerBlock
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
 
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _ffWeight1 = weights[$"{prefix}.feed_forward.linear_1.weight"];
         _ffWeight2 = weights[$"{prefix}.feed_forward.linear_2.weight"];
@@ -195,12 +195,6 @@ public sealed unsafe class Lumina2ContextRefinerBlock
         postFfnNorm.Dispose();
 
         return result;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)

@@ -33,7 +33,7 @@ public sealed unsafe class LtxVideoBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _scaleShift = LoadF32(w, $"{prefix}.scale_shift_table");
+        _scaleShift = TensorCasts.LoadF32(w, $"{prefix}.scale_shift_table");
         LoadAttn(w, $"{prefix}.attn1", 0);
         LoadAttn(w, $"{prefix}.attn2", 1);
         _ffProjW = LoadF16(w, $"{prefix}.ff.net.0.proj.weight");
@@ -48,8 +48,8 @@ public sealed unsafe class LtxVideoBlock
         _k[i] = LoadF16(w, $"{p}.to_k.weight"); w.TryGetValue($"{p}.to_k.bias", out Tensor? kb); _kB[i] = kb;
         _v[i] = LoadF16(w, $"{p}.to_v.weight"); w.TryGetValue($"{p}.to_v.bias", out Tensor? vb); _vB[i] = vb;
         _o[i] = LoadF16(w, $"{p}.to_out.0.weight"); w.TryGetValue($"{p}.to_out.0.bias", out Tensor? ob); _oB[i] = ob;
-        _nq[i] = LoadF32(w, $"{p}.norm_q.weight");
-        _nk[i] = LoadF32(w, $"{p}.norm_k.weight");
+        _nq[i] = TensorCasts.LoadF32(w, $"{p}.norm_q.weight");
+        _nk[i] = TensorCasts.LoadF32(w, $"{p}.norm_k.weight");
     }
 
     // The big 2D Linear weights load as F16 so the DiT GEMMs use F16 tensor cores (~2× the TF32 path LTX-0.9's native
@@ -305,11 +305,5 @@ public sealed unsafe class LtxVideoBlock
         float* p = (float*)t.DataPointer;
         for (int i = 0; i < n; i++) p[i] = 1f;
         return t;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

@@ -340,9 +340,9 @@ public sealed unsafe class FluxTransformer : IDisposable
         {
             // Split inside the double region: BOTH live streams cross (plus temb, which every block reads).
             // temb is only COPIED — the head on A reads the original after B finishes.
-            tembB = CopyAcross(backendB, backendA, temb);
-            img = MoveAcross(backendB, backendA, img);
-            txt = MoveAcross(backendB, backendA, txt);
+            tembB = DiTUtils.CopyAcross(backendB, backendA, temb);
+            img = DiTUtils.MoveAcross(backendB, backendA, img);
+            txt = DiTUtils.MoveAcross(backendB, backendA, txt);
             tailBackend = backendB;
             for (int i = doubleSplit; i < _config.Depth; i++)
             {
@@ -368,8 +368,8 @@ public sealed unsafe class FluxTransformer : IDisposable
         if (splitBlock >= _config.Depth)
         {
             // Split inside the single region: one concatenated stream crosses.
-            tembB = CopyAcross(backendB, backendA, temb);
-            x = MoveAcross(backendB, backendA, x);
+            tembB = DiTUtils.CopyAcross(backendB, backendA, temb);
+            x = DiTUtils.MoveAcross(backendB, backendA, x);
         }
         for (int i = singleSplit; i < _config.DepthSingleBlocks; i++)
         {
@@ -380,7 +380,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         tembB?.Dispose();
 
         // Back to A: the head (final norm + proj_out) lives in the shared weights there.
-        x = MoveAcross(backendA, backendB, x);
+        x = DiTUtils.MoveAcross(backendA, backendB, x);
         Tensor imgOut = new Tensor(new TensorShape(batch, imgSeqLen, hidden), act);
         backendA.SliceRows(imgOut, x, txtSeqLen);
         x.Dispose();
@@ -396,22 +396,6 @@ public sealed unsafe class FluxTransformer : IDisposable
         imgOut.Dispose();
         temb.Dispose();
         return output;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
-    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor moved = CopyAcross(dst, src, source);
-        source.Dispose();
-        return moved;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
-    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor copied = new Tensor(source.Shape, source.DType);
-        dst.CopyFromPeer(copied, source, src);
-        return copied;
     }
 
     /// <summary>Weights of flat-indexed blocks <c>[startBlock, endBlock)</c> (doubles then singles) — the
@@ -1002,7 +986,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         else
         {
             Tensor normed = new Tensor(seqShape, DType.F32);
-            LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
+            DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
 
             modulated = new Tensor(seqShape, DType.F32);
             float* normPtr = (float*)normed.DataPointer;
@@ -1037,37 +1021,6 @@ public sealed unsafe class FluxTransformer : IDisposable
     }
 
     // ── Helper methods ──
-
-    private static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-
-                float mean = 0f;
-                for (int d = 0; d < dim; d++)
-                    mean += inPtr[offset + d];
-                mean /= dim;
-
-                float variance = 0f;
-                for (int d = 0; d < dim; d++)
-                {
-                    float diff = inPtr[offset + d] - mean;
-                    variance += diff * diff;
-                }
-                variance /= dim;
-
-                float invStd = 1.0f / MathF.Sqrt(variance + 1e-6f);
-                for (int d = 0; d < dim; d++)
-                    outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
-            }
-        }
-    }
 
     /// <summary>Concatenates two 3D tensors along the sequence dimension: [B,S1,D] + [B,S2,D] → [B,S1+S2,D].</summary>
     private static void ConcatAlongSeqDim3D(Tensor output, Tensor first, Tensor second,

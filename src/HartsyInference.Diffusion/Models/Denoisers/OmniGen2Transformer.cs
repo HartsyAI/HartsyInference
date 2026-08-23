@@ -433,7 +433,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         }
 
         // ── 1. Patchify + embed the noise latent (x_embedder) ──
-        Tensor imgFlat = PatchifyLatent(latent, batch, inChannels, latentH, latentW, patch);
+        Tensor imgFlat = DiTUtils.PatchifyNCHW(latent, patch);
         Tensor imgTokens = new(new TensorShape(batch, imgSeqLen, hidden), DType.F32);
         backend.Linear(imgTokens, imgFlat, _xEmbedderWeight!, _xEmbedderBias);
         imgFlat.Dispose();
@@ -443,7 +443,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         Tensor[] refTokens = new Tensor[numRefs];
         for (int j = 0; j < numRefs; j++)
         {
-            Tensor refFlat = PatchifyLatent(refLatents[j], 1, inChannels, refHPacked[j] * patch, refWPacked[j] * patch, patch);
+            Tensor refFlat = DiTUtils.PatchifyNCHW(refLatents[j], patch);
             refTokens[j] = new Tensor(new TensorShape(1, refLen[j], hidden), DType.F32);
             Tensor? bias = j < _refCombinedBias.Length ? _refCombinedBias[j] : _refEmbedderBias;
             backend.Linear(refTokens[j], refFlat, _refEmbedderWeight!, bias ?? _refEmbedderBias);
@@ -587,105 +587,12 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Linear(projOut, normedOut, _projOutWeight!, _projOutBias);
         normedOut.Dispose();
 
-        Tensor velocity = UnpatchifyTokens(projOut, batch, outChannels, hPacked, wPacked, patch);
+        // negate realizes upstream OmniGen2's `return -output`.
+        Tensor velocity = DiTUtils.UnpatchifyToNCHW(projOut, outChannels, hPacked, wPacked, patch, negate: true);
         projOut.Dispose();
 
         OmniGen2DebugDump.Dump("output_velocity", velocity);
         return velocity;
-    }
-
-    /// <summary>Reshapes <c>[B, C, H, W]</c> to <c>[B, S_img = (H/p)*(W/p), p²·C]</c> with channel-outer ordering
-    /// inside each patch. Per upstream OmniGen2's <c>x = einops.rearrange(x, 'B C (H p) (W q) -&gt; B (H W) (p q C)')</c>:
-    /// for each spatial patch, the <c>p²·C</c> features are laid out as <c>[(py, px, c) for py in range(p) for px in
-    /// range(p) for c in range(C)]</c>.</summary>
-    private static Tensor PatchifyLatent(Tensor latent, int batch, int channels, int height, int width, int patch)
-    {
-        int hPacked = height / patch;
-        int wPacked = width / patch;
-        int imgSeqLen = hPacked * wPacked;
-        int patchVolume = patch * patch * channels;
-
-        TensorShape outShape = new(batch, imgSeqLen, patchVolume);
-        Tensor result = new(outShape, DType.F32);
-
-        float* src = (float*)latent.DataPointer;
-        float* dst = (float*)result.DataPointer;
-        long chwStride = (long)channels * height * width;
-        long hwStride = (long)height * width;
-
-        for (int b = 0; b < batch; b++)
-        {
-            float* batchSrc = src + b * chwStride;
-            float* batchDst = dst + (long)b * imgSeqLen * patchVolume;
-            for (int hp = 0; hp < hPacked; hp++)
-            {
-                for (int wp = 0; wp < wPacked; wp++)
-                {
-                    long tokenIdx = (long)hp * wPacked + wp;
-                    float* tokenDst = batchDst + tokenIdx * patchVolume;
-                    int outIdx = 0;
-                    for (int py = 0; py < patch; py++)
-                    {
-                        int srcRow = hp * patch + py;
-                        for (int px = 0; px < patch; px++)
-                        {
-                            int srcCol = wp * patch + px;
-                            for (int c = 0; c < channels; c++)
-                            {
-                                tokenDst[outIdx++] = batchSrc[c * hwStride + srcRow * width + srcCol];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Inverse of <see cref="PatchifyLatent"/>: <c>[B, S_img, p²·C_out]</c> → <c>[B, C_out, H, W]</c>.</summary>
-    private static Tensor UnpatchifyTokens(Tensor tokens, int batch, int channels, int hPacked, int wPacked, int patch)
-    {
-        int height = hPacked * patch;
-        int width = wPacked * patch;
-        int imgSeqLen = hPacked * wPacked;
-        int patchVolume = patch * patch * channels;
-
-        TensorShape outShape = new(batch, channels, height, width);
-        Tensor result = new(outShape, DType.F32);
-
-        float* src = (float*)tokens.DataPointer;
-        float* dst = (float*)result.DataPointer;
-        long chwStride = (long)channels * height * width;
-        long hwStride = (long)height * width;
-
-        for (int b = 0; b < batch; b++)
-        {
-            float* batchSrc = src + (long)b * imgSeqLen * patchVolume;
-            float* batchDst = dst + b * chwStride;
-            for (int hp = 0; hp < hPacked; hp++)
-            {
-                for (int wp = 0; wp < wPacked; wp++)
-                {
-                    long tokenIdx = (long)hp * wPacked + wp;
-                    float* tokenSrc = batchSrc + tokenIdx * patchVolume;
-                    int srcIdx = 0;
-                    for (int py = 0; py < patch; py++)
-                    {
-                        int dstRow = hp * patch + py;
-                        for (int px = 0; px < patch; px++)
-                        {
-                            int dstCol = wp * patch + px;
-                            for (int c = 0; c < channels; c++)
-                            {
-                                // Negate here to realize upstream OmniGen2's `return -output`.
-                                batchDst[c * hwStride + dstRow * width + dstCol] = -tokenSrc[srcIdx++];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return result;
     }
 
     /// <summary>Builds the conditioning vector <c>temb [B, conditioning_dim]</c>: sinusoidal embedding of the

@@ -619,7 +619,7 @@ public sealed unsafe class Lumina2Transformer : IDisposable
     }
 
     /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension.</summary>
-    private static Tensor ConcatAlongSeqDim(Tensor a, Tensor b, int batch, int seqA, int seqB, int dim)
+    internal static Tensor ConcatAlongSeqDim(Tensor a, Tensor b, int batch, int seqA, int seqB, int dim)
     {
         int totalSeq = seqA + seqB;
         TensorShape outShape = new TensorShape(batch, totalSeq, dim);

@@ -143,7 +143,7 @@ public sealed unsafe class LtxVideoVaeDecoder
         if (_timestepCond)
         {
             _normOutTimeEmbedder = LtxVaeTimeEmbedder.Load(w, "decoder.time_embedder", output * 2);
-            _normOutScaleShift = LoadF32(w, "decoder.scale_shift_table");
+            _normOutScaleShift = TensorCasts.LoadF32(w, "decoder.scale_shift_table");
         }
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
@@ -276,5 +276,4 @@ public sealed unsafe class LtxVideoVaeDecoder
 
     private static int[] Reverse(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Reverse(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

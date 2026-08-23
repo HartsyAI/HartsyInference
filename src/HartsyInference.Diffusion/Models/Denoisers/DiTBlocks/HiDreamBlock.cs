@@ -212,12 +212,12 @@ public sealed unsafe class HiDreamBlock
         // ── 2. Pre-attention norms + AdaLN modulation ──
         Tensor imgNormed = new Tensor(imgShape, DType.F32);
         backend.LayerNormNoAffine(imgNormed, image, 1e-6f);
-        Tensor imgMod = GpuModulate(backend, imgNormed, mods[0], mods[1], batch, imgSeqLen, _hiddenSize);
+        Tensor imgMod = DiTUtils.Modulate(backend, imgNormed, mods[0], mods[1], imgShape);
         imgNormed.Dispose();
 
         Tensor txtNormed = new Tensor(txtShape, DType.F32);
         backend.LayerNormNoAffine(txtNormed, text, 1e-6f);
-        Tensor txtMod = GpuModulate(backend, txtNormed, mods[6], mods[7], batch, txtSeqLen, _hiddenSize);
+        Tensor txtMod = DiTUtils.Modulate(backend, txtNormed, mods[6], mods[7], txtShape);
         txtNormed.Dispose();
 
         // ── 3. Joint MM-attention ──
@@ -235,7 +235,7 @@ public sealed unsafe class HiDreamBlock
         // ── 5. Image FFN (MoE single-expert fallback) ──
         Tensor imgPreFfn = new Tensor(imgShape, DType.F32);
         backend.LayerNormNoAffine(imgPreFfn, imgAfterAttn, 1e-6f);
-        Tensor imgFfnIn = GpuModulate(backend, imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
+        Tensor imgFfnIn = DiTUtils.Modulate(backend, imgPreFfn, mods[3], mods[4], imgShape);
         imgPreFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
@@ -249,7 +249,7 @@ public sealed unsafe class HiDreamBlock
         // ── 6. Text FFN (vanilla SwiGLU) ──
         Tensor txtPreFfn = new Tensor(txtShape, DType.F32);
         backend.LayerNormNoAffine(txtPreFfn, txtAfterAttn, 1e-6f);
-        Tensor txtFfnIn = GpuModulate(backend, txtPreFfn, mods[9], mods[10], batch, txtSeqLen, _hiddenSize);
+        Tensor txtFfnIn = DiTUtils.Modulate(backend, txtPreFfn, mods[9], mods[10], txtShape);
         txtPreFfn.Dispose();
 
         Tensor txtFfnOut = SwiGluForward(backend, txtFfnIn, _ffTW1!, _ffTW3!, _ffTW2!, batch, txtSeqLen);
@@ -281,7 +281,7 @@ public sealed unsafe class HiDreamBlock
         // ── 2. Pre-attention norm + modulate ──
         Tensor preAttn = new Tensor(hiddenShape, DType.F32);
         backend.LayerNormNoAffine(preAttn, hidden, 1e-6f);
-        Tensor preAttnMod = GpuModulate(backend, preAttn, mods[0], mods[1], batch, seqLen, _hiddenSize);
+        Tensor preAttnMod = DiTUtils.Modulate(backend, preAttn, mods[0], mods[1], hiddenShape);
         preAttn.Dispose();
 
         // ── 3. Self-attention over the joint sequence (only image side has RoPE; text positions are zero) ──
@@ -294,7 +294,7 @@ public sealed unsafe class HiDreamBlock
         // ── 4. MoE FFN over the joint sequence ──
         Tensor preFfn = new Tensor(hiddenShape, DType.F32);
         backend.LayerNormNoAffine(preFfn, afterAttn, 1e-6f);
-        Tensor ffnIn = GpuModulate(backend, preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
+        Tensor ffnIn = DiTUtils.Modulate(backend, preFfn, mods[3], mods[4], hiddenShape);
         preFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
@@ -333,17 +333,6 @@ public sealed unsafe class HiDreamBlock
 
         projected.Dispose();
         return results;
-    }
-
-    /// <summary>GPU-resident AdaLN modulation: output = input * (1 + scale) + shift, scale/shift [B, hidden] broadcast over the sequence.</summary>
-    private static Tensor GpuModulate(IBackend backend, Tensor input, Tensor shift, Tensor scale, int batch, int seqLen, int hiddenSize)
-    {
-        Tensor scalePlus1 = new Tensor(new TensorShape(batch, hiddenSize), DType.F32);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, hiddenSize), DType.F32);
-        backend.AffineBroadcastLastDim(output, input, scalePlus1, shift);
-        scalePlus1.Dispose();
-        return output;
     }
 
     /// <summary>GPU-resident gated residual: output = input + gate * value, gate [B, hidden] broadcast over the sequence.</summary>

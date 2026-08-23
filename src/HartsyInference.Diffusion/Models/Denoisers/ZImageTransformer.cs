@@ -674,7 +674,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         }
         else
         {
-            concat = ConcatAlongSeqDim(refinedImage, refinedCaption, batch, imgPaddedLen, capPaddedLen, hidden);
+            concat = Lumina2Transformer.ConcatAlongSeqDim(refinedImage, refinedCaption, batch, imgPaddedLen, capPaddedLen, hidden);
         }
         if (ownsRefinedCaption)
             refinedCaption.Dispose();
@@ -1090,27 +1090,6 @@ public sealed unsafe class ZImageTransformer : IDisposable
                     }
                 }
             }
-        }
-        return output;
-    }
-
-    /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension.</summary>
-    private static Tensor ConcatAlongSeqDim(Tensor a, Tensor b, int batch, int seqA, int seqB, int dim)
-    {
-        int totalSeq = seqA + seqB;
-        TensorShape outShape = new TensorShape(batch, totalSeq, dim);
-        Tensor output = new Tensor(outShape, a.DType);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int bi = 0; bi < batch; bi++)
-        {
-            long aBytes = (long)seqA * dim * sizeof(float);
-            long bBytes = (long)seqB * dim * sizeof(float);
-            Buffer.MemoryCopy(aPtr + bi * seqA * dim, outPtr + bi * totalSeq * dim, aBytes, aBytes);
-            Buffer.MemoryCopy(bPtr + bi * seqB * dim, outPtr + bi * totalSeq * dim + seqA * dim, bBytes, bBytes);
         }
         return output;
     }

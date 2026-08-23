@@ -68,11 +68,11 @@ public sealed unsafe class MatrixGame3ActionModule
             _mouseMlp2W = w[$"{prefix}.mouse_mlp.2.weight"]; w.TryGetValue($"{prefix}.mouse_mlp.2.bias", out _mouseMlp2B);
             // Both LayerNorm affine tensors must be F32: AffineBroadcastLastDim rejects a bf16 scale/shift (the bias was
             // loaded as-is → bf16 → NotSupported on the GPU action path; the CPU parity run cast everything to F32 first).
-            _mouseLnW = LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); _mouseLnB = LoadF32Opt(w, $"{prefix}.mouse_mlp.3.bias");
+            _mouseLnW = TensorCasts.LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); _mouseLnB = LoadF32Opt(w, $"{prefix}.mouse_mlp.3.bias");
             _tQkvW = w[$"{prefix}.t_qkv.weight"]; w.TryGetValue($"{prefix}.t_qkv.bias", out _tQkvB);
             _projMouseW = w[$"{prefix}.proj_mouse.weight"]; w.TryGetValue($"{prefix}.proj_mouse.bias", out _projMouseB);
-            _imgQNorm = LoadF32(w, $"{prefix}.img_attn_q_norm.weight");
-            _imgKNorm = LoadF32(w, $"{prefix}.img_attn_k_norm.weight");
+            _imgQNorm = TensorCasts.LoadF32(w, $"{prefix}.img_attn_q_norm.weight");
+            _imgKNorm = TensorCasts.LoadF32(w, $"{prefix}.img_attn_k_norm.weight");
         }
         if (_enableKeyboard)
         {
@@ -81,8 +81,8 @@ public sealed unsafe class MatrixGame3ActionModule
             _kbdKvW = w[$"{prefix}.keyboard_attn_kv.weight"]; w.TryGetValue($"{prefix}.keyboard_attn_kv.bias", out _kbdKvB);
             _kbdQW = w[$"{prefix}.mouse_attn_q.weight"]; w.TryGetValue($"{prefix}.mouse_attn_q.bias", out _kbdQB);
             _projKbdW = w[$"{prefix}.proj_keyboard.weight"]; w.TryGetValue($"{prefix}.proj_keyboard.bias", out _projKbdB);
-            _keyQNorm = LoadF32(w, $"{prefix}.key_attn_q_norm.weight");
-            _keyKNorm = LoadF32(w, $"{prefix}.key_attn_k_norm.weight");
+            _keyQNorm = TensorCasts.LoadF32(w, $"{prefix}.key_attn_q_norm.weight");
+            _keyKNorm = TensorCasts.LoadF32(w, $"{prefix}.key_attn_k_norm.weight");
         }
     }
 
@@ -296,6 +296,5 @@ public sealed unsafe class MatrixGame3ActionModule
         backend.AffineBroadcastLastDim(x, x, weight, bias);
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
     private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

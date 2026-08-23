@@ -140,8 +140,8 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
         // (B=1): the old host path read the device-produced temb's DataPointer — a full pipeline drain
         // per block (the temb stream-stall). ──
         Tensor[] mod = batch == 1
-            ? SliceModRowsDevice(backend, temb, rowCount: 3)
-            : SliceModRows(temb, batch, rowCount: 3);
+            ? ChromaDoubleStreamBlock.SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 3)
+            : ChromaDoubleStreamBlock.SliceModRows(temb, batch, rowStart: 0, rowCount: 3);
 
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
@@ -149,7 +149,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
 
         // ── 2. LayerNorm (no affine) + modulate: x*(1+scale)+shift ──
-        Tensor modulated = NormModulate(backend, x, mod[0], mod[1], shape);
+        Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape);
 
         // ── 3+4. Q/K/V + MLP projection + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): the BFL
         //         linear1 [3*hidden + mlp, hidden] runs as ONE GEMM; qkv + mlp slice off the activation
@@ -259,59 +259,5 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 
         ChromaF16.Probe("sgl-out", result);
         return result;
-    }
-
-    /// <summary>LayerNorm (no affine, eps=1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c> on the
-    /// GPU. <c>AffineBroadcastLastDim</c> is <c>x*scale+shift</c>, so the scale is pre-incremented by 1.</summary>
-    private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
-    {
-        Tensor normed = new Tensor(shape, x.DType);
-        backend.LayerNormNoAffine(normed, x, 1e-6f);
-        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(shape, x.DType);
-        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
-        normed.Dispose();
-        scalePlus1.Dispose();
-        return output;
-    }
-
-    /// <summary>Device twin of <see cref="SliceModRows"/> (B=1): per-row <c>backend.SliceRows</c> so the
-    /// device-resident temb is never drained to the host mid-forward.</summary>
-    private static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowCount)
-    {
-        int hidden = (int)temb.Shape[2];
-        Tensor[] rows = new Tensor[rowCount];
-        for (int r = 0; r < rowCount; r++)
-        {
-            Tensor row = new Tensor(new TensorShape(1, hidden), DType.F32);
-            backend.SliceRows(row, temb, r);
-            rows[r] = row;
-        }
-        return rows;
-    }
-
-    private static Tensor[] SliceModRows(Tensor temb, int batch, int rowCount)
-    {
-        int totalRows = (int)temb.Shape[1];
-        int hidden = (int)temb.Shape[2];
-        Tensor[] rows = new Tensor[rowCount];
-        float* tembPtr = (float*)temb.DataPointer;
-
-        for (int r = 0; r < rowCount; r++)
-        {
-            TensorShape rowShape = new TensorShape(batch, hidden);
-            Tensor row = new Tensor(rowShape, DType.F32);
-            float* rowPtr = (float*)row.DataPointer;
-
-            for (int b = 0; b < batch; b++)
-            {
-                long src = ((long)b * totalRows + r) * hidden;
-                long dst = (long)b * hidden;
-                Buffer.MemoryCopy(tembPtr + src, rowPtr + dst, hidden * sizeof(float), hidden * sizeof(float));
-            }
-            rows[r] = row;
-        }
-        return rows;
     }
 }

@@ -59,8 +59,8 @@ public sealed unsafe class ErnieImageBlock
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         // RMSNorm scales must be F32 (CudaBackend.RmsNorm + CPU CastTo paths read float* directly).
-        _adaLnSaWeight = LoadAsF32(weights, $"{prefix}.adaLN_sa_ln.weight");
-        _adaLnMlpWeight = LoadAsF32(weights, $"{prefix}.adaLN_mlp_ln.weight");
+        _adaLnSaWeight = TensorCasts.LoadF32(weights, $"{prefix}.adaLN_sa_ln.weight");
+        _adaLnMlpWeight = TensorCasts.LoadF32(weights, $"{prefix}.adaLN_mlp_ln.weight");
 
         _toQWeight = weights[$"{prefix}.self_attention.to_q.weight"];
         _toKWeight = weights[$"{prefix}.self_attention.to_k.weight"];
@@ -227,12 +227,5 @@ public sealed unsafe class ErnieImageBlock
         combined.Dispose();
 
         return output;
-    }
-
-    /// <summary>Loads a norm weight, casting to F32 if necessary (RmsNorm reads float* directly).</summary>
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

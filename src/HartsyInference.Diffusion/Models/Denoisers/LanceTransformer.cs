@@ -46,18 +46,18 @@ public sealed unsafe class LanceTransformer : IDisposable
     /// <summary>Loads weights using the REAL checkpoint key names. Expects the converter to have stripped the <c>language_model.model.</c> prefix off the backbone keys (→ <c>embed_tokens</c>, <c>layers.{i}.*</c>, <c>norm</c>, <c>norm_moe_gen</c>) and passed the top-level Lance heads through unchanged (<c>vae2llm.*</c>, <c>llm2vae.*</c>, <c>latent_pos_embed.pos_embed</c>, <c>time_embedder.mlp.{0,2}.*</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _embedTokens = LoadF32(weights, "embed_tokens.weight");
+        _embedTokens = TensorCasts.LoadF32(weights, "embed_tokens.weight");
         _vae2llmW = weights["vae2llm.weight"];
         weights.TryGetValue("vae2llm.bias", out _vae2llmB);
         _llm2vaeW = weights["llm2vae.weight"];
         weights.TryGetValue("llm2vae.bias", out _llm2vaeB);
-        _latentPosEmbed = LoadF32(weights, "latent_pos_embed.pos_embed");
+        _latentPosEmbed = TensorCasts.LoadF32(weights, "latent_pos_embed.pos_embed");
         _timeMlp0W = weights["time_embedder.mlp.0.weight"];
         weights.TryGetValue("time_embedder.mlp.0.bias", out _timeMlp0B);
         _timeMlp2W = weights["time_embedder.mlp.2.weight"];
         weights.TryGetValue("time_embedder.mlp.2.bias", out _timeMlp2B);
-        _normUnd = LoadF32(weights, "norm.weight");
-        _normGen = LoadF32(weights, "norm_moe_gen.weight");
+        _normUnd = TensorCasts.LoadF32(weights, "norm.weight");
+        _normGen = TensorCasts.LoadF32(weights, "norm_moe_gen.weight");
         for (int i = 0; i < _blocks.Length; i++)
             _blocks[i].LoadWeights(weights, $"layers.{i}");
     }
@@ -261,12 +261,6 @@ public sealed unsafe class LanceTransformer : IDisposable
         backend.Linear(outT, act, _timeMlp2W!, _timeMlp2B);
         act.Dispose();
         return outT;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     public void Dispose()

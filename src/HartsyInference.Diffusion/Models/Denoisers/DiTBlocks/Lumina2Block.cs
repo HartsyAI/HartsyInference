@@ -69,7 +69,7 @@ public sealed unsafe class Lumina2Block
     /// <summary>Loads weights using Lumina 2.0's diffusers naming. <paramref name="prefix"/> is e.g. "noise_refiner.0" or "layers.5".</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _norm1NormWeight = LoadAsF32(weights, $"{prefix}.norm1.norm.weight");
+        _norm1NormWeight = TensorCasts.LoadF32(weights, $"{prefix}.norm1.norm.weight");
         _norm1LinearWeight = weights[$"{prefix}.norm1.linear.weight"];
         weights.TryGetValue($"{prefix}.norm1.linear.bias", out _norm1LinearBias);
 
@@ -81,9 +81,9 @@ public sealed unsafe class Lumina2Block
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
 
-        _norm2Weight = LoadAsF32(weights, $"{prefix}.norm2.weight");
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _norm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _ffWeight1 = weights[$"{prefix}.feed_forward.linear_1.weight"];
         _ffWeight2 = weights[$"{prefix}.feed_forward.linear_2.weight"];
@@ -423,12 +423,6 @@ public sealed unsafe class Lumina2Block
 
         projected.Dispose();
         return results;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     private static Tensor ApplyScale(Tensor input, Tensor scale, int batch, int seqLen, int hiddenSize)

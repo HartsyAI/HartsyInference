@@ -90,17 +90,17 @@ public sealed unsafe class Krea2TextFusion
 public sealed unsafe class Krea2TextFusionBlock
 {
     private readonly int _dim;
-    private readonly int _ffnInner;
     private readonly float _eps;
     private readonly Krea2Attention _attn;
-    private Tensor? _norm1, _norm2, _ffGate, _ffUp, _ffDown;
+    private readonly SwiGluFfn _ffn;
+    private Tensor? _norm1, _norm2;
 
     public Krea2TextFusionBlock(int dim, int numHeads, int numKvHeads, int intermediateSize, float eps)
     {
         _dim = dim;
-        _ffnInner = intermediateSize;
         _eps = eps;
         _attn = new Krea2Attention(dim, numHeads, numKvHeads, eps);
+        _ffn = new SwiGluFfn(dim, intermediateSize);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
@@ -108,9 +108,7 @@ public sealed unsafe class Krea2TextFusionBlock
         _norm1 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm1.weight"]);
         _norm2 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm2.weight"]);
         _attn.LoadWeights(w, $"{p}.attn");
-        _ffGate = w[$"{p}.ff.gate.weight"];
-        _ffUp = w[$"{p}.ff.up.weight"];
-        _ffDown = w[$"{p}.ff.down.weight"];
+        _ffn.LoadSwiGluWeights(w[$"{p}.ff.gate.weight"], null, w[$"{p}.ff.up.weight"], null, w[$"{p}.ff.down.weight"], null);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -118,9 +116,7 @@ public sealed unsafe class Krea2TextFusionBlock
         if (_norm1 is not null) yield return _norm1;
         if (_norm2 is not null) yield return _norm2;
         foreach (Tensor t in _attn.EnumerateWeights()) yield return t;
-        if (_ffGate is not null) yield return _ffGate;
-        if (_ffUp is not null) yield return _ffUp;
-        if (_ffDown is not null) yield return _ffDown;
+        foreach (Tensor t in _ffn.EnumerateWeights()) yield return t;
     }
 
     public Tensor Forward(IBackend backend, Tensor hidden, int batch, int seqLen)
@@ -136,30 +132,11 @@ public sealed unsafe class Krea2TextFusionBlock
 
         Tensor n2 = new Tensor(hShape, DType.F32);
         backend.RmsNorm(n2, h1, _norm2!, _eps);
-        Tensor ffOut = SwiGlu(backend, n2, batch, seqLen);
+        Tensor ffOut = _ffn.Forward(backend, n2, batch, seqLen);
         n2.Dispose();
         Tensor outp = new Tensor(hShape, DType.F32);
         backend.Add(outp, h1, ffOut);
         ffOut.Dispose(); h1.Dispose();
-        return outp;
-    }
-
-    private Tensor SwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
-    {
-        TensorShape ffShape = new TensorShape(batch, seqLen, _ffnInner);
-        Tensor g = new Tensor(ffShape, DType.F32);
-        Tensor u = new Tensor(ffShape, DType.F32);
-        backend.Linear(g, input, _ffGate!, null);
-        backend.Linear(u, input, _ffUp!, null);
-        Tensor act = new Tensor(ffShape, DType.F32);
-        backend.Silu(act, g);
-        g.Dispose();
-        Tensor gated = new Tensor(ffShape, DType.F32);
-        backend.Mul(gated, act, u);
-        act.Dispose(); u.Dispose();
-        Tensor outp = new Tensor(new TensorShape(batch, seqLen, _dim), DType.F32);
-        backend.Linear(outp, gated, _ffDown!, null);
-        gated.Dispose();
         return outp;
     }
 }

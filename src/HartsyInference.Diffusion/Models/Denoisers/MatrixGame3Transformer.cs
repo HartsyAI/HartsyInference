@@ -68,7 +68,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         _patchW2d = WanDitOps.Reshape2d(pw, _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -145,7 +145,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         Tensor encoderFixed = PadOrTruncateRows(encoder, _config.TextLen, _config.TextDim);
         Tensor encoderProj = WanDitOps.TextEmbed(backend, encoderFixed, dim, _textW1!, _textB1, _textW2!, _textB2);
         if (!ReferenceEquals(encoderFixed, encoder)) encoderFixed.Dispose();
-        if (taps is not null) { taps["patch"] = CloneCpu(hidden); taps["ctx"] = CloneCpu(encoderProj); }
+        if (taps is not null) { taps["patch"] = MatrixGame2Transformer.CloneCpu(hidden); taps["ctx"] = MatrixGame2Transformer.CloneCpu(encoderProj); }
 
         int tokensPerGroup = s / gt;
         int[] frameIdx = ropeFrameIndices.ToArray();
@@ -165,18 +165,18 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
             cur = next;
             if (taps is not null)
             {
-                taps[$"b{i}"] = CloneCpu(cur);
-                if (i == 0) taps["block0"] = CloneCpu(cur);
-                if (i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
+                taps[$"b{i}"] = MatrixGame2Transformer.CloneCpu(cur);
+                if (i == 0) taps["block0"] = MatrixGame2Transformer.CloneCpu(cur);
+                if (i == _blocks.Length - 1) taps["blockLast"] = MatrixGame2Transformer.CloneCpu(cur);
             }
         }
         cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose(); pluckerEmb?.Dispose();
 
         // Read out only the trailing outputFrames frames (memory/past are conditioning, not output).
         int skipFrames = gt - outputFrames;
-        Tensor outTokens = SliceFrames(cur, skipFrames, outputFrames, tokensPerGroup, dim);
+        Tensor outTokens = MatrixGame2Transformer.SliceFrames(cur, skipFrames, outputFrames, tokensPerGroup, dim);
         cur.Dispose();
-        Tensor outTemb = SliceRows(temb, skipFrames, outputFrames, dim);
+        Tensor outTemb = MatrixGame2Transformer.SliceRows(temb, skipFrames, outputFrames, dim);
         temb.Dispose();
 
         Tensor projected = WanDitOps.FinalLayer(backend, outTokens, outTemb, _finalScaleShift!, _projOutW!, _projOutB,
@@ -225,33 +225,6 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         int copyRows = Math.Min(n, targetRows);
         Buffer.MemoryCopy((float*)rows.DataPointer, dst, (long)targetRows * dim * 4, (long)copyRows * dim * 4);
         return o;
-    }
-
-    private static Tensor SliceFrames(Tensor tokens, int skipFrames, int frames, int tokensPerFrame, int dim)
-    {
-        Tensor o = new Tensor(new TensorShape(frames * tokensPerFrame, dim), DType.F32);
-        long offset = (long)skipFrames * tokensPerFrame * dim;
-        long count = (long)frames * tokensPerFrame * dim;
-        Buffer.MemoryCopy((float*)tokens.DataPointer + offset, (float*)o.DataPointer, count * 4, count * 4);
-        return o;
-    }
-
-    private static Tensor SliceRows(Tensor rows, int skip, int count, int dim)
-    {
-        Tensor o = new Tensor(new TensorShape(count, dim), DType.F32);
-        Buffer.MemoryCopy((float*)rows.DataPointer + (long)skip * dim, (float*)o.DataPointer, (long)count * dim * 4, (long)count * dim * 4);
-        return o;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-
-    /// <summary>Fresh host F32 copy of a tensor (parity-tap snapshot; a DataPointer read syncs CUDA tensors to host).</summary>
-    private static Tensor CloneCpu(Tensor src)
-    {
-        Tensor dst = new Tensor(src.Shape, DType.F32);
-        new ReadOnlySpan<float>((float*)src.DataPointer, (int)src.ElementCount)
-            .CopyTo(new Span<float>((float*)dst.DataPointer, (int)dst.ElementCount));
-        return dst;
     }
 
     public void Dispose()

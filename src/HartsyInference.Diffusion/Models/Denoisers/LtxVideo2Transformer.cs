@@ -147,8 +147,8 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         _audioProjInW = w["audio_proj_in.weight"]; w.TryGetValue("audio_proj_in.bias", out _audioProjInB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
         _audioProjOutW = w["audio_proj_out.weight"]; w.TryGetValue("audio_proj_out.bias", out _audioProjOutB);
-        _scaleShift = DiTUtils.LoadF32(w, "scale_shift_table");
-        _audioScaleShift = DiTUtils.LoadF32(w, "audio_scale_shift_table");
+        _scaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
+        _audioScaleShift = TensorCasts.LoadF32(w, "audio_scale_shift_table");
 
         _timeEmbed.LoadWeights(w, "time_embed");
         _audioTimeEmbed.LoadWeights(w, "audio_time_embed");

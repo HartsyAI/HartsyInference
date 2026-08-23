@@ -253,7 +253,7 @@ public sealed unsafe class AuraFlowJointBlock
     /// <summary>Returns the named tensor or a fresh F32 [headDim] all-ones tensor when missing.
     /// Used for AuraFlow's non-affine QK-norm (no learnable scale in the checkpoint). The synthetic
     /// tensor lives for the lifetime of the block — small enough that we don't bother to cache.</summary>
-    private static Tensor GetOrFakeOnes(IReadOnlyDictionary<string, Tensor> weights, string key, int headDim)
+    internal static Tensor GetOrFakeOnes(IReadOnlyDictionary<string, Tensor> weights, string key, int headDim)
     {
         if (weights.TryGetValue(key, out Tensor? t) && t is not null)
             return t.DType != DType.F32 ? t.CastTo(DType.F32) : t;

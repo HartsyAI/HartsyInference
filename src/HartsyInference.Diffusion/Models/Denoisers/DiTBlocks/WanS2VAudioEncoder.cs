@@ -39,15 +39,15 @@ public sealed unsafe class WanS2VAudioEncoder
     /// (<c>casual_audio_encoder</c> — the original Wan repo's spelling, passed through the converter unchanged).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p = "casual_audio_encoder")
     {
-        _layerWeights = LoadF32(w, $"{p}.weights");
-        _conv1LocalW = LoadF32(w, $"{p}.encoder.conv1_local.conv.weight");
+        _layerWeights = TensorCasts.LoadF32(w, $"{p}.weights");
+        _conv1LocalW = TensorCasts.LoadF32(w, $"{p}.encoder.conv1_local.conv.weight");
         _conv1LocalB = LoadF32Opt(w, $"{p}.encoder.conv1_local.conv.bias");
-        _conv1GlobalW = LoadF32(w, $"{p}.encoder.conv1_global.conv.weight");
+        _conv1GlobalW = TensorCasts.LoadF32(w, $"{p}.encoder.conv1_global.conv.weight");
         _conv1GlobalB = LoadF32Opt(w, $"{p}.encoder.conv1_global.conv.bias");
-        _conv2W = LoadF32(w, $"{p}.encoder.conv2.conv.weight"); _conv2B = LoadF32Opt(w, $"{p}.encoder.conv2.conv.bias");
-        _conv3W = LoadF32(w, $"{p}.encoder.conv3.conv.weight"); _conv3B = LoadF32Opt(w, $"{p}.encoder.conv3.conv.bias");
+        _conv2W = TensorCasts.LoadF32(w, $"{p}.encoder.conv2.conv.weight"); _conv2B = LoadF32Opt(w, $"{p}.encoder.conv2.conv.bias");
+        _conv3W = TensorCasts.LoadF32(w, $"{p}.encoder.conv3.conv.weight"); _conv3B = LoadF32Opt(w, $"{p}.encoder.conv3.conv.bias");
         _finalLinearW = w[$"{p}.encoder.final_linear.weight"]; w.TryGetValue($"{p}.encoder.final_linear.bias", out _finalLinearB);
-        _paddingTokens = LoadF32(w, $"{p}.encoder.padding_tokens");
+        _paddingTokens = TensorCasts.LoadF32(w, $"{p}.encoder.padding_tokens");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -117,18 +117,18 @@ public sealed unsafe class WanS2VAudioEncoder
     /// (dim/2→dim, stride 2) → LN+SiLU. Input <c>[1, dim/4, T]</c> (consumed), output tokens <c>[T/4, dim]</c>.</summary>
     private Tensor StreamChain(IBackend backend, Tensor stream, int t, out int tOut)
     {
-        Tensor x1 = ChannelsToTokens(stream, _quarter, t); stream.Dispose();
-        LayerNormSilu(x1, t, _quarter);
-        Tensor c2 = CausalConv1d(backend, TokensToChannels(x1, _quarter, t), _quarter, _half, _conv2W!, _conv2B, 2, t, disposeInput: true);
+        Tensor x1 = WanEncoderOps.ChannelsToTokens(stream, _quarter, t); stream.Dispose();
+        WanEncoderOps.LayerNormSilu(x1, t, _quarter, _eps);
+        Tensor c2 = CausalConv1d(backend, WanEncoderOps.TokensToChannels(x1, _quarter, t), _quarter, _half, _conv2W!, _conv2B, 2, t, disposeInput: true);
         x1.Dispose();
         int t2 = (int)c2.Shape[2];
-        Tensor x2 = ChannelsToTokens(c2, _half, t2); c2.Dispose();
-        LayerNormSilu(x2, t2, _half);
-        Tensor c3 = CausalConv1d(backend, TokensToChannels(x2, _half, t2), _half, _dim, _conv3W!, _conv3B, 2, t2, disposeInput: true);
+        Tensor x2 = WanEncoderOps.ChannelsToTokens(c2, _half, t2); c2.Dispose();
+        WanEncoderOps.LayerNormSilu(x2, t2, _half, _eps);
+        Tensor c3 = CausalConv1d(backend, WanEncoderOps.TokensToChannels(x2, _half, t2), _half, _dim, _conv3W!, _conv3B, 2, t2, disposeInput: true);
         x2.Dispose();
         tOut = (int)c3.Shape[2];
-        Tensor x3 = ChannelsToTokens(c3, _dim, tOut); c3.Dispose();
-        LayerNormSilu(x3, tOut, _dim);
+        Tensor x3 = WanEncoderOps.ChannelsToTokens(c3, _dim, tOut); c3.Dispose();
+        WanEncoderOps.LayerNormSilu(x3, tOut, _dim, _eps);
         return x3;
     }
 
@@ -155,24 +155,6 @@ public sealed unsafe class WanS2VAudioEncoder
         return o;
     }
 
-    /// <summary>In-place no-affine LayerNorm over the channel dim + SiLU on <c>[T, C]</c> tokens.</summary>
-    private void LayerNormSilu(Tensor x, int t, int c)
-    {
-        float* xp = (float*)x.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            long off = (long)i * c;
-            double mean = 0; for (int d = 0; d < c; d++) mean += xp[off + d]; mean /= c;
-            double var = 0; for (int d = 0; d < c; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / c) + _eps);
-            for (int d = 0; d < c; d++)
-            {
-                float n = (float)((xp[off + d] - mean) * inv);
-                xp[off + d] = n / (1f + MathF.Exp(-n));
-            }
-        }
-    }
-
     private static Tensor SliceChannelBlock(Tensor x, int startCh, int channels, int t)
     {
         Tensor o = new Tensor(new TensorShape(1, channels, t), DType.F32);
@@ -181,24 +163,5 @@ public sealed unsafe class WanS2VAudioEncoder
         return o;
     }
 
-    private static Tensor ChannelsToTokens(Tensor x, int c, int t)
-    {
-        Tensor o = new Tensor(new TensorShape(t, c), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        for (int ci = 0; ci < c; ci++)
-            for (int ti = 0; ti < t; ti++) op[(long)ti * c + ci] = xp[(long)ci * t + ti];
-        return o;
-    }
-
-    private static Tensor TokensToChannels(Tensor x, int c, int t)
-    {
-        Tensor o = new Tensor(new TensorShape(1, c, t), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        for (int ti = 0; ti < t; ti++)
-            for (int ci = 0; ci < c; ci++) op[(long)ci * t + ti] = xp[(long)ti * c + ci];
-        return o;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
     private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

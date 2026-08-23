@@ -42,12 +42,12 @@ public sealed unsafe class EfficientVitBlock
             _projOutW = w[$"{p}.attn.proj_out.weight"];
         if (!w.TryGetValue($"{p}.attn.to_out.bias", out _projOutB))
             w.TryGetValue($"{p}.attn.proj_out.bias", out _projOutB);
-        _attnNormW = LoadF32(w, $"{p}.attn.norm_out.weight"); w.TryGetValue($"{p}.attn.norm_out.bias", out _attnNormB);
+        _attnNormW = TensorCasts.LoadF32(w, $"{p}.attn.norm_out.weight"); w.TryGetValue($"{p}.attn.norm_out.bias", out _attnNormB);
 
         _ffInvW = w[$"{p}.conv_out.conv_inverted.weight"]; w.TryGetValue($"{p}.conv_out.conv_inverted.bias", out _ffInvB);
         _ffDepthW = w[$"{p}.conv_out.conv_depth.weight"]; w.TryGetValue($"{p}.conv_out.conv_depth.bias", out _ffDepthB);
         _ffPointW = w[$"{p}.conv_out.conv_point.weight"];
-        _ffNormW = LoadF32(w, $"{p}.conv_out.norm.weight"); w.TryGetValue($"{p}.conv_out.norm.bias", out _ffNormB);
+        _ffNormW = TensorCasts.LoadF32(w, $"{p}.conv_out.norm.weight"); w.TryGetValue($"{p}.conv_out.norm.bias", out _ffNormB);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -332,6 +332,4 @@ public sealed unsafe class EfficientVitBlock
         float* vp = (float*)value.DataPointer;
         for (long i = 0; i < n; i++) tp[i] += vp[i];
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }
