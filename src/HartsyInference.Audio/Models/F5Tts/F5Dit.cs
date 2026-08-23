@@ -330,9 +330,6 @@ internal sealed unsafe class F5TimestepEmbedding
     private Tensor? _mlp0W, _mlp0B;  // [1024, 256]
     private Tensor? _mlp2W, _mlp2B;  // [1024, 1024]
 
-    /// <summary>Cached most-recent time embedding so the final AdaLN head can reuse it without recomputing the MLP (sub-optimal, but keeps the F5Dit forward simple).</summary>
-    public Tensor? LastTimeEmb { get; private set; }
-
     public F5TimestepEmbedding(F5TtsConfig cfg) { _cfg = cfg; }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
@@ -383,12 +380,6 @@ internal sealed unsafe class F5TimestepEmbedding
         // 4. Linear(1024 → 1024)
         Tensor h2 = WhisperOps.ProjectLinear(backend, h1, _mlp2W!, _mlp2B, 1, 1, _cfg.Dim, _cfg.Dim);
         h1.Dispose();
-
-        // Cache for the final AdaLN head.
-        LastTimeEmb?.Dispose();
-        LastTimeEmb = new Tensor(h2.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)h2.DataPointer, (void*)LastTimeEmb.DataPointer,
-            h2.ElementCount * 4, h2.ElementCount * 4);
         return h2;
     }
 

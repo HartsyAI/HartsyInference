@@ -10,13 +10,10 @@ internal sealed class EspeakTranslator
 
     // Language options exercised by the rule matcher; defaults match English (base Latin).
     private int _dictCondition;
-    private bool _toneNumbers;
-    private int _loptSuffix;
 
     // Per-word mutable state read by the rules.
     private int _wordVowelCount;
     private int _wordStressedCount;
-    private bool _expectVerb;
 
     public EspeakTranslator(EspeakDictFile dict, EspeakPhonemeTable phonemeTable, EspeakLetters letters, int dictCondition = 0)
     {
@@ -27,9 +24,6 @@ internal sealed class EspeakTranslator
 
         // Variant rules (e.g. en-us) enable extra dictionary conditions; default English (en-gb) sets none.
         _dictCondition = dictCondition;
-        _toneNumbers = false;
-        _loptSuffix = 0;
-        _expectVerb = false;
     }
 
     /// <summary>Convenience for tests/diagnostics: lowercases <paramref name="word"/>, frames it with spaces, applies the letter-to-sound rules, and returns the decoded phoneme mnemonics (no stress placement or dictionary lookup). The production phonemizer drives <see cref="TranslateRules"/> directly with its own buffer.</summary>
@@ -473,15 +467,11 @@ internal sealed class EspeakTranslator
                 postPtr += letterXbytes;
                 break;
             case EspeakRuleCodes.RuleDigit:
+                // espeak's tone_numbers option (a digit matching as a tone mark) is not ported.
                 if (IsDigit(letterW))
                 {
                     addPoints = 20 - distanceRight;
                     postPtr += letterXbytes;
-                }
-                else if (_toneNumbers)
-                {
-                    addPoints = 20 - distanceRight;
-                    postPtr--;
                 }
                 else return 1;
                 break;
@@ -546,9 +536,8 @@ internal sealed class EspeakTranslator
                 break;
             case EspeakRuleCodes.RuleEnding:
                 {
+                    // espeak additionally rejects a vowel-less stem here under lopt[LOPT_SUFFIX], which is not ported.
                     int endType = (_data[rule] << 16) + ((_data[rule + 1] & 0x7f) << 8) + (_data[rule + 2] & 0x7f);
-                    if (_wordVowelCount == 0 && (endType & EspeakRuleCodes.SufxP) == 0 && (_loptSuffix & 1) != 0)
-                        return 1;
                     match.EndType = endType;
                     rule += 3;
                     break;
@@ -656,10 +645,7 @@ internal sealed class EspeakTranslator
                     break;
                 }
             case EspeakRuleCodes.RuleIfVerb:
-                if (_expectVerb)
-                    addPoints = 1;
-                else return 1;
-                break;
+                return 1;   // espeak's expect_verb tracking is not ported, so this never matches
             case EspeakRuleCodes.RuleCapital:
                 if ((wordFlags & FlagFirstUpper) != 0)
                     addPoints = 1;

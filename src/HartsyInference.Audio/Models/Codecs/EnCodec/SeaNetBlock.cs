@@ -183,12 +183,4 @@ internal sealed unsafe class SeaNetBlock
             return WeightNormFusion.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
-
-    /// <summary>Replicates the upstream <c>get_extra_padding_for_conv1d</c> stride-alignment rule so encoder-side convs produce sequence lengths that round up cleanly.</summary>
-    private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)
-    {
-        float nFrames = ((float)tIn - kernel + padTotal) / stride + 1f;
-        int idealLength = ((int)MathF.Ceiling(nFrames) - 1) * stride + (kernel - padTotal);
-        return Math.Max(0, idealLength - tIn);
-    }
 }

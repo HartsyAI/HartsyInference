@@ -13,7 +13,7 @@ namespace HartsyInference.Audio.Models.QwenTts;
 /// depth step, indexed by the previously emitted codebook token) and 15 <c>lm_head</c> output projections,
 /// plus a <c>small_to_mtp_projection</c> that maps the talker hidden into the MTP hidden width.
 ///
-/// <para>Structure mirrors the Moshi depformer (<see cref="HartsyInference.Audio.Models.Kyutai.MoshiDepthTransformer"/>):
+/// <para>Structure mirrors the Moshi depformer:
 /// per depth position the input is either the projected talker hidden (step 0) or the previous codebook's
 /// embedding (steps &gt; 0); the shared <see cref="Qwen3Model"/> body runs over the growing depth sequence via an
 /// <see cref="IKvCache"/> from <see cref="Qwen3Model.CreateDecodeCache"/>; each step projects to its own per-codebook logits and samples.</para></summary>

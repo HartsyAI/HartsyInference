@@ -246,13 +246,6 @@ internal sealed class SeaNetDecoder
             return WeightNormFusionT.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
-
-    private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)
-    {
-        float nFrames = ((float)tIn - kernel + padTotal) / stride + 1f;
-        int idealLength = ((int)MathF.Ceiling(nFrames) - 1) * stride + (kernel - padTotal);
-        return Math.Max(0, idealLength - tIn);
-    }
 }
 
 /// <summary>Shared stride-1 conv helper for the EnCodec SEANet decoder + residual block, reproducing <c>EncodecConv1d.forward</c>: split the total padding into (left, right) per the causal flag, pad the channels-first input with zeros (<c>"constant"</c>) or edge reflection (<c>"reflect"</c>, the published-checkpoint default, using PyTorch semantics that exclude the edge sample), then run the backend conv with no further padding.</summary>
@@ -267,7 +260,7 @@ internal static unsafe class EnCodecConvPad
 
     /// <summary>Stride-1, dilation-aware conv with EnCodec padding. <paramref name="x"/> is <c>[B, C_in, T]</c>; output is <c>[B, C_out, T]</c> (length preserved). Caller owns the result.</summary>
     public static Tensor PaddedConv(IBackend backend, Tensor x, Tensor weight, Tensor? bias,
-        int batch, int cIn, int t, int cOut, int kernel, int dilation, bool causal, string padMode, float eluUnused = 0)
+        int batch, int cIn, int t, int cOut, int kernel, int dilation, bool causal, string padMode)
     {
         int padTotal = (kernel - 1) * dilation;
         (int padLeft, int padRight) = Split(padTotal, causal);

@@ -5,9 +5,9 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Kyutai;
 
-/// <summary>Moshi/Kyutai depth transformer ("depformer") with the REAL checkpoint layout (the older
-/// <see cref="MoshiDepthTransformer"/> assumed a Qwen2-style per-(set,layer) layout that the checkpoint does not
-/// use). Given one temporal-frame context <c>[1,1,2048]</c> it autoregressively predicts the 32 Mimi codebooks.
+/// <summary>Moshi/Kyutai depth transformer ("depformer") with the REAL checkpoint layout (it replaced an earlier
+/// implementation that assumed a Qwen2-style per-(set,layer) weight layout the checkpoint does not use). Given one
+/// temporal-frame context <c>[1,1,2048]</c> it autoregressively predicts the 32 Mimi codebooks.
 ///
 /// <para>Per codebook <c>cb</c> (weight-set <c>s = schedule[cb]</c>): project the temporal context through the
 /// per-set <c>depformer_in[s]</c> (2048→1024); add the previous token's low-rank embedding (the text demux

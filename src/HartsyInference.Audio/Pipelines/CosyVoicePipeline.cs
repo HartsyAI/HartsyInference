@@ -205,7 +205,7 @@ public sealed class CosyVoicePipeline : IDisposable
     /// <para>Zero-shot mode ONLY (<paramref name="referenceAudio"/> required) — unlike <see cref="Synthesize"/>,
     /// which also accepts a precomputed <paramref name="speakerEmbed"/> with no reference clip.
     /// <see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>'s <c>cond</c>-pinning design (the mechanism that
-    /// avoids <see cref="CosyVoiceFlow.InferenceChunk"/>'s exposure-bias drift — see that method's doc
+    /// avoids the exposure-bias drift a self-conditioned chunked design suffers — see that method's doc
     /// comment) needs a REAL reference mel to pin every windowed call to; this matches how CosyVoice2 is
     /// actually registered in the engine catalog (<c>CosyVoiceModel.cs</c> already requires a reference clip
     /// for the non-streaming path too, so this isn't a new restriction in practice).</para>

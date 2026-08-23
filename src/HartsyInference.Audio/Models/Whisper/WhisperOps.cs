@@ -20,29 +20,6 @@ internal static unsafe class WhisperOps
         return output;
     }
 
-    /// <summary>Transposes a 2-D float matrix [rows, cols] → [cols, rows].</summary>
-    public static void TransposeMatrix(Tensor src, Tensor dst, int rows, int cols)
-    {
-        float* srcPtr = (float*)src.DataPointer;
-        float* dstPtr = (float*)dst.DataPointer;
-        for (int r = 0; r < rows; r++)
-            for (int c = 0; c < cols; c++)
-                dstPtr[c * rows + r] = srcPtr[r * cols + c];
-    }
-
-    /// <summary>Adds bias [outDim] to output [batch, seqLen, outDim] in place.</summary>
-    public static void AddBiasBroadcast(Tensor output, Tensor bias, int batch, int seqLen, int outDim)
-    {
-        float* outPtr = (float*)output.DataPointer;
-        float* biasPtr = (float*)bias.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * outDim;
-                for (int d = 0; d < outDim; d++) outPtr[offset + d] += biasPtr[d];
-            }
-    }
-
     /// <summary>Reshapes [B, S, H*D] → [B, H, S, D] via element copy — the 4-D layout <see cref="IBackend.ScaledDotProductAttention"/> expects.</summary>
     public static void ReshapeToMultiHead4D(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {
@@ -83,15 +60,5 @@ internal static unsafe class WhisperOps
             for (int j = 0; j < seqLen; j++)
                 p[i * seqLen + j] = j <= i ? 0f : float.NegativeInfinity;
         return mask;
-    }
-
-    /// <summary>Expands a 2-D mask [S, S] to 4-D [1, 1, S, S] by memcpy, so SDPA can broadcast it across batch and head dims.</summary>
-    public static Tensor Expand2DMaskTo4D(Tensor mask2d, int seqLen)
-    {
-        TensorShape shape = new(1, 1, seqLen, seqLen);
-        Tensor mask4d = new(shape, DType.F32);
-        long bytes = seqLen * (long)seqLen * sizeof(float);
-        Buffer.MemoryCopy((void*)mask2d.DataPointer, (void*)mask4d.DataPointer, bytes, bytes);
-        return mask4d;
     }
 }

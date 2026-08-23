@@ -14,9 +14,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// <c>context_size</c> samples back into the cache.
 ///
 /// <para>Non-streaming mode routes through <see cref="IBackend.Conv1d"/> with the standard
-/// left-pad budget, matching the published Python <c>SConv1d._forward_non_streaming</c> (the math mirrors
-/// <see cref="VibeVoiceOps.CausalConv1d"/>, a dead host-side implementation of the same formula — not called
-/// here).</para></remarks>
+/// left-pad budget, matching the published Python <c>SConv1d._forward_non_streaming</c>.</para></remarks>
 internal sealed unsafe class SConv1d
 {
     public string LayerId { get; }

@@ -38,7 +38,7 @@ public sealed unsafe class ConditionalCfm
     /// outside the prompt region). Pass <c>cfgRate ≤ 0</c> to disable CFG.
     /// <paramref name="x0Override"/>, when set, replaces the fresh <c>seed</c>-derived draw — the caller owns
     /// it and it is copied, never mutated (this Solve call's Euler loop always mutates its OWN copy in
-    /// place). Exists for chunked streaming (<see cref="CosyVoiceFlow.InferenceChunk"/>): re-seeding fresh
+    /// place). Exists for chunked streaming (<see cref="CosyVoiceFlow.InferenceGrowingWindowed"/>): re-seeding fresh
     /// noise from the same integer seed on every chunk call would give each chunk's target frames a
     /// DIFFERENT random draw than the one the corresponding frames get in a monolithic call (the RNG stream
     /// position depends on how many frames precede it in THIS call, which varies chunk to chunk) — the fix is

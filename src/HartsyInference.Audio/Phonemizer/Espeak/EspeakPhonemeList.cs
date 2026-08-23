@@ -34,7 +34,6 @@ internal sealed class EspeakPhonemeList
         {
             int pendingStress = EspeakProgram.StressUnstressed;
             bool wordStart = true;
-            int wordStartIndex = list.Count;
             int wordMax = 0;
             List<int> wordVowelEntries = [];
 
@@ -61,7 +60,6 @@ internal sealed class EspeakPhonemeList
                 list.Add(e);
             }
             foreach (int vi in wordVowelEntries) list[vi].WordStress = wordMax;
-            if (wordStartIndex < list.Count) _ = wordStartIndex; // word emitted
         }
 
         list.Add(PauseEntry());

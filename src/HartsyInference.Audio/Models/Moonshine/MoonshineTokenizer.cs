@@ -119,19 +119,6 @@ public sealed class MoonshineTokenizer : IDisposable
         return sb.ToString();
     }
 
-    /// <summary>Returns the text for a single token ID, for streaming code that emits per-token output; byte-fallback singletons return the bytes as a raw Latin-1 string — the caller must buffer until a complete UTF-8 character lands.</summary>
-    public string DecodeOne(int id)
-    {
-        ThrowIfDisposed();
-        if ((uint)id >= (uint)_vocabSize) return string.Empty;
-        string? tok = _idToToken[id];
-        if (tok is null) return string.Empty;
-        if (_isByteFallback[id]) return Encoding.Latin1.GetString([_byteFallbackValue[id]]);
-        StringBuilder sb = new(tok.Length);
-        foreach (char c in tok) sb.Append(c == '▁' ? ' ' : c);
-        return sb.ToString();
-    }
-
     private static bool IsSpecial(int id, string tok)
     {
         // 0=<unk>, 1=<s>, 2=</s>.

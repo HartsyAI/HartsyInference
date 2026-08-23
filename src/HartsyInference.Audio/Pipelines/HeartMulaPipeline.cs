@@ -199,6 +199,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     /// <summary>Parity probe: builds the prompt-frame context from <paramref name="lyricsTokens"/> (text in the
     /// last column, audio columns empty/masked — matching the upstream frame-0 input) and returns the
     /// teacher-forced codebook logits for <paramref name="forcedCodes"/>. Not used in inference.</summary>
+    /// <remarks>Kept unwired as the C# half of <c>tests/python-reference/dump_heartmula_lm_reference.py</c>, whose dump is exactly this method's <c>c0_logits</c>/<c>dec_logits</c> pair.</remarks>
     public (float[] C0, float[][] Dec) DebugFrameLogits(IBackend backend, ReadOnlySpan<int> lyricsTokens, ReadOnlySpan<int> forcedCodes)
     {
         ThrowIfDisposed();

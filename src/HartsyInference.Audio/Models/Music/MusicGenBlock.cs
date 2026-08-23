@@ -6,9 +6,8 @@ namespace HartsyInference.Audio.Models.Music;
 
 /// <summary>One MusicGen decoder layer (HF <c>MusicgenDecoderLayer</c> naming): pre-norm causal self-attention → pre-norm cross-attention against the T5 states → pre-norm GELU MLP.</summary>
 /// <remarks>Bias-free attention projections (MusicGen default), bias on the MLP + LayerNorms. AR decoding is incremental:
-/// one cache-capturing prefill <see cref="Forward"/> then O(T) per-token <see cref="ForwardStep"/> calls
-/// against the <see cref="MusicGenKvCache"/> (cross K/V projected once via <see cref="PrimeCross"/>).
-/// Reuses the WhisperOps attention helpers and the backend SDPA op.</remarks>
+/// O(T) per-token <see cref="ForwardStep"/> calls against the <see cref="MusicGenKvCache"/> (cross K/V projected
+/// once via <see cref="PrimeCross"/>). Reuses the WhisperOps attention helpers and the backend flash-attention op.</remarks>
 public sealed unsafe class MusicGenBlock : IDisposable
 {
     private readonly MusicGenConfig _cfg;
@@ -49,92 +48,6 @@ public sealed unsafe class MusicGenBlock : IDisposable
         _fc1B = w.TryGetValue($"{prefix}.fc1.bias", out Tensor? fc1b) ? WhisperOps.EnsureF32(fc1b) : null;
         _fc2W = w[$"{prefix}.fc2.weight"];
         _fc2B = w.TryGetValue($"{prefix}.fc2.bias", out Tensor? fc2b) ? WhisperOps.EnsureF32(fc2b) : null;
-    }
-
-    /// <summary>Runs the layer over <paramref name="hidden"/> <c>[1, T, hidden]</c> against <paramref name="cross"/> <c>[1, T_text, hidden]</c>; pass <paramref name="cacheOut"/> to capture the self-attn K/V rows (prefill), enabling incremental continuation via <see cref="ForwardStep"/>.</summary>
-    /// <param name="causalMask">The <c>[1,1,T,T]</c> additive causal mask; null when T==1.</param>
-    public Tensor Forward(IBackend backend, Tensor hidden, Tensor cross, Tensor? causalMask,
-        MusicGenKvCache.MusicGenKvLayer? cacheOut = null, int cacheOffset = 0)
-    {
-        int t = (int)hidden.Shape[1];
-        int tt = (int)cross.Shape[1];
-        int d = _cfg.Hidden;
-        int nh = _cfg.NumHeads;
-        int hd = _cfg.HeadDim;
-        float scale = 1f / MathF.Sqrt(hd);
-        TensorShape inShape = new(1, t, d);
-        TensorShape mhT = new(1, nh, t, hd);
-
-        // --- Self-attention ---
-        Tensor normed = new(inShape, DType.F32);
-        backend.LayerNorm(normed, hidden, _selfLnW!, _selfLnB!, 1e-5f);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, null, 1, t, d, d);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, 1, t, d, d);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, 1, t, d, d);
-        normed.Dispose();
-        Tensor qh = new(mhT, DType.F32), kh = new(mhT, DType.F32), vh = new(mhT, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qh, q, 1, t, nh, hd);
-        WhisperOps.ReshapeToMultiHead4D(kh, k, 1, t, nh, hd);
-        WhisperOps.ReshapeToMultiHead4D(vh, v, 1, t, nh, hd);
-        q.Dispose(); k.Dispose(); v.Dispose();
-        // Prefill capture: append the prompt's head-major self-attn K/V into the device cache (in place, no
-        // host round-trip) so decoding can continue via ForwardStep.
-        if (cacheOut is not null)
-        {
-            backend.KvCacheAppend(cacheOut.K, kh, cacheOffset);
-            backend.KvCacheAppend(cacheOut.V, vh, cacheOffset);
-        }
-        Tensor attn = new(mhT, DType.F32);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, causalMask, scale);
-        qh.Dispose(); kh.Dispose(); vh.Dispose();
-        Tensor merged = new(inShape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(merged, attn, 1, t, nh, hd);
-        attn.Dispose();
-        Tensor selfProj = WhisperOps.ProjectLinear(backend, merged, _selfOW!, null, 1, t, d, d);
-        merged.Dispose();
-        Tensor res1 = new(inShape, DType.F32);
-        backend.Add(res1, hidden, selfProj);
-        selfProj.Dispose();
-
-        // --- Cross-attention to T5 ---
-        Tensor normed2 = new(inShape, DType.F32);
-        backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, 1e-5f);
-        Tensor cq = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, null, 1, t, d, d);
-        normed2.Dispose();
-        Tensor ck = WhisperOps.ProjectLinear(backend, cross, _crossKW!, null, 1, tt, d, d);
-        Tensor cv = WhisperOps.ProjectLinear(backend, cross, _crossVW!, null, 1, tt, d, d);
-        TensorShape mhTt = new(1, nh, tt, hd);
-        Tensor cqh = new(mhT, DType.F32), ckh = new(mhTt, DType.F32), cvh = new(mhTt, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(cqh, cq, 1, t, nh, hd);
-        WhisperOps.ReshapeToMultiHead4D(ckh, ck, 1, tt, nh, hd);
-        WhisperOps.ReshapeToMultiHead4D(cvh, cv, 1, tt, nh, hd);
-        cq.Dispose(); ck.Dispose(); cv.Dispose();
-        Tensor cattn = new(mhT, DType.F32);
-        backend.ScaledDotProductAttention(cattn, cqh, ckh, cvh, mask: null, scale);
-        cqh.Dispose(); ckh.Dispose(); cvh.Dispose();
-        Tensor cmerged = new(inShape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(cmerged, cattn, 1, t, nh, hd);
-        cattn.Dispose();
-        Tensor cproj = WhisperOps.ProjectLinear(backend, cmerged, _crossOW!, null, 1, t, d, d);
-        cmerged.Dispose();
-        Tensor res2 = new(inShape, DType.F32);
-        backend.Add(res2, res1, cproj);
-        res1.Dispose(); cproj.Dispose();
-
-        // --- GELU MLP ---
-        Tensor normed3 = new(inShape, DType.F32);
-        backend.LayerNorm(normed3, res2, _finalLnW!, _finalLnB!, 1e-5f);
-        Tensor fc1 = WhisperOps.ProjectLinear(backend, normed3, _fc1W!, _fc1B, 1, t, d, _cfg.FfnDim);
-        normed3.Dispose();
-        Tensor act = new(fc1.Shape, DType.F32);
-        backend.Gelu(act, fc1);
-        fc1.Dispose();
-        Tensor fc2 = WhisperOps.ProjectLinear(backend, act, _fc2W!, _fc2B, 1, t, _cfg.FfnDim, d);
-        act.Dispose();
-        Tensor outT = new(inShape, DType.F32);
-        backend.Add(outT, res2, fc2);
-        res2.Dispose(); fc2.Dispose();
-        return outT;
     }
 
     /// <summary>Projects the text states' cross-attn K/V into the cache once per generation — they depend only on the encoder output, so no per-step recompute.</summary>

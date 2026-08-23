@@ -19,7 +19,6 @@ public sealed unsafe class StyleHifiGanGenerator
 {
     private const int InitialChannel = 512;
     private static readonly int[] UpsampleRates = [10, 5, 3, 2];
-    private static readonly int[] UpsampleKernels = [20, 10, 6, 4];
     private static readonly int[] ResblockKernels = [3, 7, 11];
     private readonly int _sampleRate;
 

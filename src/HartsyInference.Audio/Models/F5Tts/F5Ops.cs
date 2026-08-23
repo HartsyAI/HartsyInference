@@ -57,26 +57,8 @@ internal static unsafe class F5Ops
         {
             int bOff = b * t * dim;
 
-            // Gx[d] = sqrt(sum_t x[b, t, d]^2). One pass over [t, d] reading column-by-column
-            // through cache-hostile strides — at our sizes (T ~1000, D ~512) this is still
-            // small enough to be fast in C# scalar.
-            for (int d = 0; d < dim; d++)
-            {
-                float sq = 0f;
-                for (int tt = 0; tt < t; tt++)
-                {
-                    float v = xp[bOff + tt * dim + d];
-                    sq += v * v;
-                }
-                // Stash Gx into the *first* row of x temporarily? No — we need it persistent
-                // through the next pass. Use beta-sized scratch via reuse: we'll write Nx into
-                // a stack-allocated scratch.
-                // Re-pass to compute the mean over D, then per-(t, d) the GRN output.
-                // We can do it in two passes: build Gx[d] array, then mean over d.
-                _ = sq;
-            }
-
-            // Two-pass implementation: first build Gx[D], then mean, then apply.
+            // Gx[d] = sqrt(sum_t x[b, t, d]^2). Reads column-by-column through cache-hostile strides —
+            // at our sizes (T ~1000, D ~512) this is still small enough to be fast in C# scalar.
             float[] gx = new float[dim];
             for (int d = 0; d < dim; d++)
             {
@@ -102,50 +84,6 @@ internal static unsafe class F5Ops
                     float xv = xp[row + d];
                     float nx = gx[d] * invMean;
                     xp[row + d] = gp[d] * (xv * nx) + bp[d] + xv;
-                }
-            }
-        }
-    }
-
-    /// <summary>Grouped 1D convolution for <see cref="F5ConvPosEmbed"/> over <c>[B, C, T]</c>, zero-padded on both sides; splits the channel dim into <paramref name="groups"/> groups, each with its own <c>(in_per_group, kernel)</c> weight slice.</summary>
-    public static void GroupedConv1D(
-        Tensor output, Tensor input, Tensor weight, Tensor bias,
-        int batch, int channels, int t, int kernel, int padding, int groups)
-    {
-        int inPerGroup = channels / groups;
-        int outPerGroup = channels / groups;  // square groups in F5 (in == out per group)
-
-        float* op = (float*)output.DataPointer;
-        float* ip = (float*)input.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        float* bp = (float*)bias.DataPointer;
-
-        // Weight layout: [outChannels=C, inPerGroup, kernel]. Row 'o' is the o-th output
-        // channel's weights for its corresponding input group (group = o / outPerGroup).
-        for (int b = 0; b < batch; b++)
-        {
-            for (int oc = 0; oc < channels; oc++)
-            {
-                int group = oc / outPerGroup;
-                int icStart = group * inPerGroup;
-                float biasV = bp[oc];
-                int wRow = oc * inPerGroup * kernel;
-
-                for (int j = 0; j < t; j++)
-                {
-                    float acc = biasV;
-                    for (int ic = 0; ic < inPerGroup; ic++)
-                    {
-                        int inCh = icStart + ic;
-                        int inBase = (b * channels + inCh) * t;
-                        int wBase = wRow + ic * kernel;
-                        for (int k = 0; k < kernel; k++)
-                        {
-                            int src = j + k - padding;
-                            if ((uint)src < (uint)t) acc += ip[inBase + src] * wp[wBase + k];
-                        }
-                    }
-                    op[(b * channels + oc) * t + j] = acc;
                 }
             }
         }

@@ -101,30 +101,6 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         return new F5TtsPipeline("SWivid/F5-TTS", resolved, dit, vocos, tok, ditLoader, vocosLoader);
     }
 
-    /// <summary>Runs one forward pass of the DiT on synthetic inputs. Used by the
-    /// integration test to verify the model assembles and produces sensible-magnitude
-    /// output without crashing — a real audio generation pipeline is layered on top.</summary>
-    public Tensor SmokeForward(IBackend backend, int t, int textLen)
-    {
-        Tensor noisyMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
-        Tensor condMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
-        unsafe
-        {
-            // Fill with deterministic small values so we don't depend on a RNG.
-            float* n = (float*)noisyMel.DataPointer;
-            float* c = (float*)condMel.DataPointer;
-            for (long i = 0; i < noisyMel.ElementCount; i++) n[i] = MathF.Sin(i * 0.01f) * 0.1f;
-            for (long i = 0; i < condMel.ElementCount; i++) c[i] = MathF.Cos(i * 0.01f) * 0.05f;
-        }
-        int[] textIds = new int[textLen];
-        for (int i = 0; i < textLen; i++) textIds[i] = (i % 50) + 1;
-
-        Tensor v = _dit.Forward(backend, noisyMel, condMel, textIds, timestep: 0.5f);
-        noisyMel.Dispose();
-        condMel.Dispose();
-        return v;
-    }
-
     /// <summary>Generates audio for <paramref name="targetText"/> in the voice of
     /// <paramref name="refMel"/>. <paramref name="refMel"/> is a precomputed log-mel of
     /// the reference WAV (shape <c>[1, 100, T_ref]</c>, natural-log, no normalization —

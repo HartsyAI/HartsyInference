@@ -53,16 +53,4 @@ public sealed record MusicGenConfig
     public static MusicGenConfig Large => new() { Hidden = 2_048, NumLayers = 48, NumHeads = 32 };
     /// <summary>AudioGen-medium: t5-large text conditioner (dim 1024, not t5-base 768) + 16 kHz EnCodec.</summary>
     public static MusicGenConfig AudioGen => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, TextDim = 1_024, CodecSampleRate = 16_000 };
-
-    /// <summary>Melody-conditioned medium variant (text + chroma conditioning).</summary>
-    public static MusicGenConfig Melody => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24 };
-
-    /// <summary>Stereo small: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
-    public static MusicGenConfig StereoSmall => new() { Hidden = 1_024, NumLayers = 24, NumHeads = 16, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
-
-    /// <summary>Stereo medium: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
-    public static MusicGenConfig StereoMedium => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
-
-    /// <summary>Stereo large: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
-    public static MusicGenConfig StereoLarge => new() { Hidden = 2_048, NumLayers = 48, NumHeads = 32, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
 }

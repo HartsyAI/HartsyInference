@@ -17,7 +17,6 @@ namespace HartsyInference.Audio.Models.StyleTts2;
 public sealed unsafe class StyleEncoder : IDisposable
 {
     private const float LeakySlope = 0.2f;
-    private static readonly float _invSqrt2 = 1f / MathF.Sqrt(2f);
     private readonly int _styleDim;
     private int _disposed;
 

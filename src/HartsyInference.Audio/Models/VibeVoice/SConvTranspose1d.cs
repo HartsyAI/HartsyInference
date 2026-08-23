@@ -12,8 +12,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// chunk has no cache and returns the full output.
 ///
 /// <para>Non-streaming forward applies the right-trim of <c>kernel - stride</c> samples directly via
-/// <see cref="IBackend.ConvTranspose1d"/> (matches <c>trim_right_ratio=1.0</c>; the same formula also exists,
-/// unused, as <see cref="VibeVoiceOps.CausalConvTranspose1d"/>).</para></remarks>
+/// <see cref="IBackend.ConvTranspose1d"/> (matches <c>trim_right_ratio=1.0</c>).</para></remarks>
 internal sealed unsafe class SConvTranspose1d
 {
     public string LayerId { get; }

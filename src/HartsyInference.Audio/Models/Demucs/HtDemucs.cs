@@ -83,6 +83,7 @@ public sealed unsafe class HtDemucs
     }
 
     /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
+    /// <remarks>Unwired on purpose: the keys emitted here match <c>tests/python-reference/demucs_reference/dump_demucs_stages.py</c>'s dump names one-for-one, so a stage-by-stage diff needs only a hook assignment.</remarks>
     public Action<string, Tensor>? DebugHook { get; set; }
 
     /// <summary>Separates a stereo waveform into 4 stereo stems. Input waveform <c>[1, C, L]</c> (channels-first,
