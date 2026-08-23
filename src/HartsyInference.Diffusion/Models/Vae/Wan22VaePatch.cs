@@ -10,7 +10,7 @@ public static unsafe class Wan22VaePatch
     /// <summary>Folds spatial <c>p×p</c> blocks into channels: <c>[B, C, T, H, W] → [B, C·p², T, H/p, W/p]</c>.</summary>
     public static Tensor Patchify(Tensor x, int patchSize)
     {
-        if (patchSize == 1) return CloneRef(x);
+        if (patchSize == 1) return VaeOps.Clone(x);
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         if (h % patchSize != 0 || w % patchSize != 0)
             throw new ArgumentException($"H/W ({h}x{w}) must be divisible by patch {patchSize}.");
@@ -38,7 +38,7 @@ public static unsafe class Wan22VaePatch
     /// <summary>GPU-resident overload: keeps unpatchify on-device (the host <see cref="Unpatchify(Tensor,int)"/> forces a D2H sync + H2D re-upload, once per decoded frame).</summary>
     public static Tensor Unpatchify(HartsyInference.Core.Backends.IBackend backend, Tensor x, int patchSize)
     {
-        if (patchSize == 1) return CloneRef(x);
+        if (patchSize == 1) return VaeOps.Clone(x);
         int b = (int)x.Shape[0], packedC = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         int p = patchSize;
         if (packedC % (p * p) != 0)
@@ -52,7 +52,7 @@ public static unsafe class Wan22VaePatch
     /// <summary>Inverse of <see cref="Patchify"/>: <c>[B, C·p², T, H, W] → [B, C, T, H·p, W·p]</c>.</summary>
     public static Tensor Unpatchify(Tensor x, int patchSize)
     {
-        if (patchSize == 1) return CloneRef(x);
+        if (patchSize == 1) return VaeOps.Clone(x);
         int b = (int)x.Shape[0], packedC = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         int p = patchSize;
         if (packedC % (p * p) != 0)
@@ -76,13 +76,5 @@ public static unsafe class Wan22VaePatch
                                     dst[dstOff] = src[srcOff];
                                 }
         return outT;
-    }
-
-    private static Tensor CloneRef(Tensor x)
-    {
-        Tensor t = new Tensor(x.Shape, x.DType);
-        long n = x.Shape.ElementCount;
-        Buffer.MemoryCopy(x.DataPointer, t.DataPointer, n * 4, n * 4);
-        return t;
     }
 }

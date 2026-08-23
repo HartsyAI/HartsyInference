@@ -82,7 +82,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
         _txt1W = w["txt_in.linear_1.weight"]; _txt1B = w["txt_in.linear_1.bias"];
         _txt2W = w["txt_in.linear_2.weight"]; _txt2B = w["txt_in.linear_2.bias"];
 
-        _finalTable = F32(w["final_layer.scale_shift_table"]);
+        _finalTable = TensorCasts.EnsureF32(w["final_layer.scale_shift_table"]);
         _finalNormW = Krea2Norm.LoadZeroCentered(w["final_layer.norm.weight"]);
         _finalLinW = w["final_layer.linear.weight"]; _finalLinB = w["final_layer.linear.bias"];
 
@@ -771,8 +771,6 @@ public sealed unsafe class Krea2Transformer : IDisposable
         backend.SliceRows(output, joint, start);
         return output;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

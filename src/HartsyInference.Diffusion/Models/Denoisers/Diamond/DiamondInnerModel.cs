@@ -27,14 +27,14 @@ public sealed unsafe class DiamondInnerModel
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _noiseEmbW = F32(w[$"{p}noise_emb.weight"]);
-        _actEmbW = F32(w[$"{p}act_emb.0.weight"]);
-        _condProj0W = F32(w[$"{p}cond_proj.0.weight"]); _condProj0B = F32(w[$"{p}cond_proj.0.bias"]);
-        _condProj2W = F32(w[$"{p}cond_proj.2.weight"]); _condProj2B = F32(w[$"{p}cond_proj.2.bias"]);
-        _convInW = F32(w[$"{p}conv_in.weight"]); _convInB = F32(w[$"{p}conv_in.bias"]);
+        _noiseEmbW = TensorCasts.EnsureF32(w[$"{p}noise_emb.weight"]);
+        _actEmbW = TensorCasts.EnsureF32(w[$"{p}act_emb.0.weight"]);
+        _condProj0W = TensorCasts.EnsureF32(w[$"{p}cond_proj.0.weight"]); _condProj0B = TensorCasts.EnsureF32(w[$"{p}cond_proj.0.bias"]);
+        _condProj2W = TensorCasts.EnsureF32(w[$"{p}cond_proj.2.weight"]); _condProj2B = TensorCasts.EnsureF32(w[$"{p}cond_proj.2.bias"]);
+        _convInW = TensorCasts.EnsureF32(w[$"{p}conv_in.weight"]); _convInB = TensorCasts.EnsureF32(w[$"{p}conv_in.bias"]);
         _unet.LoadWeights(w, $"{p}unet");
-        _normOutW = F32(w[$"{p}norm_out.norm.weight"]); _normOutB = F32(w[$"{p}norm_out.norm.bias"]);
-        _convOutW = F32(w[$"{p}conv_out.weight"]); _convOutB = F32(w[$"{p}conv_out.bias"]);
+        _normOutW = TensorCasts.EnsureF32(w[$"{p}norm_out.norm.weight"]); _normOutB = TensorCasts.EnsureF32(w[$"{p}norm_out.norm.bias"]);
+        _convOutW = TensorCasts.EnsureF32(w[$"{p}conv_out.weight"]); _convOutB = TensorCasts.EnsureF32(w[$"{p}conv_out.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -98,6 +98,4 @@ public sealed unsafe class DiamondInnerModel
             for (int e = 0; e < perAct; e++) dp[t * perAct + e] += aw[(long)a * perAct + e];
         }
     }
-
-    internal static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

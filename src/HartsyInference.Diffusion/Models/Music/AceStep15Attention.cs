@@ -23,8 +23,8 @@ internal sealed unsafe class AceStep15Attention
         _kW = w[$"{prefix}.k_proj.weight"];
         _vW = w[$"{prefix}.v_proj.weight"];
         _oW = w[$"{prefix}.o_proj.weight"];
-        _qNorm = EnsureF32(w[$"{prefix}.q_norm.weight"]);
-        _kNorm = EnsureF32(w[$"{prefix}.k_norm.weight"]);
+        _qNorm = TensorCasts.EnsureF32(w[$"{prefix}.q_norm.weight"]);
+        _kNorm = TensorCasts.EnsureF32(w[$"{prefix}.k_norm.weight"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -158,6 +158,4 @@ internal sealed unsafe class AceStep15Attention
                 p[(long)i * seqLen + j] = Math.Abs(i - j) <= window ? 0f : -1e30f;
         return mask;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

@@ -7,9 +7,6 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// <summary>Statics shared by the decoder-as-text-encoder implementations (<see cref="LlamaStyleEncoder"/>, <see cref="Gemma4TextEncoder"/>) so the two towers cannot drift apart on validation, RoPE table geometry, or tensor lifetime handling.</summary>
 internal static unsafe class TextEncoderTensorHelpers
 {
-    /// <summary>Norm scales and embedding tables must be materialized as F32 to satisfy the backend gather/RMSNorm contracts; projection weights keep their checkpoint dtype.</summary>
-    internal static Tensor CastToF32IfNeeded(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-
     /// <summary>Cleanup must never replace a successful encoder result or mask the exception that caused an encode to unwind, so backend release failures are logged and swallowed.</summary>
     internal static void DisposeBestEffort(Tensor? tensor, string description)
     {

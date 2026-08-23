@@ -94,10 +94,10 @@ public sealed unsafe class ZImageBlock
         // CudaBackend.RmsNorm reads weight as float* directly, so RMSNorm scales MUST be F32.
         // BF16-stored norms (e.g., from a BF16 or nvfp8-mixed checkpoint) would otherwise be
         // bit-reinterpreted as garbage F32. Cheap one-time cast (each tensor is just [hidden]).
-        _attnNorm1Weight = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2Weight = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
@@ -303,13 +303,6 @@ public sealed unsafe class ZImageBlock
         return (q, k, v);
     }
 
-    /// <summary>Loads a norm weight from the dict, casting to F32 if not already (RmsNorm requires F32 weight pointer).</summary>
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
     /// <summary>AdaLN: Linear(t_emb) → device 4-way split via <see cref="IBackend.ModulationSplit4"/>, which emits
     /// <c>(1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp))</c> — the diffusers Z-Image convention
     /// (tanh'd gates, transformer_z_image.py:233) with the <c>(1+scale)</c> pre-folded so the block applies the
@@ -328,7 +321,6 @@ public sealed unsafe class ZImageBlock
         projected.Dispose();
         return results;
     }
-
 
     /// <summary>Debug probe (HARTSY_ZIMAGE_F16TRACE): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>
     private static void Trace(string name, Tensor t)

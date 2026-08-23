@@ -73,7 +73,7 @@ public sealed unsafe class HunyuanVideoVaeEncoder
         _normOutWeight = w["encoder.conv_norm_out.weight"];
         _normOutBias   = w["encoder.conv_norm_out.bias"];
         _convOut = HunyuanVideoVaeKeys.Conv(w, "encoder.conv_out", padT: 1, padH: 1, padW: 1);
-        _quantConv = new CausalConv3d(w["quant_conv.weight"], Bias(w, "quant_conv.bias"));
+        _quantConv = new CausalConv3d(w["quant_conv.weight"], VaeOps.Bias(w, "quant_conv.bias"));
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -132,7 +132,7 @@ public sealed unsafe class HunyuanVideoVaeEncoder
         Tensor quant = _quantConv!.Forward(backend, moments);
         moments.Dispose();
 
-        Tensor mean = SliceChannels(quant, 0, _config.LatentChannels);
+        Tensor mean = VaeOps.SliceChannels(quant, 0, _config.LatentChannels);
         quant.Dispose();
         return mean;
     }
@@ -157,22 +157,4 @@ public sealed unsafe class HunyuanVideoVaeEncoder
             rgb.Dispose();
         }
     }
-
-    private static Tensor SliceChannels(Tensor x, int start, int count)
-    {
-        int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor o = new Tensor(new TensorShape([(long)b, count, t, h, w]), DType.F32);
-        long per = (long)t * h * w;
-        float* sp = (float*)x.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            Buffer.MemoryCopy(
-                sp + ((long)bi * c + start) * per,
-                op + (long)bi * count * per,
-                count * per * 4, count * per * 4);
-        return o;
-    }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
 }

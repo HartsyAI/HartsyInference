@@ -48,7 +48,7 @@ public sealed class HunyuanVideoVaeDecoder
         int[] channels = _config.BlockOutChannels;
         int last = channels[^1];
 
-        _postQuantConv = new CausalConv3d(w["post_quant_conv.weight"], Bias(w, "post_quant_conv.bias"));
+        _postQuantConv = new CausalConv3d(w["post_quant_conv.weight"], VaeOps.Bias(w, "post_quant_conv.bias"));
         _convIn = HunyuanVideoVaeKeys.Conv(w, "decoder.conv_in", padT: 1, padH: 1, padW: 1);
 
         _mid = new HunyuanVideoMidBlock3d(last, _config.MidBlockAttention, _config.NormGroups, _config.NormEps);
@@ -342,7 +342,4 @@ public sealed class HunyuanVideoVaeDecoder
         interp.Dispose();
         return output;
     }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
 }

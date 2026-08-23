@@ -71,21 +71,21 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _imgInW = F32(w[$"{p}img_in.weight"]); _imgInB = F32(w[$"{p}img_in.bias"]);
-        _timeW0 = F32(w[$"{p}time_in.0.weight"]); _timeB0 = F32(w[$"{p}time_in.0.bias"]);
-        _timeW1 = F32(w[$"{p}time_in.2.weight"]); _timeB1 = F32(w[$"{p}time_in.2.bias"]);
-        _vecW0 = F32(w[$"{p}vector_in.0.weight"]); _vecB0 = F32(w[$"{p}vector_in.0.bias"]);
-        _vecW1 = F32(w[$"{p}vector_in.2.weight"]); _vecB1 = F32(w[$"{p}vector_in.2.bias"]);
+        _imgInW = TensorCasts.EnsureF32(w[$"{p}img_in.weight"]); _imgInB = TensorCasts.EnsureF32(w[$"{p}img_in.bias"]);
+        _timeW0 = TensorCasts.EnsureF32(w[$"{p}time_in.0.weight"]); _timeB0 = TensorCasts.EnsureF32(w[$"{p}time_in.0.bias"]);
+        _timeW1 = TensorCasts.EnsureF32(w[$"{p}time_in.2.weight"]); _timeB1 = TensorCasts.EnsureF32(w[$"{p}time_in.2.bias"]);
+        _vecW0 = TensorCasts.EnsureF32(w[$"{p}vector_in.0.weight"]); _vecB0 = TensorCasts.EnsureF32(w[$"{p}vector_in.0.bias"]);
+        _vecW1 = TensorCasts.EnsureF32(w[$"{p}vector_in.2.weight"]); _vecB1 = TensorCasts.EnsureF32(w[$"{p}vector_in.2.bias"]);
         if (_cfg.GuidanceEmbed)
         {
-            _guidW0 = F32(w[$"{p}guidance_in.0.weight"]); _guidB0 = F32(w[$"{p}guidance_in.0.bias"]);
-            _guidW1 = F32(w[$"{p}guidance_in.2.weight"]); _guidB1 = F32(w[$"{p}guidance_in.2.bias"]);
+            _guidW0 = TensorCasts.EnsureF32(w[$"{p}guidance_in.0.weight"]); _guidB0 = TensorCasts.EnsureF32(w[$"{p}guidance_in.0.bias"]);
+            _guidW1 = TensorCasts.EnsureF32(w[$"{p}guidance_in.2.weight"]); _guidB1 = TensorCasts.EnsureF32(w[$"{p}guidance_in.2.bias"]);
         }
         _refiner.LoadWeights(w, $"{p}txt_in");
         for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(w, $"{p}double_blocks.{i}");
         for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(w, $"{p}single_blocks.{i}");
-        _finalModW = F32(w[$"{p}final_layer.mod.weight"]); _finalModB = F32(w[$"{p}final_layer.mod.bias"]);
-        _outW = F32(w[$"{p}final_layer.proj.weight"]); _outB = F32(w[$"{p}final_layer.proj.bias"]);
+        _finalModW = TensorCasts.EnsureF32(w[$"{p}final_layer.mod.weight"]); _finalModB = TensorCasts.EnsureF32(w[$"{p}final_layer.mod.bias"]);
+        _outW = TensorCasts.EnsureF32(w[$"{p}final_layer.proj.weight"]); _outB = TensorCasts.EnsureF32(w[$"{p}final_layer.proj.bias"]);
     }
 
     /// <summary>Always-resident weights: patchify/text-refiner/time/vector/guidance embedders + final layer. Touched every step regardless of the executing block, so the streaming controller doesn't manage them.</summary>
@@ -419,8 +419,6 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
             }
         }
     }
-
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     public void Dispose() { }
 }

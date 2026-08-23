@@ -87,7 +87,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
         _timeLinear2Weight = weights["t_embedder.1.linear_2.weight"];
 
         // RMSNorm of the raw sin/cos vector → embedded_timestep.
-        _timeEmbeddingNormWeight = LoadAsF32(weights, "t_embedding_norm.weight");
+        _timeEmbeddingNormWeight = TensorCasts.LoadF32(weights, "t_embedding_norm.weight");
 
         // Final-layer AdaLN-LoRA (2-chunk: shift, scale).
         _finalAdaL1 = weights["final_layer.adaln_modulation.1.weight"];
@@ -452,12 +452,6 @@ public sealed unsafe class AnimaTransformer : IDisposable
         {
             HartsyInference.Core.Logging.Logs.Error($"Failed to release Anima transformer {description}.", error);
         }
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     public void Dispose()

@@ -51,10 +51,10 @@ public sealed unsafe class ZImageContextRefinerBlock
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
 
         // RMSNorm scales must be F32 (CudaBackend.RmsNorm reads weight as float* directly).
-        _attnNorm1Weight = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2Weight = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
@@ -176,12 +176,6 @@ public sealed unsafe class ZImageContextRefinerBlock
         postFfnNorm.Dispose();
 
         return result;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)

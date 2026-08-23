@@ -68,7 +68,7 @@ public sealed unsafe class MatrixGame3ActionModule
             _mouseMlp2W = w[$"{prefix}.mouse_mlp.2.weight"]; w.TryGetValue($"{prefix}.mouse_mlp.2.bias", out _mouseMlp2B);
             // Both LayerNorm affine tensors must be F32: AffineBroadcastLastDim rejects a bf16 scale/shift (the bias was
             // loaded as-is → bf16 → NotSupported on the GPU action path; the CPU parity run cast everything to F32 first).
-            _mouseLnW = TensorCasts.LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); _mouseLnB = LoadF32Opt(w, $"{prefix}.mouse_mlp.3.bias");
+            _mouseLnW = TensorCasts.LoadF32(w, $"{prefix}.mouse_mlp.3.weight"); _mouseLnB = TensorCasts.LoadF32Opt(w, $"{prefix}.mouse_mlp.3.bias");
             _tQkvW = w[$"{prefix}.t_qkv.weight"]; w.TryGetValue($"{prefix}.t_qkv.bias", out _tQkvB);
             _projMouseW = w[$"{prefix}.proj_mouse.weight"]; w.TryGetValue($"{prefix}.proj_mouse.bias", out _projMouseB);
             _imgQNorm = TensorCasts.LoadF32(w, $"{prefix}.img_attn_q_norm.weight");
@@ -296,5 +296,4 @@ public sealed unsafe class MatrixGame3ActionModule
         backend.AffineBroadcastLastDim(x, x, weight, bias);
     }
 
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

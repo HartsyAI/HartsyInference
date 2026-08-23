@@ -82,11 +82,11 @@ public sealed unsafe class Wav2Vec2Encoder
     /// both = g·v/‖v‖).</summary>
     private Tensor LoadPosConv(IReadOnlyDictionary<string, Tensor> w)
     {
-        if (w.TryGetValue("encoder.pos_conv_embed.conv.weight", out Tensor? merged)) return LoadF32In(merged);
+        if (w.TryGetValue("encoder.pos_conv_embed.conv.weight", out Tensor? merged)) return TensorCasts.EnsureF32(merged);
         Tensor g = w.TryGetValue("encoder.pos_conv_embed.conv.weight_g", out Tensor? legacyG)
-            ? LoadF32In(legacyG) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
+            ? TensorCasts.EnsureF32(legacyG) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
         Tensor v = w.TryGetValue("encoder.pos_conv_embed.conv.weight_v", out Tensor? legacyV)
-            ? LoadF32In(legacyV) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
+            ? TensorCasts.EnsureF32(legacyV) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
         // weight = g * v / ||v|| over the (in,k) dims per output channel (HF weight_norm dim=2 → norm over dims 0,1).
         int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];
         Tensor o = new Tensor(v.Shape, DType.F32);
@@ -328,6 +328,4 @@ public sealed unsafe class Wav2Vec2Encoder
         for (int ti = 0; ti < t; ti++)
             Buffer.MemoryCopy(hp + (long)ti * dim, sp + ((long)ti * numStates + stateIdx) * dim, (long)dim * 4, (long)dim * 4);
     }
-
-    private static Tensor LoadF32In(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

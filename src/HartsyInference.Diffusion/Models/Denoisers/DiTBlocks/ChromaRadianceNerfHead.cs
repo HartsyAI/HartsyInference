@@ -78,8 +78,8 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
     /// folded embed conv and the constant L2-normalize scale vectors consumed by the device forward.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _embedWeight = AsF32(weights["nerf_image_embedder.embedder.0.weight"]);
-        _embedBias = AsF32(weights["nerf_image_embedder.embedder.0.bias"]);
+        _embedWeight = TensorCasts.EnsureF32(weights["nerf_image_embedder.embedder.0.weight"]);
+        _embedBias = TensorCasts.EnsureF32(weights["nerf_image_embedder.embedder.0.bias"]);
         BuildFoldedEmbedConv();
         BuildL2Scales();
 
@@ -88,14 +88,14 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
             _paramGenWeight[i] = weights[$"nerf_blocks.{i}.param_generator.weight"];
             weights.TryGetValue($"nerf_blocks.{i}.param_generator.bias", out _paramGenBias[i]);
             // backend.RmsNorm reads the scale as float* — must be F32.
-            _normScale[i] = AsF32(weights[$"nerf_blocks.{i}.norm.scale"]);
+            _normScale[i] = TensorCasts.EnsureF32(weights[$"nerf_blocks.{i}.norm.scale"]);
         }
 
         if (weights.TryGetValue("nerf_final_layer_conv.norm.scale", out Tensor? convNorm))
         {
             // Variant A: RMSNorm + Conv2d(nerfHidden→3, k3, pad 1). Conv sub-key name validation-gated —
             // pattern-match any 4D weight under the nerf_final_layer_conv prefix.
-            _finalNormScale = AsF32(convNorm);
+            _finalNormScale = TensorCasts.EnsureF32(convNorm);
             foreach (KeyValuePair<string, Tensor> kvp in weights)
             {
                 if (!kvp.Key.StartsWith("nerf_final_layer_conv.", StringComparison.Ordinal)) continue;
@@ -113,7 +113,7 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         else
         {
             // Variant B: per-pixel Linear [3, nerfHidden] — folded into a 1×1 conv so both variants share one path.
-            _finalNormScale = AsF32(weights["nerf_final_layer.norm.scale"]);
+            _finalNormScale = TensorCasts.EnsureF32(weights["nerf_final_layer.norm.scale"]);
             Tensor linear = weights["nerf_final_layer.linear.weight"];
             TensorShape convShape = new TensorShape(linear.Shape[0], linear.Shape[1], 1, 1);
             Tensor asConv = new Tensor(convShape, linear.DType);
@@ -467,8 +467,6 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         }
         return result;
     }
-
-    private static Tensor AsF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     /// <summary>Device-casts <paramref name="t"/> to the DiT activation dtype <paramref name="act"/> and DISPOSES
     /// the source (for the freshly-built normalized-weight chunks). No-op passthrough when already that dtype.</summary>

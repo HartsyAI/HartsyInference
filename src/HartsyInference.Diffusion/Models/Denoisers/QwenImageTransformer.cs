@@ -56,7 +56,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         _imgInWeight = weights["img_in.weight"];
         _imgInBias = weights["img_in.bias"];
 
-        _txtNormWeight = CastToF32IfNeeded(weights["txt_norm.weight"]);
+        _txtNormWeight = TensorCasts.EnsureF32(weights["txt_norm.weight"]);
 
         _txtInWeight = weights["txt_in.weight"];
         _txtInBias = weights["txt_in.bias"];
@@ -598,9 +598,6 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
     /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent under <c>$QWEN_IMAGE_DEBUG_DIR/final_latent.bin</c> when the env var is set. Used by the layer-by-layer diff harness to capture pipeline state.</summary>
     public static void DumpFinalLatent(Tensor latent) => QwenImageDebugDump.Dump("final_latent", latent);
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     /// <summary>Releases all tensor references.</summary>
     public void Dispose()

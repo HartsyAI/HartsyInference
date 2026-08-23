@@ -87,10 +87,10 @@ public sealed unsafe class LensTransformerBlock
             weights[$"{prefix}.txt_mod.1.weight"],
             weights.TryGetValue($"{prefix}.txt_mod.1.bias", out Tensor? txtModBias) ? txtModBias : null);
 
-        _imgNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.img_norm1.weight"]);
-        _imgNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.img_norm2.weight"]);
-        _txtNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.txt_norm1.weight"]);
-        _txtNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.txt_norm2.weight"]);
+        _imgNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.img_norm1.weight"]);
+        _imgNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.img_norm2.weight"]);
+        _txtNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.txt_norm1.weight"]);
+        _txtNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.txt_norm2.weight"]);
 
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
         _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
@@ -339,7 +339,4 @@ public sealed unsafe class LensTransformerBlock
 
         return (txtFinal, imgFinal);
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

@@ -99,7 +99,7 @@ public sealed unsafe class Nvfp4Linear : IDisposable
             throw new InvalidOperationException($"Linear '{prefix}.weight' must be rank-2; got {weight.Shape}.");
 
         Tensor? preQuantScale = weights.TryGetValue($"{prefix}.pre_quant_scale", out Tensor? pqs)
-            ? EnsureF32(pqs)
+            ? TensorCasts.EnsureF32(pqs)
             : null;
 
         if (weight.DType != DType.U8)
@@ -268,7 +268,6 @@ public sealed unsafe class Nvfp4Linear : IDisposable
         });
     }
 
-
     private static float[] BuildE4M3Decode()
     {
         using Tensor bytes = new Tensor(new TensorShape(256), DType.F8E4M3);
@@ -277,8 +276,6 @@ public sealed unsafe class Nvfp4Linear : IDisposable
         using Tensor decoded = bytes.CastTo(DType.F32);
         return decoded.AsReadOnlySpan<float>().ToArray();
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private static void ValidatePreQuantScale(Tensor? preQuantScale, string prefix, int inFeatures)
     {

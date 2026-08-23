@@ -104,16 +104,16 @@ public sealed unsafe class OmniGen2Block
         {
             _norm1ModulationWeight = weights[$"{prefix}.norm1.linear.weight"];
             _norm1ModulationBias = weights[$"{prefix}.norm1.linear.bias"];
-            _norm1Weight = CastToF32IfNeeded(weights[$"{prefix}.norm1.norm.weight"]);
+            _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm1.norm.weight"]);
         }
         else
         {
-            _norm1Weight = CastToF32IfNeeded(weights[$"{prefix}.norm1.weight"]);
+            _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm1.weight"]);
         }
 
-        _norm2Weight = CastToF32IfNeeded(weights[$"{prefix}.norm2.weight"]);
-        _ffnNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.ffn_norm1.weight"]);
-        _ffnNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.ffn_norm2.weight"]);
+        _norm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm2.weight"]);
+        _ffnNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.ffn_norm1.weight"]);
+        _ffnNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.ffn_norm2.weight"]);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -531,9 +531,6 @@ public sealed unsafe class OmniGen2Block
         gateTanh.Dispose();
         return output;
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }
 
 /// <summary>How an <see cref="OmniGen2Block"/> should rotate Q/K. Picked at the call site: text-stream blocks

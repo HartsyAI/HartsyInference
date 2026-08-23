@@ -270,7 +270,7 @@ public sealed unsafe class OasisVitVae
         public Tensor Forward(IBackend backend, Tensor x, Tensor cos, Tensor sin, int s)
         {
             int dim = _vae._dim, heads = _vae._heads, hd = _vae._headDim;
-            Tensor normed = Clone(x);
+            Tensor normed = VaeOps.Clone(x);
             _vae.LayerNormRows(normed, _norm1W!, _norm1B, s, dim);
             Tensor qkv = new Tensor(new TensorShape(s, 3 * dim), DType.F32);
             backend.Linear(qkv, normed, _qkvW!, _qkvB);
@@ -298,7 +298,7 @@ public sealed unsafe class OasisVitVae
             Tensor h1 = AddRows(x, proj, s, dim);
             proj.Dispose();
 
-            Tensor n2 = Clone(h1);
+            Tensor n2 = VaeOps.Clone(h1);
             _vae.LayerNormRows(n2, _norm2W!, _norm2B, s, dim);
             Tensor mid = new Tensor(new TensorShape(s, _vae._mlpHidden), DType.F32);
             backend.Linear(mid, n2, _fc1W!, _fc1B);
@@ -355,14 +355,6 @@ public sealed unsafe class OasisVitVae
             float* bp = (float*)b.DataPointer;
             float* op = (float*)o.DataPointer;
             for (long i = 0; i < n; i++) op[i] = ap[i] + bp[i];
-            return o;
-        }
-
-        private static Tensor Clone(Tensor x)
-        {
-            Tensor o = new Tensor(x.Shape, DType.F32);
-            long bytes = x.Shape.ElementCount * 4;
-            Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
             return o;
         }
     }

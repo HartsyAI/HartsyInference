@@ -41,8 +41,8 @@ public sealed unsafe class AceStep15AudioDetokenizer : IDisposable
         _fsqOutB = w["tokenizer.quantizer.project_out.bias"];
         _embedW = w["detokenizer.embed_tokens.weight"];
         _embedB = w["detokenizer.embed_tokens.bias"];
-        _special = EnsureF32(w["detokenizer.special_tokens"]);
-        _norm = EnsureF32(w["detokenizer.norm.weight"]);
+        _special = TensorCasts.EnsureF32(w["detokenizer.special_tokens"]);
+        _norm = TensorCasts.EnsureF32(w["detokenizer.norm.weight"]);
         _projW = w["detokenizer.proj_out.weight"];
         _projB = w["detokenizer.proj_out.bias"];
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"detokenizer.layers.{i}");
@@ -145,6 +145,4 @@ public sealed unsafe class AceStep15AudioDetokenizer : IDisposable
     {
         if (_disposed != 0) throw new ObjectDisposedException(nameof(AceStep15AudioDetokenizer));
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

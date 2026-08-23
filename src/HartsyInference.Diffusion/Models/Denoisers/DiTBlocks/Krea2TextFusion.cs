@@ -35,7 +35,7 @@ public sealed unsafe class Krea2TextFusion
     {
         for (int i = 0; i < _layerwise.Length; i++) _layerwise[i].LoadWeights(w, $"{p}.layerwise_blocks.{i}");
         for (int i = 0; i < _refiner.Length; i++) _refiner[i].LoadWeights(w, $"{p}.refiner_blocks.{i}");
-        _projector = F32(w[$"{p}.projector.weight"]); // [1, numTextLayers]
+        _projector = TensorCasts.EnsureF32(w[$"{p}.projector.weight"]); // [1, numTextLayers]
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -82,8 +82,6 @@ public sealed unsafe class Krea2TextFusion
         }
         return fused;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }
 
 /// <summary>Pre-norm transformer block used by <see cref="Krea2TextFusion"/> (no RoPE, no timestep modulation): <c>h = h + attn(norm1(h)); h = h + ff(norm2(h))</c>, with the Krea 2 sigmoid output gate.</summary>

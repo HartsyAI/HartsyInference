@@ -54,7 +54,7 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         Tensor proj = w["patch_embed.proj.weight"]; // [hidden, in_ch, temporal, patch, patch]
         _patchEmbedWeight = ReshapeConvToLinear(proj, _config.HiddenSize, _config.PatchEmbedInDim);
         _patchEmbedBias = w["patch_embed.proj.bias"];
-        _posEmbedWeight = F32(w["pos_embed.weight"]);
+        _posEmbedWeight = TensorCasts.EnsureF32(w["pos_embed.weight"]);
 
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"blocks.{i}");
         _merger.LoadWeights(w, "merger");
@@ -207,14 +207,12 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
 
     private static Tensor ReshapeConvToLinear(Tensor conv, int outDim, int inDim)
     {
-        Tensor src = F32(conv);
+        Tensor src = TensorCasts.EnsureF32(conv);
         Tensor outp = new Tensor(new TensorShape(outDim, inDim), DType.F32);
         long bytes = (long)outDim * inDim * sizeof(float);
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)outp.DataPointer, bytes, bytes);
         return outp;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -240,8 +238,8 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _norm1W = F32(w[$"{p}.norm1.weight"]); _norm1B = F32(w[$"{p}.norm1.bias"]);
-            _norm2W = F32(w[$"{p}.norm2.weight"]); _norm2B = F32(w[$"{p}.norm2.bias"]);
+            _norm1W = TensorCasts.EnsureF32(w[$"{p}.norm1.weight"]); _norm1B = TensorCasts.EnsureF32(w[$"{p}.norm1.bias"]);
+            _norm2W = TensorCasts.EnsureF32(w[$"{p}.norm2.weight"]); _norm2B = TensorCasts.EnsureF32(w[$"{p}.norm2.bias"]);
             _qkvW = w[$"{p}.attn.qkv.weight"]; _qkvB = w[$"{p}.attn.qkv.bias"];
             _projW = w[$"{p}.attn.proj.weight"]; _projB = w[$"{p}.attn.proj.bias"];
             _fc1W = w[$"{p}.mlp.linear_fc1.weight"]; _fc1B = w[$"{p}.mlp.linear_fc1.bias"];
@@ -342,8 +340,6 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
                     }
                 }
         }
-
-        private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     // ── patch merger (final + deepstack post-shuffle variants) ──
@@ -363,7 +359,7 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _normW = F32(w[$"{p}.norm.weight"]); _normB = F32(w[$"{p}.norm.bias"]);
+            _normW = TensorCasts.EnsureF32(w[$"{p}.norm.weight"]); _normB = TensorCasts.EnsureF32(w[$"{p}.norm.bias"]);
             _fc1W = w[$"{p}.linear_fc1.weight"]; _fc1B = w[$"{p}.linear_fc1.bias"];
             _fc2W = w[$"{p}.linear_fc2.weight"]; _fc2B = w[$"{p}.linear_fc2.bias"];
         }
@@ -425,7 +421,5 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
             Buffer.MemoryCopy((void*)hidden3d.DataPointer, (void*)outp.DataPointer, (long)numMerged * bytes, (long)numMerged * bytes);
             return outp;
         }
-
-        private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

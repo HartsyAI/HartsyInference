@@ -60,8 +60,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
         weights = TextEncoderQuantNormalizer.Normalize(weights);
 
         string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
-        _embedWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}embed_tokens.weight"]);
-        _finalNormWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}norm.weight"]);
+        _embedWeight = TensorCasts.EnsureF32(weights[$"{prefix}embed_tokens.weight"]);
+        _finalNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}norm.weight"]);
 
         for (int i = 0; i < _config.NumLayers; i++)
             _blocks[i].LoadWeights(weights, $"{prefix}layers.{i}");
@@ -377,10 +377,10 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
-            _preFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
-            _postFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
+            _inputNorm = TensorCasts.EnsureF32(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _preFfnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
+            _postFfnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
 
             _qProj = weights[$"{prefix}.self_attn.q_proj.weight"];
             _kProj = weights[$"{prefix}.self_attn.k_proj.weight"];
@@ -390,8 +390,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
                 throw new InvalidOperationException(
                     $"Layer {_index} is a k_eq_v global layer but the checkpoint carries {prefix}.self_attn.v_proj.weight.");
 
-            _qHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
-            _kHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
+            _qHeadNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_norm.weight"]);
+            _kHeadNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_norm.weight"]);
 
             _gateProj = weights[$"{prefix}.mlp.gate_proj.weight"];
             _upProj = weights[$"{prefix}.mlp.up_proj.weight"];

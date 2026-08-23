@@ -36,19 +36,17 @@ public sealed unsafe class MageVaeEncoder : IDisposable
     /// <summary>Loads encoder weights (keys with the <c>student.dconv_encoder.</c> prefix already stripped).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _patchW = F32(w["patch_cond_embed.weight"]); _patchB = F32(w["patch_cond_embed.bias"]);
+        _patchW = TensorCasts.EnsureF32(w["patch_cond_embed.weight"]); _patchB = TensorCasts.EnsureF32(w["patch_cond_embed.bias"]);
         for (int i = 0; i < NumHead; i++) _head[i].LoadWeights(w, $"head_blocks.{i}");
-        _projDownW = F32(w["proj_down.weight"]); _projDownB = F32(w["proj_down.bias"]);
-        _zProjW = F32(w["z_proj.weight"]); _zProjB = F32(w["z_proj.bias"]);
-        _fuseW = F32(w["fuse_proj.weight"]); _fuseB = F32(w["fuse_proj.bias"]);
-        _tEmbW1 = F32(w["t_embedder.mlp.0.weight"]); _tEmbB1 = F32(w["t_embedder.mlp.0.bias"]);
-        _tEmbW2 = F32(w["t_embedder.mlp.2.weight"]); _tEmbB2 = F32(w["t_embedder.mlp.2.bias"]);
+        _projDownW = TensorCasts.EnsureF32(w["proj_down.weight"]); _projDownB = TensorCasts.EnsureF32(w["proj_down.bias"]);
+        _zProjW = TensorCasts.EnsureF32(w["z_proj.weight"]); _zProjB = TensorCasts.EnsureF32(w["z_proj.bias"]);
+        _fuseW = TensorCasts.EnsureF32(w["fuse_proj.weight"]); _fuseB = TensorCasts.EnsureF32(w["fuse_proj.bias"]);
+        _tEmbW1 = TensorCasts.EnsureF32(w["t_embedder.mlp.0.weight"]); _tEmbB1 = TensorCasts.EnsureF32(w["t_embedder.mlp.0.bias"]);
+        _tEmbW2 = TensorCasts.EnsureF32(w["t_embedder.mlp.2.weight"]); _tEmbB2 = TensorCasts.EnsureF32(w["t_embedder.mlp.2.bias"]);
         for (int i = 0; i < NumBlocks; i++) _blocks[i].LoadWeights(w, $"blocks.{i}");
-        _normOutW = F32(w["norm_out.weight"]); _normOutB = F32(w["norm_out.bias"]);
-        _projOutW = F32(w["proj_out.weight"]); _projOutB = F32(w["proj_out.bias"]);
+        _normOutW = TensorCasts.EnsureF32(w["norm_out.weight"]); _normOutB = TensorCasts.EnsureF32(w["norm_out.bias"]);
+        _projOutW = TensorCasts.EnsureF32(w["proj_out.weight"]); _projOutB = TensorCasts.EnsureF32(w["proj_out.bias"]);
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -90,7 +88,7 @@ public sealed unsafe class MageVaeEncoder : IDisposable
         fuseIn.Dispose();
 
         // 21-block adaLN trunk at t=0.
-        Tensor c = TimestepEmbedZero(backend, b);
+        Tensor c = MageVaeOps.TimestepEmbedZero(backend, b, _tEmbW1!, _tEmbB1, _tEmbW2!, _tEmbB2, Hidden);
         for (int i = 0; i < NumBlocks; i++)
         {
             Tensor next = _blocks[i].Forward(backend, s, c);
@@ -99,7 +97,7 @@ public sealed unsafe class MageVaeEncoder : IDisposable
         c.Dispose();
 
         Tensor normed = new(s.Shape, DType.F32);
-        ChannelLayerNormAffine(s, normed, _normOutW!, _normOutB!, b, Hidden, h * w);
+        MageVaeOps.ChannelLayerNormAffine(s, normed, _normOutW!, _normOutB!, b, Hidden, h * w);
         s.Dispose();
         Tensor moments = new(new TensorShape(b, 2 * Latent, h, w), DType.F32);
         backend.Conv2D(moments, normed, _projOutW!, _projOutB, 1, 1, 0, 0);
@@ -114,20 +112,6 @@ public sealed unsafe class MageVaeEncoder : IDisposable
         return mean;
     }
 
-    private Tensor TimestepEmbedZero(IBackend backend, int b)
-    {
-        Tensor sinEmb = new(new TensorShape(b, 256), DType.F32);
-        float* p = (float*)sinEmb.DataPointer;
-        for (int i = 0; i < b; i++) for (int j = 0; j < 256; j++) p[i * 256 + j] = j >= 128 ? 1f : 0f;
-        Tensor t1 = new(new TensorShape(b, Hidden), DType.F32);
-        backend.Linear(t1, sinEmb, _tEmbW1!, _tEmbB1); sinEmb.Dispose();
-        Tensor act = new(t1.Shape, DType.F32);
-        backend.Silu(act, t1); t1.Dispose();
-        Tensor c = new(new TensorShape(b, Hidden), DType.F32);
-        backend.Linear(c, act, _tEmbW2!, _tEmbB2); act.Dispose();
-        return c;
-    }
-
     private static void CatChannels(Tensor a, Tensor bT, Tensor outp, int b, int ca, int hw)
     {
         float* ap = (float*)a.DataPointer; float* bp = (float*)bT.DataPointer; float* op = (float*)outp.DataPointer;
@@ -137,27 +121,6 @@ public sealed unsafe class MageVaeEncoder : IDisposable
             Buffer.MemoryCopy(ap + (long)bi * ca * hw, op + (long)bi * outC * hw, (long)ca * hw * 4, (long)ca * hw * 4);
             Buffer.MemoryCopy(bp + (long)bi * ca * hw, op + ((long)bi * outC + ca) * hw, (long)ca * hw * 4, (long)ca * hw * 4);
         }
-    }
-
-    private static void ChannelLayerNormAffine(Tensor input, Tensor output, Tensor weight, Tensor bias, int b, int c, int hw)
-    {
-        float* src = (float*)input.DataPointer; float* dst = (float*)output.DataPointer;
-        float* gw = (float*)weight.DataPointer; float* gb = (float*)bias.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int p = 0; p < hw; p++)
-            {
-                double mean = 0;
-                for (int ch = 0; ch < c; ch++) mean += src[((long)(bi * c + ch) * hw) + p];
-                mean /= c;
-                double var = 0;
-                for (int ch = 0; ch < c; ch++) { double d = src[((long)(bi * c + ch) * hw) + p] - mean; var += d * d; }
-                float inv = (float)(1.0 / Math.Sqrt(var / c + 1e-6));
-                for (int ch = 0; ch < c; ch++)
-                {
-                    long o = ((long)(bi * c + ch) * hw) + p;
-                    dst[o] = (float)((src[o] - mean) * inv) * gw[ch] + gb[ch];
-                }
-            }
     }
 
     public void Dispose() { if (Interlocked.Exchange(ref _disposed, 1) != 0) return; }

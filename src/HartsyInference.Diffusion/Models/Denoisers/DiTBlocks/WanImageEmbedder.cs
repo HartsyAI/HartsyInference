@@ -25,11 +25,11 @@ public sealed unsafe class WanImageEmbedder
     {
         if (!w.TryGetValue("condition_embedder.image_embedder.norm1.weight", out Tensor? n1))
             return false;
-        _norm1W = LoadF32In(n1); _norm1B = LoadF32Opt(w, "condition_embedder.image_embedder.norm1.bias");
+        _norm1W = TensorCasts.EnsureF32(n1); _norm1B = TensorCasts.LoadF32Opt(w, "condition_embedder.image_embedder.norm1.bias");
         _ff0W = w["condition_embedder.image_embedder.ff.net.0.proj.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.0.proj.bias", out _ff0B);
         _ff2W = w["condition_embedder.image_embedder.ff.net.2.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.2.bias", out _ff2B);
-        _norm2W = TensorCasts.LoadF32(w, "condition_embedder.image_embedder.norm2.weight"); _norm2B = LoadF32Opt(w, "condition_embedder.image_embedder.norm2.bias");
-        _posEmbed = LoadF32Opt(w, "condition_embedder.image_embedder.pos_embed");
+        _norm2W = TensorCasts.LoadF32(w, "condition_embedder.image_embedder.norm2.weight"); _norm2B = TensorCasts.LoadF32Opt(w, "condition_embedder.image_embedder.norm2.bias");
+        _posEmbed = TensorCasts.LoadF32Opt(w, "condition_embedder.image_embedder.pos_embed");
         return true;
     }
 
@@ -93,6 +93,4 @@ public sealed unsafe class WanImageEmbedder
         _norm1W = _norm1B = _ff0W = _ff0B = _ff2W = _ff2B = _norm2W = _norm2B = _posEmbed = null;
     }
 
-    private static Tensor LoadF32In(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

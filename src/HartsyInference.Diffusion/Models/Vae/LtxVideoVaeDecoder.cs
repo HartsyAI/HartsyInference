@@ -84,7 +84,7 @@ public sealed unsafe class LtxVideoVaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         int output = _blockOutRev[0];
-        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_in.conv.bias"),
+        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], VaeOps.Bias(w, "decoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         _midResnets = new LtxVaeResnetBlock3d[_layersRev[0]];
@@ -145,7 +145,7 @@ public sealed unsafe class LtxVideoVaeDecoder
             _normOutTimeEmbedder = LtxVaeTimeEmbedder.Load(w, "decoder.time_embedder", output * 2);
             _normOutScaleShift = TensorCasts.LoadF32(w, "decoder.scale_shift_table");
         }
-        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_out.conv.bias"),
+        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], VaeOps.Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         // Latent normalization stats (optional — absent on synthetic tests). LTX names them

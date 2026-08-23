@@ -102,7 +102,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
     /// block_out_channels/layers_per_block/etc. are ignored here in favour of the checkpoint's own shapes.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_in.conv.bias"),
+        _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], VaeOps.Bias(w, "decoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
@@ -166,7 +166,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _upStages = [.. stages];
         _temporalScaleInferred = [.. temporal];
 
-        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], LtxVaeResnetBlock3d.Bias(w, "decoder.conv_out.conv.bias"),
+        _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], VaeOps.Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
     }
 
@@ -353,7 +353,5 @@ public sealed unsafe class LtxVideo2VaeDecoder
         return outT;
     }
 
-
-    private static int[] Reverse(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Reverse(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }
 }

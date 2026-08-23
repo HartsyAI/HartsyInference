@@ -64,10 +64,10 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
     /// <c>decoder.upsamples.{idx}</c> indexing (3 residuals per stage, then a resample for non-final stages).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _conv2 = new CausalConv3d(w["conv2.weight"], Bias(w, "conv2.bias"), padT: 0, padH: 0, padW: 0);
+        _conv2 = new CausalConv3d(w["conv2.weight"], VaeOps.Bias(w, "conv2.bias"), padT: 0, padH: 0, padW: 0);
 
         int[] dims = BuildDims();
-        _conv1 = new CausalConv3d(w["decoder.conv1.weight"], Bias(w, "decoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
+        _conv1 = new CausalConv3d(w["decoder.conv1.weight"], VaeOps.Bias(w, "decoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
         _midRes0 = new Wan22ResidualBlock(dims[0], dims[0]);
         _midRes0.LoadWeights(w, "decoder.middle.0");
         _midAttn = new Wan22AttentionBlock(dims[0]);
@@ -105,7 +105,7 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
         int headDim = dims[^1];
         _headNorm = new WanRmsNorm(headDim);
         _headNorm.LoadWeights(w["decoder.head.0.gamma"]);
-        _headConv = new CausalConv3d(w["decoder.head.2.weight"], Bias(w, "decoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
+        _headConv = new CausalConv3d(w["decoder.head.2.weight"], VaeOps.Bias(w, "decoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -132,7 +132,7 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
         if ((int)latent.Shape[1] != _zDim)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != z_dim {_zDim}.", nameof(latent));
 
-        Tensor z = Clone(latent);
+        Tensor z = VaeOps.Clone(latent);
         Wan21VaeLatentNorm.Denormalize(z);
         Tensor x = _conv2!.Forward(backend, z);
         z.Dispose();
@@ -194,16 +194,5 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
         hcc?.Dispose();
         hn.Dispose();
         return rgb;
-    }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
-
-    private static Tensor Clone(Tensor x)
-    {
-        Tensor t = new Tensor(x.Shape, x.DType);
-        long n = x.Shape.ElementCount;
-        Buffer.MemoryCopy(x.DataPointer, t.DataPointer, n * 4, n * 4);
-        return t;
     }
 }

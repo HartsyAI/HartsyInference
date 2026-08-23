@@ -28,13 +28,13 @@ public sealed unsafe class Wan22ResidualBlock
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         _norm1.LoadWeights(weights[$"{prefix}.residual.0.gamma"]);
-        _conv1 = new CausalConv3d(weights[$"{prefix}.residual.2.weight"], Bias(weights, $"{prefix}.residual.2.bias"),
+        _conv1 = new CausalConv3d(weights[$"{prefix}.residual.2.weight"], VaeOps.Bias(weights, $"{prefix}.residual.2.bias"),
             padT: 1, padH: 1, padW: 1);
         _norm2.LoadWeights(weights[$"{prefix}.residual.3.gamma"]);
-        _conv2 = new CausalConv3d(weights[$"{prefix}.residual.6.weight"], Bias(weights, $"{prefix}.residual.6.bias"),
+        _conv2 = new CausalConv3d(weights[$"{prefix}.residual.6.weight"], VaeOps.Bias(weights, $"{prefix}.residual.6.bias"),
             padT: 1, padH: 1, padW: 1);
         if (_inDim != _outDim)
-            _shortcut = new CausalConv3d(weights[$"{prefix}.shortcut.weight"], Bias(weights, $"{prefix}.shortcut.bias"),
+            _shortcut = new CausalConv3d(weights[$"{prefix}.shortcut.weight"], VaeOps.Bias(weights, $"{prefix}.shortcut.bias"),
                 padT: 0, padH: 0, padW: 0);
     }
 
@@ -77,7 +77,4 @@ public sealed unsafe class Wan22ResidualBlock
     }
 
     private static void Silu(IBackend backend, Tensor t) => backend.Silu(t, t);
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
 }

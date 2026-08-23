@@ -39,7 +39,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         // Store the [6, hidden] table flattened to [1, 6·hidden] so the whole modulation split is one device Add
         // (tembMod + table) followed by 6 row slices — see SplitModulation. The host-path indexing (i·hidden) is
         // unchanged. Reshape is a host view (the weight is host-resident until preloaded).
-        _scaleShiftTable = F32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _hidden));
+        _scaleShiftTable = TensorCasts.EnsureF32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _hidden));
         _norm1 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm1.weight"]);
         _norm2 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm2.weight"]);
         _attn.LoadWeights(w, $"{p}.attn");
@@ -178,6 +178,4 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         gated.Dispose();
         return outp;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

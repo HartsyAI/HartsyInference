@@ -28,11 +28,11 @@ public sealed unsafe class LtxVaeTimeEmbedder
 
     public static LtxVaeTimeEmbedder Load(IReadOnlyDictionary<string, Tensor> w, string prefix, int outDim)
     {
-        Tensor l1W = F32(w, $"{prefix}.timestep_embedder.linear_1.weight");
-        Tensor l2W = F32(w, $"{prefix}.timestep_embedder.linear_2.weight");
+        Tensor l1W = TensorCasts.LoadF32(w, $"{prefix}.timestep_embedder.linear_1.weight");
+        Tensor l2W = TensorCasts.LoadF32(w, $"{prefix}.timestep_embedder.linear_2.weight");
         w.TryGetValue($"{prefix}.timestep_embedder.linear_1.bias", out Tensor? l1B);
         w.TryGetValue($"{prefix}.timestep_embedder.linear_2.bias", out Tensor? l2B);
-        return new LtxVaeTimeEmbedder(outDim, l1W, l1B is null ? null : F32B(l1B), l2W, l2B is null ? null : F32B(l2B));
+        return new LtxVaeTimeEmbedder(outDim, l1W, l1B is null ? null : TensorCasts.EnsureF32(l1B), l2W, l2B is null ? null : TensorCasts.EnsureF32(l2B));
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -60,7 +60,4 @@ public sealed unsafe class LtxVaeTimeEmbedder
         out2d.Dispose();
         return outT;
     }
-
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-    private static Tensor F32B(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

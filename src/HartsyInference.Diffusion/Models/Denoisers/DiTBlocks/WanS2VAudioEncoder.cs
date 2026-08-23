@@ -41,11 +41,11 @@ public sealed unsafe class WanS2VAudioEncoder
     {
         _layerWeights = TensorCasts.LoadF32(w, $"{p}.weights");
         _conv1LocalW = TensorCasts.LoadF32(w, $"{p}.encoder.conv1_local.conv.weight");
-        _conv1LocalB = LoadF32Opt(w, $"{p}.encoder.conv1_local.conv.bias");
+        _conv1LocalB = TensorCasts.LoadF32Opt(w, $"{p}.encoder.conv1_local.conv.bias");
         _conv1GlobalW = TensorCasts.LoadF32(w, $"{p}.encoder.conv1_global.conv.weight");
-        _conv1GlobalB = LoadF32Opt(w, $"{p}.encoder.conv1_global.conv.bias");
-        _conv2W = TensorCasts.LoadF32(w, $"{p}.encoder.conv2.conv.weight"); _conv2B = LoadF32Opt(w, $"{p}.encoder.conv2.conv.bias");
-        _conv3W = TensorCasts.LoadF32(w, $"{p}.encoder.conv3.conv.weight"); _conv3B = LoadF32Opt(w, $"{p}.encoder.conv3.conv.bias");
+        _conv1GlobalB = TensorCasts.LoadF32Opt(w, $"{p}.encoder.conv1_global.conv.bias");
+        _conv2W = TensorCasts.LoadF32(w, $"{p}.encoder.conv2.conv.weight"); _conv2B = TensorCasts.LoadF32Opt(w, $"{p}.encoder.conv2.conv.bias");
+        _conv3W = TensorCasts.LoadF32(w, $"{p}.encoder.conv3.conv.weight"); _conv3B = TensorCasts.LoadF32Opt(w, $"{p}.encoder.conv3.conv.bias");
         _finalLinearW = w[$"{p}.encoder.final_linear.weight"]; w.TryGetValue($"{p}.encoder.final_linear.bias", out _finalLinearB);
         _paddingTokens = TensorCasts.LoadF32(w, $"{p}.encoder.padding_tokens");
     }
@@ -163,5 +163,4 @@ public sealed unsafe class WanS2VAudioEncoder
         return o;
     }
 
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 }

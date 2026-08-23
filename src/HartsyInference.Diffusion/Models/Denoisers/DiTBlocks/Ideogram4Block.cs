@@ -83,10 +83,10 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
     /// <summary>Loads weights using upstream naming. <paramref name="prefix"/> is e.g. <c>"layers.0"</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _attnNorm1 = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2 = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1 = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2 = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _qkvWeight = weights[$"{prefix}.attention.qkv.weight"];
         _oWeight = weights[$"{prefix}.attention.o.weight"];
@@ -319,11 +319,5 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         backend.Linear(output, combined, _w2!, null);
         combined.Dispose();
         return output;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

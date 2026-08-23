@@ -71,7 +71,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         {
             _condEncW2d = WanDitOps.Reshape2d(condW, _config.InnerDim,
                 _config.VaeLatentChannels * _config.PatchSize.T * _config.PatchSize.H * _config.PatchSize.W);
-            _condEncB = LoadF32Opt(w, "cond_encoder.bias");
+            _condEncB = TensorCasts.LoadF32Opt(w, "cond_encoder.bias");
         }
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"blocks.{i}");
         _audioInjector.LoadWeights(w);
@@ -239,7 +239,6 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         return o;
     }
 
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 
     public void Dispose()
     {

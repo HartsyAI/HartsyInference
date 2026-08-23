@@ -69,7 +69,7 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         int[] dims = BuildDims();
-        _convIn = new CausalConv3d(w["encoder.conv1.weight"], Bias(w, "encoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
+        _convIn = new CausalConv3d(w["encoder.conv1.weight"], VaeOps.Bias(w, "encoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
 
         int numStages = _dimMult.Length;
         _stages = new DownStage[numStages];
@@ -116,8 +116,8 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
 
         _headNorm = new WanRmsNorm(headDim);
         _headNorm.LoadWeights(w["encoder.head.0.gamma"]);
-        _headConv = new CausalConv3d(w["encoder.head.2.weight"], Bias(w, "encoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
-        _quantConv = new CausalConv3d(w["conv1.weight"], Bias(w, "conv1.bias"), padT: 0, padH: 0, padW: 0);
+        _headConv = new CausalConv3d(w["encoder.head.2.weight"], VaeOps.Bias(w, "encoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
+        _quantConv = new CausalConv3d(w["conv1.weight"], VaeOps.Bias(w, "conv1.bias"), padT: 0, padH: 0, padW: 0);
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -168,7 +168,7 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
 
         foreach (DownStage s in _stages)
         {
-            Tensor main = CloneRef(h);
+            Tensor main = VaeOps.Clone(h);
             foreach (Wan22ResidualBlock r in s.Res)
             {
                 Tensor next = r.Forward(backend, main);
@@ -202,7 +202,7 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
         Tensor quant = _quantConv!.Forward(backend, doubled);
         doubled.Dispose();
 
-        Tensor mu = SliceChannels(quant, 0, _zDim);                       // μ — argmax sample
+        Tensor mu = VaeOps.SliceChannels(quant, 0, _zDim);                       // μ — argmax sample
         quant.Dispose();
         Wan22VaeLatentNorm.Normalize(mu);
         return mu;
@@ -227,31 +227,5 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
         {
             rgb.Dispose();
         }
-    }
-
-    private static Tensor SliceChannels(Tensor x, int start, int count)
-    {
-        int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor o = new Tensor(new TensorShape([(long)b, count, t, h, w]), DType.F32);
-        long per = (long)t * h * w;
-        float* sp = (float*)x.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            Buffer.MemoryCopy(
-                sp + ((long)bi * c + start) * per,
-                op + (long)bi * count * per,
-                (long)count * per * 4, (long)count * per * 4);
-        return o;
-    }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
-
-    private static Tensor CloneRef(Tensor x)
-    {
-        Tensor t = new Tensor(x.Shape, x.DType);
-        long n = x.Shape.ElementCount;
-        Buffer.MemoryCopy(x.DataPointer, t.DataPointer, n * 4, n * 4);
-        return t;
     }
 }

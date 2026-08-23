@@ -49,11 +49,11 @@ public sealed unsafe class HunyuanVideoTokenRefiner
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "txt_in")
     {
         string p = prefix + ".";
-        _inW = F32(w[$"{p}input_embedder.weight"]); _inB = F32(w[$"{p}input_embedder.bias"]);
-        _tW0 = F32(w[$"{p}t_embedder.in_layer.weight"]); _tB0 = F32(w[$"{p}t_embedder.in_layer.bias"]);
-        _tW1 = F32(w[$"{p}t_embedder.out_layer.weight"]); _tB1 = F32(w[$"{p}t_embedder.out_layer.bias"]);
-        _cW0 = F32(w[$"{p}c_embedder.in_layer.weight"]); _cB0 = F32(w[$"{p}c_embedder.in_layer.bias"]);
-        _cW1 = F32(w[$"{p}c_embedder.out_layer.weight"]); _cB1 = F32(w[$"{p}c_embedder.out_layer.bias"]);
+        _inW = TensorCasts.EnsureF32(w[$"{p}input_embedder.weight"]); _inB = TensorCasts.EnsureF32(w[$"{p}input_embedder.bias"]);
+        _tW0 = TensorCasts.EnsureF32(w[$"{p}t_embedder.in_layer.weight"]); _tB0 = TensorCasts.EnsureF32(w[$"{p}t_embedder.in_layer.bias"]);
+        _tW1 = TensorCasts.EnsureF32(w[$"{p}t_embedder.out_layer.weight"]); _tB1 = TensorCasts.EnsureF32(w[$"{p}t_embedder.out_layer.bias"]);
+        _cW0 = TensorCasts.EnsureF32(w[$"{p}c_embedder.in_layer.weight"]); _cB0 = TensorCasts.EnsureF32(w[$"{p}c_embedder.in_layer.bias"]);
+        _cW1 = TensorCasts.EnsureF32(w[$"{p}c_embedder.out_layer.weight"]); _cB1 = TensorCasts.EnsureF32(w[$"{p}c_embedder.out_layer.bias"]);
         for (int i = 0; i < _numBlocks; i++)
             _blocks[i].LoadWeights(w, $"{p}individual_token_refiner.blocks.{i}", _hidden);
     }
@@ -115,8 +115,6 @@ public sealed unsafe class HunyuanVideoTokenRefiner
         return outT;
     }
 
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
-
     /// <summary>One <c>TokenRefinerBlock</c>: LN(affine) → MHA self-attn (bias, no QK-norm/RoPE) → gated residual → LN(affine) → Linear→SiLU→Linear MLP → gated residual. The two gates come from <c>adaLN_modulation.1(SiLU(temb)).chunk(2)</c>.</summary>
     private sealed class RefinerBlock
     {
@@ -132,17 +130,17 @@ public sealed unsafe class HunyuanVideoTokenRefiner
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, int hidden)
         {
             string p = prefix + ".";
-            _n1W = F32(w[$"{p}norm1.weight"]); _n1B = F32(w[$"{p}norm1.bias"]);
-            _n2W = F32(w[$"{p}norm2.weight"]); _n2B = F32(w[$"{p}norm2.bias"]);
+            _n1W = TensorCasts.EnsureF32(w[$"{p}norm1.weight"]); _n1B = TensorCasts.EnsureF32(w[$"{p}norm1.bias"]);
+            _n2W = TensorCasts.EnsureF32(w[$"{p}norm2.weight"]); _n2B = TensorCasts.EnsureF32(w[$"{p}norm2.bias"]);
             // Fused qkv [3*hidden, hidden] → split into Q/K/V.
-            Tensor qkvW = F32(w[$"{p}self_attn.qkv.weight"]);
-            Tensor qkvB = F32(w[$"{p}self_attn.qkv.bias"]);
+            Tensor qkvW = TensorCasts.EnsureF32(w[$"{p}self_attn.qkv.weight"]);
+            Tensor qkvB = TensorCasts.EnsureF32(w[$"{p}self_attn.qkv.bias"]);
             (_qW, _kW, _vW) = SplitRows3(qkvW, hidden);
             (_qB, _kB, _vB) = SplitRows3(qkvB, hidden);
-            _projW = F32(w[$"{p}self_attn.proj.weight"]); _projB = F32(w[$"{p}self_attn.proj.bias"]);
-            _mlp0W = F32(w[$"{p}mlp.0.weight"]); _mlp0B = F32(w[$"{p}mlp.0.bias"]);
-            _mlp2W = F32(w[$"{p}mlp.2.weight"]); _mlp2B = F32(w[$"{p}mlp.2.bias"]);
-            _modW = F32(w[$"{p}adaLN_modulation.1.weight"]); _modB = F32(w[$"{p}adaLN_modulation.1.bias"]);
+            _projW = TensorCasts.EnsureF32(w[$"{p}self_attn.proj.weight"]); _projB = TensorCasts.EnsureF32(w[$"{p}self_attn.proj.bias"]);
+            _mlp0W = TensorCasts.EnsureF32(w[$"{p}mlp.0.weight"]); _mlp0B = TensorCasts.EnsureF32(w[$"{p}mlp.0.bias"]);
+            _mlp2W = TensorCasts.EnsureF32(w[$"{p}mlp.2.weight"]); _mlp2B = TensorCasts.EnsureF32(w[$"{p}mlp.2.bias"]);
+            _modW = TensorCasts.EnsureF32(w[$"{p}adaLN_modulation.1.weight"]); _modB = TensorCasts.EnsureF32(w[$"{p}adaLN_modulation.1.bias"]);
         }
 
         public IEnumerable<Tensor> EnumerateWeights()

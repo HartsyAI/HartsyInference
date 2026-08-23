@@ -99,7 +99,7 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         _timeEmbed2W = w["time_caption_embed.timestep_embedder.linear_2.weight"];
         _timeEmbed2B = w["time_caption_embed.timestep_embedder.linear_2.bias"];
 
-        _captionNormW = F32(w["time_caption_embed.caption_embedder.0.weight"]);
+        _captionNormW = TensorCasts.EnsureF32(w["time_caption_embed.caption_embedder.0.weight"]);
         _captionLinearW = w["time_caption_embed.caption_embedder.1.weight"];
         _captionLinearB = w["time_caption_embed.caption_embedder.1.bias"];
 
@@ -452,8 +452,6 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         scalePlus1.Dispose();
         return output;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

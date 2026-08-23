@@ -80,44 +80,42 @@ public sealed unsafe class MageVaeDecoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         // CoD decoder (y_embedder.decoder.*).
-        _condConvInW = F32(w["y_embedder.decoder.conv_in.weight"]);
-        _condConvInB = F32(w["y_embedder.decoder.conv_in.bias"]);
+        _condConvInW = TensorCasts.EnsureF32(w["y_embedder.decoder.conv_in.weight"]);
+        _condConvInB = TensorCasts.EnsureF32(w["y_embedder.decoder.conv_in.bias"]);
         _condRes[0].LoadWeights(w, "y_embedder.decoder.block.0");
         _condAttn[0].LoadWeights(w, "y_embedder.decoder.block.1");
         _condRes[1].LoadWeights(w, "y_embedder.decoder.block.2");
         _condAttn[1].LoadWeights(w, "y_embedder.decoder.block.3");
         _condRes[2].LoadWeights(w, "y_embedder.decoder.block.4");
-        _condNormOutW = F32(w["y_embedder.decoder.norm_out.weight"]);
-        _condNormOutB = F32(w["y_embedder.decoder.norm_out.bias"]);
-        _condConvOutW = F32(w["y_embedder.decoder.conv_out.weight"]);
-        _condConvOutB = F32(w["y_embedder.decoder.conv_out.bias"]);
+        _condNormOutW = TensorCasts.EnsureF32(w["y_embedder.decoder.norm_out.weight"]);
+        _condNormOutB = TensorCasts.EnsureF32(w["y_embedder.decoder.norm_out.bias"]);
+        _condConvOutW = TensorCasts.EnsureF32(w["y_embedder.decoder.conv_out.weight"]);
+        _condConvOutB = TensorCasts.EnsureF32(w["y_embedder.decoder.conv_out.bias"]);
 
-        _sProj2W = F32(w["s_embedder.proj2.weight"]);
-        _sProj2B = F32(w["s_embedder.proj2.bias"]);
+        _sProj2W = TensorCasts.EnsureF32(w["s_embedder.proj2.weight"]);
+        _sProj2B = TensorCasts.EnsureF32(w["s_embedder.proj2.bias"]);
 
-        _tEmbW1 = F32(w["t_embedder.mlp.0.weight"]);
-        _tEmbB1 = F32(w["t_embedder.mlp.0.bias"]);
-        _tEmbW2 = F32(w["t_embedder.mlp.2.weight"]);
-        _tEmbB2 = F32(w["t_embedder.mlp.2.bias"]);
+        _tEmbW1 = TensorCasts.EnsureF32(w["t_embedder.mlp.0.weight"]);
+        _tEmbB1 = TensorCasts.EnsureF32(w["t_embedder.mlp.0.bias"]);
+        _tEmbW2 = TensorCasts.EnsureF32(w["t_embedder.mlp.2.weight"]);
+        _tEmbB2 = TensorCasts.EnsureF32(w["t_embedder.mlp.2.bias"]);
         for (int i = 0; i < NumDiCoBlocks; i++) _dico[i].LoadWeights(w, $"blocks.{i}");
 
-        _yEmbXW = F32(w["y_embedder_x.weight"]);
-        _yEmbXB = F32(w["y_embedder_x.bias"]);
-        _xEmbW = F32(w["x_embedder.embedder.0.weight"]);
-        _xEmbB = F32(w["x_embedder.embedder.0.bias"]);
-        _decCondEmbW = F32(w["dec_net.cond_embed.weight"]);
-        _decCondEmbB = F32(w["dec_net.cond_embed.bias"]);
-        _decInputProjW = F32(w["dec_net.input_proj.weight"]);
-        _decInputProjB = F32(w["dec_net.input_proj.bias"]);
+        _yEmbXW = TensorCasts.EnsureF32(w["y_embedder_x.weight"]);
+        _yEmbXB = TensorCasts.EnsureF32(w["y_embedder_x.bias"]);
+        _xEmbW = TensorCasts.EnsureF32(w["x_embedder.embedder.0.weight"]);
+        _xEmbB = TensorCasts.EnsureF32(w["x_embedder.embedder.0.bias"]);
+        _decCondEmbW = TensorCasts.EnsureF32(w["dec_net.cond_embed.weight"]);
+        _decCondEmbB = TensorCasts.EnsureF32(w["dec_net.cond_embed.bias"]);
+        _decInputProjW = TensorCasts.EnsureF32(w["dec_net.input_proj.weight"]);
+        _decInputProjB = TensorCasts.EnsureF32(w["dec_net.input_proj.bias"]);
         for (int i = 0; i < DecResBlocks; i++) _decRes[i].LoadWeights(w, $"dec_net.res_blocks.{i}");
-        _finalNormW = F32(w["final_layer.norm.weight"]);
-        _finalLinW = F32(w["final_layer.linear.weight"]);
-        _finalLinB = F32(w["final_layer.linear.bias"]);
+        _finalNormW = TensorCasts.EnsureF32(w["final_layer.norm.weight"]);
+        _finalLinW = TensorCasts.EnsureF32(w["final_layer.linear.weight"]);
+        _finalLinB = TensorCasts.EnsureF32(w["final_layer.linear.bias"]);
 
         _dctCoords = BuildDctCoords();
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -150,7 +148,7 @@ public sealed unsafe class MageVaeDecoder : IDisposable
         sIn.Dispose();
 
         // 3. DiCo trunk at latent res, modulated by the constant c = t_embedder(0).
-        Tensor c = TimestepEmbedZero(backend, b);   // [b, 384]
+        Tensor c = MageVaeOps.TimestepEmbedZero(backend, b, _tEmbW1!, _tEmbB1, _tEmbW2!, _tEmbB2, Hidden);   // [b, 384]
         for (int i = 0; i < NumDiCoBlocks; i++)
         {
             Tensor next = _dico[i].Forward(backend, s, c);
@@ -208,25 +206,6 @@ public sealed unsafe class MageVaeDecoder : IDisposable
         backend.Conv2D(outp, normed, _condConvOutW!, _condConvOutB, 1, 1, 1, 1);   // conv_out 384→384 3×3
         normed.Dispose();
         return outp;
-    }
-
-    // t_embedder(0): sinusoidal timestep_embedding(0, 256) = [1, 0, 0, …, cos(0)=1 …]. For t=0 the sinusoidal
-    // embedding is [sin(0)=0 (×128) ; cos(0)=1 (×128)] → the "cos" half is all ones, "sin" half all zeros.
-    private Tensor TimestepEmbedZero(IBackend backend, int b)
-    {
-        Tensor sinEmb = new(new TensorShape(b, 256), DType.F32);
-        float* p = (float*)sinEmb.DataPointer;
-        for (int i = 0; i < b; i++)
-            for (int j = 0; j < 256; j++)
-                p[i * 256 + j] = j >= 128 ? 1f : 0f;   // timestep_embedding(0): cat[sin(0), cos(0)]
-        Tensor t1 = new(new TensorShape(b, Hidden), DType.F32);
-        backend.Linear(t1, sinEmb, _tEmbW1!, _tEmbB1);
-        sinEmb.Dispose();
-        Tensor act = new(t1.Shape, DType.F32);
-        backend.Silu(act, t1); t1.Dispose();
-        Tensor c = new(new TensorShape(b, Hidden), DType.F32);
-        backend.Linear(c, act, _tEmbW2!, _tEmbB2); act.Dispose();
-        return c;
     }
 
     // x_embedder: for each of the b*hw*256 rows, concat the 35 input channels with the fixed 64 DCT coords → 99,

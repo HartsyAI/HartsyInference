@@ -212,7 +212,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         public DoubleBlockHandle(FluxDoubleStreamBlock block)
         {
             _block = block;
-            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
+            EstimatedWeightBytes = WeightBytes.Sum(block.EnumerateWeights());
         }
         public long EstimatedWeightBytes { get; }
         public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
@@ -224,7 +224,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         public SingleBlockHandle(FluxSingleStreamBlock block)
         {
             _block = block;
-            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
+            EstimatedWeightBytes = WeightBytes.Sum(block.EnumerateWeights());
         }
         public long EstimatedWeightBytes { get; }
         public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
@@ -232,19 +232,6 @@ public sealed unsafe class FluxTransformer : IDisposable
 
     /// <summary>Sums a block's on-device footprint, via <see cref="DType.ComputeByteCount"/> so block-quantized
     /// dtypes are measured by their super-block size rather than a per-element size they do not have.</summary>
-    /// <remarks>The naive <c>ElementCount * SizeInBytes</c> this replaces silently reported <b>0 bytes</b> for every
-    /// K-quant weight — <c>DType.Q4_K</c> is declared <c>("Q4_K", 0, true, 144, 256)</c>, i.e. `SizeInBytes` is 0 and
-    /// the real footprint lives in `BlockByteSize`/`BlockElementCount`. A zero total made the resident-vs-streamed
-    /// comparison trivially true, so **GGUF checkpoints always took the eager path and streaming never engaged** —
-    /// the low-VRAM feature was inert for exactly the quantized models most likely to need it (e.g. flux2-dev-Q4_K_S).
-    /// No-op for non-quantized dtypes.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="packedLatent">Packed latent tokens [B, imgSeqLen, 64].</param>

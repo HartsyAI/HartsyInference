@@ -36,14 +36,14 @@ public sealed unsafe class AceStep15ConditionEncoder
         _textProjW = w["encoder.text_projector.weight"];
         _lyricEmbedW = w["encoder.lyric_encoder.embed_tokens.weight"];
         _lyricEmbedB = w["encoder.lyric_encoder.embed_tokens.bias"];
-        _lyricNorm = EnsureF32(w["encoder.lyric_encoder.norm.weight"]);
+        _lyricNorm = TensorCasts.EnsureF32(w["encoder.lyric_encoder.norm.weight"]);
         for (int i = 0; i < _lyricLayers.Length; i++)
             _lyricLayers[i].LoadWeights(w, $"encoder.lyric_encoder.layers.{i}");
 
         _timbreEmbedW = w["encoder.timbre_encoder.embed_tokens.weight"];
         _timbreEmbedB = w["encoder.timbre_encoder.embed_tokens.bias"];
-        _timbreSpecial = EnsureF32(w["encoder.timbre_encoder.special_token"]);
-        _timbreNorm = EnsureF32(w["encoder.timbre_encoder.norm.weight"]);
+        _timbreSpecial = TensorCasts.EnsureF32(w["encoder.timbre_encoder.special_token"]);
+        _timbreNorm = TensorCasts.EnsureF32(w["encoder.timbre_encoder.norm.weight"]);
         for (int i = 0; i < _timbreLayers.Length; i++)
             _timbreLayers[i].LoadWeights(w, $"encoder.timbre_encoder.layers.{i}");
     }
@@ -152,6 +152,4 @@ public sealed unsafe class AceStep15ConditionEncoder
         cur.Dispose();
         return normed;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

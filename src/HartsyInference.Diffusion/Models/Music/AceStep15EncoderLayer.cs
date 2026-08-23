@@ -24,8 +24,8 @@ internal sealed class AceStep15EncoderLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _inputNorm = EnsureF32(w[$"{prefix}.input_layernorm.weight"]);
-        _postAttnNorm = EnsureF32(w[$"{prefix}.post_attention_layernorm.weight"]);
+        _inputNorm = TensorCasts.EnsureF32(w[$"{prefix}.input_layernorm.weight"]);
+        _postAttnNorm = TensorCasts.EnsureF32(w[$"{prefix}.post_attention_layernorm.weight"]);
         _attn.LoadWeights(w, $"{prefix}.self_attn");
         _mlp.LoadSwiGluWeights(
             w[$"{prefix}.mlp.gate_proj.weight"], null,
@@ -65,6 +65,4 @@ internal sealed class AceStep15EncoderLayer
         mlpOut.Dispose();
         return result;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }
