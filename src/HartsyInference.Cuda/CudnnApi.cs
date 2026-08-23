@@ -2,10 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for the cuDNN backend graph API (cuDNN 9). Library name "cudnn" is resolved at
-/// runtime by <see cref="CudaLibraryResolver"/> to libcudnn.so.9 (Linux) / cudnn64_9.dll (Windows). Only the
-/// handle + generic backend-descriptor entry points are needed — the fused scaled-dot-product attention graph
-/// is assembled from these primitives in <see cref="CudnnSdpa"/>.</summary>
+/// <summary>P/Invoke bindings for the cuDNN backend graph API (cuDNN 9). Library name "cudnn" is resolved at runtime by <see cref="CudaLibraryResolver"/> to libcudnn.so.9 (Linux) / cudnn64_9.dll (Windows). Only the handle + generic backend-descriptor entry points are needed — the fused scaled-dot-product attention graph is assembled from these primitives in <see cref="CudnnSdpa"/>.</summary>
 internal static partial class CudnnApi
 {
     private const string LibName = "cudnn";
@@ -15,8 +12,7 @@ internal static partial class CudnnApi
     [LibraryImport(LibName)] internal static partial int cudnnDestroy(nint handle);
     [LibraryImport(LibName)] internal static partial int cudnnSetStream(nint handle, nint streamId);
     [LibraryImport(LibName)] internal static partial nuint cudnnGetVersion();
-    /// <summary>The CUDA Runtime version cuDNN was BUILT against (e.g. 12080 → CUDA 12.8). Compile-time constant,
-    /// needs no handle/context — safe to call right after the library loads to gate on a CUDA-major mismatch.</summary>
+    /// <summary>The CUDA Runtime version cuDNN was BUILT against (e.g. 12080 → CUDA 12.8). Compile-time constant, needs no handle/context — safe to call right after the library loads to gate on a CUDA-major mismatch.</summary>
     [LibraryImport(LibName)] internal static partial nuint cudnnGetCudartVersion();
     [LibraryImport(LibName)] internal static partial nint cudnnGetErrorString(int status);
 
@@ -154,4 +150,20 @@ internal static partial class CudnnApi
     // cudnnBackendHeurMode_t
     internal const int CUDNN_HEUR_MODE_A = 3;
     internal const int CUDNN_HEUR_MODE_FALLBACK = 2;
+
+    /// <summary>Sets a backend-descriptor attribute, throwing on any non-success status.</summary>
+    internal static unsafe void SetAttr(nint desc, int attr, int type, long count, void* vals)
+    {
+        int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
+        if (st != CUDNN_STATUS_SUCCESS)
+            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
+    }
+
+    /// <summary>Throws <see cref="CudnnStatusException"/> when <paramref name="st"/> is not success.</summary>
+    internal static void Check(int st, string what)
+    {
+        if (st != CUDNN_STATUS_SUCCESS)
+            throw new CudnnStatusException(st, what);
+    }
+
 }

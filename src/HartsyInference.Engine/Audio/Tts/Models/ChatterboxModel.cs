@@ -10,16 +10,11 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Chatterbox (ResembleAI/chatterbox) — T3 LM → CosyVoice2 S3Gen flow → HiFTNet, 24 kHz. Merges
-/// <c>t3_cfg.safetensors</c> (under <c>t3.</c>), <c>s3gen.safetensors</c> (under <c>s3gen.</c>), and
-/// <c>ve.safetensors</c> (under <c>ve.</c>). The default voice runs off the precomputed conditionals in
-/// <c>conds.pt</c>; a reference clip switches to zero-shot cloning, where the pipeline derives all
-/// conditioning (voice-encoder embedding, T3 cond tokens, S3Gen reference dict) from the raw audio.</summary>
+/// <summary>Chatterbox (ResembleAI/chatterbox) — T3 LM → CosyVoice2 S3Gen flow → HiFTNet, 24 kHz. Merges <c>t3_cfg.safetensors</c> (under <c>t3.</c>), <c>s3gen.safetensors</c> (under <c>s3gen.</c>), and <c>ve.safetensors</c> (under <c>ve.</c>). The default voice runs off the precomputed conditionals in <c>conds.pt</c>; a reference clip switches to zero-shot cloning, where the pipeline derives all conditioning (voice-encoder embedding, T3 cond tokens, S3Gen reference dict) from the raw audio.</summary>
 internal static class ChatterboxModel
 {
     private const string Repo = "ResembleAI/chatterbox";
 
-    /// <summary>The Chatterbox descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
@@ -94,8 +89,7 @@ internal static class ChatterboxModel
         },
     };
 
-    /// <summary>Copies the first <paramref name="count"/> floats into a fresh owned tensor (the T3 voice-encoder
-    /// embedding ships as <c>[1, 256]</c>; the pipeline takes the flat <c>[256]</c>).</summary>
+    /// <summary>Copies the first <paramref name="count"/> floats into a fresh owned tensor (the T3 voice-encoder embedding ships as <c>[1, 256]</c>; the pipeline takes the flat <c>[256]</c>).</summary>
     private static Tensor Flatten(Tensor source, int count)
     {
         Tensor flat = new Tensor(new TensorShape(count), DType.F32);

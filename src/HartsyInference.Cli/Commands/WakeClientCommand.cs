@@ -8,10 +8,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Acts as a voice satellite: streams a WAV to the wake listener in real time and prints what comes
-/// back. This is the reference client for <c>docs/Research/WAKE_SATELLITE_PROTOCOL.md</c> — useful for trying
-/// the system before any firmware exists, for measuring false accepts over long recordings, and as a worked
-/// example of the framing to port to a device.</summary>
+/// <summary>Acts as a voice satellite streaming a WAV to the wake listener in real time; the reference client for <c>docs/Research/WAKE_SATELLITE_PROTOCOL.md</c> and a worked example of the framing to port to a device.</summary>
 public sealed class WakeClientCommand : AsyncCommand<WakeClientCommand.Settings>
 {
     /// <summary>Options for <c>hartsy wake-client</c>.</summary>

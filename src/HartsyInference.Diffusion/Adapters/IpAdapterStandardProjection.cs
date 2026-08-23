@@ -3,20 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>The image-prompt projection used by the standard (non-Plus) IP-Adapter:
-/// a single Linear from the CLIP visual_projection output (typically 1024 dims) to
-/// <c>num_tokens × cross_attention_dim</c>, reshaped into <c>[B, num_tokens, cross_attention_dim]</c>
-/// and finished with a LayerNorm over the per-token cross-attention dim.
-///
-/// <para>Math is CPU-side here on purpose — even at SDXL's largest case (1024 → 8192
-/// linear, batch=1) it's a couple of MB of floats, dwarfed by the UNet's per-step cost.
-/// Avoiding a backend round-trip keeps the projection as a self-contained unit and lets
-/// us skip allocating intermediate device tensors that would flow into <c>cnn</c>'s weight
-/// cache. The Plus variant's resampler uses backend ops instead — its matmul shapes
-/// (273×1024 K/V over 8 layers) are ~6 GFLOPs and benefit from GPU.</para>
-///
-/// <para>Weight key layout matches diffusers / tencent-ailab IP-Adapter: <c>image_proj.proj.weight</c>,
-/// <c>image_proj.proj.bias</c>, <c>image_proj.norm.weight</c>, <c>image_proj.norm.bias</c>.</para></summary>
+/// <summary>The image-prompt projection used by the standard (non-Plus) IP-Adapter: a single Linear from the CLIP visual_projection output (typically 1024 dims) to <c>num_tokens × cross_attention_dim</c>, reshaped into <c>[B, num_tokens, cross_attention_dim]</c> and finished with a LayerNorm over the per-token cross-attention dim. Math is CPU-side here on purpose — even at SDXL's largest case (1024 → 8192 linear, batch=1) it's a couple of MB of floats, dwarfed by the UNet's per-step cost. Avoiding a backend round-trip keeps the projection as a self-contained unit and lets us skip allocating intermediate device tensors that would flow into <c>cnn</c>'s weight cache. The Plus variant's resampler uses backend ops instead — its matmul shapes (273×1024 K/V over 8 layers) are ~6 GFLOPs and benefit from GPU. Weight key layout matches diffusers / tencent-ailab IP-Adapter: <c>image_proj.proj.weight</c>, <c>image_proj.proj.bias</c>, <c>image_proj.norm.weight</c>, <c>image_proj.norm.bias</c>.</summary>
 public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjection
 {
     private readonly int _crossAttnDim;
@@ -37,10 +24,10 @@ public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjecti
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {
-        _projWeight = EnsureF32(weights[$"{prefix}.proj.weight"]);
-        _projBias = EnsureF32(weights[$"{prefix}.proj.bias"]);
-        _normWeight = EnsureF32(weights[$"{prefix}.norm.weight"]);
-        _normBias = EnsureF32(weights[$"{prefix}.norm.bias"]);
+        _projWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj.weight"]);
+        _projBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj.bias"]);
+        _normWeight = TensorCasts.EnsureF32(weights[$"{prefix}.norm.weight"]);
+        _normBias = TensorCasts.EnsureF32(weights[$"{prefix}.norm.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -93,8 +80,6 @@ public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjecti
             rows: batch * _numTokens, dim: _crossAttnDim, eps: 1e-5f);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>Common interface implemented by both the standard MLP projection and the Plus Resampler. Pipelines stay agnostic to which one is loaded. Tensors are owned by the safetensors loader (mmap-backed) so projections themselves don't need disposal.</summary>

@@ -1,11 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for Llama-3.2-Vision (<c>mllama</c>). The text decoder is standard Llama (so the dense
-/// self-attention / FFN keys map exactly as the llama family), but mllama interleaves <b>gated cross-attention</b>
-/// layers (at <c>[3,8,13,18,23,28,33,38]</c> for 11B) whose tensors carry the <c>cross_attn_*</c> dialect and two
-/// learned scalar gates. Those are remapped to the <c>cross_attn.*</c> + <c>cross_attn_attn_gate</c>/<c>_mlp_gate</c>
-/// names the <see cref="HartsyInference.LLM.Multimodal.MllamaCrossAttentionLayer"/> expects. The vision tower
-/// (<c>v.*</c>) and projector (<c>mm.*</c>) live in the companion mmproj GGUF and are loaded by the vision path.</summary>
+/// <summary>GGUF mapper for Llama-3.2-Vision (<c>mllama</c>). The text decoder is standard Llama (so the dense self-attention / FFN keys map exactly as the llama family), but mllama interleaves <b>gated cross-attention</b> layers (at <c>[3,8,13,18,23,28,33,38]</c> for 11B) whose tensors carry the <c>cross_attn_*</c> dialect and two learned scalar gates. Those are remapped to the <c>cross_attn.*</c> + <c>cross_attn_attn_gate</c>/<c>_mlp_gate</c> names the <see cref="HartsyInference.LLM.Multimodal.MllamaCrossAttentionLayer"/> expects. The vision tower (<c>v.*</c>) and projector (<c>mm.*</c>) live in the companion mmproj GGUF and are loaded by the vision path.</summary>
 public sealed class MllamaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "mllama";

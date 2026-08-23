@@ -78,7 +78,7 @@ public sealed unsafe class LtxVideoVaeEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         int output = _blockOut[0];
-        _convIn = new CausalConv3d(w["encoder.conv_in.conv.weight"], Bias(w, "encoder.conv_in.conv.bias"),
+        _convIn = new CausalConv3d(w["encoder.conv_in.conv.weight"], VaeOps.Bias(w, "encoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         int numStages = _blockOut.Length;
@@ -98,7 +98,7 @@ public sealed unsafe class LtxVideoVaeEncoder
             if (_scaling[i])
             {
                 stage.Downsampler = new CausalConv3d(
-                    w[$"{p}.downsamplers.0.conv.weight"], Bias(w, $"{p}.downsamplers.0.conv.bias"),
+                    w[$"{p}.downsamplers.0.conv.weight"], VaeOps.Bias(w, $"{p}.downsamplers.0.conv.bias"),
                     strideT: 2, strideH: 2, strideW: 2,
                     padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
             }
@@ -119,7 +119,7 @@ public sealed unsafe class LtxVideoVaeEncoder
             _midResnets[j].LoadWeights(w, $"encoder.mid_block.resnets.{j}");
         }
 
-        _convOut = new CausalConv3d(w["encoder.conv_out.conv.weight"], Bias(w, "encoder.conv_out.conv.bias"),
+        _convOut = new CausalConv3d(w["encoder.conv_out.conv.weight"], VaeOps.Bias(w, "encoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
 
         if (w.TryGetValue("latents_mean", out Tensor? lm)) _latentsMean = lm.DType == DType.F32 ? lm : lm.CastTo(DType.F32);
@@ -161,7 +161,7 @@ public sealed unsafe class LtxVideoVaeEncoder
         }
         foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
 
-        Tensor normed = ChannelRms(h, _lastChannel);
+        Tensor normed = LtxVaeResnetBlock3d.ChannelRms(h, _lastChannel);
         h.Dispose();
         backend.Silu(normed, normed);
         Tensor raw = _convOut!.Forward(backend, normed);   // [1, latentChannels+1, F, H, W] (mean + shared logvar)
@@ -264,25 +264,4 @@ public sealed unsafe class LtxVideoVaeEncoder
             }
         return outT;
     }
-
-    private static Tensor ChannelRms(Tensor x, int c)
-    {
-        int b = (int)x.Shape[0];
-        long spatial = x.Shape.ElementCount / ((long)b * c);
-        Tensor outT = new Tensor(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (long s = 0; s < spatial; s++)
-            {
-                long basePos = (long)bi * c * spatial + s;
-                double sum = 0;
-                for (int ci = 0; ci < c; ci++) { float v = xp[basePos + (long)ci * spatial]; sum += (double)v * v; }
-                float inv = 1f / MathF.Sqrt((float)(sum / c) + 1e-8f);
-                for (int ci = 0; ci < c; ci++) { long off = basePos + (long)ci * spatial; op[off] = xp[off] * inv; }
-            }
-        return outT;
-    }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
 }

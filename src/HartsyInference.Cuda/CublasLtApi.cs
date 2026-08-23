@@ -2,9 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>P/Invoke bindings for cuBLASLt. General F32/F16/BF16 matmul and epilogue fusion are available across
-/// the supported CUDA devices; individual low-precision formats such as FP8 still have architecture-specific
-/// requirements enforced by their executors.</summary>
+/// <summary>P/Invoke bindings for cuBLASLt. General F32/F16/BF16 matmul and epilogue fusion are available across the supported CUDA devices; individual low-precision formats such as FP8 still have architecture-specific requirements enforced by their executors.</summary>
 internal static partial class CublasLtApi
 {
     private const string LibName = "cublasLt";

@@ -3,18 +3,12 @@ using System.IO.Compression;
 
 namespace HartsyInference.Vision.Codec;
 
-/// <summary>Minimal pure-C# PNG decoder. Supports the two color types that 99% of test fixtures
-/// use — RGB (color type 2) and RGBA (color type 6, alpha dropped on output) — at 8 bits per
-/// channel, non-interlaced. Returns HWC-packed RGB u8 — the same input format every
-/// <c>HartsyInference.Vision</c> pipeline expects.
-/// <para>What we deliberately don't support:</para>
-/// <list type="bullet">
-///   <item>16-bit channels (uncommon for inference inputs; would need scaling to 8-bit anyway).</item>
-///   <item>Grayscale or palette inputs (rare for vision-model inference).</item>
-///   <item>Adam7 interlacing (largely obsolete; PNGs from modern encoders are non-interlaced).</item>
-/// </list>
-/// <para>For unsupported formats this decoder throws <see cref="NotSupportedException"/> with a
-/// descriptive message — callers can fall back to an external decoder or pre-convert images.</para></summary>
+/// <summary>Minimal pure-C# PNG decoder supporting the two color types 99% of test fixtures use — RGB
+/// (color type 2) and RGBA (color type 6, alpha dropped on output) — at 8 bits per channel, non-interlaced;
+/// returns HWC-packed RGB u8, the same input format every <c>HartsyInference.Vision</c> pipeline expects.
+/// Deliberately unsupported: 16-bit channels, grayscale/palette inputs, and Adam7 interlacing (obsolete);
+/// unsupported formats throw <see cref="NotSupportedException"/> with a descriptive message so callers can
+/// fall back to an external decoder or pre-convert images.</summary>
 public static class PngDecoder
 {
     private static readonly byte[] _pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];

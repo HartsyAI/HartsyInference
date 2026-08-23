@@ -3,15 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Mixture-of-Experts feed-forward block: a router picks the top-k experts per token, each selected
-/// expert (a SwiGLU FFN) runs only on the tokens routed to it (gather → expert GEMM → weighted scatter-add),
-/// plus an optional always-on shared expert applied to every token. Replaces the dense SwiGLU on MoE layers.
-/// Covers Qwen2-MoE / Qwen3-MoE / Mixtral (softmax routing) and DeepSeek (sigmoid routing); experts run through
-/// the same quant-aware <see cref="GenericTransformer.Project"/> path as the dense FFN.
-///
-/// <para><b>Routing residency:</b> the router logits are read to the host to pick top-k experts and build the
-/// per-expert token groups (one D2H per MoE layer). The expert GEMMs and the gather/scatter combine stay
-/// device-resident. A fully on-device top-k + dispatch is a follow-up; correctness is unaffected.</para></summary>
+/// <summary>Mixture-of-Experts feed-forward block: a router picks the top-k experts per token, each selected expert (a SwiGLU FFN) runs only on the tokens routed to it (gather → expert GEMM → weighted scatter-add), plus an optional always-on shared expert applied to every token, replacing the dense SwiGLU on MoE layers. Covers Qwen2-MoE/Qwen3-MoE/Mixtral (softmax routing) and DeepSeek (sigmoid routing); experts run through the same quant-aware <see cref="GenericTransformer.Project"/> path as the dense FFN.</summary>
+/// <remarks><b>Routing residency:</b> the router logits are read to the host to pick top-k experts and build the per-expert token groups (one D2H per MoE layer); the expert GEMMs and the gather/scatter combine stay device-resident. A fully on-device top-k + dispatch is a follow-up; correctness is unaffected.</remarks>
 public sealed class MoeFeedForward
 {
     private readonly MoeConfig _moe;
@@ -71,9 +64,7 @@ public sealed class MoeFeedForward
         if (_shGateScoreW is not null) yield return _shGateScoreW;
     }
 
-    /// <summary>Router logits (<c>x @ router_weight</c>) as their own <c>[1, N, E]</c> tensor, for callers that
-    /// need to compute them from a DIFFERENT input than the expert FFN's (Gemma-4: the router reads a separately
-    /// normalized view of the attention output) before passing them to <see cref="Forward"/>.</summary>
+    /// <summary>Router logits (<c>x @ router_weight</c>) as their own <c>[1, N, E]</c> tensor, for callers that need to compute them from a DIFFERENT input than the expert FFN's (Gemma-4: the router reads a separately normalized view of the attention output) before passing them to <see cref="Forward"/>.</summary>
     public Tensor ComputeRouterLogits(IBackend backend, Tensor x, int n)
     {
         Tensor logits = new(new TensorShape(1, n, _moe.NumExperts), DType.F32);
@@ -81,10 +72,7 @@ public sealed class MoeFeedForward
         return logits;
     }
 
-    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>. <paramref name="routerLogits"/>
-    /// overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a
-    /// differently-normalized view of the attention output than the expert FFN input, computed by the caller) —
-    /// same <c>[1, N, E]</c> shape either way, not disposed by this call.</summary>
+    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>; <paramref name="routerLogits"/> overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a differently-normalized view of the attention output, computed by the caller) — same <c>[1, N, E]</c> shape either way, not disposed by this call.</summary>
     public unsafe Tensor Forward(IBackend backend, Tensor x, int n, Tensor? routerLogits = null)
     {
         int e = _moe.NumExperts;
@@ -160,8 +148,7 @@ public sealed class MoeFeedForward
         return output;
     }
 
-    /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the
-    /// default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
+    /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
     private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter)
     {
         TensorShape ff = new(1, rows, inter);
@@ -232,11 +219,7 @@ public sealed class MoeFeedForward
         }
     }
 
-    /// <summary>DeepSeek-V3 / Kimi-K2 node-limited (group-limited) routing (HF <c>noaux_tc</c>): sigmoid scores +
-    /// per-expert correction bias form the SELECTION score; experts are partitioned into groups, each group scored
-    /// by the sum of its top-2 selection scores; only the top <c>ExpertGroupUsedCount</c> groups are eligible; the
-    /// per-token top-k is taken over the kept groups; the routing WEIGHT is the raw sigmoid score (no bias),
-    /// optionally renormalized over the selected experts, then scaled by <c>RoutedScalingFactor</c>.</summary>
+    /// <summary>DeepSeek-V3/Kimi-K2 node-limited (group-limited) routing (HF <c>noaux_tc</c>): sigmoid scores + per-expert correction bias form the SELECTION score; experts are partitioned into groups scored by the sum of their top-2 selection scores; only the top <c>ExpertGroupUsedCount</c> groups are eligible; the per-token top-k is taken over the kept groups; the routing WEIGHT is the raw sigmoid score (no bias), optionally renormalized, then scaled by <c>RoutedScalingFactor</c>.</summary>
     private void RouteGroupLimited(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
     {
         int nGroup = _moe.ExpertGroupCount;

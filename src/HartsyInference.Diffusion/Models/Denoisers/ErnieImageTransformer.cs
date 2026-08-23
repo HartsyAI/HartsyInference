@@ -60,7 +60,6 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         _rope = new ErnieImageRope([config.RopeAxesDim.Text, config.RopeAxesDim.Y, config.RopeAxesDim.X], config.RopeTheta);
     }
 
-    /// <summary>Convenience accessor for the configured architecture.</summary>
     public ErnieImageConfig Config => _config;
 
     /// <summary>Loads weights from a diffusers-style key dict (post-converter).</summary>

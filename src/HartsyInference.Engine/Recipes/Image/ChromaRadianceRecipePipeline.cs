@@ -21,9 +21,9 @@ public sealed class ChromaRadianceRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _checkpointLoader;
     private readonly SafeTensorsLoader _t5Loader;
 
-    /// <summary>Wraps the constructed Chroma Radiance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Chroma Radiance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
     public ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline, ChromaRadianceConfig config, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

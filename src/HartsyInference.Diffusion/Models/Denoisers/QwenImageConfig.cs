@@ -3,10 +3,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Configuration for Qwen-Image / Qwen-Image 2.0 MMDiT transformers (7B-20B by Alibaba). Features unified generation and editing (inpaint, outpaint, relighting, style transfer) through a single model. Uses Qwen VL text encoder and MMDiT architecture with AdaLN-Zero modulation.</summary>
 public sealed record QwenImageConfig
 {
-    /// <summary>Hidden dimension of the transformer.</summary>
     public required int HiddenSize { get; init; }
 
-    /// <summary>Number of attention heads.</summary>
     public required int NumHeads { get; init; }
 
     /// <summary>Per-head dimension.</summary>

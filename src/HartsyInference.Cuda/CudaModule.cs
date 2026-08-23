@@ -31,8 +31,7 @@ public sealed class CudaModule : IDisposable
     }
 
     /// <summary>Loads a PTX file from disk and JIT-compiles it for the current device.</summary>
-    /// <param name="maxRegisters">Per-thread register cap for the JIT (0 = let it choose). See
-    /// <see cref="LoadFromBytes"/> for why a kernel might need this.</param>
+    /// <param name="maxRegisters">Per-thread register cap for the JIT (0 = let it choose). See <see cref="LoadFromBytes"/> for why a kernel might need this.</param>
     public static CudaModule LoadFromFile(string ptxPath, int maxRegisters = 0)
     {
         if (!File.Exists(ptxPath))

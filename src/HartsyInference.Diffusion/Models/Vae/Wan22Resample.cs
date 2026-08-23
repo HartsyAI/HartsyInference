@@ -85,7 +85,7 @@ public sealed unsafe class Wan22Resample
             {
                 (bool skipDown, Tensor? prevLast) = cache.StepDownTimeConv(backend, spatial);
                 if (skipDown) return spatial;
-                Tensor joined = Vae3dLayout.ConcatFrames([prevLast!, spatial]);
+                Tensor joined = Vae3dLayout.ConcatFrames(backend, [prevLast!, spatial]);
                 prevLast!.Dispose();
                 spatial.Dispose();
                 Tensor strided = _downTimeConv.Forward(backend, joined, null, padTLeftOverride: 0);
@@ -164,24 +164,20 @@ public sealed unsafe class Wan22Resample
     private Tensor DownsampleSpatial(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor frames = Vae3dLayout.ToFrames(x, b, c, t, h, w);            // [BT,C,H,W]
-        Tensor padded = new Tensor(new TensorShape(b * t, c, h + 1, w + 1), DType.F32);
-        float* sp = (float*)frames.DataPointer;
-        float* pp = (float*)padded.DataPointer;
-        new Span<float>(pp, (int)Math.Min(int.MaxValue, padded.Shape.ElementCount)).Clear();
-        for (long bc = 0; bc < (long)b * t * c; bc++)
-            for (int row = 0; row < h; row++)
-                Buffer.MemoryCopy(
-                    sp + (bc * h + row) * w,
-                    pp + (bc * (h + 1) + row) * (w + 1),
-                    (long)w * 4, (long)w * 4);
+        // Both transposes and the pad stay on-device. The host forms below run at FULL encoder resolution
+        // (~590 MB per call at 480x800), so each one drained the stream, read the activation back and re-uploaded
+        // it — measured as 27 s of the 56 s Wan-Animate-2 VAE encode phase with no op to attribute it to.
+        Tensor frames = b == 1 ? Vae3dLayout.ToFrames(backend, x) : Vae3dLayout.ToFrames(x, b, c, t, h, w);
+        Tensor padded = VaeEncoder.PadRightBottom(backend, frames, b * t, c, h, w, DType.F32);
         frames.Dispose();
 
         int oh = h / 2, ow = w / 2;   // floor((H+1−3)/2)+1 for even H
         Tensor conv = new Tensor(new TensorShape(b * t, c, oh, ow), DType.F32);
         backend.Conv2D(conv, padded, _convW!, _convB, 2, 2, 0, 0);
         padded.Dispose();
-        Tensor outT = Vae3dLayout.FromFrames(conv, b, c, t, oh, ow);
+        Tensor outT = b == 1
+            ? Vae3dLayout.FromFrames(backend, conv, b, c, t, oh, ow)
+            : Vae3dLayout.FromFrames(conv, b, c, t, oh, ow);
         conv.Dispose();
         return outT;
     }

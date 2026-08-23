@@ -153,7 +153,7 @@ public sealed class YoloV11PoseModel
         Tensor x10 = _layer10.Forward(backend, x9); x9.Dispose();
 
         Tensor x11 = YoloV11Model.Upsample(backend, x10, 2);
-        Tensor x12 = YoloV11Model.ConcatChannel(backend, x11, x6); x11.Dispose();
+        Tensor x12 = YoloV11Model.ConcatChannel(backend, x11, x6); x11.Dispose(); x6.Dispose();
         Tensor x13 = _layer13.Forward(backend, x12); x12.Dispose();
 
         Tensor x14 = YoloV11Model.Upsample(backend, x13, 2);

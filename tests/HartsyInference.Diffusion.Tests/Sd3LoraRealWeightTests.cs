@@ -58,16 +58,17 @@ public sealed class Sd3LoraRealWeightTests
             Seed = 424242,
         };
 
+        Directory.CreateDirectory(TestPaths.OutputDir);
         byte[] withoutLora = Generate(checkpointPath, ptxDir, request, loras: null);
         _output.WriteLine($"Generated without LoRA ({withoutLora.Length} bytes).");
-        string withoutPath = Path.Combine(RepoRoot.Path, "sd3_lora_off.rgb");
+        string withoutPath = Path.Combine(TestPaths.OutputDir, "sd3_lora_off.rgb");
         File.WriteAllBytes(withoutPath, withoutLora);
         _output.WriteLine($"Wrote {withoutPath}.");
 
         LoraStack loraStack = new LoraStack { Entries = [new LoraEntry { Model = loraPath, Weight = 1.0 }] };
         byte[] withLora = Generate(checkpointPath, ptxDir, request, loras: loraStack);
         _output.WriteLine($"Generated with LoRA ({withLora.Length} bytes).");
-        string withPath = Path.Combine(RepoRoot.Path, "sd3_lora_on.rgb");
+        string withPath = Path.Combine(TestPaths.OutputDir, "sd3_lora_on.rgb");
         File.WriteAllBytes(withPath, withLora);
         _output.WriteLine($"Wrote {withPath}.");
 

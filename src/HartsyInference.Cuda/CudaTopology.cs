@@ -19,14 +19,11 @@ public readonly record struct GpuTopologyInfo(
 /// <param name="PeerAccessSupported">True when From can map To's memory directly (PCIe P2P or NVLink).</param>
 /// <param name="PerformanceRank">Driver's relative link ranking (lower is faster); -1 when no peer access.</param>
 /// <param name="NativeAtomics">True when native atomic operations work across the link.</param>
-/// <param name="LikelyNvLink">Heuristic: peer access + native atomics is the accepted driver-API signal for an
-/// NVLink-class link (NVML would be authoritative but is not a dependency).</param>
+/// <param name="LikelyNvLink">Heuristic: peer access + native atomics is the accepted driver-API signal for an NVLink-class link (NVML would be authoritative but is not a dependency).</param>
 public readonly record struct GpuLinkInfo(
     int From, int To, bool PeerAccessSupported, int PerformanceRank, bool NativeAtomics, bool LikelyNvLink);
 
-/// <summary>Device-topology probe for the placement planner: per-device VRAM/compute-capability/SM count plus
-/// the directed peer-link matrix. Read-only queries; the free-VRAM number binds each device's primary context
-/// briefly, and <see cref="ProbeLinks"/> never enables peer access.</summary>
+/// <summary>Device-topology probe for the placement planner: per-device VRAM/compute-capability/SM count plus the directed peer-link matrix. Read-only queries; the free-VRAM number binds each device's primary context briefly, and <see cref="ProbeLinks"/> never enables peer access.</summary>
 public static class CudaTopology
 {
     /// <summary>Probes every visible CUDA device. Empty when CUDA is unavailable.</summary>
@@ -61,8 +58,7 @@ public static class CudaTopology
         return devices;
     }
 
-    /// <summary>Probes every ordered device pair's peer-link capability. Query-only — peer access is never
-    /// enabled, so context state is untouched. Empty when CUDA is unavailable or fewer than two devices.</summary>
+    /// <summary>Probes every ordered device pair's peer-link capability. Query-only — peer access is never enabled, so context state is untouched. Empty when CUDA is unavailable or fewer than two devices.</summary>
     public static IReadOnlyList<GpuLinkInfo> ProbeLinks()
     {
         // TODO: per-link bandwidth microbench (needs GPU compute) — deferred, see ROADMAP §1 Phase 1.

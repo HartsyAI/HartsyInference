@@ -9,13 +9,10 @@ public sealed record MatrixGame2Config
     /// <summary>Patch size (t, h, w) for the Conv3d patch embedding.</summary>
     public (int T, int H, int W) PatchSize { get; init; } = (1, 2, 2);
 
-    /// <summary>Attention heads.</summary>
     public int NumHeads { get; init; } = 12;
 
-    /// <summary>Per-head dim.</summary>
     public int HeadDim { get; init; } = 128;
 
-    /// <summary>Inner model dim.</summary>
     public int InnerDim => NumHeads * HeadDim;
 
     /// <summary>Patch-embed input channels: 16 noisy latent + 4 mask + 16 image-condition latent.</summary>
@@ -33,13 +30,11 @@ public sealed record MatrixGame2Config
     /// <summary>Timestep sinusoidal frequency dim.</summary>
     public int FreqDim { get; init; } = 256;
 
-    /// <summary>FFN inner dim.</summary>
     public int FfnDim { get; init; } = 8960;
 
     /// <summary>Number of DiT blocks.</summary>
     public int NumLayers { get; init; } = 30;
 
-    /// <summary>Norm epsilon.</summary>
     public float Eps { get; init; } = 1e-6f;
 
     /// <summary>Main DiT RoPE θ.</summary>

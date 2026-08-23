@@ -396,9 +396,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private static bool TokensEqual(int[]? cached, int[]? incoming)
         => cached is null ? incoming is null : incoming is not null && cached.AsSpan().SequenceEqual(incoming);
 
-    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) (SDXL-family
-    /// 4-channel VAE, scaling applied inside the encoder) combined with fresh noise via flow-matching AddNoise at
-    /// sigma[startStep].
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) (SDXL-family 4-channel VAE, scaling applied inside the encoder) combined with fresh noise via flow-matching AddNoise at sigma[startStep].
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned
     /// alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain
     /// img2img.</para></summary>

@@ -53,27 +53,14 @@ public static class ModelAcquisition
         }
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
-        foreach (ModelAsset a in missing)
-            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)} [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]");
+        ListMissingAssets(missing, showTargetDir: true);
 
         if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
             return spec;
 
         try
         {
-            AnsiConsole.Progress()
-                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
-                .Start(ctx =>
-                {
-                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
-                    foreach (ModelAsset a in missing)
-                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
-                    ModelDownloader.DownloadAsync(missing, (a, fraction) =>
-                    {
-                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
-                            task.Value = fraction;
-                    }, CancellationToken.None).GetAwaiter().GetResult();
-                });
+            DownloadWithProgressAsync(missing, CancellationToken.None).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -86,8 +73,7 @@ public static class ModelAcquisition
         return primary is not null ? spec with { LocalPath = primary } : spec;
     }
 
-    /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the
-    /// <c>Models/&lt;subdir&gt;</c> tree — these must never be pulled via <see cref="ModelDownloader"/>.</summary>
+    /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the <c>Models/&lt;subdir&gt;</c> tree.</summary>
     internal static bool UsesAudioCache(CatalogEntry cat, Modality modality)
         => AudioCacheModalities.Contains(modality) && !StandardDownloadMusicIds.Contains(cat.Id);
 
@@ -105,8 +91,7 @@ public static class ModelAcquisition
             return true;
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
-        foreach (ModelAsset a in missing)
-            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}");
+        ListMissingAssets(missing, showTargetDir: false);
 
         if (confirm && !InteractivePrompt.Confirm("Download these now?", defaultYes: false))
             return false;
@@ -142,13 +127,42 @@ public static class ModelAcquisition
         return true;
     }
 
+    /// <summary>Lists one line per missing asset under the caller's own header.</summary>
+    /// <param name="showTargetDir">False for audio-cache assets, whose <c>TargetSubdir</c> is display-only and would name a folder they never land in.</param>
+    internal static void ListMissingAssets(IReadOnlyList<ModelAsset> missing, bool showTargetDir)
+    {
+        foreach (ModelAsset a in missing)
+        {
+            string target = showTargetDir ? $" [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]" : "";
+            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}{target}");
+        }
+    }
+
+    /// <summary>Downloads <paramref name="missing"/> through <see cref="ModelDownloader"/> under a per-file progress bar.</summary>
+    /// <remarks>Throws on failure — the confirm prompt, the header, and the error presentation differ per caller and stay there.</remarks>
+    internal static async Task DownloadWithProgressAsync(IReadOnlyList<ModelAsset> missing, CancellationToken ct)
+    {
+        await AnsiConsole.Progress()
+            .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
+            .StartAsync(async ctx =>
+            {
+                Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
+                foreach (ModelAsset a in missing)
+                    tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
+                await ModelDownloader.DownloadAsync(missing, (a, fraction) =>
+                {
+                    if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
+                        task.Value = fraction;
+                }, ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+    }
+
     /// <summary>The real on-disk path for an audio asset: <see cref="AudioModelCache"/>'s directory, not <see cref="ModelDownloader"/>'s.</summary>
     /// <remarks>Audio descriptors call <c>AudioModelCache.GetAsync</c> directly and never read <c>ModelSpec.LocalPath</c>
     /// for HF-backed models, so <c>TargetSubdir</c>/<c>TargetName</c> on these catalog entries are display-only.</remarks>
     private static string AudioAssetPath(ModelAsset a, string category) => Path.Combine(AudioModelCache.GetRepoDirectory(a.Repo, category), a.RepoPath);
 
-    /// <summary>Maps a CLI modality to the <see cref="AudioModelCache"/> category folder — mirrors
-    /// <c>AudioWeights.CategorySubfolder</c> (SwarmUI extension) for the audio-cache-backed modalities.</summary>
+    /// <summary>Maps a CLI modality to the <see cref="AudioModelCache"/> category folder, mirroring <c>AudioWeights.CategorySubfolder</c> in the SwarmUI extension.</summary>
     private static string AudioCategoryFor(Modality modality) => modality switch
     {
         Modality.Speech => "tts",

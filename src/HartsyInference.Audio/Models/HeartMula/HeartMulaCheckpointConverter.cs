@@ -3,30 +3,24 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>Remaps the published HeartMuLa-oss-3B checkpoint (torchtune <c>llama3_2</c> layout) onto the key
-/// names the engine's <see cref="Csm.CsmModel"/> / <c>GenericTransformer</c> expect (HF-Llama names), and
-/// splits the two fused tensors the upstream model stores as single parameters.
-///
-/// <para>Verified against the upstream <c>heartlib</c> (<c>modeling_heartmula.py</c>). Real → engine map:</para>
-/// <list type="bullet">
-/// <item><c>{bb}.layers.N.attn.q_proj/k_proj/v_proj</c> → <c>{bb}.layers.N.self_attn.q_proj/k_proj/v_proj</c></item>
-/// <item><c>{bb}.layers.N.attn.output_proj</c> → <c>self_attn.o_proj</c></item>
-/// <item><c>{bb}.layers.N.mlp.w1/w3/w2</c> → <c>mlp.gate_proj/up_proj/down_proj</c> (SwiGLU: w1=gate, w3=up, w2=down)</item>
-/// <item><c>{bb}.layers.N.sa_norm.scale</c> → <c>input_layernorm.weight</c>; <c>mlp_norm.scale</c> → <c>post_attention_layernorm.weight</c></item>
-/// <item><c>{bb}.norm.scale</c> → <c>{bb}.norm.weight</c> (bb ∈ {backbone, decoder})</item>
-/// <item><c>audio_embeddings.weight</c> <c>[NumCodebooks·AudioVocab, H]</c> → split into
-///   <c>audio_embeddings.{i}.weight</c> <c>[AudioVocab, H]</c> (row block <c>i·AudioVocab .. (i+1)·AudioVocab</c>,
-///   matching <c>_embed_audio(i, t) = embed(t + i·audio_vocab)</c>).</item>
-/// <item><c>audio_head</c> <c>[NumCodebooks-1, decoderH, AudioVocab]</c> (a single <c>nn.Parameter</c>, used as
-///   <c>h @ audio_head[i]</c>, i.e. <c>[in, out]</c>) → split + transpose into <c>audio_head.{i}.weight</c>
-///   <c>[AudioVocab, decoderH]</c> (the <c>[out, in]</c> layout <c>ProjectLinear</c> needs).</item>
-/// </list>
-/// <para><c>text_embeddings.weight</c>, <c>codebook0_head.weight</c>, <c>projection.weight</c>,
-/// <c>muq_linear.{weight,bias}</c>, <c>unconditional_text_embedding.weight</c> pass through unchanged.</para></summary>
+/// <summary>Remaps the published HeartMuLa-oss-3B checkpoint (torchtune <c>llama3_2</c> layout) onto the key names the engine's <see cref="Csm.CsmModel"/> / <c>GenericTransformer</c> expect (HF-Llama names), and splits the two fused tensors the upstream model stores as single parameters.</summary>
+// Verified against the upstream heartlib (modeling_heartmula.py). Real → engine map:
+//   {bb}.layers.N.attn.q_proj/k_proj/v_proj → {bb}.layers.N.self_attn.q_proj/k_proj/v_proj
+//   {bb}.layers.N.attn.output_proj → self_attn.o_proj
+//   {bb}.layers.N.mlp.w1/w3/w2 → mlp.gate_proj/up_proj/down_proj (SwiGLU: w1=gate, w3=up, w2=down)
+//   {bb}.layers.N.sa_norm.scale → input_layernorm.weight; mlp_norm.scale → post_attention_layernorm.weight
+//   {bb}.norm.scale → {bb}.norm.weight (bb ∈ {backbone, decoder})
+//   audio_embeddings.weight [NumCodebooks·AudioVocab, H] → split into audio_embeddings.{i}.weight
+//     [AudioVocab, H] (row block i·AudioVocab .. (i+1)·AudioVocab, matching
+//     _embed_audio(i, t) = embed(t + i·audio_vocab)).
+//   audio_head [NumCodebooks-1, decoderH, AudioVocab] (a single nn.Parameter, used as h @ audio_head[i],
+//     i.e. [in, out]) → split + transpose into audio_head.{i}.weight [AudioVocab, decoderH] (the [out, in]
+//     layout ProjectLinear needs).
+// text_embeddings.weight, codebook0_head.weight, projection.weight, muq_linear.{weight,bias},
+// unconditional_text_embedding.weight pass through unchanged.
 public static unsafe class HeartMulaCheckpointConverter
 {
-    /// <summary>Remaps a raw HeartMuLa checkpoint dictionary into the engine key layout. Pass-through tensors
-    /// are shared (no copy); the two fused tensors are split into freshly-allocated F32 tensors.</summary>
+    /// <summary>Remaps a raw HeartMuLa checkpoint dictionary into the engine key layout; pass-through tensors are shared (no copy), while the two fused tensors are split into freshly-allocated F32 tensors.</summary>
     public static Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> w, HeartMulaConfig cfg)
     {
         int nb = cfg.Lm.NumCodebooks;
@@ -102,9 +96,7 @@ public static unsafe class HeartMulaCheckpointConverter
         }
     }
 
-    /// <summary>Splits + transposes the fused <c>audio_head</c> <c>[nb-1, decH, vocab]</c> Parameter into
-    /// <c>nb-1</c> heads of <c>[vocab, decH]</c> (transpose the per-head <c>[decH, vocab]</c> = <c>[in, out]</c>
-    /// slice so it matches <c>ProjectLinear</c>'s <c>[out, in]</c> weight layout).</summary>
+    /// <summary>Splits + transposes the fused <c>audio_head</c> <c>[nb-1, decH, vocab]</c> Parameter into <c>nb-1</c> heads of <c>[vocab, decH]</c>, matching <c>ProjectLinear</c>'s <c>[out, in]</c> weight layout.</summary>
     private static void SplitAudioHead(Dictionary<string, Tensor> outW, Tensor fused, int nb, int vocab, int decH)
     {
         if (fused.Shape[0] != nb - 1 || fused.Shape[1] != decH || fused.Shape[2] != vocab)

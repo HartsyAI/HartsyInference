@@ -8,12 +8,7 @@ using HartsyInference.Vision.Detection;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Resolves Wan-Animate's two driving inputs — the pose skeleton clip (<c>[1,3,T,H,W]</c>) and the cropped
-/// face clip (<c>[1,3,T−1,S,S]</c>), both in [-1, 1] — from the request. Per branch the precedence is: explicit
-/// pre-rendered override clip → auto-preprocess of the driving video (YOLO11-pose skeleton render / face crop, the
-/// format the checkpoint was trained on) → the raw driving clip resized (face branch center-crop-squared) → the
-/// tiled <see cref="VideoRequest.InitImage"/> still. Ported from the SwarmUI extension's
-/// <c>WanAnimateDrivingPreprocessor</c>.</summary>
+/// <summary>Resolves Wan-Animate's two driving inputs — the pose skeleton clip (<c>[1,3,T,H,W]</c>) and the cropped face clip (<c>[1,3,T−1,S,S]</c>), both in [-1, 1] — from the request. Per branch the precedence is: explicit pre-rendered override clip → auto-preprocess of the driving video (YOLO11-pose skeleton render / face crop, the format the checkpoint was trained on) → the raw driving clip resized (face branch center-crop-squared) → the tiled <see cref="VideoRequest.InitImage"/> still. Ported from the SwarmUI extension's <c>WanAnimateDrivingPreprocessor</c>.</summary>
 internal static class WanAnimateDrivingResolver
 {
     private static int _poseWeightsWarned;
@@ -22,10 +17,7 @@ internal static class WanAnimateDrivingResolver
     internal sealed record ResolvedClips(Tensor PoseClip, Tensor FaceClip, int FrameCount, int? DrivingFps,
         Tensor? BackgroundClip = null, Tensor? MaskClip = null);
 
-    /// <summary>Builds both driving clips; <paramref name="requestedFrames"/> is the grid-resolved request count, which a
-    /// shorter driving video shrinks per <see cref="ResolveDrivingFrames"/> unless <paramref name="pinFrameCount"/>.
-    /// <paramref name="frameOffset"/> seeks every driving input (the chunked extension's <c>video_frame_offset</c>).
-    /// The caller owns disposal of both tensors.</summary>
+    /// <summary>Builds both driving clips; <paramref name="requestedFrames"/> is the grid-resolved request count, which a shorter driving video shrinks per <see cref="ResolveDrivingFrames"/> unless <paramref name="pinFrameCount"/>. <paramref name="frameOffset"/> seeks every driving input (the chunked extension's <c>video_frame_offset</c>). The caller owns disposal of both tensors.</summary>
     internal static ResolvedClips Resolve(IBackend backend, VideoRequest request, int width, int height,
         int requestedFrames, int temporalStep, int motionSize, CancellationToken cancel,
         int frameOffset = 0, bool pinFrameCount = false)
@@ -122,8 +114,7 @@ internal static class WanAnimateDrivingResolver
         }
     }
 
-    /// <summary>Frame-count rule for a decoded driving video: <c>min(requested, available)</c> snapped DOWN onto the
-    /// VAE's <c>step·n + 1</c> temporal grid, floored at 5 (the face pathway downsamples 4x).</summary>
+    /// <summary>Frame-count rule for a decoded driving video: <c>min(requested, available)</c> snapped DOWN onto the VAE's <c>step·n + 1</c> temporal grid, floored at 5 (the face pathway downsamples 4x).</summary>
     internal static int ResolveDrivingFrames(int requestedFrames, int availableFrames, int temporalStep)
     {
         int frames = Math.Min(requestedFrames, Math.Max(1, availableFrames));
@@ -131,15 +122,11 @@ internal static class WanAnimateDrivingResolver
         return Math.Max(frames, 5);
     }
 
-    /// <summary>Per-chunk frame count. A continuation chunk PINS the request's count: the latent geometry, noise shape
-    /// and motion-prefix arithmetic were all fixed against it, so shrinking a late chunk because the seeked driving
-    /// video ran short would break the sequence — upstream never shrinks either, it repeat-pads the pose's last
-    /// frame. Chunk 0 keeps the shrink rule so single-chunk generation is unchanged.</summary>
+    /// <summary>Per-chunk frame count. A continuation chunk PINS the request's count: the latent geometry, noise shape and motion-prefix arithmetic were all fixed against it, so shrinking a late chunk because the seeked driving video ran short would break the sequence — upstream never shrinks either, it repeat-pads the pose's last frame. Chunk 0 keeps the shrink rule so single-chunk generation is unchanged.</summary>
     internal static int ResolveChunkFrames(int requestedFrames, int availableFrames, int temporalStep, bool pinFrameCount) =>
         pinFrameCount ? requestedFrames : ResolveDrivingFrames(requestedFrames, availableFrames, temporalStep);
 
-    /// <summary>Drops the leading <paramref name="frameOffset"/> frames in place (ffmpeg is decoded from frame 0 —
-    /// <see cref="FfmpegProcessDecoder"/> has no seek), leaving an empty list when the clip is shorter.</summary>
+    /// <summary>Drops the leading <paramref name="frameOffset"/> frames in place (ffmpeg is decoded from frame 0 — <see cref="FfmpegProcessDecoder"/> has no seek), leaving an empty list when the clip is shorter.</summary>
     internal static List<byte[]> DropLeadingFrames(List<byte[]> frames, int frameOffset)
     {
         ArgumentNullException.ThrowIfNull(frames);
@@ -218,9 +205,7 @@ internal static class WanAnimateDrivingResolver
             "Wan-Animate needs a driving motion input: set VideoRequest.DrivingVideo (a driving video) "
             + "or VideoRequest.InitImage (a still tiled across frames).");
 
-    /// <summary>Decodes an override clip at the exact target geometry from <paramref name="frameOffset"/> onward and
-    /// packs it, truncated/repeat-padded to <paramref name="numFrames"/> (the extension's <c>DecodeControlClip</c>
-    /// semantics).</summary>
+    /// <summary>Decodes an override clip at the exact target geometry from <paramref name="frameOffset"/> onward and packs it, truncated/repeat-padded to <paramref name="numFrames"/> (the extension's <c>DecodeControlClip</c> semantics).</summary>
     private static Tensor DecodeToClip(VideoClip clip, int width, int height, int numFrames, int frameOffset,
         string branch, CancellationToken cancel)
     {
@@ -236,9 +221,7 @@ internal static class WanAnimateDrivingResolver
         return VideoRecipeUtils.PackRgbFramesToClip(FitFrames(frames, numFrames), width, height);
     }
 
-    /// <summary>Background clip for one chunk, seeked and truncated but NEVER repeat-padded: upstream writes background
-    /// only up to the decoded length and leaves the rest of the conditioning mid-gray, and a seek past its end drops
-    /// the background for that chunk entirely (null).</summary>
+    /// <summary>Background clip for one chunk, seeked and truncated but NEVER repeat-padded: upstream writes background only up to the decoded length and leaves the rest of the conditioning mid-gray, and a seek past its end drops the background for that chunk entirely (null).</summary>
     private static Tensor? DecodeBackgroundClip(VideoClip clip, int width, int height, int numFrames, int frameOffset,
         CancellationToken cancel)
     {
@@ -271,8 +254,7 @@ internal static class WanAnimateDrivingResolver
         }
     }
 
-    /// <summary>Loads the shared YOLO11-pose pipeline for auto-preprocess, or null (→ raw-clip fallback, warned once)
-    /// when the folded weights are not installed or fail to load — auto is the default, so this never throws.</summary>
+    /// <summary>Loads the shared YOLO11-pose pipeline for auto-preprocess, or null (→ raw-clip fallback, warned once) when the folded weights are not installed or fail to load — auto is the default, so this never throws.</summary>
     private static YoloPosePipeline? TryCreatePosePipeline(IBackend backend)
     {
         string? path = ModelFileLocator.Find(IpAdapterResolver.PoseWeightsFile, IpAdapterResolver.DetectorFolders);

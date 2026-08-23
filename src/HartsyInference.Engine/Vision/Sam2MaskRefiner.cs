@@ -8,8 +8,7 @@ using HartsyInference.Vision.Segmentation.Sam2;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Refines a detector's bounding box into a pixel-accurate mask with SAM 2 (box prompt). Always optional:
-/// when no checkpoint is installed or the refine fails, the caller falls back to rasterizing the box.</summary>
+/// <summary>Refines a detector's bounding box into a pixel-accurate mask with SAM 2 (box prompt). Always optional: when no checkpoint is installed or the refine fails, the caller falls back to rasterizing the box.</summary>
 public sealed class Sam2MaskRefiner : IDisposable
 {
     // HF Sam2ImageProcessor: resize to exactly 1024×1024, then ImageNet normalize. Prompts share that square frame.

@@ -22,7 +22,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
     private Tensor? _projMlpWeight, _projMlpBias;
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>Creates a Hunyuan Image single-stream block.</summary>
+    /// <summary>Creates a single-stream block; requires <c>numHeads * headDim == hiddenSize</c>.</summary>
     public HunyuanImageSingleBlock(int hiddenSize, int numHeads, int headDim, int mlpDim, float qkNormEps = 1e-6f)
     {
         if (numHeads * headDim != hiddenSize)

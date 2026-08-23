@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native, transport-agnostic text/image-to-video request. Carries the common generation props plus the
-/// video-specific model selections, framing, trimming, and audio-track inputs the backend reads.</summary>
+/// <summary>Native, transport-agnostic text/image-to-video request. Carries the common generation props plus the video-specific model selections, framing, trimming, and audio-track inputs the backend reads.</summary>
 public sealed record VideoRequest
 {
     /// <summary>The positive prompt.</summary>
@@ -25,8 +24,7 @@ public sealed record VideoRequest
     /// <summary>Flow-match sigma shift; null uses the family's officially recommended shift.</summary>
     public float? FlowShift { get; init; }
 
-    /// <summary>Sampler name; null uses the family's canonical solver. A family that cannot honor the named sampler
-    /// refuses rather than silently substituting its own.</summary>
+    /// <summary>Sampler name; null uses the family's canonical solver. A family that cannot honor the named sampler refuses rather than silently substituting its own.</summary>
     public string? Sampler { get; init; }
 
     /// <summary>Sigma-schedule name, independent of <see cref="Sampler"/>; null keeps the family's own spacing. The two
@@ -69,8 +67,7 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
-    /// <summary>Reference images a reference-conditioned family should carry identity/style from; null for none.
-    /// Distinct from <see cref="InitImage"/>, which pins an actual frame rather than describing subject matter.</summary>
+    /// <summary>Reference images a reference-conditioned family should carry identity/style from; null for none. Distinct from <see cref="InitImage"/>, which pins an actual frame rather than describing subject matter.</summary>
     public IReadOnlyList<ImageData>? ReferenceImages { get; init; }
 
     /// <summary>Reference clips, each with its own optional soundtrack; null for none.</summary>
@@ -79,8 +76,7 @@ public sealed record VideoRequest
     /// <summary>Standalone reference audio clips, not tied to any reference video; null for none.</summary>
     public IReadOnlyList<AudioClip>? ReferenceAudios { get; init; }
 
-    /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling
-    /// <see cref="InitImage"/> across frames.</summary>
+    /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling <see cref="InitImage"/> across frames.</summary>
     public VideoClip? DrivingVideo { get; init; }
 
     /// <summary>Pre-rendered pose/skeleton driving video; overrides auto-preprocessing for the pose branch.</summary>
@@ -89,29 +85,29 @@ public sealed record VideoRequest
     /// <summary>Pre-cropped face-square driving video; overrides auto-preprocessing for the face branch.</summary>
     public VideoClip? DrivingFaceVideo { get; init; }
 
-    /// <summary>Wan-Animate replacement mode: the background clip the character is composited into. The concat
-    /// conditioning's generated frames carry this video instead of the mid-gray placeholder (ComfyUI
-    /// <c>WanAnimateToVideo.background_video</c>).</summary>
+    /// <summary>Wan-Animate replacement mode: the background clip the character is composited into. The concat conditioning's generated frames carry this video instead of the mid-gray placeholder (ComfyUI <c>WanAnimateToVideo.background_video</c>).</summary>
     public VideoClip? DrivingBackgroundVideo { get; init; }
 
-    /// <summary>Wan-Animate replacement mode: per-frame character mask (white = generate the character there,
-    /// black = keep the background). A single-frame clip repeats over the whole video (ComfyUI
-    /// <c>WanAnimateToVideo.character_mask</c>).</summary>
+    /// <summary>Wan-Animate replacement mode: per-frame character mask (white = generate the character there, black = keep the background). A single-frame clip repeats over the whole video (ComfyUI <c>WanAnimateToVideo.character_mask</c>).</summary>
     public VideoClip? DrivingMaskVideo { get; init; }
 
-    /// <summary>Auto-derive the pose skeleton and face crop from <see cref="DrivingVideo"/> (the format the
-    /// checkpoint was trained on); off passes the raw clip to both branches.</summary>
+    /// <summary>Auto-derive the pose skeleton and face crop from <see cref="DrivingVideo"/> (the format the checkpoint was trained on); off passes the raw clip to both branches.</summary>
     public bool DrivingAutoPreprocess { get; init; } = true;
 
-    /// <summary>Wan-Animate chunked extension: total output frames, generated as successive <see cref="Frames"/>-long
-    /// chunks each conditioned on the previous chunk's tail. Null (or ≤ <see cref="Frames"/>) generates one chunk.
-    /// The driving video should be at least this long — a short one freezes on its last frame.</summary>
+    /// <summary>Wan-Animate chunked extension: total output frames, generated as successive <see cref="Frames"/>-long chunks each conditioned on the previous chunk's tail. Null (or ≤ <see cref="Frames"/>) generates one chunk. The driving video should be at least this long — a short one freezes on its last frame.</summary>
     public int? AnimateTotalFrames { get; init; }
 
-    /// <summary>Frames of the previous chunk carried into the next as motion context (ComfyUI
-    /// <c>continue_motion_max_frames</c>); snapped down onto the <c>4n+1</c> grid. Longer holds continuity better and
-    /// costs that many re-rendered frames per chunk.</summary>
+    /// <summary>Frames of the previous chunk carried into the next as motion context (ComfyUI <c>continue_motion_max_frames</c>); snapped down onto the <c>4n+1</c> grid. Longer holds continuity better and costs that many re-rendered frames per chunk.</summary>
     public int AnimateContinueMotionFrames { get; init; } = 5;
+
+    /// <summary>Wan-Animate chunked extension: strength (0..1) of the per-chunk colour correction — every chunk after the first is Lab mean/std-matched to the reference image so colour drift cannot compound through the carried-frame chain. Null = 1 (fully matched); 0 disables. Chunk 0 is never touched, so single-chunk generations are unaffected at any value.</summary>
+    public double? AnimateColorCorrection { get; init; }
+
+    /// <summary>Wan-Animate-2 only: scales the driving stream's attention values (ComfyUI <c>pose_strength</c>) — above 1 over-drives the motion, below 1 under-drives it. Null = 1.0, the trained behaviour. Wan-Animate (V1) has no such pathway and refuses a non-default value by name.</summary>
+    public double? AnimatePoseStrength { get; init; }
+
+    /// <summary>Wan-Animate-2 only: scales the reference-image slot's attention values (ComfyUI <c>reference_image_strength</c>) — the weight of the character identity image in every block. Null = 1.0, the trained behaviour. Wan-Animate (V1) has no such pathway and refuses a non-default value by name.</summary>
+    public double? AnimateReferenceImageStrength { get; init; }
 
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }

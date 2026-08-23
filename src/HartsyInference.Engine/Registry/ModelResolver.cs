@@ -2,8 +2,7 @@ using HartsyInference.Engine.Dispatch;
 
 namespace HartsyInference.Engine.Registry;
 
-/// <summary>Turns a user's <c>--model</c> / <c>--model-path</c> selection into a <see cref="ModelSpec"/> by matching
-/// the catalog and locating a local checkpoint (explicit path, raw path, or under the models root).</summary>
+/// <summary>Turns a user's <c>--model</c> / <c>--model-path</c> selection into a <see cref="ModelSpec"/> by matching the catalog and locating a local checkpoint (explicit path, raw path, or under the models root).</summary>
 public static class ModelResolver
 {
     private static readonly Dictionary<Modality, string> ModalitySubdir = new()
@@ -23,8 +22,7 @@ public static class ModelResolver
         [Modality.Restore] = "Video",
     };
 
-    /// <summary>Resolves a model selection for <paramref name="modality"/>. <paramref name="modelArg"/> may be a catalog
-    /// id, a local path, or an HF repo id; <paramref name="modelPathArg"/> is an explicit override that wins.</summary>
+    /// <summary>Resolves a model selection for <paramref name="modality"/>. <paramref name="modelArg"/> may be a catalog id, a local path, or an HF repo id; <paramref name="modelPathArg"/> is an explicit override that wins.</summary>
     public static ModelSpec Resolve(string modelArg, string? modelPathArg, Modality modality)
     {
         CatalogEntry? catalog = ModelCatalog.Find(modelArg);

@@ -10,16 +10,7 @@ using HartsyInference.Vision.Dinov2;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
-/// <summary>TRELLIS single-image → 3D Gaussian-splat pipeline: a DINOv2-with-registers conditioner encodes the
-/// image, a rectified-flow stage denoises a sparse 16³ occupancy grid to pick the active voxels, a second
-/// rectified-flow stage denoises a structured latent (SLAT) over those voxels, and the GS decoder turns the SLAT
-/// into a <see cref="GaussianSplatCloud"/>. The flexicubes mesh decoder and radiance-field decoder are not yet
-/// ported (see <c>docs/Checklists/TRELLIS_BUILD_PLAN.md</c>), so this pipeline only ever populates
-/// <see cref="ThreeDResult.Splats"/>, never <see cref="ThreeDResult.Mesh"/>.
-/// <para><b>Numerics validation-pending</b> — every network stage is parity-verified against the reference
-/// TRELLIS in isolation (see <c>TrellisStage1/2ParityTests</c>, <c>TrellisGsDecoderParityTests</c>), but the
-/// assembled pipeline's rendered splat output has not yet been visually cross-checked against the reference
-/// pipeline's render, the way <see cref="TripoSrPipeline"/>'s mesh output has.</para></summary>
+/// <summary>TRELLIS single-image → 3D Gaussian-splat pipeline: two rectified-flow stages (sparse-structure, then SLAT) followed by GS decode; the mesh and radiance-field decoders are not yet ported, so only <see cref="ThreeDResult.Splats"/> is ever populated.</summary>
 public sealed unsafe class TrellisImageTo3DPipeline : ThreeDPipelineBase
 {
     // TRELLIS-image-large's fixed SLAT normalization constants (upstream `pipeline.json` → slat_normalization).
@@ -54,12 +45,7 @@ public sealed unsafe class TrellisImageTo3DPipeline : ThreeDPipelineBase
         _preprocessor = new Dinov2ImagePreprocessor(Dinov2Preset.LargeReg.ImageSize);
     }
 
-    /// <summary>Loads a TRELLIS image-to-3D pipeline from a checkpoint directory. Expects the four upstream
-    /// <c>microsoft/TRELLIS-image-large</c> component files by their canonical <c>ckpts/</c> names
-    /// (<c>ss_flow_img_dit_L_16l8_fp16</c>, <c>ss_dec_conv3d_16l8_fp16</c>, <c>slat_flow_img_dit_L_64l8p2_fp16</c>,
-    /// <c>slat_dec_gs_swin8_B_64l8gs32_fp16</c>) plus a DINOv2-with-registers-large conditioner file named
-    /// <c>dinov2_vitl14_reg.safetensors</c> (HF <c>facebook/dinov2-with-registers-large</c> key format), all
-    /// under <paramref name="modelPath"/>.</summary>
+    /// <summary>Loads a TRELLIS image-to-3D pipeline from a checkpoint directory, expecting the four upstream <c>microsoft/TRELLIS-image-large</c> component files plus a DINOv2-with-registers conditioner by their canonical names.</summary>
     public static TrellisImageTo3DPipeline LoadFromPath(IBackend backend, string modelPath)
     {
         ArgumentNullException.ThrowIfNull(backend);

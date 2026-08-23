@@ -40,7 +40,7 @@ public sealed class KaldiFbankExtractor
 
         _frameLength = (int)(sampleRate * frameLengthMs / 1000.0);
         _frameShift = (int)(sampleRate * frameShiftMs / 1000.0);
-        _fftSize = NextPow2(_frameLength);
+        _fftSize = Fft.NextPow2(_frameLength);
         _numFftBins = _fftSize / 2 + 1;
         _numMel = numMelBins;
         _window = PoveyWindow(_frameLength);
@@ -144,11 +144,4 @@ public sealed class KaldiFbankExtractor
     }
 
     private static double MelScale(double freqHz) => 1127.0 * Math.Log(1.0 + freqHz / 700.0);
-
-    private static int NextPow2(int n)
-    {
-        int p = 1;
-        while (p < n) p <<= 1;
-        return p;
-    }
 }

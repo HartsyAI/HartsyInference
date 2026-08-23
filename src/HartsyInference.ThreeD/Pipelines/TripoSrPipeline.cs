@@ -12,12 +12,7 @@ using HartsyInference.Vision.DinoVit;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
-/// <summary>TripoSR single-image → mesh pipeline: a DINO ViT tokenizes the image, the triplane transformer
-/// produces a <see cref="Triplane"/>, and the NeRF decoder yields a density field that marching cubes turns
-/// into a colored mesh. Feed-forward and deterministic — no diffusion loop. Reuses the DINOv2 encoder
-/// (LayerScale optional), the triplane sampler, marching cubes, and the exporters.
-/// <para><b>Numerics validation-pending</b> — produces a real mesh structurally; per-checkpoint fidelity
-/// awaits the reference-diff pass.</para></summary>
+/// <summary>TripoSR single-image → mesh pipeline: a DINO ViT tokenizes the image, the triplane transformer produces a <see cref="Triplane"/>, and the NeRF decoder yields a density field that marching cubes turns into a colored mesh, feed-forward and deterministic with no diffusion loop.</summary>
 public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
 {
     private readonly DinoViTEncoder _dino;
@@ -37,9 +32,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         _preprocessor = new Dinov2ImagePreprocessor(dino.Config.ImageSize);
     }
 
-    /// <summary>Loads a TripoSR pipeline from a local checkpoint path (directory of <c>.safetensors</c> or a
-    /// single file). Defaults to <see cref="TripoSrConfig.TripoSr"/> + the <c>facebook/dino-vitb16</c>
-    /// tokenizer at 512px.</summary>
+    /// <summary>Loads a TripoSR pipeline from a local checkpoint path, defaulting to <see cref="TripoSrConfig.TripoSr"/> + the <c>facebook/dino-vitb16</c> tokenizer at 512px.</summary>
     public static TripoSrPipeline LoadFromPath(IBackend backend, string modelPath, TripoSrConfig? cfg = null, DinoViTConfig? dinoCfg = null)
     {
         ArgumentNullException.ThrowIfNull(backend);

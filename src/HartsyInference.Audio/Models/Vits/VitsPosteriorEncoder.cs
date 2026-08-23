@@ -4,9 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS posterior encoder (<c>enc_q</c>): <c>pre(Conv1d) → WaveNet(g) → proj</c> → (m, logs); samples
-/// <c>z = m + randn·exp(logs)</c>. Training-only for plain TTS, but the inference path for voice conversion
-/// (OpenVoice / GPT-SoVITS). Reuses <see cref="VitsWaveNet"/>. Channels-first <c>[1, spec, T]</c> in.</summary>
+/// <summary>VITS posterior encoder (<c>enc_q</c>): <c>pre(Conv1d) → WaveNet(g) → proj</c> → (m, logs), sampling <c>z = m + randn·exp(logs)</c>; training-only for plain TTS, but the inference path for voice conversion (OpenVoice / GPT-SoVITS).</summary>
 public sealed unsafe class VitsPosteriorEncoder
 {
     private readonly int _spec, _hidden, _inter;

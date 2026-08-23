@@ -107,9 +107,7 @@ public sealed class VulkanCommandStream : IDisposable
     /// <summary>Records a global compute->compute memory barrier (covers all buffers). Cheap fallback when per-buffer scope is unwieldy.</summary>
     public void RecordGlobalComputeBarrier() => RecordGlobalComputeBarrierOn(AcquireRecording());
 
-    /// <summary>Same barrier as <see cref="RecordGlobalComputeBarrier"/>, recorded onto an explicit command
-    /// buffer instead of this stream's own recording buffer — used by <see cref="VulkanStepGraph"/>, whose
-    /// captured dispatches record onto a separate, persistent command buffer.</summary>
+    /// <summary>Same barrier as <see cref="RecordGlobalComputeBarrier"/>, recorded onto an explicit command buffer instead of this stream's own recording buffer — used by <see cref="VulkanStepGraph"/>, whose captured dispatches record onto a separate, persistent command buffer.</summary>
     public static unsafe void RecordGlobalComputeBarrierOn(nint cb)
     {
         VkMemoryBarrier2 mb = new()
@@ -133,8 +131,7 @@ public sealed class VulkanCommandStream : IDisposable
     public void RecordCopyAndBarrier(ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
         => RecordCopyAndBarrierOn(AcquireRecording(), src, dst, size, postStage, postAccess);
 
-    /// <summary>Same as <see cref="RecordCopyAndBarrier"/>, recorded onto an explicit command buffer — used by
-    /// <see cref="VulkanStepGraph"/> capture (see <see cref="RecordGlobalComputeBarrierOn"/>'s doc for why).</summary>
+    /// <summary>Same as <see cref="RecordCopyAndBarrier"/>, recorded onto an explicit command buffer — used by <see cref="VulkanStepGraph"/> capture (see <see cref="RecordGlobalComputeBarrierOn"/>'s doc for why).</summary>
     public static unsafe void RecordCopyAndBarrierOn(nint cb, ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
     {
         VkBufferCopy region = new() { srcOffset = 0, dstOffset = 0, size = size };
@@ -250,11 +247,7 @@ public sealed class VulkanCommandStream : IDisposable
         WaitTimeline(tick);
     }
 
-    /// <summary>Schedules a buffer for free once the next-to-be-submitted tick completes. Using
-    /// _value+1 (the tick that will be assigned to the active command buffer when it next submits)
-    /// guarantees any in-flight commands referencing this buffer are done before destroy. Tagging
-    /// at _lastSubmitted (already-completed) would risk use-after-free for buffers used by the
-    /// currently-recording command buffer.</summary>
+    /// <summary>Schedules a buffer for free once the next-to-be-submitted tick completes. Using _value+1 (the tick that will be assigned to the active command buffer when it next submits) guarantees any in-flight commands referencing this buffer are done before destroy. Tagging at _lastSubmitted (already-completed) would risk use-after-free for buffers used by the currently-recording command buffer.</summary>
     public void DeferredFree(VulkanBuffer buffer)
     {
         ulong tick = _value + 1;
@@ -312,7 +305,6 @@ public sealed class VulkanCommandStream : IDisposable
         try { VulkanApi.vkQueueWaitIdle(_queue); }
         catch (Exception ex) { Logs.Warning($"VulkanCommandStream.Dispose: vkQueueWaitIdle failed on best-effort teardown: {ex.Message}"); }
 
-        // Drain deferred frees
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)
             foreach (VulkanBuffer b in bufs) b.Dispose();
         _deferredFrees.Clear();

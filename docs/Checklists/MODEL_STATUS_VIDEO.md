@@ -13,10 +13,11 @@ Concise status for every video-generation (T2V / I2V) model. Open work is in the
 | **SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)** | **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 … ([details](#seedvr2-3b-videoimage-restoration--modalityrestore-not-t2v)) |
 | **SeedVR2-7B (restoration)** | **✅ v1 NaDiT ported + real-weight smoke (2026-08-02).** The smoke run of 2026-08-01 had surfaced that `configs_7b/main.yaml` builds `models.dit.nadit` (**v1**), NOT the `models/dit_v2` tree the 3B uses — key names coincide, so it loaded and silently produced mud (GT SSIM 0.71; `Detect` then threw on the plain-MLP+no-tail signature). ([details](#seedvr2-7b-restoration)) |
 | **Wan 2.1/2.2 mainstream family** (TI2V-5B, T2V-1.3B fp16, T2V-14B fp8, I2V-14B CLIP fp8, I2V-A14B MoE, T2V-A14B MoE, FLF2V) | **All validated e2e on real weights (2026-07-01/02, 4090): coherent output.** The backbone is numerically de-risked: a Python layer-diff (faithful `comfy/ldm/wan/model.py` port, fp8-dequantized weights) proved the C# transformer matches end-to-end — patch_embed exact, all 40 blocks ~1e-3 (teacher-forced), autoregressive output relL2 4e-3 = the fp8 noise floor (memory `wan-14b-fp8-divergence`). ([details](#wan-2122-mainstream-family)) |
+| **Wan-Animate-2** (14B, pose/reference-driven animation) | **Generates correct video** — a length-dependent quality issue was root-caused to a settings mismatch, not a code bug (base checkpoint sampled with distillation settings); fixed with a build/settings-mismatch warning. 720p reached with the BF16 driving cache. Open: LoRA cannot merge into the int8-convrot checkpoint yet; `continue_motion` chunk washout unfixed. Full investigation: `WAN_ANIMATE2_PARITY_PLAN.md`. The face pathway (head rendering) is separately broken — pre-existing, not a resolution/settings issue. |
 | **Wan 2.1 VACE-1.3B** (control video) | **Real-weight coherent control-conditioned output confirmed (2026-07-02, 4090):** `wan2.1_vace_1.3B_fp16.safetensors`, 25f 480×320, 20 steps, moving-square control clip → coherent prompt-styled clip (`WanVace_Gpu_E2E`). ([details](#wan-21-vace-13b)) |
 | **HunyuanVideo 13B (T2V, 720p)** | **Real-weight coherent output confirmed (2026-07-02, 4090); production config is now the fp8 checkpoint at 2.15 s/step, full clip in 1m26s** (25f 512×320, 20 steps, embedded-guidance 6.0; day-one arc was ~20 min). ([details](#hunyuanvideo-13b-t2v-720p)) |
 | **LTX-2.3 22B** (dual-stream video+audio) | **Real-weight coherent output confirmed (2026-07-01, 4090):** `ltx-2.3-22b-dev-fp8.safetensors` + Gemma-3-12B fp8 → coherent cats-in-a-sunlit-garden clip (25f, temporally varying) **plus a decoded 48 kHz waveform**. ([details](#ltx-23-22b)) |
-| **LTX-2.5 22B** (dual-stream video+audio, Gemma-4-12B) | **Real-weight prompt-faithful output confirmed (2026-08-12, 4090):** official `ltx-2.5-22b-dev-transformer-int8_lean_convrot` + `gemma4-12b-with-proj-ltx-2.5-int8_lean_convrot` → 704×480×25f with a soundtrack in ~80 s, each prompt rendering its own scene at a fixed seed. The whole text path is verified against **ComfyUI 0.32** on the real checkpoints: tokenizer ids byte-exact, Gemma-4 tower cosine 0.9999–1.0000 per layer (sliding and global), connector within 0.2–0.6%, DiT `attn2` within 0.07%, conditioning prompt-delta ratio 1.00, and per-block prompt sensitivity ratio 1.00 across blocks 2–47. Getting there fixed one real defect: `prompt_adaln` was driven by the raw flow sigma instead of the ×1000-scaled timestep, which mis-modulated the text K/V at every block and made output follow the seed rather than the prompt (two unrelated prompts differed by ~1% of pixel range). Both previously-open research items are settled and were **not** defects — the 49-state stack correctly skips the final norm (which also clears the shipping 2.3 Gemma-3 path), and left-vs-right padding is numerically equivalent. **Perf pass 2026-08-12:** 56.62 s warm through the SwarmUI API at 768x512x97f/30 steps vs ComfyUI's 42.25 s (1.34x), down from 117.13 s — GPU reflect spatial pad in the VAE (decode 38.14 -> 3.94 s), F16 block activations + a new `ltx2_split_rope_f16` kernel (step 2.563 -> 1.756 s), on-device `ApplyKeyframesAbsPos` (which also fixed the 2.5 keyframe marker being silently dropped on CUDA), and a pool trim before the resident prefix is sized (killed a 62.6/93.5 s two-generation ping-pong). Remaining gap is the denoise and is near its int8 floor — see `benchmarks/scoreboards/VIDEO.md` for the roofline and the do-not-retry list. **Two quality defects fixed 2026-08-15.** (1) The sigma schedule implemented every part of ComfyUI's `LTXVScheduler` *except* its terminal stretch, so sampling stopped while the latent was still visibly noisy; the residual scales with the token-dependent shift, so it got worse as resolution rose — 1280x736x97f ended on sigma **0.817 against ComfyUI's 0.100** — and this is the root cause of the long-standing "raising LTX-2.5 resolution degrades output" observation (`715ee947`; knobs `SigmaStretch`/`SigmaTerminal`, kill switch `HARTSY_LTX2_SIGMA_STRETCH=0`, `FixedSigmas` bypasses it because distilled checkpoints bake their sigmas in; pinned by `LtxVideo2SigmaScheduleTests` against ComfyUI's own tail sigmas). (2) The conv VAE decoder forced `upsampleResidual` and `spatialReflectPad` true against the checkpoints' own `__metadata__.config`, worth **0.370 relL2 on final pixels** (`7a141e93`). **Quality parity with ComfyUI reached post-fix (2026-08-15, 1280x736x145f, seed 424242, conv decoder):** at matched 20 steps / cfg 3.0 both engines produce clean, undistorted faces (freckles, pores, eyelashes, catchlights) — a **visual** verdict, since the same seed takes a different RNG path in each engine and the two arms are different scenes. Recommended profile is **1280x736, 20 steps, cfg 4.0, conv decoder, 24 fps — 159.4 s warm for 145 frames**. **Speed is still behind: 153.18 s vs ComfyUI's 142.86 s at matched settings, 7.2% slower** (n=1 per arm). Numbers and caveats in `benchmarks/scoreboards/VIDEO.md`. **Defaults are template-faithful since 2026-08-17:** distilled runs the shipped two-stage flow by default (8-step base at the half grid + x2 latent upsample + 3-step refine; `HARTSY_LTX2_TWO_STAGE=0` for single-pass), `distilled`-named checkpoints under the dev id auto-route to that contract (`LtxVideo2DistilledRouting`), and both families default to 1280x736 / 121f / 24 fps with dev at the measured 20 steps / cfg 4.0. ([research](../Research/LTX_2_5.md)) |
+| **LTX-2.5 22B** (dual-stream video+audio, Gemma-4-12B) | **Real-weight prompt-faithful video+audio confirmed (2026-08-12), quality parity with ComfyUI reached post-fix (2026-08-15).** Text path verified against ComfyUI 0.32 to cosine ≥0.9999. Speed: 7.2% slower than ComfyUI at the recommended profile — see `benchmarks/scoreboards/VIDEO.md` for the roofline and do-not-retry list. ([details](#ltx-25-22b)) |
 | **LTX-Video 13B (0.9.7 dev)** (T2V) | **Real-weight coherent output confirmed (2026-07-01, 4090):** `ltxv-13b-0.9.7-dev-fp8.safetensors` (fp8-resident, ~15 GB, no OOM on 24 GB with `CacheWeightCasts=false`) → sharp photorealistic 704×480×25f at 30 steps. ([details](#ltx-video-13b-097-dev)) |
 | **LTX-Video 0.9.5 (2B)** (T2V) | **Real-weight coherent output confirmed (2026-07-01, 4090):** `ltx-video-2b-v0.9.5.safetensors` → coherent cat-in-sunlit-garden (better prompt adherence than 0.9). ([details](#ltx-video-095-2b)) |
 | **Kandinsky-5.0 T2V Lite (2B)** | **Real-weight coherent output confirmed (2026-07-02, 4090, FIRST attempt):** `Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers` (transformer BF16→F16 via `Kandinsky5CheckpointConverter.LoadDiffusersFolder`, config = `Kandinsky5Config.VideoLite2B` exact match) + the repo's shared HunyuanVideo 3D VAE → prompt-faithful, temporally-coherent snow-leopard clip (25f 512×512, 30 steps, CFG 5.0; `Kandinsky5_Gpu_T2V_ShortClip`). ([details](#kandinsky-50-t2v-lite-2b)) |
@@ -61,181 +62,34 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
 ### LTX-2.5 diffusion video decoder — wired 2026-08-13, NOT yet the default
-- [x] **The conv decoder this whole section compares against was itself misconfigured until `7a141e93`**
-  (`upsampleResidual` and `spatialReflectPad` forced true against the checkpoints' own config; 0.370 relL2 on
-  final pixels), and every latent here was sampled before the sigma terminal stretch landed (`715ee947`). Both
-  are in `benchmarks/scoreboards/VIDEO.md`. **Landmine:** the up-stage loop can exceed the per-block config
-  arrays, so the per-stage residual index must stay bounds-guarded — that is why `_residualRev` sat unused.
-- [x] **`LtxVideo25DiffusionDecoder` is on the pipeline's decode path.** `LtxVideo2Recipe` used to *refuse* it
-  ("this pipeline does not decode with yet — supply the convolutional VAE instead"), so every LTX-2.5 generation
-  ever made went through the conv decoder. Lightricks' own shipped ComfyUI templates
-  (`video_ltx2_5_{t2v,i2v}.json`) load `ltx-2.5-video-vae-bf16.safetensors`, and the model card credits that
-  decoder by name with *"sharper faces, legible text, fewer smears in fast motion"* — the exact softness a user
-  reported. **It is OPT-IN ONLY (`HARTSY_LTX2_DIFFUSION_VAE=1`), because its output is not yet correct** — the
-  composition is right but every frame carries dense full-frame noise (verified by eye at 512x320x25f; hi-frequency
-  energy ~11.8 vs the conv decode's ~3.1 on the same latent). Without the flag, a checkpoint carrying both decoders
-  uses conv, and one carrying only the diffusion decoder is refused with an actionable message rather than silently
-  decoding wrong. **Next step for the numerics: layer-diff against the ComfyUI reference**, which decodes this exact
-  VAE — not guessing conventions off a noise field. A `Reshape`-view bug in the decoder's own q/k RMS-norm (the
-  `ApplyKeyframesAbsPos` class: result lands in the view's device cache and is freed without write-back, so CUDA got
-  un-normalized q/k while CpuBackend passed) has already been found and fixed, and was NOT the main defect.
-- [x] **The host-attention blocker is CLEARED (2026-08-13).** `Kernels/ltx25vae/ltx25_na_decoder.cu` ships
-  `ltx25_na3d_f32` (one block per `(b,t,h,w,head)`; window scores in dynamic shared memory; the score pass splits
-  the window across threads and the value pass splits `head_dim`, so both stay coalesced) and `ltx25_na_rope3d_f32`
-  (one thread per `(token,head,pair)`, host-built tables uploaded so the F32 angle rounding still matches
-  `BuildTable`). `Na3d` gained a `CudaBackend` override; the rope gained `IBackend.Ltx25NaRope3d`. Both fall back
-  to the managed reference when the PTX is absent, so a deployment that forgets to copy it degrades instead of
-  throwing. Measured, 4090, `ltx25_bench.sh`, 30 steps, seed 1:
-
-  | geometry | decode before | decode after |
-  |---|---:|---:|
-  | 512×320×25f | **>22 min, never finished** | **12.89 s** |
-  | 256×160×9f | 173.22 s | **1.45 s** (119.9×) |
-
-  DiT step time is unchanged (262.8 vs 264.6 ms/step), and the shipping conv-decoder path is untouched
-  (decode 376 ms). Correctness: `Ltx25NaDecoderKernelTests` (11 cases) diffs both kernels against the managed
-  reference on non-square shapes, on every face of the volume, against an independently computed dense attention,
-  and with identity rope tables; each case asserts the PTX actually loaded, so the file cannot pass vacuously by
-  comparing the reference against itself — verified by hiding the PTX and watching all 11 fail. End-to-end,
-  CUDA vs the managed fallback at 256×160×9f agree to **mean |Δ| 0.0023/255, max 1 LSB** across all 9 frames.
-- [x] **Found and fixed on the way: q/k reached attention UN-NORMALIZED on CUDA.** `Forward` RMS-normed them
-  through a `[tokens·heads, head_dim]` `Reshape` view inside a `using` block. That is the `ApplyKeyframesAbsPos`
-  defect class from this same model: the in-place result lands in the *view's* device cache, which `Dispose`
-  frees without a write-back, so it passes on `CpuBackend` and drops silently on CUDA. The view bought nothing —
-  `RmsNorm` already rows by the last dim — so it now norms the rank-6 tensor directly. Decode 12.89 → 10.24 s as
-  a side effect. `Ltx25NaRmsNormViewTests` pins the fixed form *and* asserts the view hazard is still live, so
-  the comment explaining why the view is gone cannot rot.
-- [x] **The output blocker is CLEARED (2026-08-14) — the diffusion decoder now decodes correctly.** A numerical
-  layer-diff against ComfyUI's `NADiffusionDecoder` (`LtxVideo25ReferenceLayerDiffTests`, both sides fed the same
-  file-supplied latent and noise) passes at **every** stage: conv_in, all four deterministic stages and their
-  upsamples, context, `conv_in_x_t`, modulation, all eight diff blocks, `norm_out`, `conv_out`, pixels. Real
-  generation at 512×320×25f is a clean, sharp lighthouse at sunset — high-frequency energy **2.06 vs the conv
-  decoder's 3.10** on the same frame (it was 11.78 when broken), so this decoder is now the cleaner of the two,
-  which is what the model card claims for it. Decode 9.83 s. Three defects, none of which structural inspection
-  found — the block wiring, AdaLN chunk order, `scale_shift_table`, patchify packing, pixel-shuffle grouping,
-  timestep embedding and the NATTEN window rule were all read and all correct:
-  1. q/k reached attention **un-normalized** on CUDA (RmsNorm through a `Reshape` view — the
-     `ApplyKeyframesAbsPos` class). Real, but only moved the noise 12.02 → 11.78.
-  2. The AdaLN **modulation was all zeros** — `Linear` writing *into* a `Reshape` view, same defect the other
-     way round, so every diff block ran on its `scale_shift_table` alone. The layer-diff showed it as ref std
-     12.26 vs ours 0.00000.
-  3. **A core `GpuTransferHelper` bug affecting every model**, not an LTX bug — see `benchmarks/scoreboards/VIDEO.md`.
-     A device write to a ≥1 MB auto-promoted tensor was silently discarded because the weight cache is consulted
-     before the activation cache. Reproduced with no LTX code in `Ltx25InPlaceAddThenNormTests`.
-  **Take the lesson:** two of three were the *same* aliasing defect this model had already been bitten by once,
-  and reading the code found none of them. The layer-diff found all three in one run.
-- [ ] **DECISION OPEN: it is still gated OFF (`HARTSY_LTX2_DIFFUSION_VAE=1`), and that gate's warning text is now
-  stale.** A 4-prompt quality pass (both decoders from the same prompt+seed, so the latent is identical) is in
-  `benchmarks/scoreboards/VIDEO.md`: grain is 7–43% lower on the diffusion decode in every scene, and the scene
-  with the *smallest* grain delta (neon, 7.5%) has the *largest* visual difference — the conv decode renders a
-  shop sign as illegible smear and cross-hatches a desert frame, the diffusion decode does neither, and smearing
-  is precisely what a grain metric cannot see — but that pass predates `7a141e93`, so its conv arm ran on the
-  misconfigured decoder and the comparison is unverified until re-run. Judge it on the frames. Against that,
-  it costs **~9.3 s** per 25-frame generation versus ~0.35 s. **Two things to settle before flipping the
-  default**, neither of which this session measured: (1) the decode drops the whole resident DiT prefix, so in a
-  long-lived SwarmUI process the *next* generation pays a re-preload — the CLI harness runs one generation per
-  process and cannot see it; (2) the geometry ceiling below is still unaddressed, so the default must not be
-  flipped for resolutions this decoder cannot tile through.
-- [ ] ~~BLOCKER: the diffusion decoder's OUTPUT IS WRONG.~~ **FIXED — kept for the diagnosis.** At 512×320×25f it
-  returns the right composition — lighthouse, horizon, sunset, matching the conv decode of the same latent —
-  buried in heavy full-frame noise: high-frequency energy **11.78 vs the conv decode's 3.10** on the same frame.
-  The q/k fix above moved that only 12.02 → 11.78, so **more defects remain and that one was not the main one.**
-  Scope the evidence carefully: removing the new PTX makes the two arms agree to 1 LSB, which exonerates **the
-  two new kernels** but *not* the decoder's other CUDA ops — those ran in both arms. Nothing establishes that
-  this decoder was ever numerically right on any backend; the 1×2×2 real-checkpoint test asserts key mapping and
-  geometry, never output values. Structure surviving means `EncodeContext` and the stage-1..4 trunk are broadly
-  right, so suspect the stage-5 denoise: `model_output_type = "x0"` at `NumInferenceSteps = 1` should make one
-  pass *be* the image, so a `signal + noise` output points at the noise scaling, the timestep feeding
-  `Modulation` (`timestep: 1f`, then ×1000), or patchify/unpatchify channel order. **Best method available: a
-  layer-diff against ComfyUI**, which decodes this exact VAE at `dlbackend/ComfyUI` — the repo's established
-  technique, rather than guessing at conventions from a noise field. Iterating is now ~10 s a decode, not 22
-  minutes; that is what the kernel work bought.
-- [x] ~~Open question: which video VAE ComfyUI decoded with in the 2026-08-12 42.76 s row.~~ **RESOLVED — it was
-  conv.** `Data/Logs/2026-08/13-09-56.log` holds exactly that campaign's 6 generations, all at 768×512×97f/30
-  steps, all on `ltx-2.5-video-vae-conv-bf16`. So that row was conv-vs-conv and like-for-like; the 2026-08-14
-  re-measurement confirms it rather than replacing it.
-- [ ] **CURRENT STANDING vs ComfyUI (2026-08-14), and a retraction.** Both engines through the SwarmUI API,
-  768×512×97f/30 steps, VAE identity read out of the submitted workflow JSON on both sides:
-
-  | path | Hartsy | ComfyUI | |
-  |---|---:|---:|---|
-  | conv decoder (ships today) | 47.40 s | 42.48 s | **1.12× slower** |
-  | diffusion decoder (quality) | 60 s | 42.1 s | **1.43× slower** |
-
-  **We are slower on both.** An earlier claim in this session that we were ~2.2× *faster* on the diffusion
-  decoder was **wrong**: it differenced ComfyUI's **cold** diffusion run (68.92 s, including loading the 1.5 GB
-  VAE) against its **warm** conv run (41.47 s), inflating Comfy's decode cost by about a whole model load.
-  Warm-vs-warm, Comfy's diffusion decode costs it almost nothing over conv (42.1 vs 41.5). The decoder work was
-  still large and real — decode 79.2 → 12.9 s, geometry ceiling gone, visibly cleaner output — it closed a far
-  worse gap without closing it. **Never difference a cold arm against a warm one.**
-
-  The remaining deficit is the **denoise**: ~266 ms/step, of which ~83% is `Linear`, and the biggest single item
-  is the INT32 accumulator round trip that `cuBLASLt` provably cannot fuse (probe test: every output config
-  except INT32-D-with-scalar-alpha returns rc=15). Work to close it is tracked in `benchmarks/scoreboards/VIDEO.md`.
-- [ ] **MANDATORY CONTROL for any SwarmUI-measured row: log DiT residency.** A run whose log does not say
-  `resident prefix 48, streamed 0` is **void**. Measured 2026-08-14: an identical 768×512×97f generation read
-  **68.8 s** decode with the DiT streaming (`resident prefix 18, streamed 30`) versus **12.9 s** fully resident —
-  streaming starves the decode's free-VRAM-derived chunk budget *and* cripples the denoise, and nothing in the
-  harness flags it. Rows taken before this control existed may be affected.
-- [x] ~~BLOCKER: the neighborhood attention runs ENTIRELY ON THE HOST.~~ **DONE — kept for the diagnosis.**
-  `backend.Na3d` had **no CUDA override** — it resolved to the `IBackend` default (`IBackend.cs:1084`), whose own
-  doc says *"This managed implementation is the numerical reference, not a performance path"*: a plain six-deep
-  scalar loop. At 512×320×25f that is ~256k tokens × 4 heads × an 11×11×11 = 1331-element window × headDim 64,
-  i.e. ~349 GFLOP per stage-5 block and ~2.8 TFLOP over the eight of them, single-threaded and strided. A
-  512×320×**25f** decode ran **past 23 minutes at ~30% GPU utilization and never finished**.
-  `LtxVideo25NeighborhoodAttention3d.ApplyRope` is *also* host-side (it rotates every `(t,h,w,head)` position
-  through `x.DataPointer`), but it is the minor term — ~8.4 GB of q+k PCIe traffic across the blocks, seconds not
-  minutes. **The timeout is the proof: had the rope been the cost, the decode would have completed.** Fixing the
-  rope alone would move ~22 minutes to ~21 and read as a failed fix.
-  The parity tests only ever ran a **1×2×2 latent**, where both costs are invisible — that is how a decoder with
-  no attention kernel at all passed as "ported and parity-checked". **Keep that lesson:** a check that is real but
-  runs at a size where the thing it should catch costs nothing is not a check. The same session also found the
-  decoder's *output* was wrong (above) — which the same 1×2×2 test also could not see.
-- [ ] **Memory is unmodelled at scale.** The stage-5 trunk is a transformer over patchified pixels: at
-  768×512×97f the context is ~2.4M tokens (~5 GB per activation). A too-small VRAM bracket is worse than none —
-  it silently skips the prefix eviction and OOMs mid-decode — so this path now drops the whole resident prefix
-  unconditionally. The official templates decode it **tiled** (`VAEDecodeTiled [512, 64, 64, 16]`); we have no
-  tiling for it, so expect a geometry ceiling well below the official 0.9 MP default.
+- [x] **Built, correct, and opt-in (`HARTSY_LTX2_DIFFUSION_VAE=1`).** `LtxVideo25DiffusionDecoder` used to be
+  refused by the recipe entirely, so every generation went through the conv decoder even though Lightricks'
+  official templates use the diffusion one for sharper faces/text/motion. Host-side neighborhood attention made
+  it unusably slow at first (a 512×320×25f decode ran past 23 minutes and never finished); CUDA kernels
+  (`ltx25_na3d_f32`, `ltx25_na_rope3d_f32`) brought that to 12.89s, then 10.24s after fixing a q/k
+  un-normalized-on-CUDA bug (a `Reshape`-view aliasing defect, `Ltx25NaRmsNormViewTests` pins it). Output
+  correctness cleared 2026-08-14 via a full numerical layer-diff against ComfyUI's `NADiffusionDecoder`
+  (`LtxVideo25ReferenceLayerDiffTests`) — three defects found this way that structural code-reading missed
+  (the same view-aliasing bug a second time, in AdaLN modulation; and the core cross-model `GpuTransferHelper`
+  auto-promote bug, see `benchmarks/scoreboards/VIDEO.md`). Decode is now 9.83s and visibly cleaner than conv
+  (high-frequency energy 2.06 vs 3.10), matching the model card's claim for it.
+- [ ] **Still gated OFF.** Costs ~9.3s per 25-frame generation vs conv's ~0.35s, and two things are unmeasured
+  before flipping the default: it drops the whole resident DiT prefix (a long-lived SwarmUI process pays a
+  re-preload on the next generation), and it has no VAE tiling — the stage-5 trunk is a transformer over
+  patchified pixels (~2.4M tokens / ~5GB activation at 768×512×97f) with no ceiling below the official 0.9 MP
+  default, unlike ComfyUI's `VAEDecodeTiled`. The gate's own warning text is stale (says "does not decode with
+  yet"). Speed/ceiling detail: `benchmarks/scoreboards/VIDEO.md`.
 
 ### Wan / LTX open items
-- [x] **Wan `EndFrame` real wiring on the non-concat path — DONE 2026-08-11 for `wan-22-5b`.**
-  `GenerateFromEmbeddings`/`GenerateFramesAsync`/the internal `RunDenoise` now take an optional
-  `lastFrameLatent` alongside `firstFrameLatent`, symmetric per-frame-timestep-0 pinning at latent-frame
-  `T_lat-1` (`WriteLastFrame`, mirroring the existing `WriteFirstFrame`). `WanVideoRecipePipeline` VAE-encodes
-  `VideoRequest.VideoEndFrame` the same way `InitImage` already was. Real-weight verified against the local
-  TI2V-5B checkpoint: solid-red init / solid-blue end synthetic colors, frame 0 and the final decoded frame
-  visually confirmed to match their respective conditioning colors (`WanEndFrameRealWeightTests.cs`). The
-  2026-08-09 `Supports`/`SupportsFor` narrowing is reverted for `wan-22-5b` only. `wan-21-1_3b` shares the
-  identical non-concat code path (same `ResolveConfig` branch shape) so the mechanism should cover it too,
-  but **stays narrowed** — no local 1.3B checkpoint exists to verify against, and this doc's own verification
-  rule is a real generation actually looked at, not "should work by symmetry." Revisit once a 1.3B checkpoint
-  is available.
-- [x] ~~LTX image-to-video (Tier 3.4)~~ **DONE, real-weight verified end-to-end (2026-08-11), base 0.9
-  only.** `LtxVideoVaeEncoder` (ported from the actual diffusers source, not assumed by decoder symmetry
-  — `encoder_causal=True`/`decoder_causal=False` differ on the same checkpoint, and the base-0.9
-  downsampler is a plain strided conv with the channel-widening resnet AFTER it, mirroring the decoder's
-  before-the-upsampler ordering) round-trips correctly through the existing decoder (mean abs diff
-  1.09/255; `HasLatentStats` confirms `latents_mean`/`latents_std` are real, not a cancelling no-op; the
-  latent is genuinely unit-scale and load-bearing — a zeroed copy decodes to a diff of 47.23 vs 1.09 for
-  the real one). I2V conditioning is a per-token AdaLN modulation (diffusers'
-  `timestep.unsqueeze(-1) * (1 - conditioning_mask)`, re-pinning frame 0 to the encoded latent every
-  denoise step, not just once) — built by reusing `AffineBroadcastRowIndexed`/`GatedResidualRowIndexed`,
-  the same row-indexed-table primitive `MiniMaxH3Transformer` already proved for multi-timestep
-  modulation, threaded as an opt-in `temb0`/`modIndex` pair through `LtxVideoBlock`/`LtxVideoTransformer`
-  (null on every T2V call site — byte-identical, confirmed by all 5 pre-existing LTX tests still
-  passing unchanged). `LtxVideoRecipe.SupportsFor` (checkpoint-aware, mirrors `WanVideoRecipe`'s pattern)
-  declares `VideoFeatures.InitImage` for base 0.9 only — 0.9.5/13B use a different VAE config the
-  encoder was never verified against. Not supported together with step-cache or the step-graph capture
-  path (forces eager / throws rather than silently ignoring one). Real-weight verified through the full
-  `InferenceEngine.Video.GenerateAsync` service path (solid red synthetic init, `ltx-video-2b-v0.9.safetensors`
-  + T5-XXL): frame 0 reads back R=218 (near-exact conditioning match), then a real progressive denoise
-  trajectory (R=218→205→163→110→75 across frames 0/4/8/12/16) into a coherent, correctly-prompted scene
-  — visually confirmed a red apple beside a green pear on a wooden table, cinematic shading, matching
-  the prompt (not color drift with no structure). An earlier version only overwrote frame-0 tokens once
-  before the loop instead of re-pinning every step; a real run at 2 latent frames/8 steps caught it
-  (every output frame looked identically flat-red) before the fix. `VideoEndFrame` is still not wired —
-  the mechanism conditions on a single mask row (frame 0); extending it to a second end-of-clip
-  conditioned range is unbuilt.
+- [x] **Wan `EndFrame` wiring DONE 2026-08-11 for `wan-22-5b`** — symmetric per-frame-timestep-0 pinning
+  alongside the existing first-frame conditioning, real-weight verified (`WanEndFrameRealWeightTests.cs`).
+  `wan-21-1_3b` shares the same code path but stays narrowed pending a local 1.3B checkpoint to verify against.
+- [x] **LTX image-to-video DONE 2026-08-11, base 0.9 only, real-weight verified end-to-end.**
+  `LtxVideoVaeEncoder` ported from diffusers source (round-trips at mean abs diff 1.09/255); I2V conditioning
+  is a per-token AdaLN modulation re-pinning frame 0 every denoise step (an earlier version only pinned it
+  once before the loop — caught by a real run, every frame stayed flat-red). `SupportsFor` scopes this to
+  base 0.9 only (0.9.5/13B use a different VAE config, unverified). `VideoEndFrame` is still not wired for
+  LTX — the mechanism only conditions a single mask row (frame 0); extending it to an end-of-clip range is unbuilt.
 
 ### SeedVR2 restoration follow-ups
 - [x] ~~fp32 whole-clip VAE activation ceiling~~ **BF16 VAE activations landed (2026-08-02)** — reference
@@ -318,284 +172,48 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### LTX-2 audio level — CLOSED 2026-08-13, NOT a defect (was: "~80 dB too quiet", localized 2026-08-01)
 
-> ⚠️ **READ FIRST — the PREMISE of this whole section is not established (2026-08-13).** Every figure below
-> compares a level against an assumed "healthy" level that was never measured. Decoded RMS at a FIXED prompt and
-> settings varies enormously by seed: **−54.1 / −25.2 / −37.9 / −38.5 / −21.7 dBFS for seeds 1–5**, and
-> ComfyUI's own reference draw (−33.7 dBFS) sits **mid-distribution**, with three of five of our seeds LOUDER
-> than it. A single-seed measurement cannot distinguish "too quiet" from "an ordinary quiet draw."
->
-> Also invalid: **same-seed comparison against ComfyUI**. We derive the audio noise from `seed ^ 0x5D2B`; the
-> reference draws video then audio sequentially from one generator, so matched seeds are not matched noise.
->
-> What survives: the audio VAE and vocoder are **proven correct** against ComfyUI (log-mel relL2 9e-5 on the
-> same checkpoint and latent; a unit-Gaussian latent decodes to −29.8 dBFS ours vs −29.7 theirs), and the
-> `AudioGuidanceRescale` A/B below is a valid SAME-SEED relative measurement. What is wrong is the framing that
-> it is repairing a defect. A separate finding also explains the "muffled" character as inherent rather than a
-> port bug: **LTX-2.5 is a 16 kHz-bandwidth system in a 48 kHz container** (VAE mel at `sampling_rate 16000`,
-> `mel_fmax 8000`; 8–12 kHz carries 0.705% of energy, 16–24 kHz 0.001%), and ComfyUI's decode shows the same
-> cliff with even LESS high-frequency content than ours.
->
-> Before doing any further work here, establish the healthy distribution first — sweep seeds, and compare
-> against a ComfyUI draw that is not seed-matched. See the memory notes `ltx25-audio-quiet-is-seed-variance`
-> and `ltx25-conditioning-inert` (the latter retracted for the same class of error on the video side — but
-> note its own retraction was then partly walked back: 8 of 9 prompt×seed combinations adhere, and one
-> reproducibly does not, so "inert" is dead while an occasional failure to escape a strong prior is real).
-
-Real generation (512×320×25f, seed 42) produces a stereo soundtrack with correct duration, true L/R
-decorrelation and real temporal structure — but at **peak −43.9 dBFS / RMS −59.4 dBFS**, effectively
-inaudible. `HARTSY_LTX2_PROBE=1` now covers the audio stages (`ProbeTensor` in `LtxVideo2Pipeline`) and
-localizes the loss to **at or before the audio VAE output**:
-
-| stage | measured |
-|---|---|
-| audio latent (raw, pre-denorm) | min −7.30 max 4.36 rms 2.47 |
-| audio latent (unpacked, post-denorm) | min −7.18 max 4.74 rms 3.25 |
-| **audio VAE out (log-mel)** | **min −11.73 max −4.71 mean −10.10** |
-| vocoder out (waveform) | peak 0.0019 rms 0.00022 |
-
-Confirmed through SwarmUI on the muxed mp4 as well (`volumedetect`: mean −56.6 dB, max −45.1 dB), so this is
-the engine's output, not a CLI-only artifact.
-
-The log-mel sits essentially on the `log(clamp(mel,1e-5))` silence floor (−11.51). A real 16 kHz speech
-reference through the same convention measures **min −11.51 max +4.54 mean −1.33** — our mean is 8.8 nats
-low and our max 9.25 nats (~80 dB in magnitude) low. The vocoder is faithfully rendering near-silence, so
-it is not the culprit.
-
-**Ruled out this pass** (do not re-check these first):
-- Latent denorm is applied and correct — `MapAudioVae` strips the `audio_vae.` prefix so
-  `ReadStats(conv.AudioVae, …)` finds `per_channel_statistics.*`; our `v*std+mean` matches diffusers'
-  `_denormalize_audio_latents`. Magnitude cannot explain it anyway: `std-of-means` averages 1.17
-  (range 0.74–2.05), worth ~1.4 dB. This is NOT the video `per_channel_statistics` bug's twin.
-- `norm_out` type — the reference picks affine GroupNorm for `norm_type="group"` vs parameter-free
-  `LTX2AudioPixelNorm` for `"pixel"`; the checkpoint ships **zero** norm weights, so our hardcoded
-  pixel-norm is right.
-- Vocoder STFT config matches the reference exactly (filter 512, hop 80, window 512, 16 kHz in,
-  natural-log clamp 1e-5), and the chain order `denorm → unpack → audio_vae.decode → vocoder` matches
-  `pipeline_ltx2.py`.
-
-**The audio VAE is EXONERATED (2026-08-02).** A one-off diagnostic (since removed in the 2026-08-06 suite
-cleanup) decoded synthetic latents through the real decoder and compared log-mel levels:
-
-| latent fed to the VAE | log-mel mean | max |
-|---|---|---|
-| drawn from the checkpoint's own `per_channel_statistics` | **−4.34** | +0.58 |
-| drawn from the observed generation's stats (mean −1.48, σ 2.89) | −6.14 | +2.23 |
-| unit normal | −4.42 | −1.21 |
-| **the actual generation** | **−10.10** | −4.71 |
-
-Given a latent from the training distribution the decoder produces healthy levels. **The fault is upstream:
-the audio latent itself is off-distribution** — mean −1.48 / σ 2.89 against the checkpoint's +0.018 / 1.17
-(2.47× over-dispersed, far beyond sampling noise at n=3328).
-
-**CFG is what disperses it, and dispersion tracks quietness** (8 steps, seed 42, video cfg 3.0):
-
-| audio CFG | latent σ (pre-denorm) | log-mel mean | waveform peak |
-|---|---|---|---|
-| 3.0 (= video, shipped behaviour) | 2.22 | −10.10 | −43.9 dBFS |
-| 7.0 (the authors' recommendation) | 2.69 | −11.09 | −60.5 dBFS |
-
-**⚠️ The "raising audio CFG makes it quieter" claim below is CONTRADICTED at the production operating point
-(2026-08-13).** The 8-step / 512×320 / seed-42 table above measured cfg 7.0 as ~17 dB quieter. At **30 steps,
-768×512×97f, seed 1** the direction reverses — raising audio CFG makes it monotonically LOUDER:
-
-| audio CFG | rescale | latent mean | decoded RMS |
-|---:|---:|---:|---:|
-| 3 (= video, shipped default) | 1.0 | −0.453 | −54.1 dBFS |
-| 3 | 0.0 | −0.462 | −54.5 dBFS |
-| 7 | 1.0 | −0.308 | −45.7 dBFS |
-| 7 | 0.0 | −0.275 | −43.3 dBFS |
-| 12 | 0.7 | −0.131 | −36.1 dBFS |
-
-Both measurements stand; they are different operating points and step count is the obvious confound. Treat
-neither as settled guidance. What IS settled: audio CFG is a **loudness lever that amplifies a small
-cond−uncond difference**, not a repair. `AudioGuidanceScale` stays null (follow the video scale) because that
-is what the reference run actually used — see the next paragraph. `HARTSY_LTX2_AUDIO_CFG` remains the A/B knob.
-
-**What the ComfyUI reference run actually used** (captured graph, `Data/Logs/2026-08/13-19-42.log:1423`):
-a single `SwarmKSampler` with **joint CFG 3.0** over the concatenated AV latent, `euler` / `normal`, 30 steps,
-`LTXVAudioVAEDecode` (no normalization), and **no** `LTXVDualCFGGuider`, **no** modality guidance, **no** STG.
-SwarmUI adds no audio gain anywhere — the mux is `clip(x,−1,1)*32767` → AAC, no `loudnorm`, no `-af`.
-So the −33.7 dBFS reference figure was produced at **the same guidance this port already uses**. Do not read
-the reference's *documented* settings (audio CFG 7.0 / `rescale_scale` 0.7 / `modality_scale` 3.0 / STG,
-recorded in `docs/Research/LTX_2_5.md`) as machinery whose absence explains a level gap — the run we
-benchmarked against used none of it.
-
-**PARTIAL FIX SHIPPED — guidance rescale (2026-08-02).** `AudioGuidanceRescale` (default **1.0**, knob
-`HARTSY_LTX2_AUDIO_RESCALE`) applies diffusers' `rescale_noise_cfg` to the audio stream: the guided velocity
-is pulled back to the conditional prediction's mean/σ. Implemented as an affine transform of the guided
-velocity (`v_final = A·v_cfg + B`) so only four scalars reach the host and the Euler step stays on device —
-`LancePipelineCommon.CfgCombineRenormInPlace` was NOT reused directly because it writes host-side and the
-audio latent is GPU-cached (a host write would go stale against its device copy).
-
-Effect at 8 steps: latent σ **2.216 → 1.141** (checkpoint target 1.17), log-mel mean **−10.10 → −6.60**.
-**Verified on a real 20-step generation** (512×320×25f, seed 42, cfg 3.0): soundtrack
-**peak −43.9 → −28.2 dBFS, RMS −59.4 → −45.4 dBFS** (~14 dB recovered), still true stereo, 25 frames intact,
-video coherent and visually unchanged (the video Euler step is untouched).
-
-**~~Still not fully fixed.~~ RETRACTED 2026-08-13.** The claim that −28 dBFS is "roughly 20 dB below a healthy
-soundtrack" assumed a healthy level that was never measured. It was wrong — see the banner. Do not resume the
-"remaining suspects" hunt (STG, modality-isolation guidance) on level grounds; the reference run used neither.
-
-**The audio VAE and vocoder now HAVE reference parity (2026-08-13)** — this closes the "no captured reference
-activations" gap, and it closes it in our favour:
-
-| stage, same checkpoint + same latent, ours vs ComfyUI's `AudioVAE` | agreement |
-|---|---|
-| denormalize + unpack `[1,8,64,16]` | **bit-identical** (relL2 0.000) |
-| audio VAE → log-mel `[1,2,253,64]` | **relL2 9.05e-5**, max abs diff 0.0022 |
-| vocoder → waveform `[1,2,121440]` | relL2 6.8e-2, RMS 0.03294 vs 0.03381 (2.6%) |
-
-Tests: `tests/HartsyInference.Diffusion.Tests/LtxAudioDecodeRealWeightParityTests.cs`. The stage-by-stage test
-needs `HARTSY_LTX2_AUDIO_REFDIR` (dumps + the generator script are preserved at `~/Desktop/ltx25-audio-ref/`);
-`AudioDecode_UnitGaussianLatent_LandsInAPlausibleLoudnessBand` is standalone and **absolute** — a deterministic
-unit-Gaussian latent must decode into −46 … −16 dBFS. That absolute assertion exists because every audio check
-before it was an identity comparison against a control carrying the same suspected defect, which is precisely
-why a non-defect survived as a "known bug" for eleven days.
-
-The residual 2.6% on the waveform is the only open item here: the BigVGAN anti-alias filters are recomputed
-rather than loaded, and ComfyUI and diffusers disagree on whether vocoder stage 1 clamps to ±1
-(ComfyUI's `apply_final_activation` defaults true → `clamp`; diffusers applies nothing). Worth closing, but it
-is a numerics detail, not a level defect.
-
-**Fixed in passing:** `LtxVideo2Pipeline.AudioCfgEulerStep` was matching the conditional velocity's **mean** as
-well as its std. Diffusers' `rescale_noise_cfg` — which the method's own doc comment cites — is std-only;
-expanding its blend gives exactly our `A` coefficient and no additive `B`. The `B` term was pushed into the
-audio latent via `AddScalar` on every step. Removed. Measured effect at the default cfg 3 is within noise
-(latent mean −0.453 with it, −0.462 without), so this is a correctness fix, not a level fix.
-
-**Separately, the "muffled / low quality" character is inherent to the model, not a port bug.** LTX-2 is a
-**16 kHz-bandwidth system in a 48 kHz container**: the audio VAE's mel is computed at `sampling_rate 16000`
-with `mel_fmax 8000`, stage 1 renders 16 kHz, and the BWE stage upsamples to 48 kHz while adding almost
-nothing above 8 kHz. Measured band energy on a real generation: 8–12 kHz **0.705%**, 12–16 kHz **0.053%**,
-16–24 kHz **0.001%** of total. ComfyUI's own decode shows the same cliff with *less* HF than ours. Expect this
-to be re-filed as an audio-quality bug; it is not fixable short of a different vocoder.
+Settled: the "too quiet" symptom was seed variance, not a bug — decoded RMS at fixed prompt/settings spans
+−54.1 to −21.7 dBFS across 5 seeds, and the ComfyUI reference draw (−33.7 dBFS) sits mid-distribution. The
+audio VAE and vocoder have proven reference parity (log-mel relL2 9.05e-5, `LtxAudioDecodeRealWeightParityTests`).
+Separately, the "muffled" character is inherent to the model, not a port bug: LTX-2 is a 16 kHz-bandwidth
+system in a 48 kHz container (VAE mel at `mel_fmax 8000`; ComfyUI's own decode shows the same high-frequency
+cliff). One real fix shipped along the way: `AudioGuidanceRescale` (`HARTSY_LTX2_AUDIO_RESCALE`, default 1.0)
+corrected a CFG-rescale bug that was matching the conditional velocity's mean as well as its std. One open
+item: a 2.6% residual on the vocoder waveform (BigVGAN anti-alias filters recomputed rather than loaded,
+plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail, not a level defect.
 
 ### MiniMax-H3
-- [x] **Borrowed-view-as-output sweep — done 2026-08-03, no other site affected.** H3's mosaic bug was a
-      `View`/`RowView` passed as an in-place op's OUTPUT tensor (CUDA binds the result to the view and drops the write
-      on dispose, silently; the CPU path is unaffected, so unit tests pass). Swept every borrowed-pointer
-      `new Tensor(void*, ...)` and `RowView`/`View` construction outside `HartsyInference.Core`: the only ones are
-      `MiniMaxH3Transformer` (fixed), `MiniMaxH3VideoVaeDecoder` tile blending, and the LLM stacked-weight slicers
-      (`Qwen35Model`, `GgufLanguageModel`). The latter two are safe — the VAE views feed `VaeTiling.BlendVertical`,
-      a pure host `float*` loop, and the LLM views are read-only GEMM inputs. Re-run the grep when adding a model that
-      slices activations rather than weights.
-- [x] **fl2va DONE and controlled-experiment verified 2026-08-05.** The two-timestep hardcode is gone: `MiniMaxH3Pipeline`
-      now derives rows per step via `MiniMaxH3Conditioning.BuildTimestepRows` — the reference's sorted-dedup of
-      `{t_v, t_a}` ∪ `max(t_v, 0.999)` (cond/ref_img) ∪ `max(t_a, 1.0)` (ref_audio) — and splices conditioning rows in
-      fresh each step rather than letting the sampler integrate them. `MiniMaxH3RecipePipeline` VAE-encodes
-      `InitImage`/`VideoEndFrame` into keyframe rows and presents them to Qwen3-VL as `<Picture i>` (matching
-      `minimax.py`'s fl2va path, which uses the *same* presentation as ref images). **Proof, seed-controlled:** the
-      keyframes came from a seed-1 clip, so generation was re-run at seed 7 — T2VA scored 0.2198/0.2358 against them,
-      fl2va scored **0.9920/0.9827**, the conditioning being the only variable. CLI: `--init-image` / `--end-frame`.
-      *Non-obvious:* `FinalLayer` already emits target-rows-only, so the latent state must NOT grow — only the
-      transformer's input does; and ref segments **interleave by kind** (a `video_audio` block emits RefAudio before
-      RefImage), so row assembly must walk `layout.Segments`, never group by kind. Weight-free gates in
-      `MiniMaxH3ConditioningTests`; T2VA stayed bit-identical (`h3_rell2.py` exactly 0.000e+00) across every change.
-- [x] **ref2va COMPLETE 2026-08-06 — images, standalone audio, AND reference videos.** All three are wired end-to-end
-      (typed `VideoRequest.ReferenceImages`/`ReferenceVideos`/`ReferenceAudios`, CLI `--ref-image`/`--ref-video`/
-      `--ref-video-audio`/`--ref-audio`, SwarmUI `H3 Reference Images`/`Videos`/`Audio`). **The old "needs a 2-frame
-      path" note rested on a wrong premise:** a 2-frame vision block is **`gridT = 1`**, not 2 — the two frames *fill*
-      the temporal patch a still image fills by duplicating itself (`comfy/text_encoders/minimax.py:35-68` returns
-      `grid_thw = [1, grid_h, grid_w]`). So a video block costs exactly a still image's token count, and
-      `Qwen3VlVisionEncoder`, `Qwen3VlVisionConfig`, `MiniMaxH3TextEncoding` and `MiniMaxH3PackedLayout` needed **no
-      change at all**; only `Qwen3VlImageProcessor` gained a frame-stack overload (the single-frame path re-reads one
-      plane because its `tp` counter never appears in the source index). **Adherence is now measured, not assumed** —
-      the ref2va checkpoint is downloaded and hash-verified: control vs reference video is mean |diff| **99.3** with
-      **0.0% identical pixels**, while two clips built from the same source frames differ by only **2.9** from each
-      other, so the conditioning is doing real work rather than perturbing the seed. A paired soundtrack
-      (`video_audio`) shifts output a further **2.8**, confirming the RefAudio rows reach the packed layout.
-      Reference geometry follows the node exactly: `adapt_canvas` with the shrink guard (a 256² clip stays 256², it is
-      never upscaled to 768²), truncate to the output frame count **then** snap **down** to `17k+5`, and Qwen sees the
-      already-resized frames at 2 fps with pair-mean timestamps. fl2va and ref2va are still rejected in combination —
-      the layout restarts its position cursor for ref blocks, so their coordinates would overlap.
-      **Known ceiling:** `BuildCausalMask` is a dense `[S,S]` F32, so three 1344×768 clips (~18k tokens) costs ~1.3 GB
-      for the mask alone; at the reference's 3-clip cap this now raises a clear error naming token count and size
-      rather than OOMing.
-- [x] **LoRA on the fp8 build DONE 2026-08-06 (ComfyUI's approach).** `LoraStack.ApplyTo` no longer rejects fp8: it
-      dequantizes (`CastTo(F32)` already folds `Fp8ScaleFactor` in), merges in F32 via the unchanged quant-unaware
-      `AccumulateDelta`, then requantizes with a recomputed `absmax/448` scale and **seeded stochastic rounding** —
-      matching `comfy/model_patcher.py:patch_weight_to_device` + `quant_ops.py` `scale="recalculate"`. Reuses the
-      existing `QuantizeToFp8Scaled`. **No backend or GEMM change**, so the weight stays packed fp8 and both the native
-      fp8 GEMM and the static-input-scale path survive: measured **165/123 ms per step with the LoRA vs 168/122 ms
-      without**, and output mean |diff| **8.5** with **0.0% identical pixels**. **The trap that makes this subtle:**
-      `Fp8InputScaleFactor` is a *separate* propagation from `Fp8ScaleFactor` and lives on the tensor object; a fresh
-      tensor defaults it to `0f`, which silently fails the `> 0f` gate in `MiniMaxH3Transformer.Modulate` and costs
-      ~188 ms/step with **correct output and no failing test**. It is carried across explicitly and pinned by a test
-      that fails if the carry is removed. The old guard also tested `Fp8ScaleFactor != 1` rather than `DType.IsFp8`,
-      so an fp8 weight at identity scale slipped through — now fixed.
-- [x] **Both VAE encoder halves built 2026-08-05**, from weights the checkpoints already shipped (no converter change
-      needed). `MiniMaxH3VideoVaeEncoder` (3D causal CNN; reuses the existing `CausalConv3d`, which already had H3's
-      reflect-spatial + causal-zero-temporal modes, and `VaeTiling`; `SplitTiles` hoisted onto the config so encoder and
-      decoder share one grid) — round-trip correlation **0.9636 untiled / 0.9733 tiled**. `MiniMaxH3AudioVaeEncoder`
-      (DAC stack + causal-attention posterior head pooling 2048→32) — see the stereo item below. H3's encoder group norms
-      take **per-frame** statistics, unlike the clip-wide `GroupNormSilu3d` the other VAEs use. Both gates are GPU-only:
-      on CPU the video encoder is minutes/frame and the audio encoder ran >11 min for 3 s of audio (1 s on CUDA).
-- [ ] int8 `convrot` quantization (Comfy's shipped quant: block-diagonal Hadamard over 256-channel groups, QuaRot/
-      SpinQuant family) is detected and rejected by `MiniMaxH3CheckpointConverter.ThrowIfInt8Convrot`, not implemented.
-      This is the lever that would take the DiT off the mmap-thrash path — see the perf note in the status row.
-- [ ] Block streaming (`IStreamingBlock`/`BlockStreamingController`, as LTX-2.3 uses) is not wired for H3's 50 blocks.
-- [x] **Stereo channel identity confirmed 2026-08-05** by encoding a real stereo source rather than inspecting generated
-      audio: left 440 Hz / right 1320 Hz through `MiniMaxH3AudioVaeEncoder` → `MiniMaxH3AudioVaeDecoder` gives left
-      **0.25133 @440 / 0.00012 @1320** and right **0.00005 @440 / 0.23821 @1320** — ~2000:1 separation, and 0.25 is the
-      exact DFT magnitude of the 0.5-amplitude input, so the round trip is quantitatively accurate, not just ordered.
-      This is what the old caveat asked for: a swap is inaudible on generated content but obvious on an encoded reference.
-- [ ] Sampling with very few steps is pathological at shift 12 (a 4-step schedule puts ~80% of the denoising in the
-      final jump). Decide whether to clamp the shift for low step counts or just document a floor.
-- [x] **Catalog `Assets` + sha256 DONE 2026-08-05** — `minimax-h3` is now `ValidationPending` + CLI-drivable with four
-      assets (fp8 DiT, nvfp4 text encoder, video VAE, audio VAE) from `Comfy-Org/MiniMax-H3`. Verified by a
-      catalog-only run (`hartsy video -m minimax-h3`, no `--model-path`): resolved all four, downloaded nothing, and
-      produced frames + audio. **HuggingFace's LFS `oid` is the file sha256** — confirmed by hashing local copies, so
-      `curl .../api/models/<repo>/tree/main/<dir>` sources catalog hashes without downloading (query per directory; the
-      top-level `?full=true` response reports size 0). *Provenance trap:* the audio VAE staged here is a hardlink to the
-      **vendor** `FL2VA/audio_vae/model.safetensors` and is byte-different from the Comfy-Org repack (605,429,308 vs
-      605,254,808) despite the same weights, so that one hash is the published oid, not a locally-verified one; the
-      other three match byte-for-byte. Harmless because `ModelDownloader` returns early on `File.Exists` and verifies
-      only fresh downloads.
-- [x] **LoRA wired 2026-08-05 — H3 is the first video model with LoRA end-to-end.** `MiniMaxH3Recipe.LoadTransformer`
-      now hands back the converted dict so the merge lands before `LoadWeights`; the stack is owned by
-      `MiniMaxH3RecipePipeline` and disposed after the transformer. **Corrected 2026-08-08 against the real published
-      LoRA** (`larryvrh/MiniMax-H3-Turbo-Lora`): the `transformer.blocks.` passthrough below was only ever exercised by
-      a hand-built LoRA carrying that prefix. The actual H3 LoRA has **no wrapper prefix at all** — its roots are the
-      checkpoint's own keys (`blocks.0.attn.qkv_proj.lora_A.weight`) — so it hit `LoraFormat.Unknown` and was rejected
-      at load. Fixed by a `DiffusersBareDit` detection arm (last in precedence, so a prefixed file never falls into it).
-      **It also targets the UNPRUNED adaln projection** `[96768, 2688]` while every pruned build stores the curve-table
-      form `[96768, 8]`, so 51 of its 259 modules (50 block adaln + `final_layer`) cannot merge on a pruned checkpoint:
-      measured **208 of 259 merged, 51 skipped**. `LoraStack` now shape-checks each delta and names the skip rather
-      than handing a mismatched delta to `backend.Add`. Still true: the **fused `qkv_proj` merges** because a PEFT
-      export targets it as one Linear
-      (verified against the real bf16 checkpoint: `blocks.0.attn.qkv_proj.weight` `[21504, 5376]` BF16). Only a
-      kohya-*underscored* export would need work (`LoraKeyTransformer`'s allowlist lacks `q_norm`/`k_norm`/`adaln_proj`).
-      **LoRA works on EITHER build** — an fp8 target is dequantized, merged in F32, and requantized back to fp8 with a
-      recomputed scale (ComfyUI's approach), so the weight stays on the native fp8 GEMM path instead of being rejected.
-      *Landmine:* `Fp8InputScaleFactor` must be carried onto the merged tensor or the weight silently drops off the
-      static-input-scale fast path (~188 ms/step). *Landmine:* merged weights are written back at the checkpoint dtype,
-      so a BF16 base resolves only ~0.4% of magnitude — a probe delta below ~1e-3 rounds away entirely.
-- [x] **Region-targeted reference conditioning — DONE 2026-08-11.** `<refcrop:N,query[,threshold]>`
-      auto-crops reference image N (1-based, matching H3's own `<Picture N>` numbering) to a
-      CLIPSeg-matched region before `EncodeReferenceImage`. No packing/timestep changes needed —
-      `EncodeReferenceImage` already preserves the reference's own aspect ratio (scales down-only, no
-      canvas match), so a cropped region is just a differently-shaped `ImageData` into the same call.
-      Real-weight verified on the ref2va checkpoint: a synthetic reference cropped and visually
-      confirmed correct, then a same-seed A/B (cropped vs. whole reference) showing a measurable and
-      visually confirmed difference in the output. Full design/syntax rationale:
-      [`docs/Research/MINIMAX_H3.md`](../Research/MINIMAX_H3.md#region-targeted-reference-conditioning-tier-38--done-real-weight-verified-2026-08-11).
-- [x] **int8 `convrot` DONE 2026-08-12 — real-weight verified.** Comfy-Org publishes **five DiT builds per task**
-      (ten total — `bf16`, `int8_convrot`, `pruned_bf16`, `pruned_fp8_scaled`, `pruned_int8_convrot`, for each of fl2va
-      and ref2va), not four. The engine now loads **all** of them: `pruned_int8_convrot` (21 GB) rides the resident
-      INT8 IMMA path (`CudaBackend` `int8Resident` branch, activation ConvRot via `convrot.ptx`), and
-      `MiniMaxH3Assets.FormatRank` no longer sinks `convrot` filenames. Verified by a real fl2va generation on the
-      4090 — inspected frames, fully resident. Per-step figures live in
-      [`benchmarks/scoreboards/VIDEO.md`](../../benchmarks/scoreboards/VIDEO.md). The `bf16` build (66 GB) still
-      streams per call, and its run remains the only exercise of the pruned `adaln_t_table` curve path
-      (`curves=True`). Format details: [`QUANTIZATION_COMFY_FORMATS.md`](../Research/QUANTIZATION_COMFY_FORMATS.md).
-- [ ] **SwarmUI path: extension side done, blocked only on the engine NuGet publish.** SwarmUI core added native
-      H3 support (`T2IModelClassSorter`, PR #1469): it owns the `minimax-h3` compat class AND the `minimax-h3`,
-      `minimax-h3/vae`, `minimax-h3/audio-vae` model classes, detected on `video_patch_proj`+`audio_patch_proj`.
-      **The extension must NOT register any of these** — `Register`/`RegisterCompat` are backed by `Dictionary.Add`,
-      so a duplicate ID throws at pre-init and would break extension load. The extension therefore only maps core's
-      compat class to the engine family in `ModelSupport` (same shape as `lightricks-ltx-video-2`, which likewise
-      shares its compat class with a `/vae` class). Builds clean; **unverified end-to-end** until a NuGet release
-      carrying the H3 recipe ships. Run a Swarm generation as the first check after publishing.
+- [x] **Borrowed-view-as-output sweep, done 2026-08-03.** H3's mosaic bug was a `View`/`RowView` passed as an
+      in-place op's OUTPUT tensor (CUDA binds the result to the view and drops the write on dispose, silently —
+      CPU is unaffected, so unit tests pass). Swept every borrowed-pointer construction outside
+      `HartsyInference.Core`; only `MiniMaxH3Transformer` needed the fix. Re-run the grep when adding a model
+      that slices activations rather than weights.
+- [x] **fl2va, ref2va, and reference-video/audio conditioning all DONE and real-weight adherence-verified**
+      (2026-08-05/06/11), including region-targeted `<refcrop:N,query>` cropping. fl2va/ref2va reject
+      combination (position-cursor overlap). Known ceiling: `BuildCausalMask` is a dense `[S,S]` F32 — three
+      reference clips costs ~1.3 GB for the mask alone, now a clear error instead of an OOM. Design rationale:
+      `docs/Research/MINIMAX_H3.md`.
+- [x] **LoRA DONE 2026-08-05/08 — works on either the bf16 or fp8 build** (fp8 dequantizes, merges in F32,
+      requantizes with a recomputed scale, ComfyUI's approach). Two landmines: `Fp8InputScaleFactor` must be
+      carried onto the merged tensor or it silently drops off the fast path (~188 ms/step, correct output, no
+      failing test); a pruned checkpoint's curve-table adaln shape means 51 of 259 modules can't merge (named
+      skip, not silently dropped).
+- [x] **Both VAE encoder halves built 2026-08-05** from already-shipped weights — video round-trip correlation
+      0.9636 untiled / 0.9733 tiled; stereo channel identity confirmed by encoding a real stereo source
+      (~2000:1 L/R separation). Both gates are GPU-only (CPU is minutes/frame).
+- [x] **int8 `convrot` DONE 2026-08-12, real-weight verified** — all five DiT builds per task now load;
+      `pruned_int8_convrot` (21 GB) rides the resident INT8 IMMA path. Per-step figures:
+      `benchmarks/scoreboards/VIDEO.md`. Format details: `docs/Research/QUANTIZATION_COMFY_FORMATS.md`.
+- [x] **Catalog `Assets` + sha256 DONE 2026-08-05** — CLI-drivable with zero `--model-path`. One provenance
+      trap: the audio VAE hardlinks to the vendor repack, which is byte-different (same weights) from the
+      Comfy-Org one, so that hash is the published oid, not locally-verified; the other three match byte-for-byte.
+- [ ] Block streaming (`IStreamingBlock`) is not wired for H3's 50 blocks.
+- [ ] Sampling with very few steps is pathological at shift 12 (a 4-step schedule puts ~80% of denoising in
+      the final jump). Decide whether to clamp the shift for low step counts or document a floor.
+- [ ] **SwarmUI path: extension side done, blocked only on the engine NuGet publish.** SwarmUI core already
+      owns the `minimax-h3` compat class (PR #1469); the extension must not re-register it (`Dictionary.Add`
+      would throw at pre-init on a duplicate ID) — only maps core's compat class to the engine family. Builds
+      clean; unverified end-to-end until the NuGet release ships. Run a Swarm generation as the first check.
 
 ### CLI catalog
 - [ ] `cosmos-predict1-5b` / `cosmos-predict1-13b`: `IVideoRecipe` wrappers (also blocked on the DV pixel-decoder port, not just plumbing).
@@ -634,6 +252,28 @@ tables on 2026-08-06 so the tables stay scannable — no content was dropped.
 ### LTX-2.3 22B
 
 **Real-weight coherent output confirmed (2026-07-01, 4090):** `ltx-2.3-22b-dev-fp8.safetensors` + Gemma-3-12B fp8 → coherent cats-in-a-sunlit-garden clip (25f, temporally varying) **plus a decoded 48 kHz waveform**. **Block-swap** streams the ~19 GB fp8 DiT in a ~1.2 GB resident window (fits 24 GB, no OOM; `IStreamingBlock`/`BlockStreamingController`). The DiT is **numerically parity-verified** vs the vendored diffusers `LTX2VideoTransformer3DModel` (per-block relL2 ~1e-7, tiny matched config). Grid bug fixed: LTX-2.3 uses **`rope_type=split`** (NEOX per-head `(i,i+headDim/2)`), not base-LTX interleaved — implemented split in `LtxVideo2Rope`. Audio fixed: added **grouped `ConvTranspose1d`** to the CUDA `conv_transpose1d_f32` kernel (BigVGAN depthwise upsampling) + audio-latent denorm. See memory `ltx2-19b-vs-23-divergence`. **Perf (VIDEO_GENPERF_PLAN Phases 0–2 + 4-video, 2026-07-08/11):** steps 30 → **~2.0 s** (block GPU-residency port + pinned staging ring + VRAM-gated resident prefix + bitwise-proven CFG pairing), **video VAE decode 0.77 s (44.74-local)** — decode tail GPU-ported with existing ops (`WanRmsNormChannel`, `Permute0213` shuffle chain, `UnpatchifyVae`; exact-parity unit tests `LtxVaeDevicePortParityTests`); e2e 25f 512×320/20st ≈ **97 s**. **Phase 5 Gemma prompt cache shipped (44.75-local, 2026-07-11):** all four paired-CFG embeddings cached per (pos,neg) token key — repeat-prompt gens skip the whole TE phase (Gemma ×2 + connectors + ~12 GB TE upload, 5–22 s), warm same-prompt gen **48.3 s** with frames byte-identical to the miss gen; different-prompt miss path re-encodes correctly (`LTX2_CACHE_ROUNDTRIP=1` roundtrip in `LtxVideo2_Gpu_T2VA_ShortClip`). **Phase 5b resident-prefix persistence shipped (44.76-local, 2026-07-11):** shared weights + the block prefix stay device-resident across gens (Flux KEEP_MODELS idiom; count pinned, kills the 12→10→9 drift; TE-miss evicts only when Gemma doesn't fit — measured — then squeezes this gen and tops back up next gen; `DisposeCore` frees on model switch). Engine 4-gen roundtrip: HIT gens preload+prime 7.8 s → 0.15–0.3 s, walls 48.3 → **44.5–45.0 s**, gen-4 frames byte-identical to gen-3 (asserted). **Phase 4 audio half shipped (44.77-local, 2026-07-11): audio decode 0.13 s** — all vocoder + audio-VAE host loops GPU-ported with existing ops (`LtxAudioDeviceOps` transpose/slice/concat replicate-pads + crops, device MRF sums, `WanRmsNormChannel` pixel-norm w/ folded `eps′=sqrt(C·eps)`, batched-`Permute0213` mel flatten; the BWE transpose-then-flatten proved an identity relabel of the log-mel memory and was eliminated); exact-parity `LtxAudioDevicePortParityTests`; warm same-prompt Swarm gens **39.1/38.7 s**, video frames byte-identical to 44.76, audio waveform vs 44.76 cos 0.9999 / rms+peak dB within 0.03 dB. Remaining: F16 activations (Phase 3) — absmax probe recorded (`HARTSY_LTX2_PROBE=1`, real weights): video stream plateaus **15k–18.2k absmax over blocks 37–45** (audio ≤2k; no stream >60k so no hard F16 overflow, but only ~3.6× headroom to 65,504, and steps are weight-stream-bound at this geometry so the F16 wall win is capped — deferred with full numbers in the worklog). **Split-checkpoint path FIXED + verified (2026-08-01).** Root cause of the 2026-07-21 checkerboard: the split VAE file carries BARE keys, and the converter's bare-key router only sent `decoder.`/`encoder.`/`latents_` to the VAE bucket — `per_channel_statistics.{mean-of-means,std-of-means}` fell through to the Transformer bucket, so `ReadStats` found nothing and latent denormalization was an identity no-op. std-of-means goes as low as 0.074, so the decoder received channels up to ~13× too hot → the documented up-stack blow-up (±943) → RGB clamp saturation. One-line fix in `LtxVideo2CheckpointConverter.RouteKey` (route bare `per_channel_statistics` to `MapVae`); the mid-stack magnitude growth itself is normal (pixel_norm renormalizes — post-fix probe: denorm ±2.06, conv_out −1.80..1.42 ≈ [-1,1]). Verified: `hartsy video -m ltx-2` 512×320×25f 20 steps seed 42 → coherent convertible-at-sunset frames through the previously-broken path; transformer Sha256 now pinned. Bundled single-file checkpoints were never affected (their stats arrive as `vae.per_channel_statistics.*`). Swarm picks the fix up with the next NuGet publish. **Multi-GPU (2026-08-05)**: TE placement (incl. the Gemma-vs-prefix evict skip — the biggest single win) plus video AND audio VAE/vocoder on `VaeDevice` wired (2026-08-04 wave), awaiting checkpoint verification; pattern authority is MULTI_GPU_COMPONENT_PLACEMENT.md.
+
+### LTX-2.5 22B
+
+**Real-weight prompt-faithful output confirmed 2026-08-12** on the official `int8_lean_convrot` DiT +
+Gemma-4-12B: 704×480×25f with a soundtrack in ~80 s, each prompt rendering its own scene at a fixed seed.
+Text path verified against ComfyUI 0.32 on the real checkpoints (tokenizer ids byte-exact, Gemma-4 tower
+cosine 0.9999–1.0000/layer, DiT `attn2` within 0.07%). One real defect found and fixed getting there:
+`prompt_adaln` was driven by the raw flow sigma instead of the ×1000-scaled timestep, mis-modulating text
+K/V at every block and making output follow the seed rather than the prompt.
+
+**Two quality defects fixed 2026-08-15**, both root-caused and pinned by regression tests: the sigma
+schedule was missing ComfyUI's terminal stretch (`715ee947`, `LtxVideo2SigmaScheduleTests`), and the conv
+VAE decoder forced `upsampleResidual`/`spatialReflectPad` true against the checkpoint's own config
+(`7a141e93`). Quality parity with ComfyUI reached post-fix (1280×736×145f, matched 20 steps/cfg 3.0): both
+engines produce clean, undistorted faces — a visual verdict, since the same seed takes a different RNG path
+per engine. **Recommended profile: 1280×736, 20 steps, cfg 4.0, conv decoder, 24 fps.** Speed is not at
+parity (7.2% slower warm at that profile) — numbers, the do-not-retry list, and hard perf ceilings live in
+`benchmarks/scoreboards/VIDEO.md`, not here.
+
+Defaults are template-faithful since 2026-08-17: distilled checkpoints auto-route to the shipped two-stage
+flow (8-step base at half grid + ×2 latent upsample + 3-step refine; `HARTSY_LTX2_TWO_STAGE=0` for
+single-pass); both families default to 1280×736/121f/24fps. Full architecture notes: `../Research/LTX_2_5.md`.
 
 ### LTX-Video 13B (0.9.7 dev)
 

@@ -7,28 +7,20 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <summary>Converts <c>fal/AuraFlow-v0.3</c> single-file safetensors (BFL-style native naming) to diffusers-format weight dictionaries for the C# AuraFlowTransformer. Mirrors <c>diffusers/loaders/single_file_utils.py:convert_auraflow_transformer_checkpoint_to_diffusers</c>. AuraFlow's BFL single-file is bias-free for attention and FFN (only timestep MLP has biases); Pile-T5-XL and the SDXL VAE ship separately in the diffusers folder layout.</summary>
 public sealed class AuraFlowCheckpointConverter
 {
-    /// <summary>Result of converting a single-file AuraFlow checkpoint. The <c>calcuis/aura</c> FP8 single-file
-    /// bundles transformer (<c>model.*</c>), Pile-T5-XL text encoder (<c>text_encoders.pile_t5xl.transformer.*</c>),
-    /// and AuraFlow VAE (<c>vae.*</c>) all in one safetensors. The original <c>fal/AuraFlow-v0.3</c> BF16
-    /// single-file ships transformer-only with no <c>model.</c> prefix; both formats are handled.</summary>
+    /// <summary>Result of converting a single-file AuraFlow checkpoint. The <c>calcuis/aura</c> FP8 single-file bundles transformer (<c>model.*</c>), Pile-T5-XL text encoder (<c>text_encoders.pile_t5xl.transformer.*</c>), and AuraFlow VAE (<c>vae.*</c>) all in one safetensors. The original <c>fal/AuraFlow-v0.3</c> BF16 single-file ships transformer-only with no <c>model.</c> prefix; both formats are handled.</summary>
     public sealed class ConvertedWeights
     {
         /// <summary>AuraFlow MMDiT transformer weights in diffusers format.</summary>
         public required Dictionary<string, Tensor> Transformer { get; init; }
 
-        /// <summary>Pile-T5-XL encoder weights (HuggingFace T5 naming, prefix stripped). Empty when the
-        /// single-file doesn't bundle T5 (the BF16 <c>fal/AuraFlow-v0.3</c> release).</summary>
+        /// <summary>Pile-T5-XL encoder weights (HuggingFace T5 naming, prefix stripped). Empty when the single-file doesn't bundle T5 (the BF16 <c>fal/AuraFlow-v0.3</c> release).</summary>
         public required Dictionary<string, Tensor> T5 { get; init; }
 
-        /// <summary>AuraFlow VAE weights (diffusers naming). Empty when the single-file doesn't bundle the VAE
-        /// (the BF16 release expects you to load <c>aura_vae.safetensors</c> separately).</summary>
+        /// <summary>AuraFlow VAE weights (diffusers naming). Empty when the single-file doesn't bundle the VAE (the BF16 release expects you to load <c>aura_vae.safetensors</c> separately).</summary>
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Converts a flat AuraFlow single-file weight dictionary into transformer + T5 + VAE buckets.
-    /// Routes by prefix: <c>model.*</c> → transformer (strip <c>model.</c>, then run BFL→diffusers rename);
-    /// <c>text_encoders.pile_t5xl.transformer.*</c> → T5 (strip the prefix); <c>vae.*</c> → VAE (strip <c>vae.</c>).
-    /// Folds ComfyUI <c>.scale_weight</c> FP8 companions into <c>Tensor.Fp8ScaleFactor</c> first.</summary>
+    /// <summary>Converts a flat AuraFlow single-file weight dictionary into transformer + T5 + VAE buckets. Routes by prefix: <c>model.*</c> → transformer (strip <c>model.</c>, then run BFL→diffusers rename); <c>text_encoders.pile_t5xl.transformer.*</c> → T5 (strip the prefix); <c>vae.*</c> → VAE (strip <c>vae.</c>). Folds ComfyUI <c>.scale_weight</c> FP8 companions into <c>Tensor.Fp8ScaleFactor</c> first.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
@@ -68,8 +60,7 @@ public sealed class AuraFlowCheckpointConverter
         return new ConvertedWeights { Transformer = transformer, T5 = t5, Vae = vae };
     }
 
-    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader
-    /// (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
+    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
     public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
     {
         SafeTensorsLoader loader = new();
@@ -100,7 +91,7 @@ public sealed class AuraFlowCheckpointConverter
         if (key == "modF.1.weight")
         {
             // BFL native [shift, scale] → diffusers [scale, shift] for AuraFlowPreFinalBlock.
-            output["norm_out.linear.weight"] = SwapScaleShiftHalves(tensor);
+            output["norm_out.linear.weight"] = CheckpointConvertUtils.SwapScaleShiftHalves(tensor);
             return;
         }
         if (key == "cond_seq_linear.weight")
@@ -210,27 +201,4 @@ public sealed class AuraFlowCheckpointConverter
         output[$"{prefix}.{subKey}"] = tensor;
     }
 
-    /// <summary>Swaps the two halves of a tensor along dim 0 (BFL <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c>).
-    /// Identical implementation to the one in <see cref="FluxCheckpointConverter"/>; kept inline rather than shared
-    /// to avoid making this small utility part of a public API contract.</summary>
-    private static unsafe Tensor SwapScaleShiftHalves(Tensor input)
-    {
-        long firstDim = input.Shape[0];
-        if (firstDim % 2 != 0)
-            throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
-
-        long halfBytes = (input.ElementCount / 2) * input.DType.SizeInBytes;
-
-        Tensor swapped = new(input.Shape, input.DType)
-        {
-            Fp8ScaleFactor = input.Fp8ScaleFactor,
-        };
-
-        byte* src = (byte*)input.DataPointer;
-        byte* dst = (byte*)swapped.DataPointer;
-
-        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);              // 2nd half → 1st half
-        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);              // 1st half → 2nd half
-        return swapped;
-    }
 }

@@ -63,8 +63,8 @@ public sealed unsafe class AnimaLlmAdapter : IDisposable
     /// already stripped — e.g. <c>blocks.0.self_attn.q_proj.weight</c>, <c>embed.weight</c>, <c>norm.weight</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _embedWeight = LoadAsF32(weights, "embed.weight");
-        _normWeight = LoadAsF32(weights, "norm.weight");
+        _embedWeight = TensorCasts.LoadF32(weights, "embed.weight");
+        _normWeight = TensorCasts.LoadF32(weights, "norm.weight");
         _outProjWeight = weights["out_proj.weight"];
         weights.TryGetValue("out_proj.bias", out _outProjBias);
 
@@ -209,12 +209,6 @@ public sealed unsafe class AnimaLlmAdapter : IDisposable
         }
     }
 
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -273,9 +267,9 @@ public sealed unsafe class AnimaLlmAdapterBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _normSelfAttnWeight = LoadAsF32(weights, $"{prefix}.norm_self_attn.weight");
-        _normCrossAttnWeight = LoadAsF32(weights, $"{prefix}.norm_cross_attn.weight");
-        _normMlpWeight = LoadAsF32(weights, $"{prefix}.norm_mlp.weight");
+        _normSelfAttnWeight = TensorCasts.LoadF32(weights, $"{prefix}.norm_self_attn.weight");
+        _normCrossAttnWeight = TensorCasts.LoadF32(weights, $"{prefix}.norm_cross_attn.weight");
+        _normMlpWeight = TensorCasts.LoadF32(weights, $"{prefix}.norm_mlp.weight");
 
         _selfQ = weights[$"{prefix}.self_attn.q_proj.weight"];
         _selfK = weights[$"{prefix}.self_attn.k_proj.weight"];
@@ -320,7 +314,7 @@ public sealed unsafe class AnimaLlmAdapterBlock
         if (_mlp2Bias is not null) yield return _mlp2Bias;
     }
 
-    /// <summary>Forward pass.</summary>
+    /// <summary>Pre-norm self-attn → cross-attn → MLP, each a residual addition (no gating, unlike the outer DiT).</summary>
     /// <param name="x">Main stream <c>[1, S_t5, hidden]</c>. Self-attn Q,K,V and cross-attn Q all derive from this.</param>
     /// <param name="context">Qwen-3 hidden states <c>[1, S_qwen3, hidden]</c>. Cross-attn K,V derive from this. Caller owns disposal.</param>
     /// <param name="cosTgt">Self-attn / cross-attn-Q RoPE cos <c>[S_t5, headDim]</c>. Caller owns.</param>
@@ -478,11 +472,5 @@ public sealed unsafe class AnimaLlmAdapterBlock
         backend.Linear(result, activated, _mlp2Weight!, _mlp2Bias);
         activated.Dispose();
         return result;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

@@ -2,14 +2,7 @@ using HartsyInference.Core.Backends;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>Per-sequence CUDA-graph decode state, captured once (see <see cref="DynamicBatchScheduler"/>'s
-/// admission-time capture) and replayed for as long as that sequence stays the scheduler's sole active
-/// sequence. Mirrors exactly what <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> tracks as
-/// method-locals for one whole generation — moved to fields here because a scheduler-owned session must
-/// survive across many separate decode rounds (and potentially long gaps between them while other sequences
-/// run), not just one method call. One-way: once a session is retired (the sequence stops being solo), it is
-/// disposed and never resurrected — see the scheduler's retirement doc for why resuming a captured graph
-/// after an eager interlude is unsafe.</summary>
+/// <summary>Per-sequence CUDA-graph decode state, captured once and replayed for as long as that sequence stays the scheduler's sole active sequence; one-way — once retired (the sequence stops being solo) it is disposed and never resurrected, since resuming a captured graph after an eager interlude is unsafe.</summary>
 internal sealed class GraphDecodeSession
 {
     private readonly IBackend _backend;
@@ -20,8 +13,7 @@ internal sealed class GraphDecodeSession
     private readonly ulong _historyCount;
     private int _disposed;
 
-    /// <summary>Absolute position of the token this session is about to generate next — mirrors
-    /// <c>GenerateGraphDecode</c>'s local <c>pos</c>. Advanced by the scheduler after every replay.</summary>
+    /// <summary>Absolute position of the token this session is about to generate next; advanced by the scheduler after every replay.</summary>
     public int Pos { get; set; }
 
     public GraphDecodeSession(IBackend backend, object graph, ulong devicePos, ulong deviceTokenId,
@@ -36,22 +28,17 @@ internal sealed class GraphDecodeSession
         Pos = pos;
     }
 
-    /// <summary>Replays the captured graph once and returns the newly-sampled token id. Does NOT advance
-    /// <see cref="Pos"/> or write the next replay's device-side position — the caller does both (mirrors
-    /// <c>GenerateGraphDecode</c>'s loop body exactly, so the scheduler's per-round dispatch can replicate its
-    /// token-for-token behavior).</summary>
+    /// <summary>Replays the captured graph once and returns the newly-sampled token id; does NOT advance <see cref="Pos"/> or write the next replay's device-side position — the caller does both.</summary>
     public int Replay()
     {
         _backend.LaunchGraph(_graph!);
         return _backend.ReadDeviceTokenId(_deviceTokenId);
     }
 
-    /// <summary>Writes the device-side position buffer ahead of the NEXT replay — mirrors
-    /// <c>GenerateGraphDecode</c>'s per-step <c>WriteDevicePos(devicePos, pos + 1, pos)</c> call.</summary>
+    /// <summary>Writes the device-side position buffer ahead of the NEXT replay.</summary>
     public void WriteNextPos() => _backend.WriteDevicePos(_devicePos, Pos + 1, Pos);
 
-    /// <summary>Frees the captured graph and every device buffer allocated for it — mirrors
-    /// <c>GenerateGraphDecode</c>'s <c>finally</c> block exactly. Idempotent.</summary>
+    /// <summary>Frees the captured graph and every device buffer allocated for it; idempotent.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

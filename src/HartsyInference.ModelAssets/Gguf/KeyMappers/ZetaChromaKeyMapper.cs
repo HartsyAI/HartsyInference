@@ -1,11 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>Zeta-Chroma GGUF mapper. Despite the name, Zeta-Chroma is the Z-Image S3-DiT (NextDiT single-file
-/// naming: <c>layers.*</c>, <c>noise_refiner.*</c>, <c>context_refiner.*</c>) retrained for pixel space, with a
-/// DeCo-style <c>dec_net.*</c> decoder head replacing <c>final_layer</c>. Must be probed BEFORE
-/// <see cref="ZImageKeyMapper"/> in heuristic detection — every Zeta checkpoint also matches the Z-Image signature.
-/// Keys pass through unchanged; <see cref="HartsyInference.ModelAssets.CheckpointConverters.ZetaChromaCheckpointConverter"/>
-/// reuses the Z-Image partitioner.</summary>
+/// <summary>Zeta-Chroma GGUF mapper. Despite the name, Zeta-Chroma is the Z-Image S3-DiT (NextDiT single-file naming: <c>layers.*</c>, <c>noise_refiner.*</c>, <c>context_refiner.*</c>) retrained for pixel space, with a DeCo-style <c>dec_net.*</c> decoder head replacing <c>final_layer</c>. Must be probed BEFORE <see cref="ZImageKeyMapper"/> in heuristic detection — every Zeta checkpoint also matches the Z-Image signature. Keys pass through unchanged; <see cref="HartsyInference.ModelAssets.CheckpointConverters.ZetaChromaCheckpointConverter"/> reuses the Z-Image partitioner.</summary>
 public sealed class ZetaChromaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "zeta-chroma";

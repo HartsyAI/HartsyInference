@@ -166,11 +166,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         }
     }
 
-    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
-    /// parts, null otherwise. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature but
-    /// is never read by <see cref="FluxPipeline.GenerateFromTokens"/>'s regional path (confirmed by inspection: the
-    /// pipeline builds its actual background stream from its own internally-computed T5 embeddings, not this field)
-    /// — a throwaway placeholder, disposed immediately rather than kept alive for the plan's lifetime.</summary>
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> parts, null otherwise. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature but is never read by <see cref="FluxPipeline.GenerateFromTokens"/>'s regional path (confirmed by inspection: the pipeline builds its actual background stream from its own internally-computed T5 embeddings, not this field) — a throwaway placeholder, disposed immediately rather than kept alive for the plan's lifetime.</summary>
     private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
     {
         if (!RegionalPromptResolver.HasRegionParts(prompt))

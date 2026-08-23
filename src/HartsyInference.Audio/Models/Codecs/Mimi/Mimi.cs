@@ -4,8 +4,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Mimi neural audio codec (Kyutai), HF <c>transformers</c> MimiModel layout. DECODE path
-/// (codes -> 24 kHz PCM), used by Sesame CSM and the Kyutai delayed-streams models:
+/// <summary>Mimi neural audio codec (Kyutai), HF <c>transformers</c> MimiModel layout; decode path (codes → 24 kHz PCM), used by Sesame CSM and the Kyutai delayed-streams models.</summary>
+/// <remarks>
 /// <list type="number">
 ///   <item><see cref="MimiSplitRvq"/> EMA split semantic+acoustic RVQ: codes -> latent <c>[B,512,T]</c></item>
 ///   <item><c>upsample</c>: depthwise ConvTranspose1d (k4, stride 2, groups 512), causal trim -> 12.5 to 25 Hz</item>
@@ -13,7 +13,7 @@ namespace HartsyInference.Audio.Models.Codecs.Mimi;
 ///   <item><see cref="MimiSeanetDecoder"/> SEANet (ratios [8,6,5,4]) -> 25 Hz to 24 kHz</item>
 /// </list>
 /// Decode order matches <c>MimiModel._decode_frame</c>: quantizer.decode -> upsample -> decoder_transformer ->
-/// decoder. Verified against the real kyutai/mimi weights.</summary>
+/// decoder. Verified against the real kyutai/mimi weights.</remarks>
 public sealed unsafe class Mimi
 {
     public MimiConfig Config { get; }
@@ -97,11 +97,10 @@ public sealed unsafe class Mimi
         return pcm;
     }
 
-    /// <summary>Streaming counterpart to <see cref="Decode"/>: decodes one chunk of <c>[B,K,t]</c> codes, carrying
-    /// <paramref name="state"/> across successive calls for the same utterance so the result reconstructs (to
-    /// float rounding) what a single monolithic <see cref="Decode"/> call over the whole utterance would have
+    /// <summary>Streaming counterpart to <see cref="Decode"/>: decodes one chunk of <c>[B,K,t]</c> codes, carrying <paramref name="state"/> across successive calls so the result matches a single monolithic <see cref="Decode"/> call over the whole utterance.</summary>
+    /// <remarks>Reconstructs to float rounding what a whole-utterance <see cref="Decode"/> call would have
     /// produced — verified by <c>MimiStreamParityTests</c>. Batch must be 1 (the streaming state carries no batch
-    /// dimension bookkeeping; Mimi decode in this engine is always single-sequence in practice).</summary>
+    /// dimension bookkeeping; Mimi decode in this engine is always single-sequence in practice).</remarks>
     public Tensor DecodeStreaming(IBackend backend, Tensor codes, int batch, int tFrames, MimiDecoderStreamState state)
     {
         if (_upsampleW is null) throw new InvalidOperationException("Mimi weights not loaded.");
@@ -133,10 +132,8 @@ public sealed unsafe class Mimi
         return pcm;
     }
 
-    /// <summary>Encodes PCM <c>[B, 1, tPcm]</c> to codes <c>[B, K, T]</c> (Int32, K = total codebooks). Mirror of
-    /// <see cref="Decode"/> / HF <c>MimiModel._encode_frame</c>: SEANet encoder → encoder transformer → strided
-    /// downsample conv → split-RVQ nearest-neighbour encode. <paramref name="tPcm"/> should be a multiple of the
-    /// SEANet downsample product (960); the caller pads to a frame boundary.</summary>
+    /// <summary>Encodes PCM <c>[B, 1, tPcm]</c> to codes <c>[B, K, T]</c> (Int32, K = total codebooks); mirror of <see cref="Decode"/> / HF <c>MimiModel._encode_frame</c>.</summary>
+    /// <param name="tPcm">Should be a multiple of the SEANet downsample product (960); the caller pads to a frame boundary.</param>
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
         if (!_encodeLoaded) throw new InvalidOperationException("Mimi encode path not loaded (checkpoint lacks encoder.*/downsample.*).");

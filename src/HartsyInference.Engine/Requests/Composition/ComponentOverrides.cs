@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Optional per-request overrides for a model's swappable sub-components (VAE and the various text encoders).
-/// Each value is a model id or local path; null leaves the recipe's default for that component in place.</summary>
+/// <summary>Optional per-request overrides for a model's swappable sub-components (VAE and the various text encoders). Each value is a model id or local path; null leaves the recipe's default for that component in place.</summary>
 public sealed record ComponentOverrides
 {
     /// <summary>VAE override.</summary>

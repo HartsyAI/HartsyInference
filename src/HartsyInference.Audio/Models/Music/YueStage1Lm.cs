@@ -8,12 +8,11 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>YuE Stage-1 LM — a LLaMA-2-7B decoder that emits the interleaved codebook-0 stream
-/// <c>[vocal_0, accomp_0, vocal_1, accomp_1, …]</c> (track-decoupled next-token prediction) from
-/// lyric+genre prompt tokens. Reuses <see cref="Qwen2Model"/> (Llama, bias-off) + the shared
+/// <summary>YuE Stage-1 LM — a LLaMA-2-7B decoder that emits the interleaved codebook-0 stream <c>[vocal_0, accomp_0, vocal_1, accomp_1, …]</c> (track-decoupled next-token prediction) from lyric+genre prompt tokens.</summary>
+/// <remarks>Reuses <see cref="Qwen2Model"/> (Llama, bias-off) + the shared
 /// <see cref="NucleusSampler"/>; the only YuE-specific logic is the mandatory repetition penalty and
 /// parsing emitted absolute IDs into the two per-track codebook-0 streams by ID range. Same shape as
-/// Spark-TTS / CosyVoice's codec-token LMs.</summary>
+/// Spark-TTS / CosyVoice's codec-token LMs.</remarks>
 public sealed unsafe class YueStage1Lm : IDisposable
 {
     private readonly YueConfig _cfg;
@@ -26,21 +25,19 @@ public sealed unsafe class YueStage1Lm : IDisposable
         _lm = new Qwen2Model(cfg.Stage1);
     }
 
-    /// <summary>Optional layer-split placement for the 7B body — pools VRAM across GPUs so Stage-1 can run at
-    /// checkpoint precision instead of being quantized down to fit one card. Null = single-backend on the
-    /// per-call backend. Logits/sampling follow <see cref="LlmPlacement.LastBackend"/> when set.</summary>
+    /// <summary>Optional layer-split placement for the 7B body — pools VRAM across GPUs so Stage-1 can run at checkpoint precision instead of being quantized down to fit one card. Null = single-backend on the per-call backend. Logits/sampling follow <see cref="LlmPlacement.LastBackend"/> when set.</summary>
     public LlmPlacement? Placement { get; set; }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "model")
         => _lm.LoadWeights(w, prefix);
 
-    /// <summary>Generates the two codebook-0 track streams. Returns <c>(vocal, accompaniment)</c> codec
-    /// indices (equal length). All YuE generation params are exposed per-call (default to the config):
+    /// <summary>Generates the two codebook-0 track streams. Returns <c>(vocal, accompaniment)</c> codec indices (equal length).</summary>
+    /// <remarks>All YuE generation params are exposed per-call (default to the config):
     /// <paramref name="temperature"/> (1.0), <paramref name="topK"/> (50), <paramref name="topP"/> (0.93),
     /// <paramref name="repetitionPenalty"/> (1.1). Classifier-free guidance (YuE default 1.5) is applied when
     /// <paramref name="uncondTokenIds"/> is supplied (a negative/unconditional prompt) and
     /// <paramref name="guidanceScale"/> ≠ 1: at each step <c>logits = uncond + g·(cond − uncond)</c> via a parallel
-    /// KV cache primed on the negative prompt and fed the same generated tokens.</summary>
+    /// KV cache primed on the negative prompt and fed the same generated tokens.</remarks>
     public (List<int> Vocal, List<int> Accomp) GenerateCb0(IBackend backend,
         ReadOnlySpan<int> promptTokenIds, int maxFrames = 3000, int seed = 0,
         float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
@@ -51,11 +48,11 @@ public sealed unsafe class YueStage1Lm : IDisposable
         return (v, a);
     }
 
-    /// <summary>Generates ONE segment's cb0 from an accumulated context (infer.py's per-segment
-    /// <c>model.generate</c>). Returns <c>(vocal, accomp)</c> codec indices PLUS <paramref name="RawTokens"/> —
+    /// <summary>Generates ONE segment's cb0 from an accumulated context (infer.py's per-segment <c>model.generate</c>).</summary>
+    /// <remarks>Returns <c>(vocal, accomp)</c> codec indices PLUS <paramref name="RawTokens"/> —
     /// the exact sampled LM ids for this segment (interleaved codec tokens, no prompt, no trailing &lt;EOA&gt;) so
     /// the pipeline can build the next segment's context. Stops at &lt;EOA&gt; or after <paramref name="maxNewFrames"/>*2
-    /// tokens. Per-token sampling / masking / vocal-accomp bucketing is byte-identical to the single-shot path.</summary>
+    /// tokens. Per-token sampling / masking / vocal-accomp bucketing is byte-identical to the single-shot path.</remarks>
     public (List<int> Vocal, List<int> Accomp, List<int> RawTokens) GenerateSegment(IBackend backend,
         ReadOnlySpan<int> contextTokens, int maxNewFrames = 3000, int seed = 0,
         float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
@@ -156,8 +153,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
         return (vocal.GetRange(0, frames), accomp.GetRange(0, frames), raw);
     }
 
-    /// <summary>HF-convention repetition penalty over the trailing history (>0 divide, &lt;0 multiply).
-    /// Inline (small) — the windowed variant lives in CosyVoice's SpeechSampler.</summary>
+    /// <summary>HF-convention repetition penalty over the trailing history (>0 divide, &lt;0 multiply). Inline (small) — the windowed variant lives in CosyVoice's SpeechSampler.</summary>
     private static void ApplyRepetitionPenalty(Span<float> logits, List<int> history, float penalty)
     {
         if (penalty == 1f) return;

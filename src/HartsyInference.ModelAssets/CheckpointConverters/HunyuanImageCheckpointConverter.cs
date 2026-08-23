@@ -4,11 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE
-/// / CLIP / T5 dictionaries. The diffusers naming convention is preserved verbatim — Hunyuan ships in
-/// canonical diffusers layout, so no key remapping is required. FP8 <c>.scale_weight</c> companion
-/// tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared
-/// <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
+/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. The diffusers naming convention is preserved verbatim — Hunyuan ships in canonical diffusers layout, so no key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
 public sealed class HunyuanImageCheckpointConverter
 {
     /// <summary>Result of partitioning a Hunyuan Image 2.1 safetensors file.</summary>
@@ -224,21 +220,11 @@ public sealed class HunyuanImageCheckpointConverter
             else if (key.StartsWith("final_layer.adaLN_modulation.1.", StringComparison.Ordinal))
             {
                 // Tencent stores [shift, scale]; the diffusers AdaLN-continuous final norm wants [scale, shift].
-                output["norm_out.linear." + key["final_layer.adaLN_modulation.1.".Length..]] = SwapHalvesRows(t);
+                output["norm_out.linear." + key["final_layer.adaLN_modulation.1.".Length..]] = CheckpointConvertUtils.SwapScaleShiftHalves(t);
             }
             else output[key] = t;
         }
         return output;
-    }
-
-    /// <summary>Byte count for a row-aligned slice; validates GGUF quant-block alignment (blocks never span rows).</summary>
-    private static long SliceByteCount(Tensor t, long elementCount)
-    {
-        DType d = t.DType;
-        if (d.IsQuantized && t.Shape.Rank == 2 && t.Shape[1] % d.BlockElementCount != 0)
-            throw new NotSupportedException(
-                $"Cannot split {d.Name} tensor with row length {t.Shape[1]}: not a multiple of the {d.BlockElementCount}-element quant block.");
-        return d.ComputeByteCount(elementCount);
     }
 
     private static unsafe void SplitRows(Tensor fused, int parts, Dictionary<string, Tensor> output,
@@ -246,7 +232,7 @@ public sealed class HunyuanImageCheckpointConverter
     {
         long rows = fused.Shape[0] / parts;
         TensorShape shape = isBias || fused.Shape.Rank == 1 ? new TensorShape(rows) : new TensorShape(rows, fused.Shape[1]);
-        long chunkBytes = SliceByteCount(fused, shape.ElementCount);
+        long chunkBytes = CheckpointConvertUtils.SliceByteCount(fused, shape.ElementCount);
         string suffix = isBias ? "bias" : "weight";
         string[] names = [name0, name1, name2];
         byte* src = (byte*)fused.DataPointer;
@@ -265,8 +251,8 @@ public sealed class HunyuanImageCheckpointConverter
         long totalRows = fused.Shape[0];
         long mlpRows = totalRows - 3L * hidden;
         long cols = isBias || fused.Shape.Rank == 1 ? 1 : fused.Shape[1];
-        long qkvChunk = SliceByteCount(fused, hidden * cols);
-        long mlpChunk = SliceByteCount(fused, mlpRows * cols);
+        long qkvChunk = CheckpointConvertUtils.SliceByteCount(fused, hidden * cols);
+        long mlpChunk = CheckpointConvertUtils.SliceByteCount(fused, mlpRows * cols);
         string suffix = isBias ? "bias" : "weight";
         TensorShape qkvShape = cols == 1 ? new TensorShape(hidden) : new TensorShape(hidden, cols);
         TensorShape mlpShape = cols == 1 ? new TensorShape(mlpRows) : new TensorShape(mlpRows, cols);
@@ -285,18 +271,6 @@ public sealed class HunyuanImageCheckpointConverter
         mlp.Fp8ScaleFactor = fused.Fp8ScaleFactor;
         Buffer.MemoryCopy(src + offset, (void*)mlp.DataPointer, mlpChunk, mlpChunk);
         output[$"{mlpName}.{suffix}"] = mlp;
-    }
-
-    private static unsafe Tensor SwapHalvesRows(Tensor input)
-    {
-        long halfBytes = SliceByteCount(input, input.ElementCount / 2);
-        Tensor swapped = new Tensor(input.Shape, input.DType);
-        swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
-        byte* src = (byte*)input.DataPointer;
-        byte* dst = (byte*)swapped.DataPointer;
-        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
-        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
-        return swapped;
     }
 
     private static bool DetectFp8Mix(Dictionary<string, Tensor> weights)

@@ -61,12 +61,12 @@ public sealed unsafe class GptOssEncoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         Tensor rawEmbed = weights["model.embed_tokens.weight"];
-        _embedWeight = CastToF32IfNeeded(rawEmbed);
+        _embedWeight = TensorCasts.EnsureF32(rawEmbed);
 
         if (_config.HasFinalNorm)
         {
             Tensor rawFinalNorm = weights["model.norm.weight"];
-            _finalNormWeight = CastToF32IfNeeded(rawFinalNorm);
+            _finalNormWeight = TensorCasts.EnsureF32(rawFinalNorm);
         }
 
         for (int i = 0; i < _config.NumLayers; i++)
@@ -103,7 +103,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
         EnsureRopeTable(seqLen);
         EnsureMasks(seqLen);
 
-        Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
+        Tensor hidden = TextEncoderTensorHelpers.EmbeddingLookupHost(
+            tokenIds, batch, seqLen, _embedWeight!, _config.HiddenSize, _config.VocabSize, embeddingScale: 1.0f);
 
         for (int i = 0; i < _config.NumLayers; i++)
         {
@@ -161,7 +162,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
         EnsureRopeTable(seqLen);
         EnsureMasks(seqLen);
 
-        Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
+        Tensor hidden = TextEncoderTensorHelpers.EmbeddingLookupHost(
+            tokenIds, batch, seqLen, _embedWeight!, _config.HiddenSize, _config.VocabSize, embeddingScale: 1.0f);
 
         // Pre-allocate slots in the order the user requested.
         Tensor?[] outputs = new Tensor?[selectedLayers.Length];
@@ -198,32 +200,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
         return copy;
     }
 
-    private Tensor EmbeddingLookup(int[][] tokenIds, int batch, int seqLen)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, _config.HiddenSize);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        float* embedPtr = (float*)_embedWeight!.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int H = _config.HiddenSize;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int tokenId = tokenIds[b][s];
-                if ((uint)tokenId >= (uint)_config.VocabSize)
-                    throw new ArgumentOutOfRangeException(nameof(tokenIds),
-                        $"Token id {tokenId} at [{b},{s}] out of vocab (size {_config.VocabSize}).");
-
-                long src = (long)tokenId * H;
-                long dst = ((long)b * seqLen + s) * H;
-                Buffer.MemoryCopy(embedPtr + src, outPtr + dst, H * sizeof(float), H * sizeof(float));
-            }
-        }
-        return output;
-    }
-
     /// <summary>Builds (or rebuilds, if seqLen grew) both the full-causal and sliding-window causal masks,
     /// each <c>[seqLen, seqLen]</c>. Sliding-window: position q only attends to positions in
     /// <c>[q - SlidingWindow + 1, q]</c>. Cached on the encoder between calls.</summary>
@@ -235,27 +211,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
         _causalMaskFull?.Dispose();
         _causalMaskSliding?.Dispose();
 
-        TensorShape shape = new TensorShape(seqLen, seqLen);
-        Tensor full = new Tensor(shape, DType.F32);
-        Tensor sliding = new Tensor(shape, DType.F32);
-
-        const float negInf = -1e30f;
-        int window = _config.SlidingWindow;
-        float* pFull = (float*)full.DataPointer;
-        float* pSlide = (float*)sliding.DataPointer;
-        for (int q = 0; q < seqLen; q++)
-        {
-            int slidingMin = q - window + 1;
-            if (slidingMin < 0) slidingMin = 0;
-            for (int k = 0; k < seqLen; k++)
-            {
-                pFull[q * seqLen + k] = k > q ? negInf : 0f;
-                pSlide[q * seqLen + k] = (k > q || k < slidingMin) ? negInf : 0f;
-            }
-        }
-
-        _causalMaskFull = full;
-        _causalMaskSliding = sliding;
+        _causalMaskFull = TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue);
+        _causalMaskSliding = TextEncoderTensorHelpers.BuildCausalMask(seqLen, _config.SlidingWindow);
         _causalMasksBuiltForLen = seqLen;
     }
 
@@ -272,10 +229,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
 
         int halfDim = _config.HeadDim / 2;
         int dim = _config.HeadDim;
-        int targetLen = Math.Max(seqLen, _ropeBuiltForMaxLen);
-        int rounded = 1;
-        while (rounded < targetLen) rounded <<= 1;
-        targetLen = Math.Min(rounded, _config.MaxPositionEmbeddings);
+        int targetLen = TextEncoderTensorHelpers.GrowRopeTableLength(seqLen, _ropeBuiltForMaxLen, _config.MaxPositionEmbeddings);
 
         // Inverse frequencies + YaRN mscale via the shared RopeFrequencyBuilder (the same scaling math the LLM
         // decoder uses; this encoder was the original source of the ported YaRN). YaRN is position-independent,
@@ -305,9 +259,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
         }
         _ropeBuiltForMaxLen = targetLen;
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -364,8 +315,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _inputNorm = TensorCasts.EnsureF32(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_attention_layernorm.weight"]);
 
             _qProj = weights[$"{prefix}.self_attn.q_proj.weight"];
             _kProj = weights[$"{prefix}.self_attn.k_proj.weight"];
@@ -381,7 +332,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
             }
 
             if (_config.HasAttentionSinks)
-                _sinks = CastToF32IfNeeded(weights[$"{prefix}.self_attn.sinks"]);
+                _sinks = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.sinks"]);
 
             _moe.LoadWeights(weights, $"{prefix}.mlp");
         }
@@ -642,8 +593,5 @@ public sealed unsafe class GptOssEncoder : IDisposable
                 }
             }
         }
-
-        private static Tensor CastToF32IfNeeded(Tensor t) =>
-            t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

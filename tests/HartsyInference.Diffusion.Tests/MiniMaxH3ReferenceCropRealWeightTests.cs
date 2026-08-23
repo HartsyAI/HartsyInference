@@ -95,7 +95,8 @@ public sealed class MiniMaxH3ReferenceCropRealWeightTests
         meanR /= pixels; meanG /= pixels; meanB /= pixels;
         _output.WriteLine($"Cropped region mean RGB: ({meanR:F1},{meanG:F1},{meanB:F1}).");
 
-        string outPath = Path.Combine(RepoRoot.Path, "h3_refcrop_isolated.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string outPath = Path.Combine(TestPaths.OutputDir, "h3_refcrop_isolated.rgb");
         File.WriteAllBytes(outPath, croppedRgb);
         _output.WriteLine($"Wrote {outPath} for visual inspection ({cropped.Width}x{cropped.Height}, RGB24 raw).");
 
@@ -167,8 +168,9 @@ public sealed class MiniMaxH3ReferenceCropRealWeightTests
         double meanAbsDiff = diffSum / (double)wholeRgb.Length;
         _output.WriteLine($"Frame 0 mean abs diff (whole vs. cropped reference): {meanAbsDiff:F2}.");
 
-        File.WriteAllBytes(Path.Combine(RepoRoot.Path, "h3_refcrop_whole_frame0.rgb"), wholeRgb);
-        File.WriteAllBytes(Path.Combine(RepoRoot.Path, "h3_refcrop_cropped_frame0.rgb"), croppedRgb);
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "h3_refcrop_whole_frame0.rgb"), wholeRgb);
+        File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "h3_refcrop_cropped_frame0.rgb"), croppedRgb);
         _output.WriteLine("Wrote both frame-0 outputs for visual inspection.");
 
         Assert.True(meanAbsDiff > 0.5, $"Cropped vs. whole reference produced nearly identical output (mean abs diff {meanAbsDiff:F2}) — <refcrop:> likely isn't reaching the conditioning.");

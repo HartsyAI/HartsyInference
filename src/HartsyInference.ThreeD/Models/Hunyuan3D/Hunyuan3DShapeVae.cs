@@ -4,13 +4,7 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 VecSet ShapeVAE decoder (decode-only). Mirrors hy3dgen <c>ShapeVAE</c>: <c>post_kl</c>
-/// Linear(64→1024) → a <see cref="Hunyuan3DVaeResBlock"/> self-attention <c>transformer</c> stack over the 3072
-/// latent tokens → a <see cref="Hunyuan3DGeoDecoder"/> that Fourier-embeds a batch of 3D query points and
-/// cross-attends them to the processed latents, projecting to a scalar occupancy per point. A dense grid of
-/// occupancies is assembled into a <see cref="ScalarField3D"/> for marching cubes.
-/// <para>QK-norm here is <b>LayerNorm</b> on the head dim (weight+bias, eps 1e-6), the MLPs use <b>erf</b> GELU
-/// (<c>nn.GELU()</c>), and the fused <c>c_qkv</c>/<c>c_kv</c> are <b>head-interleaved</b> (per head [q,k,v]/[k,v]).</para></summary>
+/// <summary>Hunyuan3D-2 VecSet ShapeVAE decoder (decode-only): a self-attention transformer over the latent set, then a <see cref="Hunyuan3DGeoDecoder"/> that cross-attends 3D query points to the latents for a dense occupancy grid.</summary>
 public sealed unsafe class Hunyuan3DShapeVae
 {
     private readonly Hunyuan3DConfig _cfg;
@@ -57,16 +51,14 @@ public sealed unsafe class Hunyuan3DShapeVae
         return x;
     }
 
-    /// <summary>Precomputes the query-independent cross-attn K/V from processed latents (from
-    /// <see cref="ProcessLatents"/>). Pair with <see cref="DecodePoints"/>; dispose both returned tensors.</summary>
+    /// <summary>Precomputes the query-independent cross-attn K/V from processed latents; pair with <see cref="DecodePoints"/> and dispose both returned tensors.</summary>
     public (Tensor kNorm, Tensor v) PrepareKv(IBackend backend, Tensor processed) => _geo.PrepareKv(backend, processed);
 
     /// <summary>Occupancy logits for query points <c>[count,3]</c> given precomputed cross-attn K/V. Returns <c>[count]</c>.</summary>
     public Tensor DecodePoints(IBackend backend, (Tensor kNorm, Tensor v) kv, Tensor coords, int count)
         => _geo.Query(backend, kv, coords, count);
 
-    /// <summary>Full grid decode: process latents once, then chunk the <paramref name="resolution"/>³ query grid
-    /// over <c>[-bound,bound]</c> into occupancy → <see cref="ScalarField3D"/>. ij(k)-order (x outer, z inner).</summary>
+    /// <summary>Full grid decode: process latents once, then chunk the <paramref name="resolution"/>³ query grid over <c>[-bound,bound]</c> into occupancy → <see cref="ScalarField3D"/>.</summary>
     // chunkSize bounds the geo-decoder cross-attn scores buffer (H·chunk·Nlatent floats): 4096 → ~1.6 GB at
     // heads 16 / 3072 latents. Larger values (e.g. 32768 → ~6 GB) OOM alongside the weights on a 24 GB card.
     public ScalarField3D Decode(IBackend backend, Tensor latent, int resolution, float bound, int chunkSize = 4096)
@@ -107,7 +99,7 @@ public sealed unsafe class Hunyuan3DShapeVae
             Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
             new ReadOnlySpan<float>(coordBuf, 0, count * 3).CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
             Tensor occ = DecodePoints(backend, kv, coordsT, count);
-            Tensor occF = occ.DType == DType.F32 ? occ : occ.CastTo(DType.F32);
+            Tensor occF = TensorCasts.EnsureF32(occ);
             new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(values.AsSpan((int)done, count));
             if (!ReferenceEquals(occF, occ)) occF.Dispose();
             occ.Dispose();
@@ -123,5 +115,5 @@ public sealed unsafe class Hunyuan3DShapeVae
         };
     }
 
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+    internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);
 }

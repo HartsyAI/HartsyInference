@@ -46,7 +46,7 @@ public sealed unsafe class T5Block
     {
         // Attention sublayer (layer.0)
         // Norm weights must be F32 — they go through backend.RmsNorm with F32 input
-        _attnNormWeight = EnsureF32(weights[$"{prefix}.layer.0.layer_norm.weight"]);
+        _attnNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.layer.0.layer_norm.weight"]);
         _qWeight = weights[$"{prefix}.layer.0.SelfAttention.q.weight"];
         _kWeight = weights[$"{prefix}.layer.0.SelfAttention.k.weight"];
         _vWeight = weights[$"{prefix}.layer.0.SelfAttention.v.weight"];
@@ -54,7 +54,7 @@ public sealed unsafe class T5Block
 
         // FFN sublayer (layer.1) — named DenseReluDense regardless of flavor. v1.1/UMT5 store a gated pair
         // (wi_0 + wi_1); the original v1.0 (google/t5-base, MusicGen) stores a single wi with ReLU.
-        _ffnNormWeight = EnsureF32(weights[$"{prefix}.layer.1.layer_norm.weight"]);
+        _ffnNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.layer.1.layer_norm.weight"]);
         if (_gatedFeedForward)
         {
             _wi0Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_0.weight"];
@@ -91,7 +91,6 @@ public sealed unsafe class T5Block
 
         // --- Self-Attention sublayer ---
 
-        // RMSNorm
         Tensor normed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(normed, input, _attnNormWeight!, _eps);
 
@@ -145,19 +144,16 @@ public sealed unsafe class T5Block
         ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
-        // Output projection (no bias)
         Tensor attnProjected = new Tensor(hidShape, DType.F32);
         backend.Linear(attnProjected, merged, _oWeight!, null);
         merged.Dispose();
 
-        // Residual connection
         Tensor attnResidual = new Tensor(hidShape, DType.F32);
         backend.Add(attnResidual, input, attnProjected);
         attnProjected.Dispose();
 
         // --- FFN sublayer ---
 
-        // RMSNorm
         Tensor ffnNormed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(ffnNormed, attnResidual, _ffnNormWeight!, _eps);
 
@@ -200,12 +196,10 @@ public sealed unsafe class T5Block
             proj.Dispose();
         }
 
-        // Output projection
         Tensor ffnOutput = new Tensor(hidShape, DType.F32);
         backend.Linear(ffnOutput, gated, _woWeight!, null);
         gated.Dispose();
 
-        // Residual connection
         Tensor output = new Tensor(hidShape, DType.F32);
         backend.Add(output, attnResidual, ffnOutput);
         attnResidual.Dispose();
@@ -291,9 +285,6 @@ public sealed unsafe class T5Block
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor tensor) =>
-        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 
     private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {

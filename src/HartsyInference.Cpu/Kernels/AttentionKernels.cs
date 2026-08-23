@@ -59,10 +59,14 @@ public static class AttentionKernels
                     //   rank 4  [B|1, H|1, Sq, Skv]  → per-batch / per-head
                     // The previous code assumed rank 4 unconditionally and, for a rank-2 mask, mis-read
                     // Shape[0]/Shape[1] as B/H — producing an out-of-bounds offset (h·Sq·Skv) for every head > 0.
+                    // A mask whose query axis is 1 stores one [Skv] row broadcast over every query (a bias that
+                    // depends only on the key); maskSq is that axis, so it is also the per-block row count.
                     long maskBhOffset = 0;
+                    long maskSq = Sq;
                     if (pMask != null && mask != null)
                     {
                         long maskRank = mask.Shape.Rank;
+                        maskSq = maskRank == 2 ? mask.Shape[0] : maskRank == 3 ? mask.Shape[1] : mask.Shape[2];
                         if (maskRank == 2)
                         {
                             maskBhOffset = 0;
@@ -70,13 +74,13 @@ public static class AttentionKernels
                         else if (maskRank == 3)
                         {
                             long maskH = mask.Shape[0] > 1 ? h : 0;
-                            maskBhOffset = maskH * Sq * Skv;
+                            maskBhOffset = maskH * maskSq * Skv;
                         }
                         else
                         {
                             long maskB = mask.Shape[0] > 1 ? b : 0;
                             long maskH = mask.Shape[1] > 1 ? h : 0;
-                            maskBhOffset = maskB * mask.Shape[1] * Sq * Skv + maskH * Sq * Skv;
+                            maskBhOffset = maskB * mask.Shape[1] * maskSq * Skv + maskH * maskSq * Skv;
                         }
                     }
 
@@ -95,7 +99,7 @@ public static class AttentionKernels
                         // Step 2: Apply additive mask if present
                         if (pMask != null)
                         {
-                            float* maskRow = pMask + maskBhOffset + qi * Skv;
+                            float* maskRow = pMask + maskBhOffset + (maskSq == 1 ? 0 : qi) * Skv;
                             for (long ki = 0; ki < Skv; ki++)
                             {
                                 attnRow[ki] += maskRow[ki];
@@ -108,7 +112,6 @@ public static class AttentionKernels
                         // Step 4: attnRow @ V -> output row
                         float* oRow = oHead + qi * D;
 
-                        // Zero the output row
                         NativeMemory.Clear(oRow, (nuint)(D * sizeof(float)));
 
                         for (long vi = 0; vi < Skv; vi++)
@@ -162,7 +165,6 @@ public static class AttentionKernels
         }
     }
 
-    /// <summary>Computes the dot product of two float vectors using SIMD acceleration.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe float VectorizedDot(float* a, float* b, int count)
     {

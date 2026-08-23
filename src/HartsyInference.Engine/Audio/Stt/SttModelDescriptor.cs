@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Per-model specifics for the generic transcription path: how to turn a variant hint into a HuggingFace
-/// repo, how to load it, and the rate the input audio is decoded to first.</summary>
+/// <summary>Per-model specifics for the generic transcription path: how to turn a variant hint into a HuggingFace repo, how to load it, and the rate the input audio is decoded to first.</summary>
 internal sealed class SttModelDescriptor
 {
     /// <summary>Maps the request's variant hint to a HuggingFace repo id.</summary>

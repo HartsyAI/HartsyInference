@@ -33,9 +33,9 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _qwenLoader;
     private readonly SafeTensorsLoader _vaeLoader;
 
-    /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
         AnimaTransformer transformer, AnimaLlmAdapter llmAdapter, IBackend backend,
         SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)

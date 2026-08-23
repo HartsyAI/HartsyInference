@@ -12,12 +12,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>OmniGen 2 text-to-image and reference-image edit pipeline. Caller supplies pre-computed Qwen2.5-VL
-/// caption embeddings — OmniGen 2's text encoder is wired through the existing
-/// <see cref="Models.TextEncoders.LlamaStyleEncoder"/> at the Qwen2.5-VL preset. Note the upstream
-/// <c>pipeline_omnigen2.py</c> conditions on TEXT ONLY even for editing (the mllm never sees the image — vision
-/// tokens are exclusive to the separate chat pipeline/model); reference images enter solely as VAE latents in the
-/// transformer's token stream, so <see cref="EditFromEmbeddings"/> takes the same text-only embeddings as t2i.</summary>
+/// <summary>OmniGen 2 text-to-image and reference-image edit pipeline. Caller supplies pre-computed Qwen2.5-VL caption embeddings — OmniGen 2's text encoder is wired through the existing <see cref="Models.TextEncoders.LlamaStyleEncoder"/> at the Qwen2.5-VL preset. Note the upstream <c>pipeline_omnigen2.py</c> conditions on TEXT ONLY even for editing (the mllm never sees the image — vision tokens are exclusive to the separate chat pipeline/model); reference images enter solely as VAE latents in the transformer's token stream, so <see cref="EditFromEmbeddings"/> takes the same text-only embeddings as t2i.</summary>
 public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 {
     private readonly OmniGen2Transformer _transformer;
@@ -37,8 +32,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
     {
     }
 
-    /// <summary>Creates an OmniGen 2 pipeline with the VAE encoder loaded — required for the reference-image
-    /// edit path (<see cref="EditFromEmbeddings"/>). Caller owns each component.</summary>
+    /// <summary>Creates an OmniGen 2 pipeline with the VAE encoder loaded — required for the reference-image edit path (<see cref="EditFromEmbeddings"/>). Caller owns each component.</summary>
     public OmniGen2Pipeline(IBackend backend, OmniGen2Transformer transformer, VaeDecoder vaeDecoder,
         VaeEncoder? vaeEncoder, OmniGen2Config config)
         : base(backend)
@@ -49,8 +43,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-computed Qwen2.5-VL caption embeddings <c>[1, T, 2048]</c>.
-    /// CFG dual-pass when guidance is active with a negative-prompt embedding.
+    /// <summary>Generates an image from pre-computed Qwen2.5-VL caption embeddings <c>[1, T, 2048]</c>. CFG dual-pass when guidance is active with a negative-prompt embedding.
     /// <para>OmniGen 2's defining feature is DUAL guidance: <paramref name="textGuidanceScale"/> (default 4.0,
     /// diffusers <c>text_guidance_scale</c>) and <paramref name="imageGuidanceScale"/> (default 1.0,
     /// diffusers <c>image_guidance_scale</c>). With an input image the reference runs three forwards — see
@@ -200,11 +193,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Reference-image edit (text + image → image), mirroring diffusers/upstream
-    /// <c>OmniGen2Pipeline.processing</c>. Reference images are RGB tensors <c>[1, 3, Hr, Wr]</c> in
-    /// <c>[-1, 1]</c> with dims divisible by 16 (the caller applies the reference's
-    /// <c>max_pixels</c>/<c>max_input_image_side_length</c> resize); they are VAE-encoded once (cached across
-    /// generations by content signature) and fed into the transformer's token stream at every forward.
+    /// <summary>Reference-image edit (text + image → image), mirroring diffusers/upstream <c>OmniGen2Pipeline.processing</c>. Reference images are RGB tensors <c>[1, 3, Hr, Wr]</c> in <c>[-1, 1]</c> with dims divisible by 16 (the caller applies the reference's <c>max_pixels</c>/<c>max_input_image_side_length</c> resize); they are VAE-encoded once (cached across generations by content signature) and fed into the transformer's token stream at every forward.
     /// <para>Dual guidance per the reference: when both scales are &gt; 1, three forwards per step —
     /// <c>cond</c> (positive text + refs), <c>refPred</c> (negative text + refs), <c>uncond</c> (negative text,
     /// NO refs) — combined as <c>pred = uncond + ig·(refPred − uncond) + tg·(cond − refPred)</c>. When only
@@ -334,9 +323,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>VAE-encodes the reference images (or reuses the single-slot cache when their content signatures
-    /// match the previous generation). Encoder weights are staged in for the encode and freed right after; the
-    /// latents are host-materialized so later activation reclaims can't lose them.</summary>
+    /// <summary>VAE-encodes the reference images (or reuses the single-slot cache when their content signatures match the previous generation). Encoder weights are staged in for the encode and freed right after; the latents are host-materialized so later activation reclaims can't lose them.</summary>
     private unsafe Tensor[] GetOrEncodeRefLatents(IReadOnlyList<Tensor> referenceImages)
     {
         long refSig = ImageSignature.CombineList(referenceImages);

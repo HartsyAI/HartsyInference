@@ -5,17 +5,7 @@ using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Locates, version-guards, and (optionally) auto-provisions the cuDNN runtime so the conv/SDPA fast paths
-/// engage across OS / CUDA-version / GPU combos WITHOUT the user hand-installing it — and emits one clear diagnostic
-/// line at engine start so a "why is it slow?" report is a single log check.
-///
-/// <para>cuDNN is a ~1 GB, <b>CUDA-major-specific</b>, OS-specific set of libraries, so it is NOT shipped inside the
-/// DLL folder (that would be ~6 GB across CUDA 11/12/13 × Windows/Linux). Instead the matching build is resolved
-/// from, in order: <c>HARTSY_CUDNN_DIR</c> → the per-user engine cache → a <c>cudnn/</c> folder beside the assembly
-/// (an optional bundled deploy) → the OS default (a system install). If none is found and auto-fetch is on, the
-/// matching redist is downloaded once to the cache. A cuDNN built for a different CUDA major than the running driver
-/// is <b>REJECTED</b> — that exact mismatch (a CUDA-12 cuDNN on a CUDA-13 runtime) previously hung the engine
-/// mid-inference.</para></summary>
+/// <summary>Locates, version-guards, and (optionally) auto-provisions the cuDNN runtime so the conv/SDPA fast paths engage across OS / CUDA-version / GPU combos WITHOUT the user hand-installing it — and emits one clear diagnostic line at engine start so a "why is it slow?" report is a single log check. <para>cuDNN is a ~1 GB, <b>CUDA-major-specific</b>, OS-specific set of libraries, so it is NOT shipped inside the DLL folder (that would be ~6 GB across CUDA 11/12/13 × Windows/Linux). Instead the matching build is resolved from, in order: <c>HARTSY_CUDNN_DIR</c> → the per-user engine cache → a <c>cudnn/</c> folder beside the assembly (an optional bundled deploy) → the OS default (a system install). If none is found and auto-fetch is on, the matching redist is downloaded once to the cache. A cuDNN built for a different CUDA major than the running driver is <b>REJECTED</b> — that exact mismatch (a CUDA-12 cuDNN on a CUDA-13 runtime) previously hung the engine mid-inference.</para></summary>
 public static class CudnnRuntime
 {
     /// <summary>True when a version-matched cuDNN loaded and passed the CUDA-major guard.</summary>
@@ -32,8 +22,7 @@ public static class CudnnRuntime
     /// <summary>Loaded cuDNN version (e.g. 90600) when <see cref="Available"/>, else 0.</summary>
     public static long Version { get; private set; }
 
-    /// <summary>Directory the matching cuDNN was resolved from (cache/bundle/system/env); added to the loader search
-    /// so <c>[LibraryImport("cudnn")]</c> resolves the same file. Read by <see cref="CudaLibraryResolver"/>.</summary>
+    /// <summary>Directory the matching cuDNN was resolved from (cache/bundle/system/env); added to the loader search so <c>[LibraryImport("cudnn")]</c> resolves the same file. Read by <see cref="CudaLibraryResolver"/>.</summary>
     public static string? LibDir { get; private set; }
 
     private static int _probed;
@@ -53,12 +42,10 @@ public static class CudnnRuntime
         return Path.Combine(home, ".cache", "hartsyinference", "cudnn", $"cuda{cudaMajor}", "lib");
     }
 
-    /// <summary>The optional bundled cuDNN folder beside the engine assembly (a self-contained deploy may drop the
-    /// matching libs here).</summary>
+    /// <summary>The optional bundled cuDNN folder beside the engine assembly (a self-contained deploy may drop the matching libs here).</summary>
     public static string BundledDir() => Path.Combine(AppContext.BaseDirectory, "cudnn");
 
-    /// <summary>Probes cuDNN once (thread-safe): provisions if needed, loads, and applies the CUDA-major guard.
-    /// Never throws — on any failure <see cref="Available"/> stays false with a <see cref="Reason"/>.</summary>
+    /// <summary>Probes cuDNN once (thread-safe): provisions if needed, loads, and applies the CUDA-major guard. Never throws — on any failure <see cref="Available"/> stays false with a <see cref="Reason"/>.</summary>
     public static void EnsureProbed()
     {
         if (Volatile.Read(ref _probed) != 0) return;
@@ -146,10 +133,7 @@ public static class CudnnRuntime
         return null;   // fall through to the OS default (system install) in the loader
     }
 
-    /// <summary>Best-effort one-time download of the matching cuDNN redist into the cache. Uses <c>HARTSY_CUDNN_URL</c>
-    /// when set (a direct .tar.xz / .zip), else NVIDIA's public redist for this CUDA major + OS. Extraction shells to
-    /// the system <c>tar</c>. Returns the cache lib dir on success, else null (the diagnostic then tells the user how
-    /// to install manually).</summary>
+    /// <summary>Best-effort one-time download of the matching cuDNN redist into the cache. Uses <c>HARTSY_CUDNN_URL</c> when set (a direct .tar.xz / .zip), else NVIDIA's public redist for this CUDA major + OS. Extraction shells to the system <c>tar</c>. Returns the cache lib dir on success, else null (the diagnostic then tells the user how to install manually).</summary>
     private static string? TryFetch(int cudaMajor)
     {
         try

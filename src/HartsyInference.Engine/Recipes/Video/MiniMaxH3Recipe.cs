@@ -15,11 +15,7 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>MiniMax-H3 ("Hailuo 03") recipe — a single-stream packed-token DiT denoising video and stereo audio
-/// jointly, with a ViT3D video VAE and a DAC/BigVGAN audio VAE. Components are located by
-/// <see cref="MiniMaxH3Assets"/>, which accepts both the vendor folder tree and the flat Comfy/SwarmUI repack. The
-/// DiT is loaded without an F32 cast because the bf16 release is larger than host RAM.
-/// See <c>docs/Research/MINIMAX_H3.md</c>.</summary>
+/// <summary>MiniMax-H3 ("Hailuo 03") recipe — a single-stream packed-token DiT denoising video and stereo audio jointly, with a ViT3D video VAE and a DAC/BigVGAN audio VAE. Components are located by <see cref="MiniMaxH3Assets"/>, which accepts both the vendor folder tree and the flat Comfy/SwarmUI repack. The DiT is loaded without an F32 cast because the bf16 release is larger than host RAM. See <c>docs/Research/MINIMAX_H3.md</c>.</summary>
 public sealed class MiniMaxH3Recipe : IVideoRecipe
 {
     // ModelScope publishes as MiniMax/*, HuggingFace as MiniMaxAI/*, and the checkpoint may say "Hailuo 03".
@@ -44,8 +40,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return false;
     }
 
-    /// <summary>The reference canvas for 16:9 (768 short edge, 768x1344 area cap, axes rounded to 32) and the
-    /// reference default length — 124 frames is the first 17k+5 value at ~5 s / 24 fps.</summary>
+    /// <summary>The reference canvas for 16:9 (768 short edge, 768x1344 area cap, axes rounded to 32) and the reference default length — 124 frames is the first 17k+5 value at ~5 s / 24 fps.</summary>
     public VideoDefaults Defaults { get; } =
         new VideoDefaults { Steps = 30, CfgScale = 1.0f, Width = 1344, Height = 768, Frames = 124, Fps = 24 };
 
@@ -129,14 +124,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             IBackend? ditShardBackend = null;
             if (context.DitShardBackend is not null && !ditIsHugeBf16Build)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], config.NumLayers, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
+                    context.Backend, context.DitShardBackend, config.NumLayers, transformer.EnumerateSharedWeights());
                 ditShardBackend = context.DitShardBackend;
                 Logs.Info($"[MiniMaxH3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{config.NumLayers}) on the shard backend.");
@@ -169,11 +158,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         }
     }
 
-    /// <summary>Conservative reserve any H3 forward needs beyond its resident weights, independent of the actual
-    /// request's sequence length — the smallest chunk's own transient scratch plus the fixed cuBLAS/RoPE fudge
-    /// tail (matches <see cref="MiniMaxH3ActivationEstimate"/>'s seq-independent terms). The seq-scaled cost is a
-    /// separate, per-request question that <c>MiniMaxH3RecipePipeline.CheckVramFeasibility</c> checks against live
-    /// free VRAM before every generation; this only needs to keep the one-time PRELOAD decision honest.</summary>
+    /// <summary>Conservative reserve any H3 forward needs beyond its resident weights, independent of the actual request's sequence length — the smallest chunk's own transient scratch plus the fixed cuBLAS/RoPE fudge tail (matches <see cref="MiniMaxH3ActivationEstimate"/>'s seq-independent terms). The seq-scaled cost is a separate, per-request question that <c>MiniMaxH3RecipePipeline.CheckVramFeasibility</c> checks against live free VRAM before every generation; this only needs to keep the one-time PRELOAD decision honest.</summary>
     private static long MinimumActivationReserveBytes(MiniMaxH3Config config)
     {
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
@@ -184,9 +169,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return Math.Max(attnChunkBytes, mlpChunkBytes) + MiniMaxH3ActivationEstimate.FudgeBytes;
     }
 
-    /// <summary>Warns when placement knobs are configured that H3 cannot use, so the operator learns why they saw
-    /// no effect instead of silently paying for an unused second CUDA context (<see cref="RecipeContext.AllBackends"/>
-    /// still constructs and gates on every configured backend regardless of whether a recipe consumes it).</summary>
+    /// <summary>Warns when placement knobs are configured that H3 cannot use, so the operator learns why they saw no effect instead of silently paying for an unused second CUDA context (<see cref="RecipeContext.AllBackends"/> still constructs and gates on every configured backend regardless of whether a recipe consumes it).</summary>
     private static void WarnIfPlacementIgnored(RecipeContext context)
     {
         if (context.CpBackends is { Count: > 0 })
@@ -203,8 +186,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         PlacementSupport.WarnIfComponentsSplit("MiniMaxH3Recipe", context);
     }
 
-    /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can
-    /// land on it first — the merge rewrites entries in place, so it has to happen before the transformer reads them.</summary>
+    /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can land on it first — the merge rewrites entries in place, so it has to happen before the transformer reads them.</summary>
     private static MiniMaxH3Transformer LoadTransformer(string file, List<SafeTensorsLoader> loaders,
         DType bodyDType, out MiniMaxH3Config config, out Dictionary<string, Tensor> transformerWeights)
     {
@@ -240,10 +222,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
     }
 
-    /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear
-    /// (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition
-    /// projections), so no convolution path is needed. Both builds are supported: the fp8 targets are requantized
-    /// per tensor by <see cref="MergedLoraStack"/>, and the int8-convrot build is already rejected at load.</summary>
+    /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition projections), so no convolution path is needed. Both builds are supported: the fp8 targets are requantized per tensor by <see cref="MergedLoraStack"/>, and the int8-convrot build is already rejected at load.</summary>
     private static MergedLoraStack? ApplyLoras(RecipeContext context, Dictionary<string, Tensor> weights)
     {
         IReadOnlyList<LoraResolver.LoraSpec> specs = LoraResolver.Resolve(context.Loras);
@@ -254,8 +233,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return LoraApplier.BuildAndApply(specs, context.Backend, transformerWeights: weights);
     }
 
-    /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but
-    /// a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
+    /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
     private static (MiniMaxH3VideoVaeDecoder Decoder, MiniMaxH3VideoVaeEncoder? Encoder) LoadVideoVae(
         string file, List<SafeTensorsLoader> loaders)
     {
@@ -283,8 +261,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return (decoder, encoder);
     }
 
-    /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a
-    /// decode-only build must still generate soundtracks.</summary>
+    /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a decode-only build must still generate soundtracks.</summary>
     private static (MiniMaxH3AudioVaeDecoder? Decoder, MiniMaxH3AudioVaeEncoder? Encoder) LoadAudioVae(
         string? file, List<SafeTensorsLoader> loaders)
     {

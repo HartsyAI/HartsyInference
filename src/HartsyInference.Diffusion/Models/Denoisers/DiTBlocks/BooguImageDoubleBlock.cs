@@ -68,7 +68,7 @@ public sealed unsafe class BooguImageDoubleBlock
     private Tensor? _imgAttnNorm, _imgSelfAttnNorm, _imgFfnNorm1, _imgFfnNorm2;
     private Tensor? _insAttnNorm, _insFfnNorm1, _insFfnNorm2;
 
-    /// <summary>Creates a dual-stream block.</summary>
+    /// <summary>Creates a dual-stream block; requires <c>numQHeads * headDim == hidden</c> and <c>numQHeads % numKvHeads == 0</c>.</summary>
     public BooguImageDoubleBlock(int hidden, int numQHeads, int numKvHeads, int headDim, int ffnInner,
         int conditioningDim, float normEps = 1e-5f, float qkNormEps = 1e-5f)
     {
@@ -123,19 +123,19 @@ public sealed unsafe class BooguImageDoubleBlock
         _insFf2 = w[$"{p}.instruct_feed_forward.linear_2.weight"];
         _insFf3 = w[$"{p}.instruct_feed_forward.linear_3.weight"];
 
-        _imgN1Lin = w[$"{p}.img_norm1.linear.weight"]; _imgN1Bias = w[$"{p}.img_norm1.linear.bias"]; _imgN1Norm = F32(w[$"{p}.img_norm1.norm.weight"]);
-        _imgN2Lin = w[$"{p}.img_norm2.linear.weight"]; _imgN2Bias = w[$"{p}.img_norm2.linear.bias"]; _imgN2Norm = F32(w[$"{p}.img_norm2.norm.weight"]);
-        _imgN3Lin = w[$"{p}.img_norm3.linear.weight"]; _imgN3Bias = w[$"{p}.img_norm3.linear.bias"]; _imgN3Norm = F32(w[$"{p}.img_norm3.norm.weight"]);
-        _insN1Lin = w[$"{p}.instruct_norm1.linear.weight"]; _insN1Bias = w[$"{p}.instruct_norm1.linear.bias"]; _insN1Norm = F32(w[$"{p}.instruct_norm1.norm.weight"]);
-        _insN2Lin = w[$"{p}.instruct_norm2.linear.weight"]; _insN2Bias = w[$"{p}.instruct_norm2.linear.bias"]; _insN2Norm = F32(w[$"{p}.instruct_norm2.norm.weight"]);
+        _imgN1Lin = w[$"{p}.img_norm1.linear.weight"]; _imgN1Bias = w[$"{p}.img_norm1.linear.bias"]; _imgN1Norm = TensorCasts.EnsureF32(w[$"{p}.img_norm1.norm.weight"]);
+        _imgN2Lin = w[$"{p}.img_norm2.linear.weight"]; _imgN2Bias = w[$"{p}.img_norm2.linear.bias"]; _imgN2Norm = TensorCasts.EnsureF32(w[$"{p}.img_norm2.norm.weight"]);
+        _imgN3Lin = w[$"{p}.img_norm3.linear.weight"]; _imgN3Bias = w[$"{p}.img_norm3.linear.bias"]; _imgN3Norm = TensorCasts.EnsureF32(w[$"{p}.img_norm3.norm.weight"]);
+        _insN1Lin = w[$"{p}.instruct_norm1.linear.weight"]; _insN1Bias = w[$"{p}.instruct_norm1.linear.bias"]; _insN1Norm = TensorCasts.EnsureF32(w[$"{p}.instruct_norm1.norm.weight"]);
+        _insN2Lin = w[$"{p}.instruct_norm2.linear.weight"]; _insN2Bias = w[$"{p}.instruct_norm2.linear.bias"]; _insN2Norm = TensorCasts.EnsureF32(w[$"{p}.instruct_norm2.norm.weight"]);
 
-        _imgAttnNorm = F32(w[$"{p}.img_attn_norm.weight"]);
-        _imgSelfAttnNorm = F32(w[$"{p}.img_self_attn_norm.weight"]);
-        _imgFfnNorm1 = F32(w[$"{p}.img_ffn_norm1.weight"]);
-        _imgFfnNorm2 = F32(w[$"{p}.img_ffn_norm2.weight"]);
-        _insAttnNorm = F32(w[$"{p}.instruct_attn_norm.weight"]);
-        _insFfnNorm1 = F32(w[$"{p}.instruct_ffn_norm1.weight"]);
-        _insFfnNorm2 = F32(w[$"{p}.instruct_ffn_norm2.weight"]);
+        _imgAttnNorm = TensorCasts.EnsureF32(w[$"{p}.img_attn_norm.weight"]);
+        _imgSelfAttnNorm = TensorCasts.EnsureF32(w[$"{p}.img_self_attn_norm.weight"]);
+        _imgFfnNorm1 = TensorCasts.EnsureF32(w[$"{p}.img_ffn_norm1.weight"]);
+        _imgFfnNorm2 = TensorCasts.EnsureF32(w[$"{p}.img_ffn_norm2.weight"]);
+        _insAttnNorm = TensorCasts.EnsureF32(w[$"{p}.instruct_attn_norm.weight"]);
+        _insFfnNorm1 = TensorCasts.EnsureF32(w[$"{p}.instruct_ffn_norm1.weight"]);
+        _insFfnNorm2 = TensorCasts.EnsureF32(w[$"{p}.instruct_ffn_norm2.weight"]);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preload.</summary>
@@ -490,6 +490,4 @@ public sealed unsafe class BooguImageDoubleBlock
         backend.Linear(output, input, weight, null);
         return output;
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

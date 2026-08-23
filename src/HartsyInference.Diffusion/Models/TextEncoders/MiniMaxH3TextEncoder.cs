@@ -528,10 +528,10 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = F32(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = F32(weights[$"{prefix}.post_attention_layernorm.weight"]);
-            _queryNorm = F32(weights[$"{prefix}.self_attn.q_norm.weight"]);
-            _keyNorm = F32(weights[$"{prefix}.self_attn.k_norm.weight"]);
+            _inputNorm = TensorCasts.EnsureF32(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _queryNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_norm.weight"]);
+            _keyNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_norm.weight"]);
             _query = Nvfp4Linear.Load(weights, $"{prefix}.self_attn.q_proj");
             _key = Nvfp4Linear.Load(weights, $"{prefix}.self_attn.k_proj");
             _value = Nvfp4Linear.Load(weights, $"{prefix}.self_attn.v_proj");
@@ -673,8 +673,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             if (_up is not null) yield return _up;
             if (_down is not null) yield return _down;
         }
-
-        private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
         private static void FlatToHeads(Tensor output, Tensor input, int seqLen, int heads, int headDim)
         {

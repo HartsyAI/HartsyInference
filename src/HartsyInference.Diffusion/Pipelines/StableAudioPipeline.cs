@@ -10,15 +10,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Stable Audio Open Small text-to-audio/SFX pipeline: pre-computed T5-base prompt states + a
-/// <c>seconds_total</c> timing token → <see cref="StableAudioDit"/> rectified-flow denoise (8-step
-/// <see cref="StableAudioPingPongScheduler"/>, no CFG — ARC-distilled) → Oobleck VAE decode → 44.1 kHz stereo,
-/// trimmed to the requested duration. The DiT always denoises the full trained-length latent
-/// (<see cref="StableAudioDitConfig.MaxLatentTokens"/>, ~11.89 s) regardless of the requested
-/// <c>secondsTotal</c> — duration is controlled purely through the timing conditioning token and a post-decode
-/// trim, matching upstream <c>generate_diffusion_cond</c>. <b>Status: DiT / VAE / timing conditioner components
-/// individually real-weight-verified (cosine 1.0 each, see PARITY_VERIFICATION.md); this composition is
-/// structurally wired but not yet end-to-end validated against a Python reference.</b></summary>
+/// <summary>Stable Audio Open Small text-to-audio/SFX pipeline: pre-computed T5-base prompt states + a <c>seconds_total</c> timing token → <see cref="StableAudioDit"/> rectified-flow denoise (8-step <see cref="StableAudioPingPongScheduler"/>, no CFG — ARC-distilled) → Oobleck VAE decode → 44.1 kHz stereo, trimmed to the requested duration. The DiT always denoises the full trained-length latent (<see cref="StableAudioDitConfig.MaxLatentTokens"/>, ~11.89 s) regardless of the requested <c>secondsTotal</c> — duration is controlled purely through the timing conditioning token and a post-decode trim, matching upstream <c>generate_diffusion_cond</c>. <b>Status: DiT / VAE / timing conditioner components individually real-weight-verified (cosine 1.0 each, see PARITY_VERIFICATION.md); this composition is structurally wired but not yet end-to-end validated against a Python reference.</b></summary>
 public sealed unsafe class StableAudioPipeline : DiffusionPipelineBase
 {
     private readonly StableAudioDit _dit;
@@ -36,10 +28,7 @@ public sealed unsafe class StableAudioPipeline : DiffusionPipelineBase
         _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
-    /// <summary>Generates stereo audio from pre-computed T5-base prompt states <c>[1, T_text, 768]</c>
-    /// (<c>T5TextEncoderConfig.T5Base</c>, max_length 64) and a requested duration. Returns one <c>float[]</c>
-    /// per channel at 44.1 kHz, trimmed to <paramref name="secondsTotal"/> (clamped to the model's trained
-    /// window).</summary>
+    /// <summary>Generates stereo audio from pre-computed T5-base prompt states <c>[1, T_text, 768]</c> (<c>T5TextEncoderConfig.T5Base</c>, max_length 64) and a requested duration. Returns one <c>float[]</c> per channel at 44.1 kHz, trimmed to <paramref name="secondsTotal"/> (clamped to the model's trained window).</summary>
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textEmbeds, double secondsTotal,
         int? steps = null, int? seed = null, Action<GenerationProgress>? onProgress = null)

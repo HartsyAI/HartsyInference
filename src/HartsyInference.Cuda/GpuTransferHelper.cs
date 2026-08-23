@@ -7,32 +7,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay
-/// until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's
-/// CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand.
-/// <para><b>Multi-backend safety:</b> all mutable state lives in a per-BACKEND <see cref="State"/> object (one per
-/// <see cref="CudaBackend"/> registration, identified by a process-unique <see cref="State.Key"/> that is never
-/// reused), resolved at every call via the ambient thread-static the owning backend binds at each op entry
-/// (<c>CudaBackend.EnterOp</c>). Activation callbacks capture their owning State directly, so a tensor produced on
-/// backend A always syncs/frees against A's context and stream even when backend B was used more recently.
-/// History: this was once a single set of static fields (constructing a second CudaBackend silently retargeted ALL
-/// cached state → cross-device frees → CUDA_ERROR_ILLEGAL_ADDRESS on both GPUs), then keyed by CUDA context handle
-/// — which collapsed two backends on the SAME device into one State (primary contexts are one-per-device), giving
-/// last-writer-wins stream bindings, cross-backend H2D copies on the wrong stream, and Dispose wiping the sibling's
-/// live weights. Per-backend keys + the ambient make same-device backends fully independent; the cost is that a
-/// host tensor shared by two same-device backends holds two device copies (accepted: preserves the "each backend
-/// owns its VRAM" invariant and PreloadWeight's ownership contract, no refcounting).</para></summary>
+/// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand. <para><b>Multi-backend safety:</b> all mutable state lives in a per-BACKEND <see cref="State"/> object (one per <see cref="CudaBackend"/> registration, identified by a process-unique <see cref="State.Key"/> that is never reused), resolved at every call via the ambient thread-static the owning backend binds at each op entry (<c>CudaBackend.EnterOp</c>). Activation callbacks capture their owning State directly, so a tensor produced on backend A always syncs/frees against A's context and stream even when backend B was used more recently. History: this was once a single set of static fields (constructing a second CudaBackend silently retargeted ALL cached state → cross-device frees → CUDA_ERROR_ILLEGAL_ADDRESS on both GPUs), then keyed by CUDA context handle — which collapsed two backends on the SAME device into one State (primary contexts are one-per-device), giving last-writer-wins stream bindings, cross-backend H2D copies on the wrong stream, and Dispose wiping the sibling's live weights. Per-backend keys + the ambient make same-device backends fully independent; the cost is that a host tensor shared by two same-device backends holds two device copies (accepted: preserves the "each backend owns its VRAM" invariant and PreloadWeight's ownership contract, no refcounting).</para></summary>
 internal static unsafe class GpuTransferHelper
 {
     /// <summary>All per-backend mutable state, identified by a process-unique <see cref="Key"/>.</summary>
     internal sealed class State
     {
-        /// <summary>Process-unique identity of this backend registration, never reused. Keys the registry, each
-        /// tensor's GPU bindings, and the finalizer-cleanup buckets.</summary>
+        /// <summary>Process-unique identity of this backend registration, never reused. Keys the registry, each tensor's GPU bindings, and the finalizer-cleanup buckets.</summary>
         public nint Key;
 
-        /// <summary>Original registry-routing handle. Kept stable until final retirement even if the owning
-        /// CudaContext has already zeroed its native handle during a faulted cleanup path.</summary>
+        /// <summary>Original registry-routing handle. Kept stable until final retirement even if the owning CudaContext has already zeroed its native handle during a faulted cleanup path.</summary>
         public nint RegisteredContextHandle;
 
         /// <summary>Cache mapping Tensor object references to GPU device pointers (weights — permanent).</summary>
@@ -41,42 +25,22 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Cache mapping Tensor object references to GPU activation data from previous ops.</summary>
         public readonly Dictionary<Tensor, (ulong gpuPtr, nuint bytes)> ActivationCache = new(ReferenceEqualityComparer.Instance);
 
-        /// <summary>Cache of dtype-upcast copies of preloaded weights (e.g. fp8 → BF16 for tensor-core GEMM).
-        /// The cast result is identical every forward, so it is computed once and reused — avoiding a per-Linear
-        /// re-cast of the whole 9.3B weight set on every denoise step. Keyed by the source weight tensor; freed
-        /// alongside its weight in <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>.</summary>
+        /// <summary>Cache of dtype-upcast copies of preloaded weights (e.g. fp8 → BF16 for tensor-core GEMM). The cast result is identical every forward, so it is computed once and reused — avoiding a per-Linear re-cast of the whole 9.3B weight set on every denoise step. Keyed by the source weight tensor; freed alongside its weight in <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>.</summary>
         public readonly Dictionary<Tensor, (ulong castPtr, nuint bytes)> WeightCastCache = new(ReferenceEqualityComparer.Instance);
 
-        /// <summary>Upload counts for host tensors that miss both caches. A tensor re-uploaded with unchanged host data
-        /// is behaving like a weight, whoever created it — on its second upload it is promoted into the weight cache
-        /// (see <see cref="TryAutoPromote"/>), making pipelines that never call <c>PreloadWeights</c> (the audio stack)
-        /// GPU-resident instead of PCIe-bound. Weak-keyed so tracked tensors stay collectible; the state dies with its
-        /// tensor. Per-State so promotion bookkeeping stays with the backend that owns the device copy.</summary>
+        /// <summary>Upload counts for host tensors that miss both caches. A tensor re-uploaded with unchanged host data is behaving like a weight, whoever created it — on its second upload it is promoted into the weight cache (see <see cref="TryAutoPromote"/>), making pipelines that never call <c>PreloadWeights</c> (the audio stack) GPU-resident instead of PCIe-bound. Weak-keyed so tracked tensors stay collectible; the state dies with its tensor. Per-State so promotion bookkeeping stays with the backend that owns the device copy.</summary>
         public readonly ConditionalWeakTable<Tensor, UploadState> UploadTracker = new();
 
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
 
-        /// <summary>Buffers displaced by a <see cref="CacheActivation"/> rebind, awaiting a caller's
-        /// <see cref="FreeDevice"/>; whatever is still here when the next op starts had no owner and is freed.</summary>
+        /// <summary>Buffers displaced by a <see cref="CacheActivation"/> rebind, awaiting a caller's <see cref="FreeDevice"/>; whatever is still here when the next op starts had no owner and is freed.</summary>
         public readonly HashSet<ulong> PendingOrphans = new();
 
-        /// <summary>Auto-promoted weight buffers demoted mid-op because a device write rebound their tensor to a
-        /// different buffer. They come from <c>cuMemAlloc</c> (<see cref="CudaMemory.AllocatePersistent"/>), so they
-        /// must be released with <c>cuMemFree</c> and NOT parked in <see cref="PendingOrphans"/>, which frees against
-        /// the async pool. Freed by the next op's sweep, after the current op's finally blocks have run — freeing
-        /// inline would double-free, since the demoted buffer is usually that same op's input.</summary>
+        /// <summary>Auto-promoted weight buffers demoted mid-op because a device write rebound their tensor to a different buffer. They come from <c>cuMemAlloc</c> (<see cref="CudaMemory.AllocatePersistent"/>), so they must be released with <c>cuMemFree</c> and NOT parked in <see cref="PendingOrphans"/>, which frees against the async pool. Freed by the next op's sweep, after the current op's finally blocks have run — freeing inline would double-free, since the demoted buffer is usually that same op's input.</summary>
         public readonly HashSet<ulong> PendingPersistentFrees = new();
 
-        /// <summary>Graph-capture arenas: while a decode-step graph is being captured
-        /// (<see cref="BeginGraphArena"/>), <see cref="AllocateDevice"/> bump-allocates from a per-capture
-        /// pre-reserved buffer instead of the stream-ordered pool — so the captured graph contains ZERO
-        /// memAlloc/memFree nodes for step intermediates (measured on gemma3: 875 alloc + 797 free nodes of
-        /// 2264 total, each replaying every token). One arena per LIVE graph (the batch scheduler can hold
-        /// several captured graphs at once — sharing one bump buffer would alias them); pointers inside any
-        /// live arena are never freed individually (every free path checks <see cref="IsArenaPtr"/>); an
-        /// arena is released as a whole when its graph is disposed (<see cref="FreeGraphArena"/>). Overflow
-        /// falls back to normal pool allocation (correct, just adds nodes) and logs once.</summary>
+        /// <summary>Graph-capture arenas: while a decode-step graph is being captured (<see cref="BeginGraphArena"/>), <see cref="AllocateDevice"/> bump-allocates from a per-capture pre-reserved buffer instead of the stream-ordered pool — so the captured graph contains ZERO memAlloc/memFree nodes for step intermediates (measured on gemma3: 875 alloc + 797 free nodes of 2264 total, each replaying every token). One arena per LIVE graph (the batch scheduler can hold several captured graphs at once — sharing one bump buffer would alias them); pointers inside any live arena are never freed individually (every free path checks <see cref="IsArenaPtr"/>); an arena is released as a whole when its graph is disposed (<see cref="FreeGraphArena"/>). Overflow falls back to normal pool allocation (correct, just adds nodes) and logs once.</summary>
         public readonly List<(ulong basePtr, nuint capacity)> LiveArenas = new();
         public ulong ArenaBase;      // the arena of the capture in progress (also in LiveArenas)
         public nuint ArenaCapacity;
@@ -84,51 +48,31 @@ internal static unsafe class GpuTransferHelper
         public bool ArenaActive;
         public bool ArenaOverflowLogged;
 
-        /// <summary>Q8_1 activation sidecars emitted by quantize-at-producer kernels (xq int8 + per-32-block
-        /// scale xd + int-sum xs device buffers, K = the producing row width). Keyed by the F32 output tensor;
-        /// consumed by the dp4a Linear path in place of its own quantize launch. Invalidated (buffers freed)
-        /// whenever the tensor is re-bound, synced to host, or disposed — see <see cref="CacheActivation"/>.</summary>
+        /// <summary>Q8_1 activation sidecars emitted by quantize-at-producer kernels (xq int8 + per-32-block scale xd + int-sum xs device buffers, K = the producing row width). Keyed by the F32 output tensor; consumed by the dp4a Linear path in place of its own quantize launch. Invalidated (buffers freed) whenever the tensor is re-bound, synced to host, or disposed — see <see cref="CacheActivation"/>.</summary>
         public readonly Dictionary<Tensor, (ulong xq, ulong xd, ulong xs, int k)> SidecarCache = new(ReferenceEqualityComparer.Instance);
 
-        /// <summary>Activations pinned to SURVIVE <see cref="FreeActivations"/> — cross-step state whose only
-        /// authoritative copy lives on-device (e.g. the across-step feature cache's previous indicator and
-        /// residual, which per-step FreeActivations in the video pipelines would otherwise silently destroy:
-        /// the host buffer was never materialized, so the next CopyToDevice would re-upload garbage). Pinned
-        /// tensors are still freed by their own Dispose/sync callbacks and by <see cref="FreeAllCached"/>.</summary>
+        /// <summary>Activations pinned to SURVIVE <see cref="FreeActivations"/> — cross-step state whose only authoritative copy lives on-device (e.g. the across-step feature cache's previous indicator and residual, which per-step FreeActivations in the video pipelines would otherwise silently destroy: the host buffer was never materialized, so the next CopyToDevice would re-upload garbage). Pinned tensors are still freed by their own Dispose/sync callbacks and by <see cref="FreeAllCached"/>.</summary>
         public readonly HashSet<Tensor> PinnedActivations = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H.</summary>
         public nint StreamHandle;
 
-        /// <summary>Streaming cache reference, used to drain its upload stream + trim the
-        /// device's stream-ordered allocator pool when an OOM retry needs to reclaim
-        /// memory locked up in pool reservations. Null when the backend's streaming
-        /// cache hasn't been wired (test setups, CPU/Vulkan).</summary>
+        /// <summary>Streaming cache reference, used to drain its upload stream + trim the device's stream-ordered allocator pool when an OOM retry needs to reclaim memory locked up in pool reservations. Null when the backend's streaming cache hasn't been wired (test setups, CPU/Vulkan).</summary>
         public IStreamingWeightCache? StreamingCache;
 
-        /// <summary>The owning CUDA context. Held so the lazy sync/dispose callbacks (which fire
-        /// from arbitrary threads — finalizers, async continuations, etc.) can bind the context
-        /// before issuing any CUDA Driver API call. Without this, a callback that fires on a
-        /// thread that's never bound the context would hit CUDA_ERROR_INVALID_CONTEXT.</summary>
+        /// <summary>The owning CUDA context. Held so the lazy sync/dispose callbacks (which fire from arbitrary threads — finalizers, async continuations, etc.) can bind the context before issuing any CUDA Driver API call. Without this, a callback that fires on a thread that's never bound the context would hit CUDA_ERROR_INVALID_CONTEXT.</summary>
         public CudaContext? Context;
 
-        /// <summary>Set at the start of backend teardown. A retiring state remains in the registry only so its
-        /// owner can clean it through explicit-state APIs; it is immediately excluded from ambient, sole-state,
-        /// context-fallback, and same-device routing.</summary>
+        /// <summary>Set at the start of backend teardown. A retiring state remains in the registry only so its owner can clean it through explicit-state APIs; it is immediately excluded from ambient, sole-state, context-fallback, and same-device routing.</summary>
         public volatile bool Retiring;
 
-        /// <summary>Set when this state's backend is fully torn down (<see cref="CompleteRetire"/>). Stale promoted-weight
-        /// callbacks that survived teardown (queued by tensor finalizers before their callbacks could be detached)
-        /// check this FIRST and bail out — reading a bool field is safe on a resurrected object graph, whereas
-        /// touching <see cref="UploadTracker"/> is not (a ConditionalWeakTable whose Container was finalized while
-        /// the state was unreachable throws NRE from its freed dependent handles — the GGUF model-switch crash).</summary>
+        /// <summary>Set when this state's backend is fully torn down (<see cref="CompleteRetire"/>). Stale promoted-weight callbacks that survived teardown (queued by tensor finalizers before their callbacks could be detached) check this FIRST and bail out — reading a bool field is safe on a resurrected object graph, whereas touching <see cref="UploadTracker"/> is not (a ConditionalWeakTable whose Container was finalized while the state was unreachable throws NRE from its freed dependent handles — the GGUF model-switch crash).</summary>
         public volatile bool Unregistered;
 
         private int _activeCallbacks;
         private readonly ManualResetEventSlim _callbacksDrained = new(initialState: true);
 
-        /// <summary>Claims a tensor lifecycle callback only while this State is routable. The second retirement
-        /// check closes the race where teardown publishes Retiring immediately after the first check.</summary>
+        /// <summary>Claims a tensor lifecycle callback only while this State is routable. The second retirement check closes the race where teardown publishes Retiring immediately after the first check.</summary>
         public bool TryEnterCallback()
         {
             if (Retiring || Unregistered) return false;
@@ -149,19 +93,10 @@ internal static unsafe class GpuTransferHelper
         public long Hits;
         public long Misses;
 
-        /// <summary>Count of lazy D2H sync callbacks fired (each forces a cuStreamSynchronize + device-to-host copy).
-        /// A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0.</summary>
+        /// <summary>Count of lazy D2H sync callbacks fired (each forces a cuStreamSynchronize + device-to-host copy). A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0.</summary>
         public long D2hSyncs;
 
-        /// <summary>Step-graph capture-window alloc/free tracker. Per-State: this used to be process-wide statics
-        /// on <see cref="CudaMemory"/>, so a second backend beginning its own capture cleared the first backend's
-        /// in-flight window and folded its own non-capturing allocations into the wrong backend's report.
-        /// <para>Not diagnostic-only any more: the recorded stream is what lets <see cref="GpuTransferHelper"/>
-        /// tell a GRAPH-PRIVATE allocation (made on the capturing stream — a virtual address the driver releases
-        /// the instant an aborted capture is discarded) apart from an ordinary allocation that merely happened
-        /// while capture was active (the streaming weight cache's uploads run on a separate, non-capturing
-        /// upload stream and are real regardless of the compute stream's capture outcome). See
-        /// <see cref="PurgeAbortedCaptureAllocs"/>.</para></summary>
+        /// <summary>Step-graph capture-window alloc/free tracker. Per-State: this used to be process-wide statics on <see cref="CudaMemory"/>, so a second backend beginning its own capture cleared the first backend's in-flight window and folded its own non-capturing allocations into the wrong backend's report. <para>Not diagnostic-only any more: the recorded stream is what lets <see cref="GpuTransferHelper"/> tell a GRAPH-PRIVATE allocation (made on the capturing stream — a virtual address the driver releases the instant an aborted capture is discarded) apart from an ordinary allocation that merely happened while capture was active (the streaming weight cache's uploads run on a separate, non-capturing upload stream and are real regardless of the compute stream's capture outcome). See <see cref="PurgeAbortedCaptureAllocs"/>.</para></summary>
         public bool TrackCaptureWindow;
         public readonly Dictionary<ulong, (nuint bytes, nint stream)> CaptureAllocs = new();
         public long CaptureAllocBytes, CaptureFreeBytes;
@@ -171,38 +106,27 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Per-tensor H2D upload bookkeeping for weight auto-promotion.</summary>
     internal sealed class UploadState { public int Count; public bool Promoted; public bool Blocked; }
 
-    /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload
-    /// behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that
-    /// bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
+    /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
     public static readonly bool AutoPromoteWeights = Environment.GetEnvironmentVariable("HARTSY_NO_AUTOPROMOTE") != "1";
 
-    /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room).
-    /// A promotion that would dip below this floor is skipped and the tensor streams as before. Override via
-    /// <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
+    /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
     private static readonly long _autoPromoteHeadroomBytes =
         long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUTOPROMOTE_HEADROOM_MB"), out long mb) ? mb << 20 : 1536L << 20;
 
-    /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are
-    /// the most likely to be mutated scratch buffers.</summary>
+    /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are the most likely to be mutated scratch buffers.</summary>
     private const nuint AutoPromoteMinBytes = 1 << 20;
 
-    /// <summary>Registered states keyed by <see cref="State.Key"/>. Concurrent: registration happens on backend
-    /// construction threads while Resolve() reads from compute threads.</summary>
+    /// <summary>Registered states keyed by <see cref="State.Key"/>. Concurrent: registration happens on backend construction threads while Resolve() reads from compute threads.</summary>
     private static readonly ConcurrentDictionary<nint, State> _states = new();
 
-    /// <summary>Last-registered live state per CUDA context handle — the ambient-less resolution fallback for
-    /// helper calls arriving outside a backend op (tests, tooling). Ambiguous by construction when two backends
-    /// share a device; <see cref="Resolve"/> warns once per handle in that case.</summary>
+    /// <summary>Last-registered live state per CUDA context handle — the ambient-less resolution fallback for helper calls arriving outside a backend op (tests, tooling). Ambiguous by construction when two backends share a device; <see cref="Resolve"/> warns once per handle in that case.</summary>
     private static readonly ConcurrentDictionary<nint, State> _byContext = new();
 
-    /// <summary>The calling thread's current backend State, bound by <c>CudaBackend.EnterOp</c> at every op entry.
-    /// This is THE resolution path — cuCtxGetCurrent cannot distinguish two same-device backends (they share the
-    /// primary context), so context identity stopped being usable as the owner identity.</summary>
+    /// <summary>The calling thread's current backend State, bound by <c>CudaBackend.EnterOp</c> at every op entry. This is THE resolution path — cuCtxGetCurrent cannot distinguish two same-device backends (they share the primary context), so context identity stopped being usable as the owner identity.</summary>
     [ThreadStatic]
     private static State? _ambient;
 
-    /// <summary>Fast path for ambient-less callers: the sole registered state when exactly one backend exists.
-    /// Null when zero or 2+ states are registered.</summary>
+    /// <summary>Fast path for ambient-less callers: the sole registered state when exactly one backend exists. Null when zero or 2+ states are registered.</summary>
     private static volatile State? _sole;
 
     /// <summary>Monotonic source for <see cref="State.Key"/>. Starts at 1; key 0 is the context-less bucket.</summary>
@@ -214,17 +138,13 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Context handles already warned about ambiguous ambient-less resolution.</summary>
     private static readonly ConcurrentDictionary<nint, bool> _ambiguityWarned = new();
 
-    /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call
-    /// happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
+    /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
     private static readonly bool _assertAmbient = Environment.GetEnvironmentVariable("HARTSY_ASSERT_AMBIENT") == "1";
 
-    /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure
-    /// helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
+    /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
     private static readonly State _unregistered = new();
 
-    /// <summary>Creates and registers a NEW state for one backend. Called once from <see cref="CudaBackend"/>'s
-    /// constructor with the context, compute stream, and streaming cache; the returned state is the backend's
-    /// identity for ambient binding, tensor GPU bindings, and finalizer-cleanup routing.</summary>
+    /// <summary>Creates and registers a NEW state for one backend. Called once from <see cref="CudaBackend"/>'s constructor with the context, compute stream, and streaming cache; the returned state is the backend's identity for ambient binding, tensor GPU bindings, and finalizer-cleanup routing.</summary>
     public static State Register(CudaContext context, nint stream, IStreamingWeightCache? streamingCache)
     {
         State state = new State
@@ -246,8 +166,7 @@ internal static unsafe class GpuTransferHelper
 
     private static bool IsResolvable(State state) => !state.Retiring && !state.Unregistered;
 
-    /// <summary>Atomically removes a state from every implicit routing path while retaining its explicit handle
-    /// for owner-driven cleanup. Must run before native teardown starts.</summary>
+    /// <summary>Atomically removes a state from every implicit routing path while retaining its explicit handle for owner-driven cleanup. Must run before native teardown starts.</summary>
     internal static void BeginRetire(State state)
     {
         try
@@ -335,13 +254,10 @@ internal static unsafe class GpuTransferHelper
     internal static nint ContextFallbackKey(nint contextHandle) =>
         _byContext.TryGetValue(contextHandle, out State? state) && IsResolvable(state) ? state.Key : 0;
 
-    /// <summary>Binds <paramref name="state"/> as the calling thread's current backend. Called by
-    /// <c>CudaBackend.EnterOp</c> on every op entry; cheap (one thread-static write).</summary>
+    /// <summary>Binds <paramref name="state"/> as the calling thread's current backend. Called by <c>CudaBackend.EnterOp</c> on every op entry; cheap (one thread-static write).</summary>
     internal static void SetAmbient(State state) => _ambient = state;
 
-    /// <summary>Resolves the calling thread's owning backend State: the ambient bound by the current op, else the
-    /// sole registered state, else the last state registered for the thread's current CUDA context (ambiguous for
-    /// same-device siblings — warned once), else an inert empty state (pre-registration test paths).</summary>
+    /// <summary>Resolves the calling thread's owning backend State: the ambient bound by the current op, else the sole registered state, else the last state registered for the thread's current CUDA context (ambiguous for same-device siblings — warned once), else an inert empty state (pre-registration test paths).</summary>
     private static State Resolve()
     {
         State? ambient = _ambient;
@@ -387,8 +303,7 @@ internal static unsafe class GpuTransferHelper
         return count;
     }
 
-    /// <summary>Every live registered state sharing <paramref name="deviceOrdinal"/> — the same-device escalation
-    /// sweep for OOM retries (a sibling backend's pool reservations can hold the memory this one needs).</summary>
+    /// <summary>Every live registered state sharing <paramref name="deviceOrdinal"/> — the same-device escalation sweep for OOM retries (a sibling backend's pool reservations can hold the memory this one needs).</summary>
     internal static List<State> StatesOnDevice(int deviceOrdinal)
     {
         List<State> result = [];
@@ -399,12 +314,10 @@ internal static unsafe class GpuTransferHelper
         return result;
     }
 
-    /// <summary>The ambient (or resolved) state's compute stream, for <see cref="CudaMemory"/>'s allocator routing;
-    /// 0 when nothing is resolvable (sync-allocation fallback).</summary>
+    /// <summary>The ambient (or resolved) state's compute stream, for <see cref="CudaMemory"/>'s allocator routing; 0 when nothing is resolvable (sync-allocation fallback).</summary>
     internal static nint ResolvedStreamHandle => Resolve().StreamHandle;
 
-    /// <summary>The calling thread's owning backend State, for callers (<see cref="CudaMemory"/>'s capture-window
-    /// tracker) that need more than just the stream handle. Same ambient-first resolution as every other lookup.</summary>
+    /// <summary>The calling thread's owning backend State, for callers (<see cref="CudaMemory"/>'s capture-window tracker) that need more than just the stream handle. Same ambient-first resolution as every other lookup.</summary>
     internal static State CurrentState => Resolve();
 
     /// <summary>Synchronizes the CUDA stream to flush pending FreeAsync operations. Called by CudaMemory.Allocate on OOM retry.</summary>
@@ -418,12 +331,7 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>OOM-retry hook: drains both the compute stream and the streaming cache's
-    /// upload stream, then trims the device mempool so memory queued via
-    /// <c>cuMemFreeAsync</c> is released back to the driver allocator. Called from
-    /// <see cref="CudaMemory.Allocate"/> when the first <c>cuMemAlloc</c> returned OOM.
-    /// Without this, an op that should succeed against just-evicted streaming memory
-    /// will throw OOM even though several GB are technically free.</summary>
+    /// <summary>OOM-retry hook: drains both the compute stream and the streaming cache's upload stream, then trims the device mempool so memory queued via <c>cuMemFreeAsync</c> is released back to the driver allocator. Called from <see cref="CudaMemory.Allocate"/> when the first <c>cuMemAlloc</c> returned OOM. Without this, an op that should succeed against just-evicted streaming memory will throw OOM even though several GB are technically free.</summary>
     public static void SyncStreamsAndReleasePool()
     {
         State s = Resolve();
@@ -496,8 +404,7 @@ internal static unsafe class GpuTransferHelper
     private static readonly int _traceBigMissLimit =
         int.TryParse(Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE_LIMIT"), out int lim) ? lim : 24;
 
-    /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache
-    /// → activation cache → fresh H2D transfer.</summary>
+    /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
     {
         State s = Resolve();
@@ -603,10 +510,7 @@ internal static unsafe class GpuTransferHelper
         return false;
     }
 
-    /// <summary>Allocates a fresh per-capture arena and activates it. Call immediately before a decode-step
-    /// graph capture; pair with <see cref="EndGraphArena"/>, and release via <see cref="FreeGraphArena"/>
-    /// when the captured graph is disposed. Returns the arena base (0 = allocation failed, arena disabled
-    /// for this capture).</summary>
+    /// <summary>Allocates a fresh per-capture arena and activates it. Call immediately before a decode-step graph capture; pair with <see cref="EndGraphArena"/>, and release via <see cref="FreeGraphArena"/> when the captured graph is disposed. Returns the arena base (0 = allocation failed, arena disabled for this capture).</summary>
     public static ulong BeginGraphArena()
     {
         State s = Resolve();
@@ -627,8 +531,7 @@ internal static unsafe class GpuTransferHelper
         return basePtr;
     }
 
-    /// <summary>Deactivates the in-progress capture arena (buffers handed out stay valid for the graph's
-    /// lifetime) and logs the actual bytes used, for capacity tuning.</summary>
+    /// <summary>Deactivates the in-progress capture arena (buffers handed out stay valid for the graph's lifetime) and logs the actual bytes used, for capacity tuning.</summary>
     public static void EndGraphArena()
     {
         State s = Resolve();
@@ -679,8 +582,7 @@ internal static unsafe class GpuTransferHelper
     /// <remarks>Called at the start of each op, so every previous op's <c>finally</c> has already run and anything
     /// still parked provably has no owner. Sweeping here rather than inside CacheActivation is what keeps the
     /// in-place case (where the displaced buffer is the op's own input) from being double-freed.</remarks>
-    /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a
-    /// bisect handle for a change that sits on every op's allocation path.</summary>
+    /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
     private static readonly bool OrphanSweepEnabled =
         Environment.GetEnvironmentVariable("HARTSY_ORPHAN_SWEEP") != "0";
 
@@ -709,8 +611,7 @@ internal static unsafe class GpuTransferHelper
         s.PendingOrphans.Clear();
     }
 
-    /// <summary>Releases demoted auto-promoted weight buffers with <c>cuMemFree</c>, the allocator they came from.
-    /// Runs a stream sync first: the op that demoted them may still have had them queued as an input.</summary>
+    /// <summary>Releases demoted auto-promoted weight buffers with <c>cuMemFree</c>, the allocator they came from. Runs a stream sync first: the op that demoted them may still have had them queued as an input.</summary>
     private static void SweepPersistentFrees(State s)
     {
         if (s.StreamHandle != 0)
@@ -727,9 +628,7 @@ internal static unsafe class GpuTransferHelper
         s.PendingPersistentFrees.Clear();
     }
 
-    /// <summary>Registers a Q8_1 sidecar (from a quantize-at-producer kernel) for an activation tensor.
-    /// Call AFTER <see cref="CacheActivation"/> for the same tensor — CacheActivation invalidates any
-    /// previous sidecar as part of rebinding.</summary>
+    /// <summary>Registers a Q8_1 sidecar (from a quantize-at-producer kernel) for an activation tensor. Call AFTER <see cref="CacheActivation"/> for the same tensor — CacheActivation invalidates any previous sidecar as part of rebinding.</summary>
     internal static void RegisterSidecar(Tensor tensor, ulong xq, ulong xd, ulong xs, int k)
     {
         State s = Resolve();
@@ -737,8 +636,7 @@ internal static unsafe class GpuTransferHelper
         s.SidecarCache[tensor] = (xq, xd, xs, k);
     }
 
-    /// <summary>Looks up a Q8_1 sidecar for a dp4a GEMV input (M=1 decode rows only — producers emit
-    /// per-row sidecars and the decode path is single-row).</summary>
+    /// <summary>Looks up a Q8_1 sidecar for a dp4a GEMV input (M=1 decode rows only — producers emit per-row sidecars and the decode path is single-row).</summary>
     internal static bool TryGetSidecar(Tensor tensor, int k, out ulong xq, out ulong xd, out ulong xs)
     {
         if (Resolve().SidecarCache.TryGetValue(tensor, out (ulong xq, ulong xd, ulong xs, int k) sc) && sc.k == k)
@@ -760,9 +658,7 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer
-    /// access triggers D2H, Dispose frees GPU memory. The callbacks capture this backend's <see cref="State"/>, so
-    /// they stay correct even after another backend registers.</summary>
+    /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory. The callbacks capture this backend's <see cref="State"/>, so they stay correct even after another backend registers.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
         State s = Resolve();
@@ -858,12 +754,8 @@ internal static unsafe class GpuTransferHelper
         tensor.SetGpuBinding(s.Key, syncCallback, disposeCallback);
     }
 
-    /// <summary>The one materialize-to-host-then-release body: stream-sync → <c>EnsureHostBuffer</c> → D2H → free
-    /// device. Fired lazily by the sync callback <see cref="CacheActivation"/> plants, and by the
-    /// <see cref="OffloadActivation"/> / <see cref="OffloadActivations"/> policy entry points through that same
-    /// callback.</summary>
-    /// <param name="arenaBacked">Ownership decided at BINDING time, not now — an arena-born pointer is never freed
-    /// individually even after its arena has been destroyed (see the capture note in <see cref="CacheActivation"/>).</param>
+    /// <summary>The one materialize-to-host-then-release body: stream-sync → <c>EnsureHostBuffer</c> → D2H → free device. Fired lazily by the sync callback <see cref="CacheActivation"/> plants, and by the <see cref="OffloadActivation"/> / <see cref="OffloadActivations"/> policy entry points through that same callback.</summary>
+    /// <param name="arenaBacked">Ownership decided at BINDING time, not now — an arena-born pointer is never freed individually even after its arena has been destroyed (see the capture note in <see cref="CacheActivation"/>).</param>
     private static void SyncActivationToHost(State s, Tensor tensor, bool arenaBacked)
     {
         if (!s.TryEnterCallback()) return;
@@ -898,9 +790,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>True when this backend's activation cache currently holds a device copy of <paramref name="tensor"/>.</summary>
     internal static bool HasCachedActivation(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
 
-    /// <summary>The device pointer already backing <paramref name="tensor"/>, without uploading anything. For an op
-    /// that OVERWRITES its destination in full: <see cref="CopyToDevice"/> would stage the host bytes over PCIe
-    /// first, and the very next line discards them.</summary>
+    /// <summary>The device pointer already backing <paramref name="tensor"/>, without uploading anything. For an op that OVERWRITES its destination in full: <see cref="CopyToDevice"/> would stage the host bytes over PCIe first, and the very next line discards them.</summary>
     internal static bool TryGetCachedDevice(Tensor tensor, out ulong gpuPtr)
     {
         State s = Resolve();
@@ -917,27 +807,14 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Number of activations this backend currently holds on device.</summary>
     internal static int CachedActivationCount => Resolve().ActivationCache.Count;
 
-    /// <summary>Materializes one cached activation to host and releases its device buffer — the named spelling of the
-    /// bare <c>_ = t.DataPointer</c> host-materialize idiom, running the very same sync callback. No-op for a tensor
-    /// with no device copy. Auto-promotion is deliberately left alone: the cross-step caches that use this are
-    /// re-uploaded unchanged every step and are MEANT to be promoted back into the weight cache. The bulk
-    /// <see cref="OffloadActivations"/> blocks promotion instead, because there the resident copy is the thing being
-    /// reclaimed.</summary>
+    /// <summary>Materializes one cached activation to host and releases its device buffer — the named spelling of the bare <c>_ = t.DataPointer</c> host-materialize idiom, running the very same sync callback. No-op for a tensor with no device copy. Auto-promotion is deliberately left alone: the cross-step caches that use this are re-uploaded unchanged every step and are MEANT to be promoted back into the weight cache. The bulk <see cref="OffloadActivations"/> blocks promotion instead, because there the resident copy is the thing being reclaimed.</summary>
     public static void OffloadActivation(Tensor tensor)
     {
         ArgumentNullException.ThrowIfNull(tensor);
         _ = tensor.DataPointer;
     }
 
-    /// <summary>D2H-materializes cached activations largest-first until <paramref name="targetBytes"/> of device memory
-    /// has been released; returns the bytes actually freed (may exceed the target — entries are whole tensors, and may
-    /// fall short when too little is offloadable). Unlike <see cref="FreeActivations"/> the DATA survives: each entry
-    /// reloads from host on its next use, so this is a VRAM-vs-PCIe lever rather than a reclaim of dead buffers
-    /// (docs/Research/MEMORY_SCHEDULING_SERVING.md §9).
-    /// <para><b>Safe points only, owning thread only.</b> The caches are plain dictionaries and nothing here can tell
-    /// an idle cached activation from a live kernel argument — never wire this into the allocator's OOM retry, which
-    /// fires mid-op by construction. Callers must also skip it while a step graph is live: a captured graph bakes
-    /// activation pointers and a reload returns a new one.</para></summary>
+    /// <summary>D2H-materializes cached activations largest-first until <paramref name="targetBytes"/> of device memory has been released; returns the bytes actually freed (may exceed the target — entries are whole tensors, and may fall short when too little is offloadable). Unlike <see cref="FreeActivations"/> the DATA survives: each entry reloads from host on its next use, so this is a VRAM-vs-PCIe lever rather than a reclaim of dead buffers (docs/Research/MEMORY_SCHEDULING_SERVING.md §9). <para><b>Safe points only, owning thread only.</b> The caches are plain dictionaries and nothing here can tell an idle cached activation from a live kernel argument — never wire this into the allocator's OOM retry, which fires mid-op by construction. Callers must also skip it while a step graph is live: a captured graph bakes activation pointers and a reload returns a new one.</para></summary>
     public static long OffloadActivations(long targetBytes)
     {
         if (targetBytes <= 0) return 0;
@@ -975,12 +852,7 @@ internal static unsafe class GpuTransferHelper
         return freed;
     }
 
-    /// <summary>
-    /// Removes a just-published activation binding when a multi-output operation fails while publishing a later
-    /// output. The caller retains ownership of <paramref name="expectedGpuPtr"/> and must free it afterward.
-    /// Existing contents displaced by <see cref="CacheActivation"/> follow the normal orphan-sweep lifecycle;
-    /// this helper only prevents a failed operation from exposing a partial new result set.
-    /// </summary>
+    /// <summary> Removes a just-published activation binding when a multi-output operation fails while publishing a later output. The caller retains ownership of <paramref name="expectedGpuPtr"/> and must free it afterward. Existing contents displaced by <see cref="CacheActivation"/> follow the normal orphan-sweep lifecycle; this helper only prevents a failed operation from exposing a partial new result set. </summary>
     internal static bool TryUncacheActivation(Tensor tensor, ulong expectedGpuPtr)
     {
         State s = Resolve();
@@ -997,9 +869,7 @@ internal static unsafe class GpuTransferHelper
         return true;
     }
 
-    /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source
-    /// weight) and returns the bytes released. Called from CudaMemory's OOM retry so opportunistic cast
-    /// caching can never make an allocation fail that would have succeeded without it.</summary>
+    /// <summary>Frees EVERY cached weight cast (they are pure caches — always rebuildable from the source weight) and returns the bytes released. Called from CudaMemory's OOM retry so opportunistic cast caching can never make an allocation fail that would have succeeded without it.</summary>
     internal static long EvictAllWeightCasts()
     {
         State s = Resolve();
@@ -1023,8 +893,7 @@ internal static unsafe class GpuTransferHelper
         return found;
     }
 
-    /// <summary>Records a dtype-upcast of a weight so subsequent forwards reuse it instead of re-casting.
-    /// The pointer is tracked as cached so <see cref="FreeDevice"/> won't reclaim it as a transient.</summary>
+    /// <summary>Records a dtype-upcast of a weight so subsequent forwards reuse it instead of re-casting. The pointer is tracked as cached so <see cref="FreeDevice"/> won't reclaim it as a transient.</summary>
     public static void CacheWeightCast(Tensor weight, ulong castPtr, nuint byteSize)
     {
         State s = Resolve();
@@ -1033,8 +902,7 @@ internal static unsafe class GpuTransferHelper
         s.CachedBytes += (long)byteSize;
     }
 
-    /// <summary>Uploads a weight tensor to GPU and caches it for future CopyToDevice calls. Returns false when the
-    /// weight was already resident and no upload happened.</summary>
+    /// <summary>Uploads a weight tensor to GPU and caches it for future CopyToDevice calls. Returns false when the weight was already resident and no upload happened.</summary>
     /// <remarks>The return value is what makes a failed bulk preload rollback-able: only weights this call actually
     /// uploaded may be freed, since one already resident from an earlier phase (or from HARTSY_KEEP_MODELS) belongs to
     /// someone else. Reporting it from here rather than having the caller pre-check with <see cref="IsWeightCached"/>
@@ -1056,14 +924,7 @@ internal static unsafe class GpuTransferHelper
         return true;
     }
 
-    /// <summary>Promotes a repeatedly-uploaded host tensor into the resident weight cache. Fires on the second
-    /// cache-missing upload of the same tensor object: weights are the only tensors that live long enough to be
-    /// uploaded twice (activations are fresh objects per op), so this catches every weight of pipelines that never
-    /// call <see cref="PreloadWeight"/> at the cost of one duplicate upload. Correctness hinges on the demote hook:
-    /// promotion plants <c>_gpuSyncCallback</c>/<c>_gpuDisposeCallback</c>, so ANY later CPU access (which always
-    /// funnels through <c>EnsureCpuData</c>) or Dispose evicts the device copy before host data can diverge — and
-    /// blocks re-promotion, so host-mutated scratch tensors settle back to plain streaming instead of thrashing.
-    /// Skipped when the promotion would drop free VRAM below <see cref="_autoPromoteHeadroomBytes"/>.</summary>
+    /// <summary>Promotes a repeatedly-uploaded host tensor into the resident weight cache. Fires on the second cache-missing upload of the same tensor object: weights are the only tensors that live long enough to be uploaded twice (activations are fresh objects per op), so this catches every weight of pipelines that never call <see cref="PreloadWeight"/> at the cost of one duplicate upload. Correctness hinges on the demote hook: promotion plants <c>_gpuSyncCallback</c>/<c>_gpuDisposeCallback</c>, so ANY later CPU access (which always funnels through <c>EnsureCpuData</c>) or Dispose evicts the device copy before host data can diverge — and blocks re-promotion, so host-mutated scratch tensors settle back to plain streaming instead of thrashing. Skipped when the promotion would drop free VRAM below <see cref="_autoPromoteHeadroomBytes"/>.</summary>
     private static bool TryAutoPromote(State s, Tensor cpuTensor, nuint byteSize, out ulong dptr)
     {
         dptr = 0;
@@ -1100,11 +961,7 @@ internal static unsafe class GpuTransferHelper
         return true;
     }
 
-    /// <summary>Demote hook for auto-promoted weights: fires from <c>EnsureCpuData</c> (host about to read/write) or
-    /// Dispose/finalizer (via the pending-cleanup queue). Frees the device copy (and any cached dtype-cast) after a
-    /// stream sync so in-flight kernels finish first. Host data is authoritative for promoted tensors, so no D2H copy
-    /// is needed. Blocks re-promotion only when an entry was actually evicted — after <see cref="FreeAllCached"/>
-    /// (backend teardown) the stale callback finds nothing and the tensor stays promotable for the next session.</summary>
+    /// <summary>Demote hook for auto-promoted weights: fires from <c>EnsureCpuData</c> (host about to read/write) or Dispose/finalizer (via the pending-cleanup queue). Frees the device copy (and any cached dtype-cast) after a stream sync so in-flight kernels finish first. Host data is authoritative for promoted tensors, so no D2H copy is needed. Blocks re-promotion only when an entry was actually evicted — after <see cref="FreeAllCached"/> (backend teardown) the stale callback finds nothing and the tensor stays promotable for the next session.</summary>
     private static void OnPromotedHostAccess(State s, Tensor tensor)
     {
         // Torn-down backend: the caches were already freed wholesale and the state's ConditionalWeakTable may
@@ -1143,14 +1000,7 @@ internal static unsafe class GpuTransferHelper
         finally { s.ExitCallback(); }
     }
 
-    /// <summary>Detaches the auto-promotion lifecycle from a tensor whose cached device copy is being freed by a
-    /// bulk eviction path (<see cref="FreeWeights"/> / <see cref="FreeAllCached"/> /
-    /// <see cref="TryUnregisterCachedWeight"/>): resets the promoted flag and removes the planted sync/dispose
-    /// callbacks. Without this, a later Dispose — or worse, a finalizer — of the tensor enqueues a stale
-    /// <see cref="OnPromotedHostAccess"/> against a state that may since have been torn down; the CUDA driver
-    /// reuses primary-context handles, so the NEXT backend on the device drains and runs those stale callbacks
-    /// (the GGUF model-switch NRE). Re-promotion stays possible: the tensor's upload count is intact, so the
-    /// next session's second upload re-promotes it (matching the documented FreeAllCached semantics).</summary>
+    /// <summary>Detaches the auto-promotion lifecycle from a tensor whose cached device copy is being freed by a bulk eviction path (<see cref="FreeWeights"/> / <see cref="FreeAllCached"/> / <see cref="TryUnregisterCachedWeight"/>): resets the promoted flag and removes the planted sync/dispose callbacks. Without this, a later Dispose — or worse, a finalizer — of the tensor enqueues a stale <see cref="OnPromotedHostAccess"/> against a state that may since have been torn down; the CUDA driver reuses primary-context handles, so the NEXT backend on the device drains and runs those stale callbacks (the GGUF model-switch NRE). Re-promotion stays possible: the tensor's upload count is intact, so the next session's second upload re-promotes it (matching the documented FreeAllCached semantics).</summary>
     private static void DetachPromotedTensor(State s, Tensor tensor)
     {
         if (s.UploadTracker.TryGetValue(tensor, out UploadState? promo) && promo.Promoted)
@@ -1172,15 +1022,12 @@ internal static unsafe class GpuTransferHelper
     // single source of truth for the cache state without forcing the streaming cache
     // to reach into private fields.
 
-    /// <summary>True if the weight is currently cached on the device. Streaming
-    /// uploads check this to skip already-resident tensors.</summary>
+    /// <summary>True if the weight is currently cached on the device. Streaming uploads check this to skip already-resident tensors.</summary>
     internal static bool IsWeightCached(Tensor weight) => Resolve().WeightCache.ContainsKey(weight);
 
     internal static bool IsActivationCached(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
 
-    /// <summary>Registers an already-uploaded weight in the cache. The caller is
-    /// responsible for the alloc + H2D copy (sync or async); this just records the
-    /// tensor → dptr mapping and bumps the byte counter.</summary>
+    /// <summary>Registers an already-uploaded weight in the cache. The caller is responsible for the alloc + H2D copy (sync or async); this just records the tensor → dptr mapping and bumps the byte counter.</summary>
     internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)
     {
         State s = Resolve();
@@ -1189,13 +1036,7 @@ internal static unsafe class GpuTransferHelper
         s.CachedBytes += (long)byteSize;
     }
 
-    /// <summary>Removes a weight from the cache and returns its dptr, leaving the
-    /// caller responsible for the actual <c>cuMemFree*</c> call. Returns <c>false</c>
-    /// if the weight wasn't cached. Also frees any cached dtype-cast of the weight:
-    /// streamed blocks otherwise orphan their F16 casts on eviction (the cast is keyed
-    /// by the Tensor and only reclaimed via <see cref="FreeWeights"/>, which streaming
-    /// eviction doesn't call) — for a streamed 12B fp8 DiT that accumulated ~19 GB of
-    /// dead casts by VAE-decode time and OOM'd the decode.</summary>
+    /// <summary>Removes a weight from the cache and returns its dptr, leaving the caller responsible for the actual <c>cuMemFree*</c> call. Returns <c>false</c> if the weight wasn't cached. Also frees any cached dtype-cast of the weight: streamed blocks otherwise orphan their F16 casts on eviction (the cast is keyed by the Tensor and only reclaimed via <see cref="FreeWeights"/>, which streaming eviction doesn't call) — for a streamed 12B fp8 DiT that accumulated ~19 GB of dead casts by VAE-decode time and OOM'd the decode.</summary>
     internal static bool TryUnregisterCachedWeight(Tensor weight, out ulong dptr)
     {
         State s = Resolve();
@@ -1264,8 +1105,7 @@ internal static unsafe class GpuTransferHelper
         ClearCacheBookkeeping(s);
     }
 
-    /// <summary>Explicit-owner, best-effort full sweep used by backend retirement after implicit routing has been
-    /// disabled. Every independent allocation is attempted even when another free reports an error.</summary>
+    /// <summary>Explicit-owner, best-effort full sweep used by backend retirement after implicit routing has been disabled. Every independent allocation is attempted even when another free reports an error.</summary>
     internal static void FreeAllCached(State s)
     {
         List<Exception>? failures = null;
@@ -1336,18 +1176,7 @@ internal static unsafe class GpuTransferHelper
 
     internal static void EvictAll(State state) => FreeAllCached(state);
 
-    /// <summary>Purges cache entries left dangling by an ABORTED step-graph capture. Every alloc issued on the
-    /// CAPTURING stream while capture is active becomes a graph memory node; if the capture is aborted before
-    /// the graph is ever instantiated/launched (an exception partway through the captured step), the driver
-    /// releases those virtual addresses as part of discarding the never-launched graph. Anything still mapping
-    /// to one of them in this State's caches (an activation cached mid-capture, a weight dtype-cast computed
-    /// mid-capture, …) is now dangling: the next <see cref="FreeActivations"/>/<c>Dispose</c> that tries to
-    /// actually free one gets <c>CUDA_ERROR_INVALID_VALUE</c> — the pointer is no longer a live stream-ordered
-    /// allocation. Called from <c>CudaBackend.StepGraphReset</c> right after <c>CudaGraph.AbortCapture</c>.
-    /// <para>Scoped to <paramref name="capturingStream"/>: <see cref="State.CaptureAllocs"/> also records
-    /// allocations the streaming weight cache made on its separate upload stream while capture happened to be
-    /// active — those are ordinary allocations untouched by the abort and must be left alone, or a live
-    /// streamed weight would be silently stranded (never freed, no longer tracked by anything).</para></summary>
+    /// <summary>Purges cache entries left dangling by an ABORTED step-graph capture. Every alloc issued on the CAPTURING stream while capture is active becomes a graph memory node; if the capture is aborted before the graph is ever instantiated/launched (an exception partway through the captured step), the driver releases those virtual addresses as part of discarding the never-launched graph. Anything still mapping to one of them in this State's caches (an activation cached mid-capture, a weight dtype-cast computed mid-capture, …) is now dangling: the next <see cref="FreeActivations"/>/<c>Dispose</c> that tries to actually free one gets <c>CUDA_ERROR_INVALID_VALUE</c> — the pointer is no longer a live stream-ordered allocation. Called from <c>CudaBackend.StepGraphReset</c> right after <c>CudaGraph.AbortCapture</c>. <para>Scoped to <paramref name="capturingStream"/>: <see cref="State.CaptureAllocs"/> also records allocations the streaming weight cache made on its separate upload stream while capture happened to be active — those are ordinary allocations untouched by the abort and must be left alone, or a live streamed weight would be silently stranded (never freed, no longer tracked by anything).</para></summary>
     internal static void PurgeAbortedCaptureAllocs(State s, nint capturingStream)
     {
         HashSet<ulong>? stale = null;
@@ -1421,12 +1250,7 @@ internal static unsafe class GpuTransferHelper
             "entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).");
     }
 
-    /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call
-    /// between denoise steps to deterministically reclaim device memory held by activations that were neither read
-    /// back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the
-    /// cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because
-    /// the only cross-step state (the latent) lives on the host; anything still cached here is dead. Bindings are
-    /// detached as entries are reclaimed so late tensor finalizers cannot enqueue obsolete backend callbacks.</summary>
+    /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call between denoise steps to deterministically reclaim device memory held by activations that were neither read back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because the only cross-step state (the latent) lives on the host; anything still cached here is dead. Bindings are detached as entries are reclaimed so late tensor finalizers cannot enqueue obsolete backend callbacks.</summary>
     public static void FreeActivations(bool trimPool = true)
     {
         State s = Resolve();
@@ -1466,21 +1290,13 @@ internal static unsafe class GpuTransferHelper
         if (trimPool) TrimPool();
     }
 
-    /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations"/> (cross-step state
-    /// whose only copy is on-device). Keyed by tensor object identity — safe to call before or after the entry
-    /// exists. The tensor's own Dispose/sync callbacks and <see cref="FreeAllCached"/> still reclaim it.</summary>
+    /// <summary>Marks a tensor's device activation as surviving <see cref="FreeActivations"/> (cross-step state whose only copy is on-device). Keyed by tensor object identity — safe to call before or after the entry exists. The tensor's own Dispose/sync callbacks and <see cref="FreeAllCached"/> still reclaim it.</summary>
     public static void PinActivation(Tensor tensor) => Resolve().PinnedActivations.Add(tensor);
 
-    /// <summary>Removes a <see cref="PinActivation"/> mark; the next <see cref="FreeActivations"/> reclaims the
-    /// tensor's device buffer like any other activation.</summary>
+    /// <summary>Removes a <see cref="PinActivation"/> mark; the next <see cref="FreeActivations"/> reclaims the tensor's device buffer like any other activation.</summary>
     public static void UnpinActivation(Tensor tensor) => Resolve().PinnedActivations.Remove(tensor);
 
-    /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache.
-    /// <c>cuMemFreeAsync</c> (every activation/dispose free) hands blocks back to the stream-ordered mempool, which
-    /// RESERVES them (counts as used in cuMemGetInfo) until trimmed. Unlike <see cref="FreeActivations"/> this leaves
-    /// live cached activations intact — only already-freed blocks are reclaimed — so it is safe to call mid-computation
-    /// (e.g. between VAE decode tiles) to cap peak at one unit's working set without corrupting tensors still in use.
-    /// Syncs the stream first so queued async frees complete before the trim.</summary>
+    /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache. <c>cuMemFreeAsync</c> (every activation/dispose free) hands blocks back to the stream-ordered mempool, which RESERVES them (counts as used in cuMemGetInfo) until trimmed. Unlike <see cref="FreeActivations"/> this leaves live cached activations intact — only already-freed blocks are reclaimed — so it is safe to call mid-computation (e.g. between VAE decode tiles) to cap peak at one unit's working set without corrupting tensors still in use. Syncs the stream first so queued async frees complete before the trim.</summary>
     public static void TrimPool()
     {
         State s = Resolve();
@@ -1493,8 +1309,7 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized
-    /// tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>
+    /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static nuint ByteSize(Tensor tensor)
     {
@@ -1508,8 +1323,7 @@ internal static unsafe class GpuTransferHelper
         return (s.CachedBytes, s.Hits, s.Misses);
     }
 
-    /// <summary>Number of lazy D2H sync callbacks fired since the last reset. Each one is a full GPU stall plus a
-    /// device-to-host copy; a GPU-resident hot loop should fire none.</summary>
+    /// <summary>Number of lazy D2H sync callbacks fired since the last reset. Each one is a full GPU stall plus a device-to-host copy; a GPU-resident hot loop should fire none.</summary>
     public static long GetSyncCount() => Resolve().D2hSyncs;
 
     /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>

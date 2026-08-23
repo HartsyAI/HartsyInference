@@ -14,22 +14,10 @@ using ImagePromptRequest = HartsyInference.Engine.Requests.IpAdapter;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Resolves the request's image-prompt conditioning into <see cref="IpAdapterConditioning"/>s for an SDXL or
-/// SD 1.5 pipeline: loads the IPA checkpoint, runs the variant's image encoder over the reference images (CLIP-Vision for
-/// standard/Plus, ArcFace face embedding for FaceID), projects the result into image-prompt tokens, and returns the
-/// per-cross-attn wiring.
-///
-/// <para><b>Scope:</b> SDXL + SD 1.5; standard + Plus + Plus-Face + FaceID + FaceID-Plus/Plus-v2. For FaceID the face is
-/// located with a dedicated YOLOv8-Face detector when installed (else YOLO11-pose keypoints), aligned to the ArcFace
-/// 112×112 template, and embedded with the in-engine ArcFace IR-50. FaceID-Plus additionally renders the same alignment
-/// at 224×224 and feeds its CLIP-Vision-H penultimate hidden states to the two-input projection; the Plus-v2 shortcut
-/// strength comes from <see cref="ImagePromptRequest.FaceIdV2Weight"/>. All FaceID checkpoints also ship a rank-128 UNet
-/// LoRA whose path is surfaced on <see cref="ResolvedSpec.FaceIdLoraPath"/> so the caller merges it through the normal
-/// LoRA path. Single adapter only — stacking multiple IPA models is deferred.</para></summary>
+/// <summary>Resolves the request's image-prompt conditioning into <see cref="IpAdapterConditioning"/>s for an SDXL or SD 1.5 pipeline: loads the IPA checkpoint, runs the variant's image encoder over the reference images (CLIP-Vision for standard/Plus, ArcFace face embedding for FaceID), projects the result into image-prompt tokens, and returns the per-cross-attn wiring. <para><b>Scope:</b> SDXL + SD 1.5; standard + Plus + Plus-Face + FaceID + FaceID-Plus/Plus-v2. For FaceID the face is located with a dedicated YOLOv8-Face detector when installed (else YOLO11-pose keypoints), aligned to the ArcFace 112×112 template, and embedded with the in-engine ArcFace IR-50. FaceID-Plus additionally renders the same alignment at 224×224 and feeds its CLIP-Vision-H penultimate hidden states to the two-input projection; the Plus-v2 shortcut strength comes from <see cref="ImagePromptRequest.FaceIdV2Weight"/>. All FaceID checkpoints also ship a rank-128 UNet LoRA whose path is surfaced on <see cref="ResolvedSpec.FaceIdLoraPath"/> so the caller merges it through the normal LoRA path. Single adapter only — stacking multiple IPA models is deferred.</para></summary>
 public static class IpAdapterResolver
 {
-    /// <summary>Converted ArcFace recognition backbone expected under an <c>ipadapter</c> folder. Source: buffalo_l
-    /// <c>w600k_r50.onnx</c> converted with <c>tests/python-reference/convert_arcface_onnx.py</c>.</summary>
+    /// <summary>Converted ArcFace recognition backbone expected under an <c>ipadapter</c> folder. Source: buffalo_l <c>w600k_r50.onnx</c> converted with <c>tests/python-reference/convert_arcface_onnx.py</c>.</summary>
     public const string ArcFaceWeightsFile = "arcface_w600k_r50.safetensors";
 
     /// <summary>Folded YOLO11n-pose weights used for the fallback face-keypoint alignment.</summary>
@@ -41,8 +29,7 @@ public static class IpAdapterResolver
     /// <summary>Models-root-relative folders searched for IP-Adapter checkpoints.</summary>
     private static readonly string[] _ipaFolders = ["ipadapter", "IpAdapter", "IPAdapter", "ip_adapter"];
 
-    /// <summary>Models-root-relative folders searched for the pose / face detector checkpoints (shared with the
-    /// Wan-Animate driving-clip auto-preprocess, which reuses the same YOLO11-pose weights).</summary>
+    /// <summary>Models-root-relative folders searched for the pose / face detector checkpoints (shared with the Wan-Animate driving-clip auto-preprocess, which reuses the same YOLO11-pose weights).</summary>
     internal static readonly string[] DetectorFolders = ["facedetection", "yolov8-face", "face", "ipadapter", "text_encoders", "clip_vision"];
 
     /// <summary>A known FaceID checkpoint plus its companion UNet-LoRA half, both from <c>h94/IP-Adapter-FaceID</c>.</summary>
@@ -83,8 +70,7 @@ public static class IpAdapterResolver
             "ip-adapter-faceid-plus_sd15_lora.safetensors", "3f00341d11e5e7b5aadf63cbdead09ef82eb28669156161cf1bfc2105d4ff1cd"),
     ];
 
-    /// <summary>One generation's resolved IPA state. Owns the projected image-prompt tokens; the loaded adapter and image
-    /// encoder live in an <see cref="IpAdapterCacheEntry"/> the caller's cache holds across generations.</summary>
+    /// <summary>One generation's resolved IPA state. Owns the projected image-prompt tokens; the loaded adapter and image encoder live in an <see cref="IpAdapterCacheEntry"/> the caller's cache holds across generations.</summary>
     public sealed class ResolvedSpec : IDisposable
     {
         /// <summary>The conditionings to hand to the pipeline.</summary>
@@ -93,8 +79,7 @@ public static class IpAdapterResolver
         /// <summary>The projected token tensors backing <see cref="Conditionings"/>.</summary>
         public required List<Tensor> ImageTokens { get; init; }
 
-        /// <summary>Path of the FaceID companion UNet LoRA (kohya format) to merge, or null for non-FaceID adapters and
-        /// when the companion file couldn't be located.</summary>
+        /// <summary>Path of the FaceID companion UNet LoRA (kohya format) to merge, or null for non-FaceID adapters and when the companion file couldn't be located.</summary>
         public string? FaceIdLoraPath { get; init; }
 
         /// <summary>Merge strength for <see cref="FaceIdLoraPath"/>; 1.0 matches the official FaceID pipeline default.</summary>
@@ -110,8 +95,7 @@ public static class IpAdapterResolver
         }
     }
 
-    /// <summary>Resolves IPA for this generation, or null when no adapter is named. <paramref name="baseModel"/> selects
-    /// which UNet family the checkpoint must match — mismatches throw.</summary>
+    /// <summary>Resolves IPA for this generation, or null when no adapter is named. <paramref name="baseModel"/> selects which UNet family the checkpoint must match — mismatches throw.</summary>
     /// <param name="imagePrompt">Reference images plus the FaceID-v2 weight; null or empty images throws when an adapter is named.</param>
     /// <param name="adapterModel">IPA model id or path; null/"None" disables the feature.</param>
     /// <param name="clipVisionModel">CLIP-Vision override; null auto-downloads <see cref="SideModels.ClipVisionH14"/>.</param>
@@ -252,8 +236,7 @@ public static class IpAdapterResolver
             $"IP-Adapter model '{adapterModel}' was not found under '{Path.Combine(RepoPaths.ModelsRoot(), "ipadapter")}'.");
     }
 
-    /// <summary>FaceID image encoding: per reference image detect the strongest face, align it to the ArcFace template,
-    /// embed with ArcFace IR-50, then average the L2-normalized embeddings and renormalize. Returns <c>[1, 512]</c>.</summary>
+    /// <summary>FaceID image encoding: per reference image detect the strongest face, align it to the ArcFace template, embed with ArcFace IR-50, then average the L2-normalized embeddings and renormalize. Returns <c>[1, 512]</c>.</summary>
     private static Tensor EmbedFaces(IBackend backend, IpAdapterCacheEntry entry, IReadOnlyList<ImageDataRef> images, Action<string> log)
     {
         (Tensor faceEmbeds, Tensor? clipHidden) = EmbedFacesCore(backend, entry, images, wantClipCrop: false, log);
@@ -395,10 +378,7 @@ public static class IpAdapterResolver
         ? config.IsPlus ? (config.IsFaceIdV2 ? "FaceID-PlusV2" : "FaceID-Plus") : "FaceID"
         : config.IsPlus ? "Plus" : "Standard";
 
-    /// <summary>Detects people, picks the best face (largest inter-eye distance among detections with usable eye+nose
-    /// keypoints, else the highest-confidence person), and returns an ArcFace-aligned 112×112 RGB crop plus — when
-    /// <paramref name="wantClipCrop"/> — the SAME alignment at 224×224 for CLIP-Vision. Falls back to an unrotated square
-    /// face crop when keypoints are missing, and to a center crop when no person is detected at all.</summary>
+    /// <summary>Detects people, picks the best face (largest inter-eye distance among detections with usable eye+nose keypoints, else the highest-confidence person), and returns an ArcFace-aligned 112×112 RGB crop plus — when <paramref name="wantClipCrop"/> — the SAME alignment at 224×224 for CLIP-Vision. Falls back to an unrotated square face crop when keypoints are missing, and to a center crop when no person is detected at all.</summary>
     private static (byte[] ArcCrop, byte[]? ClipCrop) DetectAndAlignFace(
         FaceDetector? faceDetector, YoloPosePipeline pose, byte[] rgb, int width, int height, bool wantClipCrop, Action<string> log)
     {
@@ -478,8 +458,7 @@ public static class IpAdapterResolver
         return FaceAlignment.WarpAffine(rgb, width, height, srcToDst, outSize, outSize);
     }
 
-    /// <summary>Runs CLIP-Vision on each reference image and averages the outputs. All inputs share a shape after the
-    /// preprocess, so the mean has the same shape as a single encode — this merges multiple references into one conditioning.</summary>
+    /// <summary>Runs CLIP-Vision on each reference image and averages the outputs. All inputs share a shape after the preprocess, so the mean has the same shape as a single encode — this merges multiple references into one conditioning.</summary>
     private static unsafe Tensor AverageVisionOutputs(
         IBackend backend, IpAdapterCacheEntry entry, IReadOnlyList<ImageDataRef> images, Action<string> log)
     {
@@ -560,8 +539,7 @@ public static class IpAdapterResolver
         return false;
     }
 
-    /// <summary>Loads and constructs the adapter plus its image encoder. Standard/Plus get CLIP-Vision (auto-downloaded
-    /// ViT-H/14 unless overridden); FaceID gets the ArcFace IR-50 + YOLO11-pose pair and its companion UNet LoRA path.</summary>
+    /// <summary>Loads and constructs the adapter plus its image encoder. Standard/Plus get CLIP-Vision (auto-downloaded ViT-H/14 unless overridden); FaceID gets the ArcFace IR-50 + YOLO11-pose pair and its companion UNet LoRA path.</summary>
     private static async Task<IpAdapterCacheEntry> LoadIpaEntryAsync(
         IBackend backend, string ipaPath, string? clipVisionModel, IpAdapterBaseModel expectedBase, Action<string> log, CancellationToken ct)
     {
@@ -660,8 +638,7 @@ public static class IpAdapterResolver
         }
     }
 
-    /// <summary>Loads a dedicated YOLOv8-Face detector when a checkpoint is installed; returns null (→ pose-keypoint
-    /// fallback) when absent or on load failure. The variant + landmark stride are inferred from the filename.</summary>
+    /// <summary>Loads a dedicated YOLOv8-Face detector when a checkpoint is installed; returns null (→ pose-keypoint fallback) when absent or on load failure. The variant + landmark stride are inferred from the filename.</summary>
     private static FaceDetector? TryLoadFaceDetector(IBackend backend, Action<string> log)
     {
         string? path = ResolveFaceDetectorWeights();
@@ -712,8 +689,7 @@ public static class IpAdapterResolver
         return null;
     }
 
-    /// <summary>Infers the YOLOv8-Face variant (n/s/m/l) + landmark stride from the filename; stride defaults to 3
-    /// (Ultralytics x/y/visibility), and a name hinting a landmark-only branch selects stride 2.</summary>
+    /// <summary>Infers the YOLOv8-Face variant (n/s/m/l) + landmark stride from the filename; stride defaults to 3 (Ultralytics x/y/visibility), and a name hinting a landmark-only branch selects stride 2.</summary>
     private static YoloConfig InferFaceConfig(string path)
     {
         string n = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
@@ -734,8 +710,7 @@ public static class IpAdapterResolver
         return YoloV8FaceConfig.YoloV8nFace(kptDims);
     }
 
-    /// <summary>Resolves and loads the CLIP-Vision encoder: an explicit override wins, otherwise the canonical
-    /// CLIP-ViT-H/14 is auto-downloaded (every supported IPA — including FaceID-Plus — was trained against it).</summary>
+    /// <summary>Resolves and loads the CLIP-Vision encoder: an explicit override wins, otherwise the canonical CLIP-ViT-H/14 is auto-downloaded (every supported IPA — including FaceID-Plus — was trained against it).</summary>
     private static async Task<(ClipVisionEncoder Encoder, SafeTensorsLoader Loader)> LoadClipVisionAsync(
         string? clipVisionModel, Action<string> log, CancellationToken ct)
     {
@@ -764,8 +739,7 @@ public static class IpAdapterResolver
         }
     }
 
-    /// <summary>Finds the FaceID companion UNet LoRA: a sibling <c>&lt;name&gt;_lora.safetensors</c> next to the
-    /// checkpoint, else the known h94 companion (auto-downloaded). Returns null when unavailable.</summary>
+    /// <summary>Finds the FaceID companion UNet LoRA: a sibling <c>&lt;name&gt;_lora.safetensors</c> next to the checkpoint, else the known h94 companion (auto-downloaded). Returns null when unavailable.</summary>
     private static async Task<string?> ResolveFaceIdLoraAsync(string ipaPath, CancellationToken ct)
     {
         string sibling = Path.Combine(

@@ -3,8 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>A loaded music model reduced to: prompt → PCM at <see cref="SampleRate"/>. The cancellation token is
-/// observed inside the synth loop so a stop request interrupts long autoregressive decodes mid-flight.</summary>
+/// <summary>A loaded music model reduced to: prompt → PCM at <see cref="SampleRate"/>. The cancellation token is observed inside the synth loop so a stop request interrupts long autoregressive decodes mid-flight.</summary>
 internal interface IMusicRunner : IDisposable
 {
     /// <summary>Output sample rate in Hz.</summary>

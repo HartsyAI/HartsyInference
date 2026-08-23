@@ -2,11 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Splits a TripoSR (<c>stabilityai/TripoSR</c>) checkpoint into the three component weight dicts the
-/// pipeline loads: the DINO ViT-B/16 image tokenizer (<c>Dino</c>, keys stripped of
-/// <c>image_tokenizer.model.</c>), the backbone (<c>Transformer</c>, retaining <c>tokenizer.</c> /
-/// <c>backbone.</c> / <c>post_processor.</c> prefixes), and the NeRF MLP (<c>Decoder</c>, stripped of
-/// <c>decoder.</c>). The published checkpoint key layout is verified against the real <c>model.ckpt</c>.</summary>
+/// <summary>Splits a TripoSR (<c>stabilityai/TripoSR</c>) checkpoint into the three component weight dicts the pipeline loads: the DINO ViT-B/16 image tokenizer (<c>Dino</c>, keys stripped of <c>image_tokenizer.model.</c>), the backbone (<c>Transformer</c>, retaining <c>tokenizer.</c> / <c>backbone.</c> / <c>post_processor.</c> prefixes), and the NeRF MLP (<c>Decoder</c>, stripped of <c>decoder.</c>). The published checkpoint key layout is verified against the real <c>model.ckpt</c>.</summary>
 public static class TripoSrCheckpointConverter
 {
     public sealed class ConvertedWeights

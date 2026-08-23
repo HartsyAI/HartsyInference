@@ -14,10 +14,7 @@ internal readonly record struct PatchTokenGeometry(
     long PatchVolume,
     long ElementCount);
 
-/// <summary>
-/// Centralizes the exact tensor contract for <see cref="IBackend.PatchifyTokens"/> and
-/// <see cref="IBackend.UnpatchifyTokens"/> so CPU fallbacks and accelerator dispatch cannot silently disagree.
-/// </summary>
+/// <summary>Centralizes the exact tensor contract for <see cref="IBackend.PatchifyTokens"/> and <see cref="IBackend.UnpatchifyTokens"/> so CPU fallbacks and accelerator dispatch cannot silently disagree.</summary>
 internal static class PatchTokenContract
 {
     internal static PatchTokenGeometry ValidatePatchify(Tensor output, Tensor input, int patch)

@@ -104,10 +104,6 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         return name.Contains("distill", StringComparison.OrdinalIgnoreCase) ? DistillLogScale : 0f;
     }
 
-    /// <summary>Scales the driving V at splice time; see <see cref="WanAnimate2SelfAttnContext.PoseStrength"/>.
-    /// 1.0 reproduces the reference.</summary>
-    public float PoseStrength { get; set; } = 1.0f;
-
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
     private readonly WanImageEmbedder _imgEmbedder;
@@ -153,7 +149,7 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
         _patchW2d = WanDitOps.Reshape2d(w["patch_embedding.weight"], _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -268,7 +264,8 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// reference-image slot, which is denoised and then discarded by the caller.</summary>
     /// <param name="unconditional">The negative branch, which skips block <see cref="UncondSkipBlockIndex"/>.</param>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, float timestep,
-        WanAnimate2DrivingCache driving, Tensor? clipImageEmbeds = null, bool unconditional = false)
+        WanAnimate2DrivingCache driving, Tensor? clipImageEmbeds = null, bool unconditional = false,
+        float poseStrength = 1.0f, float referenceImageStrength = 1.0f)
     {
         ArgumentNullException.ThrowIfNull(driving);
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -295,7 +292,8 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             TokensPerFrame = hw,
             LogScaleBiasGen = biasGen,
             LogScaleBiasSpliced = biasSpliced,
-            PoseStrength = PoseStrength,
+            PoseStrength = poseStrength,
+            ReferenceImageStrength = referenceImageStrength,
             KeyBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
             ValueBuffer = new Tensor(new TensorShape(1, _config.NumHeads, s + hw, _config.HeadDim), DType.F32),
         };
@@ -348,14 +346,17 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
 
     /// <summary>The <c>[hw, 2hw)</c> band of <paramref name="keys"/> gets <paramref name="logScale"/>, every other
     /// key 0. <paramref name="queries"/> is one latent frame's token count, which is also the band stride.</summary>
+    /// <remarks>Stored as ONE <c>[1, keys]</c> row, not the <c>[queries, keys]</c> duplicate of it: the reference
+    /// <c>score_mod</c> has no query-side condition, so every row is identical. The backends broadcast it, which is
+    /// what keeps the biased path off the materialized <c>[heads, Sq, Skv]</c> score matrix — at 480x800/61f that
+    /// matrix is 5836 MB and does not fit beside the resident DiT.</remarks>
     internal static Tensor BuildLogScaleBias(int queries, int keys, float logScale)
     {
-        Tensor bias = new Tensor(new TensorShape(queries, keys), DType.F32);
+        Tensor bias = new Tensor(new TensorShape(1, keys), DType.F32);
         float* p = (float*)bias.DataPointer;
-        new Span<float>(p, queries * keys).Clear();
+        new Span<float>(p, keys).Clear();
         int bandEnd = Math.Min(2 * queries, keys);
-        for (int q = 0; q < queries; q++)
-            for (int k = queries; k < bandEnd; k++) p[(long)q * keys + k] = logScale;
+        for (int k = queries; k < bandEnd; k++) p[k] = logScale;
         return bias;
     }
 
@@ -404,8 +405,6 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
             return half;
         }
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 
     public void Dispose()
     {

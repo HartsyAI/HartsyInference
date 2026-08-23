@@ -27,9 +27,9 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly IDisposable? _ggufHandle;
 
-    /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
     public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
@@ -118,14 +118,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
         }
     }
 
-    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
-    /// parts, null otherwise (Tier 3.7). Mirrors <c>Flux1RecipePipeline.BuildRegionalPlan</c>: each region's text is
-    /// tokenized the SAME way the base prompt was (Klein's chat template vs. Dev's Mistral splice) and encoded
-    /// through <see cref="Flux2Pipeline.EncodeRegionText"/> — the same text-encoder instance + hidden-layer taps
-    /// the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature
-    /// that <see cref="Flux2Pipeline.GenerateFromTokens"/>'s regional path never reads (same as Flux.1 — confirmed
-    /// by inspection: the pipeline builds its own background stream from the base <c>textEmbeddings</c>) — a
-    /// throwaway placeholder tensor satisfies it.</summary>
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> parts, null otherwise (Tier 3.7). Mirrors <c>Flux1RecipePipeline.BuildRegionalPlan</c>: each region's text is tokenized the SAME way the base prompt was (Klein's chat template vs. Dev's Mistral splice) and encoded through <see cref="Flux2Pipeline.EncodeRegionText"/> — the same text-encoder instance + hidden-layer taps the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature that <see cref="Flux2Pipeline.GenerateFromTokens"/>'s regional path never reads (same as Flux.1 — confirmed by inspection: the pipeline builds its own background stream from the base <c>textEmbeddings</c>) — a throwaway placeholder tensor satisfies it.</summary>
     private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
     {
         if (!RegionalPromptResolver.HasRegionParts(prompt))

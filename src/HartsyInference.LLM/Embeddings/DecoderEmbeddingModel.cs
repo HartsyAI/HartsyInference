@@ -6,10 +6,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Embeddings;
 
-/// <summary>A decoder-based text-embedding model (Qwen3-Embedding, gte-Qwen2, e5-mistral, LLM2Vec, …): runs a
-/// causal LLM decoder over the input and pools the final-layer hidden states (last-token by default, or mean) into
-/// an L2-normalized sentence embedding. Reuses the verified <see cref="GenericTransformer"/> decoder + its
-/// tokenizer — no new architecture, just a pooling head.</summary>
+/// <summary>A decoder-based text-embedding model (Qwen3-Embedding, gte-Qwen2, e5-mistral, LLM2Vec, …): runs a causal LLM decoder over the input and pools the final-layer hidden states (last-token by default, or mean) into an L2-normalized sentence embedding, reusing the verified <see cref="GenericTransformer"/> decoder + its tokenizer — no new architecture, just a pooling head.</summary>
 public sealed unsafe class DecoderEmbeddingModel : IDisposable
 {
     private readonly GgufLanguageModel _lm;

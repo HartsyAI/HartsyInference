@@ -2,9 +2,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>One prepared text-to-speech job: the request knobs plus the voice reference materialized in the forms
-/// the descriptors consume — mono 24 kHz samples, a temp WAV path for pipelines that take a file, and the raw clip
-/// for pipelines that need their own sample rate.</summary>
+/// <summary>One prepared text-to-speech job: the request knobs plus the voice reference materialized in the forms the descriptors consume — mono 24 kHz samples, a temp WAV path for pipelines that take a file, and the raw clip for pipelines that need their own sample rate.</summary>
 internal sealed record TtsJob
 {
     /// <summary>The text to speak.</summary>

@@ -274,7 +274,6 @@ internal sealed unsafe class PocketTtsMimiDecoder
             int inCh = mult * NFilters;
             int outCh = inCh / 2;
             int ratio = Ratios[s];
-            // ELU
             Tensor e = new(x.Shape, DType.F32); backend.Elu(e, x, 1.0f); x.Dispose(); x = e;
             // convtr inCh->outCh, k=2r s=r, causal trim padRight=r
             int tUp = curT * ratio;

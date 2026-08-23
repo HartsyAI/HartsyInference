@@ -2,7 +2,7 @@ namespace HartsyInference.Diffusion.Schedulers;
 
 /// <summary>Logit-normal flow-matching schedule used by Ideogram 4 (<c>ideogram-oss/ideogram4</c> <c>scheduler.py</c>). Maps a uniform grid value <c>t ∈ [0,1]</c> to a noise level via <c>1 − sigmoid(mean + std · Φ⁻¹(t))</c>, clamped to a log-SNR window. This is NOT the SD3-style time-shift used by <see cref="FlowMatchEulerDiscreteScheduler"/>; Ideogram drives its own Euler loop in the pipeline (<c>z += v·(s−t)</c>), so this is a plain stateless warp rather than an <c>IScheduler</c>.
 ///
-/// The <c>mean</c> auto-adjusts for resolution: <c>mean = knownMean + 0.5·ln(numPixels / knownPixels)</c> with <c>knownResolution = 512×512</c>. Construct via <see cref="ForResolution"/>.</summary>
+/// <para>The <c>mean</c> auto-adjusts for resolution: <c>mean = knownMean + 0.5·ln(numPixels / knownPixels)</c> with <c>knownResolution = 512×512</c>. Construct via <see cref="ForResolution"/>.</para></summary>
 public sealed class LogitNormalSchedule
 {
     private readonly double _mean;

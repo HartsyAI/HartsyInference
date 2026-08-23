@@ -12,19 +12,10 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Interactive-world service: routes to a per-model pipeline by catalog id, caches it per checkpoint, and
-/// hands out sessions that drive it. <c>oasis</c> and <c>diamond</c> are fully wired. <c>hunyuan-gamecraft</c> has a
-/// real, code-complete checkpoint loader (<see cref="LoadHunyuanGameCraft"/> — see its remarks) but still fails
-/// fast with a clear, specific message today: it needs a VAE encoder no converter builds yet, so no session could
-/// ever succeed regardless of weights present. <c>matrix-game-2</c> and <c>matrix-game-3</c> are catalogued but not
-/// yet loadable here — each needs a multi-checkpoint loader (transformer + VAE + CLIP/T5 text encoder) this service
-/// does not build yet, and Matrix-Game 3.0 additionally has no image→latent encoder ported (<c>Wan22VaeEncoder</c> is
-/// decode-only today). Selecting any of those three fails fast with a clear message instead of silently mis-loading
-/// as Oasis.</summary>
+/// <summary>Interactive-world service: routes to a per-model pipeline by catalog id, caches it per checkpoint, and hands out sessions that drive it. <c>oasis</c> and <c>diamond</c> are fully wired. <c>hunyuan-gamecraft</c> has a real, code-complete checkpoint loader (<see cref="LoadHunyuanGameCraft"/> — see its remarks) but still fails fast with a clear, specific message today: it needs a VAE encoder no converter builds yet, so no session could ever succeed regardless of weights present. <c>matrix-game-2</c> and <c>matrix-game-3</c> are catalogued but not yet loadable here — each needs a multi-checkpoint loader (transformer + VAE + CLIP/T5 text encoder) this service does not build yet, and Matrix-Game 3.0 additionally has no image→latent encoder ported (<c>Wan22VaeEncoder</c> is decode-only today). Selecting any of those three fails fast with a clear message instead of silently mis-loading as Oasis.</summary>
 public sealed class WorldService : IWorldService, IDisposable
 {
-    /// <summary>Aux key on <see cref="ModelSpec"/> that points at the model's VAE checkpoint (Oasis's ViT-VAE;
-    /// Hunyuan-GameCraft's 3D causal VAE).</summary>
+    /// <summary>Aux key on <see cref="ModelSpec"/> that points at the model's VAE checkpoint (Oasis's ViT-VAE; Hunyuan-GameCraft's 3D causal VAE).</summary>
     public const string VaeAuxKey = "vae-path";
 
     /// <summary>Aux key on <see cref="ModelSpec"/> that points at Hunyuan-GameCraft's Llava-Llama-3-8B text-encoder checkpoint.</summary>
@@ -95,9 +86,7 @@ public sealed class WorldService : IWorldService, IDisposable
         }
     }
 
-    /// <summary>Loads the Oasis DiT (spec local path) + its ViT-VAE (aux <see cref="VaeAuxKey"/>). The Oasis
-    /// pipeline is a one-shot rollout over a full action plan, not a resumable step API — see
-    /// <see cref="OasisWorldSession"/> for exactly what that means for a session.</summary>
+    /// <summary>Loads the Oasis DiT (spec local path) + its ViT-VAE (aux <see cref="VaeAuxKey"/>). The Oasis pipeline is a one-shot rollout over a full action plan, not a resumable step API — see <see cref="OasisWorldSession"/> for exactly what that means for a session.</summary>
     private LoadedWorld LoadOasis(ModelSpec spec)
     {
         if (!spec.Aux.TryGetValue(VaeAuxKey, out string? vaePath))
@@ -129,8 +118,7 @@ public sealed class WorldService : IWorldService, IDisposable
         }
     }
 
-    /// <summary>Loads DIAMOND's denoiser from the spec local path — a single checkpoint file, no aux paths.
-    /// Genuinely per-frame interactive; see <see cref="DiamondWorldSession"/>.</summary>
+    /// <summary>Loads DIAMOND's denoiser from the spec local path — a single checkpoint file, no aux paths. Genuinely per-frame interactive; see <see cref="DiamondWorldSession"/>.</summary>
     private LoadedWorld LoadDiamond(ModelSpec spec)
     {
         try

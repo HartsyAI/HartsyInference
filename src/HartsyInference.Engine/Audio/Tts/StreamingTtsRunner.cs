@@ -3,10 +3,7 @@ using HartsyInference.Core.Backends;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Wraps both a synchronous synth delegate (the non-streaming <see cref="ITtsRunner.Synthesize"/> path —
-/// kept byte-identical to what a plain <see cref="TtsRunner"/> would produce) and a streaming delegate, plus the
-/// disposables the loaded model owns. Mirrors <see cref="TtsRunner"/>'s shape for the models that genuinely
-/// support incremental output.</summary>
+/// <summary>Wraps both a synchronous synth delegate (the non-streaming <see cref="ITtsRunner.Synthesize"/> path — kept byte-identical to what a plain <see cref="TtsRunner"/> would produce) and a streaming delegate, plus the disposables the loaded model owns. Mirrors <see cref="TtsRunner"/>'s shape for the models that genuinely support incremental output.</summary>
 internal sealed class StreamingTtsRunner(
     int sampleRate,
     Func<IBackend, TtsJob, float[]> synth,

@@ -1,9 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>The <c>remove_accent</c> table from espeak-ng v1.50 <c>dictionary.c</c>, mapping accented Latin
-/// codepoints (starting at U+00C0) to their base ASCII letter, or 0 when there is no base letter. Used by
-/// <see cref="EspeakLetters.IsLetter"/> so accented letters classify the same as their base (e.g. <c>e</c> is a
-/// vowel). Generated verbatim from the source table (414 entries); a 0 entry means "no base letter".</summary>
+/// <summary>The <c>remove_accent</c> table from espeak-ng v1.50 <c>dictionary.c</c>, mapping accented Latin codepoints (starting at U+00C0) to their base ASCII letter, or 0 when there is no base letter; used by <see cref="EspeakLetters.IsLetter"/> so accented letters classify the same as their base (e.g. <c>e</c> is a vowel).</summary>
 internal static class EspeakAccents
 {
     /// <summary>Upper bound (exclusive) on codepoints handled by the table; espeak's <c>N_REMOVE_ACCENT</c>.</summary>

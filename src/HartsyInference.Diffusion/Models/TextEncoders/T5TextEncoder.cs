@@ -83,7 +83,6 @@ public sealed unsafe class T5TextEncoder : IDisposable
             _positionBias!.LoadWeights(biasTable);
         }
 
-        // Per-block weights
         for (int i = 0; i < _config.NumLayers; i++)
         {
             _blocks[i].LoadWeights(weights, $"encoder.block.{i}");

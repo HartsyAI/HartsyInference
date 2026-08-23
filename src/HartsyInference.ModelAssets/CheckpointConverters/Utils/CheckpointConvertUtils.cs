@@ -3,6 +3,7 @@ using System.Text;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Quant;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
@@ -12,10 +13,7 @@ public static unsafe class CheckpointConvertUtils
     // ── UNet Shared ──────────────────────────────────────────
 
     /// <summary>Converts LDM ResNet sub-keys to diffusers format. Shared across all Stable Diffusion variants.</summary>
-    /// <remarks>
-    /// in_layers.0→norm1, in_layers.2→conv1, emb_layers.1→time_emb_proj,
-    /// out_layers.0→norm2, out_layers.3→conv2, skip_connection→conv_shortcut.
-    /// </remarks>
+    /// <remarks>in_layers.0→norm1, in_layers.2→conv1, emb_layers.1→time_emb_proj, out_layers.0→norm2, out_layers.3→conv2, skip_connection→conv_shortcut.</remarks>
     public static string ConvertResNetSubKey(string ldmSubKey)
     {
         if (ldmSubKey.StartsWith("in_layers.0."))
@@ -75,6 +73,89 @@ public static unsafe class CheckpointConvertUtils
             2 => "mid_block.resnets.1." + ConvertResNetSubKey(rest),
             _ => null,
         };
+    }
+
+
+    // ── DiT Key Shared ──────────────────────────────────────────
+
+    /// <summary>Strips an optional Comfy/diffusers wrapper prefix (<c>model.diffusion_model.</c> / <c>diffusion_model.</c> / <c>transformer.</c>) off a transformer key.</summary>
+    public static string StripTransformerPrefix(string key)
+    {
+        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
+            return key["model.diffusion_model.".Length..];
+        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
+            return key["diffusion_model.".Length..];
+        if (key.StartsWith("transformer.", StringComparison.Ordinal))
+            return key["transformer.".Length..];
+        return key;
+    }
+
+    /// <summary>Maps a Qwen3-VL language-tower key to the <c>LlamaStyleEncoder</c> convention (<c>model.embed_tokens</c>, <c>model.layers.{i}.*</c>, <c>model.norm</c>), re-rooting the HF <c>language_model.</c> tower at <c>model.</c>; returns null to drop the vision tower, <c>lm_head</c>, and other non-encoder trees.</summary>
+    public static string? RemapQwenLanguageKey(string key)
+    {
+        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
+        if (key.Contains("lm_head", StringComparison.Ordinal)) return null;
+
+        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
+        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
+        if (suffix.StartsWith("model.", StringComparison.Ordinal))
+            suffix = suffix["model.".Length..];
+
+        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
+            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
+            || suffix == "norm.weight")
+        {
+            return "model." + suffix;
+        }
+        return null;
+    }
+
+
+    // ── Shard Loading ──────────────────────────────────────────
+
+    /// <summary>Finds .safetensors shards in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
+    public static string[] DiscoverShards(string preferredDir, string rootPath, string what, string modelName)
+    {
+        if (Directory.Exists(preferredDir))
+        {
+            string[] s = Directory.GetFiles(preferredDir, "*.safetensors");
+            if (s.Length > 0) { Array.Sort(s); return s; }
+        }
+        string[] all = Directory.GetFiles(rootPath, "*.safetensors");
+        string[] match = Array.FindAll(all, f => Path.GetFileName(f).ToLowerInvariant().Contains(what));
+        if (match.Length == 0)
+            throw new FileNotFoundException($"No {modelName} {what} .safetensors found under {preferredDir} or {rootPath}.");
+        Array.Sort(match);
+        return match;
+    }
+
+    /// <summary>Loads and merges shards, mapping each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers, and folding fp8_scaled companions via <see cref="ApplyFp8ScaledDequant"/>. On failure the loaders opened so far are disposed.</summary>
+    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadShards(
+        string[] shards, int capacity, Func<string, string?> keyMap)
+    {
+        Dictionary<string, Tensor> merged = new(capacity);
+        List<SafeTensorsLoader> loaders = new(shards.Length);
+        try
+        {
+            foreach (string shard in shards)
+            {
+                SafeTensorsLoader loader = new();
+                loader.Load(shard);
+                loaders.Add(loader);
+                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
+                {
+                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
+                    string? mapped = keyMap(kvp.Key);
+                    if (mapped is not null) merged[mapped] = kvp.Value;
+                }
+            }
+            return (ApplyFp8ScaledDequant(merged), loaders);
+        }
+        catch
+        {
+            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            throw;
+        }
     }
 
 
@@ -226,6 +307,96 @@ public static unsafe class CheckpointConvertUtils
 
     // ── Tensor Splitting ──────────────────────────────────────────
 
+    /// <summary>Byte count for a row-aligned slice of a fused tensor. GGUF block quants (Q4_K etc.) pack fixed-size blocks that never span rows, so any split along dim 0 is byte-exact as long as the row length is a whole number of blocks — which this validates.</summary>
+    public static long SliceByteCount(Tensor fused, long elementCount)
+    {
+        DType d = fused.DType;
+        if (d.IsQuantized && fused.Shape.Rank == 2 && fused.Shape[1] % d.BlockElementCount != 0)
+            throw new NotSupportedException(
+                $"Cannot split {d.Name} tensor with row length {fused.Shape[1]}: not a multiple of the {d.BlockElementCount}-element quant block.");
+        return d.ComputeByteCount(elementCount);
+    }
+
+    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three [innerDim, inDim] weights under <c>{prefix}.{qName}.weight</c> etc. Quant-aware via <see cref="SliceByteCount"/>; the fused tensor's per-tensor fp8 scale is carried onto every split.</summary>
+    public static void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
+        string qName, string kName, string vName, Dictionary<string, Tensor> output)
+    {
+        int inDim = (int)fused.Shape[1];
+        long chunkBytes = SliceByteCount(fused, (long)innerDim * inDim);
+        TensorShape splitShape = new TensorShape(innerDim, inDim);
+
+        Tensor qWeight = new Tensor(splitShape, fused.DType);
+        Tensor kWeight = new Tensor(splitShape, fused.DType);
+        Tensor vWeight = new Tensor(splitShape, fused.DType);
+        // The raw fp8 bytes alone are real_value/scale — dropping the factor runs every attention projection
+        // dozens of times too large → saturated softmax → pure-noise output.
+        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
+        byte* src = (byte*)fused.DataPointer;
+        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
+
+        output[$"{prefix}.{qName}.weight"] = qWeight;
+        output[$"{prefix}.{kName}.weight"] = kWeight;
+        output[$"{prefix}.{vName}.weight"] = vWeight;
+    }
+
+    /// <summary>Splits a fused QKV bias [3*innerDim] into three [innerDim] biases under <c>{prefix}.{qName}.bias</c> etc. Quant-aware via <see cref="SliceByteCount"/> (identical to <c>innerDim * SizeInBytes</c> for the plain dtypes biases ship in).</summary>
+    public static void SplitQkvBias(Tensor fused, int innerDim, string prefix,
+        string qName, string kName, string vName, Dictionary<string, Tensor> output)
+    {
+        long chunkBytes = SliceByteCount(fused, innerDim);
+        TensorShape splitShape = new TensorShape(innerDim);
+
+        Tensor qBias = new Tensor(splitShape, fused.DType);
+        Tensor kBias = new Tensor(splitShape, fused.DType);
+        Tensor vBias = new Tensor(splitShape, fused.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
+        byte* src = (byte*)fused.DataPointer;
+        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
+
+        output[$"{prefix}.{qName}.bias"] = qBias;
+        output[$"{prefix}.{kName}.bias"] = kBias;
+        output[$"{prefix}.{vName}.bias"] = vBias;
+    }
+
+    /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
+    /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
+    public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)
+    {
+        long firstDim = input.Shape[0];
+        if (firstDim % 2 != 0)
+            throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        Tensor source = castToF32 && input.DType != DType.F32 ? input.CastTo(DType.F32) : input;
+        try
+        {
+            long halfBytes = SliceByteCount(source, source.ElementCount / 2);
+            Tensor swapped = new Tensor(source.Shape, source.DType);
+            if (!castToF32)
+                swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
+
+            byte* src = (byte*)source.DataPointer;
+            byte* dst = (byte*)swapped.DataPointer;
+            Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
+            Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
+            return swapped;
+        }
+        finally
+        {
+            if (!ReferenceEquals(source, input)) source.Dispose();
+        }
+    }
+
     /// <summary>Splits a fused in_proj_weight [3*H, H] into separate q_proj, k_proj, v_proj weights [H, H] each.</summary>
     public static void SplitInProjWeight(Tensor inProj, int hiddenSize, string layerPrefix, Dictionary<string, Tensor> output)
     {
@@ -281,12 +452,10 @@ public static unsafe class CheckpointConvertUtils
 
     // ── ComfyUI int8_tensorwise ──────────────────────────────────────────
 
-    /// <summary>Suffix of ComfyUI's per-output-row int8 dequant scale (the same suffix fp8 builds use for their
-    /// per-tensor scalar; the weight's dtype is what tells the two apart).</summary>
+    /// <summary>Suffix of ComfyUI's per-output-row int8 dequant scale (the same suffix fp8 builds use for their per-tensor scalar; the weight's dtype is what tells the two apart).</summary>
     private const string WeightScaleSuffix = ".weight_scale";
 
-    /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8
-    /// tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
+    /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8 tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
     public static ComfyQuantDescriptor? TryReadComfyQuant(Tensor blob)
     {
         ArgumentNullException.ThrowIfNull(blob);
@@ -298,16 +467,9 @@ public static unsafe class CheckpointConvertUtils
         return ComfyQuantDescriptor.TryParse(bytes[..end]);
     }
 
-    /// <summary>Moves ComfyUI's <c>int8_tensorwise</c> companions — the <c>.weight_scale</c> per-output-row scale and
-    /// the <c>.comfy_quant</c> descriptor — onto <see cref="Tensor.QuantInfo"/> of the I8 weight they belong to, and
-    /// returns a dictionary without those companion keys. The weight itself is left <b>packed</b>: dequantizing here
-    /// would turn LTX 2.5's 21.5 GB int8 DiT back into 42 GB, which is the whole reason the format exists.</summary>
-    /// <remarks><para><see cref="ApplyFp8ScaledDequant"/> calls this first, because that pass drops
-    /// <c>.weight_scale</c>/<c>.comfy_quant</c> unconditionally — an int8 weight that skipped this step would reach
-    /// the backend as raw int8 with no scale at all. Every converter funnels through it, so no caller can lose the
-    /// companions by forgetting a call.</para>
-    /// <para>Idempotent: a weight that already carries <see cref="Tensor.QuantInfo"/> is skipped. The companion
-    /// tensors are <b>borrowed</b> — the loader that produced them still owns their lifetime.</para></remarks>
+    /// <summary>Moves ComfyUI's <c>int8_tensorwise</c> companions — the <c>.weight_scale</c> per-output-row scale and the <c>.comfy_quant</c> descriptor — onto <see cref="Tensor.QuantInfo"/> of the I8 weight they belong to, and returns a dictionary without those companion keys. The weight itself is left <b>packed</b>: dequantizing here would turn LTX 2.5's 21.5 GB int8 DiT back into 42 GB, which is the whole reason the format exists.</summary>
+    /// <remarks><para><see cref="ApplyFp8ScaledDequant"/> calls this first, because that pass drops <c>.weight_scale</c>/<c>.comfy_quant</c> unconditionally — an int8 weight that skipped this step would reach the backend as raw int8 with no scale at all. Every converter funnels through it, so no caller can lose the companions by forgetting a call.</para>
+    /// <para>Idempotent: a weight that already carries <see cref="Tensor.QuantInfo"/> is skipped. The companion tensors are <b>borrowed</b> — the loader that produced them still owns their lifetime.</para></remarks>
     public static Dictionary<string, Tensor> AttachInt8QuantInfo(Dictionary<string, Tensor> source)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -404,23 +566,15 @@ public static unsafe class CheckpointConvertUtils
 
     /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports three companion formats:
     /// <list type="bullet">
-    ///   <item>ComfyUI <c>fp8_scaled</c>: <c>.scale_weight</c>/<c>.scale_input</c> (F32 scalar).</item>
-    ///   <item>BFL Mistral / Flux.2 Dev mixed-fp8: <c>.weight_scale</c>/<c>.input_scale</c> (F32 scalar).</item>
-    ///   <item>ComfyUI <c>comfy_quant</c>: <c>.comfy_quant</c> (U8 JSON blob like <c>{"format":"float8_e4m3fn"}</c>) — newer format used by Chroma1-HD-fp8mixed and similar. There's no separately-stored scalar; fp8 values are used at identity scale (the model is trained with the natural fp8 dynamic range). The companion is purely a format declaration and must still be dropped or it pollutes the weight dictionary.</item>
+    /// <item>ComfyUI <c>fp8_scaled</c>: <c>.scale_weight</c>/<c>.scale_input</c> (F32 scalar).</item>
+    /// <item>BFL Mistral / Flux.2 Dev mixed-fp8: <c>.weight_scale</c>/<c>.input_scale</c> (F32 scalar).</item>
+    /// <item>ComfyUI <c>comfy_quant</c>: <c>.comfy_quant</c> (U8 JSON blob like <c>{"format":"float8_e4m3fn"}</c>) — newer format used by Chroma1-HD-fp8mixed and similar. There's no separately-stored scalar; fp8 values are used at identity scale (the model is trained with the natural fp8 dynamic range). The companion is purely a format declaration and must still be dropped or it pollutes the weight dictionary.</item>
     /// </list>
-    /// The input-side scale is folded into <see cref="Tensor.Fp8InputScaleFactor"/> so the backend can quantize the
-    /// activation with a constant rather than a per-call absmax; weights without one keep 0 and take the dynamic path. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
+    /// The input-side scale is folded into <see cref="Tensor.Fp8InputScaleFactor"/> so the backend can quantize the activation with a constant rather than a per-call absmax; weights without one keep 0 and take the dynamic path. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
     /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
-    /// <param name="nvfp4ToFp8">When true, NVFP4 weights are dequantized to <b>fp8 (1 byte/param)</b> with the block
-    /// scale folded into the value and the global scale carried on <see cref="Tensor.Fp8ScaleFactor"/>, instead of
-    /// the default F16 (2 byte/param). Halves the resident footprint of an all-nvfp4 model (Ideogram 4: two 9.3B
-    /// DiTs, 35.9 GB at F16 → 18.6 GB at fp8, the difference between "won't fit a 24 GB card" and "fits"). Leave
-    /// false for small nvfp4 text encoders (Z-Image's Qwen3-4B) where F16 is free and avoids fp8's smaller range.</param>
+    /// <param name="nvfp4ToFp8">When true, NVFP4 weights are dequantized to <b>fp8 (1 byte/param)</b> with the block scale folded into the value and the global scale carried on <see cref="Tensor.Fp8ScaleFactor"/>, instead of the default F16 (2 byte/param). Halves the resident footprint of an all-nvfp4 model (Ideogram 4: two 9.3B DiTs, 35.9 GB at F16 → 18.6 GB at fp8, the difference between "won't fit a 24 GB card" and "fits"). Leave false for small nvfp4 text encoders (Z-Image's Qwen3-4B) where F16 is free and avoids fp8's smaller range.</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
-    /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on
-    /// <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and
-    /// is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights
-    /// should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
+    /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
         bool nvfp4ToFp8 = false, bool residentNvfp4 = false)
     {
@@ -561,15 +715,7 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    /// <summary>In-place: quantizes the large 2-D Linear weights under <paramref name="blockKeyMarker"/> from
-    /// BF16/F16 to fp8 e4m3, ADDING a <c>.scale_weight</c> [1] F32 companion for each (the ComfyUI
-    /// <c>fp8_scaled</c> layout). Because the scale rides in a companion tensor — not the un-persisted
-    /// <see cref="Tensor.Fp8ScaleFactor"/> — the result round-trips through safetensors: write it once with
-    /// <c>SafeTensorsWriter</c> to build a persistent fp8 <b>repack</b>, then every future load reads it back and
-    /// <see cref="ApplyFp8ScaledDequant"/> folds the companions in. This halves the DiT's resident footprint
-    /// (2 → 1 byte/param; the LTX-2.3 22B goes ~35 → ~18 GB, fitting a 24 GB card fully resident and killing the
-    /// per-step streaming). Only weights with ≥ <paramref name="minElements"/> elements are touched (norms,
-    /// scale-shift tables, timestep-MLP and projections stay BF16); the VAE/TE and already-fp8 tensors are skipped.</summary>
+    /// <summary>In-place: quantizes the large 2-D Linear weights under <paramref name="blockKeyMarker"/> from BF16/F16 to fp8 e4m3, ADDING a <c>.scale_weight</c> [1] F32 companion for each (the ComfyUI <c>fp8_scaled</c> layout). Because the scale rides in a companion tensor — not the un-persisted <see cref="Tensor.Fp8ScaleFactor"/> — the result round-trips through safetensors: write it once with <c>SafeTensorsWriter</c> to build a persistent fp8 <b>repack</b>, then every future load reads it back and <see cref="ApplyFp8ScaledDequant"/> folds the companions in. This halves the DiT's resident footprint (2 → 1 byte/param; the LTX-2.3 22B goes ~35 → ~18 GB, fitting a 24 GB card fully resident and killing the per-step streaming). Only weights with ≥ <paramref name="minElements"/> elements are touched (norms, scale-shift tables, timestep-MLP and projections stay BF16); the VAE/TE and already-fp8 tensors are skipped.</summary>
     public static void QuantizeDitBlocksToFp8(Dictionary<string, Tensor> weights, string blockKeyMarker,
         long minElements = 1L << 20)
     {
@@ -580,12 +726,7 @@ public static unsafe class CheckpointConvertUtils
         }
     }
 
-    /// <summary>The per-tensor half of <see cref="QuantizeDitBlocksToFp8"/>: same eligibility gate (rank-2 BF16/F16
-    /// with at least <paramref name="minElements"/> elements, key ending in <c>.weight</c>) and same emitted bytes,
-    /// but for ONE tensor, so a converter can requantize each weight the moment it is produced and free the wide
-    /// intermediate before taking the next. Writes the fp8 tensor plus its <c>.scale_weight</c> [1] F32 companion into
-    /// <paramref name="output"/> and returns true; returns false (writing nothing) when the tensor is not eligible.
-    /// Does NOT dispose <paramref name="tensor"/> — the caller owns it and knows whether it is a borrowed mmap view.</summary>
+    /// <summary>The per-tensor half of <see cref="QuantizeDitBlocksToFp8"/>: same eligibility gate (rank-2 BF16/F16 with at least <paramref name="minElements"/> elements, key ending in <c>.weight</c>) and same emitted bytes, but for ONE tensor, so a converter can requantize each weight the moment it is produced and free the wide intermediate before taking the next. Writes the fp8 tensor plus its <c>.scale_weight</c> [1] F32 companion into <paramref name="output"/> and returns true; returns false (writing nothing) when the tensor is not eligible. Does NOT dispose <paramref name="tensor"/> — the caller owns it and knows whether it is a borrowed mmap view.</summary>
     public static unsafe bool TryQuantizeWeightToFp8(Dictionary<string, Tensor> output, string key, Tensor tensor,
         long minElements = 1L << 20)
     {
@@ -602,9 +743,7 @@ public static unsafe class CheckpointConvertUtils
         return true;
     }
 
-    /// <summary>BF16/F16 weight → fp8 e4m3 with a per-tensor scale = absmax/448 (E4M3's max magnitude), folded onto
-    /// <see cref="Tensor.Fp8ScaleFactor"/> so the GEMM computes <c>fp8_decoded · scale ≈ w</c> via cuBLAS alpha.
-    /// Uses the engine's tested F32→F8E4M3 cast on a transient F32 copy (the source is left untouched).</summary>
+    /// <summary>BF16/F16 weight → fp8 e4m3 with a per-tensor scale = absmax/448 (E4M3's max magnitude), folded onto <see cref="Tensor.Fp8ScaleFactor"/> so the GEMM computes <c>fp8_decoded · scale ≈ w</c> via cuBLAS alpha. Uses the engine's tested F32→F8E4M3 cast on a transient F32 copy (the source is left untouched).</summary>
     private static unsafe Tensor QuantizeToFp8Scaled(Tensor w)
     {
         Tensor f32 = w.CastTo(DType.F32);        // BF16/F16 → fresh F32 (source unmodified)
@@ -613,11 +752,7 @@ public static unsafe class CheckpointConvertUtils
         return fp8;
     }
 
-    /// <summary>The same <c>absmax/448</c> per-tensor scheme as <see cref="QuantizeDitBlocksToFp8"/>, but entered with
-    /// the wide values already in hand: a LoRA merge dequantizes an fp8 weight, adds its delta in F32, and hands the
-    /// accumulator straight back here, so no second quantizer exists. <b>Overwrites <paramref name="f32"/>'s contents</b>
-    /// (scaled in place) but does NOT dispose it — the caller owns it. Emits no <c>.scale_weight</c> companion; the
-    /// scale rides on <see cref="Tensor.Fp8ScaleFactor"/> only, which is what an in-memory weight dict consumes.</summary>
+    /// <summary>The same <c>absmax/448</c> per-tensor scheme as <see cref="QuantizeDitBlocksToFp8"/>, but entered with the wide values already in hand: a LoRA merge dequantizes an fp8 weight, adds its delta in F32, and hands the accumulator straight back here, so no second quantizer exists. <b>Overwrites <paramref name="f32"/>'s contents</b> (scaled in place) but does NOT dispose it — the caller owns it. Emits no <c>.scale_weight</c> companion; the scale rides on <see cref="Tensor.Fp8ScaleFactor"/> only, which is what an in-memory weight dict consumes.</summary>
     /// <param name="stochasticSeedKey">Tensor key seeding stochastic rounding, mirroring ComfyUI's <c>string_to_seed</c>; null keeps the plain round-to-nearest cast.</param>
     public static unsafe Tensor QuantizeF32ToFp8Scaled(Tensor f32, string? stochasticSeedKey = null)
     {
@@ -639,12 +774,7 @@ public static unsafe class CheckpointConvertUtils
         return fp8;
     }
 
-    /// <summary>Snaps each value onto an exactly-representable e4m3 grid point, picking between the two neighbours with
-    /// probability proportional to distance. The engine's F32→F8E4M3 cast is round-to-nearest, which biases a weight
-    /// systematically when many tensors are requantized; ComfyUI rounds stochastically instead
-    /// (<c>comfy/float.py</c> <c>manual_stochastic_round_to_float8</c>), and this reproduces that mantissa-domain
-    /// <c>floor(scaled + U[0,1))</c>. Pre-rounding rather than writing a second encoder keeps the tested cast as the
-    /// only encoder — the values it then sees are already on the grid, so it is lossless.</summary>
+    /// <summary>Snaps each value onto an exactly-representable e4m3 grid point, picking between the two neighbours with probability proportional to distance. The engine's F32→F8E4M3 cast is round-to-nearest, which biases a weight systematically when many tensors are requantized; ComfyUI rounds stochastically instead (<c>comfy/float.py</c> <c>manual_stochastic_round_to_float8</c>), and this reproduces that mantissa-domain <c>floor(scaled + U[0,1))</c>. Pre-rounding rather than writing a second encoder keeps the tested cast as the only encoder — the values it then sees are already on the grid, so it is lossless.</summary>
     private static unsafe void StochasticPreRoundToFp8Grid(float* p, long n, uint seed)
     {
         if (n < ParallelPassMinElements)
@@ -714,22 +844,14 @@ public static unsafe class CheckpointConvertUtils
         return crc ^ 0xFFFFFFFFu;
     }
 
-    /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these
-    /// passes are memory-bound, so a <see cref="Parallel.For"/> dispatch (measured at 22µs for 16 chunks on this box) only
-    /// pays for itself on a fairly large buffer: the measured crossover is 2^19 elements (vector-serial 91µs vs parallel
-    /// 84µs; at 2^18 serial still wins 43µs vs 66µs). Everything reaching <see cref="QuantizeToFp8Scaled"/> is already
-    /// ≥ <c>minElements</c> (2^20), so this is a guard for any future caller with smaller tensors.</summary>
+    /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these passes are memory-bound, so a <see cref="Parallel.For"/> dispatch (measured at 22µs for 16 chunks on this box) only pays for itself on a fairly large buffer: the measured crossover is 2^19 elements (vector-serial 91µs vs parallel 84µs; at 2^18 serial still wins 43µs vs 66µs). Everything reaching <see cref="QuantizeToFp8Scaled"/> is already ≥ <c>minElements</c> (2^20), so this is a guard for any future caller with smaller tensors.</summary>
     private const long ParallelPassMinElements = 1L << 19;
 
-    /// <summary>Minimum elements per chunk, so a barely-over-threshold pass fans out to a few fat slices instead of
-    /// <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    /// <summary>Minimum elements per chunk, so a barely-over-threshold pass fans out to a few fat slices instead of <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
     private const long ParallelPassChunkElements = 1L << 17;
 
     /// <summary>Largest <c>|x|</c> over <paramref name="n"/> floats, ignoring NaN.</summary>
-    /// <remarks>Bit-identical to the scalar <c>if (MathF.Abs(p[i]) &gt; absmax) absmax = …</c> it replaces, including
-    /// under NaN: the lane update uses <c>GreaterThan</c> + <c>ConditionalSelect</c>, NOT <see cref="Vector.Max{T}"/>,
-    /// which lowers to <c>maxps</c> and would let a NaN lane win. Max is order-independent, so chunking across cores
-    /// cannot perturb the result the way a sum reduction would.</remarks>
+    /// <remarks>Bit-identical to the scalar <c>if (MathF.Abs(p[i]) &gt; absmax) absmax = …</c> it replaces, including under NaN: the lane update uses <c>GreaterThan</c> + <c>ConditionalSelect</c>, NOT <see cref="Vector.Max{T}"/>, which lowers to <c>maxps</c> and would let a NaN lane win. Max is order-independent, so chunking across cores cannot perturb the result the way a sum reduction would.</remarks>
     private static unsafe float AbsMax(float* p, long n)
     {
         if (n < ParallelPassMinElements)
@@ -777,8 +899,7 @@ public static unsafe class CheckpointConvertUtils
     }
 
     /// <summary>Multiplies <paramref name="n"/> floats in place by <paramref name="inv"/>.</summary>
-    /// <remarks>Bit-identical to the scalar loop: IEEE multiply is exact per element and every element is independent,
-    /// so neither vector width nor chunk boundaries can change a result.</remarks>
+    /// <remarks>Bit-identical to the scalar loop: IEEE multiply is exact per element and every element is independent, so neither vector width nor chunk boundaries can change a result.</remarks>
     private static unsafe void ScaleInPlace(float* p, long n, float inv)
     {
         if (n < ParallelPassMinElements)
@@ -813,12 +934,10 @@ public static unsafe class CheckpointConvertUtils
         }
     }
 
-    /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5}
-    /// (subnormal), exp>0 → 2^(exp-1) · (1 + m/2). Bit 3 of the nibble is the sign.</summary>
+    /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5} (subnormal), exp>0 → 2^(exp-1) · (1 + m/2). Bit 3 of the nibble is the sign.</summary>
     private static readonly float[] E2M1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
-    /// <summary>256-entry FP8-E4M3FN decode table (built once). Index = raw byte. E4M3FN: bias 7, no infinities,
-    /// exp=15/man=7 is NaN, max ±448. Shared with <see cref="HartsyInference.ModelAssets.Nvfp4.Nvfp4Codec"/>.</summary>
+    /// <summary>256-entry FP8-E4M3FN decode table (built once). Index = raw byte. E4M3FN: bias 7, no infinities, exp=15/man=7 is NaN, max ±448. Shared with <see cref="HartsyInference.ModelAssets.Nvfp4.Nvfp4Codec"/>.</summary>
     internal static readonly float[] E4M3Table = BuildE4M3Table();
 
     private static float[] BuildE4M3Table()
@@ -841,12 +960,7 @@ public static unsafe class CheckpointConvertUtils
         return table;
     }
 
-    /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two
-    /// e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen
-    /// <c>hi_first=True</c>, its default for both quantize and dequantize; verified against
-    /// <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one
-    /// scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>.
-    /// Rows are dequantized in parallel (pure per-row writes).</summary>
+    /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen <c>hi_first=True</c>, its default for both quantize and dequantize; verified against <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
     public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
     {
         if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
@@ -888,14 +1002,7 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    /// <summary>Dequantizes an NVFP4 weight to <b>fp8 e4m3 (1 byte/param)</b> instead of F16, folding the per-16-element
-    /// block scale into the stored value and returning the <b>global</b> scale on <see cref="Tensor.Fp8ScaleFactor"/>.
-    /// The GEMM then computes <c>fp8_value · globalScale ≈ e2m1 · block_scale · globalScale</c> (the same real weight),
-    /// reusing the existing fp8 alpha path — so an all-nvfp4 model keeps its footprint at fp8 size. fp8 e4m3 (3-bit
-    /// mantissa) is finer than the 4-bit nvfp4 source, so folding block_scale into the value adds negligible rounding
-    /// vs the F16 path; the only real difference is fp8's smaller range — a block whose <c>e2m1·block_scale</c> falls
-    /// below fp8's min subnormal (~2^-9) flushes to 0 (F16 wouldn't). Acceptable for weights; used for the Ideogram-4
-    /// DiTs to fit a 24 GB card. Nibble order and block layout match <see cref="DequantNvfp4ToF16"/>.</summary>
+    /// <summary>Dequantizes an NVFP4 weight to <b>fp8 e4m3 (1 byte/param)</b> instead of F16, folding the per-16-element block scale into the stored value and returning the <b>global</b> scale on <see cref="Tensor.Fp8ScaleFactor"/>. The GEMM then computes <c>fp8_value · globalScale ≈ e2m1 · block_scale · globalScale</c> (the same real weight), reusing the existing fp8 alpha path — so an all-nvfp4 model keeps its footprint at fp8 size. fp8 e4m3 (3-bit mantissa) is finer than the 4-bit nvfp4 source, so folding block_scale into the value adds negligible rounding vs the F16 path; the only real difference is fp8's smaller range — a block whose <c>e2m1·block_scale</c> falls below fp8's min subnormal (~2^-9) flushes to 0 (F16 wouldn't). Acceptable for weights; used for the Ideogram-4 DiTs to fit a 24 GB card. Nibble order and block layout match <see cref="DequantNvfp4ToF16"/>.</summary>
     public static Tensor DequantNvfp4ToFp8(Tensor packed, Tensor blockScales, float globalScale)
     {
         if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
@@ -943,21 +1050,9 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    /// <summary>Requantizes a group of fp8_scaled (E4M3) tensors IN PLACE to one common per-tensor scale —
-    /// the enabler for concat-fusing separately-scaled projections (Q/K/V, FFN w1/w3) into a single GEMM,
-    /// which was previously ruled out because one cuBLAS <c>alpha</c> cannot represent N different
-    /// <see cref="Tensor.Fp8ScaleFactor"/>s. Picks <c>s* = max(sᵢ)</c>, decodes each tensor's bytes at its own
-    /// scale, and re-encodes at <c>s*</c> — values only shrink (<c>sᵢ ≤ s*</c>), so nothing saturates.
+    /// <summary>Requantizes a group of fp8_scaled (E4M3) tensors IN PLACE to one common per-tensor scale — the enabler for concat-fusing separately-scaled projections (Q/K/V, FFN w1/w3) into a single GEMM, which was previously ruled out because one cuBLAS <c>alpha</c> cannot represent N different <see cref="Tensor.Fp8ScaleFactor"/>s. Picks <c>s* = max(sᵢ)</c>, decodes each tensor's bytes at its own scale, and re-encodes at <c>s*</c> — values only shrink (<c>sᵢ ≤ s*</c>), so nothing saturates.
     ///
-    /// <para><b>Precision:</b> E4M3 is floating-point, so relative error is scale-invariant for values that
-    /// stay in the NORMAL range after rescaling — those weights round-trip within half an E4M3 ulp
-    /// (rel ≤ 1/16). Only weights whose real magnitude falls below <c>s*·2⁻⁶</c> (E4M3 min normal) enter the
-    /// subnormal range and lose precision progressively, bounded by the group's scale ratio; weights below
-    /// <c>s*·2⁻¹⁰</c> (half min subnormal) flush to zero. Both populations carry negligible GEMM energy at
-    /// typical fp8_scaled ratios (≤ ~8×), but callers fusing groups with extreme ratios should A/B output
-    /// quality. Returns the largest introduced decode error across the group, normalized per tensor to its
-    /// own amax (<c>max |Δreal| / amax(real)</c> — the metric that bounds the GEMM contribution); 0 when all
-    /// scales already match (nothing rewritten).</para></summary>
+    /// <para><b>Precision:</b> E4M3 is floating-point, so relative error is scale-invariant for values that stay in the NORMAL range after rescaling — those weights round-trip within half an E4M3 ulp (rel ≤ 1/16). Only weights whose real magnitude falls below <c>s*·2⁻⁶</c> (E4M3 min normal) enter the subnormal range and lose precision progressively, bounded by the group's scale ratio; weights below <c>s*·2⁻¹⁰</c> (half min subnormal) flush to zero. Both populations carry negligible GEMM energy at typical fp8_scaled ratios (≤ ~8×), but callers fusing groups with extreme ratios should A/B output quality. Returns the largest introduced decode error across the group, normalized per tensor to its own amax (<c>max |Δreal| / amax(real)</c> — the metric that bounds the GEMM contribution); 0 when all scales already match (nothing rewritten).</para></summary>
     public static float RequantizeToCommonFp8Scale(params Tensor[] tensors)
     {
         if (tensors is null || tensors.Length < 2)
@@ -1013,10 +1108,7 @@ public static unsafe class CheckpointConvertUtils
         return maxError;
     }
 
-    /// <summary>Row-concatenates two rank-2 weight tensors <c>[r1, C]</c> + <c>[r2, C]</c> → <c>[r1+r2, C]</c>
-    /// (host memcpy — row-major rows are contiguous). Same dtype and column count required; for fp8 tensors the
-    /// caller must have unified the scales first (<see cref="RequantizeToCommonFp8Scale"/>) — the concat carries
-    /// <paramref name="a"/>'s <see cref="Tensor.Fp8ScaleFactor"/> and throws if <paramref name="b"/>'s differs.</summary>
+    /// <summary>Row-concatenates two rank-2 weight tensors <c>[r1, C]</c> + <c>[r2, C]</c> → <c>[r1+r2, C]</c> (host memcpy — row-major rows are contiguous). Same dtype and column count required; for fp8 tensors the caller must have unified the scales first (<see cref="RequantizeToCommonFp8Scale"/>) — the concat carries <paramref name="a"/>'s <see cref="Tensor.Fp8ScaleFactor"/> and throws if <paramref name="b"/>'s differs.</summary>
     public static unsafe Tensor ConcatRowsHost(Tensor a, Tensor b)
     {
         if (a.Shape.Rank != 2 || b.Shape.Rank != 2)
@@ -1037,12 +1129,7 @@ public static unsafe class CheckpointConvertUtils
         return fused;
     }
 
-    /// <summary>Fuses SwiGLU FFN weight pairs (<c>…w1Suffix</c> gate + <c>…w3Suffix</c> up) into single
-    /// row-concatenated <c>…fusedSuffix</c> tensors — one GEMM instead of two (INFERENCE_ACCEL_GRIND §H3).
-    /// fp8_scaled pairs are first unified via <see cref="RequantizeToCommonFp8Scale"/>; a pair whose
-    /// introduced requant error exceeds <paramref name="maxRequantError"/> is left UNFUSED (per-block
-    /// fallback — extreme scale ratios would visibly perturb output). Mixed-dtype or mismatched-shape pairs
-    /// are skipped. Returns (fused count, worst accepted requant error).</summary>
+    /// <summary>Fuses SwiGLU FFN weight pairs (<c>…w1Suffix</c> gate + <c>…w3Suffix</c> up) into single row-concatenated <c>…fusedSuffix</c> tensors — one GEMM instead of two (INFERENCE_ACCEL_GRIND §H3). fp8_scaled pairs are first unified via <see cref="RequantizeToCommonFp8Scale"/>; a pair whose introduced requant error exceeds <paramref name="maxRequantError"/> is left UNFUSED (per-block fallback — extreme scale ratios would visibly perturb output). Mixed-dtype or mismatched-shape pairs are skipped. Returns (fused count, worst accepted requant error).</summary>
     public static (int Fused, float WorstError) FuseSwiGluPairs(Dictionary<string, Tensor> weights,
         string w1Suffix, string w3Suffix, string fusedSuffix, float maxRequantError = 1f / 16f)
     {

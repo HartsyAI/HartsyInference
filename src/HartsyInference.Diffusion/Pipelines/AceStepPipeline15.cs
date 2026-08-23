@@ -10,20 +10,8 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>ACE-Step v1.5 turbo text/lyrics-to-music pipeline — the 2B Qwen3-block flow-matching DiT over Oobleck
-/// latents (25 Hz, 64-ch): pre-computed Qwen3-Embedding-0.6B prompt + lyric states → packed
-/// [lyric ‖ timbre ‖ text] cross-attention conditions → fixed 8-step shift-3 Euler ODE (hardcoded
-/// <c>SHIFT_TIMESTEPS</c> table, <b>no CFG</b>, r = t) → Oobleck decode to 48 kHz stereo. Plain T2M uses the silence
-/// latent as <c>src_latents</c> (VAE-encoded at first use when the injected decoder can encode — the reference ships
-/// it as <c>silence_latent.pt</c>; recompute is the research doc's sanctioned alternative) with an all-ones chunk
-/// mask. The FSQ/LM hint path (cover mode, Comfy's <c>generate_audio_codes</c>) is phase 2 — <c>lmHints</c> is its
-/// null-default extension point. <b>Status: DiT + condition encoder numerically verified vs the f32 torch oracle on the
-/// real turbo checkpoint</b> (condition encoder maxAbs 1.9e-6; DiT velocity / full-loop latent corr 1.0 — see
-/// <c>AceStep15DitParityTests</c>); Oobleck VAE decode verified corr 0.9999999999. Hints-less quality vs Comfy
-/// defaults remains an open question (research §7).</summary>
-/// <summary>Per-generation knobs for <see cref="AceStepPipeline15.Generate"/>. Defaults mirror the upstream
-/// per-family UI config: turbo ignores guidance (distilled, CFG baked in) and enables DCW; base/sft run CFG
-/// (APG default, ADG opt-in, interval-gated) with DCW off.</summary>
+/// <summary>ACE-Step v1.5 turbo text/lyrics-to-music pipeline — the 2B Qwen3-block flow-matching DiT over Oobleck latents (25 Hz, 64-ch): pre-computed Qwen3-Embedding-0.6B prompt + lyric states → packed [lyric ‖ timbre ‖ text] cross-attention conditions → fixed 8-step shift-3 Euler ODE (hardcoded <c>SHIFT_TIMESTEPS</c> table, <b>no CFG</b>, r = t) → Oobleck decode to 48 kHz stereo. Plain T2M uses the silence latent as <c>src_latents</c> (VAE-encoded at first use when the injected decoder can encode — the reference ships it as <c>silence_latent.pt</c>; recompute is the research doc's sanctioned alternative) with an all-ones chunk mask. The FSQ/LM hint path (cover mode, Comfy's <c>generate_audio_codes</c>) is phase 2 — <c>lmHints</c> is its null-default extension point. <b>Status: DiT + condition encoder numerically verified vs the f32 torch oracle on the real turbo checkpoint</b> (condition encoder maxAbs 1.9e-6; DiT velocity / full-loop latent corr 1.0 — see <c>AceStep15DitParityTests</c>); Oobleck VAE decode verified corr 0.9999999999. Hints-less quality vs Comfy defaults remains an open question (research §7).</summary>
+/// <summary>Per-generation knobs for <see cref="AceStepPipeline15.Generate"/>. Defaults mirror the upstream per-family UI config: turbo ignores guidance (distilled, CFG baked in) and enables DCW; base/sft run CFG (APG default, ADG opt-in, interval-gated) with DCW off.</summary>
 public sealed record AceStep15GenerateOptions
 {
     public float? Shift { get; init; }
@@ -68,8 +56,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
-    /// <summary>Sets the checkpoint's learned <c>null_condition_emb</c> <c>[1, 1, encHidden]</c> — the CFG
-    /// unconditional row substituted for every position of the packed condition sequence (base/sft).</summary>
+    /// <summary>Sets the checkpoint's learned <c>null_condition_emb</c> <c>[1, 1, encHidden]</c> — the CFG unconditional row substituted for every position of the packed condition sequence (base/sft).</summary>
     public void SetNullConditionEmb(Tensor nullEmb)
     {
         ThrowIfDisposed();
@@ -77,9 +64,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         _nullConditionEmb = nullEmb;
     }
 
-    /// <summary>Sets the shipped <c>silence_latent.pt</c> rows <c>[T, 64]</c> as the text-to-music src latent
-    /// (upstream loads it per checkpoint; byte-identical across all v1.5 repos). When unset, the pipeline
-    /// falls back to VAE-encoding digital silence.</summary>
+    /// <summary>Sets the shipped <c>silence_latent.pt</c> rows <c>[T, 64]</c> as the text-to-music src latent (upstream loads it per checkpoint; byte-identical across all v1.5 repos). When unset, the pipeline falls back to VAE-encoding digital silence.</summary>
     public void SetSilenceLatent(Tensor silenceRows)
     {
         ThrowIfDisposed();
@@ -89,13 +74,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         _silenceFrames = silenceRows;
     }
 
-    /// <summary>Generates stereo audio from pre-computed Qwen3-Embedding-0.6B prompt states <c>[T_text, 1024]</c>
-    /// and optional lyric states <c>[L, 1024]</c> (null → no lyric tokens; instrumental via prompt tags).
-    /// <paramref name="timbreLatent"/> is an optional reference-audio Oobleck latent <c>[T_ref, 64]</c>;
-    /// <paramref name="lmHints"/> is the phase-2 cover-mode hook (25 Hz detokenizer latents <c>[1, T, 64]</c>
-    /// replacing the silence src). <paramref name="inferSteps"/> overrides the turbo default 8 (upstream allows
-    /// 1..20 on turbo via the same linspace+shift schedule; shift stays snapped to the trained {1,2,3}).
-    /// Returns one <c>float[]</c> per channel at 48 kHz.</summary>
+    /// <summary>Generates stereo audio from pre-computed Qwen3-Embedding-0.6B prompt states <c>[T_text, 1024]</c> and optional lyric states <c>[L, 1024]</c> (null → no lyric tokens; instrumental via prompt tags). <paramref name="timbreLatent"/> is an optional reference-audio Oobleck latent <c>[T_ref, 64]</c>; <paramref name="lmHints"/> is the phase-2 cover-mode hook (25 Hz detokenizer latents <c>[1, T, 64]</c> replacing the silence src). <paramref name="inferSteps"/> overrides the turbo default 8 (upstream allows 1..20 on turbo via the same linspace+shift schedule; shift stays snapped to the trained {1,2,3}). Returns one <c>float[]</c> per channel at 48 kHz.</summary>
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textHidden, Tensor? lyricHidden, double durationSeconds,
         float? shift = null, int? seed = null, Tensor? timbreLatent = null, Tensor? lmHints = null,
@@ -110,16 +89,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         Tensor? timbreLatent = null, Tensor? lmHints = null, Action<GenerationProgress>? onProgress = null)
         => GenerateCore(textHidden, lyricHidden, durationSeconds, opts, editPlan: null, timbreLatent, lmHints, onProgress, CancellationToken.None);
 
-    /// <summary>Audio-conditioned generation: <paramref name="editPlan"/> supplies the <c>src_latents</c> slot, the
-    /// per-frame chunk mask (1 = generate, 0 = preserve) and the schedule entry point, which together drive
-    /// continuation, repaint and cover. Preserved frames are re-asserted from the source after every step (the standard
-    /// repaint re-noise), so they survive rather than merely conditioning. A null plan is byte-identical to the plain
-    /// text-to-music path. <b>Parity-pending: no part of this path is verified against real weights.</b> Two deliberate
-    /// divergences: the reference preserves purely through the context (it always runs the full schedule from noise and
-    /// never re-asserts the source), and the reference's cover strength blends a cover-instruction and a
-    /// text2music-instruction velocity per step instead of moving the schedule entry point. Cover here also feeds raw
-    /// 25 Hz Oobleck latents where upstream feeds FSQ-detokenized 5 Hz hints (that tokenizer is not ported). The mask
-    /// polarity follows upstream's boolean <c>ones()</c> mask.</summary>
+    /// <summary>Audio-conditioned generation: <paramref name="editPlan"/> supplies the <c>src_latents</c> slot, the per-frame chunk mask (1 = generate, 0 = preserve) and the schedule entry point, which together drive continuation, repaint and cover. Preserved frames are re-asserted from the source after every step (the standard repaint re-noise), so they survive rather than merely conditioning. A null plan is byte-identical to the plain text-to-music path. <b>Parity-pending: no part of this path is verified against real weights.</b> Two deliberate divergences: the reference preserves purely through the context (it always runs the full schedule from noise and never re-asserts the source), and the reference's cover strength blends a cover-instruction and a text2music-instruction velocity per step instead of moving the schedule entry point. Cover here also feeds raw 25 Hz Oobleck latents where upstream feeds FSQ-detokenized 5 Hz hints (that tokenizer is not ported). The mask polarity follows upstream's boolean <c>ones()</c> mask.</summary>
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textHidden, Tensor? lyricHidden, double durationSeconds, AceStep15GenerateOptions opts,
         AceStep15EditPlan? editPlan, Tensor? timbreLatent = null, Tensor? lmHints = null,
@@ -337,11 +307,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         return (left, right, _config.SampleRate, actualSeed);
     }
 
-    /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = <paramref name="srcLatents"/>
-    /// (LM hints or an edit plan's source) when given, else the silence latent tiled; mask = <paramref name="chunkMask"/>
-    /// when given, else 1.0 everywhere (upstream's full-generation bool ones() mask — its "auto" 2.0 assign clamps to
-    /// True=1.0). With <paramref name="silenceMaskedFrames"/> the src row of every generate-masked frame becomes the
-    /// tiled silence latent, which is upstream's repaint rule and also gives a continuation's appended tail a src row.</summary>
+    /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = <paramref name="srcLatents"/> (LM hints or an edit plan's source) when given, else the silence latent tiled; mask = <paramref name="chunkMask"/> when given, else 1.0 everywhere (upstream's full-generation bool ones() mask — its "auto" 2.0 assign clamps to True=1.0). With <paramref name="silenceMaskedFrames"/> the src row of every generate-masked frame becomes the tiled silence latent, which is upstream's repaint rule and also gives a continuation's appended tail a src row.</summary>
     private Tensor BuildContextLatents(int frames, Tensor? srcLatents, float[]? chunkMask, bool silenceMaskedFrames)
     {
         int latCh = _config.LatentChannels;
@@ -369,9 +335,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         return context;
     }
 
-    /// <summary>Re-asserts the source over every masked-preserve frame (mask &lt; 0.5) after a denoise step: the standard
-    /// repaint re-noise <c>z = (1 − t_next)·src + t_next·noise</c>, which collapses to writing the clean source back on
-    /// the final step (t_next = 0). Without it a 0 mask only conditions the DiT instead of preserving the audio.</summary>
+    /// <summary>Re-asserts the source over every masked-preserve frame (mask &lt; 0.5) after a denoise step: the standard repaint re-noise <c>z = (1 − t_next)·src + t_next·noise</c>, which collapses to writing the clean source back on the final step (t_next = 0). Without it a 0 mask only conditions the DiT instead of preserving the audio.</summary>
     private static void RestorePreservedFrames(Tensor z, Tensor src, float[] chunkMask, float sigmaNext, int noiseSeed)
     {
         int frames = chunkMask.Length;
@@ -405,10 +369,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         noise?.Dispose();
     }
 
-    /// <summary>Computes the silence src latent once: 1 s of digital silence through the VAE encoder (the research
-    /// doc's sanctioned recompute of the shipped <c>silence_latent.pt</c>). Falls back to zero latents when the
-    /// injected decoder cannot encode — validation-gated: parity with the .pt asset is unverified either way until a
-    /// real-checkpoint dump comparison.</summary>
+    /// <summary>Computes the silence src latent once: 1 s of digital silence through the VAE encoder (the research doc's sanctioned recompute of the shipped <c>silence_latent.pt</c>). Falls back to zero latents when the injected decoder cannot encode — validation-gated: parity with the .pt asset is unverified either way until a real-checkpoint dump comparison.</summary>
     private void EnsureSilenceFrames()
     {
         if (_silenceFrames is not null) return;

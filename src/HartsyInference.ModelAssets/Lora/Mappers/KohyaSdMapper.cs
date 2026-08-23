@@ -18,7 +18,7 @@ public static class KohyaSdMapper
         if (format != LoraFormat.KohyaSd15 && format != LoraFormat.KohyaSdxl)
             throw new ArgumentException($"KohyaSdMapper only handles KohyaSd15 / KohyaSdxl, got {format}.", nameof(format));
 
-        Dictionary<(LoraTarget, string), GroupBuffer> groups = [];
+        Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
             if (!TryClassifyRoleAndRoot(key, out LoraRole role, out string root))
@@ -32,12 +32,7 @@ public static class KohyaSdMapper
                 continue;
             }
 
-            (LoraTarget, string) groupKey = (target, canonicalKey);
-            if (!groups.TryGetValue(groupKey, out GroupBuffer? group))
-            {
-                group = new GroupBuffer { Target = target, FirstSourceKey = key };
-                groups[groupKey] = group;
-            }
+            LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, target, canonicalKey, key);
 
             switch (role)
             {
@@ -53,28 +48,8 @@ public static class KohyaSdMapper
             }
         }
 
-        List<LoraLayer> layers = new(groups.Count);
-        foreach (((LoraTarget _, string canonicalKey), GroupBuffer group) in groups)
-        {
-            if (group.Down is null || group.Up is null)
-            {
-                Logs.Warning($"LoRA group '{group.FirstSourceKey}' is missing down or up matrix; skipping.");
-                continue;
-            }
-            int rank = (int)group.Down.Shape[0];
-            float alpha = group.Alpha ?? rank;
-            layers.Add(new LoraLayer
-            {
-                TargetKey = canonicalKey,
-                Target = group.Target,
-                LoraDown = group.Down,
-                LoraUp = group.Up,
-                Alpha = alpha,
-                Rank = rank,
-                Variant = LoraVariant.StandardLora,
-            });
-        }
-        return layers;
+        return LoraGroupBuffer.BuildLayers(groups,
+            sourceKey => $"LoRA group '{sourceKey}' is missing down or up matrix; skipping.");
     }
 
     private static bool TryClassifyRoleAndRoot(string key, out LoraRole role, out string root)
@@ -160,13 +135,4 @@ public static class KohyaSdMapper
     }
 
     internal enum LoraRole { Down, Up, Alpha }
-
-    private sealed class GroupBuffer
-    {
-        public required LoraTarget Target { get; init; }
-        public required string FirstSourceKey { get; init; }
-        public Tensor? Down { get; set; }
-        public Tensor? Up { get; set; }
-        public float? Alpha { get; set; }
-    }
 }

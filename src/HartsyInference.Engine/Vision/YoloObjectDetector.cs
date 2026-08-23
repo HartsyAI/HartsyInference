@@ -5,16 +5,14 @@ using HartsyInference.Vision.Detection;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Class-prompted detection with the pure-C# YOLO v8/v11 models. The architecture variant is inferred from
-/// the checkpoint filename (the engine loads safetensors, never Ultralytics <c>.pt</c>).</summary>
+/// <summary>Class-prompted detection with the pure-C# YOLO v8/v11 models. The architecture variant is inferred from the checkpoint filename (the engine loads safetensors, never Ultralytics <c>.pt</c>).</summary>
 public sealed class YoloObjectDetector : IDisposable
 {
     private readonly Dictionary<string, YoloPipeline> _cache = new(StringComparer.Ordinal);
     private readonly object _lock = new();
     private IBackend? _boundBackend;
 
-    /// <summary>Detects objects in <paramref name="image"/> with the checkpoint at <paramref name="checkpointPath"/>,
-    /// returning pixel-space boxes above the threshold.</summary>
+    /// <summary>Detects objects in <paramref name="image"/> with the checkpoint at <paramref name="checkpointPath"/>, returning pixel-space boxes above the threshold.</summary>
     public IReadOnlyList<Detection> Detect(IBackend backend, string checkpointPath, ImageData image, float threshold)
     {
         ArgumentNullException.ThrowIfNull(image);

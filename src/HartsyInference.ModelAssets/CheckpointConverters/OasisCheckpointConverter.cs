@@ -3,11 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads the Oasis-500m checkpoints (<c>Etched/oasis-500m</c>, MIT): <c>oasis500m.safetensors</c> (the
-/// DiT-S/2) and <c>vit-l-20.safetensors</c> (the continuous ViT-VAE). Both ship as plain PyTorch state dicts whose
-/// keys match the HartsyInference loaders 1:1 (inferred — confirmed at first key dump), so conversion is a prefix
-/// strip (<c>model.</c>/<c>module.</c> wrappers seen in community forks) plus dropping non-persistent
-/// <c>rotary_freqs</c> buffers if a repack included them (HartsyInference recomputes RoPE at load).</summary>
+/// <summary>Loads the Oasis-500m checkpoints (<c>Etched/oasis-500m</c>, MIT): <c>oasis500m.safetensors</c> (the DiT-S/2) and <c>vit-l-20.safetensors</c> (the continuous ViT-VAE). Both ship as plain PyTorch state dicts whose keys match the HartsyInference loaders 1:1 (inferred — confirmed at first key dump), so conversion is a prefix strip (<c>model.</c>/<c>module.</c> wrappers seen in community forks) plus dropping non-persistent <c>rotary_freqs</c> buffers if a repack included them (HartsyInference recomputes RoPE at load).</summary>
 public sealed class OasisCheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["model.", "module."];

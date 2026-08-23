@@ -314,8 +314,7 @@ internal sealed class WyomingConnection : IDisposable
         }
     }
 
-    /// <summary>Streams a rendered clip out as Wyoming audio at its own sample rate — Home Assistant resamples,
-    /// so forcing 16 kHz here would only add a lossy step the wire format does not require.</summary>
+    /// <summary>Streams a rendered clip out as Wyoming audio at its own sample rate — Home Assistant resamples, so forcing 16 kHz here would only add a lossy step the wire format does not require.</summary>
     private async Task SendAudioAsync(AudioResult result, CancellationToken cancel)
     {
         if (!string.Equals(result.Format, "wav", StringComparison.OrdinalIgnoreCase))

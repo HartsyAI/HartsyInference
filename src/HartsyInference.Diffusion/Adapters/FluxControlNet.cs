@@ -6,23 +6,13 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Flux DiT ControlNet adapter — a faithful port of diffusers' <c>FluxControlNetModel</c> (the
-/// InstantX / Shakker-Labs architecture). It is a shallow copy of the base <see cref="FluxTransformer"/>:
-/// its own <c>x_embedder</c> / <c>context_embedder</c> / <c>time_text_embed</c> and a reduced stack of the SAME
-/// double/single-stream blocks (<see cref="FluxDoubleStreamBlock"/> / <see cref="FluxSingleStreamBlock"/>,
-/// identical checkpoint key layout), plus three ControlNet-specific parts:
+/// <summary>Flux DiT ControlNet adapter — a faithful port of diffusers' <c>FluxControlNetModel</c> (the InstantX / Shakker-Labs architecture). It is a shallow copy of the base <see cref="FluxTransformer"/>: its own <c>x_embedder</c> / <c>context_embedder</c> / <c>time_text_embed</c> and a reduced stack of the SAME double/single-stream blocks (<see cref="FluxDoubleStreamBlock"/> / <see cref="FluxSingleStreamBlock"/>, identical checkpoint key layout), plus three ControlNet-specific parts:
 /// <list type="bullet">
-/// <item>a zero-init <c>controlnet_x_embedder</c> Linear(64→hidden) whose projection of the packed VAE-encoded
-/// control image is ADDED to the x-embedded noise tokens,</item>
-/// <item>one zero-init output Linear(hidden→hidden) per block (<c>controlnet_blocks.{i}</c> /
-/// <c>controlnet_single_blocks.{i}</c>) that gates each block's image stream into a residual,</item>
-/// <item>for union checkpoints, a <c>controlnet_mode_embedder</c> whose selected row is prepended to the
-/// projected text tokens as an extra zero-position token (diffusers union mapping — see
-/// <see cref="FluxUnionControlMode"/>).</item>
+///   <item>a zero-init <c>controlnet_x_embedder</c> Linear(64→hidden) whose projection of the packed VAE-encoded control image is ADDED to the x-embedded noise tokens,</item>
+///   <item>one zero-init output Linear(hidden→hidden) per block (<c>controlnet_blocks.{i}</c> / <c>controlnet_single_blocks.{i}</c>) that gates each block's image stream into a residual,</item>
+///   <item>for union checkpoints, a <c>controlnet_mode_embedder</c> whose selected row is prepended to the projected text tokens as an extra zero-position token (diffusers union mapping — see <see cref="FluxUnionControlMode"/>).</item>
 /// </list>
-/// The residuals are consumed by <see cref="FluxTransformer.Forward"/> via <see cref="FluxControlNetResiduals"/>
-/// with diffusers' interval mapping. Weight tensors are owned by the <see cref="ControlNetFile"/> that produced
-/// them; this class only borrows references (same ownership model as <see cref="ControlNet"/>).</summary>
+/// The residuals are consumed by <see cref="FluxTransformer.Forward"/> via <see cref="FluxControlNetResiduals"/> with diffusers' interval mapping. Weight tensors are owned by the <see cref="ControlNetFile"/> that produced them; this class only borrows references (same ownership model as <see cref="ControlNet"/>).</summary>
 public sealed unsafe class FluxControlNet : IDisposable
 {
     private readonly FluxControlNetConfig _config;
@@ -81,10 +71,7 @@ public sealed unsafe class FluxControlNet : IDisposable
     /// <summary>The config this adapter was built from.</summary>
     public FluxControlNetConfig Config => _config;
 
-    /// <summary>Loads all weights using diffusers <c>FluxControlNetModel</c> naming. Block keys are identical to
-    /// the base transformer's (<c>transformer_blocks.{i}.*</c> / <c>single_transformer_blocks.{i}.*</c>); the
-    /// ControlNet extras are <c>controlnet_x_embedder</c>, <c>controlnet_blocks.{i}</c>,
-    /// <c>controlnet_single_blocks.{i}</c>, and (union only) <c>controlnet_mode_embedder.weight</c>.</summary>
+    /// <summary>Loads all weights using diffusers <c>FluxControlNetModel</c> naming. Block keys are identical to the base transformer's (<c>transformer_blocks.{i}.*</c> / <c>single_transformer_blocks.{i}.*</c>); the ControlNet extras are <c>controlnet_x_embedder</c>, <c>controlnet_blocks.{i}</c>, <c>controlnet_single_blocks.{i}</c>, and (union only) <c>controlnet_mode_embedder.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         _xEmbedWeight = weights["x_embedder.weight"];
@@ -291,8 +278,8 @@ public sealed unsafe class FluxControlNet : IDisposable
         foreach (Tensor? b in _cnSingleBlockBiases) if (b is not null) yield return b;
     }
 
-    /// <summary>Applies the per-block zero-init output Linear and the conditioning scale.</summary>
-    private static Tensor ProjectResidual(IBackend backend, Tensor blockImg, Tensor weight, Tensor? bias,
+    /// <summary>Applies the per-block zero-init output Linear and the conditioning scale. Shared with <see cref="QwenImageControlNet"/>, whose residual projection is identical.</summary>
+    internal static Tensor ProjectResidual(IBackend backend, Tensor blockImg, Tensor weight, Tensor? bias,
         float conditioningScale, TensorShape imgShape)
     {
         Tensor residual = new Tensor(imgShape, DType.F32);
@@ -382,8 +369,7 @@ public sealed unsafe class FluxControlNet : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
-    /// <summary>Releases borrowed weight references and the owned F32 mode table. The underlying weight tensors
-    /// belong to the safetensors loader that produced them.</summary>
+    /// <summary>Releases borrowed weight references and the owned F32 mode table. The underlying weight tensors belong to the safetensors loader that produced them.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)

@@ -3,12 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
 
-/// <summary>Residual Vector Quantization — the codebook stack at the heart of EnCodec,
-/// SoundStream, and most of their derivatives. Stores N learned codebooks, each
-/// containing K entries of dimension D. Encoding greedily picks the nearest codeword
-/// in codebook 0, subtracts it from the latent, picks the nearest in codebook 1 from
-/// the residual, and so on for the requested number of codebooks.
-///
+/// <summary>Residual Vector Quantization — the codebook stack at the heart of EnCodec, SoundStream, and most of their derivatives, greedily encoding against N learned KxD codebooks in sequence against the shrinking residual.</summary>
+/// <remarks>
 /// <para>The per-frame work is <c>O(N * K * D)</c> nearest-neighbor lookups. For the
 /// EnCodec 24 kHz config (<c>K=1024, D=128, N=8</c>) that's ~1M flops per frame, ~75M
 /// flops per second of audio — negligible compared to the SEANet encoder cost.</para>
@@ -21,7 +17,8 @@ namespace HartsyInference.Audio.Models.Codecs;
 /// <para>Used by EnCodec (this file's primary consumer), and re-used by DAC (which
 /// switches to L2-normalized cosine codebooks but keeps the same residual structure),
 /// XCodec, and several other Section 4 codecs. The L2-norm variant is enabled via the
-/// <see cref="L2Normalize"/> flag at construction.</para></summary>
+/// <see cref="L2Normalize"/> flag at construction.</para>
+/// </remarks>
 internal sealed unsafe class ResidualVectorQuantizer
 {
     public int MaxCodebooks { get; }
@@ -53,13 +50,7 @@ internal sealed unsafe class ResidualVectorQuantizer
         }
     }
 
-    /// <summary>Greedy residual encoding of a continuous latent.
-    /// <paramref name="latent"/> is channels-first <c>[batch, dim, T]</c>. Returns codes
-    /// of shape <c>[nQ, batch, T]</c> as Int32 — the first axis indexes the codebook,
-    /// matching the layout the upstream EnCodec uses for its LM-side token sequences.
-    ///
-    /// <para><paramref name="nQ"/> selects how many of the available codebooks to use
-    /// (Bark = 8 ⇒ 6 kbps; MusicGen-small = 4 ⇒ 3 kbps). Must be ≤ <see cref="MaxCodebooks"/>.</para></summary>
+    /// <summary>Greedy residual encoding of a continuous latent. <paramref name="latent"/> is channels-first <c>[batch, dim, T]</c>. Returns codes of shape <c>[nQ, batch, T]</c> as Int32 — the first axis indexes the codebook, matching the layout upstream EnCodec uses for its LM-side token sequences. <paramref name="nQ"/> selects how many of the available codebooks to use (Bark = 8 ⇒ 6 kbps; MusicGen-small = 4 ⇒ 3 kbps) and must be ≤ <see cref="MaxCodebooks"/>.</summary>
     public Tensor Encode(Tensor latent, int batch, int t, int nQ)
     {
         if (_codebooks[0] is null) throw new InvalidOperationException("ResidualVectorQuantizer weights not loaded.");
@@ -76,7 +67,6 @@ internal sealed unsafe class ResidualVectorQuantizer
         {
             for (int ti = 0; ti < t; ti++)
             {
-                // Load latent[b, :, ti] into residual.
                 for (int d = 0; d < Dim; d++)
                     residual[d] = lp[(b * Dim + d) * t + ti];
 
@@ -89,7 +79,6 @@ internal sealed unsafe class ResidualVectorQuantizer
                     int idx = NearestCodewordIndex(cbp, residual);
                     cp[(q * batch + b) * t + ti] = idx;
 
-                    // Subtract the chosen codeword from the residual.
                     for (int d = 0; d < Dim; d++)
                         residual[d] -= cbp[idx * Dim + d];
                 }
@@ -98,9 +87,7 @@ internal sealed unsafe class ResidualVectorQuantizer
         return codes;
     }
 
-    /// <summary>Decoding: sum the chosen codewords across all codebooks per frame.
-    /// <paramref name="codes"/> has shape <c>[nQ, batch, T]</c> Int32. Returns the
-    /// reconstructed channels-first latent <c>[batch, dim, T]</c>.</summary>
+    /// <summary>Decoding: sum the chosen codewords across all codebooks per frame. <paramref name="codes"/> has shape <c>[nQ, batch, T]</c> Int32. Returns the reconstructed channels-first latent <c>[batch, dim, T]</c>.</summary>
     public Tensor Decode(Tensor codes, int batch, int t)
     {
         if (_codebooks[0] is null) throw new InvalidOperationException("ResidualVectorQuantizer weights not loaded.");
@@ -113,7 +100,6 @@ internal sealed unsafe class ResidualVectorQuantizer
         float* lp = (float*)latent.DataPointer;
         int* cp = (int*)codes.DataPointer;
 
-        // Zero-init.
         long total = (long)batch * Dim * t;
         for (long i = 0; i < total; i++) lp[i] = 0f;
 
@@ -140,8 +126,7 @@ internal sealed unsafe class ResidualVectorQuantizer
             if (_codebooks[q] is not null) yield return _codebooks[q]!;
     }
 
-    /// <summary>Returns the index of the codeword with the smallest L2 distance to
-    /// <paramref name="query"/>. Codebook is stored row-major as <c>[K, D]</c>.</summary>
+    /// <summary>Returns the index of the codeword with the smallest L2 distance to <paramref name="query"/>. Codebook is stored row-major as <c>[K, D]</c>.</summary>
     private int NearestCodewordIndex(float* codebookPtr, ReadOnlySpan<float> query)
     {
         int bestIdx = 0;

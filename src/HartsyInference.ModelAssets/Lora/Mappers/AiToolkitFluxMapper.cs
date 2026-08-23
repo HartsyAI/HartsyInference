@@ -10,7 +10,6 @@ public static class AiToolkitFluxMapper
     private const string DownSuffix = ".lora_A.weight";
     private const string UpSuffix = ".lora_B.weight";
 
-    /// <summary>Parses every LoRA layer in the file.</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader)
     {
         Dictionary<(LoraTarget, string), GroupBuffer> groups = [];

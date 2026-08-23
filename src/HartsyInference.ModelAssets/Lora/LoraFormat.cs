@@ -27,9 +27,7 @@ public enum LoraFormat
     /// <summary>ComfyUI-style Wan format: diffusion_model.blocks.* dotted keys in original Wan module naming, with either PEFT (.lora_A/.lora_B) or kohya (.lora_down/.lora_up) suffixes.</summary>
     DiffusersWan,
 
-    /// <summary>ComfyUI-style BFL format: dotted original module names under a <c>diffusion_model.</c> prefix
-    /// (<c>diffusion_model.double_blocks.0.img_attn.qkv.lora_A.weight</c>) — Chroma/Flux LoRAs trained against
-    /// ComfyUI checkpoints. Same translation table as KohyaFlux, different root spelling.</summary>
+    /// <summary>ComfyUI-style BFL format: dotted original module names under a <c>diffusion_model.</c> prefix (<c>diffusion_model.double_blocks.0.img_attn.qkv.lora_A.weight</c>) — Chroma/Flux LoRAs trained against ComfyUI checkpoints. Same translation table as KohyaFlux, different root spelling.</summary>
     ComfyBflDit,
 
     /// <summary>PEFT suffixes on BARE checkpoint keys — no transformer./diffusion_model. wrapper at all, so the root is already the canonical weight name (MiniMax-H3's Turbo LoRA: blocks.0.attn.qkv_proj.lora_A.weight). Detected last, so a file carrying any recognized prefix never lands here.</summary>

@@ -3,9 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Configuration for a Qwen-Image DiT ControlNet (diffusers <c>QwenImageControlNetModel</c>, the
-/// InstantX architecture), auto-derived from the checkpoint header. The block stack reuses the base
-/// transformer's <c>QwenImageBlock</c> geometry, so most fields mirror <c>QwenImageConfig</c>.</summary>
+/// <summary>Configuration for a Qwen-Image DiT ControlNet (diffusers <c>QwenImageControlNetModel</c>, the InstantX architecture), auto-derived from the checkpoint header. The block stack reuses the base transformer's <c>QwenImageBlock</c> geometry, so most fields mirror <c>QwenImageConfig</c>.</summary>
 public sealed record QwenImageControlNetConfig
 {
     /// <summary>Transformer hidden size (3072 for the released checkpoints).</summary>
@@ -38,8 +36,7 @@ public sealed record QwenImageControlNetConfig
     /// <summary>QK-norm epsilon.</summary>
     public float QkNormEps { get; init; } = 1e-6f;
 
-    /// <summary>Derives the config from a checkpoint's tensor descriptors. Throws when the header does not
-    /// look like a Qwen-Image ControlNet.</summary>
+    /// <summary>Derives the config from a checkpoint's tensor descriptors. Throws when the header does not look like a Qwen-Image ControlNet.</summary>
     public static QwenImageControlNetConfig FromDescriptors(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
     {
         if (!descriptors.TryGetValue("img_in.weight", out SafeTensorDescriptor? imgIn))

@@ -3,10 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
-/// <summary>The conditioning text tower an LTX-2 pipeline drives. LTX-2.3 uses Gemma 3 12B
-/// (<see cref="LlamaStyleEncoder"/>); LTX-2.5 changed family to a Gemma 4 12B fine-tune
-/// (<see cref="Gemma4TextEncoder"/>) whose per-layer geometry cannot be expressed as a
-/// <see cref="LlamaStyleEncoderConfig"/> preset.</summary>
+/// <summary>The conditioning text tower an LTX-2 pipeline drives: LTX-2.3 uses Gemma 3 12B (<see cref="LlamaStyleEncoder"/>), while LTX-2.5 changed family to a Gemma 4 12B fine-tune (<see cref="Gemma4TextEncoder"/>) whose per-layer geometry cannot be expressed as a <see cref="LlamaStyleEncoderConfig"/> preset.</summary>
 /// <remarks>The pipeline's <c>3840</c> caption channels and <c>49</c> harvested states hold for both families.</remarks>
 public interface ILtx2TextTower : IDisposable
 {

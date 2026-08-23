@@ -3,11 +3,7 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>Converts the SLAT Gaussian decoder's 448-dim per-voxel output into a <see cref="GaussianSplatCloud"/>
-/// (TRELLIS <c>to_representation</c>). Per active voxel, 32 gaussians: position = voxel-center + tanh(offset +
-/// hammersley perturbation)·½·voxel_size/res; scaling/rotation/opacity/features_dc reshaped per gaussian. Fields are
-/// stored raw (log-scale, logit-opacity, quaternion) — <see cref="Io.PlyWriter.SaveSplats"/> writes the 3DGS PLY.
-/// A y-up→z-up transform ([x,y,z]→[x,−z,y], quaternion rotated 90° about X) matches the reference viewing.</summary>
+/// <summary>Converts the SLAT Gaussian decoder's 448-dim per-voxel output into a <see cref="GaussianSplatCloud"/> (TRELLIS <c>to_representation</c>), applying a y-up→z-up transform to match the reference viewing convention.</summary>
 public static unsafe class TrellisGaussianRepresentation
 {
     private const int NumGaussians = 32, Resolution = 64;

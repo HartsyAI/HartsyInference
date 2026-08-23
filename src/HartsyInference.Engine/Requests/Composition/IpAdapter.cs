@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Image-prompt (IP-Adapter / Redux / FaceID) conditioning: one or more reference images plus grouping and
-/// face-weight controls.</summary>
+/// <summary>Image-prompt (IP-Adapter / Redux / FaceID) conditioning: one or more reference images plus grouping and face-weight controls.</summary>
 public sealed record IpAdapter
 {
     /// <summary>The reference / prompt images driving the adapter.</summary>

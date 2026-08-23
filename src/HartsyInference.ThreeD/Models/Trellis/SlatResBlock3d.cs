@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS <c>SparseResBlock3d</c>: <c>updown → norm1(affine)·SiLU·conv1 → norm2·(1+scale)+shift·SiLU·conv2 →
-/// + skip</c>. Modulation <c>scale/shift = chunk(SiLU(emb)·emb_layers, 2)</c> broadcast over all voxels. Convs are
-/// submanifold (scatter→Conv3d→gather); downsample = avg-pool, upsample = gather via the paired downsample's idx.</summary>
+/// <summary>TRELLIS <c>SparseResBlock3d</c>: <c>updown → norm1(affine)·SiLU·conv1 → norm2·(1+scale)+shift·SiLU·conv2 → + skip</c>, with submanifold (scatter→Conv3d→gather) convs.</summary>
 internal sealed unsafe class SlatResBlock3d
 {
     private Tensor _n1W = null!, _n1B = null!;   // norm2 is non-affine (no params) → handled by LayerNormModulate
@@ -37,8 +35,7 @@ internal sealed unsafe class SlatResBlock3d
         foreach (Tensor t in _c2Slices) yield return t;
     }
 
-    /// <summary>Applies the res-block. <paramref name="up"/> is the paired downsample state (idx + pre-down coords +
-    /// resolution) used only when this block upsamples.</summary>
+    /// <summary>Applies the res-block; <paramref name="up"/> is the paired downsample state, used only when this block upsamples.</summary>
     public SparseTensor Forward(IBackend backend, SparseTensor x, Tensor vec, ref DownState? down, (int[] idx, int[] coords, int res)? up)
     {
         // updown FIRST (per reference).

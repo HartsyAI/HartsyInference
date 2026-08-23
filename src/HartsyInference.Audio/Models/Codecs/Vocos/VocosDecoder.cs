@@ -5,16 +5,17 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Vocos;
 
-/// <summary>Standalone Vocos decoder (ConvNeXt backbone + iSTFT head) as used by YuE's per-stem 44.1 kHz vocoders
-/// (<c>decoders/decoder_131000.pth</c> = vocal, <c>decoder_151000.pth</c> = instrumental). Consumes the x-codec
-/// quantizer's 1024-dim latent (the same <c>[B, 1024, T]</c> that would otherwise feed the SeaNet/DAC decoder) and
-/// reconstructs a waveform directly — this is YuE's REAL output path; the raw x-codec decode is only a 16 kHz draft.
+/// <summary>Standalone Vocos decoder (ConvNeXt backbone + iSTFT head) as used by YuE's per-stem 44.1 kHz vocoders (<c>decoders/decoder_131000.pth</c> = vocal, <c>decoder_151000.pth</c> = instrumental).</summary>
+/// <remarks>
+/// Consumes the x-codec quantizer's 1024-dim latent (the same <c>[B, 1024, T]</c> that would otherwise feed the
+/// SeaNet/DAC decoder) and reconstructs a waveform directly — this is YuE's REAL output path; the raw x-codec
+/// decode is only a 16 kHz draft.
 ///
 /// <para>Architecture (config <c>decoders/config.yaml</c>): <c>backbone.embed</c> Conv1d(1024→512, k7, pad same),
 /// <c>backbone.norm</c> LayerNorm, 8× ConvNeXt blocks (depthwise Conv1d k7 + LayerNorm + Linear 512→1536 + GELU +
 /// Linear 1536→512 + per-channel γ), <c>backbone.final_layer_norm</c>, then <c>head.out</c> Linear(512→n_fft+2) →
 /// (mag, phase) → iSTFT (n_fft 3528, hop 882 ⇒ 44.1 kHz at 50 fps). Same op sequence as
-/// <see cref="WavTokenizer.WavTokenizerHead"/>; the shipped Hann window matches <see cref="HannWindow"/>.</para></summary>
+/// <see cref="WavTokenizer.WavTokenizerHead"/>; the shipped Hann window matches <see cref="HannWindow"/>.</para></remarks>
 public sealed unsafe class VocosDecoder
 {
     private const int Dim = 512;
@@ -169,9 +170,7 @@ public sealed unsafe class VocosDecoder
         return pcm;
     }
 
-    /// <summary>Vocos ISTFTHead: <c>mag = exp(out[:n_bins])</c> (clipped), <c>phase = out[n_bins:]</c>, complex
-    /// spectrogram → iSTFT overlap-add with the head's <c>padding="same"</c> (per the shipped config.yaml), which
-    /// trims <c>(n_fft - hop)/2</c> per end and yields <c>frames · hop</c> samples.</summary>
+    /// <summary>Vocos ISTFTHead: <c>mag = exp(out[:n_bins])</c> (clipped), <c>phase = out[n_bins:]</c>, complex spectrogram → iSTFT overlap-add with the head's <c>padding="same"</c> (per the shipped config.yaml), which trims <c>(n_fft - hop)/2</c> per end and yields <c>frames · hop</c> samples.</summary>
     private Tensor ApplyIStft(Tensor magPhase, int batch, int tFrames)
     {
         // "same", NOT center: trimming n_fft/2 instead would start the waveform 441 samples late and drop 882 —

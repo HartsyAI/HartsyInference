@@ -159,20 +159,20 @@ public sealed class YoloSegModel : IYoloDetectModel
         Tensor x9 = _layer9.Forward(backend, x8); x8.Dispose();
 
         // Neck.
-        Tensor x10 = Upsample(backend, x9, 2);
-        Tensor x11 = ConcatChannel(backend, x10, x6); x10.Dispose();
+        Tensor x10 = YoloV11Model.Upsample(backend, x9, 2);
+        Tensor x11 = YoloV11Model.ConcatChannel(backend, x10, x6); x10.Dispose(); x6.Dispose();
         Tensor x12 = _layer12.Forward(backend, x11); x11.Dispose();
 
-        Tensor x13 = Upsample(backend, x12, 2);
-        Tensor x14 = ConcatChannel(backend, x13, x4); x13.Dispose(); x4.Dispose();
+        Tensor x13 = YoloV11Model.Upsample(backend, x12, 2);
+        Tensor x14 = YoloV11Model.ConcatChannel(backend, x13, x4); x13.Dispose(); x4.Dispose();
         Tensor x15 = _layer15.Forward(backend, x14); x14.Dispose();
 
         Tensor x16 = _layer16.Forward(backend, x15);
-        Tensor x17 = ConcatChannel(backend, x16, x12); x16.Dispose(); x12.Dispose();
+        Tensor x17 = YoloV11Model.ConcatChannel(backend, x16, x12); x16.Dispose(); x12.Dispose();
         Tensor x18 = _layer18.Forward(backend, x17); x17.Dispose();
 
         Tensor x19 = _layer19.Forward(backend, x18);
-        Tensor x20 = ConcatChannel(backend, x19, x9); x19.Dispose(); x9.Dispose();
+        Tensor x20 = YoloV11Model.ConcatChannel(backend, x19, x9); x19.Dispose(); x9.Dispose();
         Tensor x21 = _layer21.Forward(backend, x20); x20.Dispose();
 
         (Tensor detections, Tensor protos) = _segHead.Forward(backend, [x15, x18, x21]);
@@ -180,25 +180,4 @@ public sealed class YoloSegModel : IYoloDetectModel
         return (detections, protos);
     }
 
-    private static Tensor Upsample(IBackend backend, Tensor input, int scale)
-    {
-        int n = (int)input.Shape[0];
-        int c = (int)input.Shape[1];
-        int h = (int)input.Shape[2];
-        int w = (int)input.Shape[3];
-        Tensor output = new Tensor(new TensorShape(n, c, h * scale, w * scale), DType.F32);
-        backend.UpsampleNearest2D(output, input, scale, scale);
-        return output;
-    }
-
-    private static Tensor ConcatChannel(IBackend backend, Tensor a, Tensor b)
-    {
-        int n = (int)a.Shape[0];
-        int c = (int)(a.Shape[1] + b.Shape[1]);
-        int h = (int)a.Shape[2];
-        int w = (int)a.Shape[3];
-        Tensor output = new Tensor(new TensorShape(n, c, h, w), DType.F32);
-        backend.Concat(output, [a, b], dim: 1);
-        return output;
-    }
 }

@@ -3,10 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that
-/// <see cref="LoraApplier"/> can merge. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the
-/// <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends.
-/// Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
+/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="LoraApplier"/> can merge. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
 public static class LoraResolver
 {
     /// <summary>One resolved LoRA: the on-disk file plus its diffusion-side and text-encoder-side strengths.</summary>
@@ -28,8 +25,7 @@ public static class LoraResolver
     /// <summary>Models-root-relative folders searched for LoRA weights.</summary>
     private static readonly string[] _folders = ["Lora", "loras", "LoRA", "lora"];
 
-    /// <summary>Resolves every entry in <paramref name="loras"/>. Returns an empty list when the stack is null/empty or
-    /// every entry is confined to a non-global section. Throws when a selected LoRA has no resolvable file.</summary>
+    /// <summary>Resolves every entry in <paramref name="loras"/>. Returns an empty list when the stack is null/empty or every entry is confined to a non-global section. Throws when a selected LoRA has no resolvable file.</summary>
     public static List<LoraSpec> Resolve(LoraStack? loras)
     {
         List<LoraSpec> result = [];

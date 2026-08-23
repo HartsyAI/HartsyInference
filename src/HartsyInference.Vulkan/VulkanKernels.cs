@@ -3,10 +3,7 @@ using System.Text;
 
 namespace HartsyInference.Vulkan;
 
-/// <summary>Identifies a kernel variant: shader file name + a hash of its specialization constants + whether this
-/// is the push-descriptor-flavored pipeline built for step-graph capture (see <see cref="VulkanDescriptorManager"/>'s
-/// field doc). Two variants of the same .spv with different spec values, or different descriptor-binding
-/// flavors, cache separately — a pipeline is bound to one specific <c>VkPipelineLayout</c> at creation time.</summary>
+/// <summary>Identifies a kernel variant: shader file name + a hash of its specialization constants + whether this is the push-descriptor-flavored pipeline built for step-graph capture (see <see cref="VulkanDescriptorManager"/>'s field doc). Two variants of the same .spv with different spec values, or different descriptor-binding flavors, cache separately — a pipeline is bound to one specific <c>VkPipelineLayout</c> at creation time.</summary>
 public readonly record struct KernelKey(string Name, ulong SpecHash, bool ForCapture = false);
 
 /// <summary>One built compute pipeline. Owns its <see cref="Pipeline"/> handle (destroyed by registry on Dispose).</summary>
@@ -57,8 +54,7 @@ public sealed class VulkanKernelRegistry : IDisposable
         Marshal.Copy(_mainEntryUtf8, 0, _mainEntry, _mainEntryUtf8.Length);
     }
 
-    /// <summary>Builds (or returns cached) a pipeline for the given kernel + spec constants. <paramref name="forCapture"/>
-    /// selects the push-descriptor-flavored pipeline used by step-graph capture (see <see cref="KernelKey"/>).</summary>
+    /// <summary>Builds (or returns cached) a pipeline for the given kernel + spec constants. <paramref name="forCapture"/> selects the push-descriptor-flavored pipeline used by step-graph capture (see <see cref="KernelKey"/>).</summary>
     public VulkanKernel Get(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> specConstants, bool forCapture = false)
     {
         ulong specHash = HashSpec(specConstants);

@@ -7,7 +7,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>CosyVoice 2's HiFTNet vocoder (mel → 24 kHz waveform). Mirrors
+/// <summary>CosyVoice 2's HiFTNet vocoder (mel → 24 kHz waveform).</summary>
+/// <remarks>Mirrors
 /// <c>cosyvoice/hifigan/generator.py:HiFTGenerator</c>: an internal F0 predictor drives an NSF
 /// harmonic-plus-noise source; the source STFT is injected at every upsample level; the backbone is a
 /// HiFiGAN transposed-conv stack with plain (non-style-conditioned) Snake MRF resblocks; the output is
@@ -18,7 +19,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// predictor (Kokoro takes F0 from the prosody predictor); plain Snake resblocks (no AdaIN); and the
 /// CosyVoice upsample schedule. <b>Checkpoint-validation pending</b> — weight keys + the source-inject
 /// downsample params follow the FunAudioLLM layout and need reconciling against the real
-/// <c>hift.pt</c>.</para></summary>
+/// <c>hift.pt</c>.</para></remarks>
 public sealed unsafe class HiFTNetVocoder : IDisposable
 {
     private const float LeakySlope = 0.1f;
@@ -120,15 +121,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         return ForwardCore(backend, mel, harSource);
     }
 
-    /// <summary>Monolithic variant of <see cref="Forward"/> that computes F0 via
-    /// <see cref="F0Predictor.ForwardHostCpu"/> instead of the GPU <see cref="F0Predictor.Forward"/> — the
-    /// SAME F0 computation <see cref="ForwardStreaming"/> uses internally. Numerically close to but NOT
-    /// bit-identical with <see cref="Forward"/> (cuDNN vs. a naive host conv give slightly different F32
-    /// roundings for the same math — see <see cref="HiFTStreamState"/>'s doc comment). Exists as the correct
-    /// reference for streaming self-parity tests (comparing <see cref="ForwardStreaming"/> against
-    /// <see cref="Forward"/> conflates "is chunking exact" with "does host-CPU F0 match GPU F0", two
-    /// different questions) and as a non-chunked entry point when exact consistency with a streamed run of
-    /// the same utterance matters more than matching the plain <see cref="Forward"/> path.</summary>
+    /// <summary>Monolithic variant of <see cref="Forward"/> that computes F0 via <see cref="F0Predictor.ForwardHostCpu"/> instead of the GPU <see cref="F0Predictor.Forward"/> — the SAME F0 computation <see cref="ForwardStreaming"/> uses internally. Numerically close to but NOT bit-identical with <see cref="Forward"/> (cuDNN vs. a naive host conv give slightly different F32 roundings for the same math — see <see cref="HiFTStreamState"/>'s doc comment). Exists as the correct reference for streaming self-parity tests (comparing <see cref="ForwardStreaming"/> against <see cref="Forward"/> conflates "is chunking exact" with "does host-CPU F0 match GPU F0", two different questions) and as a non-chunked entry point when exact consistency with a streamed run of the same utterance matters more than matching the plain <see cref="Forward"/> path.</summary>
     public float[] ForwardHostCpuF0(IBackend backend, Tensor mel)
     {
         int upProd = 1;
@@ -151,11 +144,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         return ForwardCore(backend, mel, harSource);
     }
 
-    /// <summary>Shared tail of <see cref="Forward"/>: everything from the harmonic source's forward STFT
-    /// onward (source injection, conv_pre/upsample/MRF loop, conv_post, iSTFT). <paramref name="harSource"/>
-    /// is the audio-domain NSF signal (<c>mel.Shape[2] · upsampleProd · hop</c> samples) — <see cref="Forward"/>
-    /// builds it fresh each call; <see cref="ForwardStreaming"/> builds it from carried phase state instead
-    /// (see <see cref="HiFTStreamState"/>) so this method itself has no streaming-specific logic at all.</summary>
+    /// <summary>Shared tail of <see cref="Forward"/>: everything from the harmonic source's forward STFT onward (source injection, conv_pre/upsample/MRF loop, conv_post, iSTFT). <paramref name="harSource"/> is the audio-domain NSF signal (<c>mel.Shape[2] · upsampleProd · hop</c> samples) — <see cref="Forward"/> builds it fresh each call; <see cref="ForwardStreaming"/> builds it from carried phase state instead (see <see cref="HiFTStreamState"/>) so this method itself has no streaming-specific logic at all.</summary>
     public float[] ForwardCore(IBackend backend, Tensor mel, float[] harSource)
     {
         int nFft = _cfg.IstftNFft;
@@ -235,8 +224,8 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     private static int? ReadMarginOverride() =>
         int.TryParse(Environment.GetEnvironmentVariable("HARTSY_HIFT_STREAM_MARGIN"), out int v) ? v : null;
 
-    /// <summary>Streaming counterpart to <see cref="Forward"/>: feed successive mel chunks of one utterance
-    /// (via <paramref name="state"/>), get back only the audio newly settled by this chunk. Set
+    /// <summary>Streaming counterpart to <see cref="Forward"/>: feed successive mel chunks of one utterance and get back only the audio newly settled by this chunk.</summary>
+    /// <remarks>Consumed via <paramref name="state"/>. Set
     /// <paramref name="isFinal"/> on the last chunk of an utterance to flush the remaining
     /// <see cref="StreamMarginSamples"/>-sample tail unconditionally (mirrors <see cref="Forward"/>'s own
     /// natural end-of-utterance behavior — there's no more future mel coming, so nothing is held back).
@@ -254,7 +243,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     ///         re-derived. The still-unsettled tail gets a THROWAWAY continuation (a copy of the carried
     ///         phase/RNG, advanced but not persisted) purely so <see cref="ForwardCore"/> has something to
     ///         inject at those positions this call; its output there is discarded by the margin anyway.</item>
-    /// </list></summary>
+    /// </list></remarks>
     public float[] ForwardStreaming(IBackend backend, Tensor melChunk, HiFTStreamState state, bool isFinal = false)
     {
         Tensor melSoFar = state.MelHistory is null ? CopyMel(melChunk) : ConcatMelTime(state.MelHistory, melChunk);
@@ -424,8 +413,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     }
 }
 
-/// <summary>ConvRNNF0Predictor: 5 × (Conv1d k=3 + ELU) condnet → Linear(→1) → abs, predicting F0 in Hz
-/// from the input mel. Output is channels-first <c>[1, 1, T]</c>.</summary>
+/// <summary>ConvRNNF0Predictor: 5 × (Conv1d k=3 + ELU) condnet → Linear(→1) → abs, predicting F0 in Hz from the input mel. Output is channels-first <c>[1, 1, T]</c>.</summary>
 internal sealed unsafe class F0Predictor
 {
     private const int CondLayers = 5;
@@ -479,19 +467,7 @@ internal sealed unsafe class F0Predictor
         return f0;
     }
 
-    /// <summary>Pure host C# reimplementation of <see cref="Forward"/> — no <see cref="IBackend"/> call at
-    /// all. Exists ONLY for <see cref="HiFTNetVocoder.ForwardStreaming"/>, where F0 feeds an unbounded phase
-    /// accumulator: confirmed empirically (2026-08-11) that <see cref="Forward"/>'s <c>backend.Conv1d</c>
-    /// output for a given INTERIOR position (far from either edge, well past any plausible local receptive
-    /// field) still varies by up to ~0.16 Hz depending on the TOTAL input length — cuDNN's algorithm
-    /// selection depends on overall tensor shape, not just local content, so "settled by margin" does not
-    /// hold for it the way it does for the rest of this vocoder (see <see cref="HiFTStreamState"/>'s doc
-    /// comment). A naive, un-tiled host loop has no such shape-dependent code path — a given output position
-    /// depends only on its own literal kernel window, computed the same way regardless of how much more input
-    /// exists beyond it. F0Predictor is tiny (5×512-channel k=3 convs + 1 linear), so the O(T) host cost here
-    /// is negligible next to the GPU work the rest of the vocoder still does. <paramref name="mel"/> is
-    /// channel-major <c>[melBins, T]</c> (row-major, T fastest-varying, matching <see cref="Tensor"/>'s own
-    /// layout); returns F0 in Hz, length <c>T</c>.</summary>
+    /// <summary>Pure host C# reimplementation of <see cref="Forward"/> — no <see cref="IBackend"/> call at all. Exists ONLY for <see cref="HiFTNetVocoder.ForwardStreaming"/>, where F0 feeds an unbounded phase accumulator: confirmed empirically (2026-08-11) that <see cref="Forward"/>'s <c>backend.Conv1d</c> output for a given INTERIOR position (far from either edge, well past any plausible local receptive field) still varies by up to ~0.16 Hz depending on the TOTAL input length — cuDNN's algorithm selection depends on overall tensor shape, not just local content, so "settled by margin" does not hold for it the way it does for the rest of this vocoder (see <see cref="HiFTStreamState"/>'s doc comment). A naive, un-tiled host loop has no such shape-dependent code path — a given output position depends only on its own literal kernel window, computed the same way regardless of how much more input exists beyond it. F0Predictor is tiny (5×512-channel k=3 convs + 1 linear), so the O(T) host cost here is negligible next to the GPU work the rest of the vocoder still does. <paramref name="mel"/> is channel-major <c>[melBins, T]</c> (row-major, T fastest-varying, matching <see cref="Tensor"/>'s own layout); returns F0 in Hz, length <c>T</c>.</summary>
     internal unsafe float[] ForwardHostCpu(float[] mel, int melBins, int t)
     {
         float[] cur = mel;

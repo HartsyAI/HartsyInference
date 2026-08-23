@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
@@ -485,11 +486,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         backend.AffineMix(output, source, noise, 1.0f - sigma, sigma);
     }
 
-    /// <summary>
-    /// Keeps an SD3 inpaint latent's unmasked region on the source trajectory at <paramref name="nextStep"/>.
-    /// Nonterminal steps reproduce the established <c>seed + nextStep</c> fresh-noise sequence; the terminal step
-    /// passes a null noise tensor with zero noise scale and therefore blends the clean source.
-    /// </summary>
+    /// <summary> Keeps an SD3 inpaint latent's unmasked region on the source trajectory at <paramref name="nextStep"/>. Nonterminal steps reproduce the established <c>seed + nextStep</c> fresh-noise sequence; the terminal step passes a null noise tensor with zero noise scale and therefore blends the clean source. </summary>
     internal static void BlendMaskedSourceTrajectory(
         IBackend backend,
         FlowMatchEulerDiscreteScheduler scheduler,
@@ -546,7 +543,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG, clipSkip);
 
         // Combine pooled: concat(clip_l_pooled, clip_g_pooled, dim=-1) → [1, 2048]
-        Tensor pooled = ConcatPooled(clipLPooled!, clipGPooled!);
+        Tensor pooled = DiTUtils.ConcatPooled(clipLPooled!, clipGPooled!);
         clipLPooled?.Dispose();
         clipGPooled?.Dispose();
 
@@ -558,7 +555,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // Pad to 4096: [1, 77, 2048] → [1, 77, 4096]
         int lgDim = (int)lgHidden.Shape[2];
         int targetDim = 4096;
-        Tensor lgPadded = PadLastDim(lgHidden, lgDim, targetDim);
+        Tensor lgPadded = DiTUtils.PadLastDim(lgHidden, lgDim, targetDim);
         lgHidden.Dispose();
 
         // T5 encoding
@@ -586,9 +583,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         return (context, pooled);
     }
 
-    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the
-    /// non-sharded path — <see cref="Sd3Transformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path. <paramref name="stepCache"/> only applies on the non-sharded path — <see cref="Sd3Transformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
     private Tensor RunForward(Tensor latent, float timestep, Tensor context, Tensor pooled, Utilities.DeviceFeatureCache? stepCache = null)
     {
         if (DitShardBackend is not null)
@@ -625,63 +620,6 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             int bSrcOffset = bIdx * seqB * dim;
             int bDstOffset = bIdx * seqOut * dim + seqA * dim;
             Buffer.MemoryCopy(bPtr + bSrcOffset, outPtr + bDstOffset, seqB * dim * sizeof(float), seqB * dim * sizeof(float));
-        }
-
-        return output;
-    }
-
-    /// <summary>Pads the last dimension with zeros: [B, S, currentDim] → [B, S, targetDim].</summary>
-    private static Tensor PadLastDim(Tensor input, int currentDim, int targetDim)
-    {
-        if (currentDim == targetDim)
-            return input;
-
-        int batch = (int)input.Shape[0];
-        int seqLen = (int)input.Shape[1];
-
-        TensorShape outShape = new TensorShape(batch, seqLen, targetDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        // Zero the entire output first, then copy input data
-        int totalElements = batch * seqLen * targetDim;
-        for (int i = 0; i < totalElements; i++)
-            outPtr[i] = 0.0f;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * currentDim;
-                int outOffset = (b * seqLen + s) * targetDim;
-                Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, currentDim * sizeof(float), currentDim * sizeof(float));
-            }
-        }
-
-        return output;
-    }
-
-    /// <summary>Concatenates two pooled tensors [B, D1] and [B, D2] along the last dimension → [B, D1+D2].</summary>
-    private static Tensor ConcatPooled(Tensor a, Tensor b)
-    {
-        int batch = (int)a.Shape[0];
-        int dimA = (int)a.Shape[1];
-        int dimB = (int)b.Shape[1];
-        int dimOut = dimA + dimB;
-
-        TensorShape outShape = new TensorShape(batch, dimOut);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int bIdx = 0; bIdx < batch; bIdx++)
-        {
-            Buffer.MemoryCopy(aPtr + bIdx * dimA, outPtr + bIdx * dimOut, dimA * sizeof(float), dimA * sizeof(float));
-            Buffer.MemoryCopy(bPtr + bIdx * dimB, outPtr + bIdx * dimOut + dimA, dimB * sizeof(float), dimB * sizeof(float));
         }
 
         return output;

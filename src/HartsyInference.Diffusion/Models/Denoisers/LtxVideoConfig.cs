@@ -6,16 +6,12 @@ public sealed record LtxVideoConfig
     /// <summary>Transformer I/O channels (= VAE latent channels; patch_size 1 → no extra patchify).</summary>
     public int InChannels { get; init; } = 128;
 
-    /// <summary>Output channels.</summary>
     public int OutChannels { get; init; } = 128;
 
-    /// <summary>Attention heads.</summary>
     public int NumHeads { get; init; } = 32;
 
-    /// <summary>Per-head dim.</summary>
     public int HeadDim { get; init; } = 64;
 
-    /// <summary>Inner model dim (<c>NumHeads × HeadDim</c>).</summary>
     public int InnerDim => NumHeads * HeadDim;
 
     /// <summary>Cross-attention dim (T5 features after caption projection).</summary>
@@ -33,7 +29,6 @@ public sealed record LtxVideoConfig
     /// <summary>QK-RMSNorm epsilon (across-heads, affine).</summary>
     public float QkNormEps { get; init; } = 1e-5f;
 
-    /// <summary>RoPE base θ.</summary>
     public float RopeTheta { get; init; } = 10000.0f;
 
     /// <summary>RoPE base frame count (normalizer for the temporal axis).</summary>
@@ -46,16 +41,13 @@ public sealed record LtxVideoConfig
     public int RopeBaseWidth { get; init; } = 2048;
 
     // ── VAE / spatial-temporal compression (for the pipeline) ──
-    /// <summary>VAE spatial compression factor.</summary>
     public int VaeSpatialCompression { get; init; } = 32;
 
-    /// <summary>VAE temporal compression factor.</summary>
     public int VaeTemporalCompression { get; init; } = 8;
 
     /// <summary>Default flow-match timestep shift.</summary>
     public float TimestepShift { get; init; } = 1.0f;
 
-    /// <summary>Default sampling steps.</summary>
     public int NumInferenceSteps { get; init; } = 50;
 
     /// <summary>Default CFG guidance scale.</summary>

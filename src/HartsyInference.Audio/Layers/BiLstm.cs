@@ -75,17 +75,17 @@ internal sealed unsafe class BiLstm
 
         // Reusable per-step buffers.
         Tensor stepIn = new(new TensorShape(batch, InputDim), DType.F32);
-        Tensor hFwd = ZeroAllocate(batch, HiddenDim);
-        Tensor cFwd = ZeroAllocate(batch, HiddenDim);
-        Tensor hBwd = ZeroAllocate(batch, HiddenDim);
-        Tensor cBwd = ZeroAllocate(batch, HiddenDim);
+        Tensor hFwd = RnnOps.ZeroAllocate(batch, HiddenDim);
+        Tensor cFwd = RnnOps.ZeroAllocate(batch, HiddenDim);
+        Tensor hBwd = RnnOps.ZeroAllocate(batch, HiddenDim);
+        Tensor cBwd = RnnOps.ZeroAllocate(batch, HiddenDim);
 
         try
         {
             // Forward sweep: t = 0..T-1.
             for (int step = 0; step < t; step++)
             {
-                LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
+                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
                 (Tensor hNew, Tensor cNew) = _fwd.Step(backend, stepIn, hFwd, cFwd, batch);
                 hFwd.Dispose();
                 cFwd.Dispose();
@@ -97,7 +97,7 @@ internal sealed unsafe class BiLstm
             // Backward sweep: t = T-1..0.
             for (int step = t - 1; step >= 0; step--)
             {
-                LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
+                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
                 (Tensor hNew, Tensor cNew) = _bwd.Step(backend, stepIn, hBwd, cBwd, batch);
                 hBwd.Dispose();
                 cBwd.Dispose();
@@ -122,29 +122,6 @@ internal sealed unsafe class BiLstm
     {
         foreach (Tensor t in _fwd.EnumerateWeights()) yield return t;
         foreach (Tensor t in _bwd.EnumerateWeights()) yield return t;
-    }
-
-    private static Tensor ZeroAllocate(int batch, int dim)
-    {
-        Tensor t = new(new TensorShape(batch, dim), DType.F32);
-        long n = t.ElementCount;
-        float* p = (float*)t.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = 0f;
-        return t;
-    }
-
-    /// <summary>Copies <c>x[:, step, :]</c> from a <c>[B, T, D]</c> input into a
-    /// <c>[B, D]</c> step buffer. For each batch row the stride is <c>D</c> floats —
-    /// a single contiguous span per batch entry.</summary>
-    private static void LoadTimestep(float* xPtr, Tensor stepIn, int batch, int t, int dim, int step)
-    {
-        float* dp = (float*)stepIn.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int srcBase = (b * t + step) * dim;
-            int dstBase = b * dim;
-            for (int k = 0; k < dim; k++) dp[dstBase + k] = xPtr[srcBase + k];
-        }
     }
 
     /// <summary>Writes a <c>[B, hidden]</c> step output into either the left half

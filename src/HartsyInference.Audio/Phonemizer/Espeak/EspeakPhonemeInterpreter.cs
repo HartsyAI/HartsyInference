@@ -2,11 +2,7 @@ using System.Text;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Interprets a phoneme's bytecode program from <c>phonindex</c> (ported from <c>InterpretPhoneme</c> +
-/// <c>InterpretCondition</c> in espeak-ng synthdata.c). Over a phoneme-list context it evaluates the program's
-/// conditions (prev/next phoneme type, stress, word boundaries) and produces the allophone-change parameters
-/// (CHANGE/INSERT/REPLACE/APPEND) and the IPA name. The audio-synthesis instructions are walked for control flow but
-/// their data is ignored.</summary>
+/// <summary>Interprets a phoneme's bytecode program from <c>phonindex</c> (ported from <c>InterpretPhoneme</c> + <c>InterpretCondition</c> in espeak-ng synthdata.c); over a phoneme-list context it evaluates the program's conditions (prev/next phoneme type, stress, word boundaries) and produces the allophone-change parameters (CHANGE/INSERT/REPLACE/APPEND) and the IPA name. Audio-synthesis instructions are walked for control flow but their data is ignored.</summary>
 internal sealed class EspeakPhonemeInterpreter
 {
     private readonly EspeakPhonemeTable _phon;
@@ -20,9 +16,7 @@ internal sealed class EspeakPhonemeInterpreter
         _pause = phonemeTable.TryGet(1, out EspeakPhoneme p) ? p : default; // code 1 is the pause/NULL phoneme
     }
 
-    /// <summary>Runs the program for <paramref name="list"/>[<paramref name="pos"/>] (with neighbours as context),
-    /// filling <paramref name="phdata"/>. <paramref name="tr"/> false skips the language-dependent stress ChangeIf
-    /// (matches espeak passing <c>tr == NULL</c> for the IPA render pass).</summary>
+    /// <summary>Runs the program for <paramref name="list"/>[<paramref name="pos"/>] (with neighbours as context), filling <paramref name="phdata"/>; <paramref name="tr"/> false skips the language-dependent stress ChangeIf (matches espeak passing <c>tr == NULL</c> for the IPA render pass).</summary>
     public void Interpret(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int control, bool tr, EspeakPhonemeData phdata)
     {
         phdata.Reset();

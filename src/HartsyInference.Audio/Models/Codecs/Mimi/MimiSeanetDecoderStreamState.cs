@@ -2,16 +2,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Per-utterance carried state for <see cref="MimiSeanetDecoder"/>'s streaming decode: the last
-/// <c>kernel-1</c> input samples of every causal conv (so a new chunk's left context is the real preceding audio
-/// instead of implicit zero-padding) and the un-emitted overlap-add tail of every upsample
-/// <c>ConvTranspose1d</c> stage. Slots are keyed positionally in call order (in-conv, per-stage r1, out-conv for
+/// <summary>Per-utterance carried state for <see cref="MimiSeanetDecoder"/>'s streaming decode: the last <c>kernel-1</c> input samples of every causal conv, plus the un-emitted overlap-add tail of every upsample <c>ConvTranspose1d</c> stage.</summary>
+/// <remarks>Slots are keyed positionally in call order (in-conv, per-stage r1, out-conv for
 /// conv history; per-stage upsample for transpose history) — <see cref="MimiSeanetDecoder"/> always touches them
 /// in the same fixed order, so a simple index counter is enough; no dictionary needed.
 ///
 /// <para>All slots start null, which reads as "no history yet" — the same as the non-streaming path's implicit
 /// zero-padding — so the very first chunk of an utterance produces byte-identical output to today's
-/// <see cref="MimiSeanetDecoder.Forward"/> without any special-casing.</para></summary>
+/// <see cref="MimiSeanetDecoder.Forward"/> without any special-casing.</para></remarks>
 internal sealed unsafe class MimiSeanetDecoderStreamState : IDisposable
 {
     private readonly Tensor?[] _convTail = new Tensor?[6];      // in-conv, r1 x4, out-conv (r2 is kernel=1, needs none)
@@ -21,13 +19,11 @@ internal sealed unsafe class MimiSeanetDecoderStreamState : IDisposable
     private readonly Tensor?[] _transposeTail = new Tensor?[5];
     private int _disposed;
 
-    /// <summary>Prepends <paramref name="kernel"/><c>-1</c> samples of left context to <paramref name="input"/>
-    /// along the time axis — the carried tail from the previous chunk, or zeros on an utterance's first chunk
-    /// (matching the non-streaming path's implicit zero-padding exactly, so chunk 1 needs no special-casing
-    /// anywhere else). Returns a tensor the caller owns and must dispose; also updates the stored tail to the
+    /// <summary>Prepends <paramref name="kernel"/><c>-1</c> samples of left context to <paramref name="input"/> along the time axis — the carried tail from the previous chunk, or zeros on an utterance's first chunk.</summary>
+    /// <remarks>Returns a tensor the caller owns and must dispose; also updates the stored tail to the
     /// last <c>kernel-1</c> samples of the AUGMENTED (context+input) sequence — not of <paramref name="input"/>
     /// alone, which would be wrong when <paramref name="t"/> is smaller than the history length, since then part
-    /// of the next chunk's context must still come from what was carried into THIS call.</summary>
+    /// of the next chunk's context must still come from what was carried into THIS call.</remarks>
     public Tensor Augment(int slot, Tensor input, int inDim, int t, int kernel, int batch)
     {
         ThrowIfDisposed();
@@ -82,13 +78,9 @@ internal sealed unsafe class MimiSeanetDecoderStreamState : IDisposable
         return augmented;
     }
 
-    /// <summary>Adds this stage's carried overlap tail (or nothing, on the first chunk) into the first
-    /// <c>overlap</c> samples of <paramref name="rawFull"/> (the UNCROPPED transpose-conv output, length
-    /// <c>tUp+overlap</c>), in place. Then splits it: returns the first <paramref name="tUp"/> samples as the
-    /// emitted chunk (a fresh tensor the caller owns) and stores the last <paramref name="overlap"/> samples as
-    /// the new tail for next time — this is the overlap-add reconstruction of what a single monolithic
-    /// <c>ConvTranspose1d</c> call over the whole utterance would have produced, split across chunk boundaries.
-    /// Disposes <paramref name="rawFull"/>.</summary>
+    /// <summary>Adds this stage's carried overlap tail into the first <c>overlap</c> samples of <paramref name="rawFull"/> (the UNCROPPED transpose-conv output, length <c>tUp+overlap</c>) in place, then splits it into the emitted chunk plus the new carried tail; disposes <paramref name="rawFull"/>.</summary>
+    /// <remarks>This is the overlap-add reconstruction of what a single monolithic
+    /// <c>ConvTranspose1d</c> call over the whole utterance would have produced, split across chunk boundaries.</remarks>
     public Tensor SplitTransposeOutput(int slot, Tensor rawFull, int outCh, int tUp, int overlap, int batch)
     {
         ThrowIfDisposed();

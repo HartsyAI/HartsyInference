@@ -62,7 +62,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         _patchW2d = WanDitOps.Reshape2d(pw, _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -166,7 +166,8 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return outVel;
     }
 
-    private static Tensor CloneCpu(Tensor src)
+    /// <summary>Fresh host F32 copy of a tensor (parity-tap snapshot; a DataPointer read syncs CUDA tensors to host).</summary>
+    internal static Tensor CloneCpu(Tensor src)
     {
         Tensor dst = new Tensor(src.Shape, DType.F32);
         new ReadOnlySpan<float>((float*)src.DataPointer, (int)src.ElementCount)
@@ -198,7 +199,8 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return mask;
     }
 
-    private static Tensor SliceFrames(Tensor tokens, int skipFrames, int frames, int tokensPerFrame, int dim)
+    /// <summary>Copies frames [skipFrames, skipFrames+frames) of [T·tokensPerFrame, dim] host tokens into a fresh tensor.</summary>
+    internal static Tensor SliceFrames(Tensor tokens, int skipFrames, int frames, int tokensPerFrame, int dim)
     {
         Tensor o = new Tensor(new TensorShape(frames * tokensPerFrame, dim), DType.F32);
         long offset = (long)skipFrames * tokensPerFrame * dim;
@@ -207,14 +209,13 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return o;
     }
 
-    private static Tensor SliceRows(Tensor rows, int skip, int count, int dim)
+    /// <summary>Copies rows [skip, skip+count) of a [T, dim] host tensor into a fresh tensor.</summary>
+    internal static Tensor SliceRows(Tensor rows, int skip, int count, int dim)
     {
         Tensor o = new Tensor(new TensorShape(count, dim), DType.F32);
         Buffer.MemoryCopy((float*)rows.DataPointer + (long)skip * dim, (float*)o.DataPointer, (long)count * dim * 4, (long)count * dim * 4);
         return o;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 
     public void Dispose()
     {

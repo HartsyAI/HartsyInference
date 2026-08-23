@@ -6,8 +6,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native embedding route. One-shot, no step-preview progress (same shape as <see cref="AudioEndpoints"/>),
-/// so no <c>/stream</c> variant.</summary>
+/// <summary>Native embedding route. One-shot, no step-preview progress (same shape as <see cref="AudioEndpoints"/>), so no <c>/stream</c> variant.</summary>
 public static class EmbeddingEndpoints
 {
     /// <summary>Maps <c>/v1/native/embeddings</c>.</summary>

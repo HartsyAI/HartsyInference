@@ -4,21 +4,17 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Causal Conv1D with built-in streaming-cache support. Wraps
-/// <see cref="VibeVoiceOps.CausalConv1d"/> so that successive calls on contiguous chunks
-/// produce the same output as a single call on the concatenated input.
-///
-/// <para>Each instance carries a deterministic <c>LayerId</c> string assigned at
+/// <summary>Causal Conv1D with built-in streaming-cache support: successive calls on contiguous chunks produce the same output as a single call on the concatenated input.</summary>
+/// <remarks>Each instance carries a deterministic <c>LayerId</c> string assigned at
 /// construction (e.g. <c>"enc.stage3.block2.mixer"</c>) that keys into the per-layer
 /// <see cref="VibeVoiceTokenizerStreamingCache"/>. The cache buffer per (layer, sample)
 /// holds the last <c>context_size = (kernel-1)*dilation - (stride-1)</c> INPUT samples;
 /// when a new chunk arrives we prepend the cached history, run the conv with no extra
 /// left padding (the history IS the padding), then stash the trailing
-/// <c>context_size</c> samples back into the cache.</para>
+/// <c>context_size</c> samples back into the cache.
 ///
-/// <para>Non-streaming mode (<paramref name="useCache"/> = false): forwards to
-/// <see cref="VibeVoiceOps.CausalConv1d"/> with the standard left-pad budget, matching
-/// the published Python <c>SConv1d._forward_non_streaming</c>.</para></summary>
+/// <para>Non-streaming mode routes through <see cref="IBackend.Conv1d"/> with the standard
+/// left-pad budget, matching the published Python <c>SConv1d._forward_non_streaming</c>.</para></remarks>
 internal sealed unsafe class SConv1d
 {
     public string LayerId { get; }
@@ -30,8 +26,7 @@ internal sealed unsafe class SConv1d
     public int Groups { get; }
     public bool Bias { get; }
 
-    /// <summary><c>(kernel-1)*dilation - (stride-1)</c> — the per-call left-pad budget,
-    /// also the streaming context size carried between chunks.</summary>
+    /// <summary><c>(kernel-1)*dilation - (stride-1)</c> — the per-call left-pad budget, also the streaming context size carried between chunks.</summary>
     public int ContextSize => (KernelSize - 1) * Dilation - (Stride - 1);
 
     private Tensor? _weight;
@@ -59,10 +54,8 @@ internal sealed unsafe class SConv1d
         if (Bias) _bias = WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.bias"]);
     }
 
-    /// <summary>Non-streaming forward. Input <c>[B, C_in, T_in]</c>, output
-    /// <c>[B, C_out, T_out]</c>. T_out depends on stride and the right-pad budget. Routed to
-    /// <see cref="IBackend.Conv1d"/> (GPU-resident) — the causal left-pad budget and the
-    /// stride-alignment right-pad map directly onto its asymmetric <c>padLeft/padRight</c>.</summary>
+    /// <summary>Non-streaming forward, routed to <see cref="IBackend.Conv1d"/>'s asymmetric <c>padLeft/padRight</c> for the causal left-pad and stride-alignment right-pad.</summary>
+    /// <returns><c>[B, C_out, T_out]</c>; T_out depends on stride and the right-pad budget.</returns>
     public Tensor Forward(IBackend backend, Tensor input, int batch, int tIn)
     {
         if (_weight is null) throw new InvalidOperationException($"SConv1d '{LayerId}' weights not loaded.");
@@ -76,15 +69,11 @@ internal sealed unsafe class SConv1d
         return output;
     }
 
-    /// <summary>Streaming forward. Prepends per-sample cached history, runs the conv with
-    /// zero additional left pad, stashes the new trailing context. Output corresponds to
-    /// the new input chunk only.
-    ///
-    /// <para>For chunk-stride alignment we use NO right-pad (<c>extraRight = 0</c>) — the
-    /// streaming forward intentionally drops a few trailing samples per chunk and lets the
-    /// next chunk's cached history (plus its own new samples) recover them. This matches
-    /// the published Python behavior where <c>self.conv(input_with_context)</c> is called
-    /// directly without an explicit pad step.</para></summary>
+    /// <summary>Streaming forward: prepends per-sample cached history, runs the conv with zero additional left pad, then stashes the new trailing context; output corresponds to the new input chunk only.</summary>
+    /// <remarks>Uses NO right-pad (<c>extraRight = 0</c>) for chunk-stride alignment — the streaming forward
+    /// intentionally drops a few trailing samples per chunk and lets the next chunk's cached history (plus its
+    /// own new samples) recover them. This matches the published Python behavior where
+    /// <c>self.conv(input_with_context)</c> is called directly without an explicit pad step.</remarks>
     public Tensor ForwardStreaming(IBackend backend, Tensor input, int batch, int tIn, VibeVoiceTokenizerStreamingCache cache, ReadOnlySpan<int> sampleIndices)
     {
         if (_weight is null) throw new InvalidOperationException($"SConv1d '{LayerId}' weights not loaded.");

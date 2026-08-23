@@ -4,12 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API;
 
-/// <summary>The server's <see cref="System.Diagnostics.Metrics.Meter"/> and the counters/gauges recorded against
-/// it. Registered as a singleton and wired to <c>AddOpenTelemetry().WithMetrics(b => b.AddMeter(MeterName)...)</c>
-/// in <c>HartsyInferenceServiceExtensions.AddHartsyInference</c>; scraped in Prometheus text format at
-/// <c>GET /metrics</c>. HTTP request duration/count/in-flight come for free from
-/// <c>AddAspNetCoreInstrumentation()</c> — this class only adds domain-specific series ASP.NET Core's own
-/// instrumentation can't know about.</summary>
+/// <summary>The server's <see cref="System.Diagnostics.Metrics.Meter"/> and the counters/gauges recorded against it. Registered as a singleton and wired to <c>AddOpenTelemetry().WithMetrics(b => b.AddMeter(MeterName)...)</c> in <c>HartsyInferenceServiceExtensions.AddHartsyInference</c>; scraped in Prometheus text format at <c>GET /metrics</c>. HTTP request duration/count/in-flight come for free from <c>AddAspNetCoreInstrumentation()</c> — this class only adds domain-specific series ASP.NET Core's own instrumentation can't know about.</summary>
 public sealed class ApiMetrics
 {
     public const string MeterName = "HartsyInference.API";

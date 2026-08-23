@@ -1,8 +1,7 @@
 namespace HartsyInference.Audio.Models.LanguageModels.Qwen2;
 
-/// <summary>Configuration for a Qwen2 / Qwen2.5 autoregressive language model. Mirrors the
-/// HuggingFace <c>transformers.models.qwen2.configuration_qwen2.Qwen2Config</c> fields we
-/// actually use at inference. Qwen2's defining structural features vs Llama:
+/// <summary>Configuration for a Qwen2 / Qwen2.5 autoregressive language model, mirroring the HuggingFace <c>transformers.models.qwen2.configuration_qwen2.Qwen2Config</c> fields used at inference.</summary>
+/// <remarks>Qwen2's defining structural features vs Llama:
 /// <list type="bullet">
 ///   <item><b>Q/K/V projections carry biases</b> (Llama / Mistral / Qwen3 do not).</item>
 ///   <item><b>O projection has no bias</b>.</item>
@@ -14,7 +13,7 @@ namespace HartsyInference.Audio.Models.LanguageModels.Qwen2;
 /// </list>
 ///
 /// <para>VibeVoice wraps a Qwen2.5 LM and reuses several existing token IDs
-/// (<c>&lt;|vision_start|&gt;</c> etc.) as TTS control tokens — no vocab extension.</para></summary>
+/// (<c>&lt;|vision_start|&gt;</c> etc.) as TTS control tokens — no vocab extension.</para></remarks>
 public sealed record Qwen2Config
 {
     /// <summary>Hidden dimension. 1536 / 3584 / 896 for VibeVoice 1.5B / 7B / 0.5B.</summary>
@@ -26,60 +25,46 @@ public sealed record Qwen2Config
     /// <summary>Number of attention query heads. 12 / 28 / 14.</summary>
     public required int NumAttentionHeads { get; init; }
 
-    /// <summary>Number of attention key/value heads for GQA. 2 / 4 / 2 — the K/V cache
-    /// shape uses this, not <see cref="NumAttentionHeads"/>.</summary>
+    /// <summary>Number of attention key/value heads for GQA (2 / 4 / 2) — the K/V cache shape uses this, not <see cref="NumAttentionHeads"/>.</summary>
     public required int NumKeyValueHeads { get; init; }
 
     /// <summary>SwiGLU FFN inner dimension. 8 960 / 18 944 / 4 864.</summary>
     public required int IntermediateSize { get; init; }
 
-    /// <summary>Vocabulary size. 151 936 (Qwen2.5-1.5B / 0.5B) or 152 064 (7B). VibeVoice
-    /// does not extend the vocab.</summary>
+    /// <summary>Vocabulary size — 151 936 (Qwen2.5-1.5B / 0.5B) or 152 064 (7B); VibeVoice does not extend the vocab.</summary>
     public required int VocabSize { get; init; }
 
-    /// <summary>Maximum positions the RoPE table can address. 65 536 for the 1.5B
-    /// long-context preset; 32 768 for 7B and 0.5B. Acts as a hard cap on prompt + AR
-    /// generation length.</summary>
+    /// <summary>Maximum positions the RoPE table can address (65 536 for the 1.5B long-context preset, 32 768 for 7B and 0.5B); a hard cap on prompt + AR generation length.</summary>
     public required int MaxPositionEmbeddings { get; init; }
 
     /// <summary>RoPE base frequency. 1e6 across Qwen2.5 (long-context preset).</summary>
     public float RopeTheta { get; init; } = 1_000_000f;
 
-    /// <summary>Optional RoPE scaling (e.g. Llama-3 NTK-by-parts). Null = no scaling (the Qwen2.5 default).
-    /// Chatterbox's T3 ("Llama_520M") sets Llama-3 scaling (factor 8) on its theta-500000 RoPE.</summary>
+    /// <summary>Optional RoPE scaling (e.g. Llama-3 NTK-by-parts); null is the Qwen2.5 default (no scaling), while Chatterbox's T3 ("Llama_520M") sets Llama-3 scaling (factor 8) on its theta-500000 RoPE.</summary>
     public HartsyInference.Core.Rope.RopeScaling? RopeScaling { get; init; }
 
     /// <summary>RMSNorm epsilon. 1e-6 across Qwen2.5.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 
-    /// <summary>RoPE pairing convention. <c>SplitHalf</c> for Qwen2/Llama; <c>Interleaved</c> for the GPT-J /
-    /// fish-speech (complex <c>view_as_complex</c>) convention.</summary>
+    /// <summary>RoPE pairing convention — <c>SplitHalf</c> for Qwen2/Llama, <c>Interleaved</c> for the GPT-J / fish-speech (complex <c>view_as_complex</c>) convention.</summary>
     public HartsyInference.LLM.Transformer.RopeStyle Rope { get; init; } = HartsyInference.LLM.Transformer.RopeStyle.SplitHalf;
 
-    /// <summary>Whether Q/K/V projections carry biases. <c>true</c> for Qwen2/Qwen2.5 (its defining
-    /// feature). Set <c>false</c> to reuse this exact transformer for <b>Llama-3.2</b>-family backbones
-    /// (e.g. Sesame CSM), which have no attention bias. The O projection never has a bias either way.</summary>
+    /// <summary>Whether Q/K/V projections carry biases (true for Qwen2/Qwen2.5); set false to reuse this exact transformer for <b>Llama-3.2</b>-family backbones (e.g. Sesame CSM), which have no attention bias — the O projection never has a bias either way.</summary>
     public bool AttentionBias { get; init; } = true;
 
-    /// <summary>Whether <c>lm_head.weight</c> is tied to <c>embed_tokens.weight</c>.
-    /// True for 1.5B / 0.5B, false for 7B.</summary>
+    /// <summary>Whether <c>lm_head.weight</c> is tied to <c>embed_tokens.weight</c> (true for 1.5B / 0.5B, false for 7B).</summary>
     public bool TieWordEmbeddings { get; init; } = true;
 
-    /// <summary>Route quantized weights through the low-VRAM <c>QuantizedMatMul</c> (weight stays compressed,
-    /// transient dequant, no cached F16 copy). Set for big quant models on small cards (YuE 7B Q4_K on 12 GB) so the
-    /// prefill dequant doesn't OOM the F16 cast-cache. Default false = the global <c>HARTSY_LOWVRAM_QUANT</c> env.</summary>
+    /// <summary>Route quantized weights through the low-VRAM <c>QuantizedMatMul</c> (weight stays compressed, transient dequant, no cached F16 copy) — set for big quant models on small cards (YuE 7B Q4_K on 12 GB) so the prefill dequant doesn't OOM the F16 cast-cache; default false falls back to the global <c>HARTSY_LOWVRAM_QUANT</c> env.</summary>
     public bool LowVramQuant { get; init; }
 
-    /// <summary>Per-head dimension. Inferred from <see cref="HiddenSize"/> /
-    /// <see cref="NumAttentionHeads"/>. 128 across all VibeVoice variants.</summary>
+    /// <summary>Per-head dimension, <see cref="HiddenSize"/> / <see cref="NumAttentionHeads"/> — 128 across all VibeVoice variants.</summary>
     public int HeadDim => HiddenSize / NumAttentionHeads;
 
-    /// <summary>Total K and V projection output dim — <see cref="NumKeyValueHeads"/> ×
-    /// <see cref="HeadDim"/>. Smaller than <see cref="HiddenSize"/> due to GQA.</summary>
+    /// <summary>Total K and V projection output dim — <see cref="NumKeyValueHeads"/> × <see cref="HeadDim"/>, smaller than <see cref="HiddenSize"/> due to GQA.</summary>
     public int KvHiddenSize => NumKeyValueHeads * HeadDim;
 
-    /// <summary>Number of query heads per KV group — used to repeat the K/V tensors before
-    /// SDPA so the multi-head attention sees the right shape.</summary>
+    /// <summary>Number of query heads per KV group — used to repeat the K/V tensors before SDPA so the multi-head attention sees the right shape.</summary>
     public int KvGroupSize => NumAttentionHeads / NumKeyValueHeads;
 
     /// <summary>BOS / EOS / pad token IDs (informational — the AR loop owns sampling).</summary>

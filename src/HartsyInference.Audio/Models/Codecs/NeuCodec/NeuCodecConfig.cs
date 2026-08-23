@@ -1,14 +1,14 @@
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>Configuration for NeuCodec (Neuphonic) — a single-codebook 0.8 kbps neural audio codec used by
-/// NeuTTS Air. 16 kHz in / 24 kHz out, 50 Hz token rate, one FSQ codebook of <c>4^8 = 65536</c> codes.
+/// <summary>Configuration for NeuCodec (Neuphonic) — a single-codebook 0.8 kbps neural audio codec used by NeuTTS Air.</summary>
+/// <remarks>16 kHz in / 24 kHz out, 50 Hz token rate, one FSQ codebook of <c>4^8 = 65536</c> codes.
 /// The decoder (the path TTS needs) is Vocos-style: FSQ de-quant → 1024-d backbone (Conv embed + ResNet
 /// pre-net + 12 RoPE transformer blocks + ResNet post-net) → iSTFT head (no transposed-conv upsampling;
 /// the 480-sample hop on the 24 kHz grid does the rate expansion). See
 /// <c>docs/Research/KYUTAI_DSM_ARCHITECTURE.md</c>'s sibling notes; lineage is X-Codec2 / BigCodec.
 ///
 /// <para><b>Reuse:</b> FSQ index→codes via <c>Fsq.Dequantize</c>; iSTFT head via <c>IStft.Apply</c>; conv/
-/// norm/attention via <c>IBackend</c> ops. Net-new: the transformer backbone + ResNet blocks.</para></summary>
+/// norm/attention via <c>IBackend</c> ops. Net-new: the transformer backbone + ResNet blocks.</para></remarks>
 public sealed record NeuCodecConfig
 {
     public int InputSampleRate { get; init; } = 16_000;
@@ -41,9 +41,10 @@ public sealed record NeuCodecConfig
     public int NFft { get; init; } = 1_920;               // hop_length * 4
     public int Win { get; init; } = 1_920;
 
-    /// <summary>Single codebook of 65536 codes. The reference constructor's nominal VQ args are
-    /// codebook_size 16384 / codebook_dim 16, but those are unused under FSQ; the effective FSQ count
-    /// (product of <see cref="FsqLevels"/> = 65536) is what we store here.</summary>
+    /// <summary>Single codebook of 65536 codes — the effective FSQ count, not the reference constructor's nominal VQ args.</summary>
+    /// <remarks>The reference constructor's nominal VQ args are codebook_size 16384 / codebook_dim 16, but those
+    /// are unused under FSQ; the effective FSQ count (product of <see cref="FsqLevels"/> = 65536) is what we
+    /// store here.</remarks>
     public int CodebookSize { get; init; } = 65_536;
 
     public static NeuCodecConfig Default => new();

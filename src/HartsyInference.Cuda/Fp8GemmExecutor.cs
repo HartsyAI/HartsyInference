@@ -32,8 +32,7 @@ public sealed unsafe class Fp8GemmExecutor : IDisposable
     /// <summary>Compute capability detected at construction.</summary>
     public int SmMinor { get; }
 
-    /// <summary>Initializes the executor. Allocates the cuBLASLt handle + workspace if SM ≥ 8.9; otherwise leaves
-    /// itself in an unsupported state without allocating any GPU resources.</summary>
+    /// <summary>Initializes the executor. Allocates the cuBLASLt handle + workspace if SM ≥ 8.9; otherwise leaves itself in an unsupported state without allocating any GPU resources.</summary>
     public Fp8GemmExecutor(int smMajor, int smMinor)
     {
         SmMajor = smMajor;
@@ -50,8 +49,7 @@ public sealed unsafe class Fp8GemmExecutor : IDisposable
         _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
-    /// <summary>Runs an FP8 Linear GEMM on Ada+ matching <see cref="CudaBackend"/>'s row-major convention:
-    /// <c>output[M, N] = input[M, K] · weight^T[N, K]</c>.</summary>
+    /// <summary>Runs an FP8 Linear GEMM on Ada+ matching <see cref="CudaBackend"/>'s row-major convention: <c>output[M, N] = input[M, K] · weight^T[N, K]</c>.</summary>
     /// <remarks>Per-tensor weight scale is folded into the cuBLAS alpha (a separate device pointer for the
     /// descriptor's A_SCALE_POINTER attribute could be wired later for true cublasLt-style per-tensor scaling,
     /// but for the typical ComfyUI fp8_scaled / BFL distilled case where every weight already has a single

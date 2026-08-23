@@ -3,8 +3,7 @@ using HartsyInference.Core.Schedulers;
 namespace HartsyInference.Diffusion.Schedulers;
 
 /// <summary>Creates the requested noise scheduler by name. The legacy short-form names accepted here (<c>"ddim"</c>, <c>"dpm++2m"</c> / <c>"dpmpp2m"</c>, <c>"euler"</c>, <c>"lcm"</c>) match what the SD1.5 / SDXL pipelines historically accepted; new pipelines should route their <c>request.Scheduler</c> string through this helper instead of duplicating the switch.
-/// <para>Flow-matching transformers (Flux, SD3, Lumina2 family) use <see cref="FlowMatchEulerDiscreteScheduler"/> directly with dynamic-shift configuration; they don't go through this factory because their scheduler choice isn't user-selectable.</para>
-/// </summary>
+/// <para>Flow-matching transformers (Flux, SD3, Lumina2 family) use <see cref="FlowMatchEulerDiscreteScheduler"/> directly with dynamic-shift configuration; they don't go through this factory because their scheduler choice isn't user-selectable.</para></summary>
 public static class SchedulerFactory
 {
     /// <summary>Every name <see cref="Create"/> resolves to something other than the Euler default. Callers validate

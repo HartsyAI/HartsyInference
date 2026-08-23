@@ -7,15 +7,7 @@ using RequestConditioning = HartsyInference.Engine.Requests.ControlNetConditioni
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Resolves the request's ControlNet layers into engine <see cref="EngineConditioning"/>s for the UNet families
-/// (SDXL / SD 1.5). Each layer names a checkpoint and carries an ALREADY-PREPROCESSED hint image — Canny/Depth/OpenPose
-/// annotation stays host-side — so this loads the adapter, packs the hint into a <c>[1, 3, H, W]</c> tensor in
-/// <c>[0, 1]</c>, and wires strength + the step window. Pipelines stack multiple layers by summing residuals.
-///
-/// <para><b>Union checkpoints</b> (xinsir controlnet-union-sdxl, detected via
-/// <see cref="ControlNetConfig.UnionControlTypeCount"/>) need a control type per slot. Since the request contract does
-/// not carry one, supply <paramref name="unionTypeSelector"/> to map a slot index onto the host's union-type string;
-/// without it, union slots default to the thin-line (canny) type with a log.</para></summary>
+/// <summary>Resolves the request's ControlNet layers into engine <see cref="EngineConditioning"/>s for the UNet families (SDXL / SD 1.5). Each layer names a checkpoint and carries an ALREADY-PREPROCESSED hint image — Canny/Depth/OpenPose annotation stays host-side — so this loads the adapter, packs the hint into a <c>[1, 3, H, W]</c> tensor in <c>[0, 1]</c>, and wires strength + the step window. Pipelines stack multiple layers by summing residuals. <para><b>Union checkpoints</b> (xinsir controlnet-union-sdxl, detected via <see cref="ControlNetConfig.UnionControlTypeCount"/>) need a control type per slot. Since the request contract does not carry one, supply <paramref name="unionTypeSelector"/> to map a slot index onto the host's union-type string; without it, union slots default to the thin-line (canny) type with a log.</para></summary>
 public static class ControlNetResolver
 {
     /// <summary>One generation's resolved ControlNet state: owns both the loaded adapters and the hint tensors.</summary>
@@ -118,9 +110,7 @@ public static class ControlNetResolver
         };
     }
 
-    /// <summary>Maps a host union-type string (values follow the xinsir training list) onto the checkpoint's control-type
-    /// index. Null / "auto" defaults to the thin-line (canny) type. Tile/Repaint need the 8-type ProMax revision; the
-    /// 6-type standard union is rejected here with a clear message instead of an out-of-range engine error.</summary>
+    /// <summary>Maps a host union-type string (values follow the xinsir training list) onto the checkpoint's control-type index. Null / "auto" defaults to the thin-line (canny) type. Tile/Repaint need the 8-type ProMax revision; the 6-type standard union is rejected here with a clear message instead of an out-of-range engine error.</summary>
     private static SdxlUnionControlType ResolveUnionType(string? requested, int slot, int numControlTypes, string modelName, Action<string> log)
     {
         string typeStr = string.IsNullOrWhiteSpace(requested) ? "auto" : requested.Trim().ToLowerInvariant();

@@ -23,9 +23,7 @@ public sealed class ClipTokenizer : IDisposable
     /// <summary>End-of-word suffix used by CLIP's BPE merges.</summary>
     private const string EndOfWordSuffix = "</w>";
 
-    /// <summary>OpenAI CLIP pre-tokenization regex (mirrors `huggingface/transformers` <c>CLIPTokenizer</c>):
-    /// matches the special tokens, English contractions, letter sequences, single digits, and runs of
-    /// non-whitespace symbols. Letter sequences use <c>\p{L}</c> so unicode letters are kept together.</summary>
+    /// <summary>OpenAI CLIP pre-tokenization regex (mirrors `huggingface/transformers` <c>CLIPTokenizer</c>): matches the special tokens, English contractions, letter sequences, single digits, and runs of non-whitespace symbols. Letter sequences use <c>\p{L}</c> so unicode letters are kept together.</summary>
     private static readonly Regex _clipPreTokenRegex = new(
         @"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -40,10 +38,7 @@ public sealed class ClipTokenizer : IDisposable
     private readonly Tokenizer _tokenizer;
     private int _disposed;
 
-    /// <summary>Creates a CLIP tokenizer using the canonical OpenAI CLIP vocab/merges
-    /// embedded in this assembly. This is the right constructor for SD 1.5, SDXL,
-    /// SD3, Flux, and the SDXL refiner — they all share the same 49,408-token
-    /// CLIP BPE.</summary>
+    /// <summary>Creates a CLIP tokenizer using the canonical OpenAI CLIP vocab/merges embedded in this assembly. This is the right constructor for SD 1.5, SDXL, SD3, Flux, and the SDXL refiner — they all share the same 49,408-token CLIP BPE.</summary>
     public ClipTokenizer()
     {
         using Stream vocabStream = EmbeddedTokenizerResources.OpenClipVocab();

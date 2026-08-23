@@ -4,8 +4,7 @@ using HartsyInference.Cuda;
 
 namespace HartsyInference.Engine.Placement;
 
-/// <summary>Inputs for one strategy suggestion. <see cref="ModelBytes"/> is the on-disk checkpoint size (0 =
-/// unknown → the planner assumes the model fits one card and only suggests latency/throughput strategies).</summary>
+/// <summary>Inputs for one strategy suggestion. <see cref="ModelBytes"/> is the on-disk checkpoint size (0 = unknown → the planner assumes the model fits one card and only suggests latency/throughput strategies).</summary>
 public sealed record ParallelPlanRequest
 {
     public required Modality Modality { get; init; }
@@ -14,26 +13,16 @@ public sealed record ParallelPlanRequest
     public required IReadOnlyList<GpuLinkInfo> Links { get; init; }
 }
 
-/// <summary>A suggested placement plus the one-line reason that will be logged (greppable
-/// <c>[ParallelPlan]</c>). <see cref="Placement"/> is <see cref="PlacementConfig.Single"/> when the honest
-/// answer is "parallelism does not help here".</summary>
+/// <summary>A suggested placement plus the one-line reason that will be logged (greppable <c>[ParallelPlan]</c>). <see cref="Placement"/> is <see cref="PlacementConfig.Single"/> when the honest answer is "parallelism does not help here".</summary>
 public sealed record ParallelPlan(PlacementConfig Placement, string Reason);
 
-/// <summary>Topology-aware strategy selection: picks fit (sharding/layer-split) vs latency (context/tensor
-/// parallel, CFG-parallel) vs single from the MEASURED verdicts in <c>benchmarks/results/</c> and
-/// <c>docs/PARALLELISM_GUIDE.md</c>, not aspiration. The rules are deliberately conservative — every branch
-/// cites the measurement that justifies it, and anything unproven resolves to the safe choice with a reason
-/// the caller logs. Advisory only: callers apply the returned <see cref="PlacementConfig"/> themselves, and
-/// <see cref="PlacementPlanner.ValidatePlacement"/> still gets the final word.</summary>
+/// <summary>Topology-aware strategy selection: picks fit (sharding/layer-split) vs latency (context/tensor parallel, CFG-parallel) vs single from the MEASURED verdicts in <c>benchmarks/results/</c> and <c>docs/PARALLELISM_GUIDE.md</c>, not aspiration. The rules are deliberately conservative — every branch cites the measurement that justifies it, and anything unproven resolves to the safe choice with a reason the caller logs. Advisory only: callers apply the returned <see cref="PlacementConfig"/> themselves, and <see cref="PlacementPlanner.ValidatePlacement"/> still gets the final word.</summary>
 public static class ParallelPlanner
 {
-    /// <summary>Weight-fit safety factor: activations, casts, and KV/step transients ride on top of the
-    /// checkpoint bytes (measured 1.15-1.2× across the sharding campaign; 1.3 keeps margin).</summary>
+    /// <summary>Weight-fit safety factor: activations, casts, and KV/step transients ride on top of the checkpoint bytes (measured 1.15-1.2× across the sharding campaign; 1.3 keeps margin).</summary>
     private const double FitOverhead = 1.3;
 
-    /// <summary>Minimum SM-count ratio (slowest/fastest) for a pair to count as "balanced" — below this, every
-    /// synchronous parallel step waits on the slow card (measured: the 4090+3060 pair at ~0.36 makes context
-    /// parallelism lose at every geometry).</summary>
+    /// <summary>Minimum SM-count ratio (slowest/fastest) for a pair to count as "balanced" — below this, every synchronous parallel step waits on the slow card (measured: the 4090+3060 pair at ~0.36 makes context parallelism lose at every geometry).</summary>
     private const double BalancedSmRatio = 0.8;
 
     /// <summary>Suggests a placement for the request's modality on the probed topology and logs the decision.</summary>

@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
-/// <summary>Adapter for ERNIE-Image's text encoder. Baidu's <c>text_encoder/config.json</c> describes a Mistral3 ("ministral3") decoder, served by <see cref="ErnieImageLlamaTextEncoder"/> over <see cref="LlamaStyleEncoderConfig.Ministral3B"/>; the interface stays so an alternative encoder can be swapped in without touching the pipeline.
-///
-/// Implementations are responsible for whatever pre/post-processing the ERNIE pipeline expects (e.g., diffusers takes <c>output.hidden_states[-2][0]</c> — second-to-last hidden state — as the conditioning vector).</summary>
+/// <summary>Adapter for ERNIE-Image's text encoder — currently served by <see cref="ErnieImageLlamaTextEncoder"/> over <see cref="LlamaStyleEncoderConfig.Ministral3B"/> — kept as an interface so an alternative encoder can be swapped in without touching the pipeline; implementations must reproduce diffusers' <c>output.hidden_states[-2][0]</c> tap as the conditioning vector.</summary>
 public interface IErnieTextEncoder : IDisposable
 {
     /// <summary>Encodes a single prompt's already-tokenized input into the conditioning sequence the transformer's <c>text_proj</c> expects.</summary>

@@ -84,7 +84,7 @@ public sealed class QwenImageVaeEncoder : IDisposable
     {
         Tensor cinW = weights["encoder.conv1.weight"];
         _convInWeight = QwenImageVaeOps.SliceConv3dToConv2d(cinW, temporalSlot: -1);
-        _convInBias = AsF32(weights["encoder.conv1.bias"]);
+        _convInBias = TensorCasts.EnsureF32(weights["encoder.conv1.bias"]);
 
         for (int i = 0; i < _downStages.Length; i++)
         {
@@ -102,10 +102,10 @@ public sealed class QwenImageVaeEncoder : IDisposable
 
         _headGamma = QwenImageVaeOps.FlattenGamma(weights["encoder.head.0.gamma"]);
         _headConvWeight = QwenImageVaeOps.SliceConv3dToConv2d(weights["encoder.head.2.weight"], temporalSlot: -1);
-        _headConvBias = AsF32(weights["encoder.head.2.bias"]);
+        _headConvBias = TensorCasts.EnsureF32(weights["encoder.head.2.bias"]);
 
         _quantConvWeight = QwenImageVaeOps.SliceConv3dToConv2d(weights["conv1.weight"], temporalSlot: 0);
-        _quantConvBias = AsF32(weights["conv1.bias"]);
+        _quantConvBias = TensorCasts.EnsureF32(weights["conv1.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -216,8 +216,6 @@ public sealed class QwenImageVaeEncoder : IDisposable
         return outT;
     }
 
-    private static Tensor AsF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -233,11 +231,7 @@ public sealed class QwenImageVaeEncoder : IDisposable
     private readonly record struct EncodeStage(StageKind Kind, int InCh, int OutCh);
 }
 
-/// <summary>Encoder strided downsample — the WAN <c>Resample</c> in <c>downsample2d</c> mode: a
-/// channel-changing <c>Conv2d(in, out, k=3, stride=2, pad=1)</c> that halves H/W. Mirrors
-/// <see cref="QwenImageResample"/> (upsample) with the same <c>resample.1.weight/bias</c> key convention
-/// (the <c>.0</c> slot is the parameter-less pad). The asymmetric <c>(0,1,0,1)</c> pad WAN uses is
-/// approximated with symmetric pad=1, same sub-pixel compromise as <see cref="VaeEncoder"/>.</summary>
+/// <summary>Encoder strided downsample — the WAN <c>Resample</c> in <c>downsample2d</c> mode: a channel-changing <c>Conv2d(in, out, k=3, stride=2)</c> behind WAN's asymmetric <c>(0,1,0,1)</c> pad (via <see cref="VaeEncoder.PadRightBottom"/>), halving H/W. Mirrors <see cref="QwenImageResample"/> (upsample) with the same <c>resample.1.weight/bias</c> key convention (the <c>.0</c> slot is the parameter-less pad).</summary>
 public sealed class QwenImageDownsample
 {
     private readonly int _inDim;

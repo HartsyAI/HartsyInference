@@ -2,11 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Layer-activation dump hooks for the Hunyuan3D reference-diff harness (the project's standard
-/// 🔧→✅ loop). Enabled by setting <c>HARTSYINFERENCE_HUNYUAN3D_DEBUG_DIR</c> to an output directory; each
-/// <see cref="Dump"/> writes a raw little-endian F32 blob named <c>&lt;tag&gt;.bin</c> that
-/// <c>diff_hunyuan3d_layers.py</c> compares against the Python reference. No-op when the env var is unset, so
-/// it's free on the hot path in normal runs.</summary>
+/// <summary>Layer-activation dump hooks for the Hunyuan3D reference-diff harness; a no-op unless <c>HARTSYINFERENCE_HUNYUAN3D_DEBUG_DIR</c> is set, so it's free on the hot path in normal runs.</summary>
+/// <remarks>Deliberately unwired: the parity pass it feeds is planned but not yet run (docs/Research/HUNYUAN3D_2_ARCHITECTURE.md names these hooks as its mechanism), unlike the sibling *DebugDump classes whose models are already validated.</remarks>
 public static unsafe class Hunyuan3DDebugDump
 {
     private static readonly object Lock = new();

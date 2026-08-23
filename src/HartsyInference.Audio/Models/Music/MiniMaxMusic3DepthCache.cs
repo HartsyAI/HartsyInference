@@ -3,9 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>One frame's key/value cache for <see cref="MiniMaxMusic3DepthDecoder"/>: without it every residual step
-/// re-runs the whole depth sequence, 44 token-passes per frame where 8 suffice.
-///
+/// <summary>One frame's key/value cache for <see cref="MiniMaxMusic3DepthDecoder"/>: without it every residual step re-runs the whole depth sequence, 44 token-passes per frame where 8 suffice.</summary>
+/// <remarks>
 /// <para>The classifier-free pair is folded into the head axis — buffers are <c>[1, batch·heads, maxSteps, headDim]</c>
 /// — because <see cref="IBackend.KvCacheAppend"/> takes its head count from dimension 1 and would otherwise append
 /// only batch row 0. <c>[B,H,S,D]</c> is contiguous, so the bytes are identical and attention treats a batch element
@@ -16,7 +15,8 @@ namespace HartsyInference.Audio.Models.Music;
 /// prefix cannot be handed over without copying it out — and <see cref="Mask"/> hides the unwritten tail. That makes
 /// the buffers' zero-fill load-bearing: they must reach the device as zeros, which is why they are uploaded lazily by
 /// the first append rather than through <see cref="IBackend.ResidentAllocateKv"/>, which skips the upload and would
-/// leave the tail as whatever the allocator returned — and a NaN there survives an additive mask.</para></summary>
+/// leave the tail as whatever the allocator returned — and a NaN there survives an additive mask.</para>
+/// </remarks>
 public sealed unsafe class MiniMaxMusic3DepthCache : IDisposable
 {
     private readonly Tensor[] _keys;
@@ -84,8 +84,7 @@ public sealed unsafe class MiniMaxMusic3DepthCache : IDisposable
         _length += steps;
     }
 
-    /// <summary>Additive mask for a <paramref name="steps"/>-token block starting at <see cref="Length"/>: causal
-    /// within the block and <c>-inf</c> over the buffer's stale tail.</summary>
+    /// <summary>Additive mask for a <paramref name="steps"/>-token block starting at <see cref="Length"/>: causal within the block and <c>-inf</c> over the buffer's stale tail.</summary>
     /// <remarks>Kept per (position, block size) rather than rebuilt — the same handful of masks is uploaded for
     /// every frame of the generation, so a cached one stays resident on the device.</remarks>
     public Tensor Mask(int steps)

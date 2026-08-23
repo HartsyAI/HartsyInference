@@ -53,8 +53,8 @@ public sealed unsafe class WanS2VAudioInjector
             inj.KW = w[$"{p}.k.weight"]; w.TryGetValue($"{p}.k.bias", out inj.KB);
             inj.VW = w[$"{p}.v.weight"]; w.TryGetValue($"{p}.v.bias", out inj.VB);
             inj.OW = w[$"{p}.o.weight"]; w.TryGetValue($"{p}.o.bias", out inj.OB);
-            inj.NQ = LoadF32(w, $"{p}.norm_q.weight");
-            inj.NK = LoadF32(w, $"{p}.norm_k.weight");
+            inj.NQ = TensorCasts.LoadF32(w, $"{p}.norm_q.weight");
+            inj.NK = TensorCasts.LoadF32(w, $"{p}.norm_k.weight");
             Tensor adaW = w[$"audio_injector.injector_adain_layers.{i}.linear.weight"];
             w.TryGetValue($"audio_injector.injector_adain_layers.{i}.linear.bias", out Tensor? adaB);
             (inj.AdaShiftW, inj.AdaScaleW) = SplitRows(adaW, _dim);
@@ -181,6 +181,4 @@ public sealed unsafe class WanS2VAudioInjector
         bottom.Fp8ScaleFactor = x.Fp8ScaleFactor;
         return (top, bottom);
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

@@ -15,10 +15,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Drives a constructed Mage-Flow pipeline against the native <see cref="ImageRequest"/>: builds the
-/// chat-templated Qwen3-VL token ids + prefix-drop index (Qwen-Image/Krea2 template — flagged as a parity risk vs
-/// Mage-Flow's own <c>chat_template.json</c>), calls <see cref="MageFlowPipeline.GenerateFromTokens"/>, and converts
-/// the returned <c>[1,3,H,W]</c> F32 image (in [-1,1]) to an RGB <see cref="ImageResult"/>.</summary>
+/// <summary>Drives a constructed Mage-Flow pipeline against the native <see cref="ImageRequest"/>: builds the chat-templated Qwen3-VL token ids + prefix-drop index (Qwen-Image/Krea2 template — flagged as a parity risk vs Mage-Flow's own <c>chat_template.json</c>), calls <see cref="MageFlowPipeline.GenerateFromTokens"/>, and converts the returned <c>[1,3,H,W]</c> F32 image (in [-1,1]) to an RGB <see cref="ImageResult"/>.</summary>
 public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
 {
     // NOTE(parity): Mage-Flow applies its own tokenizer.chat_template. Until that template is transcribed, this

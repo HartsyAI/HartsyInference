@@ -1,11 +1,6 @@
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Engine-native parser for the structural prompt tag syntax (<c>&lt;region:x,y,w,h,strength&gt;</c>,
-/// <c>&lt;object:…&gt;</c>, <c>&lt;segment:…&gt;</c>, <c>&lt;clear:…&gt;</c>, <c>&lt;extend:…&gt;</c>, plus the stage
-/// tags <c>&lt;base&gt;</c>/<c>&lt;refiner&gt;</c>/<c>&lt;video&gt;</c>/<c>&lt;videoswap&gt;</c>/<c>&lt;pixeldecoder&gt;</c>).
-/// Text before any tag — and after a <c>&lt;region:end&gt;</c> — accumulates into <see cref="GlobalPrompt"/>; each other
-/// tag opens a section that subsequent text appends to. Unrecognized <c>&lt;…&gt;</c> runs (weighting, <c>&lt;break&gt;</c>,
-/// <c>&lt;embed:…&gt;</c>) are preserved verbatim so encoder-level syntax reaches the tokenizer untouched.</summary>
+/// <summary>Engine-native parser for the structural prompt tag syntax (<c>&lt;region:x,y,w,h,strength&gt;</c>, <c>&lt;object:…&gt;</c>, <c>&lt;segment:…&gt;</c>, <c>&lt;clear:…&gt;</c>, <c>&lt;extend:…&gt;</c>, plus the stage tags <c>&lt;base&gt;</c>/<c>&lt;refiner&gt;</c>/<c>&lt;video&gt;</c>/<c>&lt;videoswap&gt;</c>/<c>&lt;pixeldecoder&gt;</c>). Text before any tag — and after a <c>&lt;region:end&gt;</c> — accumulates into <see cref="GlobalPrompt"/>; each other tag opens a section that subsequent text appends to. Unrecognized <c>&lt;…&gt;</c> runs (weighting, <c>&lt;break&gt;</c>, <c>&lt;embed:…&gt;</c>) are preserved verbatim so encoder-level syntax reaches the tokenizer untouched.</summary>
 public sealed class PromptRegionParser
 {
     /// <summary>Kind of a parsed prompt part.</summary>

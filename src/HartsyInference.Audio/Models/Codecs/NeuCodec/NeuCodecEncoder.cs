@@ -5,13 +5,13 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>NeuCodec / X-Codec2 <b>encode</b> path (16 kHz reference wav → FSQ code indices), the branch NeuTTS-air
-/// needs for voice cloning. Faithful to the on-disk <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c>,
-/// transformers PR #47143 <c>modeling_neucodec.py</c>). Two parallel branches, both 16 kHz → 50 Hz:
+/// <summary>NeuCodec / X-Codec2 <b>encode</b> path (16 kHz reference wav → FSQ code indices), the branch NeuTTS-air needs for voice cloning; faithful to the on-disk <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c>, transformers PR #47143 <c>modeling_neucodec.py</c>).</summary>
+/// <remarks>
+/// Two parallel branches, both 16 kHz → 50 Hz:
 ///
 /// <list type="number">
 ///   <item><b>Acoustic</b> (<c>acoustic_encoder.*</c>): Conv1d(1→48,k7) stem → 5 downsample blocks
-///     (each: 3 <see cref="NeuCodecResidualUnit"/>-style SnakeBeta residual units with dilations 1/3/9, then a
+///     (each: 3 <see cref="ResidualUnit"/>-style SnakeBeta residual units with dilations 1/3/9, then a
 ///     SnakeBeta + strided Conv1d that doubles channels) → SnakeBeta → Conv1d(1536→1024,k3). Every SnakeBeta is
 ///     wrapped in BigVGAN anti-aliasing (Kaiser-sinc upsample 2× → snake → downsample 2×). Output <c>[1,1024,Ta]</c>.</item>
 ///   <item><b>Semantic</b> (<c>semantic_encoder.*</c>): Wav2Vec2-BERT conformer over 80-bin Kaldi log-fbank
@@ -27,7 +27,7 @@ namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 ///
 /// <para><b>Reuse:</b> Kaldi fbank via <see cref="KaldiFbankExtractor"/> (the <c>×2^15</c> Kaldi scaling cancels
 /// under per-bin normalization); conv / layernorm / snake / attention via <see cref="IBackend"/>. Note the engine
-/// <see cref="IBackend.Snake"/> does not exponentiate α/β, so SnakeBeta params are pre-<c>exp</c>'d on load.</para></summary>
+/// <see cref="IBackend.Snake"/> does not exponentiate α/β, so SnakeBeta params are pre-<c>exp</c>'d on load.</para></remarks>
 public sealed unsafe class NeuCodecEncoder : IDisposable
 {
     private readonly NeuCodecEncoderConfig _cfg;
@@ -188,8 +188,7 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
         return codes;
     }
 
-    /// <summary>Zero-pads the waveform by one sample then up to a multiple of the hop length (16 kHz / 50 Hz = 320),
-    /// matching the reference feature extractor so the 320×-strided acoustic branch yields a clean frame count.</summary>
+    /// <summary>Zero-pads the waveform by one sample then up to a multiple of the hop length (16 kHz / 50 Hz = 320), matching the reference feature extractor so the 320×-strided acoustic branch yields a clean frame count.</summary>
     private float[] PadForHop(float[] pcm)
     {
         int hop = _cfg.InputSampleRate / _cfg.FrameRate;           // 320
@@ -448,9 +447,7 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
         return outCl;                                              // [t,dim]
     }
 
-    /// <summary>SemanticEncoder (semantic_adapter): x=conv1(in); x = residual_blocks(x)+x; conv4(x), where
-    /// residual_blocks = ReLU→conv2→ReLU→conv3. The skip adds back the conv1 output <b>pre-ReLU</b> (the
-    /// reference does <c>self.residual_blocks(x) + x</c>, and residual_blocks applies its own leading ReLU).</summary>
+    /// <summary>SemanticEncoder (semantic_adapter): x=conv1(in); x = residual_blocks(x)+x; conv4(x), where residual_blocks = ReLU→conv2→ReLU→conv3; the skip adds back the conv1 output <b>pre-ReLU</b> (the reference does <c>self.residual_blocks(x) + x</c>, and residual_blocks applies its own leading ReLU).</summary>
     private Tensor SemanticAdapter(IBackend backend, Tensor xCf, int t)
     {
         int d = _cfg.HiddenSize;
@@ -609,8 +606,7 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
     private AaSnake LoadSnake(IReadOnlyDictionary<string, Tensor> w, string prefix)
         => new() { ExpAlpha = ExpTensor(w[$"{prefix}.alpha"]), ExpBeta = ExpTensor(w[$"{prefix}.beta"]) };
 
-    /// <summary>Returns <c>exp(x)</c> — the engine <see cref="IBackend.Snake"/> uses α/β directly, but NeuCodec's
-    /// SnakeBeta exponentiates them (<c>x + sin(exp(α)·x)²/exp(β)</c>).</summary>
+    /// <summary>Returns <c>exp(x)</c> — the engine <see cref="IBackend.Snake"/> uses α/β directly, but NeuCodec's SnakeBeta exponentiates them (<c>x + sin(exp(α)·x)²/exp(β)</c>).</summary>
     private static Tensor ExpTensor(Tensor raw)
     {
         Tensor src = F32(raw);

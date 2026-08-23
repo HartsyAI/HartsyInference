@@ -25,16 +25,14 @@ public sealed unsafe class MageDiCoBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        _conv1W = F32(w[$"{p}.conv1.weight"]); _conv1B = F32(w[$"{p}.conv1.bias"]);
-        _conv2W = F32(w[$"{p}.conv2.weight"]); _conv2B = F32(w[$"{p}.conv2.bias"]);
-        _conv3W = F32(w[$"{p}.conv3.weight"]); _conv3B = F32(w[$"{p}.conv3.bias"]);
-        _conv4W = F32(w[$"{p}.conv4.weight"]); _conv4B = F32(w[$"{p}.conv4.bias"]);
-        _conv5W = F32(w[$"{p}.conv5.weight"]); _conv5B = F32(w[$"{p}.conv5.bias"]);
-        _caW = F32(w[$"{p}.ca.1.weight"]); _caB = F32(w[$"{p}.ca.1.bias"]);
-        _adaW = F32(w[$"{p}.adaLN_modulation.1.weight"]); _adaB = F32(w[$"{p}.adaLN_modulation.1.bias"]);
+        _conv1W = TensorCasts.EnsureF32(w[$"{p}.conv1.weight"]); _conv1B = TensorCasts.EnsureF32(w[$"{p}.conv1.bias"]);
+        _conv2W = TensorCasts.EnsureF32(w[$"{p}.conv2.weight"]); _conv2B = TensorCasts.EnsureF32(w[$"{p}.conv2.bias"]);
+        _conv3W = TensorCasts.EnsureF32(w[$"{p}.conv3.weight"]); _conv3B = TensorCasts.EnsureF32(w[$"{p}.conv3.bias"]);
+        _conv4W = TensorCasts.EnsureF32(w[$"{p}.conv4.weight"]); _conv4B = TensorCasts.EnsureF32(w[$"{p}.conv4.bias"]);
+        _conv5W = TensorCasts.EnsureF32(w[$"{p}.conv5.weight"]); _conv5B = TensorCasts.EnsureF32(w[$"{p}.conv5.bias"]);
+        _caW = TensorCasts.EnsureF32(w[$"{p}.ca.1.weight"]); _caB = TensorCasts.EnsureF32(w[$"{p}.ca.1.bias"]);
+        _adaW = TensorCasts.EnsureF32(w[$"{p}.adaLN_modulation.1.weight"]); _adaB = TensorCasts.EnsureF32(w[$"{p}.adaLN_modulation.1.bias"]);
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -67,12 +65,12 @@ public sealed unsafe class MageDiCoBlock
         Tensor g = new(inp.Shape, DType.F32);
         backend.Gelu(g, c2); c2.Dispose();
         // channel attention: global avg pool → 1×1 conv → sigmoid → scale.
-        Tensor pooled = GlobalAvgPool(g, b, _c, h, w);            // [b,C,1,1]
+        Tensor pooled = MageVaeOps.GlobalAvgPool(g, b, _c, h * w);            // [b,C,1,1]
         Tensor caConv = new(pooled.Shape, DType.F32);
         backend.Conv2D(caConv, pooled, _caW!, _caB, 1, 1, 0, 0); pooled.Dispose();
         Tensor ca = new(caConv.Shape, DType.F32);
         backend.Sigmoid(ca, caConv); caConv.Dispose();
-        ScaleByChannel(g, ca, b, _c, h * w); ca.Dispose();
+        MageVaeOps.ScaleByChannel(g, ca, b, _c, h * w); ca.Dispose();
         Tensor c3 = new(inp.Shape, DType.F32);
         backend.Conv2D(c3, g, _conv3W!, _conv3B, 1, 1, 0, 0); g.Dispose();
         // inp = inp + gate_msa * c3   (gate_msa = chunk2)
@@ -141,32 +139,6 @@ public sealed unsafe class MageDiCoBlock
                 float gate = mod[bi * 6 * c + gateOff + ch];
                 long baseO = (long)(bi * c + ch) * hw;
                 for (int s = 0; s < hw; s++) { long k = baseO + s; o[k] = r[k] + gate * br[k]; }
-            }
-    }
-
-    private static Tensor GlobalAvgPool(Tensor x, int b, int c, int h, int w)
-    {
-        int hw = h * w;
-        Tensor outp = new(new TensorShape(b, c, 1, 1), DType.F32);
-        float* src = (float*)x.DataPointer; float* dst = (float*)outp.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ch = 0; ch < c; ch++)
-            {
-                double sum = 0; long baseO = (long)(bi * c + ch) * hw;
-                for (int s = 0; s < hw; s++) sum += src[baseO + s];
-                dst[bi * c + ch] = (float)(sum / hw);
-            }
-        return outp;
-    }
-
-    private static void ScaleByChannel(Tensor x, Tensor ca, int b, int c, int hw)
-    {
-        float* p = (float*)x.DataPointer; float* g = (float*)ca.DataPointer;   // ca [b,c,1,1]
-        for (int bi = 0; bi < b; bi++)
-            for (int ch = 0; ch < c; ch++)
-            {
-                float s = g[bi * c + ch]; long baseO = (long)(bi * c + ch) * hw;
-                for (int k = 0; k < hw; k++) p[baseO + k] *= s;
             }
     }
 }

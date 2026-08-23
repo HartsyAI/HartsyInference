@@ -1,5 +1,4 @@
 using HartsyInference.Audio.Layers;
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -17,8 +16,9 @@ namespace HartsyInference.Audio.Models.Demucs;
 ///            z = conv_tr(y)                # ConvTranspose, stride; trim (k-stride)/2 (freq) or [pad:pad+len] (time)
 ///            z = GELU(z)                   # except the last layer
 /// </code></summary>
-public sealed unsafe class DemucsConvBlock
+public sealed unsafe class DemucsConvBlock : IDisposable
 {
+    private readonly DemucsCastOwner _casts = new();
     /// <summary>Parity-debug only: one-shot probe fired with the next encoder conv output (pre-GELU). Not used in production.</summary>
     internal static Action<Tensor>? ConvProbe;
     /// <summary>Parity-debug only: one-shot probe fired with the next encoder post-DConv output. Not used in production.</summary>
@@ -38,8 +38,8 @@ public sealed unsafe class DemucsConvBlock
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         string convKey = _decoder ? "conv_tr" : "conv";
-        _convW = WhisperOps.EnsureF32(w[$"{prefix}.{convKey}.weight"]); _convB = Bias(w, $"{prefix}.{convKey}.bias");
-        _rewriteW = WhisperOps.EnsureF32(w[$"{prefix}.rewrite.weight"]); _rewriteB = Bias(w, $"{prefix}.rewrite.bias");
+        _convW = _casts.F32(w, $"{prefix}.{convKey}.weight"); _convB = _casts.Optional(w, $"{prefix}.{convKey}.bias");
+        _rewriteW = _casts.F32(w, $"{prefix}.rewrite.weight"); _rewriteB = _casts.Optional(w, $"{prefix}.rewrite.bias");
         _dconv.LoadWeights(w, $"{prefix}.dconv");
     }
 
@@ -207,5 +207,10 @@ public sealed unsafe class DemucsConvBlock
         return o;
     }
 
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
+    /// <summary>Frees the F32 casts this block and its DConv allocated at load time.</summary>
+    public void Dispose()
+    {
+        _dconv.Dispose();
+        _casts.Dispose();
+    }
 }

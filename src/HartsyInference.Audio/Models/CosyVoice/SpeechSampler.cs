@@ -4,15 +4,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>Autoregressive speech-token sampler for CosyVoice 2's LM. Applies repetition penalty →
-/// temperature → top-k → top-p (nucleus) → multinomial draw, with Repetition-Aware Sampling (RAS):
-/// if the draw would extend a degenerate run beyond <see cref="CosyVoiceSamplingConfig.RasMaxRepeat"/>
+/// <summary>Autoregressive speech-token sampler for CosyVoice 2's LM: repetition penalty → temperature → top-k → top-p (nucleus) → multinomial draw, with Repetition-Aware Sampling (RAS).</summary>
+/// <remarks>If the draw would extend a degenerate run beyond <see cref="CosyVoiceSamplingConfig.RasMaxRepeat"/>
 /// within the trailing <see cref="CosyVoiceSamplingConfig.RasWindow"/>, the chosen token is masked out
 /// and the draw repeats from the same filtered distribution. Mirrors <c>cosyvoice/llm/llm.py</c>'s
 /// <c>ras_sampling</c>. Deterministic for a fixed seed.
 ///
 /// <para>Candidates span <c>[0, eosToken]</c> inclusive — the 6561 FSQ codes plus the end-of-speech
-/// token; any extra <c>llm_decoder</c> slots above <c>eosToken</c> are never sampled.</para></summary>
+/// token; any extra <c>llm_decoder</c> slots above <c>eosToken</c> are never sampled.</para></remarks>
 public sealed unsafe class SpeechSampler
 {
     private readonly CosyVoiceSamplingConfig _cfg;
@@ -26,8 +25,7 @@ public sealed unsafe class SpeechSampler
         _rng = DeterministicRng.Seed(seed);
     }
 
-    /// <summary>Draws the next speech token from <paramref name="logits"/> (<c>[1, 1, vocab]</c>),
-    /// conditioning the repetition penalty + RAS check on the already-generated <paramref name="history"/>.</summary>
+    /// <summary>Draws the next speech token from <paramref name="logits"/> (<c>[1, 1, vocab]</c>), conditioning the repetition penalty + RAS check on the already-generated <paramref name="history"/>.</summary>
     public int Sample(Tensor logits, List<int> history)
     {
         float* lp = (float*)logits.DataPointer;

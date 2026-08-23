@@ -11,9 +11,6 @@ internal static class VulkanUtilities
     public static uint MakeVersion(uint major, uint minor, uint patch)
         => (major << 22) | (minor << 12) | patch;
 
-    public const uint VkApiVersion10 = (1u << 22) | (0u << 12) | 0u;
-    public const uint VkApiVersion11 = (1u << 22) | (1u << 12) | 0u;
-    public const uint VkApiVersion12 = (1u << 22) | (2u << 12) | 0u;
     public const uint VkApiVersion13 = (1u << 22) | (3u << 12) | 0u;
 
     /// <summary>Reads a NUL-terminated UTF-8 string from a fixed-size byte buffer, e.g. VkPhysicalDeviceProperties.deviceName[256].</summary>

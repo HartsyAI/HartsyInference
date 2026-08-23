@@ -8,11 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native restore routes (SeedVR2). The streaming variant mirrors <see cref="VideoEndpoints"/>
-/// (SSE <c>progress</c>/<c>frame</c>/<c>complete</c>/<c>error</c>, frames as base64 PNG); the non-streaming
-/// variant buffers the restored clip and returns one JSON array — fine for the short clips restoration
-/// typically handles, and the payload-size tradeoff is the caller's. Both run through the long-running
-/// queue: a restore is one DiT step but the whole-clip VAE work still takes minutes at 720p-area.</summary>
+/// <summary>Native restore routes (SeedVR2). The streaming variant mirrors <see cref="VideoEndpoints"/> (SSE <c>progress</c>/<c>frame</c>/<c>complete</c>/<c>error</c>, frames as base64 PNG); the non-streaming variant buffers the restored clip and returns one JSON array — fine for the short clips restoration typically handles, and the payload-size tradeoff is the caller's. Both run through the long-running queue: a restore is one DiT step but the whole-clip VAE work still takes minutes at 720p-area.</summary>
 public static class RestoreEndpoints
 {
     /// <summary>Maps <c>/v1/native/restore</c> and <c>/v1/native/restore/stream</c>.</summary>
@@ -82,8 +78,7 @@ public static class RestoreEndpoints
         });
     }
 
-    /// <summary>Writes a restored frame sequence into a numbered directory under the output root, matching the
-    /// CLI's layout. Null when the request opted out, nothing was produced, or the write failed.</summary>
+    /// <summary>Writes a restored frame sequence into a numbered directory under the output root, matching the CLI's layout. Null when the request opted out, nothing was produced, or the write failed.</summary>
     private static string? PersistFrames(NativeRestoreRequest req, IReadOnlyList<VideoFrame> frames)
     {
         if (req.Save == false || frames.Count == 0)

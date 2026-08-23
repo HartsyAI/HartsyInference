@@ -3,9 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Decodes a vision target string into the detector to run, mirroring the SwarmUI extension's
-/// <c>&lt;segment:...&gt;</c> routing: <c>yolo-</c> → YOLO, <c>dino-</c> → Grounding DINO, <c>rtdetr</c> → RT-DETR,
-/// anything else → open-vocabulary (Grounding DINO for boxes, CLIPSeg for masks), empty → RT-DETR.</summary>
+/// <summary>Decodes a vision target string into the detector to run, mirroring the SwarmUI extension's <c>&lt;segment:...&gt;</c> routing: <c>yolo-</c> → YOLO, <c>dino-</c> → Grounding DINO, <c>rtdetr</c> → RT-DETR, anything else → open-vocabulary (Grounding DINO for boxes, CLIPSeg for masks), empty → RT-DETR.</summary>
 public static class VisionTargetRouter
 {
     private const string YoloPrefix = "yolo-";
@@ -33,8 +31,7 @@ public static class VisionTargetRouter
     public static bool IsRtDetrTarget(string? target) =>
         target is not null && target.StartsWith(RtDetrPrefix, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Parses the request prompt into a routed target; <paramref name="mode"/> decides where an unprefixed
-    /// free-text query goes (boxes → Grounding DINO, masks → CLIPSeg).</summary>
+    /// <summary>Parses the request prompt into a routed target; <paramref name="mode"/> decides where an unprefixed free-text query goes (boxes → Grounding DINO, masks → CLIPSeg).</summary>
     public static VisionTarget Parse(string? prompt, VisionMode mode)
     {
         string target = (prompt ?? "").Trim();

@@ -62,22 +62,9 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         int ditShardSplitBlock = 0;
         if (context.DitShardBackend is not null)
         {
-            long[] perBlockBytes = new long[transformer.BlockCount];
-            for (int i = 0; i < perBlockBytes.Length; i++)
-            {
-                foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
-                {
-                    perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
-                }
-            }
-            long sharedWeightBytes = 0;
-            foreach (Tensor t in transformer.EnumerateSharedWeights())
-            {
-                sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-            }
-            (long freeA, _) = context.Backend.GetVramInfo();
-            (long freeB, _) = context.DitShardBackend.GetVramInfo();
-            ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
+            ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
+                context.Backend, context.DitShardBackend, transformer.BlockCount,
+                transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
             Logs.Info($"[ChromaRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                 + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend "
                 + "(sequential dual-pass CFG; the step graph is disabled while sharded).");
@@ -86,7 +73,7 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         // 2. Load T5-XXL + its embedded tokenizer.
         SafeTensorsLoader t5Loader = new SafeTensorsLoader();
         t5Loader.Load(t5Path);
-        Dictionary<string, Tensor> t5Weights = LoadT5FromStandalone(t5Loader.GetAllTensors());
+        Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
         if (t5Weights.Count == 0)
         {
             t5Loader.Dispose();
@@ -122,24 +109,5 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         };
         Logs.Info("[ChromaRecipe] Chroma ready.");
         return new ChromaRecipePipeline(pipeline, tokenizer, zLoader, t5Loader, vaeLoader, loraStack);
-    }
-
-    /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file (keys are otherwise stored as-is), so the encoder finds them.</summary>
-    private static Dictionary<string, Tensor> LoadT5FromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        const string ComfyPrefix = "text_encoders.t5xxl.transformer.";
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            if (kv.Key.StartsWith(ComfyPrefix, StringComparison.Ordinal))
-            {
-                result[kv.Key[ComfyPrefix.Length..]] = kv.Value;
-            }
-            else
-            {
-                result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
     }
 }

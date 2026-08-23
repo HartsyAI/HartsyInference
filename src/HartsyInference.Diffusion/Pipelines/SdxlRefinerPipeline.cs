@@ -44,16 +44,14 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         _vaeScalingFactor = vaeScalingFactor;
     }
 
-    /// <summary>Refines a source image. Encodes the source via the VAE encoder, injects noise at the timestep
-    /// selected by <see cref="ImageToImageRequest.Strength"/>, and runs the refiner UNet from there.</summary>
+    /// <summary>Refines a source image. Encodes the source via the VAE encoder, injects noise at the timestep selected by <see cref="ImageToImageRequest.Strength"/>, and runs the refiner UNet from there.</summary>
     /// <param name="promptTokenIdsG">Prompt token IDs for CLIP-G [seqLen]. Tokenize using the SDXL CLIP-G tokenizer.</param>
     /// <param name="negativePromptTokenIdsG">Negative prompt token IDs for CLIP-G [seqLen].</param>
     /// <param name="promptEosPositionG">Position of EOS token in prompt for CLIP-G (used to extract pooled output).</param>
     /// <param name="negativeEosPositionG">Position of EOS token in negative prompt.</param>
     /// <param name="request">Refiner request with source image, strength, and aesthetic scores.</param>
     /// <param name="onProgress">Optional progress callback.</param>
-    /// <summary>One-line stage-boundary stats — the cheap black-output diagnostic (NaN latents and dead
-    /// conditioning both show up here long before an image is visible).</summary>
+    /// <summary>One-line stage-boundary stats — the cheap black-output diagnostic (NaN latents and dead conditioning both show up here long before an image is visible).</summary>
     private static unsafe void DumpStats(string label, Tensor t)
     {
         float* p = (float*)t.DataPointer;

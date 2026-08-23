@@ -32,12 +32,11 @@ public enum ImageFeatures
     /// <summary>Variation-seed noise blending.</summary>
     VariationSeed = 128,
 
-    /// <summary>Reference-image editing: the init image is VAE-encoded and concatenated into the token sequence as
-    /// in-context reference latents, rather than noised and denoised from.
-    /// <para>Deliberately distinct from <see cref="Img2Img"/> even though both are driven by an init image, because the
+    /// <summary>Reference-image editing: the init image is VAE-encoded and concatenated into the token sequence as in-context reference latents, rather than noised and denoised from.</summary>
+    /// <remarks>Deliberately distinct from <see cref="Img2Img"/> even though both are driven by an init image, because the
     /// two obey different contracts: img2img's denoise strength selects a start step, while an edit model conditions on
     /// the reference at full strength and has no such knob. A family declaring only this bit must not silently accept a
-    /// creativity value it cannot honour.</para></summary>
+    /// creativity value it cannot honour.</remarks>
     RefEdit = 256,
 
     /// <summary>Seamless/circularly-tileable output (wrap-pad every conv instead of zero-pad).</summary>

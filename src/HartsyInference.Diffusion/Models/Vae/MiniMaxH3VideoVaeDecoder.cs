@@ -660,13 +660,6 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
 
     private static Tensor Borrow(Tensor t) => new Tensor((void*)t.DataPointer, t.Shape, t.DType);
 
-    private static int Sum(int[] values)
-    {
-        int total = 0;
-        foreach (int v in values) total += v;
-        return total;
-    }
-
     public void Dispose()
     {
         if (_disposed) return;

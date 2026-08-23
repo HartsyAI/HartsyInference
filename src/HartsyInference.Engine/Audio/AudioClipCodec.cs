@@ -6,9 +6,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Decodes request <see cref="AudioClip"/>s to float PCM and encodes generated waveforms back to WAV. Only
-/// RIFF/WAVE is decodable in-engine: the extension shelled out to ffmpeg for compressed containers, which is a host
-/// dependency the Engine deliberately does not take, so anything else is refused with a message naming the limit.</summary>
+/// <summary>Decodes request <see cref="AudioClip"/>s to float PCM and encodes generated waveforms back to WAV. Only RIFF/WAVE is decodable in-engine: the extension shelled out to ffmpeg for compressed containers, which is a host dependency the Engine deliberately does not take, so anything else is refused with a message naming the limit.</summary>
 public static class AudioClipCodec
 {
     /// <summary>Decodes a clip to mono float PCM in [-1, 1] at <paramref name="targetSampleRate"/>; empty for no input.</summary>
@@ -25,8 +23,7 @@ public static class AudioClipCodec
             : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(mono);
     }
 
-    /// <summary>Decodes a clip to a stereo pair at <paramref name="targetSampleRate"/> (mono sources duplicate the
-    /// single channel), for the models that need true stereo input such as Demucs.</summary>
+    /// <summary>Decodes a clip to a stereo pair at <paramref name="targetSampleRate"/> (mono sources duplicate the single channel), for the models that need true stereo input such as Demucs.</summary>
     public static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate)
     {
         if (clip is null || clip.Data.Length == 0)

@@ -4,16 +4,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>MuQ-MuLan style-conditioning embedder. Takes a reference-audio mel <c>[1, melBins, T]</c> and
-/// produces a 512-d MuQ embedding: a conv stem downsamples the mel into a token sequence, a few
-/// pre-norm self-attention transformer layers contextualize it, mean-pooling over time collapses to a single
-/// vector, and a final projection yields the <c>muq_dim</c> (512) embedding. <see cref="ProjectToLmHidden"/>
-/// then applies <c>muq_linear</c> to lift it into the LM hidden size for conditioning.
-///
-/// <para><b>Reuse:</b> attention via <c>backend.ScaledDotProductAttention</c>, projections via
-/// <c>WhisperOps.ProjectLinear</c>, conv stem via <c>backend.Conv1d</c>. Keys: <c>conv_stem.{i}.{weight,bias}</c>,
-/// <c>layers.{i}.{ln1,ln2,q,k,v,o,fc1,fc2}.*</c>, <c>norm.*</c>, <c>proj.{weight,bias}</c>, and
-/// <c>muq_linear.{weight,bias}</c> (LM-side projection).</para></summary>
+/// <summary>MuQ-MuLan style-conditioning embedder: takes a reference-audio mel <c>[1, melBins, T]</c> and produces a 512-d MuQ embedding via a conv stem, pre-norm self-attention layers, mean-pooling over time, then a final projection.</summary>
+// ProjectToLmHidden then applies muq_linear to lift the result into the LM hidden size for conditioning.
+// Weight keys: conv_stem.{i}.{weight,bias}, layers.{i}.{ln1,ln2,q,k,v,o,fc1,fc2}.*, norm.*,
+// proj.{weight,bias}, and muq_linear.{weight,bias} (LM-side projection).
 public sealed unsafe class MuqEmbedder : IDisposable
 {
     private readonly int _melBins, _muqDim, _hidden, _layers, _heads, _headDim, _ffn, _lmHidden;
@@ -172,8 +166,7 @@ public sealed unsafe class MuqEmbedder : IDisposable
         return muq;
     }
 
-    /// <summary>Applies <c>muq_linear</c> to lift a MuQ embedding <c>[1, muqDim]</c> into the LM hidden
-    /// <c>[1, lmHidden]</c> for conditioning.</summary>
+    /// <summary>Applies <c>muq_linear</c> to lift a MuQ embedding <c>[1, muqDim]</c> into the LM hidden <c>[1, lmHidden]</c> for conditioning.</summary>
     public Tensor ProjectToLmHidden(IBackend backend, Tensor muq)
     {
         ThrowIfDisposed();

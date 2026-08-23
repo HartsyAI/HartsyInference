@@ -39,21 +39,21 @@ public sealed unsafe class ClipVisionEncoder
     /// <summary>Loads weights from the diffusers safetensors layout. The CLIP vision encoder lives under <c>vision_model.*</c> in CLIPVisionModel checkpoints; the optional projection sits at the top level as <c>visual_projection.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "vision_model")
     {
-        _patchEmbeddingWeight = EnsureF32(weights[$"{prefix}.embeddings.patch_embedding.weight"]);
-        _classEmbedding = EnsureF32(weights[$"{prefix}.embeddings.class_embedding"]);
-        _positionEmbeddingWeight = EnsureF32(weights[$"{prefix}.embeddings.position_embedding.weight"]);
+        _patchEmbeddingWeight = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.patch_embedding.weight"]);
+        _classEmbedding = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.class_embedding"]);
+        _positionEmbeddingWeight = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.position_embedding.weight"]);
 
         // HF kept the original "layrnorm" typo from OpenAI's release. Some IPA-friendly
         // checkpoints fix it to "layernorm" — try both so we accept either spelling.
         if (weights.TryGetValue($"{prefix}.pre_layrnorm.weight", out Tensor? preLnW))
         {
-            _preLayerNormWeight = EnsureF32(preLnW);
-            _preLayerNormBias = EnsureF32(weights[$"{prefix}.pre_layrnorm.bias"]);
+            _preLayerNormWeight = TensorCasts.EnsureF32(preLnW);
+            _preLayerNormBias = TensorCasts.EnsureF32(weights[$"{prefix}.pre_layrnorm.bias"]);
         }
         else
         {
-            _preLayerNormWeight = EnsureF32(weights[$"{prefix}.pre_layernorm.weight"]);
-            _preLayerNormBias = EnsureF32(weights[$"{prefix}.pre_layernorm.bias"]);
+            _preLayerNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.pre_layernorm.weight"]);
+            _preLayerNormBias = TensorCasts.EnsureF32(weights[$"{prefix}.pre_layernorm.bias"]);
         }
 
         for (int i = 0; i < _layers.Length; i++)
@@ -61,14 +61,14 @@ public sealed unsafe class ClipVisionEncoder
             _layers[i].LoadWeights(weights, $"{prefix}.encoder.layers.{i}");
         }
 
-        _postLayerNormWeight = EnsureF32(weights[$"{prefix}.post_layernorm.weight"]);
-        _postLayerNormBias = EnsureF32(weights[$"{prefix}.post_layernorm.bias"]);
+        _postLayerNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.post_layernorm.weight"]);
+        _postLayerNormBias = TensorCasts.EnsureF32(weights[$"{prefix}.post_layernorm.bias"]);
 
         // visual_projection is optional — only IPA standard uses it (the projected CLS embed).
         // IPA Plus skips it entirely and uses penultimate hidden states pre-projection.
         if (weights.TryGetValue("visual_projection.weight", out Tensor? proj))
         {
-            _visualProjectionWeight = EnsureF32(proj);
+            _visualProjectionWeight = TensorCasts.EnsureF32(proj);
         }
     }
 
@@ -297,9 +297,6 @@ public sealed unsafe class ClipVisionEncoder
         }
         return projected;
     }
-
-    private static Tensor EnsureF32(Tensor tensor) =>
-        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 }
 
 /// <summary>Single CLIP-Vision transformer layer — same shape as the text encoder's transformer
@@ -338,22 +335,22 @@ internal sealed unsafe class ClipVisionTransformerLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _layerNorm1Weight = EnsureF32(weights[$"{prefix}.layer_norm1.weight"]);
-        _layerNorm1Bias = EnsureF32(weights[$"{prefix}.layer_norm1.bias"]);
-        _qProjWeight = EnsureF32(weights[$"{prefix}.self_attn.q_proj.weight"]);
-        _qProjBias = EnsureF32(weights[$"{prefix}.self_attn.q_proj.bias"]);
-        _kProjWeight = EnsureF32(weights[$"{prefix}.self_attn.k_proj.weight"]);
-        _kProjBias = EnsureF32(weights[$"{prefix}.self_attn.k_proj.bias"]);
-        _vProjWeight = EnsureF32(weights[$"{prefix}.self_attn.v_proj.weight"]);
-        _vProjBias = EnsureF32(weights[$"{prefix}.self_attn.v_proj.bias"]);
-        _outProjWeight = EnsureF32(weights[$"{prefix}.self_attn.out_proj.weight"]);
-        _outProjBias = EnsureF32(weights[$"{prefix}.self_attn.out_proj.bias"]);
-        _layerNorm2Weight = EnsureF32(weights[$"{prefix}.layer_norm2.weight"]);
-        _layerNorm2Bias = EnsureF32(weights[$"{prefix}.layer_norm2.bias"]);
-        _mlpFc1Weight = EnsureF32(weights[$"{prefix}.mlp.fc1.weight"]);
-        _mlpFc1Bias = EnsureF32(weights[$"{prefix}.mlp.fc1.bias"]);
-        _mlpFc2Weight = EnsureF32(weights[$"{prefix}.mlp.fc2.weight"]);
-        _mlpFc2Bias = EnsureF32(weights[$"{prefix}.mlp.fc2.bias"]);
+        _layerNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm1.weight"]);
+        _layerNorm1Bias = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm1.bias"]);
+        _qProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_proj.weight"]);
+        _qProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_proj.bias"]);
+        _kProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_proj.weight"]);
+        _kProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_proj.bias"]);
+        _vProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.v_proj.weight"]);
+        _vProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.v_proj.bias"]);
+        _outProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.out_proj.weight"]);
+        _outProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.out_proj.bias"]);
+        _layerNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm2.weight"]);
+        _layerNorm2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm2.bias"]);
+        _mlpFc1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc1.weight"]);
+        _mlpFc1Bias = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc1.bias"]);
+        _mlpFc2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc2.weight"]);
+        _mlpFc2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc2.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -527,7 +524,4 @@ internal sealed unsafe class ClipVisionTransformerLayer
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor tensor) =>
-        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 }

@@ -4,16 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>F5-TTS input embedding. Combines the noisy target mel, the reference / cond
-/// mel, and the text features into the DiT input. Concretely:
-/// <list type="number">
-///   <item>Stack along channels: <c>[noisy_mel(100), cond_mel(100), text_features(512)] = 712 ch</c></item>
-///   <item>Linear project 712 → 1024.</item>
-///   <item>Add a residual position-aware refinement via <see cref="F5ConvPosEmbed"/>:
-///         <c>x = x + ConvPosEmbed(x)</c>. The ConvPosEmbed is two stacked grouped Conv1D
-///         layers (groups=16, kernel=31) with Mish between, plus a final Mish, operating
-///         in channels-first.</item>
-/// </list></summary>
+/// <summary>F5-TTS input embedding: stacks the noisy target mel, reference/cond mel, and text features along channels ([100+100+512=712 ch]), projects 712→1024, then adds a residual refinement via <see cref="F5ConvPosEmbed"/>.</summary>
 internal sealed unsafe class F5InputEmbed
 {
     private readonly F5TtsConfig _cfg;
@@ -34,12 +25,7 @@ internal sealed unsafe class F5InputEmbed
         _convPos.LoadWeights(w, $"{prefix}.conv_pos_embed");
     }
 
-    /// <summary>Forward: <paramref name="noisyMel"/> and <paramref name="condMel"/> both
-    /// <c>[1, mel_dim, T]</c> channels-first, <paramref name="text"/> <c>[1, T, text_dim]</c>
-    /// channels-last. Returns <c>[1, T, dim]</c> channels-last DiT input.
-    ///
-    /// <para>When <paramref name="dropAudioCond"/> is true (CFG uncond pass), the cond_mel
-    /// is zero'd out — same as the upstream <c>drop_audio_cond</c> behavior.</para></summary>
+    /// <summary><paramref name="noisyMel"/> and <paramref name="condMel"/> are both <c>[1, mel_dim, T]</c> channels-first, <paramref name="text"/> is <c>[1, T, text_dim]</c> channels-last; when <paramref name="dropAudioCond"/> is true (CFG uncond pass) the cond_mel is zero'd out.</summary>
     public Tensor Forward(IBackend backend, Tensor noisyMel, Tensor condMel, Tensor text, int t, bool dropAudioCond)
     {
         int melDim = _cfg.MelDim;
@@ -95,9 +81,7 @@ internal sealed unsafe class F5InputEmbed
     }
 }
 
-/// <summary>F5-TTS conv positional embedding. Two stacked grouped Conv1D layers (groups=16,
-/// kernel=31, channels-first) with Mish activations between, operating on channels-last
-/// <c>[1, T, dim]</c> input via transposition.</summary>
+/// <summary>F5-TTS conv positional embedding: two stacked grouped Conv1D layers (groups=16, kernel=31, channels-first) with Mish activations between, operating on channels-last <c>[1, T, dim]</c> input via transposition.</summary>
 internal sealed unsafe class F5ConvPosEmbed
 {
     private readonly F5TtsConfig _cfg;
@@ -116,8 +100,7 @@ internal sealed unsafe class F5ConvPosEmbed
         _conv2B = WhisperOps.EnsureF32(w[$"{prefix}.conv1d.2.bias"]);
     }
 
-    /// <summary>Input/output <c>[1, T, dim]</c>. Internally transposes to channels-first,
-    /// runs two grouped Conv1D layers with Mish between, then transposes back.</summary>
+    /// <summary>Input/output <c>[1, T, dim]</c>; internally transposes to channels-first, runs two grouped Conv1D layers with Mish between, then transposes back.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int t, int dim)
     {
         int kernel = _cfg.ConvPosKernel;
@@ -127,9 +110,9 @@ internal sealed unsafe class F5ConvPosEmbed
         Tensor xCF = new(new TensorShape(1, dim, t), DType.F32);
         backend.Transpose2D(xCF, x, t, dim);
 
-        // Conv1 — grouped Conv1D on-device (weight [C_out, C_in/groups, K] matches backend.Conv1d). The old
-        // F5Ops.GroupedConv1D was a host quintuple-loop (~2.3B MACs/conv × 2 × NFE forwards) that pinned one
-        // CPU core and was ~99% of F5's wall time; backend.Conv1d routes to cuDNN / a grouped CUDA kernel.
+        // Conv1 — grouped Conv1D on-device (weight [C_out, C_in/groups, K] matches backend.Conv1d). The earlier
+        // host quintuple-loop (~2.3B MACs/conv × 2 × NFE forwards) pinned one CPU core and was ~99% of F5's wall
+        // time; backend.Conv1d routes to cuDNN / a grouped CUDA kernel.
         Tensor c1 = new(xCF.Shape, DType.F32);
         backend.Conv1d(c1, xCF, _conv0W!, _conv0B!, stride: 1, padLeft: pad, padRight: pad, dilation: 1, groups: groups);
         xCF.Dispose();

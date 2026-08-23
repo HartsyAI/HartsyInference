@@ -110,8 +110,9 @@ public sealed class LtxVideoVaeEncoderRoundTripRealWeightTests
             _output.WriteLine($"Mean absolute per-byte difference (real latent vs zeroed latent, both decoded): {meanAbsDiffFromZero:F2}.");
             Assert.True(meanAbsDiffFromZero > 20.0, $"Decoding a zeroed latent produced nearly the same image as the real latent (diff {meanAbsDiffFromZero:F2}) -- the latent may not be load-bearing (encoder/decoder bypass).");
 
-            File.WriteAllBytes(Path.Combine(RepoRoot.Path, "ltx_vae_roundtrip_original.rgb"), original);
-            File.WriteAllBytes(Path.Combine(RepoRoot.Path, "ltx_vae_roundtrip_decoded.rgb"), roundTripped);
+            Directory.CreateDirectory(TestPaths.OutputDir);
+            File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "ltx_vae_roundtrip_original.rgb"), original);
+            File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "ltx_vae_roundtrip_decoded.rgb"), roundTripped);
             _output.WriteLine($"Wrote {size}x{size} original + round-tripped RGB for visual inspection.");
 
             long diffSum = 0;

@@ -3,21 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>Kandinsky 5 transformer encoder block (text stream).
-/// Per <c>Kandinsky5TransformerEncoderBlock.forward</c>: produces 6 modulation params from a single
-/// <c>Linear(time_embed → 6 * model_dim)</c> after SiLU; chunks them into
-/// <c>(self_attn_params, ff_params)</c>, then each into <c>(shift, scale, gate)</c>; runs
-/// non-affine LayerNorm then modulates pre-attention/pre-FFN; the post-attention/post-FFN combine
-/// is <c>x + gate * sub_out</c>. Self-attention only — Q/K/V/Out all biased; QK norm is RMSNorm with
-/// learnable scale. Self-attention applies 1D RoPE on Q and K.
-///
-/// GPU-residency rewrite (mirrors the verified QwenImageBlock / ChromaDoubleStreamBlock): every glue op
-/// (LayerNorm / AdaLN modulation / QK-norm / reshape-to-heads / gated residual / modulation split) runs as an
-/// IBackend GPU op so the activation stays device-resident across the whole block — no per-op DataPointer
-/// reads / D2H sync barriers. RoPE is GPU-resident too for batch 1: <see cref="Kandinsky5Rope"/>'s interleaved
-/// GPT-J pairing is exactly <see cref="Kandinsky5Rope.ApplyGpu"/>'s <c>WanRopeInterleaved</c> contract, applied
-/// pre-head-permute where <c>[1, S, H, D]</c> ≡ <c>[S, heads·headDim]</c>; the host <c>Apply</c> remains the
-/// batched fallback.</summary>
+/// <summary>Kandinsky 5 transformer encoder block (text stream) — ports <c>Kandinsky5TransformerEncoderBlock.forward</c>: self-attention only (biased Q/K/V/Out, RMSNorm QK-norm), 1D RoPE on Q/K. GPU-resident end to end (mirrors QwenImageBlock/ChromaDoubleStreamBlock), including RoPE for batch 1 via <see cref="Kandinsky5Rope.ApplyGpu"/>; <see cref="Kandinsky5Rope.Apply"/> is the batched host fallback.</summary>
 public sealed unsafe class Kandinsky5EncoderBlock
 {
     private readonly int _modelDim;
@@ -49,9 +35,7 @@ public sealed unsafe class Kandinsky5EncoderBlock
         _qkNormEps = qkNormEps;
     }
 
-    /// <summary>Loads weights with the diffusers naming convention: <c>{prefix}.{text_modulation,
-    /// self_attention, feed_forward}.*</c>. Self-attention uses <c>to_query/to_key/to_value/out_layer</c>
-    /// and RMSNorm <c>query_norm/key_norm</c>. Feed-forward uses <c>in_layer/out_layer</c> with no biases.</summary>
+    /// <summary>Loads weights with the diffusers naming convention: <c>{prefix}.{text_modulation, self_attention, feed_forward}.*</c>. Self-attention uses <c>to_query/to_key/to_value/out_layer</c> and RMSNorm <c>query_norm/key_norm</c>. Feed-forward uses <c>in_layer/out_layer</c> with no biases.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         _modWeight = weights[$"{prefix}.text_modulation.out_layer.weight"];
@@ -92,8 +76,7 @@ public sealed unsafe class Kandinsky5EncoderBlock
         if (_ffOut is not null) yield return _ffOut;
     }
 
-    /// <summary>Forward pass on text tokens <c>x = [B, S_text, D]</c> with timestep embedding
-    /// <c>temb = [B, time_dim]</c> and 1D RoPE <c>rope</c> already precomputed for the same seq_len.</summary>
+    /// <summary>Forward pass on text tokens <c>x = [B, S_text, D]</c> with timestep embedding <c>temb = [B, time_dim]</c> and 1D RoPE <c>rope</c> already precomputed for the same seq_len.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, Kandinsky5Rope rope)
     {
         int batch = (int)x.Shape[0];
@@ -191,15 +174,7 @@ public sealed unsafe class Kandinsky5EncoderBlock
     }
 }
 
-/// <summary>Kandinsky 5 transformer decoder block (visual stream).
-/// Per <c>Kandinsky5TransformerDecoderBlock.forward</c>: produces 9 modulation params from a single
-/// <c>Linear(time_embed → 9 * model_dim)</c> after SiLU; chunks into
-/// <c>(self_attn_params, cross_attn_params, ff_params)</c>; each into <c>(shift, scale, gate)</c>.
-///
-/// Three sub-blocks: (1) self-attention with 3D RoPE on Q/K, (2) cross-attention to text (no RoPE),
-/// (3) FFN. All sub-LayerNorms are non-affine; QKV/out linears are biased; FFN is bias-free
-/// <c>Linear → GELU → Linear</c>; QK norm is RMSNorm. GPU-resident — see <see cref="Kandinsky5EncoderBlock"/>
-/// for the rationale (only RoPE stays on the host).</summary>
+/// <summary>Kandinsky 5 transformer decoder block (visual stream) — ports <c>Kandinsky5TransformerDecoderBlock.forward</c>: self-attention with 3D RoPE on Q/K, then cross-attention to text (no RoPE), then FFN, each gated by its own modulation triple. GPU-resident; see <see cref="Kandinsky5EncoderBlock"/> for the rationale.</summary>
 public sealed unsafe class Kandinsky5DecoderBlock
 {
     private readonly int _modelDim;
@@ -232,8 +207,7 @@ public sealed unsafe class Kandinsky5DecoderBlock
         _qkNormEps = qkNormEps;
     }
 
-    /// <summary>Loads weights with the diffusers convention <c>{prefix}.{visual_modulation,
-    /// self_attention, cross_attention, feed_forward}.*</c>.</summary>
+    /// <summary>Loads weights with the diffusers convention <c>{prefix}.{visual_modulation, self_attention, cross_attention, feed_forward}.*</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         _modWeight = weights[$"{prefix}.visual_modulation.out_layer.weight"];
@@ -284,8 +258,7 @@ public sealed unsafe class Kandinsky5DecoderBlock
         }
     }
 
-    /// <summary>Forward pass on visual tokens <c>visual = [B, S_v, D]</c> with text <c>text = [B, S_t, D]</c>,
-    /// timestep <c>temb = [B, time_dim]</c>, and 3D RoPE <c>rope</c> already precomputed for the visual seq.</summary>
+    /// <summary>Forward pass on visual tokens <c>visual = [B, S_v, D]</c> with text <c>text = [B, S_t, D]</c>, timestep <c>temb = [B, time_dim]</c>, and 3D RoPE <c>rope</c> already precomputed for the visual seq.</summary>
     public Tensor Forward(IBackend backend, Tensor visual, Tensor text, Tensor temb, Kandinsky5Rope rope)
     {
         int batch = (int)visual.Shape[0];
@@ -430,14 +403,10 @@ public sealed unsafe class Kandinsky5DecoderBlock
     }
 }
 
-/// <summary>Shared GPU-resident modulation helpers for the Kandinsky 5 encoder/decoder blocks. Keeps the AdaLN
-/// math on the device (no host DataPointer reads): the modulation projection is split with <c>SliceLastDim</c>
-/// and modulation is <c>LayerNormNoAffine → x*(1+scale)+shift</c> via <c>AddScalar</c> + <c>AffineBroadcastLastDim</c>,
-/// bit-identical to the prior CPU <c>DiTUtils</c>/<c>AdaLNModulation</c> path.</summary>
+/// <summary>Shared GPU-resident modulation helpers for the Kandinsky 5 encoder/decoder blocks. Keeps the AdaLN math on the device (no host DataPointer reads): the modulation projection is split with <c>SliceLastDim</c> and modulation is <c>LayerNormNoAffine → x*(1+scale)+shift</c> via <c>AddScalar</c> + <c>AffineBroadcastLastDim</c>, bit-identical to the prior CPU <c>DiTUtils</c>/<c>AdaLNModulation</c> path.</summary>
 internal static class Kandinsky5BlockOps
 {
-    /// <summary>Computes <c>Linear(SiLU(temb)) → count * model_dim</c> then slices into <paramref name="count"/>
-    /// <c>[B, dim]</c> tensors (chunk order matches diffusers' nested <c>torch.chunk</c>), all on the GPU.</summary>
+    /// <summary>Computes <c>Linear(SiLU(temb)) → count * model_dim</c> then slices into <paramref name="count"/> <c>[B, dim]</c> tensors (chunk order matches diffusers' nested <c>torch.chunk</c>), all on the GPU.</summary>
     public static Tensor[] ProduceModulation(IBackend backend, Tensor temb, Tensor modWeight, Tensor? modBias,
         int batch, int timeDim, int dim, int count)
     {
@@ -461,9 +430,7 @@ internal static class Kandinsky5BlockOps
         return result;
     }
 
-    /// <summary>Non-affine LayerNorm (eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on
-    /// the GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented
-    /// by 1 via <c>AddScalar</c> to reproduce the <c>(1+scale)</c> factor.</summary>
+    /// <summary>Non-affine LayerNorm (eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on the GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented by 1 via <c>AddScalar</c> to reproduce the <c>(1+scale)</c> factor.</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
         Tensor normed = new Tensor(shape, DType.F32);

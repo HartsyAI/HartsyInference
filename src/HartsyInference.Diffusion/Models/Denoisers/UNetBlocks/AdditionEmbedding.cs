@@ -16,7 +16,6 @@ public sealed unsafe class AdditionEmbedding
     private Tensor? _linear2Weight;
     private Tensor? _linear2Bias;
 
-    /// <summary>Creates an ADM addition embedding module.</summary>
     /// <param name="admInChannels">Total input dimension (2816 for SDXL base: 1280 pooled + 6*256 scalars).</param>
     /// <param name="timeDim">Output dimension matching timestep embedding (1280 for SDXL base).</param>
     /// <param name="additionTimeEmbedDim">Sinusoidal embedding dimension per scalar (256 for SDXL).</param>
@@ -45,7 +44,7 @@ public sealed unsafe class AdditionEmbedding
         if (_linear2Bias is not null) yield return _linear2Bias;
     }
 
-    /// <summary>Computes the ADM conditioning vector. pooledTextEmb [B, pooledDim], sizeCondition contains scalar values to embed sinusoidally. Returns [B, timeDim] to be added to timestep embedding.</summary>
+    /// <summary>Computes the ADM conditioning vector to be added to the timestep embedding.</summary>
     /// <param name="pooledTextEmb">Pooled text embedding from CLIP-G [B, 1280].</param>
     /// <param name="sizeCondition">Flattened scalar conditioning values. For SDXL base: [origH, origW, cropTop, cropLeft, targetH, targetW]. For refiner: [origH, origW, cropTop, cropLeft, aestheticScore].</param>
     /// <param name="batch">Batch size.</param>
@@ -67,13 +66,11 @@ public sealed unsafe class AdditionEmbedding
         {
             int outOffset = b * _admInChannels;
 
-            // Copy pooled text embedding
             for (int d = 0; d < pooledDim; d++)
             {
                 admPtr[outOffset + d] = pooledPtr[b * pooledDim + d];
             }
 
-            // Embed each scalar and concatenate
             int embOffset = outOffset + pooledDim;
             for (int s = 0; s < numScalars; s++)
             {

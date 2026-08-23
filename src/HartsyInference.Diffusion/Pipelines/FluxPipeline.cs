@@ -29,14 +29,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly FluxConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations on the eager (non-streaming) path — skips
-    /// the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode
-    /// (the TE cannot always coexist with the resident DiT), then the loop re-preloads.
-    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables); the streaming (low-VRAM) path always evicts.</summary>
-    /// <summary>True when the current residency is the sharded asymmetric layout (shared + [0, split) on
-    /// <see cref="DiffusionPipelineBase.Backend"/>, [split, BlockCount) on
-    /// <see cref="DiffusionPipelineBase.DitShardBackend"/>) rather than the whole DiT on the primary — the free
-    /// path must mirror whichever preload shape actually ran or the shard backend's range leaks.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations on the eager (non-streaming) path — skips the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode (the TE cannot always coexist with the resident DiT), then the loop re-preloads. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables); the streaming (low-VRAM) path always evicts.</summary>
+    /// <summary>True when the current residency is the sharded asymmetric layout (shared + [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, [split, BlockCount) on <see cref="DiffusionPipelineBase.DitShardBackend"/>) rather than the whole DiT on the primary — the free path must mirror whichever preload shape actually ran or the shard backend's range leaks.</summary>
     private bool _ditShardResident;
 
     private static readonly bool KeepModelsResident =
@@ -53,9 +47,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private Tensor? _cachedNegClipPooled;
     private Tensor? _cachedNegT5;
 
-    /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and
-    /// per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that
-    /// serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
+    /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
     private static readonly bool StatsEnabled =
         Environment.GetEnvironmentVariable("HARTSY_FLUX_STATS") == "1";
 
@@ -79,28 +71,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Encodes arbitrary text through this pipeline's own T5-XXL encoder — the same encoder instance and
-    /// backend the base prompt uses, so a region's caption lands in the identical embedding space. For
-    /// regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s
-    /// <c>encodeRegion</c> delegate); the recipe pipeline owns the T5 tokenizer, this owns the T5 encoder, so
-    /// neither side alone can do this. Returns a <c>[1, L, hidden]</c> tensor; disposal is the caller's
-    /// responsibility (<see cref="Prompting.RegionalPromptResolver.DisposeRegions"/> covers it once the region is
-    /// attached to a <see cref="Prompting.RegionalPlan"/>).</summary>
+    /// <summary>Encodes arbitrary text through this pipeline's own T5-XXL encoder — the same encoder instance and backend the base prompt uses, so a region's caption lands in the identical embedding space. For regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s <c>encodeRegion</c> delegate); the recipe pipeline owns the T5 tokenizer, this owns the T5 encoder, so neither side alone can do this. Returns a <c>[1, L, hidden]</c> tensor; disposal is the caller's responsibility (<see cref="Prompting.RegionalPromptResolver.DisposeRegions"/> covers it once the region is attached to a <see cref="Prompting.RegionalPlan"/>).</summary>
     public Tensor EncodeRegionText(int[] tokenIds, int[]? attentionMask = null) =>
         _t5.Encode(TextEncoderBackend, [tokenIds], attentionMask is null ? null : [attentionMask]);
 
     /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
-    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial packed latent = noise scaled by initSigma; denoise from step 0).</item>
-    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux VAE, packed (2×2 patchify), and combined with fresh packed noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
+    ///   <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial packed latent = noise scaled by initSigma; denoise from step 0).</item>
+    ///   <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux VAE, packed (2×2 patchify), and combined with fresh packed noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
     /// </list>
     /// Strength=0 short-circuits to byte-identical pass-through.
-    /// <para>True-CFG (diffusers <c>true_cfg_scale</c>): when <paramref name="trueCfgScale"/> &gt; 1 and a negative
-    /// T5 token stream is supplied, a second unconditional transformer forward runs each step against the negative
-    /// CLIP-pooled + negative T5 conditioning and the two velocity predictions are combined via standard CFG
-    /// (<c>neg + scale·(pos − neg)</c>). This is layered ON TOP of Flux's embedded distilled guidance, which still
-    /// rides along on both passes. When the trigger is not met, the path is byte-identical to the single-pass loop.</para>
-    /// </summary>
+    /// <para>True-CFG (diffusers <c>true_cfg_scale</c>): when <paramref name="trueCfgScale"/> &gt; 1 and a negative T5 token stream is supplied, a second unconditional transformer forward runs each step against the negative CLIP-pooled + negative T5 conditioning and the two velocity predictions are combined via standard CFG (<c>neg + scale·(pos − neg)</c>). This is layered ON TOP of Flux's embedded distilled guidance, which still rides along on both passes. When the trigger is not met, the path is byte-identical to the single-pass loop.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
         int promptEosPositionL,
@@ -1136,24 +1117,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Picks <c>prefetchAhead</c> for the streaming controller based on how much VRAM
-    /// is left after reserving for the peak activation working set of a single forward pass.
-    /// Each extra prefetched block costs one block's worth of resident weights in addition to
-    /// the current+next block already in flight. We pick the largest value that still leaves
-    /// headroom for activations + cuBLAS workspace, capped at 2 (deeper just churns VRAM
-    /// without extra hiding when blocks compute in tens of milliseconds).</summary>
-    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the
-    /// DiT weights — the deepest valley is a SingleStreamBlock holding the F16 mlpInput + mlpActivated and
-    /// the F16 concatted simultaneously alongside the F32 attention tensors. Shared by the resident-vs-stream
-    /// decision and the prefetch-depth choice so the two can never disagree. Byte sizes are for B=1.</summary>
-    /// <summary>Attempts to preload the whole DiT onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so
-    /// the true-CFG uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>.
-    /// Never throws — a card that can't also hold the DiT resident (~2× a single card's worth of VRAM) falls back
-    /// to the sequential path with one log line, exactly like the "no CfgParallelBackend configured" case. Called
-    /// only from the Resident placement branches; block-streaming and CFG-parallel don't compose (see the call
-    /// sites' comment).</summary>
-    /// <summary>Routes a plain-path forward (no attnBias/Kontext/ControlNet, the only calls DiT sharding v1
-    /// supports) to <see cref="FluxTransformer.ForwardSharded"/> when this generation's sharding is active.</summary>
+    /// <summary>Picks <c>prefetchAhead</c> for the streaming controller based on how much VRAM is left after reserving for the peak activation working set of a single forward pass. Each extra prefetched block costs one block's worth of resident weights in addition to the current+next block already in flight. We pick the largest value that still leaves headroom for activations + cuBLAS workspace, capped at 2 (deeper just churns VRAM without extra hiding when blocks compute in tens of milliseconds).</summary>
+    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the DiT weights — the deepest valley is a SingleStreamBlock holding the F16 mlpInput + mlpActivated and the F16 concatted simultaneously alongside the F32 attention tensors. Shared by the resident-vs-stream decision and the prefetch-depth choice so the two can never disagree. Byte sizes are for B=1.</summary>
+    /// <summary>Attempts to preload the whole DiT onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so the true-CFG uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>. Never throws — a card that can't also hold the DiT resident (~2× a single card's worth of VRAM) falls back to the sequential path with one log line, exactly like the "no CfgParallelBackend configured" case. Called only from the Resident placement branches; block-streaming and CFG-parallel don't compose (see the call sites' comment).</summary>
+    /// <summary>Routes a plain-path forward (no attnBias/Kontext/ControlNet, the only calls DiT sharding v1 supports) to <see cref="FluxTransformer.ForwardSharded"/> when this generation's sharding is active.</summary>
     /// <summary><paramref name="stepCache"/> only applies on the non-sharded path — <see cref="FluxTransformer.ForwardSharded"/> has no cache-consuming entry point.</summary>
     private Tensor RunPlainForward(bool ditShardActive, Tensor packedInput, Tensor condStream, float sigma,
         Tensor pooled, float guidanceScale, int txtLen, int hPacked, int wPacked, DeviceFeatureCache? stepCache = null) =>
@@ -1163,8 +1130,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             : _transformer.Forward(Backend, packedInput, condStream, sigma,
                 pooled, guidanceScale, txtLen, hPacked, wPacked, null, 0, 0, 0, stepCache: stepCache);
 
-    /// <summary>Frees the resident DiT on whichever backend(s) hold it — the whole set on the primary, or the
-    /// asymmetric sharded split. The unsharded free would silently no-op on the shard backend's range.</summary>
+    /// <summary>Frees the resident DiT on whichever backend(s) hold it — the whole set on the primary, or the asymmetric sharded split. The unsharded free would silently no-op on the shard backend's range.</summary>
     private void FreeResidentTransformer()
     {
         _transformer.InvalidateStepGraph(Backend);
@@ -1305,8 +1271,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return (packedNoise, null);
     }
 
-    /// <summary>Sums two Flux ControlNet residual stacks element-wise (multi-ControlNet stacking). Consumes both
-    /// inputs' tensors and returns a stack of fresh sums.</summary>
+    /// <summary>Sums two Flux ControlNet residual stacks element-wise (multi-ControlNet stacking). Consumes both inputs' tensors and returns a stack of fresh sums.</summary>
     private Adapters.FluxControlNetResiduals SumControlNetResiduals(
         Adapters.FluxControlNetResiduals acc, Adapters.FluxControlNetResiduals next)
     {
@@ -1338,8 +1303,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Builds a prompt-cache key from the CLIP-L token ids, the CLIP EOS position (the pooled vector
-    /// depends on it), and the T5 token ids, in one flat array (lengths make the encoding unambiguous).</summary>
+    /// <summary>Builds a prompt-cache key from the CLIP-L token ids, the CLIP EOS position (the pooled vector depends on it), and the T5 token ids, in one flat array (lengths make the encoding unambiguous).</summary>
     private static int[] BuildPromptCacheKey(int[] tokenIdsL, int eosPositionL, int[] tokenIdsT5)
     {
         int[] key = new int[tokenIdsL.Length + 2 + tokenIdsT5.Length];
@@ -1457,9 +1421,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim
-    /// → <c>[1, Sa+Sb, D]</c>. Used by Flux Kontext to append the packed reference-image tokens after the packed
-    /// noise tokens before the transformer. Both inputs must share batch and feature dim; F32 only.</summary>
+    /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim → <c>[1, Sa+Sb, D]</c>. Used by Flux Kontext to append the packed reference-image tokens after the packed noise tokens before the transformer. Both inputs must share batch and feature dim; F32 only.</summary>
     private static Tensor ConcatPackedSeqDim(Tensor a, Tensor b)
     {
         if (a.Shape.Rank != 3 || b.Shape.Rank != 3 || a.Shape[0] != b.Shape[0] || a.Shape[2] != b.Shape[2])
@@ -1571,8 +1533,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return packed;
     }
 
-    /// <summary>Unpacks a latent tensor from [B, H/2*W/2, C*4] back to [B, C, H, W].</summary>
-    private static Tensor UnpackLatent(Tensor packed, int h, int w)
+    /// <summary>Unpacks a latent tensor from [B, H/2*W/2, C*4] back to [B, C, H, W]. Does not dispose the input. Internal so <see cref="ChromaPipeline"/> shares the identical packed layout.</summary>
+    internal static Tensor UnpackLatent(Tensor packed, int h, int w)
     {
         int batch = (int)packed.Shape[0];
         int channels = 16; // Flux always uses 16 latent channels

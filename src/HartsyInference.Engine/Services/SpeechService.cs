@@ -10,8 +10,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference,
-/// and runs the synthesis on the shared audio device under the generation lock.</summary>
+/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference, and runs the synthesis on the shared audio device under the generation lock.</summary>
 public sealed class SpeechService : ISpeechService
 {
     /// <summary>Voice references are decoded at 24 kHz — the rate the cloning models expect.</summary>
@@ -103,8 +102,7 @@ public sealed class SpeechService : ISpeechService
         return StreamCore(backend, key, descriptor, loadContext, variant, request, stageBackends, cancel);
     }
 
-    /// <summary>Owns reference-file materialization/cleanup around the streamed run, exactly mirroring
-    /// <see cref="SynthesizeAsync"/>'s non-streaming <c>finally</c>.</summary>
+    /// <summary>Owns reference-file materialization/cleanup around the streamed run, exactly mirroring <see cref="SynthesizeAsync"/>'s non-streaming <c>finally</c>.</summary>
     private async IAsyncEnumerable<AudioChunk> StreamCore(IBackend backend, string key, TtsModelDescriptor descriptor,
         TtsLoadContext loadContext, string variant, SpeechRequest request, IReadOnlyList<IBackend>? stageBackends,
         [EnumeratorCancellation] CancellationToken cancel)
@@ -125,9 +123,7 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
-    /// <summary>Loads the runner and streams from it if it implements <see cref="IStreamingTtsRunner"/>; every
-    /// other model falls back to one chunk containing the complete synthesized buffer, so
-    /// <see cref="StreamCore"/> and its caller have a single code path regardless of which model is selected.</summary>
+    /// <summary>Loads the runner and streams from it if it implements <see cref="IStreamingTtsRunner"/>; every other model falls back to one chunk containing the complete synthesized buffer, so <see cref="StreamCore"/> and its caller have a single code path regardless of which model is selected.</summary>
     private async IAsyncEnumerable<AudioChunk> StreamWork(IBackend backend, string key, TtsModelDescriptor descriptor,
         TtsLoadContext loadContext, string variant, TtsJob job, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -155,9 +151,7 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
-    /// <summary>Decodes a voice reference to mono 24 kHz samples plus a temp WAV for pipelines that take a file
-    /// path. Returns <c>(null, null)</c> when no reference was supplied. Shared by both the batch and streaming
-    /// synthesis paths.</summary>
+    /// <summary>Decodes a voice reference to mono 24 kHz samples plus a temp WAV for pipelines that take a file path. Returns <c>(null, null)</c> when no reference was supplied. Shared by both the batch and streaming synthesis paths.</summary>
     private static (float[]? Mono, string? WavPath) MaterializeReference(AudioClip? reference)
     {
         if (reference is null || reference.Data.Length == 0)
@@ -173,8 +167,7 @@ public sealed class SpeechService : ISpeechService
         return (mono, wavPath);
     }
 
-    /// <summary>Builds the per-model job from the request plus the already-materialized reference. Shared by both
-    /// the batch and streaming synthesis paths so their knob-mapping never drifts apart.</summary>
+    /// <summary>Builds the per-model job from the request plus the already-materialized reference. Shared by both the batch and streaming synthesis paths so their knob-mapping never drifts apart.</summary>
     private static TtsJob BuildJob(SpeechRequest request, float[]? referenceMono, string? referenceWavPath) => new TtsJob
     {
         Text = request.Text,
@@ -203,10 +196,7 @@ public sealed class SpeechService : ISpeechService
         Seed = request.Seed,
     };
 
-    /// <summary>Builds the load-time context: single-device (byte-identical to pre-placement behavior) unless the
-    /// engine placement has ≥2 <c>ShardDevices</c>, in which case CosyVoice's Qwen2 LM gets the resolved shard
-    /// backends and layer-splits across them; every other TTS family ignores the shard stages. Mirrors
-    /// <c>MusicService.BuildLoadContext</c>.</summary>
+    /// <summary>Builds the load-time context: single-device (byte-identical to pre-placement behavior) unless the engine placement has ≥2 <c>ShardDevices</c>, in which case CosyVoice's Qwen2 LM gets the resolved shard backends and layer-splits across them; every other TTS family ignores the shard stages. Mirrors <c>MusicService.BuildLoadContext</c>.</summary>
     private TtsLoadContext BuildLoadContext(IBackend primary)
     {
         IReadOnlyList<string> shardDevices = _engine.Placement.ShardDevices;

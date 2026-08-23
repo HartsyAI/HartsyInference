@@ -3,34 +3,19 @@ using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API).
-/// Replaces the materialized cuBLAS QKᵀ→softmax→PV path (which allocates a [B·H, Sq, Skv] score matrix)
-/// with a single fused kernel that never materializes the scores — ~34× faster at Krea2 self-attention
-/// shape (B=1,H=24,S=4608,D=128: 62.7ms → 1.8ms/call, workspace 0), measured on RTX 4090.
-///
-/// The graph mirrors what NVIDIA's cudnn-frontend emits for plain inference SDPA on cuDNN ≥ 9.21:
-///   bmm1: S = Q @ Kᵀ  (matmul, fp32 accum) → scale: Ss = S·attn_scale (pointwise mul)
-///   → softmax: P = softmax(Ss)  (the UNIFIED backend SOFTMAX op — the decomposed
-///     max/sub/exp/sum/div graph does NOT match the fused engine) → bmm2: O = P @ V.
-/// Tensors are 4D [B,H,S,D], fp16 I/O + fp32 compute. Q/K/V/O and the scale scalar are non-virtual I/O;
-/// S/Ss/P are virtual so the engine keeps them in registers/shared memory.
-///
-/// Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by
-/// shape, exact scale bits, and bias layout. Instances are created per <see cref="CudaBackend"/> (one cuDNN
-/// handle bound to the compute stream).</summary>
+/// <summary>Fused scaled-dot-product attention via cuDNN's flash-attention engine (backend graph API). Replaces the materialized cuBLAS QKᵀ→softmax→PV path (which allocates a [B·H, Sq, Skv] score matrix) with a single fused kernel that never materializes the scores — ~34× faster at Krea2 self-attention shape (B=1,H=24,S=4608,D=128: 62.7ms → 1.8ms/call, workspace 0), measured on RTX 4090. The graph mirrors what NVIDIA's cudnn-frontend emits for plain inference SDPA on cuDNN ≥ 9.21: bmm1: S = Q @ Kᵀ (matmul, fp32 accum) → scale: Ss = S·attn_scale (pointwise mul) → softmax: P = softmax(Ss) (the UNIFIED backend SOFTMAX op — the decomposed max/sub/exp/sum/div graph does NOT match the fused engine) → bmm2: O = P @ V. Tensors are 4D [B,H,S,D], fp16 I/O + fp32 compute. Q/K/V/O and the scale scalar are non-virtual I/O; S/Ss/P are virtual so the engine keeps them in registers/shared memory. Execution plans are expensive to build (heuristics + JIT) and cheap to run, so they are cached by shape, exact scale bits, and bias layout. Instances are created per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream).</summary>
 internal sealed class CudnnSdpa : IDisposable
 {
     private readonly nint _handle;
     private readonly ConcurrentDictionary<PlanKey, Lazy<Plan>> _plans = new();
     private bool _disposed;
 
-    /// <summary>Memory layout of the Q/K/V/O device buffers. <c>TokenMajor</c> is [b,s,h,d] addressed purely by
-    /// strides — what a fused QKV projection already produces, so callers can skip the permute on both sides.</summary>
+    /// <summary>Memory layout of the Q/K/V/O device buffers. <c>TokenMajor</c> is [b,s,h,d] addressed purely by strides — what a fused QKV projection already produces, so callers can skip the permute on both sides.</summary>
     internal enum SdpaLayout { HeadMajor, TokenMajor }
 
     /// <summary>Exact identity of a cached execution plan and its immutable device scale scalar.</summary>
     internal readonly record struct PlanKey(
-        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB, SdpaLayout Layout);
+        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB, long BiasSq, SdpaLayout Layout);
 
     private sealed class Plan
     {
@@ -57,35 +42,27 @@ internal sealed class CudnnSdpa : IDisposable
         _handle = handle;
     }
 
-    /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented
-    /// flash-fprop envelope on SM80+ — covers 64/96/112/120/128, e.g. Boogu's 120) plus 256 (Ideogram 4,
-    /// build/arch-dependent). The caller falls back per-D on rejection (<c>_cudnnSdpaDeadDims</c>), so an
-    /// unsupported D costs one warning and the materialized path — never a session kill.</summary>
+    /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented flash-fprop envelope on SM80+ — covers 64/96/112/120/128, e.g. Boogu's 120) plus 256 (Ideogram 4, build/arch-dependent). The caller falls back per-D on rejection (<c>_cudnnSdpaDeadDims</c>), so an unsupported D costs one warning and the materialized path — never a session kill.</summary>
     public static bool ShapeSupported(long d) => d == 256 || (d >= 64 && d <= 128 && d % 8 == 0);
 
-    /// <summary>
-    /// Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D]
-    /// (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically).
-    /// <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as
-    /// [biasB,1,Sq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores
-    /// before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine.
-    /// </summary>
+    /// <summary> Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D] (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically). <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as [biasB,1,biasSq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine. <paramref name="biasSq"/> of 1 broadcasts one [Skv] row over every query, which is what a bias that depends only on the key needs (Wan-Animate-2's log_scale band) — a full [Sq,Skv] buffer for it is pure duplication. </summary>
     public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
                                long b, long h, long sq, long sk, long d, float scale,
-                               ulong biasF32 = 0, long biasB = 1)
-        => Execute(qF16, kF16, vF16, oF16, b, h, sq, sk, d, scale, SdpaLayout.HeadMajor, biasF32, biasB);
+                               ulong biasF32 = 0, long biasB = 1, long biasSq = 0)
+        => Execute(qF16, kF16, vF16, oF16, b, h, sq, sk, d, scale, SdpaLayout.HeadMajor, biasF32, biasB, biasSq);
 
     /// <summary>Same as the head-major overload but lets the caller pick the Q/K/V/O buffer layout.</summary>
     internal unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
                                  long b, long h, long sq, long sk, long d, float scale,
-                                 SdpaLayout layout, ulong biasF32 = 0, long biasB = 1)
+                                 SdpaLayout layout, ulong biasF32 = 0, long biasB = 1, long biasSq = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         bool hasBias = biasF32 != 0;
+        if (biasSq <= 0) biasSq = sq;
         PlanKey key = new PlanKey(
-            b, h, sq, sk, d, BitConverter.SingleToInt32Bits(scale), hasBias, biasB, layout);
+            b, h, sq, sk, d, BitConverter.SingleToInt32Bits(scale), hasBias, biasB, biasSq, layout);
         Lazy<Plan> candidate = new(
-            () => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB, layout),
+            () => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB, biasSq, layout),
             LazyThreadSafetyMode.ExecutionAndPublication);
         Lazy<Plan> cached = _plans.GetOrAdd(key, candidate);
         Plan plan;
@@ -130,7 +107,7 @@ internal sealed class CudnnSdpa : IDisposable
     private const long UidS = 100, UidSS = 101, UidP = 102, UidSB = 103;
 
     private unsafe Plan BuildPlan(
-        long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB, SdpaLayout layout)
+        long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB, long biasSq, SdpaLayout layout)
     {
         List<nint> owned = new();   // build-time descriptors to destroy once the plan is finalized
         try
@@ -172,8 +149,8 @@ internal sealed class CudnnSdpa : IDisposable
                 // pointwise ops) — the cudnn-frontend Bias score-modifier. -1e30 masked entries are safe: the
                 // add runs in fp32 and the fused softmax subtracts the row max (fully-masked rows go uniform,
                 // matching the materialized path's convention).
-                long* bDim = stackalloc long[4] { biasB, 1, sq, sk };
-                long* bStr = stackalloc long[4] { sq * sk, sq * sk, sk, 1 };
+                long* bDim = stackalloc long[4] { biasB, 1, biasSq, sk };
+                long* bStr = stackalloc long[4] { biasSq * sk, biasSq * sk, sk, 1 };
                 nint tBias = Tensor(owned, UidBias, bDim, bStr, CUDNN_DATA_FLOAT, false);
                 nint tSB = Tensor(owned, UidSB, sDim, sStr, CUDNN_DATA_FLOAT, true);
                 ops[opCount++] = PointwiseOp(owned, CUDNN_POINTWISE_ADD, tSS, tBias, tSB);
@@ -190,7 +167,7 @@ internal sealed class CudnnSdpa : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, opCount, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            (nint exec, long wsBytes) = BuildExecutionPlan(graph, owned);
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, long.MaxValue, "SDPA");
 
             Plan plan = new()
             {
@@ -221,109 +198,6 @@ internal sealed class CudnnSdpa : IDisposable
         }
     }
 
-    private unsafe (nint exec, long wsBytes) BuildExecutionPlan(nint graph, List<nint> owned)
-    {
-        // Ask heuristics (mode A = recommended runtime-compiled fused engines first) for engine configs,
-        // then finalize the first that yields a valid plan. Fall back to FALLBACK mode if A is empty.
-        foreach (int mode in new[] { CUDNN_HEUR_MODE_A, CUDNN_HEUR_MODE_FALLBACK })
-        {
-            nint heur;
-            if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR, out heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-            owned.Add(heur);
-            void* gp = (void*)graph;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &gp);
-            int m = mode;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_MODE, CUDNN_TYPE_HEUR_MODE, 1, &m);
-            if (cudnnBackendFinalize(heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-
-            const int maxCfgs = 32;
-            nint[] cfgs = new nint[maxCfgs];
-            for (int i = 0; i < maxCfgs; i++)
-                cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR, out cfgs[i]);
-            long returned;
-            fixed (nint* cfgPtr = cfgs)
-            {
-                int gst = cudnnBackendGetAttribute(heur, CUDNN_ATTR_ENGINEHEUR_RESULTS,
-                    CUDNN_TYPE_BACKEND_DESCRIPTOR, maxCfgs, out returned, cfgPtr);
-                if (gst != CUDNN_STATUS_SUCCESS) returned = 0;
-            }
-            // TryPlan can throw (SetAttr failure, e.g. a transient host-allocation error) instead of
-            // returning ok=false — without this try/finally, an exception mid-loop would skip every
-            // remaining cfgs[i]'s destroy call (both the current index and every index not yet reached),
-            // leaking up to 32 backend descriptors per throw. Under exactly the resource-pressure
-            // conditions that cause such a throw, that leak would make the underlying pressure worse with
-            // every retry — tracked per-index so the normal (non-throwing) destroy calls below aren't
-            // double-freed here.
-            bool[] destroyed = new bool[maxCfgs];
-            try
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                {
-                    if (i < returned)
-                    {
-                        (nint exec, long ws, bool ok) = TryPlan(cfgs[i]);
-                        if (ok)
-                        {
-                            // free the unused cfg descriptors, keep going only to release; exec plan is retained
-                            for (int j = 0; j < maxCfgs; j++)
-                            {
-                                if (!destroyed[j]) { cudnnBackendDestroyDescriptor(cfgs[j]); destroyed[j] = true; }
-                            }
-                            return (exec, ws);
-                        }
-                    }
-                    cudnnBackendDestroyDescriptor(cfgs[i]);
-                    destroyed[i] = true;
-                }
-            }
-            finally
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                    if (!destroyed[i]) cudnnBackendDestroyDescriptor(cfgs[i]);
-            }
-        }
-        throw new InvalidOperationException("cuDNN SDPA: no engine config produced a valid execution plan");
-    }
-
-    private unsafe (nint exec, long ws, bool ok) TryPlan(nint cfg)
-    {
-        if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR, out nint p) != CUDNN_STATUS_SUCCESS)
-            return (0, 0, false);
-        try
-        {
-            void* hp = (void*)_handle;
-            void* cp = (void*)cfg;
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &cp);
-        }
-        catch
-        {
-            // SetAttr throws directly on failure (doesn't return a status) — without this, a thrown
-            // exception here would leak the just-created execution-plan descriptor `p`.
-            cudnnBackendDestroyDescriptor(p);
-            throw;
-        }
-        if (cudnnBackendFinalize(p) != CUDNN_STATUS_SUCCESS)
-        {
-            cudnnBackendDestroyDescriptor(p);
-            return (0, 0, false);
-        }
-        long ws = 0;
-        try
-        {
-            Check(cudnnBackendGetAttribute(
-                p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws),
-                "workspace size get");
-        }
-        catch
-        {
-            cudnnBackendDestroyDescriptor(p);
-            throw;
-        }
-        return (p, ws, true);
-    }
 
     // ── descriptor builders ─────────────────────────────────────────────
     private unsafe nint Tensor(List<nint> owned, long uid, long* dims, long* strides, int dtype, bool virt)
@@ -394,18 +268,6 @@ internal sealed class CudnnSdpa : IDisposable
         return op;
     }
 
-    private static unsafe void SetAttr(nint desc, int attr, int type, long count, void* vals)
-    {
-        int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
-    }
-
-    private static void Check(int st, string what)
-    {
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, what);
-    }
 
     private static Exception? DestroyPlan(Plan plan)
     {

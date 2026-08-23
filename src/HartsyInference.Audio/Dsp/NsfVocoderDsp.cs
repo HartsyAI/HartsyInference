@@ -79,45 +79,18 @@ public static unsafe class NsfVocoderDsp
     /// producing magnitude in channels <c>[0, n_fft/2]</c> and phase angle in <c>[n_fft/2+1, n_fft+1]</c>
     /// of a <c>[1, n_fft+2, frames]</c> tensor — the <c>cat([|STFT|, angle(STFT)])</c> NSF source spectrogram.</summary>
     public static Tensor ForwardStftMagPhase(float[] signal, int nFft, int hop)
-    {
-        int half = nFft / 2;
-        int numBins = half + 1;
-        int pad = half;
-        int paddedLen = signal.Length + 2 * pad;
-        float[] padded = new float[paddedLen];
-        for (int i = 0; i < pad; i++)
-        {
-            padded[i] = signal[Math.Min(pad - i, signal.Length - 1)];
-            padded[paddedLen - 1 - i] = signal[Math.Max(signal.Length - 2 - i, 0)];
-        }
-        Array.Copy(signal, 0, padded, pad, signal.Length);
-        int frames = 1 + (paddedLen - nFft) / hop;
-        if (frames < 1) frames = 1;
-        float[] window = HannWindow.Get(nFft);
-        Tensor outT = new(new TensorShape(1, nFft + 2, frames), DType.F32);
-        float* op = (float*)outT.DataPointer;
-        float[] frame = new float[nFft];
-        float[] re = new float[numBins];
-        float[] im = new float[numBins];
-        for (int f = 0; f < frames; f++)
-        {
-            int start = f * hop;
-            for (int k = 0; k < nFft; k++) frame[k] = padded[start + k] * window[k];
-            Fft.RealTransform(frame, re, im, nFft);
-            for (int b = 0; b < numBins; b++)
-            {
-                op[b * frames + f] = MathF.Sqrt(re[b] * re[b] + im[b] * im[b]);
-                op[(numBins + b) * frames + f] = MathF.Atan2(im[b], re[b]);
-            }
-        }
-        return outT;
-    }
+        => ForwardStft(signal, nFft, hop, magPhase: true);
 
     /// <summary>Forward STFT (periodic Hann, <c>center=True</c> reflect padding) producing the real part in
     /// channels <c>[0, n_fft/2]</c> and the imaginary part in <c>[n_fft/2+1, n_fft+1]</c> of a
     /// <c>[1, n_fft+2, frames]</c> tensor — the <c>cat([Re(STFT), Im(STFT)])</c> NSF source spectrogram that
     /// HiFTGenerator's <c>source_downs</c> convs consume (NOT magnitude/phase).</summary>
     public static Tensor ForwardStftRealImag(float[] signal, int nFft, int hop)
+        => ForwardStft(signal, nFft, hop, magPhase: false);
+
+    /// <param name="magPhase">Writes magnitude/phase when true, real/imaginary when false — the only difference
+    /// between the two published forms.</param>
+    private static Tensor ForwardStft(float[] signal, int nFft, int hop, bool magPhase)
     {
         int half = nFft / 2;
         int numBins = half + 1;
@@ -144,10 +117,21 @@ public static unsafe class NsfVocoderDsp
             int start = f * hop;
             for (int k = 0; k < nFft; k++) frame[k] = padded[start + k] * window[k];
             Fft.RealTransform(frame, re, im, nFft);
-            for (int b = 0; b < numBins; b++)
+            if (magPhase)
             {
-                op[b * frames + f] = re[b];
-                op[(numBins + b) * frames + f] = im[b];
+                for (int b = 0; b < numBins; b++)
+                {
+                    op[b * frames + f] = MathF.Sqrt(re[b] * re[b] + im[b] * im[b]);
+                    op[(numBins + b) * frames + f] = MathF.Atan2(im[b], re[b]);
+                }
+            }
+            else
+            {
+                for (int b = 0; b < numBins; b++)
+                {
+                    op[b * frames + f] = re[b];
+                    op[(numBins + b) * frames + f] = im[b];
+                }
             }
         }
         return outT;

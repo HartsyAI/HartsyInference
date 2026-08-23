@@ -4,12 +4,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Turns an <see cref="Img2Img"/> (and, when present, an <see cref="Inpaint"/>) request into the source tensor +
-/// strength + optional mask a pipeline needs to build an image-to-image request. The init image is resized to the request
-/// resolution because the pipelines require source dims == request dims.
-///
-/// <para>With a mask attached the pipeline runs blend-on-vanilla inpaint, which works with any vanilla checkpoint — no
-/// dedicated 9-channel inpaint UNet required.</para></summary>
+/// <summary>Turns an <see cref="Img2Img"/> (and, when present, an <see cref="Inpaint"/>) request into the source tensor + strength + optional mask a pipeline needs to build an image-to-image request. The init image is resized to the request resolution because the pipelines require source dims == request dims. <para>With a mask attached the pipeline runs blend-on-vanilla inpaint, which works with any vanilla checkpoint — no dedicated 9-channel inpaint UNet required.</para></summary>
 public static class Img2ImgResolver
 {
     /// <summary>Resolved img2img inputs; owns both tensors.</summary>
@@ -32,8 +27,7 @@ public static class Img2ImgResolver
         }
     }
 
-    /// <summary>Builds the spec, or null when there is no init image. Caller disposes the returned spec.
-    /// Strength 0 is a valid (degenerate) pass-through state and is not filtered out.</summary>
+    /// <summary>Builds the spec, or null when there is no init image. Caller disposes the returned spec. Strength 0 is a valid (degenerate) pass-through state and is not filtered out.</summary>
     public static Img2ImgSpec? Resolve(Img2Img? img2img, Inpaint? inpaint, int targetWidth, int targetHeight)
     {
         if (img2img?.InitImage is null)

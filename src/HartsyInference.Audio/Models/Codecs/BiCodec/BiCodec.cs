@@ -4,12 +4,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.BiCodec;
 
-/// <summary>BiCodec — Spark-TTS's dual-stream tokenizer (semantic VQ + global FSQ).
-/// Used by the SparkTTS pipeline: a reference audio clip is passed through this codec
-/// to produce 50 Hz semantic tokens (one per frame, 8192-entry codebook) plus 32
-/// global FSQ tokens (4096 vocab, encoded via attention pooling). The text-conditioned
-/// Qwen2.5 LM then generates new (semantic, global) token streams and a separate DAC
-/// HiFi-GAN wave generator converts them back to PCM.
+/// <summary>BiCodec — Spark-TTS's dual-stream tokenizer, producing 50 Hz semantic VQ tokens plus 32 global FSQ tokens from a reference audio clip.</summary>
+/// <remarks>Used by the SparkTTS pipeline: the text-conditioned Qwen2.5 LM generates new (semantic, global)
+/// token streams from these, and a separate DAC HiFi-GAN wave generator converts them back to PCM.
 ///
 /// <para>Two encoders, no shared decoder: the semantic decoder isn't used at TTS
 /// inference, only the encode path. We provide a minimal decode for round-trip
@@ -20,7 +17,7 @@ namespace HartsyInference.Audio.Models.Codecs.BiCodec;
 ///   <item><c>tokenizer.encoder.*</c> — w2v-BERT projection + downsample → semantic latent</item>
 ///   <item><c>tokenizer.quantizer.*</c> — single 8192-entry VQ codebook on semantic</item>
 ///   <item><c>tokenizer.speaker_encoder.*</c> — attention-pool head + FSQ on global</item>
-/// </list></summary>
+/// </list></remarks>
 public sealed unsafe class BiCodec
 {
     public BiCodecConfig Config { get; }
@@ -41,10 +38,9 @@ public sealed unsafe class BiCodec
         _globalEncoder.LoadWeights(w);
     }
 
-    /// <summary>Encodes a w2v-BERT feature stream into BiCodec's dual token streams.
-    /// <paramref name="features"/> is channels-last <c>[B, T_features, 1024]</c> (w2v-BERT
-    /// 2.0 output at 50 Hz). Returns (semantic codes <c>[B, T_features]</c>, global codes
-    /// <c>[B, 32]</c>). Caller owns disposal.</summary>
+    /// <summary>Encodes a w2v-BERT feature stream into BiCodec's dual token streams; caller owns disposal of both results.</summary>
+    /// <param name="features">Channels-last <c>[B, T_features, 1024]</c> (w2v-BERT 2.0 output at 50 Hz).</param>
+    /// <returns>Semantic codes <c>[B, T_features]</c> and global codes <c>[B, 32]</c>.</returns>
     public (Tensor SemanticCodes, Tensor GlobalCodes) Encode(IBackend backend, Tensor features, int batch, int tFeatures)
     {
         Tensor semantic = _semanticEncoder.Forward(backend, features, batch, tFeatures);
@@ -71,9 +67,7 @@ public sealed record BiCodecConfig
     public static BiCodecConfig Default => new();
 }
 
-/// <summary>Semantic encoder: projects w2v-BERT features → 50 Hz semantic latent →
-/// VQ codebook lookup. Cosine-similarity lookup against L2-normalized 8192-entry
-/// codebook.</summary>
+/// <summary>Projects w2v-BERT features to a 50 Hz semantic latent, then nearest-neighbor matches by cosine similarity against an L2-normalized 8192-entry codebook.</summary>
 internal sealed unsafe class BiCodecSemanticEncoder
 {
     private readonly BiCodecConfig _cfg;
@@ -99,7 +93,7 @@ internal sealed unsafe class BiCodecSemanticEncoder
         _vqInProjW = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.in_proj.weight"]);
         _vqInProjB = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.in_proj.bias"]);
         _codebook = WhisperOps.EnsureF32(w[$"{_prefix}.quantizer.codebook.weight"]);
-        _codebookNorm = L2NormalizeRows(_codebook, _cfg.SemanticCodebookSize, _cfg.SemanticCodebookDim);
+        _codebookNorm = VqOps.L2NormalizeRows(_codebook, _cfg.SemanticCodebookSize, _cfg.SemanticCodebookDim);
     }
 
     /// <summary>Forward — features <c>[B, T, 1024]</c> → semantic codes <c>[B, T]</c>.</summary>
@@ -154,27 +148,9 @@ internal sealed unsafe class BiCodecSemanticEncoder
         Tensor?[] all = [_projW, _projB, _vqInProjW, _vqInProjB, _codebook];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
-
-    private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
-    {
-        Tensor result = new(src.Shape, DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            double sumSq = 0d;
-            int rowBase = r * dim;
-            for (int d = 0; d < dim; d++) sumSq += (double)sp[rowBase + d] * sp[rowBase + d];
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-            for (int d = 0; d < dim; d++) dp[rowBase + d] = sp[rowBase + d] * invNorm;
-        }
-        return result;
-    }
 }
 
-/// <summary>Global encoder: 32 learned query embeddings → cross-attention pooling over
-/// w2v-BERT features → linear projection → FSQ. Yields 32 global tokens that capture
-/// speaker / timbre identity independent of utterance content.</summary>
+/// <summary>Pools w2v-BERT features via cross-attention against 32 learned queries, then FSQ-quantizes the result into global tokens capturing speaker/timbre identity independent of content.</summary>
 internal sealed unsafe class BiCodecGlobalEncoder
 {
     private readonly BiCodecConfig _cfg;

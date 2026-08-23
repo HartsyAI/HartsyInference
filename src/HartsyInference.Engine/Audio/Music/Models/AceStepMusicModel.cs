@@ -18,9 +18,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>ACE-Step 1.5 — a flow-matching music DiT over 25 Hz Oobleck latents → 48 kHz stereo. The DiT variant is a
-/// registered checkpoint that self-heals by download when missing; the Oobleck VAE and the Qwen3-Embedding condition
-/// encoder come from the Comfy-Org distribution. Optionally driven by the 5 Hz LM planner.</summary>
+/// <summary>ACE-Step 1.5 — a flow-matching music DiT over 25 Hz Oobleck latents → 48 kHz stereo. The DiT variant is a registered checkpoint that self-heals by download when missing; the Oobleck VAE and the Qwen3-Embedding condition encoder come from the Comfy-Org distribution. Optionally driven by the 5 Hz LM planner.</summary>
 internal static class AceStepMusicModel
 {
     private const int QwenEosId = 151643;   // Qwen3-Embedding <|endoftext|>
@@ -30,7 +28,6 @@ internal static class AceStepMusicModel
     private const string QwenEmbeddingRepo = "Qwen/Qwen3-Embedding-0.6B";
     private const string QwenEmbeddingFile = "model.safetensors";
 
-    /// <summary>The ACE-Step descriptor.</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = false,
@@ -277,8 +274,7 @@ internal static class AceStepMusicModel
         return copy;
     }
 
-    /// <summary>Crops/pads detokenized hints <c>[1, T, 64]</c> to the pipeline's exact frame count (upstream crops to
-    /// src length; short hints repeat the final frame).</summary>
+    /// <summary>Crops/pads detokenized hints <c>[1, T, 64]</c> to the pipeline's exact frame count (upstream crops to src length; short hints repeat the final frame).</summary>
     private static unsafe Tensor FitHints(Tensor raw, int frames, int latentChannels)
     {
         int t = (int)raw.Shape[1];
@@ -298,8 +294,7 @@ internal static class AceStepMusicModel
         return fitted;
     }
 
-    /// <summary>Decodes and validates the editing-mode source clip, returning null for plain text-to-music. Only one of
-    /// continuation/repaint/cover may be set (<see cref="Services.MusicService"/> enforces exclusivity first).</summary>
+    /// <summary>Decodes and validates the editing-mode source clip, returning null for plain text-to-music. Only one of continuation/repaint/cover may be set (<see cref="Services.MusicService"/> enforces exclusivity first).</summary>
     private static EditInputs? ResolveEdit(MusicRequest request, AceStep15Config config)
     {
         AudioClip? clip = request.Continuation ?? request.Repaint ?? request.Cover;
@@ -354,12 +349,7 @@ internal static class AceStepMusicModel
         };
     }
 
-    /// <summary>Builds the pipeline edit plan for one mode: source latents from the VAE encoder plus the per-frame
-    /// chunk mask (1 = generate, 0 = preserve) and schedule entry point. <b>Cover is an approximation</b> — upstream
-    /// feeds FSQ-detokenized 5 Hz hints as <c>src_latents</c> with <c>is_covers=1</c>, and the 25 Hz-latent → 5 Hz-code
-    /// tokenizer half is not ported here, so raw 25 Hz Oobleck latents are substituted; upstream's cover strength also
-    /// blends a cover-instruction and a text2music-instruction velocity per step, where this maps it to the schedule
-    /// entry point instead. Parity-pending on all three modes — none is validated against real weights.</summary>
+    /// <summary>Builds the pipeline edit plan for one mode: source latents from the VAE encoder plus the per-frame chunk mask (1 = generate, 0 = preserve) and schedule entry point. <b>Cover is an approximation</b> — upstream feeds FSQ-detokenized 5 Hz hints as <c>src_latents</c> with <c>is_covers=1</c>, and the 25 Hz-latent → 5 Hz-code tokenizer half is not ported here, so raw 25 Hz Oobleck latents are substituted; upstream's cover strength also blends a cover-instruction and a text2music-instruction velocity per step, where this maps it to the schedule entry point instead. Parity-pending on all three modes — none is validated against real weights.</summary>
     private static AceStep15EditPlan BuildEditPlan(IBackend device, OobleckVae vae, AceStep15Config config, EditInputs edit)
     {
         int frames = config.FrameCount(edit.TotalSeconds);
@@ -418,9 +408,7 @@ internal static class AceStepMusicModel
         }
     }
 
-    /// <summary>VAE-encodes the source PCM to src latents <c>[1, frames, latentChannels]</c> using the same
-    /// <c>EncodeMode</c> + transpose recipe the pipeline's silence latent uses; rows past the source are either the
-    /// repeated final frame or zero (continuation, where the context falls back to the silence latent instead).</summary>
+    /// <summary>VAE-encodes the source PCM to src latents <c>[1, frames, latentChannels]</c> using the same <c>EncodeMode</c> + transpose recipe the pipeline's silence latent uses; rows past the source are either the repeated final frame or zero (continuation, where the context falls back to the silence latent instead).</summary>
     private static unsafe Tensor EncodeSourceLatents(IBackend device, OobleckVae vae, AceStep15Config config,
         EditInputs edit, int frames, bool padWithLastFrame, out int sourceFrames)
     {
@@ -492,9 +480,7 @@ internal static class AceStepMusicModel
     private const string V1LyricVocabUrl =
         "https://raw.githubusercontent.com/ace-step/ACE-Step/main/acestep/models/lyrics_utils/vocab.json";
 
-    /// <summary>ACE-Step v1 (3.5B) from the Comfy all-in-one single file: DiT + Music-DCAE + ADaMoS vocoder +
-    /// UMT5-base all come from the selected checkpoint; only the tiny lyric-tokenizer vocab self-heals from the
-    /// upstream repo. The v1 pipeline has no audio-edit or LM-planner path — those requests refuse loudly.</summary>
+    /// <summary>ACE-Step v1 (3.5B) from the Comfy all-in-one single file: DiT + Music-DCAE + ADaMoS vocoder + UMT5-base all come from the selected checkpoint; only the tiny lyric-tokenizer vocab self-heals from the upstream repo. The v1 pipeline has no audio-edit or LM-planner path — those requests refuse loudly.</summary>
     private static async Task<IMusicRunner> LoadV1Async(MusicLoadContext context, string mainPath, CancellationToken cancel)
     {
         string lyricVocabPath = AudioModelRoot.SharedFile("acestep_v1_lyric_tokenizer.json");
@@ -616,8 +602,7 @@ internal static class AceStepMusicModel
             pipeline as IDisposable, dit as IDisposable, textEncoder as IDisposable, loader);
     }
 
-    /// <summary>Per-variant inference defaults, mirroring upstream <c>get_ui_control_config</c>: the turbo family is
-    /// 8 steps (shift 3 except the shift-1 checkpoint); sft is 50 and base 32 steps at shift 1.</summary>
+    /// <summary>Per-variant inference defaults, mirroring upstream <c>get_ui_control_config</c>: the turbo family is 8 steps (shift 3 except the shift-1 checkpoint); sft is 50 and base 32 steps at shift 1.</summary>
     private static (int Steps, float Shift) VariantDefaults(string variant)
     {
         string value = (variant ?? string.Empty).Trim().ToLowerInvariant();
@@ -636,8 +621,7 @@ internal static class AceStepMusicModel
         return (8, 3f);   // turbo / turbo-shift3 / turbo-continuous / xl-turbo
     }
 
-    /// <summary>Loads the shipped silence latent (fp32 [1, 64, 15000]) into the pipeline's src-latent slot, transposed
-    /// to per-frame rows. An absent file keeps the VAE-recompute fallback.</summary>
+    /// <summary>Loads the shipped silence latent (fp32 [1, 64, 15000]) into the pipeline's src-latent slot, transposed to per-frame rows. An absent file keeps the VAE-recompute fallback.</summary>
     private static unsafe void LoadSilenceLatent(AceStepPipeline15 pipeline, string? weightsDirectory)
     {
         try

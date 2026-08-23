@@ -149,17 +149,6 @@ public sealed unsafe class Qwen3TtsTalker : IDisposable
         return row;
     }
 
-    /// <summary>Adds the talker's codebook-0 codec embedding row to <paramref name="dst"/> (channels <c>[h]</c>).
-    /// Used by the per-frame talker feedback (codebook-0 part of the 16-code sum).</summary>
-    public void AddCodecEmbed(Tensor dst, int codecToken)
-    {
-        if (codecToken < 0) return;
-        int h = _cfg.Talker.HiddenSize;
-        float* d = (float*)dst.DataPointer;
-        float* cp = (float*)_codecEmbedding!.DataPointer + (long)codecToken * h;
-        for (int i = 0; i < h; i++) d[i] += cp[i];
-    }
-
     private Tensor ProjectText(IBackend backend, Tensor x)
     {
         Tensor a = WhisperOps.ProjectLinear(backend, x, _textProjW1!, _textProjB1, 1, 1, _textHidden, _textProjMid);

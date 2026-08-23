@@ -1,14 +1,7 @@
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Incremental (streaming) validator for RFC 8259 JSON syntax: feeds one character at a time,
-/// tracking exactly enough state to answer "is the text so far still a valid PREFIX of some valid JSON
-/// document" without re-parsing everything fed so far. Used by <see cref="JsonGrammarStep"/> to test
-/// candidate tokens cheaply (<see cref="Clone"/> is a shallow stack copy, not a re-parse) — the standard
-/// technique constrained-decoding samplers use (mirrors how llama.cpp's GBNF grammar sampler works, just
-/// specialized to the single "any valid JSON" grammar instead of an arbitrary user grammar).
-///
-/// <para>Whitespace (space/tab/newline/CR) is accepted between structural tokens per RFC 8259 (not inside
-/// strings, where it's ordinary string content).</para></summary>
+/// <summary>Incremental (streaming) validator for RFC 8259 JSON syntax, tracking exactly enough state to answer "is the text so far still a valid PREFIX of some valid JSON document" without re-parsing; used by <see cref="JsonGrammarStep"/> to test candidate tokens cheaply since <see cref="Clone"/> is a shallow stack copy, not a re-parse (mirrors how llama.cpp's GBNF grammar sampler works, specialized to "any valid JSON").</summary>
+/// <remarks>Whitespace (space/tab/newline/CR) is accepted between structural tokens per RFC 8259 (not inside strings, where it's ordinary string content).</remarks>
 public sealed class JsonGrammarState
 {
     private enum Expect
@@ -62,21 +55,10 @@ public sealed class JsonGrammarState
         _pendingAfterScalar = src._pendingAfterScalar;
     }
 
-    /// <summary>Cheap copy (no re-parsing) so a candidate token can be trial-fed without disturbing the real
-    /// state — the caller clones, feeds the candidate's text into the clone, and keeps the clone only if the
-    /// real token is actually chosen.</summary>
+    /// <summary>Cheap copy (no re-parsing) so a candidate token can be trial-fed without disturbing the real state — the caller clones, feeds the candidate's text into the clone, and keeps the clone only if the real token is actually chosen.</summary>
     public JsonGrammarState Clone() => new(this);
 
-    /// <summary>True once the root value is fully formed. Numbers (unlike strings/literals) have no explicit
-    /// terminator character in JSON — "123" is complete the instant input stops, not only when some
-    /// following character (comma, brace, whitespace...) confirms it. So a number in progress still counts
-    /// as complete here PROVIDED its digits so far already form a valid number on their own (not mid-sign,
-    /// mid-fraction-start, or mid-exponent-start, all of which require at least one more digit) AND it was
-    /// the root value (nothing left open above it) — <see cref="_pendingAfterScalar"/> already encodes what
-    /// finishing this scalar would transition to, so re-using it here needs no extra bookkeeping. Strings
-    /// always need an explicit closing quote and literals ("true"/"false"/"null") only ever stop existing
-    /// (<see cref="_literalTarget"/> goes null) at the instant they fully match, so neither has this
-    /// ambiguity.</summary>
+    /// <summary>True once the root value is fully formed. Numbers (unlike strings/literals) have no explicit terminator character in JSON — "123" is complete the instant input stops — so a number in progress still counts as complete here PROVIDED its digits already form a valid number on their own (not mid-sign/mid-fraction-start/mid-exponent-start) AND it was the root value; <see cref="_pendingAfterScalar"/> already encodes what finishing this scalar would transition to. Strings always need an explicit closing quote and literals ("true"/"false"/"null") only stop existing (<see cref="_literalTarget"/> goes null) at the instant they fully match, so neither has this ambiguity.</summary>
     public bool IsComplete
     {
         get
@@ -91,9 +73,7 @@ public sealed class JsonGrammarState
         }
     }
 
-    /// <summary>Feeds every character of <paramref name="text"/> in order. Returns false (state left
-    /// unspecified — caller must discard this instance) the moment any character is invalid, matching "this
-    /// text can never be completed into valid JSON from here."</summary>
+    /// <summary>Feeds every character of <paramref name="text"/> in order; returns false (state left unspecified — caller must discard this instance) the moment any character is invalid.</summary>
     public bool TryFeed(string text)
     {
         foreach (char c in text)
@@ -154,10 +134,7 @@ public sealed class JsonGrammarState
         }
     }
 
-    /// <summary>Starts parsing a value (object/array/string/number/true/false/null) from its first
-    /// character. <paramref name="onCompleteExpect"/> is what to transition to once this value finishes
-    /// (ignored — replaced with Done — when <paramref name="afterValueIsDone"/>, i.e. this is the root
-    /// value).</summary>
+    /// <summary>Starts parsing a value (object/array/string/number/true/false/null) from its first character; <paramref name="onCompleteExpect"/> is what to transition to once this value finishes (ignored — replaced with Done — when <paramref name="afterValueIsDone"/>, i.e. this is the root value).</summary>
     private bool StartValue(char c, bool afterValueIsDone, Expect onCompleteExpect = Expect.Done)
     {
         Expect after = afterValueIsDone ? Expect.Done : onCompleteExpect;
@@ -268,9 +245,7 @@ public sealed class JsonGrammarState
         }
     }
 
-    /// <summary>Called on a non-digit while in a "could extend or could end here" number phase: try to
-    /// extend into '.'/'e' , otherwise treat the number as finished and re-dispatch <paramref name="c"/> as
-    /// the first character AFTER the number (matches how a real parser backtracks a step of lookahead).</summary>
+    /// <summary>Called on a non-digit while in a "could extend or could end here" number phase: try to extend into '.'/'e', otherwise treat the number as finished and re-dispatch <paramref name="c"/> as the first character AFTER the number.</summary>
     private bool FeedNumberContinuation(char c)
     {
         if (c == '.') { _numPhase = NumPhase.FracStart; return true; }
@@ -289,8 +264,7 @@ public sealed class JsonGrammarState
         return CompleteScalar();
     }
 
-    /// <summary>Called when a string/number/literal value just finished — transitions to whatever was
-    /// pending before it started (root-done, or back into the enclosing object/array).</summary>
+    /// <summary>Called when a string/number/literal value just finished — transitions to whatever was pending before it started (root-done, or back into the enclosing object/array).</summary>
     private bool CompleteScalar()
     {
         _expect = _pendingAfterScalar;

@@ -102,11 +102,6 @@ public static class AudioModelCache
         }
     }
 
-    /// <summary>Synchronous wrapper around <see cref="GetAsync"/>. Convenience for code
-    /// that loads at startup time and doesn't want to plumb async through.</summary>
-    public static string Get(string hfRepoId, string filename, string category, string revision = "main")
-        => GetAsync(hfRepoId, filename, category, revision).GetAwaiter().GetResult();
-
     /// <summary>Throws if <paramref name="filePath"/>'s SHA-256 does not match the pinned
     /// <paramref name="expectedHex"/> (case-insensitive). Used to verify a repacked single-file
     /// model against the hash recorded in its repack manifest.</summary>

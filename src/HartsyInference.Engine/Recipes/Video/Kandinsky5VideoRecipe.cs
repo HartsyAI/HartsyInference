@@ -13,14 +13,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Kandinsky 5.0 T2V-Lite recipe (kandinskylab, ~2B video DiT): the checkpoint is the diffusers
-/// <c>Kandinsky-5.0-T2V-Lite-*-Diffusers</c> folder — a <c>transformer/</c> shard directory plus a bundled
-/// <c>vae/</c> shard that is the shared <see cref="HunyuanVideoVaeDecoder"/> in diffusers naming (per
-/// <c>Kandinsky5VideoGenerationTests</c>) — while the dual text stack (Qwen2.5-VL-7B sequence embeddings via
-/// <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) resolves as side
-/// models, reusing the exact live-encode path <see cref="Image.Kandinsky5Recipe"/> verified for T2I
-/// (<see cref="Kandinsky5TextEncoding"/>). Unlike the T2I checkpoint test's pre-computed embeddings, this recipe
-/// encodes the request's own prompt live.</summary>
+/// <summary>Kandinsky 5.0 T2V-Lite recipe (kandinskylab, ~2B video DiT): the checkpoint is the diffusers <c>Kandinsky-5.0-T2V-Lite-*-Diffusers</c> folder — a <c>transformer/</c> shard directory plus a bundled <c>vae/</c> shard that is the shared <see cref="HunyuanVideoVaeDecoder"/> in diffusers naming (per <c>Kandinsky5VideoGenerationTests</c>) — while the dual text stack (Qwen2.5-VL-7B sequence embeddings via <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) resolves as side models, reusing the exact live-encode path <see cref="Image.Kandinsky5Recipe"/> verified for T2I (<see cref="Kandinsky5TextEncoding"/>). Unlike the T2I checkpoint test's pre-computed embeddings, this recipe encodes the request's own prompt live.</summary>
 public sealed class Kandinsky5VideoRecipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -35,9 +28,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5-video", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Kandinsky-5 Video's official sampling settings: 50 steps at guidance 5.0, 512x512, 25 frames @ 24fps
-    /// (<c>Kandinsky5VideoPipeline</c> doc comment; <c>Kandinsky5VideoGenerationTests</c> verified 512x512
-    /// coherent output at this cadence).</summary>
+    /// <summary>Kandinsky-5 Video's official sampling settings: 50 steps at guidance 5.0, 512x512, 25 frames @ 24fps (<c>Kandinsky5VideoPipeline</c> doc comment; <c>Kandinsky5VideoGenerationTests</c> verified 512x512 coherent output at this cadence).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f, Width = 512, Height = 512, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
@@ -59,11 +50,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
 
             // BF16 -> F16 (native F16 GEMM), matching the T2I recipe and Kandinsky5VideoGenerationTests.
             Kandinsky5Config config = DetectConfig(converted.Transformer);
-            Dictionary<string, Tensor> transformerWeights = new Dictionary<string, Tensor>(converted.Transformer.Count);
-            foreach (KeyValuePair<string, Tensor> kv in converted.Transformer)
-            {
-                transformerWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
-            }
+            Dictionary<string, Tensor> transformerWeights = VaePrecisionHelper.CastWeights(converted.Transformer, [DType.BF16], DType.F16);
             Kandinsky5Transformer transformer = new Kandinsky5Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
@@ -74,11 +61,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             Logs.Info($"[Kandinsky5VideoRecipe] Loading HunyuanVideo VAE (diffusers naming): {vaeDir}.");
             (Dictionary<string, Tensor> vaeWeightsRaw, List<SafeTensorsLoader> vaeLoaders) = Kandinsky5CheckpointConverter.LoadHunyuanVideoVae(vaeDir);
             loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = new Dictionary<string, Tensor>(vaeWeightsRaw.Count);
-            foreach (KeyValuePair<string, Tensor> kv in vaeWeightsRaw)
-            {
-                vaeWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
-            }
+            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastWeights(vaeWeightsRaw, [DType.BF16], DType.F16);
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(vaeWeights);
 
@@ -94,7 +77,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
-            clipL.LoadWeights(Kandinsky5TextEncoding.ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
+            clipL.LoadWeights(LoaderClipUtils.StripClipPrefix(clipLoader.GetAllTensors(), "clip_l", 0), prefix: "text_model");
 
             // Encoder half from the same vae/ shard — this is what turns on the I2V path (EncodeFirstFrame).
             HunyuanVideoVaeEncoder? vaeEncoder = null;
@@ -123,14 +106,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
         }
     }
 
-    /// <summary>Picks the Lite-2B vs. Pro-19B preset from the loaded weights, mirroring the weight-derived
-    /// detection <c>WanConfigDetector</c> uses for Wan's variants. <c>text_embeddings.in_layer.weight</c> is a
-    /// Linear projection from the shared 3584-wide Qwen2.5-VL input to <see cref="Kandinsky5Config.ModelDim"/>
-    /// (1792 Lite / 4096 Pro) — its output dim (<c>Shape[0]</c>, PyTorch's <c>[out_features, in_features]</c>
-    /// convention) is decisive without needing any other tensor. Falls back to Lite with a warning for an
-    /// unrecognized dim rather than throwing — Lite is the only preset with real-weight validation
-    /// (<see cref="Kandinsky5Config.VideoPro19B"/>'s doc: "weights untested in this engine"), so silently
-    /// mis-selecting it for a genuinely novel checkpoint is the same risk either preset carries.</summary>
+    /// <summary>Picks the Lite-2B vs. Pro-19B preset from the loaded weights, mirroring the weight-derived detection <c>WanConfigDetector</c> uses for Wan's variants. <c>text_embeddings.in_layer.weight</c> is a Linear projection from the shared 3584-wide Qwen2.5-VL input to <see cref="Kandinsky5Config.ModelDim"/> (1792 Lite / 4096 Pro) — its output dim (<c>Shape[0]</c>, PyTorch's <c>[out_features, in_features]</c> convention) is decisive without needing any other tensor. Falls back to Lite with a warning for an unrecognized dim rather than throwing — Lite is the only preset with real-weight validation (<see cref="Kandinsky5Config.VideoPro19B"/>'s doc: "weights untested in this engine"), so silently mis-selecting it for a genuinely novel checkpoint is the same risk either preset carries.</summary>
     internal static Kandinsky5Config DetectConfig(IReadOnlyDictionary<string, Tensor> transformerWeights)
     {
         if (!transformerWeights.TryGetValue("text_embeddings.in_layer.weight", out Tensor? textProj))
@@ -151,11 +127,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
         return Kandinsky5Config.VideoLite2B;
     }
 
-    /// <summary>Maps the resolved checkpoint path to the diffusers <c>transformer/</c> directory
-    /// <see cref="Kandinsky5CheckpointConverter.LoadVideoTransformer"/> expects: the catalog's primary asset
-    /// resolves to the transformer shard FILE inside that folder, so a file path degrades to its parent
-    /// directory; a directory is used as-is (or its own <c>transformer</c> subfolder, when it is the checkpoint
-    /// root rather than the transformer folder itself).</summary>
+    /// <summary>Maps the resolved checkpoint path to the diffusers <c>transformer/</c> directory <see cref="Kandinsky5CheckpointConverter.LoadVideoTransformer"/> expects: the catalog's primary asset resolves to the transformer shard FILE inside that folder, so a file path degrades to its parent directory; a directory is used as-is (or its own <c>transformer</c> subfolder, when it is the checkpoint root rather than the transformer folder itself).</summary>
     private static string ResolveTransformerDir(string rawPath)
     {
         if (string.IsNullOrWhiteSpace(rawPath))

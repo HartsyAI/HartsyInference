@@ -124,7 +124,6 @@ public enum VkBufferUsageFlags : uint
     ShaderDeviceAddress = 0x00020000,
 }
 
-/// <summary>VkMemoryPropertyFlags.</summary>
 [Flags]
 public enum VkMemoryPropertyFlags : uint
 {
@@ -139,7 +138,6 @@ public enum VkMemoryPropertyFlags : uint
     DeviceUncachedAmd = 0x80,
 }
 
-/// <summary>VkMemoryHeapFlags.</summary>
 [Flags]
 public enum VkMemoryHeapFlags : uint
 {
@@ -148,7 +146,6 @@ public enum VkMemoryHeapFlags : uint
     MultiInstance = 0x2,
 }
 
-/// <summary>VkQueueFlags.</summary>
 [Flags]
 public enum VkQueueFlags : uint
 {
@@ -160,7 +157,6 @@ public enum VkQueueFlags : uint
     Protected = 0x10,
 }
 
-/// <summary>VkPhysicalDeviceType.</summary>
 public enum VkPhysicalDeviceType
 {
     Other = 0,
@@ -177,7 +173,6 @@ public enum VkDescriptorType
     StorageBuffer = 7,
 }
 
-/// <summary>VkShaderStageFlags.</summary>
 [Flags]
 public enum VkShaderStageFlags : uint
 {
@@ -201,7 +196,6 @@ public enum VkSubgroupFeatureFlags : uint
     Quad = 0x80,
 }
 
-/// <summary>VkCommandPoolCreateFlags.</summary>
 [Flags]
 public enum VkCommandPoolCreateFlags : uint
 {
@@ -211,7 +205,6 @@ public enum VkCommandPoolCreateFlags : uint
     Protected = 0x04,
 }
 
-/// <summary>VkCommandBufferUsageFlags.</summary>
 [Flags]
 public enum VkCommandBufferUsageFlags : uint
 {
@@ -221,21 +214,18 @@ public enum VkCommandBufferUsageFlags : uint
     SimultaneousUse = 0x04,
 }
 
-/// <summary>VkCommandBufferLevel.</summary>
 public enum VkCommandBufferLevel
 {
     Primary = 0,
     Secondary = 1,
 }
 
-/// <summary>VkPipelineBindPoint.</summary>
 public enum VkPipelineBindPoint
 {
     Graphics = 0,
     Compute = 1,
 }
 
-/// <summary>VkPipelineShaderStageCreateFlags.</summary>
 [Flags]
 public enum VkPipelineShaderStageCreateFlags : uint
 {

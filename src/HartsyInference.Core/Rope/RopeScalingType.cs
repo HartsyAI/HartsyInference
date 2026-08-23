@@ -20,8 +20,7 @@ public enum RopeScalingType
     /// <summary>Llama-3 piecewise wavelength rescale (low/high freq factors over the original context).</summary>
     Llama3,
 
-    /// <summary>YaRN: blends extrapolation (high freq, kept) and interpolation (low freq, /factor) over a
-    /// dimension-index ramp, plus an attention mscale baked into cos/sin.</summary>
+    /// <summary>YaRN: blends extrapolation (high freq, kept) and interpolation (low freq, /factor) over a dimension-index ramp, plus an attention mscale baked into cos/sin.</summary>
     Yarn,
 
     /// <summary>Dynamic NTK: the RoPE base is rescaled by the current sequence length past the original context.</summary>

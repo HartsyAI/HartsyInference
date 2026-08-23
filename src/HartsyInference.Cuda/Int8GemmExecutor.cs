@@ -2,19 +2,7 @@ using System.Runtime.CompilerServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>INT8 tensor-core (IMMA) GEMM via cuBLASLt for the W8A8 path (INFERENCE_ACCEL_GRIND §H5,
-/// QUANTIZATION_LOW_PRECISION_INFERENCE §5). Ampere SM 8.6 (RTX 3060 class) has native INT8 tensor cores at
-/// ~2× the F16 rate but NO fp8 MMA — int8 is that hardware's only true low-precision tensor-core GEMM.
-///
-/// <para>Layout matches <see cref="LtGemmExecutor"/>: row-major <c>D_i32[M, N] = input_i8[M, K] ·
-/// weight_i8^T[N, K]</c>, dispatched TN (OP_T on the weight, OP_N on the input) with plain column-major
-/// layouts — on cuBLASLt 12/13 the int8 TN plain-layout config routes to IMMA kernels directly, so the
-/// Turing-era COL32/COL4_4R2_8C interleaved orderings (and their per-call cublasLtMatrixTransform cost) are
-/// only needed if the heuristic refuses this config; probe with <see cref="IsSupported"/> + a smoke Run.
-/// int8 TN requires K % 4 == 0 and N % 4 == 0 (lda/ldb/ldc multiples of 4) — every DiT shape in the fleet
-/// satisfies this. Output stays raw int32; the caller's dequant epilogue applies
-/// <c>actScale[row] · wScale · D</c> (+bias) — cuBLASLt cannot dequantize int32 into a float epilogue with
-/// per-row vectors, so that stays a custom kernel.</para></summary>
+/// <summary>INT8 tensor-core (IMMA) GEMM via cuBLASLt for the W8A8 path (INFERENCE_ACCEL_GRIND §H5, QUANTIZATION_LOW_PRECISION_INFERENCE §5). Ampere SM 8.6 (RTX 3060 class) has native INT8 tensor cores at ~2× the F16 rate but NO fp8 MMA — int8 is that hardware's only true low-precision tensor-core GEMM. <para>Layout matches <see cref="LtGemmExecutor"/>: row-major <c>D_i32[M, N] = input_i8[M, K] · weight_i8^T[N, K]</c>, dispatched TN (OP_T on the weight, OP_N on the input) with plain column-major layouts — on cuBLASLt 12/13 the int8 TN plain-layout config routes to IMMA kernels directly, so the Turing-era COL32/COL4_4R2_8C interleaved orderings (and their per-call cublasLtMatrixTransform cost) are only needed if the heuristic refuses this config; probe with <see cref="IsSupported"/> + a smoke Run. int8 TN requires K % 4 == 0 and N % 4 == 0 (lda/ldb/ldc multiples of 4) — every DiT shape in the fleet satisfies this. Output stays raw int32; the caller's dequant epilogue applies <c>actScale[row] · wScale · D</c> (+bias) — cuBLASLt cannot dequantize int32 into a float epilogue with per-row vectors, so that stays a custom kernel.</para></summary>
 public sealed unsafe class Int8GemmExecutor : IDisposable
 {
     private nint _ltHandle;
@@ -22,9 +10,7 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
     private readonly nuint _workspaceBytes;
     private int _disposed;
 
-    /// <summary>Whether the cuBLASLt handle was created (int8 IMMA itself needs SM 7.5+; the engine's CUDA
-    /// floor is above that, so handle creation is the only gate — a per-shape heuristic failure still throws
-    /// from <see cref="Run"/>).</summary>
+    /// <summary>Whether the cuBLASLt handle was created (int8 IMMA itself needs SM 7.5+; the engine's CUDA floor is above that, so handle creation is the only gate — a per-shape heuristic failure still throws from <see cref="Run"/>).</summary>
     public bool IsSupported { get; }
 
     public Int8GemmExecutor()
@@ -40,8 +26,7 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
         _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
-    /// <summary>Runs <c>D_i32[M, N] = input_i8[M, K] · weight_i8^T[N, K]</c> (alpha=1, beta=0, int32
-    /// accumulate). All pointers are device pointers; <paramref name="outPtr"/> must hold M·N int32.</summary>
+    /// <summary>Runs <c>D_i32[M, N] = input_i8[M, K] · weight_i8^T[N, K]</c> (alpha=1, beta=0, int32 accumulate). All pointers are device pointers; <paramref name="outPtr"/> must hold M·N int32.</summary>
     /// <remarks><para>The five per-call cuBLASLt object creations below look like obvious waste and are not.
     /// Caching the descriptor, the layouts and the heuristic pick — removing ~45k host cuBLASLt calls per LTX-2.5
     /// step — was built and measured on 2026-08-13 with 4 interleaved reps per arm: <b>1428.5 vs 1428.4 ms/step,

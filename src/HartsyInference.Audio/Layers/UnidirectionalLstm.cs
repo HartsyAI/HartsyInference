@@ -73,8 +73,8 @@ internal sealed unsafe class UnidirectionalLstm
             int dimIn = layer == 0 ? InputDim : HiddenDim;
             // Per-step input buffer, sized to THIS layer's input dim (layer 0 may differ from HiddenDim).
             Tensor stepIn = new(new TensorShape(batch, dimIn), DType.F32);
-            Tensor h = ZeroAllocate(batch, HiddenDim);
-            Tensor c = ZeroAllocate(batch, HiddenDim);
+            Tensor h = RnnOps.ZeroAllocate(batch, HiddenDim);
+            Tensor c = RnnOps.ZeroAllocate(batch, HiddenDim);
             Tensor nextSeq = new(new TensorShape(batch, t, HiddenDim), DType.F32);
 
             float* srcSeqPtr = (float*)currentSeq.DataPointer;
@@ -120,14 +120,5 @@ internal sealed unsafe class UnidirectionalLstm
     {
         foreach (LstmCell cell in _layers)
             foreach (Tensor t in cell.EnumerateWeights()) yield return t;
-    }
-
-    private static Tensor ZeroAllocate(int batch, int dim)
-    {
-        Tensor t = new(new TensorShape(batch, dim), DType.F32);
-        long n = t.ElementCount;
-        float* p = (float*)t.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = 0f;
-        return t;
     }
 }

@@ -3,28 +3,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Block/page-based KV cache for ONE sequence, backed by a shared <see cref="PagedKvPool"/>. Unlike
-/// <see cref="FixedKvCache"/> (one contiguous per-layer buffer sized to a worst-case max sequence length,
-/// hard-restricted to a single sequence per instance), this allocates fixed-size pages from the pool on
-/// demand as the sequence grows and returns them on <see cref="Dispose"/>/<see cref="Reset"/> — multiple
-/// <see cref="PagedKvCache"/> instances share one pool, so VRAM isn't reserved per-sequence for a worst case,
-/// and a finished sequence's pages are immediately reusable by the next admission instead of sitting idle.
-///
-/// <para><b>Design: "physically paged, logically contiguous."</b> <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/>
-/// gather this sequence's pages into a contiguous scratch tensor each call (via
-/// <see cref="IBackend.SliceTimeRange"/> + <see cref="IBackend.KvCacheAppend"/>, page by page) so
-/// <c>FlashAttention</c>'s existing contiguous-buffer contract is unchanged — this gets the memory-management
-/// win (bounded, reusable, non-contiguous physical storage; multi-sequence support FixedKvCache can't do at
-/// all) without a new paged-attention kernel. A true paged-attention kernel that reads pages directly (no
-/// gather) is a natural follow-up once this is correctness-proven — see
-/// docs/Checklists/LLM_DECODE_PERF_GRIND.md.</para>
-///
-/// <para><b>Backend capture:</b> <see cref="IKvCache.KeyPrefix"/>/<see cref="IKvCache.ValuePrefix"/> don't
-/// receive an <see cref="IBackend"/> parameter (matching the existing interface, which every other
-/// implementation satisfies without one — they just return an already-populated tensor), but gathering pages
-/// requires issuing backend calls. This cache captures the <see cref="IBackend"/> passed to the most recent
-/// <see cref="AppendStep"/> and reuses it for the gather; every caller in this codebase uses exactly one
-/// backend instance per session, so this holds in practice without a wider interface change.</para></summary>
+/// <summary>Block/page-based KV cache for ONE sequence, backed by a shared <see cref="PagedKvPool"/>: unlike <see cref="FixedKvCache"/> (one contiguous per-layer buffer sized to a worst-case max sequence length, hard-restricted to a single sequence per instance), this allocates fixed-size pages from the pool on demand as the sequence grows and returns them on <see cref="Dispose"/>/<see cref="Reset"/>, so VRAM isn't reserved per-sequence for a worst case and a finished sequence's pages are immediately reusable.</summary>
+/// <remarks>
+/// <para><b>Design: "physically paged, logically contiguous."</b> <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> gather this sequence's pages into a contiguous scratch tensor each call (via <see cref="IBackend.SliceTimeRange"/> + <see cref="IBackend.KvCacheAppend"/>, page by page) so <c>FlashAttention</c>'s existing contiguous-buffer contract is unchanged — this gets the memory-management win without a new paged-attention kernel. A true paged-attention kernel that reads pages directly (no gather) is a natural follow-up once this is correctness-proven — see docs/Checklists/LLM_DECODE_PERF_GRIND.md.</para>
+/// <para><b>Backend capture:</b> <see cref="IKvCache.KeyPrefix"/>/<see cref="IKvCache.ValuePrefix"/> don't receive an <see cref="IBackend"/> parameter (matching the existing interface), but gathering pages requires issuing backend calls, so this cache captures the <see cref="IBackend"/> passed to the most recent <see cref="AppendStep"/> and reuses it for the gather; every caller in this codebase uses exactly one backend instance per session, so this holds in practice without a wider interface change.</para>
+/// </remarks>
 public sealed class PagedKvCache : IKvCache
 {
     private readonly PagedKvPool _pool;
@@ -184,12 +167,7 @@ public sealed class PagedKvCache : IKvCache
         _currentLength += by;
     }
 
-    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection): shrinks both the
-    /// committed length and the physically-written count (unlike <see cref="FixedKvCache.Truncate"/>, this
-    /// cache tracks physical-write extent separately — see the class doc — and it must shrink too, or
-    /// <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> would keep gathering the rejected tokens' stale
-    /// K/V into subsequent attention). Also frees any page that's now entirely beyond the new length back to
-    /// the pool, so a rejected multi-token draft doesn't hold VRAM it no longer needs.</summary>
+    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection): shrinks both the committed length and the physically-written count (unlike <see cref="FixedKvCache.Truncate"/>, this cache tracks physical-write extent separately, and it must shrink too or <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> would keep gathering the rejected tokens' stale K/V). Also frees any page now entirely beyond the new length back to the pool.</summary>
     public void Truncate(int newLength)
     {
         ThrowIfDisposed();
@@ -204,9 +182,7 @@ public sealed class PagedKvCache : IKvCache
         _currentLength = newLength;
     }
 
-    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike
-    /// <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this
-    /// actually frees VRAM back to the shared pool for reuse by other sequences.</summary>
+    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this actually frees VRAM back to the shared pool for reuse by other sequences.</summary>
     public void Reset()
     {
         ThrowIfDisposed();

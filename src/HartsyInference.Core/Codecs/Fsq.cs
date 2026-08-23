@@ -68,8 +68,7 @@ public static unsafe class Fsq
         }
 
         Span<int> placeValue = stackalloc int[d];
-        placeValue[0] = 1;
-        for (int dd = 1; dd < d; dd++) placeValue[dd] = placeValue[dd - 1] * levels[dd - 1];
+        Basis(levels, placeValue);
 
         float* zp = (float*)z.DataPointer;
         int* cp = (int*)codes.DataPointer;
@@ -112,9 +111,8 @@ public static unsafe class Fsq
 
         Span<int> halfLevel = stackalloc int[d];
         Span<int> placeValue = stackalloc int[d];
-        placeValue[0] = 1;
+        Basis(levels, placeValue);
         for (int dd = 0; dd < d; dd++) halfLevel[dd] = levels[dd] / 2;
-        for (int dd = 1; dd < d; dd++) placeValue[dd] = placeValue[dd - 1] * levels[dd - 1];
 
         float* zp = (float*)zHat.DataPointer;
         int* cp = (int*)codes.DataPointer;
@@ -158,8 +156,7 @@ public static unsafe class Fsq
         }
 
         Span<int> placeValue = stackalloc int[d];
-        placeValue[0] = 1;
-        for (int dd = 1; dd < d; dd++) placeValue[dd] = placeValue[dd - 1] * levels[dd - 1];
+        Basis(levels, placeValue);
 
         int* cp = (int*)codes.DataPointer;
         float* zp = (float*)zHat.DataPointer;

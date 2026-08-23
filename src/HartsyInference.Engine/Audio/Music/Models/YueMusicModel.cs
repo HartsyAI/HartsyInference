@@ -15,20 +15,16 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>YuE Stage-1 (m-a-p/YuE-s1-7B-anneal-*) — a folder checkpoint plus a sibling tokenizer.model and
-/// xcodec.safetensors. The optional sibling s2 folder adds the residual upsampler (full 8-codebook decode) and the
-/// per-stem Vocos vocoders raise the output from the 16 kHz x-codec draft to 44.1 kHz.</summary>
+/// <summary>YuE Stage-1 (m-a-p/YuE-s1-7B-anneal-*) — a folder checkpoint plus a sibling tokenizer.model and xcodec.safetensors. The optional sibling s2 folder adds the residual upsampler (full 8-codebook decode) and the per-stem Vocos vocoders raise the output from the 16 kHz x-codec draft to 44.1 kHz.</summary>
 internal static class YueMusicModel
 {
-    /// <summary>Holds a loader created after the runner's disposable set was snapshotted (the lazily loaded x-codec
-    /// encode branch), so it still gets disposed with the model.</summary>
+    /// <summary>Holds a loader created after the runner's disposable set was snapshotted (the lazily loaded x-codec encode branch), so it still gets disposed with the model.</summary>
     private sealed class LoaderBox : IDisposable
     {
         public IDisposable? Inner;
         public void Dispose() => Inner?.Dispose();
     }
 
-    /// <summary>The YuE descriptor.</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = false,
@@ -234,8 +230,7 @@ internal static class YueMusicModel
         return Task.FromResult<IMusicRunner>(new MusicRunner(pipeline.OutputSampleRate, Synth, [.. disposables]));
     }
 
-    /// <summary>Applies the resolved LM precision policy: Q4_K/Q8_0 quantize the big GEMM weights in place;
-    /// <see cref="AudioLmQuant.Off"/> keeps checkpoint precision (bf16) — the pooled-VRAM quality path.</summary>
+    /// <summary>Applies the resolved LM precision policy: Q4_K/Q8_0 quantize the big GEMM weights in place; <see cref="AudioLmQuant.Off"/> keeps checkpoint precision (bf16) — the pooled-VRAM quality path.</summary>
     private static void ApplyLmQuant(Dictionary<string, Tensor> weights, AudioLmQuant quant)
     {
         switch (quant)
@@ -251,8 +246,7 @@ internal static class YueMusicModel
         }
     }
 
-    /// <summary>Plans the Stage-1 layer split across the context's shard devices (explicit ratios win, else
-    /// proportional to live free VRAM) and binds each stage to its resolved backend.</summary>
+    /// <summary>Plans the Stage-1 layer split across the context's shard devices (explicit ratios win, else proportional to live free VRAM) and binds each stage to its resolved backend.</summary>
     private static LlmPlacement BuildStage1Placement(MusicLoadContext context, YueStage1Lm stage1, YueConfig config)
     {
         int layers = config.Stage1.NumHiddenLayers;
@@ -275,9 +269,7 @@ internal static class YueMusicModel
         return new LlmPlacement([.. stages]);
     }
 
-    /// <summary>Ensures a loadable <c>xcodec.safetensors</c> exists, converting the downloaded X-Codec torch
-    /// checkpoint on first use. Only the tensors the engine's X-Codec loader maps are kept, with their original keys,
-    /// so the normal load path re-maps them identically. Null when neither form is present.</summary>
+    /// <summary>Ensures a loadable <c>xcodec.safetensors</c> exists, converting the downloaded X-Codec torch checkpoint on first use. Only the tensors the engine's X-Codec loader maps are kept, with their original keys, so the normal load path re-maps them identically. Null when neither form is present.</summary>
     private static string? EnsureXCodec(string folder)
     {
         string? existing = FindSibling(folder, "xcodec.safetensors");
@@ -323,9 +315,7 @@ internal static class YueMusicModel
         return outputPath;
     }
 
-    /// <summary>Repacks the torch x-codec checkpoint keeping every tensor the loader maps in EITHER direction, under
-    /// its original key, so the decode load path re-maps it identically and the ICL encode path finds its roots.
-    /// Writes via a temp file so a failure cannot leave a truncated export shadowing a good one.</summary>
+    /// <summary>Repacks the torch x-codec checkpoint keeping every tensor the loader maps in EITHER direction, under its original key, so the decode load path re-maps it identically and the ICL encode path finds its roots. Writes via a temp file so a failure cannot leave a truncated export shadowing a good one.</summary>
     private static void RepackXCodec(string checkpoint, string outputPath)
     {
         string temp = outputPath + ".tmp";
@@ -360,11 +350,7 @@ internal static class YueMusicModel
         }
     }
 
-    /// <summary>Converts the upstream xcodec_mini_infer Vocos vocoder checkpoints (<c>decoder_131000.pth</c> =
-    /// vocal, <c>decoder_151000.pth</c> = instrumental) to the safetensors the loader consumes, one time. The
-    /// torch state dicts already use VocosDecoder's exact key layout (backbone.*/head.out), so this is a pure
-    /// format conversion — same self-healing pattern as <see cref="EnsureXCodec"/>. No-op when the converted
-    /// files exist or the sources are absent (16 kHz draft fallback stays available).</summary>
+    /// <summary>Converts the upstream xcodec_mini_infer Vocos vocoder checkpoints (<c>decoder_131000.pth</c> = vocal, <c>decoder_151000.pth</c> = instrumental) to the safetensors the loader consumes, one time. The torch state dicts already use VocosDecoder's exact key layout (backbone.*/head.out), so this is a pure format conversion — same self-healing pattern as <see cref="EnsureXCodec"/>. No-op when the converted files exist or the sources are absent (16 kHz draft fallback stays available).</summary>
     private static void EnsureVocoders(string folder)
     {
         if (FindSibling(folder, "vocal_vocoder.safetensors") is not null
@@ -418,11 +404,7 @@ internal static class YueMusicModel
     private static string? FindSiblingFolder(string folder, string name)
         => Probe(folder, name, Directory.Exists);
 
-    /// <summary>Looks for <paramref name="name"/> under the checkpoint folder, its parent, and any case-variant
-    /// of that parent — consumers disagree on the family root's casing (the engine resolves <c>music/yue</c> from
-    /// the family id, AudioLab builds <c>music/YuE</c> from the provider's display prefix), and on a case-sensitive
-    /// filesystem those are two trees. Without this, sidecars dropped in one are invisible from the other and the
-    /// pipeline silently degrades to the cb0-only 16 kHz draft. Each level is matched case-insensitively too.</summary>
+    /// <summary>Looks for <paramref name="name"/> under the checkpoint folder, its parent, and any case-variant of that parent — consumers disagree on the family root's casing (the engine resolves <c>music/yue</c> from the family id, AudioLab builds <c>music/YuE</c> from the provider's display prefix), and on a case-sensitive filesystem those are two trees. Without this, sidecars dropped in one are invisible from the other and the pipeline silently degrades to the cb0-only 16 kHz draft. Each level is matched case-insensitively too.</summary>
     private static string? Probe(string folder, string name, Func<string, bool> exists)
     {
         string? parent = Directory.GetParent(folder)?.FullName;
@@ -447,8 +429,7 @@ internal static class YueMusicModel
         return null;
     }
 
-    /// <summary>Search roots in priority order: the checkpoint folder, its parent, then the parent's case-variant
-    /// siblings (the split-family-root case).</summary>
+    /// <summary>Search roots in priority order: the checkpoint folder, its parent, then the parent's case-variant siblings (the split-family-root case).</summary>
     private static IEnumerable<string> Roots(string folder, string? parent)
     {
         yield return folder;

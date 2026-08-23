@@ -4,11 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Mimi SEANet decoder, HF <c>transformers</c> layout (pre-fused <c>decoder.layers.N.conv</c> keys).
-/// Layout for ratios [8,6,5,4]: layer 0 = Conv1d(latent->mult*nf, k7); then per ratio an ELU + causal
+/// <summary>Mimi SEANet decoder, HF <c>transformers</c> layout (pre-fused <c>decoder.layers.N.conv</c> keys).</summary>
+/// <remarks>Layout for ratios [8,6,5,4]: layer 0 = Conv1d(latent->mult*nf, k7); then per ratio an ELU + causal
 /// ConvTranspose1d (k=2r, stride r, trim last k-r) + a MimiResnetBlock (ELU, Conv1d k3 dim->dim/2, ELU,
 /// Conv1d k1 ->dim, residual); final ELU + Conv1d(nf->1, k3). All convs causal (left-pad k-1; transpose trims
-/// the trailing k-stride). ELU alpha 1.0.</summary>
+/// the trailing k-stride). ELU alpha 1.0.</remarks>
 internal sealed unsafe class MimiSeanetDecoder
 {
     private static readonly int[] Ratios = [8, 6, 5, 4];
@@ -66,12 +66,8 @@ internal sealed unsafe class MimiSeanetDecoder
         return pcm;
     }
 
-    /// <summary>Streaming counterpart to <see cref="Forward"/>: same computation, restructured so each causal
-    /// conv's left context is <paramref name="state"/>'s carried real-audio tail instead of implicit zero-padding,
-    /// and each upsample stage's overlap-add tail carries across calls instead of being silently cropped away —
-    /// verified equivalent (to float rounding) to a single monolithic <see cref="Forward"/> call over the whole
-    /// utterance by <c>MimiStreamParityTests</c>. z <c>[B, latentDim, t]</c> -> pcm <c>[B, 1, t*960]</c> for THIS
-    /// chunk only.</summary>
+    /// <summary>Streaming counterpart to <see cref="Forward"/>: same computation restructured so each causal conv's left context is <paramref name="state"/>'s carried real-audio tail, and each upsample stage's overlap-add tail carries across calls; z <c>[B, latentDim, t]</c> -> pcm <c>[B, 1, t*960]</c> for THIS chunk only.</summary>
+    /// <remarks>Verified equivalent (to float rounding) to a single monolithic <see cref="Forward"/> call over the whole utterance by <c>MimiStreamParityTests</c>.</remarks>
     public Tensor ForwardStreaming(IBackend backend, Tensor z, int batch, int t, MimiSeanetDecoderStreamState state)
     {
         int mult = 1 << Ratios.Length;
@@ -124,8 +120,7 @@ internal sealed unsafe class MimiSeanetDecoder
         return outp;
     }
 
-    /// <summary>Left-pads with <paramref name="state"/>'s carried real tail (zero, i.e. today's implicit
-    /// zero-padding, on the first chunk of an utterance) instead of the non-streaming path's virtual zero-pad.</summary>
+    /// <summary>Left-pads with <paramref name="state"/>'s carried real tail (zero on the first chunk of an utterance) instead of the non-streaming path's virtual zero-pad.</summary>
     private static Tensor CausalConvStreaming(IBackend backend, MimiSeanetDecoderStreamState state, int slot,
         Tensor x, Tensor wt, Tensor b, int batch, int inDim, int outDim, int t, int kernel)
     {
@@ -136,9 +131,7 @@ internal sealed unsafe class MimiSeanetDecoder
         return o;
     }
 
-    /// <summary>Adds per-output-channel <paramref name="bias"/> to every sample of <paramref name="t"/>
-    /// <c>[B,C,T]</c> in place. Companion to the bias-free streaming <c>ConvTranspose1d</c> call above — see the
-    /// comment at its call site for why bias is added here instead of inside the overlap-add.</summary>
+    /// <summary>Adds per-output-channel <paramref name="bias"/> to every sample of <paramref name="t"/> <c>[B,C,T]</c> in place; companion to the bias-free streaming <c>ConvTranspose1d</c> call above (see that call site for why).</summary>
     private static void AddBiasInPlace(Tensor t, Tensor bias, int batch, int channels, int len)
     {
         float* tp = (float*)t.DataPointer;

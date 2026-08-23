@@ -119,12 +119,7 @@ public sealed class GptOssTokenizer : IDisposable
         $"{ChatAssistantThinking}<|end|>" +
         "<|start|>assistant<|channel|>final<|message|>";
 
-    /// <summary>Encodes a user prompt through Lens' Harmony chat template. Returns the true-length token
-    /// ids (truncated to the max length; NO padding — the reference tokenizes without padding and the
-    /// engine pipeline runs each prompt at its natural length) plus an all-ones attention mask of the
-    /// same length. Fails fast if the fixed wrapper does not tokenize to exactly
-    /// <see cref="DefaultTxtOffset"/> tokens (vocab/merges drift would silently mis-align the encoder
-    /// offset otherwise).</summary>
+    /// <summary>Encodes a user prompt through Lens' Harmony chat template. Returns the true-length token ids (truncated to the max length; NO padding — the reference tokenizes without padding and the engine pipeline runs each prompt at its natural length) plus an all-ones attention mask of the same length. Fails fast if the fixed wrapper does not tokenize to exactly <see cref="DefaultTxtOffset"/> tokens (vocab/merges drift would silently mis-align the encoder offset otherwise).</summary>
     public (int[] tokenIds, int[] attentionMask) BuildChatInputs(string prompt)
     {
         ThrowIfDisposed();

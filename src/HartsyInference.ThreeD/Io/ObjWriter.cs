@@ -4,8 +4,7 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
 
-/// <summary>Writes a <see cref="Mesh"/> to Wavefront OBJ (ASCII) — a human-readable debug/interop format.
-/// Emits <c>v</c>, optional <c>vn</c>, and triangle <c>f</c> records (OBJ is 1-indexed).</summary>
+/// <summary>Writes a <see cref="Mesh"/> to Wavefront OBJ (ASCII), emitting <c>v</c>, optional <c>vn</c>, and 1-indexed triangle <c>f</c> records.</summary>
 public static class ObjWriter
 {
     /// <summary>Serializes <paramref name="mesh"/> to OBJ text.</summary>

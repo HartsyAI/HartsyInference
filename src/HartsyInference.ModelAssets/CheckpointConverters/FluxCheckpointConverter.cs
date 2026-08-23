@@ -183,14 +183,12 @@ public sealed class FluxCheckpointConverter
 
     private static void ConvertBflTransformerKey(string bflKey, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        // Image input projection
         if (bflKey.StartsWith("img_in.", StringComparison.Ordinal))
         {
             output["x_embedder." + bflKey["img_in.".Length..]] = tensor;
             return;
         }
 
-        // Text input projection
         if (bflKey.StartsWith("txt_in.", StringComparison.Ordinal))
         {
             output["context_embedder." + bflKey["txt_in.".Length..]] = tensor;
@@ -218,21 +216,18 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // Final layer
         if (bflKey.StartsWith("final_layer.", StringComparison.Ordinal))
         {
             ConvertFinalLayerKey(bflKey["final_layer.".Length..], tensor, output);
             return;
         }
 
-        // Double-stream blocks
         if (bflKey.StartsWith("double_blocks.", StringComparison.Ordinal))
         {
             ConvertDoubleBlockKey(bflKey["double_blocks.".Length..], tensor, output);
             return;
         }
 
-        // Single-stream blocks
         if (bflKey.StartsWith("single_blocks.", StringComparison.Ordinal))
         {
             ConvertSingleBlockKey(bflKey["single_blocks.".Length..], tensor, output);
@@ -263,7 +258,7 @@ public sealed class FluxCheckpointConverter
             // (modParams[0..dim] = scale, modParams[dim..2*dim] = shift), so BFL weights need their
             // halves swapped along dim 0 to match. See diffusers' convert_flux_to_diffusers.py
             // `swap_scale_shift`.
-            Tensor swapped = SwapScaleShiftHalves(tensor);
+            Tensor swapped = CheckpointConvertUtils.SwapScaleShiftHalves(tensor);
             output["norm_out.linear." + rest["adaLN_modulation.1.".Length..]] = swapped;
             return;
         }
@@ -272,34 +267,6 @@ public sealed class FluxCheckpointConverter
             output["proj_out." + rest["linear.".Length..]] = tensor;
             return;
         }
-    }
-
-    /// <summary>Swaps the two halves of a tensor along dim 0. Input shape [2*H, ...] becomes [scale_half, shift_half] from BFL's [shift_half, scale_half] (or vice versa). Works for both 2D weights and 1D biases.</summary>
-    private static unsafe Tensor SwapScaleShiftHalves(Tensor input)
-    {
-        long firstDim = input.Shape[0];
-        if (firstDim % 2 != 0)
-            throw new InvalidOperationException(
-                $"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
-
-        long halfDim = firstDim / 2;
-        long totalElements = input.ElementCount;
-        long elemBytes = input.DType.SizeInBytes;
-        long halfBytes = (totalElements / 2) * elemBytes;
-
-        Tensor swapped = new Tensor(input.Shape, input.DType);
-        // Propagate fp8_scaled per-tensor scale — the swap is a row-permutation, not a change of magnitudes.
-        swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
-
-        byte* src = (byte*)input.DataPointer;
-        byte* dst = (byte*)swapped.DataPointer;
-
-        // 2nd half of input → 1st half of swapped
-        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
-        // 1st half of input → 2nd half of swapped
-        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
-
-        return swapped;
     }
 
     private static void ConvertDoubleBlockKey(string rest, Tensor tensor, Dictionary<string, Tensor> output)
@@ -359,16 +326,15 @@ public sealed class FluxCheckpointConverter
         // Fused QKV → split
         if (rest == "qkv.weight")
         {
-            SplitQkvWeight(tensor, HiddenSize, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, HiddenSize, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
         if (rest == "qkv.bias")
         {
-            SplitQkvBias(tensor, HiddenSize, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, HiddenSize, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
 
-        // Output projection
         if (rest.StartsWith("proj.", StringComparison.Ordinal))
         {
             output[$"{prefix}.attn.to_out.0.{rest["proj.".Length..]}"] = tensor;
@@ -393,16 +359,15 @@ public sealed class FluxCheckpointConverter
         // Fused QKV → split
         if (rest == "qkv.weight")
         {
-            SplitQkvWeight(tensor, HiddenSize, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, HiddenSize, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
         if (rest == "qkv.bias")
         {
-            SplitQkvBias(tensor, HiddenSize, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, HiddenSize, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
 
-        // Output projection
         if (rest.StartsWith("proj.", StringComparison.Ordinal))
         {
             output[$"{prefix}.attn.to_add_out.{rest["proj.".Length..]}"] = tensor;
@@ -487,59 +452,6 @@ public sealed class FluxCheckpointConverter
 
 
     // ── QKV Splitting ──────────────────────────────────────────
-
-    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three separate [innerDim, inDim] weights. Uses <see cref="DType.ComputeByteCount"/> rather than <c>SizeInBytes</c> so quantized fused-QKV tensors (Q4_K, Q5_K, Q8_0) split correctly — the row-aligned chunk size is computed from the per-row element count, which is block-aligned for ggml K-quants since Flux's hidden=3072 is a multiple of the 256-element super-block.</summary>
-    private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = fused.DType.ComputeByteCount(inDim);
-        long chunkBytes = (long)innerDim * rowBytes;
-        TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-        Tensor qWeight = new Tensor(splitShape, fused.DType);
-        Tensor kWeight = new Tensor(splitShape, fused.DType);
-        Tensor vWeight = new Tensor(splitShape, fused.DType);
-
-        // Propagate fp8_scaled per-tensor scale to all splits — they share the same quant scale.
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.weight"] = qWeight;
-        output[$"{prefix}.{kName}.weight"] = kWeight;
-        output[$"{prefix}.{vName}.weight"] = vWeight;
-    }
-
-    /// <summary>Splits a fused QKV bias [3*innerDim] into three separate [innerDim] biases. ggml-quantized 1D biases would need block-alignment which 3072 satisfies (3072/256=12); but in practice ggml never quantizes biases (always F32/F16), so the quant path here is theoretical.</summary>
-    private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        long chunkBytes = fused.DType.ComputeByteCount(innerDim);
-        TensorShape splitShape = new TensorShape(innerDim);
-
-        Tensor qBias = new Tensor(splitShape, fused.DType);
-        Tensor kBias = new Tensor(splitShape, fused.DType);
-        Tensor vBias = new Tensor(splitShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.bias"] = qBias;
-        output[$"{prefix}.{kName}.bias"] = kBias;
-        output[$"{prefix}.{vName}.bias"] = vBias;
-    }
 
     /// <summary>Splits single-stream fused linear1 weight [3*hidden + mlpDim, hidden] = [21504, 3072] into Q, K, V, proj_mlp weights. Quantization-aware via <see cref="DType.ComputeByteCount"/>.</summary>
     private static unsafe void SplitSingleLinear1Weight(Tensor fused, string prefix, Dictionary<string, Tensor> output)

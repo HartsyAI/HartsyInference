@@ -3,14 +3,9 @@ using Microsoft.ML.Tokenizers;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>YuE "mm" tokenizer — the LLaMA SentencePiece model extended with YuE's structural / audio
-/// special tokens, loaded from the model's <c>tokenizer.model</c> (m-a-p/xcodec_mini_infer,
-/// <c>mm_tokenizer_v0.2_hf/</c>). Builds the Stage-1 lyrics→token prompt for <c>YueStage1Lm</c>.
+/// <summary>YuE "mm" tokenizer — the LLaMA SentencePiece model extended with YuE's structural / audio special tokens, loaded from the model's <c>tokenizer.model</c> (m-a-p/xcodec_mini_infer, <c>mm_tokenizer_v0.2_hf/</c>). Builds the Stage-1 lyrics→token prompt for <c>YueStage1Lm</c>.
 ///
-/// <para>IDs are resolved from the loaded model, not hardcoded — so they're correct for whatever
-/// checkpoint the user supplies. The Stage-1 prompt's special-token tail follows YuE's
-/// <c>infer.py</c> (CoT) / docs/Research/YUE_ARCHITECTURE.md §7; verify token parity (bit-exact first
-/// ~100 tokens) against the reference per the M5 checklist before treating output as faithful.</para></summary>
+/// <para>IDs are resolved from the loaded model, not hardcoded — so they're correct for whatever checkpoint the user supplies. The Stage-1 prompt's special-token tail follows YuE's <c>infer.py</c> (CoT) / docs/Research/YUE_ARCHITECTURE.md §7; verify token parity (bit-exact first ~100 tokens) against the reference per the M5 checklist before treating output as faithful.</para></summary>
 public sealed class YueTokenizer : IDisposable
 {
     // The YuE structural / audio markers are SentencePiece CONTROL symbols spelled with ANGLE brackets
@@ -25,8 +20,7 @@ public sealed class YueTokenizer : IDisposable
     public const string Stage1Piece = "<stage_1>";
     /// <summary>Stage-2 handoff marker (Stage-2 prompt: [SOA][stage_1] + cb0 + [stage_2]).</summary>
     public const string Stage2Piece = "<stage_2>";
-    /// <summary>xcodec codec-type separator — CodecManipulator("xcodec").sep_ids. Ends the Stage-1 prompt
-    /// (… &lt;SOA&gt; &lt;xcodec&gt;) to prime cb0 generation.</summary>
+    /// <summary>xcodec codec-type separator — CodecManipulator("xcodec").sep_ids. Ends the Stage-1 prompt (… &lt;SOA&gt; &lt;xcodec&gt;) to prime cb0 generation.</summary>
     public const string XcodecPiece = "<xcodec>";
 
     // Fixed mm_tokenizer_v0.2 ids for the YuE control symbols (verified by Decode round-trip below).
@@ -62,9 +56,7 @@ public sealed class YueTokenizer : IDisposable
         Xcodec = ResolveControl(XcodecId, XcodecPiece);
     }
 
-    /// <summary>Confirms a pinned control-symbol id maps back to its expected angle-bracket piece via
-    /// <c>Decode</c> (the reliable piece-&gt;id direction for SP control symbols). A mismatch means the file
-    /// isn't the YuE mm tokenizer — fail with guidance.</summary>
+    /// <summary>Confirms a pinned control-symbol id maps back to its expected angle-bracket piece via <c>Decode</c> (the reliable piece-&gt;id direction for SP control symbols). A mismatch means the file isn't the YuE mm tokenizer — fail with guidance.</summary>
     private int ResolveControl(int id, string expectedPiece)
     {
         string decoded = _sp.Decode([id]);
@@ -77,8 +69,7 @@ public sealed class YueTokenizer : IDisposable
         return id;
     }
 
-    /// <summary>Splits lyrics into YuE's structured segments (one per <c>[verse]/[chorus]/…</c> tag),
-    /// mirroring infer.py's <c>split_lyrics</c>: each becomes <c>"[label]\n{text}\n\n"</c>.</summary>
+    /// <summary>Splits lyrics into YuE's structured segments (one per <c>[verse]/[chorus]/…</c> tag), mirroring infer.py's <c>split_lyrics</c>: each becomes <c>"[label]\n{text}\n\n"</c>.</summary>
     public static List<string> SplitLyrics(string? lyrics)
     {
         List<string> segs = [];
@@ -88,8 +79,7 @@ public sealed class YueTokenizer : IDisposable
         return segs;
     }
 
-    /// <summary>The Stage-1 "head" prompt (instruction + genre + full structured lyrics) — infer.py <c>prompt_texts[0]</c>.
-    /// Testable; the structured lyrics join each <c>[label]</c> segment with a blank line, matching <c>split_lyrics</c>.</summary>
+    /// <summary>The Stage-1 "head" prompt (instruction + genre + full structured lyrics) — infer.py <c>prompt_texts[0]</c>. Testable; the structured lyrics join each <c>[label]</c> segment with a blank line, matching <c>split_lyrics</c>.</summary>
     public static string BuildStage1PromptText(string? genre, string? lyrics)
     {
         List<string> segs = SplitLyrics(lyrics);
@@ -97,12 +87,7 @@ public sealed class YueTokenizer : IDisposable
         return $"Generate music from the given lyrics segment by segment.\n[Genre] {(genre ?? "").Trim()}\n{full}";
     }
 
-    /// <summary>Encodes YuE's Stage-1 **segment-0** prompt EXACTLY as infer.py builds it:
-    /// <c>tokenize(head) + tokenize("[start_of_segment]") + tokenize(section[0]) + [SOA] + [&lt;xcodec&gt; sep]</c>.
-    /// The head restates the genre + all structured lyrics as context; the section restates segment-0's lyrics
-    /// (this <c>[start_of_segment]</c> + section restatement is what primes coherent cb0 generation — omitting it
-    /// yields gibberish). Later segments are appended by the pipeline's segment loop (<c>[end_of_segment]</c> +
-    /// <c>[start_of_segment]</c> + section + [SOA] + sep). <c>&lt;stage_1&gt;</c> is Stage-2 only.</summary>
+    /// <summary>Encodes YuE's Stage-1 **segment-0** prompt EXACTLY as infer.py builds it: <c>tokenize(head) + tokenize("[start_of_segment]") + tokenize(section[0]) + [SOA] + [&lt;xcodec&gt; sep]</c>. The head restates the genre + all structured lyrics as context; the section restates segment-0's lyrics (this <c>[start_of_segment]</c> + section restatement is what primes coherent cb0 generation — omitting it yields gibberish). Later segments are appended by the pipeline's segment loop (<c>[end_of_segment]</c> + <c>[start_of_segment]</c> + section + [SOA] + sep). <c>&lt;stage_1&gt;</c> is Stage-2 only.</summary>
     public int[] EncodeStage1Prompt(string? genre, string? lyrics)
     {
         List<string> segs = SplitLyrics(lyrics);
@@ -115,9 +100,7 @@ public sealed class YueTokenizer : IDisposable
         return [.. ids];
     }
 
-    /// <summary>Builds a subsequent-segment continuation prompt (infer.py, i&gt;0):
-    /// <c>tokenize("[end_of_segment][start_of_segment]") + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>.
-    /// The pipeline prepends the running generated context and appends this per segment.</summary>
+    /// <summary>Builds a subsequent-segment continuation prompt (infer.py, i&gt;0): <c>tokenize("[end_of_segment][start_of_segment]") + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>. The pipeline prepends the running generated context and appends this per segment.</summary>
     public int[] EncodeStage1SegmentContinuation(string? sectionLyrics)
     {
         List<int> ids = [.. _sp.EncodeToIds("[end_of_segment][start_of_segment]")];
@@ -139,9 +122,7 @@ public sealed class YueTokenizer : IDisposable
     /// <summary>The structured lyric segments (infer.py <c>split_lyrics</c>) — one per <c>[label]</c> section.</summary>
     public IReadOnlyList<string> Stage1Segments(string? lyrics) => SplitLyrics(lyrics);
 
-    /// <summary>Per-segment prompt ids driving iterative Stage-1 generation (infer.py loop):
-    /// <c>(isFirst ? [] : end_of_segment) + start_of_segment + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>.
-    /// The head ids are prepended once by the pipeline for the first segment.</summary>
+    /// <summary>Per-segment prompt ids driving iterative Stage-1 generation (infer.py loop): <c>(isFirst ? [] : end_of_segment) + start_of_segment + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>. The head ids are prepended once by the pipeline for the first segment.</summary>
     public int[] EncodeSegmentPrompt(string? sectionText, bool isFirst)
     {
         List<int> ids = new(32);
@@ -158,20 +139,15 @@ public sealed class YueTokenizer : IDisposable
 
     // ── Reference-audio in-context learning (infer.py --use_audio_prompt / --use_dual_tracks_prompt) ──
 
-    /// <summary>CodecManipulator("xcodec") global token offset: LM id = 45334 + k*1024 + code. The ICL path runs the
-    /// codec at target_bw=0.5 ⇒ codebook 0 only ⇒ k = 0.</summary>
+    /// <summary>CodecManipulator("xcodec") global token offset: LM id = 45334 + k*1024 + code. The ICL path runs the codec at target_bw=0.5 ⇒ codebook 0 only ⇒ k = 0.</summary>
     public const int XcodecGlobalOffset = 45_334;
 
     /// <summary>x-codec frame rate (tokens per second per track).</summary>
     public const int XcodecFps = 50;
 
-    /// <summary>Builds infer.py's <c>audio_prompt_codec</c>: offsets raw codebook-0 indices into the LM's audio-token
-    /// range, interleaves the two tracks when a dual-track reference is supplied, then slices the requested
-    /// second-window. Pure arithmetic — no tokenizer state.
+    /// <summary>Builds infer.py's <c>audio_prompt_codec</c>: offsets raw codebook-0 indices into the LM's audio-token range, interleaves the two tracks when a dual-track reference is supplied, then slices the requested second-window. Pure arithmetic — no tokenizer state.
     ///
-    /// <para>Single-track slices at <c>fps</c> tokens/second; dual-track interleaves <c>v0,i0,v1,i1,…</c> and slices at
-    /// <c>2·fps</c>, so the window means the same wall-clock span either way. An odd dual-track start index flips the
-    /// vocal/instrumental parity of the prompt — upstream does not correct this, so neither does this.</para></summary>
+    /// <para>Single-track slices at <c>fps</c> tokens/second; dual-track interleaves <c>v0,i0,v1,i1,…</c> and slices at <c>2·fps</c>, so the window means the same wall-clock span either way. An odd dual-track start index flips the vocal/instrumental parity of the prompt — upstream does not correct this, so neither does this.</para></summary>
     /// <param name="vocalCb0">Codebook-0 indices of the single/vocal reference track.</param>
     /// <param name="instrumentalCb0">Codebook-0 indices of the instrumental track; empty selects the single-track path.</param>
     public static int[] BuildAudioPromptCodec(ReadOnlySpan<int> vocalCb0, ReadOnlySpan<int> instrumentalCb0,
@@ -202,11 +178,7 @@ public sealed class YueTokenizer : IDisposable
         return window;
     }
 
-    /// <summary>Wraps offset reference codes in infer.py's <c>sentence_ids</c>:
-    /// <c>tokenize("[start_of_reference]") + [SOA] + [&lt;xcodec&gt;] + codes + [EOA] + tokenize("[end_of_reference]")</c>.
-    /// The markers are plain SentencePiece text, not control symbols. Append this to the head prompt (NOT before it) —
-    /// infer.py builds <c>head_id = tokenize(prompt_texts[0]) + sentence_ids</c>, so only segment 0 carries it and
-    /// later segments inherit it through the running context.</summary>
+    /// <summary>Wraps offset reference codes in infer.py's <c>sentence_ids</c>: <c>tokenize("[start_of_reference]") + [SOA] + [&lt;xcodec&gt;] + codes + [EOA] + tokenize("[end_of_reference]")</c>. The markers are plain SentencePiece text, not control symbols. Append this to the head prompt (NOT before it) — infer.py builds <c>head_id = tokenize(prompt_texts[0]) + sentence_ids</c>, so only segment 0 carries it and later segments inherit it through the running context.</summary>
     public int[] EncodeReferenceBlock(IReadOnlyList<int> audioPromptCodec)
     {
         List<int> ids = new(audioPromptCodec.Count + 16);

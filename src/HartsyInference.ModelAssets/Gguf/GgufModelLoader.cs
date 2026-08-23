@@ -26,12 +26,9 @@ public sealed class GgufModelLoader : IDisposable
 
         public required IGgufKeyMapper Mapper { get; init; }
         public required IReadOnlyDictionary<string, Tensor> Weights { get; init; }
-        /// <summary>The GGUF's own <c>general.architecture</c> (e.g. "qwen2", "gemma3"), or the resolved mapper's
-        /// name when the file declared none. This is the real model architecture, not the mapper that handles it
-        /// (one mapper, e.g. the llama-family mapper, serves several architectures).</summary>
+        /// <summary>The GGUF's own <c>general.architecture</c> (e.g. "qwen2", "gemma3"), or the resolved mapper's name when the file declared none. This is the real model architecture, not the mapper that handles it (one mapper, e.g. the llama-family mapper, serves several architectures).</summary>
         public required string Architecture { get; init; }
-        /// <summary>The display name of the <see cref="IGgufKeyMapper"/> that remapped this file's tensor keys.
-        /// Often differs from <see cref="Architecture"/> (e.g. arch "qwen2" handled by the "llama"-family mapper).</summary>
+        /// <summary>The display name of the <see cref="IGgufKeyMapper"/> that remapped this file's tensor keys. Often differs from <see cref="Architecture"/> (e.g. arch "qwen2" handled by the "llama"-family mapper).</summary>
         public required string MapperName { get; init; }
         public required GgufMetadata Metadata { get; init; }
 
@@ -107,13 +104,7 @@ public sealed class GgufModelLoader : IDisposable
         }
     }
 
-    /// <summary>Relabels every rank-2 tensor's shape from GGUF's <c>[in, out]</c> (ggml <c>ne</c>) order to the
-    /// <c>[out, in]</c> order the rest of the engine assumes for a matrix weight (matmul reads <c>N=Shape[0]</c>,
-    /// <c>K=Shape[1]</c>; embeddings/heads are <c>[vocab, hidden]</c>). The underlying data is already row-major
-    /// <c>[out, in]</c> — identical to an HF safetensors weight — so this is a pure metadata swap (a <see cref="Tensor.Reshape"/>
-    /// that keeps borrowing the GGUF mmap, valid for quantized dtypes too since it touches no bytes). Diffusion GGUF
-    /// converters must run their input through this before mapping keys, exactly as <c>GgufLanguageModel</c> does for
-    /// LLM weights; skipping it leaves every Linear transposed and the first matmul derives a degenerate <c>M=0</c>.</summary>
+    /// <summary>Relabels every rank-2 tensor's shape from GGUF's <c>[in, out]</c> (ggml <c>ne</c>) order to the <c>[out, in]</c> order the rest of the engine assumes for a matrix weight (matmul reads <c>N=Shape[0]</c>, <c>K=Shape[1]</c>; embeddings/heads are <c>[vocab, hidden]</c>). The underlying data is already row-major <c>[out, in]</c> — identical to an HF safetensors weight — so this is a pure metadata swap (a <see cref="Tensor.Reshape"/> that keeps borrowing the GGUF mmap, valid for quantized dtypes too since it touches no bytes). Diffusion GGUF converters must run their input through this before mapping keys, exactly as <c>GgufLanguageModel</c> does for LLM weights; skipping it leaves every Linear transposed and the first matmul derives a degenerate <c>M=0</c>.</summary>
     public static Dictionary<string, Tensor> RelabelRank2ToPyTorchOrder(IReadOnlyDictionary<string, Tensor> ggufWeights)
     {
         Dictionary<string, Tensor> relabeled = new(StringComparer.Ordinal);

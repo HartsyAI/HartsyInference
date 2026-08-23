@@ -13,12 +13,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan-Animate recipe (character animation) — the Wan backbone plus a driving-pose latent
-/// (<c>pose_patch_embedding</c>) and a face pathway (<c>motion_encoder</c> → <c>face_encoder</c> →
-/// <c>face_adapter</c>). Config is weight-derived via <see cref="WanConfigDetector"/> (the layout the engine's Animate
-/// harness validated). Lifted from the SwarmUI backend's <c>WanAnimateLoader</c>: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H
-/// (<see cref="SideModels.ClipVisionH14"/>) when the checkpoint ships the i2v image embedder.</summary>
+/// <summary>Wan-Animate recipe (character animation) — the Wan backbone plus a driving-pose latent (<c>pose_patch_embedding</c>) and a face pathway (<c>motion_encoder</c> → <c>face_encoder</c> → <c>face_adapter</c>). Config is weight-derived via <see cref="WanConfigDetector"/> (the layout the engine's Animate harness validated). Lifted from the SwarmUI backend's <c>WanAnimateLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>) when the checkpoint ships the i2v image embedder.</summary>
 public sealed class WanAnimateRecipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -31,8 +26,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at
-    /// guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
+    /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 1.0f, Frames = 77, Fps = 30 };
 
     /// <inheritdoc/>
@@ -68,13 +62,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
             WanAnimateTransformer transformer = new WanAnimateTransformer(config);
             transformer.LoadWeights(conv.Transformer);
 
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-            Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder();
-            vaeDecoder.LoadWeights(vaeWeights);
-            Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder();
-            vaeEncoder.LoadWeights(vaeWeights);
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);
 
             ClipVisionEncoder? clipVision = null;
             if (hasClipEmbedder)
@@ -87,13 +75,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
                 clipVision.LoadWeights(clipLoader.GetAllTensors());
             }
 
-            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-            umt5Loader.Load(umt5Path);
-            loaders.Add(umt5Loader);
-            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-            umt5.LoadWeights(umt5Weights);
-            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: WanVideoRecipe.TokenLength);
+            (T5TextEncoder umt5, T5Tokenizer tokenizer) = VideoRecipeUtils.LoadUmt5(umt5Path, loaders);
 
             WanAnimatePipeline pipeline = new WanAnimatePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanAnimateRecipe] Wan-Animate ready (driving-video).");

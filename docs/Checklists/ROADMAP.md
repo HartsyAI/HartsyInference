@@ -176,29 +176,18 @@ giants (Kimi-K2, DeepSeek-V3, Mixtral, Qwen3-MoE, Qwen2.5-VL-7B).
   the seam. Plan-level only (`NcclApi` design in `MULTI_GPU_PARALLELISM.md`); needs NVLink hardware this
   box doesn't have to pay off.
 - [ ] **M3 — expert parallel (MoE):** route experts to devices; ties to on-device MoE routing (§4).
-- [~] **M2 — tensor parallel v1 SHIPPED (Phase 3, 2026-08-07):** `TensorParallelDegree` consumed for
-  real — Megatron-style column/row split (quant-block-aligned), 2 NCCL all-reduces/layer via the Phase 1
-  collectives, per-rank KV head slices, TextService branch with the asserted `[TensorParallel] active`
-  marker (precedes layer-split so a TP config can never silently layer-split). Verified: 17/17 CPU
-  synthetic parity + real-GGUF degree-2 EXACT token parity on 4090+3060 (+3,511/+1,730 MiB shards).
-  v1 bounds: dense Llama/Qwen2/Qwen3 only (loud refusals), single driving thread, no graph/spec decode —
-  perf on PCIe is pre-declared honest (correctness + harness, not a speed claim). Follow-ups: threaded
-  RankRunner driver, per-token comm profiling, more architectures.
-- [~] **M4 — sequence/context parallel (Phase 2, 2026-08-06): Wan v1 LANDED.**
-  `PlacementConfig.ContextParallelDevices` → frame-aligned proportional token split, per-block
-  self-attention K/V exchange (2-rank two-phase barrier, host-assembled), weights replicated. Mechanism
-  byte-exact (synthetic `ContextParallelWanTests`); real-weight cross-device SSIM 0.9616 gated > 0.90
-  (cross-ARCH drift ceiling on this 4090+3060 pair measured 0.7774 via `WanCrossGpuRegimeDiagnosticTests`
-  — regime flags can't equalize architectures, so 0.99 is unreachable on heterogeneous cards by physics,
-  not by defect). HONEST perf: slower at the 675-token test geometry (exchange/imbalance-bound); the win
-  case is long sequences on balanced links. **Update 2026-08-07:** Qwen-Image CP shipped (img-row split,
-  replicated txt stream; on this box the 19 GB replica can't fit the 3060 → the verified behavior is the
-  observable preload-OOM fallback, single-GPU completion, SSIM 1.0000; active CP needs a same-VRAM pair);
-  CLI `--cp-gpu` shipped; the large-geometry perf point was MEASURED via CLI (832×480×25f: CP 3.5× slower
-  than single-GPU — on a no-P2P heterogeneous pair Wan CP loses at every geometry; mechanism correct,
-  the latency win needs NVLink-class links + balanced GPUs); data-parallel serving pattern pinned by
-  `DataParallelServingEngineTests` (1.71× for 4 concurrent requests). Not yet: >2 ranks, NCCL-backed
-  exchange, Ulysses head-parallel variant, CP×CFG-parallel composition, threaded TP driver.
+- [~] **M2 — tensor parallel v1 SHIPPED (Phase 3, 2026-08-07):** Megatron-style column/row split over NCCL,
+  real-GGUF degree-2 exact token parity on 4090+3060. Bounds: dense Llama/Qwen2/Qwen3 only, single driving
+  thread, no graph/spec decode. Follow-ups: threaded `RankRunner` driver, per-token comm profiling, more
+  architectures.
+- [~] **M4 — sequence/context parallel (Phase 2, 2026-08-06): Wan + Qwen-Image v1 LANDED.**
+  `PlacementConfig.ContextParallelDevices`, frame-aligned proportional token split. Real-weight SSIM 0.9616
+  on Wan (cross-arch drift ceiling on this 4090+3060 pair is 0.7774 by physics, not defect — see
+  `WanCrossGpuRegimeDiagnosticTests`). Honest perf: slower than single-GPU on this no-P2P heterogeneous
+  pair at every geometry measured (CP needs NVLink-class links + balanced GPUs to win; mechanism is
+  correct, not the current hardware). Data-parallel serving is the win that already lands: 1.71× for 4
+  concurrent requests (`DataParallelServingEngineTests`). Not yet: >2 ranks, NCCL-backed exchange, Ulysses
+  head-parallel, CP×CFG-parallel composition, threaded TP driver.
 - [ ] **M5 — disaggregated serving:** separate prefill and decode pools.
 - [x] **Collectives (Phase 1, 2026-08-06):** `NcclApi` P/Invoke (runtime-resolved libnccl.so.2, no system
   install — torch-venv copy hardlinked into the probe dir), `ICollectiveComm` with `NcclComm` +
@@ -809,169 +798,42 @@ grinds).
 
 ## 6. Diffusion / accel-grind open levers
 
-- [ ] **Step-cache port to Sdxl/Flux/StableDiffusion15/Sd3/Chroma/HiDream pipelines** — not a checkpoint
-  gap, corrected 2026-08-10: the blocker is transformer-side plumbing, not missing weights, and the six
-  targets are NOT one uniform item — they split by transformer topology (design pass done 2026-08-10,
-  zero code changed):
-  - **DiT-shaped (`Sd3Transformer`/`ChromaTransformer`/`HiDreamTransformer`/`FluxTransformer`)**: all four
-    are a homogeneous iterative block loop, the same shape `ZImageTransformer` already wires
-    `DeviceFeatureCache` into (`ForwardPacked`/`PackedCore` — run block 0, gate on drift, skip 1..Depth-1
-    on a hit via a cached residual, always run the final norm/proj). `DeviceFeatureCache` itself is
-    confirmed generic (backend-op based, no packed-token assumption baked in) — this is a real port here.
-    `FluxPipeline`/`ChromaPipeline` additionally already use `DitStepGraph` (graph capture) and need the
-    same graph-mode mutual-exclusion gate Z-Image has; `Sd3Pipeline`/`HiDreamPipeline` don't, so those two
-    are the cleaner starting point.
-  - **UNet-shaped (`SdxlPipeline`/`StableDiffusion15Pipeline`, sharing `UNet.cs`)**: NOT a port. A UNet's
-    down-block skip connections feed the up blocks directly, so there is no "skip everything after block
-    0" cut point the way a DiT has — the literal `DeviceFeatureCache` pattern applied here means skipping
-    the *entire* rest of the network on a cache hit, not the established DeepCache-for-UNets technique
-    (cache specific down-block features, shorten the up-path). Needs its own algorithm design, sized
-    separately from the DiT group. SDXL's fused batched-CFG loop is also a single in-place device kernel
-    with nothing host-visible to gate a cache on (same reason it falls back to the eager loop for
-    CFG-Rescale). **Deprioritized 2026-08-10 per user judgment** — SDXL/SD1.5 are old enough that a
-    from-scratch caching algorithm may not be worth the design effort; not started, revisit only if asked.
-  - **Progress (2026-08-10)**: `Sd3Transformer`/`Sd3Pipeline` and `ChromaTransformer`/`ChromaPipeline` — DONE,
-    real-weight verified (two independent `DeviceFeatureCache` instances for the true-CFG cond/uncond streams
-    on both; SD3's context stream and Chroma's text stream are both dropped on a cache hit since neither is
-    read outside the block loop). Chroma needed a different mechanical approach than SD3/Flux: its
-    `ForwardDoubleRange`/`ForwardSingleRange` take `ref` params and unconditionally dispose their input on
-    every call (no `ReferenceEquals`-guarded loop to alias), so the cache anchor is an explicit device-copy
-    snapshot of block 0's output rather than a reused reference — block 0 runs alone via
-    `ForwardDoubleRange`'s own partial-range support (the existing DiT-sharding primitive), then the rest of
-    the stack runs or is skipped based on the snapshot's drift. `HiDreamTransformer`/`HiDreamPipeline` — DONE,
-    real-weight verified (double-then-single-stream, image-token stream cached across the whole stack; the
-    text encoders it needs — Llama-3.1-8B, dual CLIP, T5-XXL — turned out to already be present locally from
-    other architectures' prior downloads, only the 17.1GB transformer itself needed fetching, deleted after
-    testing). See the calibration-finding entry below for HiDream's own failure mode — its proven-safe profile
-    needed the late-window gate, not just a threshold, to avoid a real image-collapse failure. `FluxTransformer`/`FluxPipeline` — DONE, real-weight verified. Wired the graph route (forcing
-    it off when a cache is armed, matching `ForwardGraphable`'s own internal exclusion) and the sequential
-    drainFree path (`RunPlainForward`, one instance for the guidance-embedded case, two for sequential
-    true-CFG). Deliberately left the CFG-parallel branch (dual concurrent backends) unwired — its own
-    concurrency hazards deserve dedicated verification, not a bundled change — so a generation using both
-    step-cache and CFG-parallel simply runs uncached on that branch (silent, not incorrect). The host-step
-    branch (ControlNet/Kontext/regional/masked-inpaint) needed no change: the transformer's own `cacheActive`
-    gate already excludes all of it, confirmed by `Flux1RegionalPromptingRealWeightTests` passing unchanged
-    after this wiring. Threshold 0.08 is Flux's own proven-safe value — a THIRD distinct number from SD3
-    (0.03) and Chroma (0.15).
-  - **Calibration finding (2026-08-10, applies fleet-wide, not just the new SD3/Chroma ports)**: step-cache
-    profiles are uncalibrated across every pipeline that has this wired — `ZImagePipeline`'s own comment
-    already says "no calibrated profile yet." Measured on SD3: the generic fallback threshold (env `"1"`/
-    `"true"` → 0.10) reused 13/20 steps and produced a visibly darker, lower-detail image; an explicit
-    `HARTSY_STEP_CACHE=0.03` reused 5/20 steps and stayed visually consistent. **Measured on Chroma: neither
-    SD3's 0.03 nor the generic 0.10 transferred** — 0.03 produced ZERO reuses in 20 steps (Chroma's block-0
-    indicator drifts faster per step than SD3's), 0.3 reused 14/20 but visibly washed out the image (same
-    scene-level-failure signature as SD3's bad case), 0.15 reused 11/20 and stayed visually consistent. Two
-    architectures, two different proven-safe numbers — this is not a one-off SD3 fluke, every pipeline needs
-    its own number. **Measured on Flux: 0.08** (a third distinct value, between SD3's and Chroma's), reused
-    4/20 steps, mean abs diff 6.91 — the cleanest result of the three, visually near-identical to cache-off.
-    **Measured on HiDream: a qualitatively different, worse failure mode, not just another threshold number.**
-    At its native 50-step schedule, threshold 0.08 with the whole schedule eligible didn't just degrade the
-    image (SD3/Chroma/Flux's bad cases stayed recognizable) — it collapsed it into a flat, textureless color
-    field (mean abs diff 77 vs. cache-off). HiDream's block-0 indicator apparently reads as low-drift EARLY in
-    the schedule while the true compositional cost of skipping those blocks is severe — reusing early steps
-    destroys the image before it forms, unlike SD3/Chroma/Flux where early reuse merely blurred detail.
-    Restricting reuse to the back 60% of the schedule (`HARTSY_STEP_CACHE_LATE=0.6` — the late-window mechanism
-    already built for Ideogram 4) fixed it completely: mean abs diff dropped to 3.55, visually near-identical.
-    **Implication for the fleet:** late-window isn't just a nice-to-have knob for some pipelines — for at least
-    one architecture it's the difference between "works" and "destroys the image." Any calibration pass must
-    sweep the late-window dimension too, not just the threshold. Nobody has A/B'd the generic 0.10 default
-    against any of the OTHER pipelines it's wired into (Z-Image, Krea2, QwenImage, Flux2, Ideogram4, Wan, LTX)
-    — it may be silently over-aggressive, or silently collapsing images the way HiDream's did, on some of them.
-    A real calibration pass (per-model `StepCacheProfile`, the mechanism `StepCacheEnv.Resolve` already
-    supports) is real, useful, currently-nonexistent work.
+- [x] **Step-cache port to Sd3/Chroma/HiDream/Flux — DONE 2026-08-10, real-weight verified.** All four are
+  a homogeneous DiT block loop, the same shape `ZImageTransformer` already wires `DeviceFeatureCache` into.
+  Each needed its own calibrated threshold (SD3 0.03, Chroma 0.15, Flux 0.08, HiDream 0.08+late-window
+  0.6 — HiDream alone collapses to a flat color field without the late-window restriction); see
+  `MODEL_STATUS_IMAGE.md` for the per-model numbers and mean-abs-diff evidence.
+- [ ] **Step-cache calibration pass, fleet-wide** — nobody has A/B'd the generic 0.10 default against
+  Z-Image/Krea2/QwenImage/Flux2/Ideogram4/Wan/LTX; it may be silently over-aggressive or collapsing images
+  the way HiDream's did. Needs a per-model `StepCacheProfile` (mechanism already supported by
+  `StepCacheEnv.Resolve`), sweeping the late-window dimension, not just the threshold.
+- [ ] **Step-cache for SDXL/SD1.5 (UNet-shaped)** — not a port of the DiT mechanism: a UNet's skip
+  connections mean there's no "skip everything after block 0" cut point, so this needs its own
+  DeepCache-style algorithm design. Deprioritized 2026-08-10 per user judgment (old enough architecture
+  that the design effort may not be worth it) — not started, revisit only if asked.
   - CFG-interval late-band replicate to HiDream / Wan.
 - [ ] F16-ingest / F16-out Sage attention kernel (designed, build next).
 - [ ] Wan2.2-Lightning / LTX-distilled loadable accelerators.
 - [ ] **TensorRT compile support** — zero TRT code anywhere in the engine today; no design started.
 - [ ] **LoRA extraction / checkpoint-diff utility** — zero checkpoint-diff/extraction code anywhere;
   no design started.
-- [x] **Seamless tiling / circular conv padding** (2026-08-11) — neither cuDNN's convolution graph API nor
-  the im2col fallback kernel support anything but zero padding, engine-wide. Solved centrally rather than per
-  callsite: `CudaBackend.Conv2D` intercepts at its own top when `SeamlessTilingX`/`SeamlessTilingY`
-  (`IBackend`, default off) are set, wrap-pads a host copy of the input to the requested pad size, and
-  recurses with pad=0 — every conv on the hot path (UNet AND VAE, both route through that one method) gets
-  it with zero changes to `UNet`/`ResNetBlock2D`/etc. themselves. Reads SwarmUI core's existing shared
-  `SeamlessTileable` param end-to-end (`ImageRequest.SeamlessTiling` → `TextToImageRequest.SeamlessTiling`,
-  string vocabulary `"false"`/`"true"`/`"X-Only"`/`"Y-Only"`) rather than a new Hartsy-flagged duplicate —
-  unlike the Tier 2 CFG cluster, that param already carries its own `"seamless"` FeatureFlag, not a
-  Comfy-only one, so no AND-semantics problem exists to work around. SDXL only (`SdxlRecipe.Supports |=
-  ImageFeatures.SeamlessTiling`); `Backend`/`VaeBackend` are try/finally-reset every call since both persist
-  across generations. Real-weight verified: edge discontinuity (mean abs diff, opposite edges) dropped
-  33.55→5.84 on a real SDXL generation, and the 2x2-tiled mosaic was visually inspected — clean tiling, no
-  seam. SD1.5 shares `UNet.cs`/`Conv2D` so it likely comes free, but per this backlog's own verification rule
-  that's not claimed until it's actually run.
-- [x] **Segment-based regional prompting (`<segment:face>` etc.) — CLIPSeg free-text slice DONE
-  2026-08-11, real-weight verified.** The design pass above correctly identified the mechanism
-  (post-hoc crop-detect-denoise-recomposite on decoded pixels, not a pre-generation attention bias)
-  but was wrong about what was missing: **the crop/bounds/oversize/recomposite orchestration layer
-  already existed** — `InpaintOnlyMasked.Prepare/Apply/Composite` (built for ordinary "inpaint only
-  masked") is exactly a "denoise a masked sub-crop and paste it back" subroutine; it just had no
-  caller for segment parts. Shipped: `Engine/Features/SegmentRefinement.cs` — `HasSegmentParts`/
-  `Apply`, wired into `Services/ImagesService.GenerateAsync` after the ordinary generate/inpaint
-  path, since `<segment:>` needs pixels that don't exist yet at request-build time. Uses
-  `PromptRegionParser`'s existing `Segment` parts + `ClipSegSegmenter` (source-resolution
-  thresholded mask) + `InpaintOnlyMasked`'s crop/generate/composite cycle verbatim. Real-weight
-  verified on Flux.1 Schnell (direct-engine test), then live-verified a second time through the
-  actual running SwarmUI service: same-seed baseline vs. `<segment:the red apple,0.95,0.5>a bright
-  blue apple`, log-confirmed `CLIPSeg 'the red apple': matched 71186 px (27.2% of image)`,
-  `Meta["segments_refined"] == 1`, the recomposited region visually and dramatically changed
-  (apple → blue) while the pear stayed recognizably the pear.
-  <br>**Still missing (deliberately out of scope for this slice)**: YOLO detector path (`yolo-`
-  prefix parses but is skipped with a warning, not wired); pipe-separated `X|Y` OR-composite masks;
-  `<clear:>` (`ClearSegment`) alpha-cutout — a separate, simpler, unrelated mechanism (CLIPSeg-match
-  + blur + threshold + alpha-hole, no denoise); `SegmentModel` separate-checkpoint-for-refinement
-  path; `SegmentSortOrder` (parsed into `Regional` but never consumed — segments always apply in
-  parse order today). Dependency on the tiled-VAE-encoder segfault is still conditional, not
-  automatic, for the same reason as before (oversized-bbox crops are usually small).
-  <br>**Base-prompt tag-leak, confirmed real via the live test's own numbers, not just theoretical**
-  (documented in `SegmentRefinement.cs`'s class doc, but not previously quantified): no recipe
-  pipeline stripped `<segment:X>...` tag text from what it sent to its own text encoder for the
-  BASE (full-canvas) pass. Measuring the live A/B pair's mean-abs-diff on a crop that's pure
-  untouched background (no apple, no pear) found ~40-47/255, not near-zero as a clean isolation
-  would predict — the literal segment tag text was reaching the tokenizer and lightly steering the
-  WHOLE base image, not just the masked region.
-  <br>**FIXED, real-weight + live re-verified (2026-08-11, same day).** `SegmentRefinement.StripSegmentText`
-  mirrors `PromptRegionParser`'s own split/accumulate grammar (not a regex — "what belongs to a
-  segment" is defined by the accumulator rebinding the parser itself uses) to drop
-  `<segment:>`/`<clear:>` tags and their accumulated text while preserving everything else —
-  `<region:>`/`<object:>` tags included — byte-for-byte. `ImagesService.GenerateAsync` tokenizes the
-  stripped prompt for the base pass, gated on `HasSegmentParts` so a segment-free request is
-  byte-identical to before (identity path, not re-serialization). Re-ran the exact same live A/B:
-  background-corner diff dropped from ~40-47/255 to **exactly 0.0**, masked-region diff (the
-  feature's actual job) still dominant and visually unchanged. 10 parser-level unit tests
-  (`SegmentRefinementStripTests.cs`) lock in the grammar edge cases (segment-then-region survives
-  the region tag verbatim, embed-inside-segment dropped, `//cid=N` suffix, the `<segment:end>`
-  literal-text quirk, no-op on a tag-free prompt). Commit `31ac81ed`.
-  <br>**`<region:>`/`<object:>` have the same class of leak — deliberately NOT fixed by this
-  change.** Those pipelines each re-parse `request.Prompt` raw themselves
-  (`RegionalPromptResolver.HasRegionParts`) to build their own live per-step attention-bias plan —
-  handing them a pre-stripped prompt would make that check return false and silently break regional
-  prompting on all five already-shipped architectures (1.4's Flux.1/Z-Image/Ideogram4, 3.7's
-  Flux.2/Krea2). The real fix there is per-pipeline (tokenize `PromptRegionParser.GlobalPrompt` for
-  the base stream while still handing `Resolve` the raw prompt) and needs its own re-verification
-  pass across all five — a separate, larger item, not bundled here.
-  <br>**Syntax note, easy to get backwards**: `<segment:query,Strength2,Strength>` — the mask
-  threshold (`Strength`, default 0.5) comes LAST, the denoise/creativity strength (`Strength2`,
-  default 0.6) comes second. There is no `<segment:end>` closer (unlike `<region:end>`) — writing
-  one parses as a harmless second segment matching the literal text "end". Schnell's 4-step
-  schedule at the default `Strength2=0.6` only runs `steps - round(steps·0.6)` = 2 real denoise
-  steps — enough to shift texture but not color; this reads as "wiring broken" but isn't, it's
-  scheduling.
-- [x] **CPU-offloaded activations** — done 2026-08-12, but **this entry's premise was wrong** and the
-  resolution is not what it describes. The materialize-to-host-then-reload path already EXISTED per-tensor:
-  `CacheActivation`'s lazy sync callback does stream-sync → `EnsureHostBuffer` → D2H → free-device, and four
-  transformers already drove it via a bare `_ = t.DataPointer`. Only a named, bulk, policy-level entry point
-  was missing — now `IBackend.OffloadActivation` / `OffloadActivations(targetBytes)`, with the step-graph
-  invalidation this entry correctly anticipated, plus arena skipping, pin clearing, and (the non-obvious one)
-  blocking weight auto-promotion, which otherwise silently re-residents an offloaded tensor on its second
-  re-upload. Wired to `DeviceFeatureCache` behind `HARTSY_STEP_CACHE_OFFLOAD`, off by default.
-  <br>**Paging is the wrong mechanism for the engine's one measured activation OOM** (MiniMax-H3 chunked
-  attention): the host path is pageable and synchronous (~3-6 GB/s, nothing overlapped), and the same bytes
-  come off structurally for free. That peak instead went 3x → 2x `seq·inner·F32` by splitting the fused qkv
-  projection across the two passes (k+v in pass 1, q re-projected per chunk in pass 2 — identical total GEMM
-  work), which needed a new `LinearWeightRows` GEMM entry point because a weight *slice* would be a separate
-  GPU cache identity and upload a second copy of an already-resident weight. See
-  `docs/Research/MEMORY_SCHEDULING_SERVING.md` §9 for the full reasoning and the invariants.
+- [x] **Seamless tiling / circular conv padding** (2026-08-11) — `CudaBackend.Conv2D` wrap-pads a host copy
+  of the input when `SeamlessTilingX`/`SeamlessTilingY` are set, so every conv on the hot path (UNet + VAE)
+  gets it with no per-callsite changes. Reads SwarmUI core's shared `SeamlessTileable` param. SDXL only
+  (real-weight verified, clean 2×2 tile mosaic); SD1.5 shares the same `Conv2D` path but is unverified.
+- [x] **Segment-based regional prompting (`<segment:face>` etc.)** — CLIPSeg free-text slice shipped
+  2026-08-11, real-weight + live-SwarmUI verified (`31ac81ed`). Reuses `InpaintOnlyMasked`'s existing
+  crop/generate/composite cycle; a base-prompt tag-leak found during verification (segment tag text was
+  steering the untouched background) was fixed same-day via `SegmentRefinement.StripSegmentText`. Out of
+  scope for this slice: the YOLO detector path, `X|Y` OR-composite masks, `<clear:>` alpha-cutout,
+  `SegmentModel`, `SegmentSortOrder`. `<region:>`/`<object:>` have the same class of tag-leak, deliberately
+  NOT fixed here — each of those pipelines re-parses the raw prompt itself for its own attention-bias plan,
+  so pre-stripping would silently break regional prompting; needs its own per-pipeline fix across all five
+  architectures that have it.
+- [x] **CPU-offloaded activations** — shipped 2026-08-12 as `IBackend.OffloadActivation(s)`, wired to
+  `DeviceFeatureCache` behind `HARTSY_STEP_CACHE_OFFLOAD` (off by default). The engine's one measured
+  activation OOM (MiniMax-H3 chunked attention) was fixed separately, not by paging — a GEMM-projection
+  split halved the peak instead. See `docs/Research/MEMORY_SCHEDULING_SERVING.md` §9.
 - [ ] **PAG / SAG attention-hook infrastructure** — no self-attention substitution/introspection mechanism
   exists anywhere (confirmed zero hits for any `AttentionHook`-shaped primitive); `FluxTransformer`'s
   ControlNet residual-injection points are an external-adapter residual-add, not reusable as-is for a
@@ -985,32 +847,14 @@ grinds).
   1536x1536 SDXL img2img; crash site is the driver itself, not managed code — this dtype-correctness fix is
   the first caller to ever feed the encoder a dtype-matched, BF16, tile). The wiring was reverted pending a
   dedicated CUDA-driver-level investigation; the class itself has zero production callers today.
-- [x] **SDXL hires-fix / 2-pass upscale (`RefinerUpscale != 1`, PostApply hand-off) — DONE 2026-08-11 for
-  the official-refiner-checkpoint case, real-weight verified.** Was tracked as "blocked" on the
-  `VaeTiledEncoder` segfault directly above — that assumption was wrong: the crash is specifically the
-  BF16 cuDNN conv fast path engaging on a dtype-matched TILED tile; SDXL's VAE was never in the BF16-
-  adoption list (still runs F32), and PostApply uses the SAME untiled `VaeEncoder.Encode` ordinary
-  SDXL img2img has used since Tier 0 — outside the crash's trigger condition entirely. `SdxlRecipePipeline`
-  previously downgraded every refiner request to StepSwap (mid-loop UNet swap, same resolution
-  throughout) regardless of the resolved method — `PostApply` is the resolver's own default and was
-  silently never served. Turned out to need no new denoise-loop code: `SdxlRefinerPipeline` (a full
-  pixel-roundtrip CLIP-G-only/aesthetic-score refiner pass) already existed with zero callers and zero
-  test coverage anywhere in the repo. Wired: base pass runs to completion → resize via
-  `TorchResize.BicubicAntialiasChw` (rounded to the nearest multiple of 8) → `SdxlRefinerPipeline.RefineFromTokens`
-  redenoises the whole refiner schedule. **Found and fixed a real, pre-existing bug along the way**:
-  `SdxlRefinerLoader` was converting the refiner checkpoint through the BASE `SdxlCheckpointConverter`
-  instead of the dedicated `SdxlRefinerCheckpointConverter` (the refiner UNet has a genuinely different
-  4-level block layout) — a bug that predates this change and affected StepSwap too, just never caught
-  since neither hand-off had any real-weight test before this. Real-weight verified on the official
-  `stabilityai/stable-diffusion-xl-refiner-1.0` checkpoint: 512→768 (1.5x, exact) and 512→664 (1.3x,
-  exercises the rounding path), both visually confirmed same composition at higher resolution with
-  refined structural detail, not degraded. **Not supported yet**: a base-architecture checkpoint as
-  the refiner model (the common "same checkpoint, just upscale" hires-fix case) now fails with a clear
-  `NotSupportedException` instead of a cryptic shape-mismatch — that needs a different mechanism (a
-  second `GenerateFromTokens` img2img call on the base pipeline's own UNet, no refiner UNet load at
-  all), not built in this slice. `refinerupscalemethod` stays unconsumed (extension's own
-  `HonoredComfyParams` comment) — this hardcodes one resize algorithm rather than reading a
-  user-selectable one.
+- [x] **SDXL hires-fix / 2-pass upscale (`RefinerUpscale != 1`, PostApply hand-off)** — DONE 2026-08-11 for
+  the official-refiner-checkpoint case, real-weight verified (512→768 and 512→664, both visually confirmed).
+  `SdxlRefinerPipeline` already existed with zero callers; wired base→resize→refiner-redenoise. Found and
+  fixed a pre-existing bug along the way: the refiner checkpoint was loading through the base converter
+  instead of `SdxlRefinerCheckpointConverter` (different block layout), which also silently affected
+  StepSwap. **Not supported yet:** using a base-architecture checkpoint as the refiner (the common
+  "same checkpoint, just upscale" case) — fails with a clear `NotSupportedException`, needs a different
+  mechanism (a second img2img pass on the base UNet, no refiner load).
 
 ## 7. Robotics models (new modality — greenfield)
 
@@ -1054,3 +898,33 @@ From `RELEASE_NUGET` — mostly unstarted; persist through the 1.0 release.
 - [ ] Branding/metadata pass across all packages; license/readme per package.
 - [ ] Quality gates (build/test/pack) in CI; symbol packages.
 - [ ] Publish alpha → beta → stable progression; verify package-boundary dependency graph.
+
+## 12. Cleanup follow-ups (from the `engine-cleanup` pass, 2026-08-23)
+
+Deferred deliberately during the dead-code/duplication sweep — each needs a judgement or a
+design call rather than a mechanical edit. Full verdict-by-verdict record:
+`docs/Checklists/DEAD_CODE_RESOLUTIONS.md`.
+
+- [ ] `TensorPool` — adopt it on a real hot path or retire it. It has no production call site;
+      AGENTS.md no longer cites it as established practice, so the contradiction is closed either way.
+- [ ] 77 remaining analyzer hits (`docs/Checklists/analyzer-sweep-2026-08-23.txt`) — mostly config
+      mirrors and per-block dimension fields whose value is documentary. Per-symbol judgement, not a
+      bulk delete. Reproduce by bumping IDE0051/IDE0052/CA1823 in `.editorconfig` and building with
+      `-p:TreatWarningsAsErrors=false`.
+- [ ] `LtGemmExecutor` subsuming the Int8/Fp8 executors — blocked on Fp4's block-scale pointer
+      attributes, which `LtGemm` does not expose.
+- [ ] Vulkan spec-constant / push-constant builders (tiled matmul, Conv2D, WithOffsets) — the three
+      arrays differ in their bias/activation/residual tail slots; a shared builder needs ~5 params for
+      ~13 lines.
+- [ ] `QwenImageVaeOps.FlattenGamma` ownership asymmetry — returns a borrowed dict tensor on the
+      rank-1 no-cast path and an owned copy otherwise, so whether a caller may dispose it depends on
+      dtype at runtime. The dead no-op branch is gone; the asymmetry is not.
+- [ ] `VocosConfig.AdaNormNumEmbeddings` / `Padding` — settable but never read now that the
+      `Encodec24k` preset is gone. Deleting them turns the same silent trap into a compile error.
+- [ ] `WeightNormFusion.LoadFused` — the outer `EnsureF32` leaks its cast for F16 checkpoints
+      (`Fuse` re-casts internally and disposes only its own). Dropping the outer call is
+      output-identical.
+- [ ] Cli: a shared `Settings` base for the `-b`/`-o`/`-q` options repeated across 13 command
+      classes, and the `ReplSession.Generate` / `CommandRunner.Run` partial overlap.
+- [ ] `VideoRequest.VideoModel` / `VideoFormat` — no in-repo reader; public request-DTO surface the
+      SwarmUI extension may bind. Decide with the extension in hand.

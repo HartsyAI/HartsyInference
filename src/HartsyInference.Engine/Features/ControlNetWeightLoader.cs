@@ -4,9 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Loads a ControlNet checkpoint and constructs an adapter against a base UNet config, refusing base-model
-/// mismatches (an SD 1.5 ControlNet on an SDXL generation, or a Flux DiT ControlNet which needs
-/// <see cref="FluxControlNetResolver"/> instead).</summary>
+/// <summary>Loads a ControlNet checkpoint and constructs an adapter against a base UNet config, refusing base-model mismatches (an SD 1.5 ControlNet on an SDXL generation, or a Flux DiT ControlNet which needs <see cref="FluxControlNetResolver"/> instead).</summary>
 public static class ControlNetWeightLoader
 {
     /// <summary>Models-root-relative folders searched for ControlNet weights.</summary>

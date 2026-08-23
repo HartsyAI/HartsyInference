@@ -3,16 +3,9 @@ using System.Text.Json;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Gemma 4's tokenizer, built from the HuggingFace <c>tokenizer.json</c> that LTX-2.5 ships <i>inside</i>
-/// its text-encoder safetensors as the U8 <c>tokenizer_json</c> tensor. Despite the SentencePiece flavour
-/// (spaces become <c>▁</c>, unknown characters fall back to <c>&lt;0xNN&gt;</c> pieces) the model is a genuine
-/// rank-ordered <c>BPE</c>, so neither <see cref="HfTokenizerJson"/> (byte-level remaps the input through
-/// <see cref="ByteLevelCodec"/> first) nor <see cref="SpmGgufTokenizer"/> (merges by score, not rank) can read it.</summary>
+/// <summary>Gemma 4's tokenizer, built from the HuggingFace <c>tokenizer.json</c> that LTX-2.5 ships <i>inside</i> its text-encoder safetensors as the U8 <c>tokenizer_json</c> tensor. Despite the SentencePiece flavour (spaces become <c>▁</c>, unknown characters fall back to <c>&lt;0xNN&gt;</c> pieces) the model is a genuine rank-ordered <c>BPE</c>, so neither <see cref="HfTokenizerJson"/> (byte-level remaps the input through <see cref="ByteLevelCodec"/> first) nor <see cref="SpmGgufTokenizer"/> (merges by score, not rank) can read it.</summary>
 ///
-/// <remarks>Pipeline as declared by the real blob: normalizer <c>Replace(" " → "▁")</c>, then a
-/// <c>Split(" ")</c> pre-tokenizer that is vestigial (normalization already consumed every space), so BPE runs
-/// over the whole normalized string as a single word. <c>ignore_merges</c> is false and there is no
-/// continuing-subword prefix or end-of-word suffix.</remarks>
+/// <remarks>Pipeline as declared by the real blob: normalizer <c>Replace(" " → "▁")</c>, then a <c>Split(" ")</c> pre-tokenizer that is vestigial (normalization already consumed every space), so BPE runs over the whole normalized string as a single word. <c>ignore_merges</c> is false and there is no continuing-subword prefix or end-of-word suffix.</remarks>
 public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
 {
     /// <summary>Padding token id (<c>&lt;pad&gt;</c>).</summary>
@@ -55,8 +48,7 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
     /// <summary>Vocabulary size (highest id + 1).</summary>
     public int VocabSize => _tokens.Length;
 
-    /// <summary>Parses a Gemma 4 <c>tokenizer.json</c>. Throws when the declared pipeline is not the one this
-    /// implementation reproduces, rather than silently producing a different tokenization.</summary>
+    /// <summary>Parses a Gemma 4 <c>tokenizer.json</c>. Throws when the declared pipeline is not the one this implementation reproduces, rather than silently producing a different tokenization.</summary>
     public static Gemma4Tokenizer FromTokenizerJson(Stream json)
     {
         ArgumentNullException.ThrowIfNull(json);
@@ -64,8 +56,7 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         return FromDocument(doc.RootElement);
     }
 
-    /// <summary>Parses a Gemma 4 <c>tokenizer.json</c> held in memory — the form the LTX-2.5 checkpoint's
-    /// <c>tokenizer_json</c> tensor takes.</summary>
+    /// <summary>Parses a Gemma 4 <c>tokenizer.json</c> held in memory — the form the LTX-2.5 checkpoint's <c>tokenizer_json</c> tensor takes.</summary>
     public static Gemma4Tokenizer FromTokenizerJson(ReadOnlySpan<byte> json)
     {
         using JsonDocument doc = JsonDocument.Parse(json.ToArray());
@@ -129,8 +120,7 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         return new Gemma4Tokenizer(tokens, tokenToId, mergeRanks, byteToId, specialByLiteral, unkId);
     }
 
-    /// <summary>Encodes text to ids with <b>no</b> special tokens added — literal special-token strings already in
-    /// the text still resolve to their ids, which is what the reference tokenizer does.</summary>
+    /// <summary>Encodes text to ids with <b>no</b> special tokens added — literal special-token strings already in the text still resolve to their ids, which is what the reference tokenizer does.</summary>
     public int[] Encode(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -155,17 +145,13 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         return [.. ids];
     }
 
-    /// <summary>RAW ids — BOS + content, NO padding. The pipeline pads to <see cref="LtxMinLength"/> and marks
-    /// which positions are real; padding here instead would hand the connector 1000+ pad tokens as content.</summary>
+    /// <summary>RAW ids — BOS + content, NO padding. The pipeline pads to <see cref="LtxMinLength"/> and marks which positions are real; padding here instead would hand the connector 1000+ pad tokens as content.</summary>
     int[] ILtx2PromptTokenizer.EncodeForConditioning(string text) => BuildConditioningSequence(Encode(text), minLength: 0);
 
     /// <summary>ComfyUI conditions Gemma 4 at 1024 tokens, and length is part of the conditioning.</summary>
     int ILtx2PromptTokenizer.MinimumConditioningLength => LtxMinLength;
 
-    /// <summary>Prepends BOS unless <paramref name="ids"/> already starts with it (upstream both dropped and
-    /// duplicated it at different times), never appends EOS, and right-pads to <paramref name="minLength"/>.
-    /// Sequences already longer than <paramref name="minLength"/> are returned unpadded — the reference caps
-    /// length at <c>min_length</c>, not a maximum.</summary>
+    /// <summary>Prepends BOS unless <paramref name="ids"/> already starts with it (upstream both dropped and duplicated it at different times), never appends EOS, and right-pads to <paramref name="minLength"/>. Sequences already longer than <paramref name="minLength"/> are returned unpadded — the reference caps length at <c>min_length</c>, not a maximum.</summary>
     public static int[] BuildConditioningSequence(ReadOnlySpan<int> ids, int minLength = LtxMinLength,
         int bosId = BosTokenId, int padId = PadTokenId)
     {
@@ -231,8 +217,7 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
         return [.. ids];
     }
 
-    /// <summary>Applies BPE merges lowest-rank-first over a doubly-linked view of <paramref name="symbols"/>.
-    /// A stale queue entry is detected by re-checking adjacency instead of eagerly purging the queue.</summary>
+    /// <summary>Applies BPE merges lowest-rank-first over a doubly-linked view of <paramref name="symbols"/>. A stale queue entry is detected by re-checking adjacency instead of eagerly purging the queue.</summary>
     private void MergeSymbols(List<string> symbols)
     {
         int count = symbols.Count;

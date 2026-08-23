@@ -2,22 +2,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Thrown by <see cref="PagedKvPool.AllocatePage"/> when no free page remains. Reject policy: the
-/// pool never blocks or evicts on its own — a caller that hits this must refuse new admission (or evict a
-/// sequence itself); queueing/eviction policy belongs at the scheduler layer (continuous batching), not
-/// inside the pool.</summary>
+/// <summary>Thrown by <see cref="PagedKvPool.AllocatePage"/> when no free page remains; reject policy — the pool never blocks or evicts on its own, a caller that hits this must refuse new admission (or evict a sequence itself), since queueing/eviction policy belongs at the scheduler layer, not inside the pool.</summary>
 public sealed class KvPoolExhaustedException(string message) : Exception(message);
 
-/// <summary>Shared page pool backing one or more <see cref="PagedKvCache"/> instances. Pre-allocates a fixed
-/// budget of <see cref="PageSize"/>-token pages per layer up front (bounded VRAM, same fixed-capacity
-/// philosophy as <see cref="FixedKvCache"/> — see its class doc), then hands out page INDICES via a
-/// free-list shared across every layer: page index P always means "the same token range" in every layer, so
-/// a cache's block table is a single list of indices, not one per layer.
-///
-/// <para>Multiple sequences (multiple <see cref="PagedKvCache"/> instances) share one pool — that's the
-/// actual point of paging: a short sequence doesn't reserve VRAM for a worst-case max length the way
-/// <see cref="FixedKvCache"/> does, and a finished sequence's pages go straight back to the free-list for the
-/// next admission instead of sitting reserved.</para></summary>
+/// <summary>Shared page pool backing one or more <see cref="PagedKvCache"/> instances: pre-allocates a fixed budget of <see cref="PageSize"/>-token pages per layer up front, then hands out page INDICES via a free-list shared across every layer, so a cache's block table is a single list of indices, not one per layer.</summary>
+/// <remarks>Multiple sequences (multiple <see cref="PagedKvCache"/> instances) share one pool — that's the actual point of paging: a short sequence doesn't reserve VRAM for a worst-case max length the way <see cref="FixedKvCache"/> does, and a finished sequence's pages go straight back to the free-list for the next admission instead of sitting reserved.</remarks>
 public sealed class PagedKvPool : IDisposable
 {
     public int PageSize { get; }
@@ -35,13 +24,11 @@ public sealed class PagedKvPool : IDisposable
     /// <summary>Free pages remaining (for observability/logging — not load-bearing for correctness).</summary>
     public int FreePageCount { get { lock (_freeList) return _freeList.Count; } }
 
-    /// <summary>Allocates a pool with every layer sharing one <paramref name="headDim"/> (every architecture
-    /// except Gemma-4).</summary>
+    /// <summary>Allocates a pool with every layer sharing one <paramref name="headDim"/> (every architecture except Gemma-4).</summary>
     public PagedKvPool(int numLayers, int numKvHeads, int headDim, int pageSize, int maxPages)
         : this(numLayers, numKvHeads, UniformHeadDims(numLayers, headDim), pageSize, maxPages) { }
 
-    /// <summary>Allocates a pool with a PER-LAYER head dimension (Gemma-4: local/SWA layers are narrower than
-    /// global layers) — mirrors <see cref="FixedKvCache"/>'s two constructor overloads exactly.</summary>
+    /// <summary>Allocates a pool with a PER-LAYER head dimension (Gemma-4: local/SWA layers are narrower than global layers) — mirrors <see cref="FixedKvCache"/>'s two constructor overloads exactly.</summary>
     public PagedKvPool(int numLayers, int numKvHeads, int[] headDimPerLayer, int pageSize, int maxPages)
     {
         if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
@@ -100,10 +87,7 @@ public sealed class PagedKvPool : IDisposable
         }
     }
 
-    /// <summary>Returns a page index to the free-list for reuse by another (or the same) sequence. Does NOT
-    /// clear the page's contents — the next allocator of this index will overwrite exactly as many slots as
-    /// it writes, and nothing reads a page beyond what its owning cache's block table + written-length says
-    /// is valid, so stale bytes in unwritten slots are never observed.</summary>
+    /// <summary>Returns a page index to the free-list for reuse; does NOT clear the page's contents — the next allocator overwrites exactly as many slots as it writes, and nothing reads a page beyond what its owning cache's block table + written-length says is valid, so stale bytes in unwritten slots are never observed.</summary>
     public void FreePage(int pageIndex)
     {
         ThrowIfDisposed();

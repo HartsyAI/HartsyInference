@@ -63,7 +63,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
         // 2. T5-XXL + its embedded tokenizer. No VAE — Radiance is pixel-space.
         SafeTensorsLoader t5Loader = new SafeTensorsLoader();
         t5Loader.Load(t5Path);
-        Dictionary<string, Tensor> t5Weights = NormalizeT5(t5Loader.GetAllTensors());
+        Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
         if (t5Weights.Count == 0)
         {
             t5Loader.Dispose();
@@ -77,24 +77,5 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
         ChromaRadiancePipeline pipeline = new ChromaRadiancePipeline(context.Backend, t5, transformer, config);
         Logs.Info("[ChromaRadianceRecipe] Chroma Radiance ready (mid-pretraining checkpoint — output is validation-gated).");
         return new ChromaRadianceRecipePipeline(pipeline, config, tokenizer, loader, t5Loader, loraStack);
-    }
-
-    /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file so the encoder finds its keys.</summary>
-    private static Dictionary<string, Tensor> NormalizeT5(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        const string ComfyPrefix = "text_encoders.t5xxl.transformer.";
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            if (kv.Key.StartsWith(ComfyPrefix, StringComparison.Ordinal))
-            {
-                result[kv.Key[ComfyPrefix.Length..]] = kv.Value;
-            }
-            else
-            {
-                result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
     }
 }

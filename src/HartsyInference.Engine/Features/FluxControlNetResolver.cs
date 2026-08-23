@@ -5,10 +5,7 @@ using RequestConditioning = HartsyInference.Engine.Requests.ControlNetConditioni
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Flux DiT counterpart of <see cref="ControlNetResolver"/>: resolves the request's ControlNet layers into
-/// <see cref="FluxControlNetConditioning"/>s. Per-slot checkpoint load, hint packing to <c>[1, 3, H, W]</c> in
-/// <c>[-1, 1]</c> (the Flux control convention), strength + start/end wiring. Hint preprocessing is host-side, so the
-/// image arrives as the finished control map — union checkpoints therefore take it as-is.</summary>
+/// <summary>Flux DiT counterpart of <see cref="ControlNetResolver"/>: resolves the request's ControlNet layers into <see cref="FluxControlNetConditioning"/>s. Per-slot checkpoint load, hint packing to <c>[1, 3, H, W]</c> in <c>[-1, 1]</c> (the Flux control convention), strength + start/end wiring. Hint preprocessing is host-side, so the image arrives as the finished control map — union checkpoints therefore take it as-is.</summary>
 public static class FluxControlNetResolver
 {
     /// <summary>One generation's resolved Flux ControlNet state: owns the adapters and the control tensors.</summary>

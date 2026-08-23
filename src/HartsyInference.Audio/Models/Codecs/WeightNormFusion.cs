@@ -3,23 +3,19 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
 
-/// <summary>Fuses PyTorch's <c>weight_norm</c> reparametrization (<c>weight_g</c> +
-/// <c>weight_v</c>) into a single weight tensor at load time. EnCodec, Vocos, HiFiGAN,
-/// BigVGAN, and most SEANet-style codecs ship with weight-norm applied throughout — we
-/// pay the fusion cost once during model construction and store the fused tensor.
-///
+/// <summary>Fuses PyTorch's <c>weight_norm</c> reparametrization (<c>weight_g</c> + <c>weight_v</c>) into a single weight tensor at load time, paying the fusion cost once during model construction.</summary>
+/// <remarks>
 /// <para>Math (per-output-channel): <c>weight[oc, ...] = weight_g[oc] * weight_v[oc, ...] / ||weight_v[oc, ...]||_2</c>
 /// where the L2 norm is taken over every axis except axis 0 (out_channels). Works for
 /// any rank: Conv1d <c>[oc, ic, k]</c>, Conv2d <c>[oc, ic, kh, kw]</c>, Linear <c>[oc, ic]</c>.</para>
 ///
 /// <para>The returned tensor is freshly allocated and owned by the caller. Original
 /// <paramref name="weightG"/> / <paramref name="weightV"/> are not modified or
-/// disposed.</para></summary>
+/// disposed.</para>
+/// </remarks>
 public static unsafe class WeightNormFusion
 {
-    /// <summary>Loads a (possibly weight-normed) conv weight at <paramref name="prefix"/>: fuses
-    /// <c>weight_g</c>+<c>weight_v</c> when present, otherwise returns the already-fused <c>weight</c>
-    /// (checkpoints with weight-norm removed, e.g. the HuggingFace <c>descript/dac_44khz</c> export).</summary>
+    /// <summary>Loads a (possibly weight-normed) conv weight at <paramref name="prefix"/>: fuses <c>weight_g</c>+<c>weight_v</c> when present, otherwise returns the already-fused <c>weight</c> (checkpoints with weight-norm removed, e.g. the HuggingFace <c>descript/dac_44khz</c> export).</summary>
     public static Tensor Compose(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g))
@@ -29,6 +25,15 @@ public static unsafe class WeightNormFusion
         if (w.TryGetValue($"{prefix}.parametrizations.weight.original0", out Tensor? g2))
             return Fuse(g2, w[$"{prefix}.parametrizations.weight.original1"]);
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
+    }
+
+    /// <summary>Fuses the weight-normed conv weight at <paramref name="prefix"/>; unlike <see cref="Compose"/> this
+    /// requires <c>weight_g</c>/<c>weight_v</c> to be present and throws when the checkpoint is already fused.</summary>
+    public static Tensor LoadFused(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
+        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
+        return Fuse(g, v);
     }
 
     public static Tensor Fuse(Tensor weightG, Tensor weightV)

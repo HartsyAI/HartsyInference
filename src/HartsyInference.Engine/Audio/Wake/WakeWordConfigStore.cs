@@ -30,8 +30,7 @@ public sealed class WakeWordConfigStore
     public WakeWordConfigStore(string modelRoot, string? fileName = null)
         => _path = System.IO.Path.Combine(modelRoot, fileName ?? "wake-words.json");
 
-    /// <summary>Reads the file if present. A malformed file is logged and ignored rather than thrown: the
-    /// listener starting with default settings is better than it refusing to start at all.</summary>
+    /// <summary>Reads the file if present. A malformed file is logged and ignored rather than thrown: the listener starting with default settings is better than it refusing to start at all.</summary>
     public IReadOnlyDictionary<string, WakeWordConfig> Load()
     {
         lock (_lock)

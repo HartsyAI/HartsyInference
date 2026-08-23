@@ -25,9 +25,7 @@ public sealed class AnimaRecipe : IArchitectureRecipe
     public string Name => "anima";
 
     /// <inheritdoc/>
-    /// <inheritdoc/>
-    /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and
-    /// <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>
+    /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>

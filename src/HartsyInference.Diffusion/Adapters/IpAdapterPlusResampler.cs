@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>The Perceiver-style resampler used by IP-Adapter Plus / Plus-Face / Full-Face. A small transformer with N learnable query embeddings (latents) that cross-attend over the CLIP-Vision penultimate hidden states (concatenated with the latents themselves for K/V), distilled through <c>depth</c> alternating attention + feed-forward layers, and finally projected from the resampler's working dim to the base UNet's cross-attention dim.
-///
-/// <para>Canonical configs (verified against the released checkpoint tensor shapes): SDXL Plus is <c>depth=4, num_queries=16, dim=1280, dim_head=64, heads=20 (inner_dim=1280), embedding_dim=1280, output_dim=2048, ff_mult=4</c>; SD1.5 Plus is the same shape at <c>dim=768, heads=12 (inner_dim=768), output_dim=768</c>. In both, <c>to_q</c> is square (<c>dim == inner_dim</c>) and the FFN expands <c>dim → 4·dim → dim</c>.</para>
-///
-/// <para>Weight key layout matches tencent-ailab / diffusers IP-Adapter checkpoints: <c>image_proj.latents</c>, <c>image_proj.proj_in.{weight,bias}</c>, per-layer <c>image_proj.layers.{i}.0.{norm1,norm2,to_q,to_kv,to_out}.*</c> + <c>image_proj.layers.{i}.1.net.{0,1,3}.*</c>, and <c>image_proj.proj_out.{weight,bias}</c> + <c>image_proj.norm_out.{weight,bias}</c>.</para></summary>
+/// <summary>The Perceiver-style resampler used by IP-Adapter Plus / Plus-Face / Full-Face. A small transformer with N learnable query embeddings (latents) that cross-attend over the CLIP-Vision penultimate hidden states (concatenated with the latents themselves for K/V), distilled through <c>depth</c> alternating attention + feed-forward layers, and finally projected from the resampler's working dim to the base UNet's cross-attention dim. Canonical configs (verified against the released checkpoint tensor shapes): SDXL Plus is <c>depth=4, num_queries=16, dim=1280, dim_head=64, heads=20 (inner_dim=1280), embedding_dim=1280, output_dim=2048, ff_mult=4</c>; SD1.5 Plus is the same shape at <c>dim=768, heads=12 (inner_dim=768), output_dim=768</c>. In both, <c>to_q</c> is square (<c>dim == inner_dim</c>) and the FFN expands <c>dim → 4·dim → dim</c>. Weight key layout matches tencent-ailab / diffusers IP-Adapter checkpoints: <c>image_proj.latents</c>, <c>image_proj.proj_in.{weight,bias}</c>, per-layer <c>image_proj.layers.{i}.0.{norm1,norm2,to_q,to_kv,to_out}.*</c> + <c>image_proj.layers.{i}.1.net.{0,1,3}.*</c>, and <c>image_proj.proj_out.{weight,bias}</c> + <c>image_proj.norm_out.{weight,bias}</c>.</summary>
 public sealed unsafe class IpAdapterPlusResampler : IIpAdapterImageProjection
 {
     private readonly int _embeddingDim;
@@ -59,13 +55,13 @@ public sealed unsafe class IpAdapterPlusResampler : IIpAdapterImageProjection
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {
-        _latents = EnsureF32(weights[$"{prefix}.latents"]);
-        _projInWeight = EnsureF32(weights[$"{prefix}.proj_in.weight"]);
-        _projInBias = EnsureF32(weights[$"{prefix}.proj_in.bias"]);
-        _projOutWeight = EnsureF32(weights[$"{prefix}.proj_out.weight"]);
-        _projOutBias = EnsureF32(weights[$"{prefix}.proj_out.bias"]);
-        _normOutWeight = EnsureF32(weights[$"{prefix}.norm_out.weight"]);
-        _normOutBias = EnsureF32(weights[$"{prefix}.norm_out.bias"]);
+        _latents = TensorCasts.EnsureF32(weights[$"{prefix}.latents"]);
+        _projInWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj_in.weight"]);
+        _projInBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj_in.bias"]);
+        _projOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj_out.weight"]);
+        _projOutBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj_out.bias"]);
+        _normOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.norm_out.weight"]);
+        _normOutBias = TensorCasts.EnsureF32(weights[$"{prefix}.norm_out.bias"]);
         for (int i = 0; i < _depth; i++)
         {
             _layers[i].LoadWeights(weights, $"{prefix}.layers.{i}");
@@ -138,8 +134,6 @@ public sealed unsafe class IpAdapterPlusResampler : IIpAdapterImageProjection
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>One resampler layer: PerceiverAttention(latents over [x, latents]) + residual; FeedForward(latents) + residual. PerceiverAttention is a cross-attention where Q comes from latents and K/V come from concatenating the input x with the latents themselves — letting the latents both gather information from the image patches and refine via self-attention in a single op.</summary>
@@ -172,17 +166,17 @@ internal sealed unsafe class ResamplerLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _norm1Weight = EnsureF32(weights[$"{prefix}.0.norm1.weight"]);
-        _norm1Bias = EnsureF32(weights[$"{prefix}.0.norm1.bias"]);
-        _norm2Weight = EnsureF32(weights[$"{prefix}.0.norm2.weight"]);
-        _norm2Bias = EnsureF32(weights[$"{prefix}.0.norm2.bias"]);
-        _toQWeight = EnsureF32(weights[$"{prefix}.0.to_q.weight"]);
-        _toKvWeight = EnsureF32(weights[$"{prefix}.0.to_kv.weight"]);
-        _toOutWeight = EnsureF32(weights[$"{prefix}.0.to_out.weight"]);
-        _ffNormWeight = EnsureF32(weights[$"{prefix}.1.0.weight"]);
-        _ffNormBias = EnsureF32(weights[$"{prefix}.1.0.bias"]);
-        _ffLinear1Weight = EnsureF32(weights[$"{prefix}.1.1.weight"]);
-        _ffLinear2Weight = EnsureF32(weights[$"{prefix}.1.3.weight"]);
+        _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm1.weight"]);
+        _norm1Bias = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm1.bias"]);
+        _norm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm2.weight"]);
+        _norm2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.0.norm2.bias"]);
+        _toQWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_q.weight"]);
+        _toKvWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_kv.weight"]);
+        _toOutWeight = TensorCasts.EnsureF32(weights[$"{prefix}.0.to_out.weight"]);
+        _ffNormWeight = TensorCasts.EnsureF32(weights[$"{prefix}.1.0.weight"]);
+        _ffNormBias = TensorCasts.EnsureF32(weights[$"{prefix}.1.0.bias"]);
+        _ffLinear1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.1.1.weight"]);
+        _ffLinear2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.1.3.weight"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -380,8 +374,6 @@ internal sealed unsafe class ResamplerLayer
         }
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>Linear projection helper for the IPA components. Mirrors <c>ClipTransformerLayer.ProjectLinear</c>'s shape contract: input <c>[B, S, inDim]</c>, weight <c>[outDim, inDim]</c> (PyTorch standard), optional bias <c>[outDim]</c>; output <c>[B, S, outDim]</c>. Internally transposes weight to <c>[inDim, outDim]</c> for <see cref="IBackend.BatchedMatMul"/>.</summary>

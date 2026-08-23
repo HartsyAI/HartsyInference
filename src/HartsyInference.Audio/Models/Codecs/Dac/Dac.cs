@@ -3,10 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Dac;
 
-/// <summary>Top-level Descript Audio Codec (DAC). Ties together <see cref="DacEncoder"/>,
-/// <see cref="DacResidualVectorQuantizer"/>, and <see cref="DacDecoder"/> into the
-/// standard <c>Encode</c> / <c>Decode</c> surface. State-dict layout matches
-/// <c>descript/dac_*khz</c>:</summary>
+/// <summary>Top-level Descript Audio Codec (DAC), tying <see cref="DacEncoder"/>, <see cref="DacResidualVectorQuantizer"/>, and <see cref="DacDecoder"/> into the standard <c>Encode</c> / <c>Decode</c> surface.</summary>
+/// <remarks>
+/// <para>State-dict layout matches <c>descript/dac_*khz</c>:</para>
 /// <list type="bullet">
 ///   <item><c>encoder.block.*</c> — DAC encoder</item>
 ///   <item><c>quantizer.quantizers.{i}.{in_proj|out_proj|codebook}.*</c> — RVQ</item>
@@ -17,6 +16,7 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 /// and Spark-TTS HiFi-GAN wave generator (16 kHz). Three sample-rate variants share
 /// the same architecture; pick the matching preset via
 /// <see cref="DacConfig.Dac44kHz"/> / <see cref="DacConfig.Dac24kHz"/> / <see cref="DacConfig.Dac16kHz"/>.</para>
+/// </remarks>
 public sealed class Dac
 {
     public DacConfig Config { get; }
@@ -48,9 +48,7 @@ public sealed class Dac
         _decoder.LoadWeights(w);
     }
 
-    /// <summary>Encodes PCM to RVQ codes. <paramref name="pcm"/> is
-    /// <c>[B, 1, T_pcm]</c>; output is <c>[nQ, B, T_frames]</c> Int32 where
-    /// <c>T_frames = T_pcm / hop</c>.</summary>
+    /// <summary>Encodes PCM to RVQ codes. <paramref name="pcm"/> is <c>[B, 1, T_pcm]</c>; output is <c>[nQ, B, T_frames]</c> Int32 where <c>T_frames = T_pcm / hop</c>.</summary>
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm, int? nQ = null)
     {
         Tensor latent = _encoder.Forward(backend, pcm, batch, tPcm);
@@ -60,8 +58,7 @@ public sealed class Dac
         return codes;
     }
 
-    /// <summary>Decodes RVQ codes back to PCM. <paramref name="codes"/> is
-    /// <c>[nQ, B, T_frames]</c>; output is <c>[B, 1, T_frames * hop]</c>.</summary>
+    /// <summary>Decodes RVQ codes back to PCM. <paramref name="codes"/> is <c>[nQ, B, T_frames]</c>; output is <c>[B, 1, T_frames * hop]</c>.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {
         Tensor latent = _quantizer.Decode(backend, codes, batch, tFrames);

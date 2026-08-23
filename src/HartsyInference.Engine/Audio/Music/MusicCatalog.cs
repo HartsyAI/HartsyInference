@@ -12,8 +12,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>The music model registry: catalog id → descriptor, plus the shared runner cache and the local-checkpoint
-/// resolution the placed-weights families (ACE-Step, YuE) use.</summary>
+/// <summary>The music model registry: catalog id → descriptor, plus the shared runner cache and the local-checkpoint resolution the placed-weights families (ACE-Step, YuE) use.</summary>
 internal static class MusicCatalog
 {
     private const int T5MaxTokens = 256;
@@ -61,8 +60,7 @@ internal static class MusicCatalog
         ["stableaudio"] = StableAudioMusicModel.Descriptor,
     };
 
-    /// <summary>Resolves a placed checkpoint for the registry-backed families: an explicit local path wins, then the
-    /// registered variant file (or, for folder checkpoints, the variant directory) under the family's weights dir.</summary>
+    /// <summary>Resolves a placed checkpoint for the registry-backed families: an explicit local path wins, then the registered variant file (or, for folder checkpoints, the variant directory) under the family's weights dir.</summary>
     internal static string ResolveLocalCheckpoint(string familyId, AudioModelSelector selector)
     {
         if (!string.IsNullOrEmpty(selector.LocalPath))

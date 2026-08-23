@@ -41,7 +41,7 @@ public sealed unsafe class ZImageBlock
 
     // Fused QKV is split into separate Q/K/V weights at load (GPU-residency rewrite): 3 Linears write
     // directly into [B, S, H, D] so the head-split needs no host memcopy. The scalar fp8 weight_scale is
-    // per-tensor, so the three splits share it (see LoadSplitQkv).
+    // per-tensor, so the three splits share it (see SplitQkv).
     private Tensor? _toQWeight, _toKWeight, _toVWeight;
 
     // Output projection: Linear(hidden → hidden), no bias.
@@ -77,7 +77,7 @@ public sealed unsafe class ZImageBlock
         _adaLNWeight = weights[$"{prefix}.adaLN_modulation.0.weight"];
         weights.TryGetValue($"{prefix}.adaLN_modulation.0.bias", out _adaLNBias);
 
-        LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
+        (_toQWeight, _toKWeight, _toVWeight) = SplitQkv(weights[$"{prefix}.attention.qkv.weight"], _hiddenSize);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
         // F16 mode: damp the two RmsNorm-sandwiched projections so their raw outputs fit F16 range (see
@@ -94,10 +94,10 @@ public sealed unsafe class ZImageBlock
         // CudaBackend.RmsNorm reads weight as float* directly, so RMSNorm scales MUST be F32.
         // BF16-stored norms (e.g., from a BF16 or nvfp8-mixed checkpoint) would otherwise be
         // bit-reinterpreted as garbage F32. Cheap one-time cast (each tensor is just [hidden]).
-        _attnNorm1Weight = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2Weight = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
@@ -129,11 +129,9 @@ public sealed unsafe class ZImageBlock
         if (_w3Weight is not null) yield return _w3Weight;
     }
 
-    /// <summary>Forward pass with optional RoPE.</summary>
-    /// <param name="backend">Compute backend.</param>
+    /// <summary>Runs the AdaLN-modulated self-attention → SwiGLU FFN sandwich; rotates Q/K via <paramref name="rope"/> when non-null.</summary>
     /// <param name="x">Token sequence [B, seqLen, hidden].</param>
     /// <param name="tEmb">Timestep embedding [B, adaLNEmbedDim] — already through t_embedder.mlp (Linear → SiLU → Linear), output is NOT SiLU'd.</param>
-    /// <param name="rope">Multi-axis RoPE precomputed for this seqLen, or null to skip.</param>
     public Tensor Forward(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];
@@ -286,30 +284,23 @@ public sealed unsafe class ZImageBlock
     /// weights <c>[hidden, hidden]</c> at load. Rows [0,H)=Q, [H,2H)=K, [2H,3H)=V (matches the old feature-dim split).
     /// The per-tensor scalar <see cref="Tensor.Fp8ScaleFactor"/> is shared by all three splits (mirrors
     /// <c>CheckpointConvertUtils.SplitInProjWeight</c>). Dtype-agnostic byte copy — works for fp8/F16/F32.</summary>
-    private void LoadSplitQkv(Tensor qkv)
+    internal static (Tensor q, Tensor k, Tensor v) SplitQkv(Tensor qkv, int h)
     {
-        int h = _hiddenSize;
         if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
             throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
 
         long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
         TensorShape splitShape = new TensorShape(h, h);
 
-        _toQWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toKWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toVWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        Tensor q = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        Tensor k = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        Tensor v = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
 
         byte* src = (byte*)qkv.DataPointer;
-        Buffer.MemoryCopy(src, (void*)_toQWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)_toKWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)_toVWeight.DataPointer, chunkBytes, chunkBytes);
-    }
-
-    /// <summary>Loads a norm weight from the dict, casting to F32 if not already (RmsNorm requires F32 weight pointer).</summary>
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        Buffer.MemoryCopy(src, (void*)q.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)k.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)v.DataPointer, chunkBytes, chunkBytes);
+        return (q, k, v);
     }
 
     /// <summary>AdaLN: Linear(t_emb) → device 4-way split via <see cref="IBackend.ModulationSplit4"/>, which emits
@@ -330,7 +321,6 @@ public sealed unsafe class ZImageBlock
         projected.Dispose();
         return results;
     }
-
 
     /// <summary>Debug probe (HARTSY_ZIMAGE_F16TRACE): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>
     private static void Trace(string name, Tensor t)

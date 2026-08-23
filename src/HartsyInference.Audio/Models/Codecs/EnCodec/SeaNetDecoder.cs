@@ -5,7 +5,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 
-/// <summary>SEANet decoder for EnCodec. Mirror of <see cref="SeaNetEncoder"/>:
+/// <summary>SEANet decoder for EnCodec — mirror of <see cref="SeaNetEncoder"/>.</summary>
+/// <remarks>
 /// <code>
 ///   initial: Conv1d(latent_dim=128 → max_channels=512, k=7)
 ///   2-layer unidir LSTM at hidden = 512 (residual add)
@@ -22,7 +23,8 @@ namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 /// <para>Input is <c>[B, latent_dim, T_frames]</c>; output is
 /// <c>[B, channels=1, T_frames * 320]</c> for the 24 kHz model. The LSTM is positioned at
 /// the "narrowest" point (bottleneck) — directly after the initial projection conv and
-/// before any upsample stages, matching the encoder's symmetric placement.</para></summary>
+/// before any upsample stages, matching the encoder's symmetric placement.</para>
+/// </remarks>
 internal sealed class SeaNetDecoder
 {
     private readonly EnCodecConfig _cfg;
@@ -113,12 +115,10 @@ internal sealed class SeaNetDecoder
         _finalB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{seqIdx}.conv.conv.bias"]);
     }
 
-    /// <summary>Optional per-Sequential-index activation hook for parity debugging (key = HF layer index).
-    /// Not used in production paths.</summary>
+    /// <summary>Optional per-Sequential-index activation hook for parity debugging (key = HF layer index). Not used in production paths.</summary>
     internal Action<int, Tensor>? DebugStageHook { get; set; }
 
-    /// <summary>Forward — <paramref name="latent"/> channels-first
-    /// <c>[batch, latent_dim, T_frames]</c>. Returns <c>[batch, 1, T_frames * 320]</c>.</summary>
+    /// <summary>Forward — <paramref name="latent"/> channels-first <c>[batch, latent_dim, T_frames]</c>. Returns <c>[batch, 1, T_frames * 320]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
     {
         if (_initialW is null) throw new InvalidOperationException("SeaNetDecoder weights not loaded.");
@@ -153,13 +153,11 @@ internal sealed class SeaNetDecoder
         }
         DebugStageHook?.Invoke(1, x);
 
-        // Upsample stages.
         int dbgIdx = _lstm is not null ? 2 : 1;
         for (int i = 0; i < _stages; i++)
         {
             dbgIdx++;   // ELU index
             int convtrDbg = dbgIdx;
-            // ELU.
             Tensor activated = new(x.Shape, DType.F32);
             backend.Elu(activated, x, _cfg.EluAlpha);
             x.Dispose();
@@ -185,7 +183,6 @@ internal sealed class SeaNetDecoder
             DebugStageHook?.Invoke(convtrDbg, x);
             dbgIdx++;   // convtr index consumed
 
-            // Residual blocks.
             foreach (SeaNetBlock block in _stageBlocks[i])
             {
                 Tensor next = block.Forward(backend, x, batch, t);
@@ -196,7 +193,6 @@ internal sealed class SeaNetDecoder
             dbgIdx++;   // resblock index consumed
         }
 
-        // Final ELU.
         Tensor activatedFinal = new(x.Shape, DType.F32);
         backend.Elu(activatedFinal, x, _cfg.EluAlpha);
         x.Dispose();
@@ -235,34 +231,24 @@ internal sealed class SeaNetDecoder
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
-    /// <summary>ConvTranspose1d weight has shape <c>[C_in, C_out, K]</c>. WeightNormFusion
+    /// <summary>Fuses a weight-normed <c>ConvTranspose1d</c> weight, accounting for its transposed axis convention.</summary>
+    /// <remarks>ConvTranspose1d weight has shape <c>[C_in, C_out, K]</c>. WeightNormFusion
     /// computes the per-out-channel norm along axis 0 of the input, but for transpose
     /// conv the "out" dim is axis 1, not axis 0. We need to fuse along axis 1 → easiest
     /// is to call the generic Fuse with the trailing-axis assumption swapped: weight_g
     /// for ConvTranspose1d has shape <c>[1, C_out, 1]</c> (per-output-channel scale on
     /// the middle axis), and weight_v has the same shape as the final weight. The
     /// L2-norm direction is along axis 0 and 2 (treating axis 1 = C_out as the "kept"
-    /// dimension).</summary>
+    /// dimension).</remarks>
     private static Tensor LoadFusedConvTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
             return WeightNormFusionT.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
-
-    private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)
-    {
-        float nFrames = ((float)tIn - kernel + padTotal) / stride + 1f;
-        int idealLength = ((int)MathF.Ceiling(nFrames) - 1) * stride + (kernel - padTotal);
-        return Math.Max(0, idealLength - tIn);
-    }
 }
 
-/// <summary>Shared stride-1 conv helper for the EnCodec SEANet decoder + residual block. Reproduces
-/// <c>EncodecConv1d.forward</c>: split <paramref name="padTotal"/> into (left, right) per the causal flag,
-/// then pad the channels-first input either with zeros (<c>"constant"</c>) or by edge reflection
-/// (<c>"reflect"</c>, the published-checkpoint default), and run the backend conv with no further padding.
-/// Reflect uses PyTorch semantics (excludes the edge sample): <c>pad[i] = x[reflect_index]</c>.</summary>
+/// <summary>Shared stride-1 conv helper for the EnCodec SEANet decoder + residual block, reproducing <c>EncodecConv1d.forward</c>: split the total padding into (left, right) per the causal flag, pad the channels-first input with zeros (<c>"constant"</c>) or edge reflection (<c>"reflect"</c>, the published-checkpoint default, using PyTorch semantics that exclude the edge sample), then run the backend conv with no further padding.</summary>
 internal static unsafe class EnCodecConvPad
 {
     public static (int Left, int Right) Split(int padTotal, bool causal)
@@ -272,10 +258,9 @@ internal static unsafe class EnCodecConvPad
         return (padTotal - right, right);
     }
 
-    /// <summary>Stride-1, dilation-aware conv with EnCodec padding. <paramref name="x"/> is
-    /// <c>[B, C_in, T]</c>; output is <c>[B, C_out, T]</c> (length preserved). Caller owns the result.</summary>
+    /// <summary>Stride-1, dilation-aware conv with EnCodec padding. <paramref name="x"/> is <c>[B, C_in, T]</c>; output is <c>[B, C_out, T]</c> (length preserved). Caller owns the result.</summary>
     public static Tensor PaddedConv(IBackend backend, Tensor x, Tensor weight, Tensor? bias,
-        int batch, int cIn, int t, int cOut, int kernel, int dilation, bool causal, string padMode, float eluUnused = 0)
+        int batch, int cIn, int t, int cOut, int kernel, int dilation, bool causal, string padMode)
     {
         int padTotal = (kernel - 1) * dilation;
         (int padLeft, int padRight) = Split(padTotal, causal);
@@ -316,15 +301,17 @@ internal static unsafe class EnCodecConvPad
     }
 }
 
-/// <summary>WeightNormFusion variant for PyTorch's <c>ConvTranspose1d</c>. The
-/// transpose-conv weight has layout <c>[C_in, C_out, K]</c>. Both Meta AudioCraft and HF
+/// <summary>WeightNormFusion variant for PyTorch's <c>ConvTranspose1d</c>, whose <c>weight_norm</c> is normalized per input channel rather than per output channel.</summary>
+/// <remarks>
+/// The transpose-conv weight has layout <c>[C_in, C_out, K]</c>. Both Meta AudioCraft and HF
 /// <c>transformers</c> apply <c>nn.utils.weight_norm</c> with the DEFAULT <c>dim=0</c>, so the
 /// norm is taken per <b>input</b> channel (axis 0) over the (C_out, K) slice — NOT per output
 /// channel. The companion <c>weight_g</c> therefore has shape <c>[C_in, 1, 1]</c> (one scalar
 /// per input channel).
 ///
 /// <para>Fused weight is computed as
-/// <c>w[ic, oc, k] = g[ic] * v[ic, oc, k] / ||v[ic, :, :]||_2</c>.</para></summary>
+/// <c>w[ic, oc, k] = g[ic] * v[ic, oc, k] / ||v[ic, :, :]||_2</c>.</para>
+/// </remarks>
 public static unsafe class WeightNormFusionT
 {
     public static Tensor Fuse(Tensor weightG, Tensor weightV)

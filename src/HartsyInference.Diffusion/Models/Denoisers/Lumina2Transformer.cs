@@ -150,7 +150,6 @@ public sealed unsafe class Lumina2Transformer : IDisposable
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
-    /// <param name="backend">Compute backend.</param>
     /// <param name="latent">Input latent [B, in_channels, H, W] in latent space (already VAE-scaled).</param>
     /// <param name="captionEmbeddings">Gemma-2-encoded caption [B, capLen, capFeatDim=2304].</param>
     /// <param name="sigma">Current sigma (flow-match noise level, typically 1 - t/num_train_timesteps as Lumina 2.0 inverts the schedule).</param>
@@ -620,7 +619,7 @@ public sealed unsafe class Lumina2Transformer : IDisposable
     }
 
     /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension.</summary>
-    private static Tensor ConcatAlongSeqDim(Tensor a, Tensor b, int batch, int seqA, int seqB, int dim)
+    internal static Tensor ConcatAlongSeqDim(Tensor a, Tensor b, int batch, int seqA, int seqB, int dim)
     {
         int totalSeq = seqA + seqB;
         TensorShape outShape = new TensorShape(batch, totalSeq, dim);

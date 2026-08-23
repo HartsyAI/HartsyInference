@@ -111,12 +111,12 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
 
         Tensor rawEmbed = weights[$"{prefix}embed_tokens.weight"];
-        _embedWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(rawEmbed);
+        _embedWeight = TensorCasts.EnsureF32(rawEmbed);
 
         if (_config.HasFinalNorm)
         {
             Tensor rawFinalNorm = weights[$"{prefix}norm.weight"];
-            _finalNormWeight = TextEncoderTensorHelpers.CastToF32IfNeeded(rawFinalNorm);
+            _finalNormWeight = TensorCasts.EnsureF32(rawFinalNorm);
             if (_config.RmsNormScalePlusOne) AddOneInPlace(_finalNormWeight);
         }
 
@@ -617,8 +617,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
-            _inputNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
-            _postAttnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            _inputNorm = TensorCasts.EnsureF32(weights[$"{prefix}.input_layernorm.weight"]);
+            _postAttnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_attention_layernorm.weight"]);
             if (_config.RmsNormScalePlusOne)
             {
                 AddOneInPlace(_inputNorm);
@@ -626,8 +626,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             }
             if (_config.HasFfnSandwichNorms)
             {
-                _preFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
-                _postFfnNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
+                _preFfnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
+                _postFfnNorm = TensorCasts.EnsureF32(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
                 if (_config.RmsNormScalePlusOne)
                 {
                     AddOneInPlace(_preFfnNorm);
@@ -650,8 +650,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
             if (_config.QkHeadNorm)
             {
-                _qHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
-                _kHeadNorm = TextEncoderTensorHelpers.CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
+                _qHeadNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_norm.weight"]);
+                _kHeadNorm = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_norm.weight"]);
                 // Gemma 3's per-head q/k norms are Gemma RMSNorms (scale stored as offset from 1). Qwen3
                 // (RmsNormScalePlusOne=false) stores them directly, so this only fires for the Gemma path.
                 if (_config.RmsNormScalePlusOne)

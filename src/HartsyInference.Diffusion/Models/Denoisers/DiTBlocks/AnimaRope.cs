@@ -159,11 +159,9 @@ public sealed unsafe class AnimaRope
         }
     }
 
-    /// <summary>
-    /// Returns immutable tables for one backend/grid, preloading the pair once so every transformer block and
+    /// <summary>Returns immutable tables for one backend/grid, preloading the pair once so every transformer block and
     /// denoising step reuses the same device addresses. Returned tensors are borrowed; callers must not dispose
-    /// them and must pair the model phase with <see cref="ReleaseGpuTables"/>.
-    /// </summary>
+    /// them and must pair the model phase with <see cref="ReleaseGpuTables"/>.</summary>
     internal (Tensor Cos, Tensor Sin) GetOrCreateTables(
         IBackend backend, int tFrames, int hPatched, int wPatched)
     {
@@ -206,10 +204,8 @@ public sealed unsafe class AnimaRope
         }
     }
 
-    /// <summary>
-    /// Evicts and disposes this backend's explicitly preloaded table pair. Idempotent. A backend-eviction failure
-    /// leaves the entry published so the caller can retry without losing the handles to live device allocations.
-    /// </summary>
+    /// <summary>Evicts and disposes this backend's explicitly preloaded table pair. Idempotent. A backend-eviction failure
+    /// leaves the entry published so the caller can retry without losing the handles to live device allocations.</summary>
     public void ReleaseGpuTables(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);

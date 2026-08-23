@@ -4,12 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 shape DiT — a <b>Flux</b> transformer over a VecSet latent (N set tokens × C channels),
-/// image-conditioned via cross-stream joint attention to DINOv2-giant tokens. Mirrors
-/// <c>hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py</c>: <c>latent_in</c> → 16 <see cref="Hunyuan3DDoubleBlock"/>
-/// (img=latent, txt=cond) → concat[cond,latent] → 32 <see cref="Hunyuan3DSingleBlock"/> → drop cond → LastLayer.
-/// <b>No RoPE</b> (<c>pe=None</c>; a VecSet is permutation-invariant). Predicts the rectified-flow velocity.
-/// Reuses the verified Flux helpers (<see cref="AdaLNModulation"/>, <see cref="QkNorm"/>, <see cref="SwiGluFfn"/>).</summary>
+/// <summary>Hunyuan3D-2 shape DiT: a <b>Flux</b> transformer over a VecSet latent, image-conditioned via joint attention to DINOv2-giant tokens, with <b>no RoPE</b> since a VecSet is permutation-invariant.</summary>
 public sealed unsafe class Hunyuan3DDit
 {
     // ── CUDA-graph step capture. The 48-block DiT forward is per-op-host-overhead-bound (GEMM_F16 = 0%);
@@ -68,9 +63,7 @@ public sealed unsafe class Hunyuan3DDit
         foreach (Hunyuan3DSingleBlock b in _single) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Predicts the flow velocity for <paramref name="latent"/> <c>[B,N,C]</c> at
-    /// <paramref name="timestep"/> ∈ [0,1], conditioned on DINOv2-giant tokens <paramref name="cond"/>
-    /// <c>[B, Scond, CondDim]</c>. Returns velocity <c>[B,N,C]</c>.</summary>
+    /// <summary>Predicts the flow velocity for <paramref name="latent"/> <c>[B,N,C]</c> at <paramref name="timestep"/> ∈ [0,1], conditioned on DINOv2-giant tokens <paramref name="cond"/>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor cond, float timestep)
     {
         int b = (int)latent.Shape[0], n = (int)latent.Shape[1], width = _cfg.Width;
@@ -152,10 +145,7 @@ public sealed unsafe class Hunyuan3DDit
         return velocity;
     }
 
-    /// <summary>The device-resident block loop + final layer, shared by the eager and graph-capture paths.
-    /// Consumes <paramref name="img"/>/<paramref name="txt"/> (double-stream) and reads <paramref name="vec"/>
-    /// (modulation, not disposed here). When <paramref name="ownInputs"/> is false the initial img/txt are fixed
-    /// buffers (not disposed on first use).</summary>
+    /// <summary>The device-resident block loop + final layer, shared by the eager and graph-capture paths; when <paramref name="ownInputs"/> is false the initial img/txt are fixed buffers not disposed on first use.</summary>
     private Tensor RunBlocks(IBackend backend, Tensor img, Tensor txt, Tensor vec, int n, int scond, bool ownInputs)
     {
         int b = (int)img.Shape[0], width = _cfg.Width;
@@ -206,9 +196,7 @@ public sealed unsafe class Hunyuan3DDit
         return velocity;
     }
 
-    /// <summary>Runs the block loop over the fixed input buffers and lands the velocity in <see cref="_velFixed"/>
-    /// (a stable, non-graph-owned buffer — the last op the captured graph records, so replay's velocity survives
-    /// the graph-memory auto-free).</summary>
+    /// <summary>Runs the block loop over the fixed input buffers and lands the velocity in a stable, non-graph-owned buffer so replay's output survives the graph-memory auto-free.</summary>
     private void RunBlocksIntoFixed(IBackend backend, int n, int scond)
     {
         Tensor v = RunBlocks(backend, _imgFixed!, _txtFixed!, _vecFixed!, n, scond, ownInputs: false);
@@ -216,8 +204,7 @@ public sealed unsafe class Hunyuan3DDit
         v.Dispose();
     }
 
-    /// <summary>Returns a fresh copy of the captured-graph velocity buffer so the caller may dispose it freely
-    /// (the fixed <see cref="_velFixed"/> persists across steps for the graph).</summary>
+    /// <summary>Returns a fresh copy of the captured-graph velocity buffer so the caller may dispose it freely while the fixed buffer persists across steps.</summary>
     private Tensor CopyOut(IBackend backend)
     {
         Tensor o = new(_velFixed!.Shape, DType.F32);
@@ -225,10 +212,8 @@ public sealed unsafe class Hunyuan3DDit
         return o;
     }
 
-    /// <summary>Flux sinusoidal timestep embedding, matching hy3dgen <c>timestep_embedding(t, dim, self.time_factor)</c>:
-    /// the model passes <c>time_factor</c> as the <b>max_period</b> positional arg, so BOTH the t-scale and the
-    /// frequency base are <see cref="Hunyuan3DConfig.TimeFactor"/> (1000) — NOT the 10000 default. So
-    /// <c>t*=1000</c>, <c>freqs=exp(-log(1000)·i/half)</c>, <c>emb=[cos(t·freqs), sin(t·freqs)]</c> (cos first).</summary>
+    // hy3dgen passes time_factor as the max_period positional arg, so BOTH the t-scale and frequency base
+    // are TimeFactor (1000) — NOT the usual 10000 default.
     private static void FluxTimestepEmbedding(Tensor outp, float timestep, int batch, int dim, float timeFactor)
     {
         float* p = (float*)outp.DataPointer;
@@ -248,5 +233,5 @@ public sealed unsafe class Hunyuan3DDit
         }
     }
 
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+    internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);
 }

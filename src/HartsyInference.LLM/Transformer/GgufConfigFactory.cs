@@ -4,15 +4,10 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Builds a <see cref="TransformerConfig"/> from a loaded GGUF model's metadata + remapped weight dict.
-/// Reads the llama.cpp architecture kv (<c>{arch}.block_count</c>, <c>{arch}.embedding_length</c>, etc.) and
-/// infers the three Qwen variation axes structurally from the weights (QKV bias / per-head q-norm presence,
-/// tied vs separate lm_head). Covers the Qwen2 / Qwen3 / Llama family decoder LLMs that the
-/// <see cref="GenericTransformer"/> runs; throws on missing required metadata.</summary>
+/// <summary>Builds a <see cref="TransformerConfig"/> from a loaded GGUF model's metadata + remapped weight dict: reads the llama.cpp architecture kv and infers the three Qwen variation axes structurally from the weights (QKV bias / per-head q-norm presence, tied vs separate lm_head). Covers the Qwen2/Qwen3/Llama family decoder LLMs that <see cref="GenericTransformer"/> runs; throws on missing required metadata.</summary>
 public static class GgufConfigFactory
 {
-    /// <summary>Derives a <see cref="TransformerConfig"/> from <paramref name="metadata"/> and the HF-remapped
-    /// <paramref name="weights"/> (the dict returned by <c>GgufModelLoader.Load(...).Weights</c>).</summary>
+    /// <summary>Derives a <see cref="TransformerConfig"/> from <paramref name="metadata"/> and the HF-remapped <paramref name="weights"/> (the dict returned by <c>GgufModelLoader.Load(...).Weights</c>).</summary>
     public static TransformerConfig FromGguf(GgufMetadata metadata, IReadOnlyDictionary<string, Tensor> weights, bool lowVramQuant = false)
     {
         string arch = metadata.GetString("general.architecture") ?? "";
@@ -350,9 +345,7 @@ public static class GgufConfigFactory
         };
     }
 
-    /// <summary>RoPE scaling from GGUF: the precomputed <c>rope_freqs.weight</c> per-frequency multiplier when
-    /// present (llama.cpp bakes Llama-3 scaling there), else the <c>{arch}.rope.scaling.*</c> metadata
-    /// (yarn/linear). Returns <see cref="RopeScaling.None"/> for standard RoPE (Qwen/Mistral).</summary>
+    /// <summary>RoPE scaling from GGUF: the precomputed <c>rope_freqs.weight</c> per-frequency multiplier when present (llama.cpp bakes Llama-3 scaling there), else the <c>{arch}.rope.scaling.*</c> metadata (yarn/linear); returns <see cref="RopeScaling.None"/> for standard RoPE (Qwen/Mistral).</summary>
     private static unsafe RopeScaling BuildRopeScaling(GgufMetadata metadata, string arch,
         IReadOnlyDictionary<string, Tensor> weights, int headDim)
     {
@@ -397,7 +390,6 @@ public static class GgufConfigFactory
         // branch in FromGguf), so here we leave the cos/sin mscale neutral (attn_factor = 1) for it.
         double betaFast = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_fast", 32f);
         double betaSlow = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_slow", 1f);
-        double yarnLogMul = metadata.GetFloat32($"{arch}.rope.scaling.yarn_log_multiplier", 0f);
         bool isDeepseek = arch == "deepseek2";
         return type switch
         {
@@ -405,7 +397,7 @@ public static class GgufConfigFactory
             "yarn" => new RopeScaling
             {
                 Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx,
-                BetaFast = betaFast, BetaSlow = betaSlow, YarnLogMultiplier = yarnLogMul,
+                BetaFast = betaFast, BetaSlow = betaSlow,
                 AttentionFactor = isDeepseek ? 1.0 : attn,
             },
             _ => RopeScaling.None,

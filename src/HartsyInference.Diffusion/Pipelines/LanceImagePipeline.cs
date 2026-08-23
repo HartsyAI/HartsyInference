@@ -12,7 +12,6 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>Lance (ByteDance, Apache-2.0) text-to-image pipeline. Wires <see cref="LanceTransformer"/> (MoT backbone), the packed-sequence builders in <see cref="LancePipelineCommon"/>, and <see cref="Wan22VaeDecoder"/> into the T2I path from upstream <c>validation_gen</c> (reconciled against the real <c>Lance_3B</c> checkpoint).
-///
 /// <para>Per upstream inference defaults: 2-way text CFG gated to shifted time in <c>(0.4, 1]</c> with global renorm; the uncond branch is the same chat-templated sequence with the caption removed (or the negative prompt substituted when provided). Vision CFG / editing (the frozen Qwen2.5-VL ViT) is not part of this release's T2I path.</para>
 ///
 /// <para>Spatial math: the VAE downsamples 16× and the transformer patchifies (1,1,1), so an H×W image gives a <c>[48, 1, H/16, W/16]</c> latent = <c>(1, H/16, W/16)</c> token grid of 48-dim tokens. H and W must be divisible by 16, and H/16, W/16 ≤ 64 (the frozen position table).</para></summary>
@@ -190,10 +189,7 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         return (bytes, width, height, seed);
     }
 
-    /// <summary>Builds the initial token-space latents <c>[nVae, 48]</c>. T2I: pure seeded noise. Img2img: the
-    /// source image goes <c>Wan22VaeEncoder.EncodeFrame</c> (<c>[1,48,1,H/16,W/16]</c>, normalized latent space —
-    /// the same space the T2I loop denoises and the decoder consumes) → channel-last → token flatten →
-    /// <c>Img2ImgSetup.MixAtSigma</c> with the fresh noise at <c>t = tsteps[startStep]</c>.</summary>
+    /// <summary>Builds the initial token-space latents <c>[nVae, 48]</c>. T2I: pure seeded noise. Img2img: the source image goes <c>Wan22VaeEncoder.EncodeFrame</c> (<c>[1,48,1,H/16,W/16]</c>, normalized latent space — the same space the T2I loop denoises and the decoder consumes) → channel-last → token flatten → <c>Img2ImgSetup.MixAtSigma</c> with the fresh noise at <c>t = tsteps[startStep]</c>.</summary>
     private Tensor BuildInitialTokenLatents(TextToImageRequest request, float[] tsteps,
         int nVae, int seed, int startStep, out Tensor? sourceTokensKeep)
     {

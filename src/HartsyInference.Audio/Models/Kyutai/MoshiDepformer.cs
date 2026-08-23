@@ -1,13 +1,14 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Kyutai;
 
-/// <summary>Moshi/Kyutai depth transformer ("depformer") with the REAL checkpoint layout (the older
-/// <see cref="MoshiDepthTransformer"/> assumed a Qwen2-style per-(set,layer) layout that the checkpoint does not
-/// use). Given one temporal-frame context <c>[1,1,2048]</c> it autoregressively predicts the 32 Mimi codebooks.
+/// <summary>Moshi/Kyutai depth transformer ("depformer") with the REAL checkpoint layout (it replaced an earlier
+/// implementation that assumed a Qwen2-style per-(set,layer) weight layout the checkpoint does not use). Given one
+/// temporal-frame context <c>[1,1,2048]</c> it autoregressively predicts the 32 Mimi codebooks.
 ///
 /// <para>Per codebook <c>cb</c> (weight-set <c>s = schedule[cb]</c>): project the temporal context through the
 /// per-set <c>depformer_in[s]</c> (2048→1024); add the previous token's low-rank embedding (the text demux
@@ -110,7 +111,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
             x.Dispose();
             Buffer.MemoryCopy((void*)lg.DataPointer, (float*)logits.DataPointer + (long)cb * Card, Card * 4, Card * 4);
             ReadOnlySpan<float> lgSpan = new((void*)lg.DataPointer, Card);
-            int tok = temp > 0f && rng is not null ? SampleTopK(lgSpan, temp, topK, rng) : ArgMax(lgSpan);
+            int tok = temp > 0f && rng is not null ? LogitSampling.SampleTopK(lgSpan, temp, topK, rng) : LogitSampling.ArgMax(lgSpan);
             lg.Dispose();
             tokens[cb] = tok;
             // Teacher forcing (parity): feed the reference's previous-codebook token as the next step's input,
@@ -224,37 +225,6 @@ public sealed unsafe class MoshiDepformer : IDisposable
         Tensor outT = new(new TensorShape(Dim), DType.F32);
         Buffer.MemoryCopy((void*)alpha.DataPointer, (void*)outT.DataPointer, (long)Dim * 4, (long)Dim * 4);
         return outT;
-    }
-
-    private static int ArgMax(ReadOnlySpan<float> v)
-    {
-        int best = 0; float bv = v[0];
-        for (int i = 1; i < v.Length; i++) if (v[i] > bv) { bv = v[i]; best = i; }
-        return best;
-    }
-
-    /// <summary>Top-k temperature sampling (moshi <c>sample_token</c>): scale logits by <paramref name="temp"/>,
-    /// keep the <paramref name="topK"/> highest, softmax over them, then multinomial-sample with
-    /// <paramref name="rng"/>. Kyutai TTS was trained for sampling (audio temp 0.8 / top-k 250); greedy argmax
-    /// collapses the code cascade to non-speech.</summary>
-    private static int SampleTopK(ReadOnlySpan<float> logits, float temp, int topK, Random rng)
-    {
-        int n = logits.Length;
-        int k = topK <= 0 ? n : Math.Min(topK, n);
-        // Indices of the k largest logits (k is small vs n; a full index sort is fine here).
-        int[] idx = new int[n];
-        for (int i = 0; i < n; i++) idx[i] = i;
-        float[] vals = new float[n];
-        for (int i = 0; i < n; i++) vals[i] = logits[i];
-        Array.Sort(idx, (a, b) => vals[b].CompareTo(vals[a]));   // descending by logit
-
-        float max = vals[idx[0]] / temp;
-        double sum = 0;
-        double[] p = new double[k];
-        for (int j = 0; j < k; j++) { p[j] = Math.Exp(vals[idx[j]] / temp - max); sum += p[j]; }
-        double r = rng.NextDouble() * sum, acc = 0;
-        for (int j = 0; j < k; j++) { acc += p[j]; if (r <= acc) return idx[j]; }
-        return idx[k - 1];
     }
 
     public void Dispose()

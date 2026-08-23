@@ -178,7 +178,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         foreach (Tensor w in _txtFfn.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Forward pass. Each modulation produces <c>[shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]</c>. Joint attention concats <c>[txt, img]</c>; QK rotated by <see cref="QwenImageRope"/> separately for image (per-token <c>[0, row, col]</c>) and text (offset by <paramref name="txtPositionStart"/>) before concat. Returns <c>(image, text)</c>.</summary>
+    /// <summary>Each modulation produces <c>[shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]</c>. Joint attention concats <c>[txt, img]</c>; QK rotated by <see cref="QwenImageRope"/> separately for image (per-token <c>[0, row, col]</c>) and text (offset by <paramref name="txtPositionStart"/>) before concat. Returns <c>(image, text)</c>.</summary>
     // GPU-residency rewrite (mirrors the verified ChromaDoubleStreamBlock): every glue op (LayerNorm / AdaLN
     // modulation / QK-norm / reshape-to-heads / joint concat / split / gated residual) runs as an IBackend GPU op so
     // the activation stays device-resident across the whole block — no per-op DataPointer reads / D2H sync barriers
@@ -394,7 +394,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
     /// <summary>LayerNorm (no affine, eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on the
     /// GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented by 1
     /// (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor — bit-identical to the old CPU
-    /// <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors ChromaDoubleStreamBlock.NormModulate.</summary>
+    /// <c>AdaLNModulation.ApplyModulation</c>. Mirrors ChromaDoubleStreamBlock.NormModulate.</summary>
     private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps)
     {
         Tensor normed = new Tensor(shape, x.DType);

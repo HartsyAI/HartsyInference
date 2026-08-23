@@ -2,12 +2,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Growing K/V history for <see cref="MimiTransformer.ForwardStreaming"/>, one per decoder-transformer
-/// instance per streamed utterance. Unlike <c>FixedKvCache</c> (the backbone's O(1)-append, fixed-capacity
+/// <summary>Growing K/V history for <see cref="MimiTransformer.ForwardStreaming"/>, one per decoder-transformer instance per streamed utterance.</summary>
+/// <remarks>Unlike <c>FixedKvCache</c> (the backbone's O(1)-append, fixed-capacity
 /// design, sized for LLM-scale sequences), this is a plain reallocate-and-copy growth — appropriate here because
 /// a Mimi decode utterance is capped at a few hundred frames total, so the O(n) copy per call costs nothing
 /// measurable, and it avoids the fixed-capacity/no-batch-support constraints an LLM-oriented cache carries for no
-/// benefit at this scale.</summary>
+/// benefit at this scale.</remarks>
 internal sealed unsafe class MimiTransformerCache : IDisposable
 {
     private Tensor?[] _k = [];
@@ -26,10 +26,8 @@ internal sealed unsafe class MimiTransformerCache : IDisposable
         _v = new Tensor?[layers];
     }
 
-    /// <summary>Appends this layer's new-frame K/V (<c>[1,heads,t,headDim]</c>) to whatever history is stored,
-    /// returning the concatenated <c>[1,heads,priorLen+t,headDim]</c> tensors — owned by the cache; the caller
-    /// must NOT dispose them. Every layer's history advances together, driven by
-    /// <see cref="MimiTransformer.ForwardStreaming"/>'s single <see cref="Length"/> update after all layers run.</summary>
+    /// <summary>Appends this layer's new-frame K/V (<c>[1,heads,t,headDim]</c>) to whatever history is stored, returning the concatenated <c>[1,heads,priorLen+t,headDim]</c> tensors — owned by the cache; the caller must NOT dispose them.</summary>
+    /// <remarks>Every layer's history advances together, driven by <see cref="MimiTransformer.ForwardStreaming"/>'s single <see cref="Length"/> update after all layers run.</remarks>
     public (Tensor K, Tensor V) AppendAndGet(int layer, Tensor kNew, Tensor vNew, int t)
     {
         ThrowIfDisposed();

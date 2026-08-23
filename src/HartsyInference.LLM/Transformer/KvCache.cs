@@ -3,19 +3,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Device-resident per-layer K/V cache for the GPU-resident decode loop. Each layer's K/V is a
-/// backend activation tensor grown on-device with <see cref="IBackend.Concat"/> along the sequence axis; on
-/// CUDA that is a device-to-device copy, so the cache never forces a device-to-host sync and the whole decode
-/// loop stays resident.
-///
-/// <para>Layout per layer: <c>[batch, num_kv_heads, currentLength, head_dim]</c>. The stored tensor is the
-/// populated prefix (no padding), handed straight to the GQA repeat then SDPA. Growth is O(n) per step
-/// (a fresh concat), i.e. O(n²) total — fine for the current scope; a fixed-buffer in-place append is the
-/// later optimization.</para>
-///
-/// <para>Usage: read <see cref="CurrentLength"/> for the position offset before the layer loop,
-/// <see cref="Append"/> each layer's new K/V during the loop, then <see cref="AdvanceLength"/> once after all
-/// layers.</para></summary>
+/// <summary>Device-resident per-layer K/V cache for the GPU-resident decode loop: each layer's K/V is a backend activation tensor grown on-device with <see cref="IBackend.Concat"/> along the sequence axis, which on CUDA is a device-to-device copy so the cache never forces a device-to-host sync.</summary>
+/// <remarks>
+/// <para>Layout per layer: <c>[batch, num_kv_heads, currentLength, head_dim]</c>. The stored tensor is the populated prefix (no padding), handed straight to the GQA repeat then SDPA. Growth is O(n) per step (a fresh concat), i.e. O(n²) total — fine for the current scope; a fixed-buffer in-place append is the later optimization.</para>
+/// <para>Usage: read <see cref="CurrentLength"/> for the position offset before the layer loop, <see cref="Append"/> each layer's new K/V during the loop, then <see cref="AdvanceLength"/> once after all layers.</para>
+/// </remarks>
 public sealed class KvCache : IKvCache, IDisposable
 {
     private readonly Tensor?[] _k;
@@ -53,10 +45,7 @@ public sealed class KvCache : IKvCache, IDisposable
         _v = new Tensor?[numLayers];
     }
 
-    /// <summary>Appends a new K/V block for <paramref name="layer"/> on-device. <paramref name="newK"/> and
-    /// <paramref name="newV"/> are <c>[B, num_kv_heads, tNew, head_dim]</c>. The cache takes a fresh resident
-    /// copy (concat), so the caller still owns and may dispose the inputs. Does not change
-    /// <see cref="CurrentLength"/> — call <see cref="AdvanceLength"/> after all layers.</summary>
+    /// <summary>Appends a new K/V block <c>[B, num_kv_heads, tNew, head_dim]</c> for <paramref name="layer"/> on-device; the cache takes a fresh resident copy (concat), so the caller still owns and may dispose the inputs. Does not change <see cref="CurrentLength"/> — call <see cref="AdvanceLength"/> after all layers.</summary>
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
@@ -94,8 +83,7 @@ public sealed class KvCache : IKvCache, IDisposable
         return _v[layer] ?? throw new InvalidOperationException($"Layer {layer} V not populated.");
     }
 
-    /// <summary>Advances the shared position counter by <paramref name="by"/> tokens. Call once per step,
-    /// after every layer has appended.</summary>
+    /// <summary>Advances the shared position counter by <paramref name="by"/> tokens; call once per step, after every layer has appended.</summary>
     public void AdvanceLength(int by)
     {
         ThrowIfDisposed();

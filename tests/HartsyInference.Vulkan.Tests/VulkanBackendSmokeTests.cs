@@ -178,6 +178,54 @@ public sealed class VulkanBackendSmokeTests
         a.Dispose(); b.Dispose(); c.Dispose();
     }
 
+    /// <summary>Per-batch weights ([B,K,N]) exercise the offset-dispatch path; a shared 2D weight exercises the flattened single-GEMM path.</summary>
+    [Fact]
+    public void Backend_BatchedMatMul_Matches_Scalar_Reference()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 3, M = 4, K = 5, N = 6;
+        Tensor a = new(new TensorShape(B, M, K), DType.F32);
+        Span<float> aS = a.AsSpan<float>();
+        for (int i = 0; i < aS.Length; i++) aS[i] = (i % 13) * 0.25f - 1.5f;
+
+        Tensor b3 = new(new TensorShape(B, K, N), DType.F32);
+        Span<float> b3S = b3.AsSpan<float>();
+        for (int i = 0; i < b3S.Length; i++) b3S[i] = (i % 7) * 0.125f - 0.375f;
+
+        Tensor c3 = new(new TensorShape(B, M, N), DType.F32);
+        backend.BatchedMatMul(c3, a, b3);
+        ReadOnlySpan<float> c3S = c3.AsReadOnlySpan<float>();
+        for (int bi = 0; bi < B; bi++)
+            for (int m = 0; m < M; m++)
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0.0f;
+                    for (int k = 0; k < K; k++) acc += aS[(bi * M + m) * K + k] * b3S[(bi * K + k) * N + n];
+                    Assert.InRange(c3S[(bi * M + m) * N + n] - acc, -1e-4f, 1e-4f);
+                }
+        c3.Dispose(); b3.Dispose();
+
+        Tensor b2 = new(new TensorShape(K, N), DType.F32);
+        Span<float> b2S = b2.AsSpan<float>();
+        for (int i = 0; i < b2S.Length; i++) b2S[i] = (i % 5) * 0.2f - 0.4f;
+
+        Tensor c2 = new(new TensorShape(B, M, N), DType.F32);
+        backend.BatchedMatMul(c2, a, b2);
+        ReadOnlySpan<float> c2S = c2.AsReadOnlySpan<float>();
+        for (int bi = 0; bi < B; bi++)
+            for (int m = 0; m < M; m++)
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0.0f;
+                    for (int k = 0; k < K; k++) acc += aS[(bi * M + m) * K + k] * b2S[k * N + n];
+                    Assert.InRange(c2S[(bi * M + m) * N + n] - acc, -1e-4f, 1e-4f);
+                }
+        c2.Dispose(); b2.Dispose(); a.Dispose();
+    }
+
     /// <summary>Compares Vulkan FP8 cast vs CPU CastTo by reading every byte value (0..255) via CastToF16 — both paths exercise the kernel.</summary>
     [Fact]
     public void Backend_FP8_Cast_Matches_Cpu_AllBytes()
@@ -1195,6 +1243,70 @@ public sealed class VulkanBackendSmokeTests
             $"Large FP16 matmul: {errs} elements outside 1% rel tolerance. Max relative error: {maxRel:G6}");
 
         a.Dispose(); b.Dispose(); c.Dispose();
+    }
+
+    /// <summary>A key-only additive mask (one <c>[1, Skv]</c> row broadcast over every query — Wan-Animate-2's
+    /// log_scale band) must match the <c>[Sq, Skv]</c> duplicate of it. The mask_add dispatch adds a flat Sq·Skv
+    /// block at one offset and cannot broadcast a row, so the backend expands it; handing the shader the short
+    /// buffer instead would read past the allocation and go unnoticed.</summary>
+    [Fact]
+    public void Backend_SDPA_KeyOnlyMask_Matches_ExpandedMask()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
+        using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor k = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor v = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor broadcast = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor duplicate = new(new TensorShape(B, H, Sq, D), DType.F32);
+        Span<float> qS = q.AsSpan<float>(), kS = k.AsSpan<float>(), vS = v.AsSpan<float>();
+        for (int i = 0; i < B * H * Sq * D; i++) qS[i] = MathF.Sin(i * 0.11f);
+        for (int i = 0; i < B * H * Skv * D; i++) { kS[i] = MathF.Cos(i * 0.07f); vS[i] = MathF.Sin(i * 0.13f) * 0.5f; }
+
+        using Tensor row = new(new TensorShape(1, Skv), DType.F32);
+        using Tensor full = new(new TensorShape(Sq, Skv), DType.F32);
+        Span<float> rowS = row.AsSpan<float>(), fullS = full.AsSpan<float>();
+        for (int key = 0; key < Skv; key++) rowS[key] = key >= Sq && key < 2 * Sq ? -1.3f : 0f;
+        for (int query = 0; query < Sq; query++)
+            for (int key = 0; key < Skv; key++) fullS[query * Skv + key] = rowS[key];
+
+        float scale = 1.0f / MathF.Sqrt(D);
+        backend.ScaledDotProductAttention(broadcast, q, k, v, row, scale);
+        backend.ScaledDotProductAttention(duplicate, q, k, v, full, scale);
+
+        Span<float> a = broadcast.AsSpan<float>(), b = duplicate.AsSpan<float>();
+        float worst = 0f;
+        for (int i = 0; i < a.Length; i++) worst = MathF.Max(worst, MathF.Abs(a[i] - b[i]));
+        Assert.True(worst < 1e-5f, $"key-only mask diverged from the duplicate by {worst:E3}.");
+    }
+
+    /// <summary>An F16 key-only mask must be rejected by the existing F32-only dtype guard, not expanded first.
+    /// Regression target: <c>ExpandKeyOnlyMask</c> read the mask natively as <c>float*</c> unconditionally, before
+    /// any dtype check ran — an F16 <c>[1,Skv]</c> mask (half the bytes of the same-shaped F32 one) was copied as
+    /// four bytes per element from a two-byte allocation (an out-of-bounds native read), and the RESULT of that
+    /// copy is a freshly-allocated F32 tensor, so the dtype guard downstream never even saw the original F16 mask
+    /// to reject it — the call silently proceeded on garbage mask data instead of throwing.</summary>
+    [Fact]
+    public void Backend_SDPA_KeyOnlyMask_F16_IsRejectedByDtypeGuard_NotExpandedFirst()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
+        using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor k = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor v = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor o = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor rowF16 = new(new TensorShape(1, Skv), DType.F16);
+
+        float scale = 1.0f / MathF.Sqrt(D);
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(
+            () => backend.ScaledDotProductAttention(o, q, k, v, rowF16, scale));
+        Assert.Contains("F32", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

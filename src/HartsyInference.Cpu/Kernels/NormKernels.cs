@@ -244,7 +244,6 @@ public static class NormKernels
         }
     }
 
-    /// <summary>Computes vectorized sum and sum-of-squares of a float buffer.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe void VectorizedSumAndSumSq(float* ptr, int count, out float sum, out float sumSq)
     {
@@ -303,7 +302,6 @@ public static class NormKernels
         }
     }
 
-    /// <summary>Vectorized sum of squares, reusing <see cref="VectorizedSumAndSumSq"/>'s reduction and discarding the unneeded plain sum.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe float VectorizedSumOfSquares(float* ptr, int count)
     {

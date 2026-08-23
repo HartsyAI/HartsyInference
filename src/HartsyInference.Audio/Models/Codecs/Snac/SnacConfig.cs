@@ -1,8 +1,8 @@
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>Configuration for SNAC — Multi-Scale Neural Audio Codec (Siuzdak et al.
-/// 2024). Used by Orpheus TTS and its derivatives. Architectural overlap with DAC is
-/// substantial — same SEANet-style encoder/decoder with snake activations and
+/// <summary>Configuration for SNAC — Multi-Scale Neural Audio Codec (Siuzdak et al. 2024), used by Orpheus TTS and its derivatives.</summary>
+/// <remarks>
+/// Architectural overlap with DAC is substantial — same SEANet-style encoder/decoder with snake activations and
 /// weight-normed convolutions — with one key extension:
 ///
 /// <para><b>Hierarchical residual VQ.</b> Each codebook operates at a different temporal
@@ -17,7 +17,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 ///   <item>SNAC 24 kHz — <c>hubertsiuzdak/snac_24khz</c>, used by Orpheus</item>
 ///   <item>SNAC 32 kHz — speech-only, slightly larger model</item>
 ///   <item>SNAC 44.1 kHz — music-focused, more codebooks</item>
-/// </list></summary>
+/// </list></remarks>
 public sealed record SnacConfig
 {
     public int SampleRate { get; init; } = 24_000;
@@ -32,11 +32,10 @@ public sealed record SnacConfig
     public int CodebookSize { get; init; } = 4_096;
     public int CodebookDim { get; init; } = 8;
 
-    /// <summary>Per-codebook temporal stride. Codebook <c>i</c> processes the latent at
-    /// <c>1/VqStrides[i]</c> of the bottleneck frame rate, via avg-pool down on encode
-    /// and repeat-interleave up on decode. Bigger stride = coarser timescale. The 24 kHz
-    /// speech model uses <c>[4,2,1]</c> → per super-frame the 3 codebooks emit 1/2/4 codes
-    /// (the 7-code group Orpheus packs).</summary>
+    /// <summary>Per-codebook temporal stride — codebook <c>i</c> processes the latent at <c>1/VqStrides[i]</c> of the bottleneck frame rate.</summary>
+    /// <remarks>Via avg-pool down on encode and repeat-interleave up on decode. Bigger stride = coarser timescale.
+    /// The 24 kHz speech model uses <c>[4,2,1]</c> → per super-frame the 3 codebooks emit 1/2/4 codes (the
+    /// 7-code group Orpheus packs).</remarks>
     public IReadOnlyList<int> VqStrides { get; init; } = [4, 2, 1];
 
     public int ResidualKernelSize { get; init; } = 7;
@@ -44,22 +43,21 @@ public sealed record SnacConfig
     public int DecoderFinalKernelSize { get; init; } = 7;
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];
 
-    /// <summary>NoiseBlock injection in each decoder block (a 1x1 conv whose output scales per-frame
-    /// Gaussian noise added back to the signal). True for the published snac_24khz/32khz/44khz checkpoints.</summary>
+    /// <summary>NoiseBlock injection in each decoder block (a 1x1 conv whose output scales per-frame Gaussian noise added back to the signal). True for the published snac_24khz/32khz/44khz checkpoints.</summary>
     public bool Noise { get; init; } = true;
 
-    /// <summary>Scale applied to the NoiseBlock contribution. 1.0 in production. Set to 0 to make decode
-    /// deterministic (the noise add becomes a no-op), which is how the parity test matches a torch oracle
-    /// that has <c>torch.randn</c> stubbed to zeros. The NoiseBlock conv weights still load either way.</summary>
+    /// <summary>Scale applied to the NoiseBlock contribution. 1.0 in production.</summary>
+    /// <remarks>Set to 0 to make decode deterministic (the noise add becomes a no-op), which is how the parity
+    /// test matches a torch oracle that has <c>torch.randn</c> stubbed to zeros. The NoiseBlock conv weights
+    /// still load either way.</remarks>
     public float NoiseScale { get; init; } = 1.0f;
 
-    /// <summary>Depthwise residual/initial convs (groups = channels). True for the published checkpoints.
-    /// When true the decoder's initial conv splits into a depthwise k7 conv plus a pointwise k1 conv, the
-    /// residual-unit first conv uses groups=dim, and the encoder's final conv uses groups=d_model.</summary>
+    /// <summary>Depthwise residual/initial convs (groups = channels). True for the published checkpoints.</summary>
+    /// <remarks>When true the decoder's initial conv splits into a depthwise k7 conv plus a pointwise k1 conv, the
+    /// residual-unit first conv uses groups=dim, and the encoder's final conv uses groups=d_model.</remarks>
     public bool Depthwise { get; init; } = true;
 
-    /// <summary>Local windowed multi-head attention window inserted after the encoder/decoder initial convs.
-    /// Null for snac_24khz; 32 for the 32 kHz and 44.1 kHz checkpoints. Wiring LocalMHA is Phase 4 (PARITY-TODO).</summary>
+    /// <summary>Local windowed multi-head attention window inserted after the encoder/decoder initial convs. Null for snac_24khz; 32 for the 32 kHz and 44.1 kHz checkpoints. Wiring LocalMHA is Phase 4 (PARITY-TODO).</summary>
     public int? AttnWindowSize { get; init; } = null;
 
     /// <summary>Convenience — latent dim at the encoder bottleneck. <c>EncoderDim * 2^len(EncoderRates)</c>.</summary>
@@ -79,9 +77,7 @@ public sealed record SnacConfig
     /// <summary>SNAC 24 kHz — Orpheus TTS preset (<c>hubertsiuzdak/snac_24khz</c>).</summary>
     public static SnacConfig Snac24kHz => new();
 
-    /// <summary>SNAC 32 kHz preset (<c>hubertsiuzdak/snac_32khz</c>). Rates / strides match the published
-    /// checkpoint; NOT numerically validated. The 32 kHz and 44.1 kHz models add a windowed LocalMHA
-    /// (attn_window_size 32) in the encoder/decoder; wiring that block is Phase 4.</summary>
+    /// <summary>SNAC 32 kHz preset (<c>hubertsiuzdak/snac_32khz</c>). Rates / strides match the published checkpoint; NOT numerically validated. The 32 kHz and 44.1 kHz models add a windowed LocalMHA (attn_window_size 32) in the encoder/decoder; wiring that block is Phase 4.</summary>
     public static SnacConfig Snac32kHz => new()
     {
         SampleRate = 32_000,
@@ -94,9 +90,7 @@ public sealed record SnacConfig
         AttnWindowSize = 32,
     };
 
-    /// <summary>SNAC 44.1 kHz preset (<c>hubertsiuzdak/snac_44khz</c>, music-focused). Published checkpoint
-    /// uses 4 codebooks with strides [8,4,2,1]; the old [3,3,7,7] values were library constructor defaults.
-    /// NOT numerically validated. LocalMHA (attn_window_size 32) wiring is Phase 4.</summary>
+    /// <summary>SNAC 44.1 kHz preset (<c>hubertsiuzdak/snac_44khz</c>, music-focused). Published checkpoint uses 4 codebooks with strides [8,4,2,1]; the old [3,3,7,7] values were library constructor defaults. NOT numerically validated. LocalMHA (attn_window_size 32) wiring is Phase 4.</summary>
     public static SnacConfig Snac44kHz => new()
     {
         SampleRate = 44_100,

@@ -5,8 +5,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 
-/// <summary>SEANet encoder for EnCodec. Mirrors <c>SEANetEncoder</c> from
-/// <c>facebookresearch/encodec</c>:
+/// <summary>SEANet encoder for EnCodec, mirroring <c>SEANetEncoder</c> from <c>facebookresearch/encodec</c>.</summary>
+/// <remarks>
 /// <code>
 ///   stem: Conv1d(channels=1 → n_filters=32, k=7)
 ///   for ratio in reversed(ratios) (= [2, 4, 5, 8] for the 24 kHz model):
@@ -24,7 +24,8 @@ namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 /// where <c>hop = product(ratios) = 320</c> for the 24 kHz model. The intermediate LSTM
 /// runs on the channels-last view <c>[B, T_frames, dim]</c> and is the part that
 /// distinguishes EnCodec's "convolutional-and-recurrent" encoder from the pure-conv
-/// VAEs we built for VibeVoice.</para></summary>
+/// VAEs we built for VibeVoice.</para>
+/// </remarks>
 internal sealed class SeaNetEncoder
 {
     private readonly EnCodecConfig _cfg;
@@ -126,8 +127,7 @@ internal sealed class SeaNetEncoder
         _finalB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{seqIdx}.conv.conv.bias"]);
     }
 
-    /// <summary>Forward — <paramref name="pcm"/> channels-first <c>[batch, 1, T_pcm]</c>.
-    /// Returns <c>[batch, latent_dim, T_latent]</c>.</summary>
+    /// <summary>Forward — <paramref name="pcm"/> channels-first <c>[batch, 1, T_pcm]</c>. Returns <c>[batch, latent_dim, T_latent]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
         if (_stemW is null) throw new InvalidOperationException("SeaNetEncoder weights not loaded.");
@@ -143,10 +143,8 @@ internal sealed class SeaNetEncoder
         int t = tStem;
         int dim = _cfg.NFilters;
 
-        // Stages.
         for (int i = 0; i < _stages; i++)
         {
-            // Residual blocks.
             foreach (SeaNetBlock block in _stageBlocks[i])
             {
                 Tensor next = block.Forward(backend, x, batch, t);
@@ -154,7 +152,6 @@ internal sealed class SeaNetEncoder
                 x = next;
             }
 
-            // ELU.
             Tensor activated = new(x.Shape, DType.F32);
             backend.Elu(activated, x, _cfg.EluAlpha);
             x.Dispose();
@@ -204,7 +201,6 @@ internal sealed class SeaNetEncoder
             cf = x;
         }
 
-        // ELU.
         Tensor activatedFinal = new(cf.Shape, DType.F32);
         backend.Elu(activatedFinal, cf, _cfg.EluAlpha);
         cf.Dispose();

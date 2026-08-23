@@ -4,16 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.PyTorch;
 
-/// <summary>Loads a PyTorch <c>.pt</c> / <c>.pth</c> checkpoint (the modern <c>torch.save</c> ZIP container) into a
-/// <c>Dictionary&lt;string, Tensor&gt;</c>, mirroring <see cref="SafeTensors.SafeTensorsLoader"/>'s surface so any
-/// model loader can consume <c>.pt</c>-only checkpoints (Hunyuan-GameCraft, Cosmos, …). Implements a
-/// <b>safe-subset</b> pickle VM (no arbitrary code execution): it recognizes only the opcodes and the two torch
-/// reduce functions (<c>torch._utils._rebuild_tensor_v2</c> + storage <c>persistent_id</c>) that a flat
-/// <c>state_dict</c> emits. Tensors are materialized into owned native memory (one copy), so the loader can be
-/// disposed immediately after <see cref="GetAllTensors"/>.
-/// <para><b>Validation-gated:</b> exact storage-type → dtype coverage and any non-contiguous/shared-storage edge
-/// cases are confirmed against a real checkpoint dump. Quantized storages are not supported (weights are
-/// F32/F16/BF16/int).</para></summary>
+/// <summary>Loads a PyTorch <c>.pt</c> / <c>.pth</c> checkpoint (the modern <c>torch.save</c> ZIP container) into a <c>Dictionary&lt;string, Tensor&gt;</c>, mirroring <see cref="SafeTensors.SafeTensorsLoader"/>'s surface so any model loader can consume <c>.pt</c>-only checkpoints (Hunyuan-GameCraft, Cosmos, …). Implements a <b>safe-subset</b> pickle VM (no arbitrary code execution): it recognizes only the opcodes and the two torch reduce functions (<c>torch._utils._rebuild_tensor_v2</c> + storage <c>persistent_id</c>) that a flat <c>state_dict</c> emits. Tensors are materialized into owned native memory (one copy), so the loader can be disposed immediately after <see cref="GetAllTensors"/>.
+/// <para><b>Validation-gated:</b> exact storage-type → dtype coverage and any non-contiguous/shared-storage edge cases are confirmed against a real checkpoint dump. Quantized storages are not supported (weights are F32/F16/BF16/int).</para></summary>
 public sealed class PytorchPickleLoader : IDisposable
 {
     private readonly Dictionary<string, Tensor> _tensors = [];
@@ -27,10 +19,7 @@ public sealed class PytorchPickleLoader : IDisposable
     public string FilePath { get; private set; } = string.Empty;
 
     /// <summary>Opens the <c>.pt</c> ZIP, parses <c>data.pkl</c>, and materializes every tensor into owned memory.
-    /// <para>When <paramref name="recursiveFlatten"/> is true, a multi-module checkpoint — a dict whose values
-    /// are themselves state-dicts (e.g. Kokoro's <c>{bert:{…}, predictor:{…}, decoder:{…}}</c>) — is flattened
-    /// into fully-qualified dotted keys (<c>bert.embeddings.weight</c>, …) covering EVERY module. The default
-    /// (false) keeps the legacy behavior: load top-level tensors, else descend one wrapper envelope.</para></summary>
+    /// <para>When <paramref name="recursiveFlatten"/> is true, a multi-module checkpoint — a dict whose values are themselves state-dicts (e.g. Kokoro's <c>{bert:{…}, predictor:{…}, decoder:{…}}</c>) — is flattened into fully-qualified dotted keys (<c>bert.embeddings.weight</c>, …) covering EVERY module. The default (false) keeps the legacy behavior: load top-level tensors, else descend one wrapper envelope.</para></summary>
     public void Load(string filePath, bool recursiveFlatten = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -47,8 +36,7 @@ public sealed class PytorchPickleLoader : IDisposable
         throw new InvalidOperationException($"'{filePath}' is not a recognized torch checkpoint (magic 0x{magic[0]:x2}{magic[1]:x2}).");
     }
 
-    /// <summary>Modern <c>torch.save</c> path: a ZIP whose <c>data.pkl</c> holds the pickle and whose
-    /// <c>data/&lt;key&gt;</c> entries hold each storage's raw bytes.</summary>
+    /// <summary>Modern <c>torch.save</c> path: a ZIP whose <c>data.pkl</c> holds the pickle and whose <c>data/&lt;key&gt;</c> entries hold each storage's raw bytes.</summary>
     private unsafe void LoadZip(string filePath, bool recursiveFlatten)
     {
         using ZipArchive zip = ZipFile.OpenRead(filePath);
@@ -83,11 +71,7 @@ public sealed class PytorchPickleLoader : IDisposable
         Descriptors = descriptors;
     }
 
-    /// <summary>Legacy <c>torch.save</c> path (<c>_legacy_save</c>): five back-to-back pickle streams
-    /// (MAGIC_NUMBER, PROTOCOL_VERSION, sys_info, the state_dict, then the storage-key list) followed by each
-    /// storage's raw bytes in key-list order, prefixed by an <c>int64</c> element count. No ZIP, no per-storage
-    /// alignment. The whole file is read into memory (legacy checkpoints predate the &gt;2 GB era; .NET caps a
-    /// single read at ~2 GB, which this format never exceeds in practice).</summary>
+    /// <summary>Legacy <c>torch.save</c> path (<c>_legacy_save</c>): five back-to-back pickle streams (MAGIC_NUMBER, PROTOCOL_VERSION, sys_info, the state_dict, then the storage-key list) followed by each storage's raw bytes in key-list order, prefixed by an <c>int64</c> element count. No ZIP, no per-storage alignment. The whole file is read into memory (legacy checkpoints predate the &gt;2 GB era; .NET caps a single read at ~2 GB, which this format never exceeds in practice).</summary>
     private unsafe void LoadLegacy(string filePath, bool recursiveFlatten)
     {
         // Memory-map instead of File.ReadAllBytes: a legacy T5 encoder (e.g. t5-large's 2.9 GB pytorch_model.bin)
@@ -178,8 +162,7 @@ public sealed class PytorchPickleLoader : IDisposable
         Descriptors = descriptors;
     }
 
-    /// <summary>Runs one pickle stream starting at <paramref name="start"/>, yields its unpickled root, and returns
-    /// the offset just past its STOP opcode (i.e. the start of the next stream).</summary>
+    /// <summary>Runs one pickle stream starting at <paramref name="start"/>, yields its unpickled root, and returns the offset just past its STOP opcode (i.e. the start of the next stream).</summary>
     private static int RunPickle(byte[] buf, int start, out object? result)
     {
         PickleMachine m = new(buf, start);
@@ -194,12 +177,7 @@ public sealed class PytorchPickleLoader : IDisposable
         return new Dictionary<string, Tensor>(_tensors);
     }
 
-    /// <summary>Reorders a just-materialized tensor from its torch STORAGE order into row-major (C-contiguous)
-    /// order when the tensor's <paramref name="stride"/> is non-contiguous (e.g. a transposed <c>.t()</c> view,
-    /// which <c>torch.save</c> preserves as size + non-row-major stride over shared storage). The raw copy above
-    /// wrote the storage bytes as-is; for a contiguous stride that is already correct (no-op fast path), but for a
-    /// view it yields the transpose — which silently mis-loads e.g. bert-base-uncased Linear weights. Gathers each
-    /// row-major element from its strided source position. Only fires for the rare non-contiguous case.</summary>
+    /// <summary>Reorders a just-materialized tensor from its torch STORAGE order into row-major (C-contiguous) order when the tensor's <paramref name="stride"/> is non-contiguous (e.g. a transposed <c>.t()</c> view, which <c>torch.save</c> preserves as size + non-row-major stride over shared storage). The raw copy above wrote the storage bytes as-is; for a contiguous stride that is already correct (no-op fast path), but for a view it yields the transpose — which silently mis-loads e.g. bert-base-uncased Linear weights. Gathers each row-major element from its strided source position. Only fires for the rare non-contiguous case.</summary>
     private static unsafe void MakeRowMajor(Tensor t, long[] size, long[] stride, DType dt)
     {
         int nd = size.Length;
@@ -264,8 +242,7 @@ public sealed class PytorchPickleLoader : IDisposable
         return null;
     }
 
-    /// <summary>Collects every <see cref="PickleTensor"/> in the unpickled object, descending one wrapper level
-    /// (e.g. a <c>{"module": {...}}</c> or <c>{"state_dict": {...}}</c> envelope) if the top level holds no tensors.</summary>
+    /// <summary>Collects every <see cref="PickleTensor"/> in the unpickled object, descending one wrapper level (e.g. a <c>{"module": {...}}</c> or <c>{"state_dict": {...}}</c> envelope) if the top level holds no tensors.</summary>
     private static void FlattenStateDict(object? root, Dictionary<string, PickleTensor> outMap)
     {
         // torch.save(tensor) writes the tensor as the root object, with no dict wrapper (ACE-Step's silence_latent.pt).
@@ -293,9 +270,7 @@ public sealed class PytorchPickleLoader : IDisposable
         if (outMap.Count == 0) throw new InvalidOperationException("No tensors found in checkpoint.");
     }
 
-    /// <summary>Recursively flattens nested dicts into fully-qualified dotted keys, visiting every module
-    /// (unlike <see cref="FlattenStateDict"/>, which descends only one wrapper and drops the prefix). Non-tensor,
-    /// non-dict leaves (version ints, metadata) are ignored.</summary>
+    /// <summary>Recursively flattens nested dicts into fully-qualified dotted keys, visiting every module (unlike <see cref="FlattenStateDict"/>, which descends only one wrapper and drops the prefix). Non-tensor, non-dict leaves (version ints, metadata) are ignored.</summary>
     private static void FlattenStateDictRecursive(object? node, string prefix, Dictionary<string, PickleTensor> outMap)
     {
         if (node is PickleTensor t)

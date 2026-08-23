@@ -53,16 +53,37 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     private readonly IWanVaeEncoder _encoder;
     private readonly WanVideoConfig _config;
 
-    /// <summary>Opt-in halving of the driving cache to BF16. Off because the rest of the forward is F32, so it is a
-    /// divergence from the reference and from ComfyUI alike, and it has had no real-weight quality run.</summary>
-    public const string Bf16DrivingCacheSwitch = "HARTSY_ANIMATE2_BF16_DRIVING_CACHE";
+    /// <summary>Explicit driving-cache dtype override; unset = auto. See <see cref="WanAnimate2DrivingCachePolicy"/>,
+    /// which owns the resolution.</summary>
+    public const string Bf16DrivingCacheSwitch = WanAnimate2DrivingCachePolicy.EnvironmentVariable;
 
     /// <summary>Measured per-token activation slope of the Animate denoise loop, reused here — the block internals
     /// are the same Wan i2v ones, and the binding constraint is activations rather than weights.</summary>
     private const long ActivationBytesPerToken = 671_089;
 
     /// <summary>Allowance for cuBLAS workspace, the prefetch window and pool slack, on top of the token-scaled term.</summary>
-    private const long FixedHeadroomBytes = 1L << 30;
+    public const long FixedHeadroomBytes = 1L << 30;
+
+    /// <summary>Activation + workspace headroom a chunk at <paramref name="tokenLoad"/> reserves before weights are
+    /// placed — the exact quantity <see cref="GenerateChunk"/> hands to <see cref="BlockStreamingScope"/>, shared so
+    /// the recipe's up-front dtype decision and the chunk's placement cannot disagree.</summary>
+    public static long ActivationReserveBytes(long tokenLoad) =>
+        Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
+            tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
+
+    /// <summary>Weights that must sit on the device even with every block streamed: the shared (non-block) weights
+    /// plus the prefetch window. The floor a feasibility check charges against free VRAM.</summary>
+    public static long StreamedWeightFloorBytes(WanAnimate2Transformer transformer)
+    {
+        ArgumentNullException.ThrowIfNull(transformer);
+        long shared = 0;
+        foreach (Tensor t in transformer.EnumerateSharedWeights())
+        {
+            shared += t.DType.ComputeByteCount(t.ElementCount);
+        }
+        const int prefetchWindowBlocks = 3;   // BlockStreamingOptions.PrefetchAhead default (2) + the active block
+        return shared + prefetchWindowBlocks * transformer.GetBlock(0).EstimatedWeightBytes;
+    }
 
     public WanAnimate2Pipeline(IBackend backend, WanAnimate2Transformer transformer, IWanVaeDecoder vae,
         IWanVaeEncoder encoder, WanVideoConfig config)
@@ -180,6 +201,8 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         bool useCfg = UsesCfgBranch(guidance);
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? DefaultFlowShift;
+        float poseStrength = (request as VideoGenerationRequest)?.AnimatePoseStrength ?? 1.0f;
+        float referenceImageStrength = (request as VideoGenerationRequest)?.AnimateReferenceImageStrength ?? 1.0f;
         string samplerName = ResolveSampler(sampler);
 
         Logs.Info($"Wan-Animate-2: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, "
@@ -187,6 +210,10 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             + $"{(continuation ? ", continuation chunk" : "")}, log_scale={_config.Animate2LogScale}).");
         string? settingsWarning = SettingsMismatchWarning(_config.Animate2LogScale != 0f, steps, guidance);
         if (settingsWarning is not null) Logs.Warning(settingsWarning);
+        if (poseStrength != 1.0f || referenceImageStrength != 1.0f)
+        {
+            Logs.Info($"Wan-Animate-2 strengths: pose={poseStrength}, reference_image={referenceImageStrength} (1.0 is the trained behaviour).");
+        }
         if (samplerName == AlternateSampler)
         {
             Logs.Warning("[WanAnimate2] UniPC was requested. Its sigma grid floors at 1/1000 where get_sampling_sigmas "
@@ -202,34 +229,49 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             // One causal VAE encode per stream. The continuation frame goes over the HEAD of a mid-grey clip and is
             // encoded WITH it: the Wan VAE is temporally causal, so encoding the carried frame separately and
             // splicing latents is not the same tensor.
+            Stopwatch phase = Stopwatch.StartNew();
+            Backend.ResetOpProfile();
             Backend.PreloadWeights(_encoder.EnumerateWeights());
             Tensor referenceLatent = _encoder.Encode(Backend, referenceRgb);
+            Backend.Sync();
+            double tRefMs = phase.Elapsed.TotalMilliseconds;
             Tensor videoPixels = BuildContinuationPixels(carriedRgbFrame, pixT, pixH, pixW);
             Tensor videoLatent = _encoder.Encode(Backend, videoPixels);
             videoPixels.Dispose();
+            Backend.Sync();
+            double tGreyMs = phase.Elapsed.TotalMilliseconds - tRefMs;
             Tensor drivingLatentDev = _encoder.Encode(Backend, drivingRgbClip);
             Backend.Sync();
+            double tDriveMs = phase.Elapsed.TotalMilliseconds - tRefMs - tGreyMs;
             Backend.FreeWeights(_encoder.EnumerateWeights());
+            Backend.DumpOpProfile("animate2-vaeencode");
+            Logs.Info($"Wan-Animate-2 VAE encode: reference+preload {tRefMs / 1000.0:F1}s, continuation clip "
+                + $"{tGreyMs / 1000.0:F1}s, driving clip {tDriveMs / 1000.0:F1}s.");
 
             conditioning = WanAnimate2Conditioning.BuildGenerationChannels(referenceLatent, videoLatent, continuation);
             referenceLatent.Dispose();
             videoLatent.Dispose();
             // Host-materialized: the driving latent has to survive the per-step activation sweeps between the
             // prepass and the loop, and it is a few MB.
-            drivingLatent = HostCopy(drivingLatentDev);
+            drivingLatent = WanAnimate2Conditioning.HostCopy(drivingLatentDev);
             drivingLatentDev.Dispose();
             Backend.TrimMemoryPool();
 
             (int pt, int ph, int pw) = _config.PatchSize;
             (int T, int H, int W) genGrid = (tTotal / pt, hLat / ph, wLat / pw);
             long tokenLoad = (long)genGrid.T * genGrid.H * genGrid.W;
-            bool bf16Cache = EnvSwitch.IsEnabled(Bf16DrivingCacheSwitch, false);
+            // The recipe resolves the dtype once per generation and relays it here, so a chunked video cannot mix
+            // cache dtypes as free VRAM shifts between chunks; the fallback is for direct GenerateChunk callers.
+            bool bf16Cache = (request as VideoGenerationRequest)?.Animate2Bf16DrivingCache
+                ?? WanAnimate2DrivingCachePolicy.Resolve(Backend,
+                    _transformer.DrivingCacheBytes(genGrid, bf16Cache: false),
+                    _transformer.DrivingCacheBytes(genGrid, bf16Cache: true),
+                    ActivationReserveBytes(tokenLoad), StreamedWeightFloorBytes(_transformer));
             // The driving cache is built after this placement is chosen but outlives every step of it, so it is
             // headroom, not activation churn. Omitting it let the planner keep all 40 blocks resident and then OOM
             // on the cache with the card genuinely full.
             long drivingCacheBytes = _transformer.DrivingCacheBytes(genGrid, bf16Cache);
-            long headroomBytes = Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
-                tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes) + drivingCacheBytes;
+            long headroomBytes = ActivationReserveBytes(tokenLoad) + drivingCacheBytes;
             // Opened before the prepass, not just around the loop: EncodeDriving is a full 40-block forward and
             // needs the same streaming budget the denoise steps do.
             stream = BlockStreamingScope.Open(new BlockStreamingOptions
@@ -243,7 +285,6 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 
             // The driving stream sits outside the guidance loop entirely — it never sees the negative prompt, and it
             // is built once per chunk rather than once per step.
-            _transformer.PoseStrength = (float)EnvSwitch.GetLong("HARTSY_ANIMATE2_POSE_STRENGTH_X100", 100) / 100f;
             driving = _transformer.EncodeDriving(Backend, drivingLatent, drivingPromptEmbeds, drivingClipEmbeds, genGrid,
                 bf16Cache: bf16Cache);
             long drivingTokens = (long)driving.Frames * driving.TokensPerFrame;
@@ -252,6 +293,9 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 + $"{drivingTokens} tokens, {driving.StorageDType.Name}).");
             stream.EndStep();
             Backend.FreeActivations();
+            Logs.Info($"Wan-Animate-2 driving prepass: {phase.Elapsed.TotalMilliseconds / 1000.0 - tRefMs / 1000.0 - tGreyMs / 1000.0 - tDriveMs / 1000.0:F1}s (placement + EncodeDriving).");
+            Backend.DumpOpProfile("animate2-prepass");
+            phase.Restart();
 
             latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
             bool alternate = samplerName == AlternateSampler;
@@ -266,12 +310,14 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 Stopwatch sw = Stopwatch.StartNew();
                 float tEmb = timesteps[k];
                 Tensor modelInput = WanAnimate2Conditioning.ConcatChannels(latents, conditioning);
-                Tensor vCond = _transformer.Forward(Backend, modelInput, promptEmbeds, tEmb, driving, referenceClipEmbeds);
+                Tensor vCond = _transformer.Forward(Backend, modelInput, promptEmbeds, tEmb, driving, referenceClipEmbeds,
+                    poseStrength: poseStrength, referenceImageStrength: referenceImageStrength);
                 if (useCfg)
                 {
                     // Strictly after the positive branch: the transformer's caches are unsynchronized.
                     Tensor vUncond = _transformer.Forward(Backend, modelInput, negativeEmbeds, tEmb, driving,
-                        referenceClipEmbeds, unconditional: true);
+                        referenceClipEmbeds, unconditional: true,
+                        poseStrength: poseStrength, referenceImageStrength: referenceImageStrength);
                     LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
                     vUncond.Dispose();
                 }
@@ -286,7 +332,11 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
                 });
                 Backend.FreeActivations();
                 stream.EndStep();
+                // Window the profiler onto the steady-state steps; step 0 carries the streaming window's warm-up.
+                if (k == 0) Backend.ResetOpProfile();
             }
+            Backend.DumpOpProfile($"animate2-denoise{Math.Max(1, steps - 1)}");
+            Logs.Info($"Wan-Animate-2 denoise: {steps} steps in {phase.Elapsed.TotalMilliseconds / 1000.0:F1}s.");
         }
         catch
         {
@@ -309,8 +359,12 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         Tensor video = WanAnimate2Conditioning.TrimReferenceFrame(latents!);
         latents!.Dispose();
         Tensor rgb;
+        Stopwatch decodeSw = Stopwatch.StartNew();
+        Backend.ResetOpProfile();
         try { rgb = _vae.Decode(Backend, video); }
         finally { video.Dispose(); }
+        Backend.DumpOpProfile("animate2-vaedecode");
+        Logs.Info($"Wan-Animate-2 VAE decode: {decodeSw.Elapsed.TotalMilliseconds / 1000.0:F1}s.");
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
@@ -339,15 +393,5 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             Buffer.MemoryCopy(src + (long)c * frame, dst + (long)c * pixT * frame, frame * sizeof(float), frame * sizeof(float));
         }
         return grey;
-    }
-
-    /// <summary>Fresh host-materialized copy of a (possibly device-resident) tensor — the form that survives the
-    /// per-step activation sweeps and re-faults to device on use.</summary>
-    private static Tensor HostCopy(Tensor x)
-    {
-        Tensor o = new Tensor(x.Shape, x.DType);
-        long bytes = x.DType.ComputeByteCount(x.ElementCount);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, bytes, bytes);
-        return o;
     }
 }

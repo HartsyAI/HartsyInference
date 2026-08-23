@@ -2,16 +2,13 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Engine-native replacement for the host app's model-set lookups: finds a side-model file by name under the
-/// conventional folders of <see cref="RepoPaths.ModelsRoot"/>. Absolute paths that exist are returned untouched, so a
-/// caller may always pass either a bare model id or a concrete path.</summary>
+/// <summary>Engine-native replacement for the host app's model-set lookups: finds a side-model file by name under the conventional folders of <see cref="RepoPaths.ModelsRoot"/>. Absolute paths that exist are returned untouched, so a caller may always pass either a bare model id or a concrete path.</summary>
 public static class ModelFileLocator
 {
     /// <summary>Extensions tried, in order, when the supplied name carries none.</summary>
     private static readonly string[] _extensions = [".safetensors", ".sft", ".bin", ".pth", ".pt", ".ckpt"];
 
-    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative
-    /// <paramref name="subfolders"/> (recursively) and trying the common weight extensions. Returns null when nothing matches.</summary>
+    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative <paramref name="subfolders"/> (recursively) and trying the common weight extensions. Returns null when nothing matches.</summary>
     public static string? Find(string? nameOrPath, params string[] subfolders)
     {
         if (string.IsNullOrWhiteSpace(nameOrPath))

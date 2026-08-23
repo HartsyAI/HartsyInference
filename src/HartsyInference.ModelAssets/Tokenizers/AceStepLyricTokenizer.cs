@@ -3,15 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>ACE-Step's lyric tokenizer — the XTTS-v2 <c>VoiceBpeTokenizer</c> (vocab 6693 incl. 12 structure-tag
-/// added tokens — verified against the shipped tokenizer) plus the <c>tokenize_lyrics</c> line protocol: stream
-/// starts with <c>[START]</c>=261, every line is encoded as <c>[lang]line</c> with spaces replaced by
-/// <c>[SPACE]</c>=2 (which also terminates each line, bare 2 for blank lines), <c>zh</c> maps to the <c>[zh-cn]</c>
-/// token, and lowercase structure tags (<c>[verse]</c>, <c>[chorus]</c>, …) hit their dedicated added tokens
-/// (ids 6681–6692). Mirrors the reference encode: lowercase + whitespace-collapse cleaners, HF Whitespace
-/// pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then plain BPE with <c>[UNK]</c>=1 fallback. Loads the
-/// <c>vocab.json</c> + <c>merges.txt</c> export described in <c>AceStepCheckpointConverter</c>. Number expansion and
-/// CJK G2P/transliteration are the caller's responsibility (the official pipeline uses external phonemizers).</summary>
+/// <summary>ACE-Step's lyric tokenizer — the XTTS-v2 <c>VoiceBpeTokenizer</c> (vocab 6693 incl. 12 structure-tag added tokens — verified against the shipped tokenizer) plus the <c>tokenize_lyrics</c> line protocol: stream starts with <c>[START]</c>=261, every line is encoded as <c>[lang]line</c> with spaces replaced by <c>[SPACE]</c>=2 (which also terminates each line, bare 2 for blank lines), <c>zh</c> maps to the <c>[zh-cn]</c> token, and lowercase structure tags (<c>[verse]</c>, <c>[chorus]</c>, …) hit their dedicated added tokens (ids 6681–6692). Mirrors the reference encode: lowercase + whitespace-collapse cleaners, HF Whitespace pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then plain BPE with <c>[UNK]</c>=1 fallback. Loads the <c>vocab.json</c> + <c>merges.txt</c> export described in <c>AceStepCheckpointConverter</c>. Number expansion and CJK G2P/transliteration are the caller's responsibility (the official pipeline uses external phonemizers).</summary>
 public sealed partial class AceStepLyricTokenizer
 {
     /// <summary>Stream-opening token.</summary>
@@ -54,9 +46,7 @@ public sealed partial class AceStepLyricTokenizer
             .OrderByDescending(k => k.Length)];
     }
 
-    /// <summary>Builds the tokenizer straight from an HF-tokenizers <c>tokenizer.json</c> (the upstream repo's
-    /// <c>lyrics_utils/vocab.json</c> is one): <c>model.vocab</c> + <c>model.merges</c> ("a b" pair strings) —
-    /// no vocab/merges export step.</summary>
+    /// <summary>Builds the tokenizer straight from an HF-tokenizers <c>tokenizer.json</c> (the upstream repo's <c>lyrics_utils/vocab.json</c> is one): <c>model.vocab</c> + <c>model.merges</c> ("a b" pair strings) — no vocab/merges export step.</summary>
     public static AceStepLyricTokenizer FromTokenizerJson(string tokenizerJsonPath)
     {
         using FileStream fs = File.OpenRead(tokenizerJsonPath);
@@ -80,8 +70,7 @@ public sealed partial class AceStepLyricTokenizer
     /// <summary>Vocabulary size.</summary>
     public int VocabSize => _vocab.Count;
 
-    /// <summary>The full ACE-Step lyric protocol: <c>[261]</c> then per line tokens + <c>[2]</c> (bare 2 for blank
-    /// lines). <paramref name="languageOverride"/> forces one code for all lines (otherwise per-line heuristic).</summary>
+    /// <summary>The full ACE-Step lyric protocol: <c>[261]</c> then per line tokens + <c>[2]</c> (bare 2 for blank lines). <paramref name="languageOverride"/> forces one code for all lines (otherwise per-line heuristic).</summary>
     public int[] TokenizeLyrics(string lyrics, string? languageOverride = null)
     {
         List<int> ids = [StartToken];
@@ -100,8 +89,7 @@ public sealed partial class AceStepLyricTokenizer
         return [.. ids];
     }
 
-    /// <summary>Encodes one line per the reference: cleaners (lowercase + whitespace collapse), <c>zh → zh-cn</c>,
-    /// <c>[lang]</c> prefix, spaces → <c>[SPACE]</c>, then pre-tokenized BPE.</summary>
+    /// <summary>Encodes one line per the reference: cleaners (lowercase + whitespace collapse), <c>zh → zh-cn</c>, <c>[lang]</c> prefix, spaces → <c>[SPACE]</c>, then pre-tokenized BPE.</summary>
     public int[] EncodeLine(string text, string lang)
     {
         lang = lang.Split('-')[0];
@@ -151,8 +139,7 @@ public sealed partial class AceStepLyricTokenizer
         if (runStart < text.Length) yield return text[runStart..];
     }
 
-    /// <summary>HF Whitespace pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then character BPE per piece;
-    /// unknown symbols emit <c>[UNK]</c>.</summary>
+    /// <summary>HF Whitespace pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then character BPE per piece; unknown symbols emit <c>[UNK]</c>.</summary>
     private IEnumerable<int> Bpe(string segment)
     {
         foreach (string piece in PreTokenize(segment))
@@ -176,8 +163,7 @@ public sealed partial class AceStepLyricTokenizer
         }
     }
 
-    /// <summary>Splits a run into word (<c>\w+</c>) and punctuation (<c>[^\w\s]+</c>) pieces so merges never cross
-    /// the boundary (matches the tokenizer.json Whitespace pre-tokenizer).</summary>
+    /// <summary>Splits a run into word (<c>\w+</c>) and punctuation (<c>[^\w\s]+</c>) pieces so merges never cross the boundary (matches the tokenizer.json Whitespace pre-tokenizer).</summary>
     private static IEnumerable<string> PreTokenize(string text)
     {
         int i = 0;
@@ -207,8 +193,7 @@ public sealed partial class AceStepLyricTokenizer
         return sb.ToString();
     }
 
-    /// <summary>Per-line script heuristic over ACE-Step's 17 supported languages (the official pipeline uses a
-    /// statistical detector; this covers the script-distinct cases and defaults to English for Latin text).</summary>
+    /// <summary>Per-line script heuristic over ACE-Step's 17 supported languages (the official pipeline uses a statistical detector; this covers the script-distinct cases and defaults to English for Latin text).</summary>
     public static string DetectLanguage(string line)
     {
         foreach (char ch in line)

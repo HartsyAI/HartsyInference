@@ -1,9 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry;
 
-/// <summary>A triplane feature volume: three orthogonal feature planes (XY, XZ, YZ), each
-/// <c>[Channels, Height, Width]</c>, packed contiguously as <c>[3, C, H, W]</c>. The implicit representation
-/// produced by LRM-style image→3D models (TripoSR); a NeRF/occupancy MLP decodes density+color at any 3D
-/// point by bilinearly sampling each plane (<see cref="Ops.GridSampler.BilinearPlane"/>) and combining.</summary>
+/// <summary>A triplane feature volume: three orthogonal feature planes (XY, XZ, YZ) packed contiguously as <c>[3, C, H, W]</c>, the implicit representation produced by LRM-style image-to-3D models (TripoSR).</summary>
 public sealed class Triplane
 {
     /// <summary>Packed plane features, length <c>3 * Channels * Height * Width</c> (plane-major: XY, XZ, YZ).</summary>

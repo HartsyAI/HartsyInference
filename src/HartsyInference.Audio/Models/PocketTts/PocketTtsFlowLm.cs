@@ -14,8 +14,7 @@ namespace HartsyInference.Audio.Models.PocketTts;
 /// <c>[text_embeddings ++ input_linear([bos, latent_0..latent_{f-1}])]</c> runs through the causal backbone;
 /// the last hidden conditions <c>flow_net</c>, and an <c>lsd_decode</c> step turns a noise sample into the next
 /// 32-d latent. Latents then decode to audio via <see cref="PocketTtsMimiDecoder"/>. The per-step math
-/// (backbone + flow_net) is verified bit-exact; full generation differs only by the noise draw, so
-/// <see cref="GenerateLatents"/> takes the noise explicitly for deterministic, parity-testable use.</para></summary>
+/// (backbone + flow_net) is verified bit-exact; full generation differs only by the noise draw.</para></summary>
 internal sealed unsafe class PocketTtsFlowLm
 {
     private const int Ldim = 32, Dim = 1024;
@@ -52,7 +51,7 @@ internal sealed unsafe class PocketTtsFlowLm
         _outNormB = WhisperOps.EnsureF32(w[$"{_p}.out_norm.bias"]);
         _backbone.LoadWeights(w);
         _flowNet.LoadWeights(w);
-        // Production-path weights (absent in the low-level parity harness, which only drives GenerateLatents).
+        // Production-path weights (absent in the low-level parity harness, which drives the backbone directly).
         if (w.ContainsKey($"{_p}.out_eos.weight"))
         {
             _outEosW = WhisperOps.EnsureF32(w[$"{_p}.out_eos.weight"]);
@@ -162,97 +161,6 @@ internal sealed unsafe class PocketTtsFlowLm
             for (int f = 0; f < n; f++)
                 op[(long)c * n + f] = latents[f][c];
         return outLat;
-    }
-
-    /// <summary>Deterministic AR decode. <paramref name="textEmb"/> = <c>[1, T, 1024]</c> conditioner output;
-    /// <paramref name="noises"/> = <c>[N, 32]</c> per-frame noise. Returns latents <c>[1, 32, N]</c>.</summary>
-    public Tensor GenerateLatents(IBackend backend, Tensor textEmb, float[][] noises)
-    {
-        int tText = (int)textEmb.Shape[1];
-        int n = noises.Length;
-        float* tep = (float*)textEmb.DataPointer;
-        float* bos = (float*)_bos!.DataPointer;
-        float* ilW = (float*)_inputLinW!.DataPointer;   // [1024,32]
-
-        float[][] latents = new float[n][];
-        for (int f = 0; f < n; f++)
-        {
-            int seqLen = f + 1;               // [bos, latent_0..latent_{f-1}]
-            int total = tText + seqLen;
-            Tensor full = new(new TensorShape(1, total, Dim), DType.F32);
-            float* fp = (float*)full.DataPointer;
-            // text prefix
-            for (int i = 0; i < tText * Dim; i++) fp[i] = tep[i];
-            // input_linear([bos, latents...])
-            for (int j = 0; j < seqLen; j++)
-            {
-                float[] lat = j == 0 ? null! : latents[j - 1];
-                long rowBase = (long)(tText + j) * Dim;
-                for (int o = 0; o < Dim; o++)
-                {
-                    double acc = 0;
-                    long wb = (long)o * Ldim;
-                    for (int i = 0; i < Ldim; i++)
-                    {
-                        float v = j == 0 ? bos[i] : lat[i];
-                        acc += (double)v * ilW[wb + i];
-                    }
-                    fp[rowBase + o] = (float)acc;
-                }
-            }
-
-            Tensor tout = _backbone.Forward(backend, full, 1, total);
-            full.Dispose();
-            Tensor normed = new(tout.Shape, DType.F32);
-            backend.LayerNorm(normed, tout, _outNormW!, _outNormB!, 1e-5f);
-            tout.Dispose();
-
-            // last position hidden
-            float[] hidden = new float[Dim];
-            float* np = (float*)normed.DataPointer;
-            long lastBase = (long)(total - 1) * Dim;
-            for (int i = 0; i < Dim; i++) hidden[i] = np[lastBase + i];
-            normed.Dispose();
-
-            // lsd_decode, 1 step: latent = noise + flow_net(hidden, s=0, t=1, noise)
-            float[] noise = noises[f];
-            float[] flowDir = _flowNet.Forward(hidden, 0f, 1f, noise);
-            float[] latent = new float[Ldim];
-            for (int i = 0; i < Ldim; i++) latent[i] = noise[i] + flowDir[i];
-            latents[f] = latent;
-        }
-
-        // assemble [1, 32, N]
-        Tensor outLat = new(new TensorShape(1, Ldim, n), DType.F32);
-        float* op = (float*)outLat.DataPointer;
-        for (int c = 0; c < Ldim; c++)
-            for (int f = 0; f < n; f++)
-                op[(long)c * n + f] = latents[f][c];
-        return outLat;
-    }
-
-    /// <summary>Debug: the conditioned hidden (post out_norm, last position) for one voice-primed step over
-    /// <c>[textEmb ++ ilBos]</c>. Isolates <see cref="PocketTtsStreamingTransformer.ForwardPrimed"/> from the
-    /// tokenizer/embed/input_linear (which the caller supplies pre-computed).</summary>
-    public float[] DebugPrimedHidden(IBackend backend, Tensor textEmb, float[] ilBos, Tensor[] prefixK, Tensor[] prefixV, int prefixLen, float[][]? layerBosDump = null)
-    {
-        int tText = (int)textEmb.Shape[1];
-        int total = tText + 1;
-        Tensor full = new(new TensorShape(1, total, Dim), DType.F32);
-        float* fp = (float*)full.DataPointer;
-        Buffer.MemoryCopy((void*)textEmb.DataPointer, fp, (long)tText * Dim * 4, (long)tText * Dim * 4);
-        for (int i = 0; i < Dim; i++) fp[(long)tText * Dim + i] = ilBos[i];
-        Tensor tout = _backbone.ForwardPrimed(backend, full, total, prefixK, prefixV, prefixLen, layerBosDump);
-        full.Dispose();
-        Tensor normed = new(tout.Shape, DType.F32);
-        backend.LayerNorm(normed, tout, _outNormW!, _outNormB!, 1e-5f);
-        tout.Dispose();
-        float[] hidden = new float[Dim];
-        float* np = (float*)normed.DataPointer;
-        long lastBase = (long)(total - 1) * Dim;
-        for (int i = 0; i < Dim; i++) hidden[i] = np[lastBase + i];
-        normed.Dispose();
-        return hidden;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

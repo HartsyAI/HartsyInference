@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -85,7 +84,7 @@ public sealed unsafe class ErnieImageRope
         return posIds;
     }
 
-    /// <summary>Computes the cos/sin freqs tensor used by <see cref="ApplyRotaryEmb"/>. Output shape is <c>[B, totalSeq, head_dim]</c> packed as <c>[cos_0..cos_{D-1}, sin_0..sin_{D-1}]</c> per token along the last dim — but stored as two separate halves of length <c>head_dim</c>: a cos block then a sin block, total length <c>2 * head_dim</c>. We pack both halves into one tensor so the GPU upload path is a single buffer; <see cref="ApplyRotaryEmb"/> indexes them as <c>cos = freqs[..., :head_dim]</c> and <c>sin = freqs[..., head_dim:]</c>.</summary>
+    /// <summary>Computes the cos/sin freqs tensor used by <see cref="ApplyRotaryEmbGpu"/>. Output shape is <c>[B, totalSeq, head_dim]</c> packed as <c>[cos_0..cos_{D-1}, sin_0..sin_{D-1}]</c> per token along the last dim — but stored as two separate halves of length <c>head_dim</c>: a cos block then a sin block, total length <c>2 * head_dim</c>. We pack both halves into one tensor so the GPU upload path is a single buffer; <see cref="ApplyRotaryEmbGpu"/> indexes them as <c>cos = freqs[..., :head_dim]</c> and <c>sin = freqs[..., head_dim:]</c>.</summary>
     public Tensor BuildFreqs(Tensor posIds)
     {
         int batch = (int)posIds.Shape[0];
@@ -153,63 +152,12 @@ public sealed unsafe class ErnieImageRope
         return freqs;
     }
 
-    /// <summary>Applies non-interleaved Megatron-style rotation to Q and K in-place.
-    /// <para>Layout requirements:
-    /// <list type="bullet">
-    ///   <item><paramref name="q"/>, <paramref name="k"/> shape: <c>[B, S, numHeads, headDim]</c> (heads-as-3rd-dim layout — matches <c>transformer_ernie_image.py</c>'s <c>unflatten(-1, (heads, -1))</c> step).</item>
-    ///   <item><paramref name="freqs"/> shape: <c>[B, S, 2 * headDim]</c> (from <see cref="BuildFreqs"/>): cos in <c>[..., :headDim]</c>, sin in <c>[..., headDim:]</c>.</item>
-    /// </list></para>
-    /// <para>The rotation is <c>out = x * cos + rotate_half(x) * sin</c> with <c>rotate_half(x) = cat(-x[..., halfDim:], x[..., :halfDim])</c>.</para>
-    /// </summary>
-    public void ApplyRotaryEmb(Tensor q, Tensor k, Tensor freqs)
-    {
-        int batch = (int)q.Shape[0];
-        int seqLen = (int)q.Shape[1];
-        int numHeads = (int)q.Shape[2];
-        int headDim = (int)q.Shape[3];
-        if (headDim != _headDim)
-            throw new ArgumentException($"Q head_dim {headDim} != rope head_dim {_headDim}.", nameof(q));
-        if (k.Shape[0] != batch || k.Shape[1] != seqLen || k.Shape[2] != numHeads || k.Shape[3] != headDim)
-            throw new ArgumentException("K shape must match Q shape.", nameof(k));
-        if (freqs.Shape[0] != batch || freqs.Shape[1] != seqLen || freqs.Shape[2] != 2 * headDim)
-            throw new ArgumentException($"freqs shape must be [{batch}, {seqLen}, {2 * headDim}].", nameof(freqs));
-
-        int halfDim = headDim / 2;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-        float* fPtr = (float*)freqs.DataPointer;
-
-        // Single-vector scratch reused across every (b,s,h) — sized for the maximum halfDim we ever see.
-        // halfDim = 64 for the default (32,48,48) → 512 bytes. Allocate once at the call site to avoid
-        // hammering the stack from a deep tight loop.
-        Span<float> lowerSnapshot = stackalloc float[halfDim];
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long freqBase = ((long)b * seqLen + s) * (2L * headDim);
-                float* cosVec = fPtr + freqBase;
-                float* sinVec = fPtr + freqBase + headDim;
-
-                for (int h = 0; h < numHeads; h++)
-                {
-                    long vecOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
-                    ApplyNonInterleavedRotation(qPtr + vecOff, cosVec, sinVec, halfDim, lowerSnapshot);
-                    ApplyNonInterleavedRotation(kPtr + vecOff, cosVec, sinVec, halfDim, lowerSnapshot);
-                }
-            }
-        }
-    }
-
-    /// <summary>Non-interleaved rotation: pairs are <c>(i, i + halfDim)</c>. Computes <c>out[i] = x[i]*cos[i] - x[i+halfDim]*sin[i]</c> for <c>i &lt; halfDim</c> and <c>out[i] = x[i]*cos[i] + x[i-halfDim]*sin[i]</c> for <c>i &gt;= halfDim</c>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    /// <summary>GPU-resident equivalent of <see cref="ApplyRotaryEmb"/>: slices the packed
-    /// <c>[B, S, 2·headDim]</c> freqs into <c>cos = freqs[..., :headDim]</c> / <c>sin = freqs[..., headDim:]</c>
-    /// and applies the same rotate_half rotation via <see cref="IBackend.ApplyRope"/> — that op computes
-    /// <c>x·cos + rotate_half(x)·sin</c> with <c>rotate_half(x)=cat(-x[half:], x[:half])</c>, which is
-    /// algebraically identical to <see cref="ApplyNonInterleavedRotation"/>. Keeps Q/K device-resident (no
-    /// per-block D2H/H2D). q/k are <c>[B, S, numHeads, headDim]</c> (pre-permute), modified in place.</summary>
+    /// <summary>Applies the non-interleaved Megatron-style rotation to Q/K on-device: slices the packed
+    /// <c>[B, S, 2·headDim]</c> freqs (from <see cref="BuildFreqs"/>) into <c>cos = freqs[..., :headDim]</c> /
+    /// <c>sin = freqs[..., headDim:]</c> and applies <c>x·cos + rotate_half(x)·sin</c> with
+    /// <c>rotate_half(x)=cat(-x[half:], x[:half])</c> via <see cref="IBackend.ApplyRope"/>. Keeps Q/K
+    /// device-resident (no per-block D2H/H2D). q/k are <c>[B, S, numHeads, headDim]</c> (pre-permute,
+    /// matching <c>transformer_ernie_image.py</c>'s <c>unflatten(-1, (heads, -1))</c> layout), modified in place.</summary>
     public void ApplyRotaryEmbGpu(IBackend backend, Tensor q, Tensor k, Tensor freqs)
     {
         int batch = (int)q.Shape[0];
@@ -222,20 +170,5 @@ public sealed unsafe class ErnieImageRope
         backend.ApplyRope(q, k, cos, sin);
         cos.Dispose();
         sin.Dispose();
-    }
-
-    private static void ApplyNonInterleavedRotation(float* vec, float* cos, float* sin, int halfDim, Span<float> lowerSnapshot)
-    {
-        // Snapshot the lower half before overwriting — the upper-half write reads original lower-half values.
-        for (int i = 0; i < halfDim; i++)
-            lowerSnapshot[i] = vec[i];
-
-        for (int i = 0; i < halfDim; i++)
-        {
-            float lower = lowerSnapshot[i];
-            float upper = vec[i + halfDim];
-            vec[i] = lower * cos[i] - upper * sin[i];
-            vec[i + halfDim] = upper * cos[i + halfDim] + lower * sin[i + halfDim];
-        }
     }
 }

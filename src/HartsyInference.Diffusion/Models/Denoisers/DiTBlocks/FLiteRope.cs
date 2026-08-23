@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -15,7 +14,7 @@ public sealed unsafe class FLiteRope
     private readonly int _maxGrid;
     private readonly float[] _invFreq;
 
-    /// <summary>Total per-head dimension. RoPE operates on the full headDim; the half-split is internal to <see cref="ApplyRotation"/>.</summary>
+    /// <summary>Total per-head dimension. RoPE operates on the full headDim; the half-split is internal to the rotation.</summary>
     public int HeadDim => _headDim;
 
     /// <summary>Creates a FLiteRope with the given config. <paramref name="headDim"/> must be even (the half-split assumes 2-divisible).</summary>
@@ -36,9 +35,7 @@ public sealed unsafe class FLiteRope
         }
     }
 
-    /// <summary>Builds cos/sin tables for the given image patch grid plus register token padding. Output length = <c>numRegisterTokens + hPacked * wPacked</c>; output last-dim = <c>headDim/2</c> (the half each side of the split rotates against).
-    ///
-    /// <para>Returned tensors are F32 with shape <c>[1, 1, T, headDim/2]</c> — broadcast-ready against multi-head Q/K of shape <c>[B, H, T, headDim]</c> (the rotation reads cos/sin against the first <c>headDim/2</c> and last <c>headDim/2</c> halves separately).</para></summary>
+    /// <summary>Builds cos/sin tables for the given image patch grid plus register token padding. Output length = <c>numRegisterTokens + hPacked * wPacked</c>; output last-dim = <c>headDim/2</c> (the half each side of the split rotates against). Returned tensors are F32 with shape <c>[1, 1, T, headDim/2]</c> — broadcast-ready against multi-head Q/K of shape <c>[B, H, T, headDim]</c> (the rotation reads cos/sin against the first <c>headDim/2</c> and last <c>headDim/2</c> halves separately).</summary>
     public (Tensor cos, Tensor sin) Build(int hPacked, int wPacked, int numRegisterTokens)
     {
         if (hPacked <= 0 || wPacked <= 0)
@@ -116,49 +113,5 @@ public sealed unsafe class FLiteRope
         cosHalf.Dispose();
         sinHalf.Dispose();
         return (cosFull, sinFull);
-    }
-
-    /// <summary>Applies the F-Lite half-rotation in place to a multi-head tensor of shape <c>[B, H, T, headDim]</c>. Reads cos/sin of shape <c>[1, 1, T, headDim/2]</c>. Caller is responsible for the matching head-major layout.</summary>
-    public void ApplyRotation(Tensor x, Tensor cos, Tensor sin, int batch, int numHeads, int seqLen)
-    {
-        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new ArgumentException("FLiteRope.ApplyRotation expects F32 tensors.");
-        if (x.Shape.Rank != 4 || x.Shape[3] != _headDim)
-            throw new ArgumentException($"x must be [B, H, T, {_headDim}] (head_dim={_headDim}); got {x.Shape}.");
-
-        int halfDim = _headDim / 2;
-        float* xPtr = (float*)x.DataPointer;
-        float* cosPtr = (float*)cos.DataPointer;
-        float* sinPtr = (float*)sin.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < numHeads; h++)
-            {
-                for (int t = 0; t < seqLen; t++)
-                {
-                    long baseIdx = ((long)b * numHeads + h) * seqLen * _headDim + (long)t * _headDim;
-                    long rotIdx = (long)t * halfDim;
-                    RotateOnePosition(xPtr + baseIdx, cosPtr + rotIdx, sinPtr + rotIdx, halfDim);
-                }
-            }
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void RotateOnePosition(float* x, float* cos, float* sin, int halfDim)
-    {
-        // y1 = x1 * cos + x2 * sin
-        // y2 = -x1 * sin + x2 * cos
-        // Compute into a stack temp because we'd otherwise overwrite x1 before reading it for y2.
-        for (int i = 0; i < halfDim; i++)
-        {
-            float x1 = x[i];
-            float x2 = x[halfDim + i];
-            float c = cos[i];
-            float s = sin[i];
-            x[i] = x1 * c + x2 * s;
-            x[halfDim + i] = -x1 * s + x2 * c;
-        }
     }
 }

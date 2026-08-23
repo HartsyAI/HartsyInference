@@ -61,8 +61,8 @@ public sealed unsafe class LanceMoTBlock
         _gateW = weights[$"{prefix}.mlp.gate_proj.weight"];
         _upW = weights[$"{prefix}.mlp.up_proj.weight"];
         _downW = weights[$"{prefix}.mlp.down_proj.weight"];
-        _inNorm = LoadF32(weights, $"{prefix}.input_layernorm.weight");
-        _postNorm = LoadF32(weights, $"{prefix}.post_attention_layernorm.weight");
+        _inNorm = TensorCasts.LoadF32(weights, $"{prefix}.input_layernorm.weight");
+        _postNorm = TensorCasts.LoadF32(weights, $"{prefix}.post_attention_layernorm.weight");
 
         // gen path
         _qWg = weights[$"{prefix}.self_attn.q_proj_moe_gen.weight"];
@@ -75,8 +75,8 @@ public sealed unsafe class LanceMoTBlock
         _gateWg = weights[$"{prefix}.mlp_moe_gen.gate_proj.weight"];
         _upWg = weights[$"{prefix}.mlp_moe_gen.up_proj.weight"];
         _downWg = weights[$"{prefix}.mlp_moe_gen.down_proj.weight"];
-        _inNormg = LoadF32(weights, $"{prefix}.input_layernorm_moe_gen.weight");
-        _postNormg = LoadF32(weights, $"{prefix}.post_attention_layernorm_moe_gen.weight");
+        _inNormg = TensorCasts.LoadF32(weights, $"{prefix}.input_layernorm_moe_gen.weight");
+        _postNormg = TensorCasts.LoadF32(weights, $"{prefix}.post_attention_layernorm_moe_gen.weight");
 
         if (_qkNorm)
         {
@@ -339,11 +339,5 @@ public sealed unsafe class LanceMoTBlock
         else
             backend.Concat(result, segs, 0);
         return result;
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

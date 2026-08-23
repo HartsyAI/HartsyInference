@@ -20,12 +20,12 @@ public sealed record AceStepPlannerOptions
     public int Seed { get; init; }
 }
 
-/// <summary>ACE-Step 5 Hz LM planner — a stock Qwen3 causal LM (vocab 217,204 = Qwen 151,936 + 65,535
-/// <c>&lt;|audio_code_N|&gt;</c> added tokens, id = 151,669 + N) that plans a song as FSQ audio codes.
+/// <summary>ACE-Step 5 Hz LM planner that plans a song as FSQ audio codes using a stock Qwen3 causal LM.</summary>
+/// <remarks>Vocab is 217,204 = Qwen 151,936 + 65,535 <c>&lt;|audio_code_N|&gt;</c> added tokens (id = 151,669 + N).
 /// Runs on the LLM lib's <see cref="GenericTransformer"/> (no bespoke transformer): phase 1 samples the
 /// <c>&lt;think&gt;…&lt;/think&gt;</c> CoT (no CFG), phase 2 samples exactly <c>duration·5</c> audio codes with
 /// logits masked to code ids (+EOS) and optional dual-KV-stream CFG, mirroring upstream
-/// <c>_generate_with_cfg_custom</c>. Codes then feed <c>AceStep15AudioDetokenizer</c> → 25 Hz lmHints.</summary>
+/// <c>_generate_with_cfg_custom</c>. Codes then feed <c>AceStep15AudioDetokenizer</c> → 25 Hz lmHints.</remarks>
 public sealed unsafe class AceStepLmPlanner : IDisposable
 {
     private const int ImStart = 151_644;
@@ -59,8 +59,7 @@ public sealed unsafe class AceStepLmPlanner : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights() => _lm.EnumerateWeights();
 
-    /// <summary>Plans <c>duration·5</c> FSQ audio codes for the caption/lyrics. Returns the codes and the CoT
-    /// text (empty when thinking is off).</summary>
+    /// <summary>Plans <c>duration·5</c> FSQ audio codes for the caption/lyrics; returns the codes and the CoT text (empty when thinking is off).</summary>
     public (int[] Codes, string Cot) Plan(IBackend backend, string caption, string lyrics, double durationSeconds,
         AceStepPlannerOptions opts, CancellationToken cancel = default)
     {

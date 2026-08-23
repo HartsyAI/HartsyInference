@@ -2,17 +2,10 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
-/// <summary>Classic Marching Cubes (Lorensen &amp; Cline / Paul Bourke tables): extracts a triangle
-/// <see cref="Mesh"/> from a <see cref="ScalarField3D"/> at a given iso level. Pure managed C# — mesh
-/// extraction is a post-decode step, not a GPU hot path. The reusable mesh extractor for every
-/// occupancy/SDF-producing 3D model (Hunyuan3D today; TripoSR/TRELLIS later).
-/// <para>Convention: a corner is "inside" when its value is <b>below</b> <c>isoLevel</c>. For an SDF
-/// pass <c>isoLevel = 0</c>; for an occupancy/logit field pass the model's threshold. Output winding is
-/// CCW for outward-facing normals when inside &lt; outside.</para></summary>
+/// <summary>Classic Marching Cubes (Lorensen &amp; Cline / Paul Bourke tables): extracts a triangle <see cref="Mesh"/> from a <see cref="ScalarField3D"/> at a given iso level, where a corner is "inside" when its value is <b>below</b> the iso level.</summary>
 public static class MarchingCubes
 {
-    /// <summary>Extracts a mesh from <paramref name="field"/> at <paramref name="isoLevel"/>. Vertices are
-    /// de-duplicated per shared cube edge within a Z-slab so the result is watertight (no cracks).</summary>
+    /// <summary>Extracts a mesh from <paramref name="field"/> at <paramref name="isoLevel"/>; vertices are de-duplicated per shared cube edge so the result is watertight.</summary>
     public static Mesh Extract(ScalarField3D field, float isoLevel = 0f)
     {
         ArgumentNullException.ThrowIfNull(field);
@@ -78,7 +71,6 @@ public static class MarchingCubes
         return new Mesh { Vertices = [.. verts], Indices = [.. tris] };
     }
 
-    /// <summary>Linearly interpolate the iso-crossing position on the edge between corners a and b.</summary>
     private static (float, float, float) InterpEdge(
         ScalarField3D f, int x, int y, int z,
         ReadOnlySpan<int> cox, ReadOnlySpan<int> coy, ReadOnlySpan<int> coz,
@@ -92,9 +84,7 @@ public static class MarchingCubes
         return (ax + t * (bx - ax), ay + t * (by - ay), az + t * (bz - az));
     }
 
-    /// <summary>Canonical key for the grid edge between two cube corners, independent of which cell
-    /// references it — so neighbouring cells share the vertex. Encodes the lower endpoint's grid coord
-    /// plus the edge axis.</summary>
+    /// <summary>Canonical key for the grid edge between two cube corners, independent of which cell references it, so neighbouring cells share the vertex.</summary>
     private static long EdgeKey(int x, int y, int z,
         ReadOnlySpan<int> cox, ReadOnlySpan<int> coy, ReadOnlySpan<int> coz,
         int a, int b, int nx, int ny)

@@ -3,11 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Pure-C# espeak-ng phonemizer: turns text into the IPA the espeak-trained TTS models (Piper, MeloTTS,
-/// Zonos, StyleTTS2) consume. It composes the ported pieces, splitting text into words, looking each up in the
-/// dictionary (falling back to the letter-to-sound rules), placing stress, and converting the resulting phonemes to
-/// IPA. This is the default <see cref="IPhonemizer"/> backend; it can be swapped for a native espeak binding behind the
-/// same interface. Full clause/number normalization is layered on later; this handles word-by-word phonemization.</summary>
+/// <summary>Pure-C# espeak-ng phonemizer: turns text into the IPA the espeak-trained TTS models (Piper, MeloTTS, Zonos, StyleTTS2) consume by composing the ported pieces — splitting text into words, dictionary lookup with letter-to-sound rule fallback, stress placement, then IPA conversion. The default <see cref="IPhonemizer"/> backend; handles word-by-word phonemization only, with full clause/number normalization layered on later.</summary>
 public sealed class EspeakPhonemizer : IPhonemizer
 {
     private readonly EspeakWordLookup _lookup;
@@ -36,9 +32,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         }
     }
 
-    /// <summary>Resolves the <c>espeak-ng-data</c> directory from the <c>ESPEAK_DATA_DIR</c> environment variable, then
-    /// the shared model cache (<c>HARTSYINFERENCE_MODEL_CACHE</c> or <c>~/.cache/hartsyinference/models</c>), and
-    /// builds a phonemizer. Throws with guidance if the data cannot be found.</summary>
+    /// <summary>Resolves the <c>espeak-ng-data</c> directory from <c>ESPEAK_DATA_DIR</c>, then the shared model cache (<c>HARTSYINFERENCE_MODEL_CACHE</c> or <c>~/.cache/hartsyinference/models</c>), and builds a phonemizer; throws with guidance if the data cannot be found.</summary>
     public static EspeakPhonemizer FromCache(string language = "en")
     {
         foreach (string dir in CandidateDataDirs())
@@ -67,8 +61,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         yield return "/usr/share/espeak-ng-data";
     }
 
-    /// <summary>Builds a phonemizer for English from an <c>espeak-ng-data</c> directory containing <c>en_dict</c> and
-    /// <c>phontab</c>. Multi-language support loads the matching <c>&lt;lang&gt;_dict</c> and phoneme table.</summary>
+    /// <summary>Builds a phonemizer for English from an <c>espeak-ng-data</c> directory containing <c>en_dict</c> and <c>phontab</c>; multi-language support loads the matching <c>&lt;lang&gt;_dict</c> and phoneme table.</summary>
     public static EspeakPhonemizer FromDataDirectory(string dataDir, string language = "en")
     {
         try
@@ -114,17 +107,10 @@ public sealed class EspeakPhonemizer : IPhonemizer
         return string.Join(" ", words.Select(c => _ipa.ToIpa((List<byte>)c, _phon)));
     }
 
-    /// <summary>Sentence/clause punctuation that carries prosody (pauses, phrasing). Preserved verbatim in the
-    /// phoneme stream when <c>preservePunctuation</c> is set — TTS front-ends like StyleTTS2 encode these as their
-    /// own tokens and rely on them for phrasing. Mirrors espeak-ng's <c>preserve_punctuation</c> behaviour.</summary>
+    /// <summary>Sentence/clause punctuation that carries prosody (pauses, phrasing), preserved verbatim in the phoneme stream when <c>preservePunctuation</c> is set — TTS front-ends like StyleTTS2 encode these as their own tokens and rely on them for phrasing. Mirrors espeak-ng's <c>preserve_punctuation</c> behaviour.</summary>
     private const string ProsodyPunctuation = ".,!?;:…";
 
-    /// <summary>As <see cref="PhonemizeToIpa(string,string)"/>, but when <paramref name="preservePunctuation"/> is
-    /// set, sentence/clause punctuation (<see cref="ProsodyPunctuation"/>) is kept as standalone, space-delimited
-    /// tokens between clauses. Each maximal run of words up to a punctuation mark is phonemized as one clause (so
-    /// intra-clause stress/reduction is unchanged), then the punctuation is emitted verbatim. This matches the
-    /// reference <c>espeak(preserve_punctuation=True)</c> → word-tokenize pipeline that speech models were trained
-    /// on; without it the duration/prosody predictor sees a run-on utterance and slurs across phrase boundaries.</summary>
+    /// <summary>As <see cref="PhonemizeToIpa(string,string)"/>, but when <paramref name="preservePunctuation"/> is set, sentence/clause punctuation (<see cref="ProsodyPunctuation"/>) is kept as standalone, space-delimited tokens between clauses, each clause phonemized separately so intra-clause stress/reduction is unchanged; matches the reference <c>espeak(preserve_punctuation=True)</c> pipeline speech models were trained on — without it the duration/prosody predictor sees a run-on utterance and slurs across phrase boundaries.</summary>
     public string PhonemizeToIpa(string text, string language, bool preservePunctuation)
     {
         if (!preservePunctuation)

@@ -13,13 +13,13 @@ public sealed class DdimScheduler : IScheduler
     private int _numInferenceSteps;
     private float _eta;
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "ddim";
 
-    /// <summary>Number of inference steps configured.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
-    /// <summary>The computed timestep schedule.</summary>
+    /// <inheritdoc/>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
     /// <summary>Initial noise sigma (always 1.0 for DDIM).</summary>
@@ -107,20 +107,6 @@ public sealed class DdimScheduler : IScheduler
     }
 
     /// <summary>Adds noise to a clean sample (forward diffusion process).</summary>
-    public unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
-    {
-        int timestep = (int)_timesteps[stepIndex];
-        float sqrtAlphaCumprod = MathF.Sqrt(_alphasCumprod[timestep]);
-        float sqrtOneMinusAlphaCumprod = MathF.Sqrt(1.0f - _alphasCumprod[timestep]);
-
-        float* samplePtr = (float*)sample.DataPointer;
-        float* noisePtr = (float*)noise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)sample.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = sqrtAlphaCumprod * samplePtr[i] + sqrtOneMinusAlphaCumprod * noisePtr[i];
-        }
-    }
+    public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
+        => NoiseSchedule.AddNoise(output, sample, noise, _timesteps, _alphasCumprod, stepIndex);
 }

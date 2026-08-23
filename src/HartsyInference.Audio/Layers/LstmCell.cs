@@ -111,23 +111,15 @@ internal static unsafe class LstmOps
             int outRow = b * hidden;
             for (int k = 0; k < hidden; k++)
             {
-                float iGate = SigmoidS(g[gateRow + k]);
-                float fGate = SigmoidS(g[gateRow + hidden + k]);
+                float iGate = Activations.SigmoidS(g[gateRow + k]);
+                float fGate = Activations.SigmoidS(g[gateRow + hidden + k]);
                 float gGate = MathF.Tanh(g[gateRow + 2 * hidden + k]);
-                float oGate = SigmoidS(g[gateRow + 3 * hidden + k]);
+                float oGate = Activations.SigmoidS(g[gateRow + 3 * hidden + k]);
 
                 float cNext = fGate * c0[outRow + k] + iGate * gGate;
                 cOut[outRow + k] = cNext;
                 hOut[outRow + k] = oGate * MathF.Tanh(cNext);
             }
         }
-    }
-
-    private static float SigmoidS(float x)
-    {
-        // Sign-aware to avoid Inf in exp.
-        if (x >= 0f) return 1f / (1f + MathF.Exp(-x));
-        float ex = MathF.Exp(x);
-        return ex / (1f + ex);
     }
 }

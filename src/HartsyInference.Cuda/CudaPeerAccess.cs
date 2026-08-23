@@ -3,10 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Probe/enable memo for CUDA peer (P2P/NVLink) access between device pairs. Enablement is per
-/// DIRECTED context pair and sticky for the contexts' lifetime, so each pair is probed once and remembered.
-/// <c>HARTSY_P2P_DISABLE=1</c> forces every query to false — the deterministic consumer-path test switch (and
-/// escape hatch for the flaky-P2P boards the design doc warns about).</summary>
+/// <summary>Probe/enable memo for CUDA peer (P2P/NVLink) access between device pairs. Enablement is per DIRECTED context pair and sticky for the contexts' lifetime, so each pair is probed once and remembered. <c>HARTSY_P2P_DISABLE=1</c> forces every query to false — the deterministic consumer-path test switch (and escape hatch for the flaky-P2P boards the design doc warns about).</summary>
 internal static class CudaPeerAccess
 {
     private static readonly bool _disabled = Environment.GetEnvironmentVariable("HARTSY_P2P_DISABLE") == "1";
@@ -17,9 +14,7 @@ internal static class CudaPeerAccess
     /// <summary>Memo keyed by (accessing ordinal, peer ordinal); value = enabled both probe and grant.</summary>
     private static readonly ConcurrentDictionary<(int, int), bool> _pairs = new();
 
-    /// <summary>True when <paramref name="accessor"/>'s context can directly address <paramref name="peer"/>'s
-    /// memory (probing and enabling on first ask). Binds <paramref name="accessor"/> current on this thread —
-    /// call from the accessing backend's op context only.</summary>
+    /// <summary>True when <paramref name="accessor"/>'s context can directly address <paramref name="peer"/>'s memory (probing and enabling on first ask). Binds <paramref name="accessor"/> current on this thread — call from the accessing backend's op context only.</summary>
     internal static bool TryEnable(CudaContext accessor, CudaContext peer)
     {
         if (_disabled || accessor.DeviceOrdinal == peer.DeviceOrdinal)

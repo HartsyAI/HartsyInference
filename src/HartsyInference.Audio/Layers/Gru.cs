@@ -43,12 +43,12 @@ internal sealed unsafe class Gru
         ValidateInput(x, batch, t);
         float* xPtr = (float*)x.DataPointer;
         Tensor stepIn = new(new TensorShape(batch, InputDim), DType.F32);
-        Tensor h = ZeroAllocate(batch, HiddenDim);
+        Tensor h = RnnOps.ZeroAllocate(batch, HiddenDim);
         try
         {
             for (int step = 0; step < t; step++)
             {
-                LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
+                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
                 Tensor hNew = _cell.Step(backend, stepIn, h, batch);
                 h.Dispose();
                 h = hNew;
@@ -73,12 +73,12 @@ internal sealed unsafe class Gru
         float* outPtr = (float*)output.DataPointer;
         float* xPtr = (float*)x.DataPointer;
         Tensor stepIn = new(new TensorShape(batch, InputDim), DType.F32);
-        Tensor h = ZeroAllocate(batch, HiddenDim);
+        Tensor h = RnnOps.ZeroAllocate(batch, HiddenDim);
         try
         {
             for (int step = 0; step < t; step++)
             {
-                LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
+                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
                 Tensor hNew = _cell.Step(backend, stepIn, h, batch);
                 h.Dispose();
                 h = hNew;
@@ -99,26 +99,6 @@ internal sealed unsafe class Gru
     {
         if (x.Shape.Rank != 3 || (int)x.Shape[0] != batch || (int)x.Shape[1] != t || (int)x.Shape[2] != InputDim)
             throw new ArgumentException($"Gru input must be [{batch}, {t}, {InputDim}], got {x.Shape}.", nameof(x));
-    }
-
-    private static Tensor ZeroAllocate(int batch, int dim)
-    {
-        Tensor t = new(new TensorShape(batch, dim), DType.F32);
-        long n = t.ElementCount;
-        float* p = (float*)t.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = 0f;
-        return t;
-    }
-
-    private static void LoadTimestep(float* xPtr, Tensor stepIn, int batch, int t, int dim, int step)
-    {
-        float* dp = (float*)stepIn.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int srcBase = (b * t + step) * dim;
-            int dstBase = b * dim;
-            for (int k = 0; k < dim; k++) dp[dstBase + k] = xPtr[srcBase + k];
-        }
     }
 
     private static void StoreTimestep(float* outPtr, Tensor h, int batch, int t, int hidden, int step)

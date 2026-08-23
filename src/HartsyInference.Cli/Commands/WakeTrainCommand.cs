@@ -8,8 +8,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Trains a new wake word from its text alone: the engine synthesizes the phrase across its own TTS
-/// voices, augments it, and fits the small head that sits on the frozen shared backbone.</summary>
+/// <summary>Trains a new wake word from its text alone by synthesizing it across the engine's own TTS voices and fitting a small head on the frozen shared backbone.</summary>
 public sealed class WakeTrainCommand : AsyncCommand<WakeTrainCommand.Settings>
 {
     /// <summary>Options for <c>hartsy wake train</c>.</summary>

@@ -7,8 +7,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native image-generation routes: a byte-for-byte pass-through of <see cref="ImageRequest"/> (LoRA/
-/// ControlNet/IP-Adapter/Refiner/img2img/inpaint/regional composition included) to <see cref="ImageResult"/>.</summary>
+/// <summary>Native image-generation routes: a byte-for-byte pass-through of <see cref="ImageRequest"/> (LoRA/ControlNet/IP-Adapter/Refiner/img2img/inpaint/regional composition included) to <see cref="ImageResult"/>.</summary>
 public static class ImageEndpoints
 {
     /// <summary>Maps <c>/v1/native/images</c> and its SSE step-preview variant.</summary>
@@ -44,9 +43,7 @@ public static class ImageEndpoints
         });
     }
 
-    /// <summary>Folds the envelope's base64 init image / mask conveniences into the native request. Returns the
-    /// request untouched when none are set, so a client that populates <c>request.img2img</c> with raw RGB24 directly
-    /// keeps working.</summary>
+    /// <summary>Folds the envelope's base64 init image / mask conveniences into the native request. Returns the request untouched when none are set, so a client that populates <c>request.img2img</c> with raw RGB24 directly keeps working.</summary>
     public static ImageRequest ApplyImageComposition(NativeImageRequest req)
     {
         ImageRequest request = req.Request;
@@ -77,8 +74,7 @@ public static class ImageEndpoints
         IProgress<StepPreview>? progress, CancellationToken ct) =>
         queue.EnqueueAsync(() => engine.Images.GenerateAsync(spec, request, progress, ct), ct);
 
-    /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no
-    /// codec of its own), and reports where it was saved.</summary>
+    /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no codec of its own), and reports where it was saved.</summary>
     internal static object ToResponse(ImageResult result, string? savedPath = null) => new
     {
         png = Convert.ToBase64String(PngEncoder.Encode(result.Rgb, result.Width, result.Height)),

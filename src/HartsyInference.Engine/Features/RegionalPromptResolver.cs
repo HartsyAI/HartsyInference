@@ -3,15 +3,10 @@ using HartsyInference.Diffusion.Prompting;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Translates <c>&lt;region:x,y,w,h,strength&gt;</c> / <c>&lt;object:…&gt;</c> prompt parts into a
-/// <see cref="RegionalPlan"/>: each part's fractional bbox becomes a pixel-space <see cref="RectMask"/> and its prompt is
-/// encoded via the supplied delegate, which the engine turns into a per-step attention bias. Returns null when the prompt
-/// carries no region/object parts, so callers keep the plain single-conditioning path byte-identical.</summary>
+/// <summary>Translates <c>&lt;region:x,y,w,h,strength&gt;</c> / <c>&lt;object:…&gt;</c> prompt parts into a <see cref="RegionalPlan"/>: each part's fractional bbox becomes a pixel-space <see cref="RectMask"/> and its prompt is encoded via the supplied delegate, which the engine turns into a per-step attention bias. Returns null when the prompt carries no region/object parts, so callers keep the plain single-conditioning path byte-identical.</summary>
 public static class RegionalPromptResolver
 {
-    /// <summary>Builds the plan from the RAW (un-stripped) prompt, or null when it has no region/object parts.
-    /// <paramref name="encodeRegion"/> encodes one region's text into a <c>[1, L, featDim]</c> caption embedding using the
-    /// same encoder path as the global prompt; the caller owns disposal via <see cref="DisposeRegions"/>.</summary>
+    /// <summary>Builds the plan from the RAW (un-stripped) prompt, or null when it has no region/object parts. <paramref name="encodeRegion"/> encodes one region's text into a <c>[1, L, featDim]</c> caption embedding using the same encoder path as the global prompt; the caller owns disposal via <see cref="DisposeRegions"/>.</summary>
     public static RegionalPlan? Resolve(
         string? rawPrompt, Tensor baseCond, int width, int height, int steps,
         Func<string, Tensor> encodeRegion)

@@ -24,24 +24,13 @@ public sealed record SamplingOptions
     /// <summary>When true, always selects the argmax token and ignores every other setting.</summary>
     public bool Greedy { get; init; } = false;
 
-    /// <summary>When true, every generated token is masked so only syntactically-valid JSON can be produced
-    /// (see <see cref="JsonGrammarStep"/>) — a hard structural constraint, not a probability-shaping setting,
-    /// so unlike <see cref="Temperature"/>/<see cref="TopK"/>/etc. it still applies even when
-    /// <see cref="Greedy"/> is true (matches how <see cref="RepetitionPenalty"/> already behaves under
-    /// greedy — see <see cref="SamplerChain.Next"/>'s doc comment).</summary>
+    /// <summary>When true, every generated token is masked so only syntactically-valid JSON can be produced (see <see cref="JsonGrammarStep"/>) — a hard structural constraint that still applies even when <see cref="Greedy"/> is true, unlike <see cref="Temperature"/>/<see cref="TopK"/>/etc.</summary>
     public bool JsonMode { get; init; } = false;
 
-    /// <summary>When set to a non-empty literal (e.g. <c>"&lt;tool_call&gt;"</c>), grammar masking
-    /// (see <see cref="SentinelJsonGrammarStep"/>) activates only for the span starting right after this text
-    /// is emitted, deactivating the instant that JSON value completes — everywhere else generation is
-    /// completely unconstrained plain text. Mutually exclusive with <see cref="JsonMode"/> in intent (that
-    /// one constrains the entire response from token 0); if both are set, <see cref="JsonMode"/> wins and
-    /// this is ignored, since a whole-response constraint already subsumes any narrower one.</summary>
+    /// <summary>When set to a non-empty literal (e.g. <c>"&lt;tool_call&gt;"</c>), grammar masking (see <see cref="SentinelJsonGrammarStep"/>) activates only for the span starting right after this text is emitted, deactivating once that JSON value completes; if <see cref="JsonMode"/> is also set, it wins and this is ignored.</summary>
     public string? JsonModeSentinel { get; init; } = null;
 
-    /// <summary>True if either JSON constraint is active — the single check call sites that need to gate an
-    /// incompatible fast path (CUDA-graph decode, speculative decode) on "some form of JSON masking is live"
-    /// should use.</summary>
+    /// <summary>True if either JSON constraint is active — the single check call sites use to gate an incompatible fast path (CUDA-graph decode, speculative decode) on "some form of JSON masking is live".</summary>
     public bool HasJsonConstraint => JsonMode || !string.IsNullOrEmpty(JsonModeSentinel);
 
     /// <summary>Default sampling options (all filters disabled, stochastic draw at temperature 1.0).</summary>

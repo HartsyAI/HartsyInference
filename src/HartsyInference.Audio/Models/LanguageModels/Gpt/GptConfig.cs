@@ -1,7 +1,6 @@
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
-/// <summary>Config for a <see cref="GptBackbone"/> — a vanilla GPT-2 pre-norm decoder. Width / depth /
-/// head count parameterize the shared body; token vocab + output heads are owned by each model.</summary>
+/// <summary>Config for a <see cref="GptBackbone"/> — width / depth / head count parameterize the shared body; token vocab and output heads are owned by each model.</summary>
 public sealed record GptConfig
 {
     public required int Hidden { get; init; }

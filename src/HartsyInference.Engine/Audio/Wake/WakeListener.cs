@@ -89,8 +89,7 @@ public sealed class WakeListener : IDisposable
         }
     }
 
-    /// <summary>Runs the satellite protocol over any duplex stream, so the same session handling serves both the
-    /// raw TCP listener and a WebSocket-tunnelled connection. The transport only has to deliver bytes in order.</summary>
+    /// <summary>Runs the satellite protocol over any duplex stream, so the same session handling serves both the raw TCP listener and a WebSocket-tunnelled connection. The transport only has to deliver bytes in order.</summary>
     public async Task ServeStreamAsync(Stream stream, string remote, CancellationToken cancel)
     {
         WakeSession? session = null;
@@ -173,8 +172,7 @@ public sealed class WakeListener : IDisposable
         }
     }
 
-    /// <summary>Constant-time comparison of the presented token against the configured one. No token configured
-    /// means the check is disabled, which is the LAN default.</summary>
+    /// <summary>Constant-time comparison of the presented token against the configured one. No token configured means the check is disabled, which is the LAN default.</summary>
     private bool IsTokenValid(string? presented)
     {
         if (string.IsNullOrEmpty(_options.AuthToken)) return true;

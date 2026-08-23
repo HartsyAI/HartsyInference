@@ -26,20 +26,17 @@ public sealed record WakeTrainingOptions
     /// <summary>TTS model used to synthesize positives.</summary>
     public string SpeechModel { get; init; } = "kokoro";
 
-    /// <summary>Voices to synthesize with. More voices is the single biggest quality lever, because the head
-    /// has to generalize past whoever it heard during training.</summary>
+    /// <summary>Voices to synthesize with. More voices is the single biggest quality lever, because the head has to generalize past whoever it heard during training.</summary>
     public IReadOnlyList<string> Voices { get; init; } =
         ["af_heart", "af_bella", "af_nicole", "am_michael", "am_adam", "bf_emma", "bm_george", "af_sarah"];
 
     /// <summary>Speaking rates applied to every voice.</summary>
     public IReadOnlyList<double> Speeds { get; init; } = [0.85, 1.0, 1.15];
 
-    /// <summary>Extra phrases synthesized as negatives. Phonetically close ones matter most — the failure that
-    /// annoys people is a wake word that fires on a similar-sounding phrase, not one that misses a stranger.</summary>
+    /// <summary>Extra phrases synthesized as negatives. Phonetically close ones matter most — the failure that annoys people is a wake word that fires on a similar-sounding phrase, not one that misses a stranger.</summary>
     public IReadOnlyList<string> NegativePhrases { get; init; } = [];
 
-    /// <summary>Directory of WAV files used as additional negatives — podcasts, TV, room ambience. This is the
-    /// most valuable input a user can supply: synthetic negatives cannot represent a real room.</summary>
+    /// <summary>Directory of WAV files used as additional negatives — podcasts, TV, room ambience. This is the most valuable input a user can supply: synthetic negatives cannot represent a real room.</summary>
     public string? NegativeAudioDirectory { get; init; }
 
     /// <summary>Training epochs over the assembled dataset.</summary>
@@ -65,9 +62,7 @@ public sealed record WakeTrainingResult
     public required float Recall { get; init; }
     public required float FalseAcceptRate { get; init; }
 
-    /// <summary>False accepts per hour of continuous audio, derived from the per-window rate at 12.5 scored
-    /// windows per second. This is the figure the field quotes (openWakeWord targets under 0.5/hour), and it
-    /// makes an inadequate negative set obvious in a way a small-looking percentage does not.</summary>
+    /// <summary>False accepts per hour of continuous audio, derived from the per-window rate at 12.5 scored windows per second. This is the figure the field quotes (openWakeWord targets under 0.5/hour), and it makes an inadequate negative set obvious in a way a small-looking percentage does not.</summary>
     public required float FalseAcceptsPerHour { get; init; }
     public required float SuggestedThreshold { get; init; }
     public required float FinalLoss { get; init; }
@@ -234,9 +229,7 @@ public sealed class WakeTrainingJob
         progress?.Report($"Loaded {count} negative recordings from {directory}");
     }
 
-    /// <summary>Runs clips through the real detection pipeline and collects the feature windows it scores.
-    /// <paramref name="augment"/> adds gain and noise variants, which is what stops the head from keying on the
-    /// TTS engine's recording conditions instead of the phrase.</summary>
+    /// <summary>Runs clips through the real detection pipeline and collects the feature windows it scores. <paramref name="augment"/> adds gain and noise variants, which is what stops the head from keying on the TTS engine's recording conditions instead of the phrase.</summary>
     private static List<float[]> ExtractFeatures(IBackend backend, WakeMelFrontend mel, SpeechEmbeddingModel embedding,
         IReadOnlyList<float[]> clips, bool augment)
     {
@@ -292,8 +285,7 @@ public sealed class WakeTrainingJob
         return (train, test);
     }
 
-    /// <summary>Picks the threshold with the best recall among those keeping held-out false accepts under 1%,
-    /// falling back to the fewest false accepts when nothing clears that bar.</summary>
+    /// <summary>Picks the threshold with the best recall among those keeping held-out false accepts under 1%, falling back to the fewest false accepts when nothing clears that bar.</summary>
     private static (float Threshold, float Recall, float FalseAccepts) ChooseThreshold(
         WakeHeadTrainer trainer, IReadOnlyList<float[]> positives, IReadOnlyList<float[]> negatives)
     {
@@ -347,8 +339,7 @@ public sealed class WakeTrainingJob
         return model;
     }
 
-    /// <summary>Decodes synthesized WAV bytes to 16 kHz mono at int16 scale, which is what the wake models
-    /// consume — feeding them normalized audio silently shifts every log-mel value.</summary>
+    /// <summary>Decodes synthesized WAV bytes to 16 kHz mono at int16 scale, which is what the wake models consume — feeding them normalized audio silently shifts every log-mel value.</summary>
     private static float[] DecodeToInt16Scaled(byte[] wav)
     {
         using MemoryStream ms = new(wav);

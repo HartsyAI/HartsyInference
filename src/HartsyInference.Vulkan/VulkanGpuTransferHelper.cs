@@ -1,3 +1,4 @@
+using HartsyInference.Core.MemoryManagement;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
 
@@ -14,14 +15,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private readonly Dictionary<Tensor, VulkanBuffer> _activationCache = new(ReferenceEqualityComparer.Instance);
     /// <summary>Per-weight, per-target-dtype cast cache — casts a preloaded weight to the GEMM dtype once instead of on every Linear.</summary>
     private readonly Dictionary<Tensor, Dictionary<string, VulkanBuffer>> _weightCastCache = new(ReferenceEqualityComparer.Instance);
-    /// <summary>Master kill-switch for weight dtype-cast caching (mirrors <c>CudaBackend.CacheWeightCasts</c>
-    /// exactly, exposed on <see cref="VulkanBackend.CacheWeightCasts"/>). Defaults from
-    /// <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>, settable afterward — a large FP8/quantized model
-    /// whose full dtype-cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw
-    /// weights needs this off (transient, recomputed-and-freed-per-call dequant) instead of caching every
-    /// layer's cast forever. Found via a real OOM running Krea2 (13 GB fp8) on Vulkan: with no way to
-    /// disable it, EVERY layer's F32-cast weight stayed resident permanently on top of the raw FP8
-    /// weights, exhausting VRAM partway through just the 4B-param text encoder. See TROUBLESHOOTING.md.</summary>
+    /// <summary>Master kill-switch for weight dtype-cast caching (mirrors <c>CudaBackend.CacheWeightCasts</c> exactly, exposed on <see cref="VulkanBackend.CacheWeightCasts"/>). Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>, settable afterward — a large FP8/quantized model whose full dtype-cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights needs this off (transient, recomputed-and-freed-per-call dequant) instead of caching every layer's cast forever. Found via a real OOM running Krea2 (13 GB fp8) on Vulkan: with no way to disable it, EVERY layer's F32-cast weight stayed resident permanently on top of the raw FP8 weights, exhausting VRAM partway through just the 4B-param text encoder. See TROUBLESHOOTING.md.</summary>
     public bool CacheWeightCasts { get; set; } =
         Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE") != "1";
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
@@ -39,9 +33,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private long _misses;
     private long _d2hSyncs;
 
-    /// <summary>Number of lazy D2H sync callbacks fired since the last <see cref="ResetSyncCount"/>. Each
-    /// one is a full GPU stall plus a device-to-host copy; a GPU-resident hot loop should fire none.
-    /// Mirrors <c>HartsyInference.Cuda.GpuTransferHelper.GetSyncCount</c>.</summary>
+    /// <summary>Number of lazy D2H sync callbacks fired since the last <see cref="ResetSyncCount"/>. Each one is a full GPU stall plus a device-to-host copy; a GPU-resident hot loop should fire none. Mirrors <c>HartsyInference.Cuda.GpuTransferHelper.GetSyncCount</c>.</summary>
     public long GetSyncCount() => _d2hSyncs;
 
     /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>
@@ -58,8 +50,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     public bool CapturingStepGraph { get; set; }
     private readonly List<VulkanBuffer> _stepGraphRetained = new();
 
-    /// <summary>Redirects a buffer that would normally be freed to the capture-lifetime retain list instead.
-    /// Returns true if the buffer was retained (caller must NOT free it); false if capture isn't active.</summary>
+    /// <summary>Redirects a buffer that would normally be freed to the capture-lifetime retain list instead. Returns true if the buffer was retained (caller must NOT free it); false if capture isn't active.</summary>
     private bool TryRetainForCapture(VulkanBuffer buffer)
     {
         if (!CapturingStepGraph) return false;
@@ -67,21 +58,14 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         return true;
     }
 
-    /// <summary>Frees every buffer retained during step-graph capture. Call after the graph itself is torn
-    /// down (StepGraphReset) — these buffers back the captured command buffer's baked-in descriptor bindings,
-    /// so freeing them while the graph could still be replayed would leave it referencing destroyed memory.</summary>
+    /// <summary>Frees every buffer retained during step-graph capture. Call after the graph itself is torn down (StepGraphReset) — these buffers back the captured command buffer's baked-in descriptor bindings, so freeing them while the graph could still be replayed would leave it referencing destroyed memory.</summary>
     public void ReleaseStepGraphRetained()
     {
         foreach (VulkanBuffer b in _stepGraphRetained) b.Dispose();
         _stepGraphRetained.Clear();
     }
 
-    /// <summary>Buffers currently redirected to the capture-lifetime retain list, and their total size —
-    /// diagnostic only (see <see cref="DiagnosticsSummary"/>). Every buffer disposed DURING a step-graph
-    /// capture window stays alive here for the graph's whole lifetime (the captured command buffer bakes
-    /// its address into descriptor bindings), so capture has a fundamentally higher peak-VRAM requirement
-    /// than eager execution: it must hold every intermediate activation touched by the ENTIRE recorded
-    /// forward pass alive simultaneously, not free-and-reuse block-by-block the way eager mode does.</summary>
+    /// <summary>Buffers currently redirected to the capture-lifetime retain list, and their total size — diagnostic only (see <see cref="DiagnosticsSummary"/>). Every buffer disposed DURING a step-graph capture window stays alive here for the graph's whole lifetime (the captured command buffer bakes its address into descriptor bindings), so capture has a fundamentally higher peak-VRAM requirement than eager execution: it must hold every intermediate activation touched by the ENTIRE recorded forward pass alive simultaneously, not free-and-reuse block-by-block the way eager mode does.</summary>
     public (int count, long bytes) StepGraphRetainedStats()
     {
         long bytes = 0;
@@ -89,10 +73,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         return (_stepGraphRetained.Count, bytes);
     }
 
-    /// <summary>Full per-cache byte/count breakdown, computed directly from each dictionary rather than the
-    /// running <see cref="_cachedBytes"/> counter (which historically only tracked weight/weight-cast
-    /// bytes, not activation-cache bytes — see the OOM investigation this was built for in
-    /// docs/Checklists/TROUBLESHOOTING.md). Diagnostic only, not on any hot path.</summary>
+    /// <summary>Full per-cache byte/count breakdown, computed directly from each dictionary rather than the running <see cref="_cachedBytes"/> counter (which historically only tracked weight/weight-cast bytes, not activation-cache bytes — see the OOM investigation this was built for in docs/Checklists/TROUBLESHOOTING.md). Diagnostic only, not on any hot path.</summary>
     public string DiagnosticsSummary()
     {
         long weightBytes = 0; foreach (VulkanBuffer b in _weightCache.Values) weightBytes += (long)b.Size;
@@ -102,11 +83,10 @@ public sealed class VulkanGpuTransferHelper : IDisposable
             foreach (VulkanBuffer b in inner.Values) { castBytes += (long)b.Size; castCount++; }
         (int retainedCount, long retainedBytes) = StepGraphRetainedStats();
 
-        static string Mb(long bytes) => $"{bytes / (1024.0 * 1024):F1} MB";
-        return $"  weight cache: {_weightCache.Count} tensors, {Mb(weightBytes)}\n" +
-               $"  activation cache: {_activationCache.Count} tensors, {Mb(activationBytes)}\n" +
-               $"  weight-cast cache: {castCount} casts, {Mb(castBytes)}\n" +
-               $"  step-graph-retained: {retainedCount} buffers, {Mb(retainedBytes)} (capturing={CapturingStepGraph})\n" +
+        return $"  weight cache: {_weightCache.Count} tensors, {ByteFormat.MbF1(weightBytes)}\n" +
+               $"  activation cache: {_activationCache.Count} tensors, {ByteFormat.MbF1(activationBytes)}\n" +
+               $"  weight-cast cache: {castCount} casts, {ByteFormat.MbF1(castBytes)}\n" +
+               $"  step-graph-retained: {retainedCount} buffers, {ByteFormat.MbF1(retainedBytes)} (capturing={CapturingStepGraph})\n" +
                $"  transient (in-flight, uncached) buffers: {_transientBuffers.Count}";
     }
 
@@ -124,10 +104,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         _stream = stream;
     }
 
-    /// <summary>Peeks the weight/activation caches WITHOUT uploading on a miss — unlike
-    /// <see cref="CopyToDevice"/>, does not touch <c>DataPointer</c> or allocate anything. Lets a caller
-    /// (e.g. <see cref="VulkanBackend.CopyTo"/>) take a device-to-device fast path only when the source
-    /// is ALREADY GPU-resident, instead of always forcing one.</summary>
+    /// <summary>Peeks the weight/activation caches WITHOUT uploading on a miss — unlike <see cref="CopyToDevice"/>, does not touch <c>DataPointer</c> or allocate anything. Lets a caller (e.g. <see cref="VulkanBackend.CopyTo"/>) take a device-to-device fast path only when the source is ALREADY GPU-resident, instead of always forcing one.</summary>
     public bool TryGetCached(Tensor tensor, out VulkanBuffer? buffer)
     {
         if (_weightCache.TryGetValue(tensor, out buffer)) return true;
@@ -167,9 +144,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         return dst;
     }
 
-    /// <summary>Schedules every non-cached upload buffer for deferred-free. Called by the backend
-    /// during periodic flushes — by then every dispatch that referenced these buffers has been
-    /// recorded into the active command buffer, so tagging at _value+1 is safe.</summary>
+    /// <summary>Schedules every non-cached upload buffer for deferred-free. Called by the backend during periodic flushes — by then every dispatch that referenced these buffers has been recorded into the active command buffer, so tagging at _value+1 is safe.</summary>
     public void DrainTransients()
     {
         foreach (VulkanBuffer t in _transientBuffers)
@@ -181,10 +156,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         _transientBuffers.Clear();
     }
 
-    /// <summary>Allocates a device-local buffer for an op output / temporary. When ReBAR is
-    /// available we *prefer* a memory type that is also HOST_VISIBLE so the uploader can write
-    /// directly via mapped memory and skip staging — saving an entire staging copy + freeing the
-    /// host-visible heap (which is much smaller than VRAM on most discrete GPUs).</summary>
+    /// <summary>Allocates a device-local buffer for an op output / temporary. When ReBAR is available we *prefer* a memory type that is also HOST_VISIBLE so the uploader can write directly via mapped memory and skip staging — saving an entire staging copy + freeing the host-visible heap (which is much smaller than VRAM on most discrete GPUs).</summary>
     public VulkanBuffer AllocateDevice(ulong byteSize)
     {
         VkMemoryPropertyFlags preferred = _caps.HasReBar
@@ -378,9 +350,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private static ulong AlignUp(ulong v, ulong a) => (v + a - 1) & ~(a - 1);
     private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
-    /// <summary>True when <paramref name="weight"/> is a preloaded weight whose dtype-cast result is worth
-    /// caching (i.e. caching is enabled and the tensor lives in the permanent weight cache). Activations
-    /// are never cached this way — they change every step, so the key would never hit.</summary>
+    /// <summary>True when <paramref name="weight"/> is a preloaded weight whose dtype-cast result is worth caching (i.e. caching is enabled and the tensor lives in the permanent weight cache). Activations are never cached this way — they change every step, so the key would never hit.</summary>
     public bool ShouldCacheCast(Tensor weight) => CacheWeightCasts && _weightCache.ContainsKey(weight);
 
     /// <summary>Returns a previously-cached dtype-cast of <paramref name="weight"/> for <paramref name="want"/>, if present.</summary>

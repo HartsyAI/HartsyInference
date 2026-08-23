@@ -16,7 +16,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
 
-    // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see LoadSplitQkv.
+    // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see ZImageBlock.SplitQkv.
     private Tensor? _toQWeight, _toKWeight, _toVWeight;
     private Tensor? _attnOutWeight;
 
@@ -44,17 +44,17 @@ public sealed unsafe class ZImageContextRefinerBlock
     /// <summary>Loads weights using Z-Image's Lumina-style naming under the given prefix (e.g., "context_refiner.0").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
+        (_toQWeight, _toKWeight, _toVWeight) = ZImageBlock.SplitQkv(weights[$"{prefix}.attention.qkv.weight"], _hiddenSize);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
 
         // RMSNorm scales must be F32 (CudaBackend.RmsNorm reads weight as float* directly).
-        _attnNorm1Weight = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2Weight = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1Weight = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2Weight = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
@@ -176,33 +176,6 @@ public sealed unsafe class ZImageContextRefinerBlock
         postFfnNorm.Dispose();
 
         return result;
-    }
-
-    /// <summary>Splits the fused <c>attention.qkv.weight</c> [3H, H] into contiguous Q/K/V weights [H, H], sharing
-    /// the per-tensor scalar fp8 scale. See <c>ZImageBlock.LoadSplitQkv</c>.</summary>
-    private void LoadSplitQkv(Tensor qkv)
-    {
-        int h = _hiddenSize;
-        if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
-            throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
-
-        long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
-        TensorShape splitShape = new TensorShape(h, h);
-
-        _toQWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toKWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        _toVWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-
-        byte* src = (byte*)qkv.DataPointer;
-        Buffer.MemoryCopy(src, (void*)_toQWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)_toKWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)_toVWeight.DataPointer, chunkBytes, chunkBytes);
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)

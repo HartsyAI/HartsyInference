@@ -99,7 +99,7 @@ public sealed unsafe class Nvfp4Linear : IDisposable
             throw new InvalidOperationException($"Linear '{prefix}.weight' must be rank-2; got {weight.Shape}.");
 
         Tensor? preQuantScale = weights.TryGetValue($"{prefix}.pre_quant_scale", out Tensor? pqs)
-            ? EnsureF32(pqs)
+            ? TensorCasts.EnsureF32(pqs)
             : null;
 
         if (weight.DType != DType.U8)
@@ -262,15 +262,11 @@ public sealed unsafe class Nvfp4Linear : IDisposable
                 if (k % bytesPerGroup == 0)
                     scale = e4m3[bs[BlockScaleSwizzle.SwizzledIndex(r, k / bytesPerGroup, paddedCols)]] * scaleFactor * global;
                 byte packed = wr[k];
-                dr[2 * k] = ToBf16(lut[(packed >> 4) & 0x0F] * scale);   // high nibble = even element
-                dr[2 * k + 1] = ToBf16(lut[packed & 0x0F] * scale);      // low nibble = odd element
+                dr[2 * k] = TensorCasts.F32ToBf16Bits(lut[(packed >> 4) & 0x0F] * scale);   // high nibble = even element
+                dr[2 * k + 1] = TensorCasts.F32ToBf16Bits(lut[packed & 0x0F] * scale);      // low nibble = odd element
             }
         });
     }
-
-    /// <summary>Truncating F32→BF16, matching <see cref="Tensor.CastTo"/> bit for bit.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ushort ToBf16(float value) => (ushort)(BitConverter.SingleToUInt32Bits(value) >> 16);
 
     private static float[] BuildE4M3Decode()
     {
@@ -280,8 +276,6 @@ public sealed unsafe class Nvfp4Linear : IDisposable
         using Tensor decoded = bytes.CastTo(DType.F32);
         return decoded.AsReadOnlySpan<float>().ToArray();
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private static void ValidatePreQuantScale(Tensor? preQuantScale, string prefix, int inFeatures)
     {

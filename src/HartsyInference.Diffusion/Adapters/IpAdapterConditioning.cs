@@ -2,22 +2,18 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>One IP-Adapter's contribution to a generation: the loaded adapter (per-cross-attn-layer K_ip / V_ip), the projected image-prompt tokens (computed once per generation outside the denoise loop, possibly averaged across multiple reference images), a strength multiplier, weight-type semantics, and a step-fraction window during which the adapter is active.
-///
-/// <para>The pipeline consumes this record once per generation and builds a per-step, per-cross-attention-layer scale array based on:
+/// <summary>One IP-Adapter's contribution to a generation: the loaded adapter (per-cross-attn-layer K_ip / V_ip), the projected image-prompt tokens (computed once per generation outside the denoise loop, possibly averaged across multiple reference images), a strength multiplier, weight-type semantics, and a step-fraction window during which the adapter is active. The pipeline consumes this record once per generation and builds a per-step, per-cross-attention-layer scale array based on:
 /// <list type="bullet">
 ///   <item><see cref="Scale"/> as the base multiplier.</item>
 ///   <item><see cref="WeightType"/> selecting a per-cross-attn-layer weighting profile ("standard" = uniform, "prompt is more important" = ramp down toward decoder, "style transfer" = only style-relevant blocks). All values are heuristics — Cubiq's IPAdapterPlus distinguishes 15+ weight schedules; we map Swarm's 3-option dropdown to documented approximations.</item>
 ///   <item><see cref="StartFraction"/> / <see cref="EndFraction"/> — the adapter contributes nothing for steps outside <c>[start, end]</c> of the schedule (multiplies all layer scales by 0 in that range). Lets the user use IPA only at the beginning (composition phase) or only at the end (style refinement phase).</item>
-/// </list></para>
-///
-/// <para>Caller is responsible for:
+/// </list>
+/// Caller is responsible for:
 /// <list type="bullet">
 ///   <item>Encoding the reference image(s) through CLIP-Vision into the right form (CLS-projected for standard, penultimate hidden states for Plus). For multi-image input, average the projected tokens (or the raw vision outputs) into one set of <see cref="ImageTokens"/> — diffusers does this; multi-image IPA is single-conditioning-with-averaged-tokens, not per-image-stacking.</item>
 ///   <item>Running <see cref="IpAdapter.ProjectImage"/> on that to produce <see cref="ImageTokens"/>.</item>
 ///   <item>Disposing the returned tokens after the generation completes.</item>
-/// </list></para>
-/// </summary>
+/// </list></summary>
 public sealed record IpAdapterConditioning
 {
     /// <summary>The loaded IP-Adapter (already weights-loaded; pipelines borrow its per-layer K_ip/V_ip during the denoise loop).</summary>

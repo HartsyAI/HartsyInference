@@ -2,9 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>VibeVoice-specific DPM-Solver multistep scheduler. Ports the subset of
-/// <c>vibevoice/schedule/dpm_solver.py::DPMSolverMultistepScheduler</c> needed at
-/// inference: 1000-step Nichol-Dhariwal cosine beta schedule, v-prediction model output,
+/// <summary>VibeVoice-specific DPM-Solver multistep scheduler, porting the subset of <c>vibevoice/schedule/dpm_solver.py::DPMSolverMultistepScheduler</c> needed at inference.</summary>
+/// <remarks>1000-step Nichol-Dhariwal cosine beta schedule, v-prediction model output,
 /// DPM-Solver++ second-order multistep, 20 inference steps.
 ///
 /// <para>Lives inside <c>HartsyInference.Audio</c> so the audio package stays self-contained
@@ -21,7 +20,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 ///       v_pred = predictionHead(speech, t, condition)          // v-prediction in two streams (CFG)
 ///       speech = scheduler.Step(v_pred, t, speech, idx)
 ///   return speech
-/// </code></para></summary>
+/// </code></para></remarks>
 public sealed class VibeVoiceCosineDpmSolver : IDisposable
 {
     private const int NumTrainTimesteps = 1_000;
@@ -81,10 +80,8 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         }
     }
 
-    /// <summary>Selects <paramref name="num"/> inference timesteps from the 1000-step
-    /// training schedule. Matches HF <c>timestep_spacing="linspace"</c>:
-    /// <c>linspace(0, T-1, num+1).round()[::-1][:-1]</c> — the t=0 endpoint is NOT a model
-    /// eval; the final integration to t=0 happens via the zero final sigma in <see cref="Step"/>.</summary>
+    /// <summary>Selects <paramref name="num"/> inference timesteps from the 1000-step training schedule, matching HF <c>timestep_spacing="linspace"</c>: <c>linspace(0, T-1, num+1).round()[::-1][:-1]</c>.</summary>
+    /// <remarks>The t=0 endpoint is NOT a model eval; the final integration to t=0 happens via the zero final sigma in <see cref="Step"/>.</remarks>
     public void SetTimesteps(int num)
     {
         if (num <= 0) throw new ArgumentOutOfRangeException(nameof(num));
@@ -98,12 +95,10 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         _prevStepIndex = -1;
     }
 
-    /// <summary>Performs one DPM-Solver++ step. <paramref name="vPred"/> is the v-prediction
-    /// model output for the current step. <paramref name="sample"/> is the current latent.
-    /// Returns the next-step latent (a fresh tensor; caller owns disposal).
-    ///
-    /// <para>Implements the second-order multistep update. The first step (and any step
-    /// after a reset) falls back to a single-step first-order update.</para></summary>
+    /// <summary>Performs one DPM-Solver++ second-order multistep step; the first step (and any step after a reset) falls back to a single-step first-order update.</summary>
+    /// <param name="vPred">The v-prediction model output for the current step.</param>
+    /// <param name="sample">The current latent.</param>
+    /// <returns>The next-step latent (a fresh tensor; caller owns disposal).</returns>
     public unsafe Tensor Step(Tensor vPred, Tensor sample, int stepIndex)
     {
         if (vPred.Shape != sample.Shape)
@@ -165,8 +160,7 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         return c * c;
     }
 
-    /// <summary>Interpolates alpha and sigma at a fractional timestep. Linear interp between
-    /// neighbouring integer training-step values matches HF behavior.</summary>
+    /// <summary>Interpolates alpha and sigma at a fractional timestep; linear interp between neighbouring integer training-step values matches HF behavior.</summary>
     private (float Alpha, float Sigma) InterpolateAlphaSigma(float t)
     {
         if (t <= 0f) return (1f, 0f);     // perfectly clean at t=0
@@ -206,12 +200,12 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         return output;
     }
 
-    /// <summary>Second-order DPM-Solver++ multistep step. Adds a finite-difference correction
-    /// using the previous x0 prediction:
+    /// <summary>Second-order DPM-Solver++ multistep step; adds a finite-difference correction using the previous x0 prediction.</summary>
+    /// <remarks>
     /// <code>
     ///   d1 = (x0 - x0_prev) / r0
     ///   x_next = (σ_next/σ) · x - α_next · (e^{-h} − 1) · x0 - 0.5 · α_next · (e^{-h} − 1) · d1
-    /// </code></summary>
+    /// </code></remarks>
     private static unsafe Tensor ApplySecondOrder(Tensor sample, Tensor x0, Tensor x0Prev,
         float sigmaNext, float sigma, float alphaNext, float h, float d1Coeff)
     {

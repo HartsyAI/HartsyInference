@@ -1,8 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Result of matching one dictionary rule against the input word, mirroring espeak-ng's <c>MatchRecord</c>.
-/// <see cref="PhonemesOffset"/> is an index into the dictionary rules data where the matched phoneme code bytes begin
-/// (read until a 0 terminator), or -1 for an empty match.</summary>
+/// <summary>Result of matching one dictionary rule against the input word, mirroring espeak-ng's <c>MatchRecord</c>; <see cref="PhonemesOffset"/> is an index into the dictionary rules data where the matched phoneme code bytes begin (read until a 0 terminator), or -1 for an empty match.</summary>
 internal struct EspeakMatchRecord
 {
     /// <summary>Score of this match; the highest-scoring rule in a group wins.</summary>

@@ -4,11 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 Flux DoubleStreamBlock (no RoPE), <b>GPU-resident</b>: all per-block glue (LayerNorm,
-/// modulation, fused-QKV split, head permute, QK-norm, joint concat/split, gated residual) routes through
-/// <see cref="IBackend"/> ops so the activation never leaves the device — no mid-forward <c>DataPointer</c> reads.
-/// Mirrors the verified <c>ChromaDoubleStreamBlock</c> minus RoPE, with a fused <c>{img,txt}_attn.qkv</c>.
-/// <b>Assumes B=1</b> (CFG runs as two batch-1 passes), matching the seq-dim split via <c>SliceRows</c>.</summary>
+/// <summary>Hunyuan3D-2 Flux DoubleStreamBlock (no RoPE), <b>GPU-resident</b> end to end via <see cref="IBackend"/> ops, <b>assuming B=1</b> since CFG runs as two batch-1 passes.</summary>
 internal sealed unsafe class Hunyuan3DDoubleBlock
 {
     private readonly int _width, _numHeads, _headDim, _mlpDim;
@@ -124,8 +120,7 @@ internal sealed unsafe class Hunyuan3DDoubleBlock
     private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => Hunyuan3DDit.F32(w[k]);
 }
 
-/// <summary>Hunyuan3D-2 Flux SingleStreamBlock (no RoPE), <b>GPU-resident</b>: parallel QKV+MLP via <c>linear1</c>,
-/// joint attention, then <c>linear2(cat(attn, gelu(mlp)))</c> gated residual. Mirrors hy3dgen <c>SingleStreamBlock</c>.</summary>
+/// <summary>Hunyuan3D-2 Flux SingleStreamBlock (no RoPE), <b>GPU-resident</b>: parallel QKV+MLP via <c>linear1</c>, joint attention, then <c>linear2(cat(attn, gelu(mlp)))</c> gated residual.</summary>
 internal sealed unsafe class Hunyuan3DSingleBlock
 {
     private readonly int _width, _numHeads, _headDim, _mlpDim;
@@ -188,12 +183,10 @@ internal sealed unsafe class Hunyuan3DSingleBlock
     private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => Hunyuan3DDit.F32(w[k]);
 }
 
-/// <summary>GPU-resident glue for the Hunyuan3D Flux DiT: modulation-param extraction and the
-/// <c>(1+scale)·LayerNormNoAffine(x)+shift</c> modulation, all via <see cref="IBackend"/> ops (no host reads).</summary>
+/// <summary>GPU-resident glue for the Hunyuan3D Flux DiT: modulation-param extraction and the <c>(1+scale)·LayerNormNoAffine(x)+shift</c> modulation, all via <see cref="IBackend"/> ops.</summary>
 internal static unsafe class Hunyuan3DGpuOps
 {
-    /// <summary>SiLU(vec) → Linear → [B, K·W], then <see cref="IBackend.SliceLastDim"/> into K params each [B,W]
-    /// (hy3dgen Modulation chunk order: shift, scale, gate [×2 for double]). All GPU-resident.</summary>
+    /// <summary>SiLU(vec) → Linear → [B, K·W], then <see cref="IBackend.SliceLastDim"/> into K params each [B,W] (hy3dgen Modulation chunk order: shift, scale, gate).</summary>
     public static Tensor[] ModParams(IBackend backend, Tensor vec, Tensor modW, Tensor modB, int k, int width)
     {
         int b = (int)vec.Shape[0];
@@ -205,9 +198,7 @@ internal static unsafe class Hunyuan3DGpuOps
         return p;
     }
 
-    /// <summary><c>(1 + scale)·LayerNormNoAffine(x, eps 1e-6) + shift</c>, scale/shift broadcast over seq ([B,W]).
-    /// Activation (normed/output) follows <paramref name="x"/>'s dtype (F16 on the DiT F16 path); the tiny
-    /// per-channel scale/shift stay F32 (the F16 kernels take F16 activation + F32 params).</summary>
+    /// <summary><c>(1 + scale)·LayerNormNoAffine(x, eps 1e-6) + shift</c>, where the output follows <paramref name="x"/>'s dtype but scale/shift stay F32 (the F16 kernels take F16 activation + F32 params).</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
         // Fused adaLN: (1+scale)·LayerNormNoAffine(x)+shift in one kernel (was LayerNormNoAffine + AddScalar + Affine).

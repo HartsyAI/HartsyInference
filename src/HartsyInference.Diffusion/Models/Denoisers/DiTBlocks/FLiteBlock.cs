@@ -64,9 +64,7 @@ public sealed unsafe class FLiteBlock
         if (_adaLNBias is not null) yield return _adaLNBias;
     }
 
-    /// <summary>Block forward. Inputs: <paramref name="x"/> [B, S, hidden] (image tokens including 16 register tokens); <paramref name="context"/> [B, S_ctx, cross_input] (T5); <paramref name="temb"/> [B, hidden] (timestep embedding); <paramref name="vPrev"/> [B, H, S, headDim] from block 0 or null for block 0; <paramref name="cosRope"/>/<paramref name="sinRope"/> [1, 1, S, headDim/2] precomputed RoPE tables.
-    ///
-    /// Returns (x_out, v) where v is the self-attn V (caller captures from block 0).</summary>
+    /// <summary>Block forward. Inputs: <paramref name="x"/> [B, S, hidden] (image tokens including 16 register tokens); <paramref name="context"/> [B, S_ctx, cross_input] (T5); <paramref name="temb"/> [B, hidden] (timestep embedding); <paramref name="vPrev"/> [B, H, S, headDim] from block 0 or null for block 0; <paramref name="cosRope"/>/<paramref name="sinRope"/> [1, 1, S, headDim/2] precomputed RoPE tables. Returns (x_out, v) where v is the self-attn V (caller captures from block 0).</summary>
     public (Tensor x, Tensor v) Forward(IBackend backend, Tensor x, Tensor context, Tensor temb,
         Tensor? vPrev, Tensor? cosRope, Tensor? sinRope)
     {

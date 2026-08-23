@@ -2,8 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>One ControlNet's contribution to a generation: the loaded adapter, the per-generation control image, and a strength multiplier. Pipelines accept a list of these so users can stack ControlNets (e.g. canny + depth simultaneously) without changing the call signature.
-/// <para>The <see cref="ConditionImage"/> dtype doesn't have to match the UNet — <see cref="ControlNet.Forward"/> casts internally if needed. Caller retains ownership of both the adapter and the image; pipelines only borrow them for the duration of the call.</para></summary>
+/// <summary>One ControlNet's contribution to a generation: the loaded adapter, the per-generation control image, and a strength multiplier. Pipelines accept a list of these so users can stack ControlNets (e.g. canny + depth simultaneously) without changing the call signature. The <see cref="ConditionImage"/> dtype doesn't have to match the UNet — <see cref="ControlNet.Forward"/> casts internally if needed. Caller retains ownership of both the adapter and the image; pipelines only borrow them for the duration of the call.</summary>
 public sealed record ControlNetConditioning
 {
     /// <summary>The loaded ControlNet adapter (already weights-loaded, ready to call <see cref="ControlNet.Forward"/>).</summary>

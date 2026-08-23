@@ -37,7 +37,7 @@ public sealed unsafe class QkNorm
     /// <summary>RMSNorm epsilon.</summary>
     public float Eps => _eps;
 
-    /// <summary>Applies per-head RMSNorm in-place. Data is treated as numVectors contiguous vectors of length headDim.</summary>
+    /// <summary>Applies per-head RMSNorm, writing into <paramref name="output"/>. Data is treated as numVectors contiguous vectors of length headDim.</summary>
     /// <param name="output">Output tensor, same size as input.</param>
     /// <param name="input">Input tensor laid out as [numVectors * headDim] contiguous floats.</param>
     /// <param name="numVectors">Total number of headDim-length vectors (= batch * seqLen * numHeads).</param>

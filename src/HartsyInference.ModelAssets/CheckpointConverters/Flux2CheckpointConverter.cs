@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -118,7 +119,7 @@ public sealed class Flux2CheckpointConverter
             // BFL stores [shift, scale] (rows 0..H = shift, H..2H = scale); the Flux.2 transformer's
             // final layer matches the diffusers convention [scale, shift]. Swap the halves to
             // align — same fix as Flux.1 deviation #23.
-            Tensor swapped = SwapScaleShiftHalves(tensor);
+            Tensor swapped = CheckpointConvertUtils.SwapScaleShiftHalves(tensor);
             output["norm_out.linear." + rest["adaLN_modulation.1.".Length..]] = swapped;
             return;
         }
@@ -166,12 +167,12 @@ public sealed class Flux2CheckpointConverter
     {
         if (rest == "qkv.weight")
         {
-            SplitQkvWeight(tensor, _hiddenSize, prefix, qName, kName, vName, output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, _hiddenSize, prefix, qName, kName, vName, output);
             return;
         }
         if (rest == "qkv.bias")
         {
-            SplitQkvBias(tensor, _hiddenSize, prefix, qName, kName, vName, output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, _hiddenSize, prefix, qName, kName, vName, output);
             return;
         }
         if (rest.StartsWith("proj.", StringComparison.Ordinal))
@@ -250,85 +251,6 @@ public sealed class Flux2CheckpointConverter
 
     // ── Static helpers ──
 
-    /// <summary>Byte count for a row-aligned slice of a fused tensor. GGUF block quants (Q4_K etc.) pack fixed-size blocks that never span rows, so any split along dim 0 is byte-exact as long as the row length is a whole number of blocks — which this validates.</summary>
-    private static long SliceByteCount(Tensor fused, long elementCount)
-    {
-        DType d = fused.DType;
-        if (d.IsQuantized && fused.Shape.Rank == 2 && fused.Shape[1] % d.BlockElementCount != 0)
-            throw new NotSupportedException(
-                $"Cannot split {d.Name} tensor with row length {fused.Shape[1]}: not a multiple of the {d.BlockElementCount}-element quant block.");
-        return d.ComputeByteCount(elementCount);
-    }
-
-    private static unsafe Tensor SwapScaleShiftHalves(Tensor input)
-    {
-        long firstDim = input.Shape[0];
-        if (firstDim % 2 != 0)
-            throw new InvalidOperationException(
-                $"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
-
-        long totalElements = input.ElementCount;
-        long halfBytes = SliceByteCount(input, totalElements / 2);
-
-        Tensor swapped = new Tensor(input.Shape, input.DType);
-        swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
-
-        byte* src = (byte*)input.DataPointer;
-        byte* dst = (byte*)swapped.DataPointer;
-        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
-        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
-        return swapped;
-    }
-
-    private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long chunkBytes = SliceByteCount(fused, (long)innerDim * inDim);
-        TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-        Tensor qWeight = new Tensor(splitShape, fused.DType);
-        Tensor kWeight = new Tensor(splitShape, fused.DType);
-        Tensor vWeight = new Tensor(splitShape, fused.DType);
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.weight"] = qWeight;
-        output[$"{prefix}.{kName}.weight"] = kWeight;
-        output[$"{prefix}.{vName}.weight"] = vWeight;
-    }
-
-    private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        long elemBytes = fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * elemBytes;
-        TensorShape splitShape = new TensorShape(innerDim);
-
-        Tensor qBias = new Tensor(splitShape, fused.DType);
-        Tensor kBias = new Tensor(splitShape, fused.DType);
-        Tensor vBias = new Tensor(splitShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.bias"] = qBias;
-        output[$"{prefix}.{kName}.bias"] = kBias;
-        output[$"{prefix}.{vName}.bias"] = vBias;
-    }
-
     /// <summary>Splits a SwiGLU <c>linear_in</c> weight or bias along dim 0 into <c>linear_in_gate</c> (first half, gate proj that gets <c>silu</c>) and <c>linear_in_up</c> (second half, up proj that multiplies the gated activation).</summary>
     private unsafe void SplitSwiGluLinearIn(Tensor fused, string prefix, string ffName,
         Dictionary<string, Tensor> output, bool hasBias)
@@ -338,7 +260,7 @@ public sealed class Flux2CheckpointConverter
             throw new InvalidOperationException(
                 $"SplitSwiGluLinearIn: expected first dim = 2 * mlp_inner ({2 * _mlpInner}), got {firstDim} for {prefix}.{ffName}");
         long totalElements = fused.ElementCount;
-        long halfBytes = SliceByteCount(fused, totalElements / 2);
+        long halfBytes = CheckpointConvertUtils.SliceByteCount(fused, totalElements / 2);
 
         TensorShape halfShape = hasBias
             ? new TensorShape(_mlpInner)
@@ -379,8 +301,8 @@ public sealed class Flux2CheckpointConverter
         up.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         byte* src = (byte*)fused.DataPointer;
-        long qkvChunkBytes = SliceByteCount(fused, (long)_hiddenSize * inDim);
-        long mlpChunkBytes = SliceByteCount(fused, (long)_mlpInner * inDim);
+        long qkvChunkBytes = CheckpointConvertUtils.SliceByteCount(fused, (long)_hiddenSize * inDim);
+        long mlpChunkBytes = CheckpointConvertUtils.SliceByteCount(fused, (long)_mlpInner * inDim);
 
         long offset = 0;
         Buffer.MemoryCopy(src + offset, (void*)q.DataPointer, qkvChunkBytes, qkvChunkBytes); offset += qkvChunkBytes;

@@ -2,12 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Onnx;
 
-/// <summary>Recovers the logical weight names that an ONNX export anonymized. When PyTorch's <c>weight_norm</c> (or a
-/// similar parametrization) is exported, the fused conv/matmul weight becomes an unnamed initializer
-/// (<c>onnx::Conv_8168</c>) feeding a node, while that node's bias keeps its module name
-/// (<c>flow.flows.6.enc.in_layers.0.bias</c>). This walks the graph and renames each anonymous weight to
-/// <c>&lt;module&gt;.weight</c>, derived from the sibling bias (preferred) or the node's path-encoding name, so a model
-/// loader can bind weights by their PyTorch names. Not model-specific — it fixes any weight-norm-fused export.</summary>
+/// <summary>Recovers the logical weight names that an ONNX export anonymized. When PyTorch's <c>weight_norm</c> (or a similar parametrization) is exported, the fused conv/matmul weight becomes an unnamed initializer (<c>onnx::Conv_8168</c>) feeding a node, while that node's bias keeps its module name (<c>flow.flows.6.enc.in_layers.0.bias</c>). This walks the graph and renames each anonymous weight to <c>&lt;module&gt;.weight</c>, derived from the sibling bias (preferred) or the node's path-encoding name, so a model loader can bind weights by their PyTorch names. Not model-specific — it fixes any weight-norm-fused export.</summary>
 public static class OnnxWeightNameResolver
 {
     private static readonly HashSet<string> WeightOps = new(StringComparer.Ordinal)
@@ -15,8 +10,7 @@ public static class OnnxWeightNameResolver
         "Conv", "ConvTranspose", "MatMul", "Gemm",
     };
 
-    /// <summary>Returns a copy of <paramref name="tensors"/> with anonymous weight initializers renamed to their
-    /// recovered module names. Tensors with no recoverable name keep their original key.</summary>
+    /// <summary>Returns a copy of <paramref name="tensors"/> with anonymous weight initializers renamed to their recovered module names. Tensors with no recoverable name keep their original key.</summary>
     public static Dictionary<string, Tensor> Resolve(OnnxModel model, IReadOnlyDictionary<string, Tensor> tensors)
     {
         Dictionary<string, string> rename = new(StringComparer.Ordinal);

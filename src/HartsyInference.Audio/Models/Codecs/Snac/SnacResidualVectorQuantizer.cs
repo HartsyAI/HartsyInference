@@ -4,9 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC's hierarchical residual VQ. Each codebook has its own
-/// <c>stride</c> — bigger stride = coarser temporal resolution.
-///
+/// <summary>SNAC's hierarchical residual VQ. Each codebook has its own <c>stride</c> — bigger stride = coarser temporal resolution.</summary>
+/// <remarks>
 /// <para>Per-codebook forward (encode):</para>
 /// <list type="number">
 ///   <item>If <c>stride &gt; 1</c>: <c>avg_pool1d</c> the residual to <c>T / stride</c> samples.</item>
@@ -19,7 +18,7 @@ namespace HartsyInference.Audio.Models.Codecs.Snac;
 ///
 /// <para>Codes for codebook <c>i</c> have shape <c>[batch, T / VqStrides[i]]</c> — that's
 /// why SNAC returns a list of variable-length code tensors rather than the rectangular
-/// <c>[nQ, B, T]</c> layout used by EnCodec / DAC.</para></summary>
+/// <c>[nQ, B, T]</c> layout used by EnCodec / DAC.</para></remarks>
 internal sealed unsafe class SnacResidualVectorQuantizer
 {
     public int NCodebooks { get; }
@@ -57,18 +56,16 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         for (int q = 0; q < NCodebooks; q++)
         {
             string p = $"{prefix}.quantizers.{q}";
-            _inProjW[q] = LoadFusedWeight(w, $"{p}.in_proj");
+            _inProjW[q] = WeightNormFusion.LoadFused(w, $"{p}.in_proj");
             _inProjB[q] = WhisperOps.EnsureF32(w[$"{p}.in_proj.bias"]);
-            _outProjW[q] = LoadFusedWeight(w, $"{p}.out_proj");
+            _outProjW[q] = WeightNormFusion.LoadFused(w, $"{p}.out_proj");
             _outProjB[q] = WhisperOps.EnsureF32(w[$"{p}.out_proj.bias"]);
             _codebooks[q] = WhisperOps.EnsureF32(w[$"{p}.codebook.weight"]);
-            _codebooksNorm[q] = L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
+            _codebooksNorm[q] = VqOps.L2NormalizeRows(_codebooks[q]!, CodebookSize, CodebookDim);
         }
     }
 
-    /// <summary>Encodes a latent. Output is a list of length <see cref="NCodebooks"/>;
-    /// entry <c>i</c> is shape <c>[batch, T / VqStrides[i]]</c> Int32. Caller owns
-    /// disposal of every returned tensor.</summary>
+    /// <summary>Encodes a latent. Output is a list of length <see cref="NCodebooks"/>; entry <c>i</c> is shape <c>[batch, T / VqStrides[i]]</c> Int32. Caller owns disposal of every returned tensor.</summary>
     public Tensor[] Encode(IBackend backend, Tensor latent, int batch, int t)
     {
         if (_inProjW[0] is null) throw new InvalidOperationException("SnacResidualVectorQuantizer weights not loaded.");
@@ -78,7 +75,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         Buffer.MemoryCopy((void*)latent.DataPointer, (void*)residual.DataPointer, bytes, bytes);
 
         Tensor[] result = new Tensor[NCodebooks];
-        Span<float> normalizedQuery = stackalloc float[CodebookDim];
 
         for (int q = 0; q < NCodebooks; q++)
         {
@@ -101,57 +97,13 @@ internal sealed unsafe class SnacResidualVectorQuantizer
             // Nearest-neighbor lookup.
             Tensor codes = new(new TensorShape(batch, tQuant), DType.I32);
             int* cp = (int*)codes.DataPointer;
-            float* pp = (float*)projected.DataPointer;
-            float* cbNorm = (float*)_codebooksNorm[q]!.DataPointer;
-
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    double sumSq = 0d;
-                    for (int d = 0; d < CodebookDim; d++)
-                    {
-                        float v = pp[(b * CodebookDim + d) * tQuant + ti];
-                        normalizedQuery[d] = v;
-                        sumSq += (double)v * v;
-                    }
-                    float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-                    for (int d = 0; d < CodebookDim; d++) normalizedQuery[d] *= invNorm;
-
-                    int bestIdx = 0;
-                    float bestDot = float.MinValue;
-                    for (int k = 0; k < CodebookSize; k++)
-                    {
-                        float dot = 0f;
-                        int rowBase = k * CodebookDim;
-                        for (int d = 0; d < CodebookDim; d++)
-                            dot += normalizedQuery[d] * cbNorm[rowBase + d];
-                        if (dot > bestDot)
-                        {
-                            bestDot = dot;
-                            bestIdx = k;
-                        }
-                    }
-                    cp[b * tQuant + ti] = bestIdx;
-                }
-            }
+            VqOps.NearestCodebookIndices((float*)projected.DataPointer, (float*)_codebooksNorm[q]!.DataPointer,
+                cp, batch, tQuant, CodebookDim, CodebookSize);
             projected.Dispose();
             result[q] = codes;
 
             // Reconstruct + out_proj + repeat-interleave + subtract from residual.
-            Tensor quantizedSmall = new(new TensorShape(batch, CodebookDim, tQuant), DType.F32);
-            float* qp = (float*)quantizedSmall.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    int idx = cp[b * tQuant + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * tQuant + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantizedSmall = VqOps.GatherCodebookVectors(_codebooks[q]!, cp, batch, tQuant, CodebookDim);
 
             Tensor reprojSmall = new(new TensorShape(batch, LatentDim, tQuant), DType.F32);
             backend.Conv1d(reprojSmall, quantizedSmall, _outProjW[q]!, _outProjB[q],
@@ -163,7 +115,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 
-            // residual -= reprojFull.
             float* rp = (float*)residual.DataPointer;
             float* xp = (float*)reprojFull.DataPointer;
             long n = residual.ElementCount;
@@ -175,10 +126,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return result;
     }
 
-    /// <summary>Decodes per-codebook codes back to a latent. <paramref name="codes"/>
-    /// must have length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T / VqStrides[i]]</c>.
-    /// Output is channels-first <c>[B, latent_dim, T]</c> where <c>T</c> is derived from
-    /// the largest code stream (codebook with stride=1).</summary>
+    /// <summary>Decodes per-codebook codes back to a latent. <paramref name="codes"/> must have length <see cref="NCodebooks"/>; entry <c>i</c> shape <c>[B, T / VqStrides[i]]</c>. Output is channels-first <c>[B, latent_dim, T]</c> where <c>T</c> is derived from the largest code stream (codebook with stride=1).</summary>
     public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> codes, int batch)
     {
         if (codes.Count != NCodebooks)
@@ -207,22 +155,8 @@ internal sealed unsafe class SnacResidualVectorQuantizer
             int tQuant = t / stride;
             int* cp = (int*)codes[q].DataPointer;
 
-            // Reconstruct codebook_dim quantized vector.
-            Tensor quantizedSmall = new(new TensorShape(batch, CodebookDim, tQuant), DType.F32);
-            float* qp = (float*)quantizedSmall.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int ti = 0; ti < tQuant; ti++)
-                {
-                    int idx = cp[b * tQuant + ti];
-                    int rowBase = idx * CodebookDim;
-                    for (int d = 0; d < CodebookDim; d++)
-                        qp[(b * CodebookDim + d) * tQuant + ti] = cb[rowBase + d];
-                }
-            }
+            Tensor quantizedSmall = VqOps.GatherCodebookVectors(_codebooks[q]!, cp, batch, tQuant, CodebookDim);
 
-            // out_proj.
             Tensor reprojSmall = new(new TensorShape(batch, LatentDim, tQuant), DType.F32);
             backend.Conv1d(reprojSmall, quantizedSmall, _outProjW[q]!, _outProjB[q],
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
@@ -233,7 +167,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 
-            // latent += reprojFull.
             float* xp = (float*)reprojFull.DataPointer;
             for (long i = 0; i < total; i++) lp[i] += xp[i];
             reprojFull.Dispose();
@@ -250,29 +183,6 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         }
     }
 
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
-    }
-
-    private static Tensor L2NormalizeRows(Tensor src, int rows, int dim)
-    {
-        Tensor result = new(src.Shape, DType.F32);
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)result.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            double sumSq = 0d;
-            int rowBase = r * dim;
-            for (int d = 0; d < dim; d++) sumSq += (double)sp[rowBase + d] * sp[rowBase + d];
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq + 1e-12));
-            for (int d = 0; d < dim; d++) dp[rowBase + d] = sp[rowBase + d] * invNorm;
-        }
-        return result;
-    }
-
     private static Tensor Clone(Tensor src)
     {
         Tensor copy = new(src.Shape, DType.F32);
@@ -281,8 +191,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return copy;
     }
 
-    /// <summary>1D average pool — non-overlapping windows of length <paramref name="stride"/>.
-    /// Input <c>[B, C, T]</c> → output <c>[B, C, T/stride]</c>.</summary>
+    /// <summary>1D average pool — non-overlapping windows of length <paramref name="stride"/>. Input <c>[B, C, T]</c> → output <c>[B, C, T/stride]</c>.</summary>
     private static Tensor AvgPool1d(Tensor src, int batch, int channels, int t, int stride)
     {
         int tOut = t / stride;
@@ -308,9 +217,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
         return result;
     }
 
-    /// <summary>Repeat-interleave along the time axis. Each element repeats
-    /// <paramref name="repeats"/> times — matches PyTorch's
-    /// <c>x.repeat_interleave(stride, dim=-1)</c>.</summary>
+    /// <summary>Repeat-interleave along the time axis. Each element repeats <paramref name="repeats"/> times — matches PyTorch's <c>x.repeat_interleave(stride, dim=-1)</c>.</summary>
     private static Tensor RepeatInterleave(Tensor src, int batch, int channels, int tIn, int repeats)
     {
         int tOut = tIn * repeats;

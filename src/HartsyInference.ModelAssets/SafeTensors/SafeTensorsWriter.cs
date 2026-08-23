@@ -4,10 +4,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.SafeTensors;
 
-/// <summary>Writes tensors to safetensors format files.</summary>
 public static class SafeTensorsWriter
 {
-    /// <summary>Saves a dictionary of tensors to a safetensors file.</summary>
+    /// <summary>Layout is an 8-byte little-endian header length, the JSON header (dtype/shape/data_offsets per tensor), then the tensor bytes back-to-back at those offsets — no padding between tensors.</summary>
     public static unsafe void Save(string filePath, IReadOnlyDictionary<string, Tensor> tensors)
     {
         // Build header JSON

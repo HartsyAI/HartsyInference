@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>The result of an image generation: the decoded RGB pixels plus the seed actually used and free-form
-/// metadata. One per generated image (a batch yields a list of these).</summary>
+/// <summary>The result of an image generation: the decoded RGB pixels plus the seed actually used and free-form metadata. One per generated image (a batch yields a list of these).</summary>
 public sealed record ImageResult
 {
     /// <summary>Row-major, top-to-bottom RGB24 bytes; length is <see cref="Width"/> * <see cref="Height"/> * 3.</summary>

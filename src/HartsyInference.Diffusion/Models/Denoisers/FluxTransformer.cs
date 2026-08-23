@@ -50,7 +50,6 @@ public sealed unsafe class FluxTransformer : IDisposable
     private Tensor? _normOutLinearWeight, _normOutLinearBias;
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>Creates a Flux transformer from configuration.</summary>
     public FluxTransformer(FluxConfig config)
     {
         _config = config;
@@ -102,7 +101,6 @@ public sealed unsafe class FluxTransformer : IDisposable
                 $"[Flux] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0})");
         }
 
-        // Timestep embedding MLP
         _timestepLinear1Weight = weights["time_text_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear1Bias = weights["time_text_embed.timestep_embedder.linear_1.bias"];
         _timestepLinear2Weight = weights["time_text_embed.timestep_embedder.linear_2.weight"];
@@ -123,15 +121,12 @@ public sealed unsafe class FluxTransformer : IDisposable
             _guidanceLinear2Bias = weights["time_text_embed.guidance_embedder.linear_2.bias"];
         }
 
-        // Double-stream blocks
         for (int i = 0; i < _config.Depth; i++)
             _doubleBlocks[i].LoadWeights(weights, $"transformer_blocks.{i}", branchDamp);
 
-        // Single-stream blocks
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
             _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}", branchDamp);
 
-        // Final layer
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _normOutLinearBias = weights["norm_out.linear.bias"];
         _projOutWeight = weights["proj_out.weight"];
@@ -217,7 +212,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         public DoubleBlockHandle(FluxDoubleStreamBlock block)
         {
             _block = block;
-            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
+            EstimatedWeightBytes = WeightBytes.Sum(block.EnumerateWeights());
         }
         public long EstimatedWeightBytes { get; }
         public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
@@ -229,7 +224,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         public SingleBlockHandle(FluxSingleStreamBlock block)
         {
             _block = block;
-            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
+            EstimatedWeightBytes = WeightBytes.Sum(block.EnumerateWeights());
         }
         public long EstimatedWeightBytes { get; }
         public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
@@ -237,19 +232,6 @@ public sealed unsafe class FluxTransformer : IDisposable
 
     /// <summary>Sums a block's on-device footprint, via <see cref="DType.ComputeByteCount"/> so block-quantized
     /// dtypes are measured by their super-block size rather than a per-element size they do not have.</summary>
-    /// <remarks>The naive <c>ElementCount * SizeInBytes</c> this replaces silently reported <b>0 bytes</b> for every
-    /// K-quant weight — <c>DType.Q4_K</c> is declared <c>("Q4_K", 0, true, 144, 256)</c>, i.e. `SizeInBytes` is 0 and
-    /// the real footprint lives in `BlockByteSize`/`BlockElementCount`. A zero total made the resident-vs-streamed
-    /// comparison trivially true, so **GGUF checkpoints always took the eager path and streaming never engaged** —
-    /// the low-VRAM feature was inert for exactly the quantized models most likely to need it (e.g. flux2-dev-Q4_K_S).
-    /// No-op for non-quantized dtypes.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="packedLatent">Packed latent tokens [B, imgSeqLen, 64].</param>
@@ -345,9 +327,9 @@ public sealed unsafe class FluxTransformer : IDisposable
         {
             // Split inside the double region: BOTH live streams cross (plus temb, which every block reads).
             // temb is only COPIED — the head on A reads the original after B finishes.
-            tembB = CopyAcross(backendB, backendA, temb);
-            img = MoveAcross(backendB, backendA, img);
-            txt = MoveAcross(backendB, backendA, txt);
+            tembB = DiTUtils.CopyAcross(backendB, backendA, temb);
+            img = DiTUtils.MoveAcross(backendB, backendA, img);
+            txt = DiTUtils.MoveAcross(backendB, backendA, txt);
             tailBackend = backendB;
             for (int i = doubleSplit; i < _config.Depth; i++)
             {
@@ -373,8 +355,8 @@ public sealed unsafe class FluxTransformer : IDisposable
         if (splitBlock >= _config.Depth)
         {
             // Split inside the single region: one concatenated stream crosses.
-            tembB = CopyAcross(backendB, backendA, temb);
-            x = MoveAcross(backendB, backendA, x);
+            tembB = DiTUtils.CopyAcross(backendB, backendA, temb);
+            x = DiTUtils.MoveAcross(backendB, backendA, x);
         }
         for (int i = singleSplit; i < _config.DepthSingleBlocks; i++)
         {
@@ -385,7 +367,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         tembB?.Dispose();
 
         // Back to A: the head (final norm + proj_out) lives in the shared weights there.
-        x = MoveAcross(backendA, backendB, x);
+        x = DiTUtils.MoveAcross(backendA, backendB, x);
         Tensor imgOut = new Tensor(new TensorShape(batch, imgSeqLen, hidden), act);
         backendA.SliceRows(imgOut, x, txtSeqLen);
         x.Dispose();
@@ -401,22 +383,6 @@ public sealed unsafe class FluxTransformer : IDisposable
         imgOut.Dispose();
         temb.Dispose();
         return output;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
-    private static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor moved = CopyAcross(dst, src, source);
-        source.Dispose();
-        return moved;
-    }
-
-    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
-    private static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
-    {
-        Tensor copied = new Tensor(source.Shape, source.DType);
-        dst.CopyFromPeer(copied, source, src);
-        return copied;
     }
 
     /// <summary>Weights of flat-indexed blocks <c>[startBlock, endBlock)</c> (doubles then singles) — the
@@ -1007,7 +973,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         else
         {
             Tensor normed = new Tensor(seqShape, DType.F32);
-            LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
+            DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
 
             modulated = new Tensor(seqShape, DType.F32);
             float* normPtr = (float*)normed.DataPointer;
@@ -1042,37 +1008,6 @@ public sealed unsafe class FluxTransformer : IDisposable
     }
 
     // ── Helper methods ──
-
-    private static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-
-                float mean = 0f;
-                for (int d = 0; d < dim; d++)
-                    mean += inPtr[offset + d];
-                mean /= dim;
-
-                float variance = 0f;
-                for (int d = 0; d < dim; d++)
-                {
-                    float diff = inPtr[offset + d] - mean;
-                    variance += diff * diff;
-                }
-                variance /= dim;
-
-                float invStd = 1.0f / MathF.Sqrt(variance + 1e-6f);
-                for (int d = 0; d < dim; d++)
-                    outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
-            }
-        }
-    }
 
     /// <summary>Concatenates two 3D tensors along the sequence dimension: [B,S1,D] + [B,S2,D] → [B,S1+S2,D].</summary>
     private static void ConcatAlongSeqDim3D(Tensor output, Tensor first, Tensor second,

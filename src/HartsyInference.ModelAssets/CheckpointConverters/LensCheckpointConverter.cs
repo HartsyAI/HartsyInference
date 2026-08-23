@@ -94,9 +94,7 @@ public sealed class LensCheckpointConverter
     // NVFP4-quantized experts). These methods produce the same per-component dicts as Convert.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>Loads + converts the three ComfyUI Lens files (DiT, GPT-OSS text encoder, Flux.2 VAE).
-    /// Returns the converted weights plus the open loaders (keep them alive — passthrough tensors are
-    /// memory-mapped views into the files).</summary>
+    /// <summary>Loads + converts the three ComfyUI Lens files (DiT, GPT-OSS text encoder, Flux.2 VAE). Returns the converted weights plus the open loaders (keep them alive — passthrough tensors are memory-mapped views into the files).</summary>
     public static (ConvertedWeights weights, SafeTensorsLoader[] loaders) LoadAndConvertComfy(
         string ditPath, string textEncoderPath, string vaePath)
     {
@@ -118,8 +116,7 @@ public sealed class LensCheckpointConverter
             Vae = vae,
         };
 
-    /// <summary>Converts the ComfyUI DiT file: dequantizes MXFP8 linears to BF16 (no-op on the BF16 file),
-    /// then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
+    /// <summary>Converts the ComfyUI DiT file: dequantizes MXFP8 linears to BF16 (no-op on the BF16 file), then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
     public static Dictionary<string, Tensor> ConvertComfyDit(Dictionary<string, Tensor> dit)
     {
         int dq = Mxfp8Codec.DequantInPlace(dit);
@@ -134,16 +131,8 @@ public sealed class LensCheckpointConverter
         return transformer;
     }
 
-    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: renames the ComfyUI expert biases
-    /// (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF form the encoder loads, prepends
-    /// the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU encoder GEMM is F32-only), and drops
-    /// the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.
-    /// <para><b>NVFP4 MoE expert banks pass through PACKED</b> (U8 nibbles + F8E4M3 swizzled block
-    /// scales + F32 per-expert globals, all still mmap-backed views into the file):
-    /// <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> dequantizes one expert
-    /// at a time transiently at forward time via <see cref="Nvfp4Codec.DequantExpertSlice"/>. Eagerly
-    /// materializing the 20B-parameter expert bank at F32 costs ~76 GB of host RAM and gets the process
-    /// OOM-killed on 64 GB hosts.</para></summary>
+    /// <summary>Converts the ComfyUI GPT-OSS text encoder file: renames the ComfyUI expert biases (<c>gate_up_proj.bias</c> → <c>gate_up_proj_bias</c>) to the HF form the encoder loads, prepends the <c>model.</c> prefix, casts BF16 weights to F32 (the CPU encoder GEMM is F32-only), and drops the <c>comfy_quant</c> blobs + the embedded <c>tokenizer_json</c>.
+    /// <para><b>NVFP4 MoE expert banks pass through PACKED</b> (U8 nibbles + F8E4M3 swizzled block scales + F32 per-expert globals, all still mmap-backed views into the file): <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> dequantizes one expert at a time transiently at forward time via <see cref="Nvfp4Codec.DequantExpertSlice"/>. Eagerly materializing the 20B-parameter expert bank at F32 costs ~76 GB of host RAM and gets the process OOM-killed on 64 GB hosts.</para></summary>
     public static Dictionary<string, Tensor> ConvertComfyTextEncoder(Dictionary<string, Tensor> textEncoder)
     {
         Dictionary<string, Tensor> output = new(textEncoder.Count);
@@ -163,8 +152,7 @@ public sealed class LensCheckpointConverter
         return output;
     }
 
-    /// <summary>True for the three NVFP4 expert-bank tensors (<c>experts.*.weight</c> U8 packed nibbles,
-    /// <c>.weight_scale</c>, <c>.weight_scale_2</c>) that must stay in their quantized on-disk form.</summary>
+    /// <summary>True for the three NVFP4 expert-bank tensors (<c>experts.*.weight</c> U8 packed nibbles, <c>.weight_scale</c>, <c>.weight_scale_2</c>) that must stay in their quantized on-disk form.</summary>
     private static bool IsPackedNvfp4ExpertTensor(string key, Tensor tensor)
     {
         if (!key.Contains("experts.", StringComparison.Ordinal))
@@ -209,78 +197,28 @@ public sealed class LensCheckpointConverter
         if (afterIdx == "attn.img_qkv.weight")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
         if (afterIdx == "attn.img_qkv.bias")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
             return;
         }
         if (afterIdx == "attn.txt_qkv.weight")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvWeight(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
         if (afterIdx == "attn.txt_qkv.bias")
         {
             int innerDim = (int)tensor.Shape[0] / 3;
-            SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
+            CheckpointConvertUtils.SplitQkvBias(tensor, innerDim, prefix, "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", output);
             return;
         }
 
         output[$"{prefix}.{afterIdx}"] = tensor;
-    }
-
-    private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * rowBytes;
-        TensorShape splitShape = new TensorShape(innerDim, inDim);
-
-        Tensor qWeight = new Tensor(splitShape, fused.DType);
-        Tensor kWeight = new Tensor(splitShape, fused.DType);
-        Tensor vWeight = new Tensor(splitShape, fused.DType);
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.weight"] = qWeight;
-        output[$"{prefix}.{kName}.weight"] = kWeight;
-        output[$"{prefix}.{vName}.weight"] = vWeight;
-    }
-
-    private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
-        string qName, string kName, string vName, Dictionary<string, Tensor> output)
-    {
-        long elemBytes = fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * elemBytes;
-        TensorShape splitShape = new TensorShape(innerDim);
-
-        Tensor qBias = new Tensor(splitShape, fused.DType);
-        Tensor kBias = new Tensor(splitShape, fused.DType);
-        Tensor vBias = new Tensor(splitShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
-        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
-
-        output[$"{prefix}.{qName}.bias"] = qBias;
-        output[$"{prefix}.{kName}.bias"] = kBias;
-        output[$"{prefix}.{vName}.bias"] = vBias;
     }
 }

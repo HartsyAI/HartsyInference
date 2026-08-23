@@ -149,7 +149,15 @@ public sealed class SamplingParamResolverTests
 
     /// <summary>The capability table and the pipelines' own refusal guards must agree. A family the table advertises as
     /// seam-carrying, whose recipe layer refuses any selection, would have SwarmUI offer a dropdown whose every value
-    /// fails at generation time — the table drifting from the code it describes.</summary>
+    /// fails at generation time — the table drifting from the code it describes.
+    ///
+    /// <para>This only checks the table's OWN family ids (<c>wan-animate</c>/<c>wan-animate-2</c>) and cannot catch a
+    /// checkpoint-classification miss: Animate and Animate-2 both share the <c>wan-21-14b</c> compat class with the
+    /// solver-owned plain backbone, so a host querying capabilities by compat class id alone would silently get the
+    /// wrong answer even though this test passes. That checkpoint-aware path is
+    /// <see cref="HartsyInference.Engine.Recipes.Video.WanVideoRecipe.SamplingSupportFor"/>, covered by the
+    /// <c>SamplingSupportFor_*Checkpoint_Reports*Samplers_NotSolverOwned</c> tests in
+    /// <c>WanAnimate2RoutingTests</c>.</para></summary>
     [Fact]
     public void CapabilityTable_AgreesWithTheRecipeRefusalGuards()
     {
@@ -271,6 +279,19 @@ public sealed class SamplingParamResolverTests
     public void TheIdentitySchedule_AddsNoSuffix(string schedule)
     {
         Assert.Equal("dpmpp_2m", SamplingParamResolver.ResolveSchedulerName(Request("dpmpp_2m", schedule)));
+    }
+
+    /// <summary>Schedule-only <c>normal</c>/<c>default</c> (no sampler at all — a host's own default dropdown
+    /// selection) must resolve to no override, exactly like neither field being set. Regression target: the
+    /// no-sampler branch used to build <c>euler_{schedule}</c> unconditionally, and neither "normal" (deliberately
+    /// not a recognized compound suffix) nor "default" (not a suffix at all) can be split back apart, so the
+    /// request was refused as an unknown sampler instead of resolving to the family's own spacing.</summary>
+    [Theory]
+    [InlineData("normal")]
+    [InlineData("default")]
+    public void ScheduleOnly_Identity_ResolvesToNoOverride(string schedule)
+    {
+        Assert.Null(SamplingParamResolver.ResolveSchedulerName(Request(sampler: null, scheduler: schedule)));
     }
 
     /// <summary>A compound pasted into the sampler slot is the more specific statement of intent, so it wins over a

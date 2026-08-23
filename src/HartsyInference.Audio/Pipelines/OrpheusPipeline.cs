@@ -3,6 +3,7 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Codecs.Snac;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Orpheus;
+using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Backends;
@@ -267,7 +268,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         Tensor hidden = _backbone.Forward(backend, prompt, batch: 1, posStart: 0, cache);
         for (int step = 0; step < maxTokens; step++)
         {
-            Tensor last = SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
+            Tensor last = VibeVoiceOps.SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
             hidden.Dispose();
             if (prof) { backend.Sync(); psw.Restart(); }
             Tensor logitsT = _backbone.ProjectLogits(backend, last, batch: 1, t: 1);
@@ -314,17 +315,8 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         foreach (Tensor t in _codec.EnumerateWeights()) yield return t;
     }
 
-    private static Tensor SliceLastFrame(Tensor hidden, int h)
-    {
-        int t = (int)hidden.Shape[1];
-        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* sp = (float*)hidden.DataPointer + (long)(t - 1) * h;
-        Buffer.MemoryCopy(sp, (void*)last.DataPointer, h * 4, h * 4);
-        return last;
-    }
-
     /// <summary>Wraps a tensor's data pointer as a <see cref="Span{Single}"/>. Pulled out into its own (non-
-    /// iterator) method for the same reason as <see cref="SliceLastFrame"/> — <see cref="GenerateTokensStream"/>
+    /// iterator) method for the same reason as <see cref="VibeVoiceOps.SliceLastFrame"/> — <see cref="GenerateTokensStream"/>
     /// needs this but can't contain the raw pointer cast itself.</summary>
     private static Span<float> AsFloatSpan(Tensor t, int length) => new((void*)t.DataPointer, length);
 

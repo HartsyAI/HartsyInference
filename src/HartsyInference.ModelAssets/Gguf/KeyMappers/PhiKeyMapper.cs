@@ -1,11 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for Microsoft Phi-3 / Phi-3.5 (<c>phi3</c>). Two tensors are <i>fused</i> in this layout
-/// and are split downstream (<see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>) into the separate
-/// projections the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> expects:
-/// <c>attn_qkv</c> → q/k/v, and <c>ffn_up</c> (a fused gate+up) → gate/up. The split is a contiguous row-byte
-/// copy, so it works directly on the quantized weights (no dequant). Phi-3 also ships the LongRope per-dimension
-/// factor tables as the <c>rope_factors_long/short</c> tensors, mapped through for the config factory.</summary>
+/// <summary>GGUF mapper for Microsoft Phi-3 / Phi-3.5 (<c>phi3</c>). Two tensors are <i>fused</i> in this layout and are split downstream (<see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>) into the separate projections the <see cref="HartsyInference.LLM.Transformer.GenericTransformer"/> expects: <c>attn_qkv</c> → q/k/v, and <c>ffn_up</c> (a fused gate+up) → gate/up. The split is a contiguous row-byte copy, so it works directly on the quantized weights (no dequant). Phi-3 also ships the LongRope per-dimension factor tables as the <c>rope_factors_long/short</c> tensors, mapped through for the config factory.</summary>
 public sealed class PhiKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "phi3";

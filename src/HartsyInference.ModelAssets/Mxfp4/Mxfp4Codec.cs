@@ -4,28 +4,16 @@ namespace HartsyInference.ModelAssets.Mxfp4;
 
 /// <summary>Dequantizer for MXFP4-packed weights (OpenAI GPT-OSS / Microsoft Lens text encoder format).
 ///
-/// <para><b>MXFP4 format:</b> 4-bit floating-point values from a fixed 16-entry sign-magnitude lookup table
-/// (8 magnitudes, sign bit), packed two-per-byte (low nibble = even index, high nibble = odd index in the
-/// dequantized last dimension). Each contiguous block of 32 dequantized elements shares one E8M0 scale —
-/// an 8-bit unsigned integer interpreted as a biased exponent: <c>actual_exp = stored - 127</c>, with the
-/// dequant value computed as <c>fp4_lookup[nibble] * 2^actual_exp</c>.</para>
+/// <para><b>MXFP4 format:</b> 4-bit floating-point values from a fixed 16-entry sign-magnitude lookup table (8 magnitudes, sign bit), packed two-per-byte (low nibble = even index, high nibble = odd index in the dequantized last dimension). Each contiguous block of 32 dequantized elements shares one E8M0 scale — an 8-bit unsigned integer interpreted as a biased exponent: <c>actual_exp = stored - 127</c>, with the dequant value computed as <c>fp4_lookup[nibble] * 2^actual_exp</c>.</para>
 ///
-/// <para><b>Tensor naming convention</b> in the upstream HuggingFace transformers integration: each
-/// MXFP4-quantized projection has two companion safetensors keys, <c>{name}_blocks</c> (uint8) and
-/// <c>{name}_scales</c> (uint8/int8). For example, GPT-OSS' MoE experts ship as
-/// <c>model.layers.{i}.mlp.experts.gate_up_proj_blocks</c> + <c>...gate_up_proj_scales</c>,
-/// dequantizing to <c>...gate_up_proj</c> shape <c>[numExperts, hidden, 2*intermediate]</c>.</para>
+/// <para><b>Tensor naming convention</b> in the upstream HuggingFace transformers integration: each MXFP4-quantized projection has two companion safetensors keys, <c>{name}_blocks</c> (uint8) and <c>{name}_scales</c> (uint8/int8). For example, GPT-OSS' MoE experts ship as <c>model.layers.{i}.mlp.experts.gate_up_proj_blocks</c> + <c>...gate_up_proj_scales</c>, dequantizing to <c>...gate_up_proj</c> shape <c>[numExperts, hidden, 2*intermediate]</c>.</para>
 ///
-/// <para><b>Shape relationship:</b> if <c>blocks</c> has shape <c>[..., N]</c> (uint8 bytes) and the
-/// dequantized tensor should have shape <c>[..., 2N]</c> (F32 elements), then <c>scales</c> has shape
-/// <c>[..., 2N / 32]</c> = <c>[..., N / 16]</c> (one scale per 32-element block = 16-byte chunk).
-/// All three tensors share a leading prefix shape; only the trailing dim differs.</para>
+/// <para><b>Shape relationship:</b> if <c>blocks</c> has shape <c>[..., N]</c> (uint8 bytes) and the dequantized tensor should have shape <c>[..., 2N]</c> (F32 elements), then <c>scales</c> has shape <c>[..., 2N / 32]</c> = <c>[..., N / 16]</c> (one scale per 32-element block = 16-byte chunk). All three tensors share a leading prefix shape; only the trailing dim differs.</para>
 ///
 /// Reference: <c>transformers/integrations/mxfp4.py</c>.</summary>
 public static unsafe class Mxfp4Codec
 {
-    /// <summary>The 16-entry FP4 lookup table. Index = 4-bit value (0-15); sign bit is bit-3
-    /// (indices 8-15 are negative). Magnitude values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0.</summary>
+    /// <summary>The 16-entry FP4 lookup table. Index = 4-bit value (0-15); sign bit is bit-3 (indices 8-15 are negative). Magnitude values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0.</summary>
     public static readonly float[] Fp4Lut =
     [
         +0.0f, +0.5f, +1.0f, +1.5f, +2.0f, +3.0f, +4.0f, +6.0f,
@@ -38,18 +26,11 @@ public static unsafe class Mxfp4Codec
     /// <summary>E8M0 bias offset — <c>stored = bias + actual_exponent</c>.</summary>
     public const int E8M0Bias = 127;
 
-    /// <summary>Dequantizes a paired (<paramref name="blocks"/>, <paramref name="scales"/>) MXFP4 weight
-    /// into a fresh F32 <see cref="Tensor"/>. Output element count is <c>blocks.ElementCount * 2</c>; the
-    /// caller supplies <paramref name="dequantShape"/> to determine the output's logical shape, which must
-    /// match that element count.
-    /// <para><b>Layout assumption:</b> bytes in <paramref name="blocks"/> are linear-row-major; the low
-    /// nibble of byte <c>j</c> dequantizes to output position <c>2j</c>, the high nibble to <c>2j + 1</c>.
-    /// One scale covers each consecutive 16-byte (32-element) block in linear order. This matches the
-    /// upstream packing used by <c>transformers/integrations/mxfp4.py</c>.</para></summary>
+    /// <summary>Dequantizes a paired (<paramref name="blocks"/>, <paramref name="scales"/>) MXFP4 weight into a fresh F32 <see cref="Tensor"/>. Output element count is <c>blocks.ElementCount * 2</c>; the caller supplies <paramref name="dequantShape"/> to determine the output's logical shape, which must match that element count.
+    /// <para><b>Layout assumption:</b> bytes in <paramref name="blocks"/> are linear-row-major; the low nibble of byte <c>j</c> dequantizes to output position <c>2j</c>, the high nibble to <c>2j + 1</c>. One scale covers each consecutive 16-byte (32-element) block in linear order. This matches the upstream packing used by <c>transformers/integrations/mxfp4.py</c>.</para></summary>
     /// <param name="blocks">MXFP4-packed bytes (one byte per two FP4 values). Must be U8.</param>
     /// <param name="scales">E8M0 per-block exponent table. Must be U8.</param>
-    /// <param name="dequantShape">Logical shape of the output. <c>ElementCount</c> must equal
-    /// <c>blocks.ElementCount * 2</c>.</param>
+    /// <param name="dequantShape">Logical shape of the output. <c>ElementCount</c> must equal <c>blocks.ElementCount * 2</c>.</param>
     public static Tensor DequantToF32(Tensor blocks, Tensor scales, TensorShape dequantShape)
     {
         if (blocks.DType != DType.U8)
@@ -102,18 +83,10 @@ public static unsafe class Mxfp4Codec
         return output;
     }
 
-    /// <summary>Walks an in-memory weight dict, finds every <c>{name}_blocks</c> / <c>{name}_scales</c>
-    /// companion pair, dequantizes each into a fresh F32 tensor stored under the bare <c>{name}</c> key,
-    /// and removes the companion pairs. Idempotent for keys that have no companion. Mirrors the way
-    /// transformers' MXFP4 loader rewrites the state_dict before assigning to model parameters.
-    /// <para>The dequantized shape is inferred from <paramref name="shapeOracle"/> when supplied; if
-    /// no oracle is given, the function assumes the dequant shape is <c>blocks.Shape</c> with its last
-    /// dim doubled (the common case for the GPT-OSS expert layout — the last byte axis decompresses
-    /// to twice as many FP4 elements).</para></summary>
-    /// <param name="weights">Mutable dict of named tensors. Companion pairs are removed; dequant'd
-    /// tensors are added under the bare name.</param>
-    /// <param name="shapeOracle">Optional callback: given the bare name, returns the desired
-    /// dequantized shape. Return <c>null</c> to fall back to <c>blocks.Shape with last-dim doubled</c>.</param>
+    /// <summary>Walks an in-memory weight dict, finds every <c>{name}_blocks</c> / <c>{name}_scales</c> companion pair, dequantizes each into a fresh F32 tensor stored under the bare <c>{name}</c> key, and removes the companion pairs. Idempotent for keys that have no companion. Mirrors the way transformers' MXFP4 loader rewrites the state_dict before assigning to model parameters.
+    /// <para>The dequantized shape is inferred from <paramref name="shapeOracle"/> when supplied; if no oracle is given, the function assumes the dequant shape is <c>blocks.Shape</c> with its last dim doubled (the common case for the GPT-OSS expert layout — the last byte axis decompresses to twice as many FP4 elements).</para></summary>
+    /// <param name="weights">Mutable dict of named tensors. Companion pairs are removed; dequant'd tensors are added under the bare name.</param>
+    /// <param name="shapeOracle">Optional callback: given the bare name, returns the desired dequantized shape. Return <c>null</c> to fall back to <c>blocks.Shape with last-dim doubled</c>.</param>
     /// <returns>Number of companion pairs dequantized.</returns>
     public static int DequantAllPairsInPlace(Dictionary<string, Tensor> weights,
         Func<string, TensorShape?>? shapeOracle = null)
@@ -143,17 +116,8 @@ public static unsafe class Mxfp4Codec
         return dequanted;
     }
 
-    /// <summary>Dequantizes a GPT-OSS Mixture-of-Experts weight (<c>experts.gate_up_proj</c> /
-    /// <c>experts.down_proj</c>) from its canonical 4D MXFP4 on-disk layout, reproducing the runtime
-    /// parameter shape that <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> expects.
-    /// <para><b>Layout:</b> on disk the blocks tensor is <c>[E, A, G, 16]</c> (U8) with a companion
-    /// scales tensor <c>[E, A, G]</c> (U8, E8M0). Each row of 16 bytes dequantizes to 32 FP4 values along
-    /// an implicit within-block axis; the <c>G</c> blocks concatenate to a length-<c>G·32</c> axis. The
-    /// upstream <c>convert_moe_packed_tensors</c> then <b>transposes the last two axes</b>, so the runtime
-    /// parameter is <c>[E, G·32, A]</c> — i.e. <c>gate_up_proj</c> becomes <c>[E, hidden, 2·intermediate]</c>
-    /// and <c>down_proj</c> becomes <c>[E, intermediate, hidden]</c>. This method bakes that transpose into
-    /// the dequant so the output is directly forward-pass-ready. Verified byte-exact against
-    /// <c>transformers.integrations.mxfp4.convert_moe_packed_tensors</c>.</para></summary>
+    /// <summary>Dequantizes a GPT-OSS Mixture-of-Experts weight (<c>experts.gate_up_proj</c> / <c>experts.down_proj</c>) from its canonical 4D MXFP4 on-disk layout, reproducing the runtime parameter shape that <see cref="HartsyInference.Diffusion.Models.TextEncoders.GptOssMoeFfn"/> expects.
+    /// <para><b>Layout:</b> on disk the blocks tensor is <c>[E, A, G, 16]</c> (U8) with a companion scales tensor <c>[E, A, G]</c> (U8, E8M0). Each row of 16 bytes dequantizes to 32 FP4 values along an implicit within-block axis; the <c>G</c> blocks concatenate to a length-<c>G·32</c> axis. The upstream <c>convert_moe_packed_tensors</c> then <b>transposes the last two axes</b>, so the runtime parameter is <c>[E, G·32, A]</c> — i.e. <c>gate_up_proj</c> becomes <c>[E, hidden, 2·intermediate]</c> and <c>down_proj</c> becomes <c>[E, intermediate, hidden]</c>. This method bakes that transpose into the dequant so the output is directly forward-pass-ready. Verified byte-exact against <c>transformers.integrations.mxfp4.convert_moe_packed_tensors</c>.</para></summary>
     /// <param name="blocks">MXFP4-packed bytes, shape <c>[E, A, G, 16]</c>, dtype U8.</param>
     /// <param name="scales">E8M0 per-block exponents, shape <c>[E, A, G]</c>, dtype U8.</param>
     /// <returns>Dequantized F32 tensor of shape <c>[E, G·32, A]</c>.</returns>
@@ -216,11 +180,7 @@ public static unsafe class Mxfp4Codec
         return output;
     }
 
-    /// <summary>Walks a GPT-OSS encoder weight dict and dequantizes every MoE expert MXFP4 companion pair
-    /// (<c>…experts.gate_up_proj_blocks</c>/<c>_scales</c> and <c>…experts.down_proj_blocks</c>/<c>_scales</c>)
-    /// via <see cref="DequantGptOssExpert"/>, storing the forward-ready F32 tensor under the bare name and
-    /// removing the companions. Idempotent for dicts with no MXFP4 pairs (e.g. an already-dequantized or
-    /// BF16 checkpoint). Use this before handing weights to the encoder loader.</summary>
+    /// <summary>Walks a GPT-OSS encoder weight dict and dequantizes every MoE expert MXFP4 companion pair (<c>…experts.gate_up_proj_blocks</c>/<c>_scales</c> and <c>…experts.down_proj_blocks</c>/<c>_scales</c>) via <see cref="DequantGptOssExpert"/>, storing the forward-ready F32 tensor under the bare name and removing the companions. Idempotent for dicts with no MXFP4 pairs (e.g. an already-dequantized or BF16 checkpoint). Use this before handing weights to the encoder loader.</summary>
     /// <param name="weights">Mutable named-tensor dict (HuggingFace <c>model.*</c> naming).</param>
     /// <returns>Number of expert pairs dequantized.</returns>
     public static int DequantGptOssExpertsInPlace(Dictionary<string, Tensor> weights)
@@ -261,8 +221,7 @@ public static unsafe class Mxfp4Codec
         return new TensorShape(dims);
     }
 
-    /// <summary>Computes <c>2^n</c> using fast bit-twiddling for the IEEE-754 single-precision exponent
-    /// range. For <c>n</c> outside <c>[-127, 127]</c> falls back to <see cref="MathF.Pow"/>.</summary>
+    /// <summary>Computes <c>2^n</c> using fast bit-twiddling for the IEEE-754 single-precision exponent range. For <c>n</c> outside <c>[-127, 127]</c> falls back to <see cref="MathF.Pow"/>.</summary>
     private static float Pow2(int n)
     {
         if (n >= -126 && n <= 127)

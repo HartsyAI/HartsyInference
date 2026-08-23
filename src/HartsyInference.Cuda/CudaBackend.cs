@@ -20,9 +20,7 @@ public sealed class CudaBackend : IBackend
     /// <c>cuStreamWaitEvent</c> inside the streaming cache.</remarks>
     private readonly CudaStream _uploadStream;
     private readonly CudaStreamingWeightCache _streamingCache;
-    /// <summary>This backend's transfer state — its identity in <see cref="GpuTransferHelper"/>, bound to the
-    /// calling thread by <see cref="EnterOp"/> at every op entry. Two same-device backends share a primary context
-    /// but never a state.</summary>
+    /// <summary>This backend's transfer state — its identity in <see cref="GpuTransferHelper"/>, bound to the calling thread by <see cref="EnterOp"/> at every op entry. Two same-device backends share a primary context but never a state.</summary>
     private readonly GpuTransferHelper.State _transferState;
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
@@ -52,7 +50,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
     /// <remarks>Exists so the classify/retry/backoff behavior can be tested deterministically — a real
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
-    internal Func<long, CudnnStatusException?>? TestCudnnSdpaFaultInjector { get; set; }
+    internal Func<long, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
 
     /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state.</summary>
     /// <remarks>Programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
@@ -134,8 +132,7 @@ public sealed class CudaBackend : IBackend
     private static long _abandonedCleanupFailedCount;
     private static readonly object _abandonedCleanupProgress = new();
 
-    /// <summary>Dedicated managed worker for abandoned backends. Its type initializer is forced from the constructor,
-    /// never from the finalizer; the finalizer itself performs only an atomic claim and a queue write.</summary>
+    /// <summary>Dedicated managed worker for abandoned backends. Its type initializer is forced from the constructor, never from the finalizer; the finalizer itself performs only an atomic claim and a queue write.</summary>
     private static class BackendAbandonmentReaper
     {
         private static readonly BlockingCollection<CudaBackend> Queue = new();
@@ -278,8 +275,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Use the division-free head-major rope kernel (<c>HARTSY_ROPE_V2=0</c> to fall back). Bit-identical.</summary>
     public bool EnableRopeHeadMajorV2 { get; set; }
 
-    /// <summary>Quantize fp8 activations with the checkpoint's <c>.input_scale</c> instead of a per-call absmax
-    /// (<c>HARTSY_FP8_STATIC_INPUT_SCALE=0</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
+    /// <summary>Quantize fp8 activations with the checkpoint's <c>.input_scale</c> instead of a per-call absmax (<c>HARTSY_FP8_STATIC_INPUT_SCALE=0</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
     public bool EnableStaticFp8InputScale { get; set; }
 
     /// <summary>Let a modulate producer write e4m3 for its consuming fp8 Linear (<c>HARTSY_MODULATE_EMIT_FP8=0</c> to disable).</summary>
@@ -406,8 +402,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set
-    /// <c>HARTSY_EPILOGUE_FUSION=0</c> to disable it.</summary>
+    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set <c>HARTSY_EPILOGUE_FUSION=0</c> to disable it.</summary>
     /// <remarks>Works on every targeted SM, including the RTX 3060. A supported biased Linear runs as one
     /// <c>cublasLtMatmul</c>; unavailable libraries, unsupported shapes, and no-algorithm results fall back to
     /// <c>cublasGemmEx</c> plus the existing <c>BiasAdd</c> path with the same resolved precision policy.</remarks>
@@ -571,10 +566,7 @@ public sealed class CudaBackend : IBackend
     /// free VRAM keeps the chunk large where there is room and shrinks it rather than failing where there is not;
     /// <c>cuMemGetInfo</c> is a cheap driver query with no stream sync, which is why the H3 transformer already
     /// polls it per forward.</para></remarks>
-    /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which
-    /// the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32
-    /// accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed
-    /// to HBM and read straight back. 0 or >= n disables tiling. Override with HARTSY_INT8_N_CHUNK.</summary>
+    /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32 accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed to HBM and read straight back. 0 or >= n disables tiling. Override with HARTSY_INT8_N_CHUNK.</summary>
     private static int Int8ResidentColChunk(int n)
     {
         if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_N_CHUNK"), out int env))
@@ -589,8 +581,7 @@ public sealed class CudaBackend : IBackend
     // Int8GemmEpilogueProbeTests) and which our own mma kernel is not yet fast enough to justify.
     private const int DefaultInt8ColChunk = int.MaxValue;
 
-    /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving
-    /// it from free VRAM. 0 keeps the derived behaviour.</summary>
+    /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving it from free VRAM. 0 keeps the derived behaviour.</summary>
     private static readonly long RowChunkBudgetOverrideBytes =
         long.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_ROW_BUDGET_MB"), out long mb) && mb > 0
             ? mb << 20 : 0;
@@ -877,9 +868,7 @@ public sealed class CudaBackend : IBackend
     /// layers/steps (e.g. ACE-Step's 3.5B DiT on a 12 GB 3060).</remarks>
     public bool HighPrecisionGemm { get; set; }
 
-    /// <summary>Opt-in: <see cref="Conv2D"/> pads the width axis of every convolution with wrapped edge pixels
-    /// instead of zeros. Default <c>false</c>. Set for the duration of one generation only — this changes every
-    /// conv's output on the hot path, so it must never leak into a request that didn't ask for it (Tier 3.6).</summary>
+    /// <summary>Opt-in: <see cref="Conv2D"/> pads the width axis of every convolution with wrapped edge pixels instead of zeros. Default <c>false</c>. Set for the duration of one generation only — this changes every conv's output on the hot path, so it must never leak into a request that didn't ask for it (Tier 3.6).</summary>
     public bool SeamlessTilingX { get; set; }
 
     /// <summary>Same as <see cref="SeamlessTilingX"/> for the height axis.</summary>
@@ -960,8 +949,7 @@ public sealed class CudaBackend : IBackend
 
     private static bool SageExplicitlyEnabled => EnvFlag("HARTSY_SAGE_ATTN");
 
-    /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>HARTSY_LTX25_NA3D_TILED=0</c> falls back to the per-query one.
-    /// Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
+    /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>HARTSY_LTX25_NA3D_TILED=0</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
     private static bool UseLtx25Na3dTiled => Environment.GetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED") != "0";
 
     /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
@@ -1185,14 +1173,9 @@ public sealed class CudaBackend : IBackend
     /// <summary>This backend's transfer state, for the multi-backend isolation tests.</summary>
     internal GpuTransferHelper.State TransferState => _transferState;
 
-    /// <summary>Op-entry guard: binds this backend as the calling thread's ambient transfer state, binds the CUDA
-    /// context, and drains THIS backend's finalizer-queued GPU cleanups. Replaces the bare
-    /// <c>_context.EnsureCurrent()</c> at every op entry — context identity alone cannot name the owning backend
-    /// when two backends share a device's primary context, and the cleanup buckets are keyed per backend.</summary>
+    /// <summary>Op-entry guard: binds this backend as the calling thread's ambient transfer state, binds the CUDA context, and drains THIS backend's finalizer-queued GPU cleanups. Replaces the bare <c>_context.EnsureCurrent()</c> at every op entry — context identity alone cannot name the owning backend when two backends share a device's primary context, and the cleanup buckets are keyed per backend.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    /// <summary>Binds this backend as the calling thread's ambient op target. For collective transports
-    /// (<see cref="NcclComm"/>), which stage uploads through the ambient-based transfer helper without going
-    /// through a public tensor op.</summary>
+    /// <summary>Binds this backend as the calling thread's ambient op target. For collective transports (<see cref="NcclComm"/>), which stage uploads through the ambient-based transfer helper without going through a public tensor op.</summary>
     internal void BindAmbient() => EnterOp();
 
     private void EnterOp()
@@ -1375,18 +1358,10 @@ public sealed class CudaBackend : IBackend
         if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
-    /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default:
-    /// −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once
-    /// <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it
-    /// measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
+    /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default: −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
     internal static bool FusedMmaGemm = Environment.GetEnvironmentVariable("HARTSY_INT8_FUSED_MMA") != "0";
 
-    /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows
-    /// is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m
-    /// heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below
-    /// this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be
-    /// assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on
-    /// the three shapes the microbenchmark covered.</summary>
+    /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on the three shapes the microbenchmark covered.</summary>
     private const int FusedMmaMinRows = 1024;
 
     /// <summary>Whether the fused mma GEMM beats the cuBLASLt-GEMM + separate-dequant pair for this shape.</summary>
@@ -1403,42 +1378,26 @@ public sealed class CudaBackend : IBackend
     /// <para>Every bound exists because a per-shape microbenchmark is NOT evidence about the workload: this gate
     /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
     /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
-    /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>),
-    /// which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the
-    /// unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was
-    /// −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that
-    /// sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also
-    /// the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
+    /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>), which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
     private static readonly bool WideMmaGate = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_WIDE_GATE") == "1";
 
-    /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces.
-    /// **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down
-    /// (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end
-    /// A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM
-    /// against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the
-    /// occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is
-    /// not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
+    /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces. **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
     private static readonly bool UseWideConvRotQuant = Environment.GetEnvironmentVariable("HARTSY_CONVROT_WIDE") == "1";
 
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
         FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
         && k <= 2L * n && n <= (WideMmaGate ? 4L : 2L) * k && _kernels!.HasInt8MmaGemm(rows, n, k);
 
-    /// <summary>One resident-int8 projection for <see cref="RunResidentInt8"/>: device pointers already resolved,
-    /// so the helper never touches the transfer caches (see the prologue ordering note in <c>LinearImpl</c>).</summary>
+    /// <summary>One resident-int8 projection for <see cref="RunResidentInt8"/>: device pointers already resolved, so the helper never touches the transfer caches (see the prologue ordering note in <c>LinearImpl</c>).</summary>
     private readonly record struct Int8ResidentTarget(
         ulong Weight, ulong Output, ulong BiasF32, ulong RowScaleDev, int N, bool OutF16, bool FuseGelu);
 
-    /// <summary>The resident int8 chain — ConvRot, per-row quant, IMMA GEMM, dequant epilogue — over one activation
-    /// and one or more weights. Every target shares the quantized activation, which is the point: the rotate+quant
-    /// pass is ~40% of the LTX-2.5 step's quant traffic precisely because an attention re-derived it per projection.
-    /// Bit-identical to running the targets one at a time (same pointer, same k, same kernel).</summary>
+    /// <summary>The resident int8 chain — ConvRot, per-row quant, IMMA GEMM, dequant epilogue — over one activation and one or more weights. Every target shares the quantized activation, which is the point: the rotate+quant pass is ~40% of the LTX-2.5 step's quant traffic precisely because an attention re-derived it per projection. Bit-identical to running the targets one at a time (same pointer, same k, same kernel).</summary>
     /// <remarks>Chunked over rows because the int32 accumulator is 4 bytes per output element: at video token counts
     /// a single unchunked m·n·4 buffer runs to gigabytes (H3's mlp.fc1 is n=28672). Each chunk is padded up to the
     /// 32-row granularity cuBLASLt's int8 TN kernels want, exactly as comfy-kitchen's own _int8_matmul_accumulate
     /// does — 31 wasted rows of int8 compute beats materializing the weight.</remarks>
-    /// <summary>An LTX-2 per-head output gate to apply as the activation is quantized, instead of as its own
-    /// pass. <c>Logits</c> = 0 means no gate.</summary>
+    /// <summary>An LTX-2 per-head output gate to apply as the activation is quantized, instead of as its own pass. <c>Logits</c> = 0 means no gate.</summary>
     private readonly record struct Int8PreGate(ulong Logits, int Heads, int HeadDim);
 
     private unsafe void RunResidentInt8(ulong pInput, DType inputDType, int m, int k, int group,
@@ -1571,14 +1530,10 @@ public sealed class CudaBackend : IBackend
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
 
-    /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization
-    /// (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
+    /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
     internal static bool FuseHeadGateIntoQuant = Environment.GetEnvironmentVariable("HARTSY_LTX2_GATEFUSE") != "0";
 
-    /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the
-    /// activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of
-    /// its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place
-    /// exactly as the caller's own sequence did.</summary>
+    /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place exactly as the caller's own sequence did.</summary>
     /// <remarks>The gate is a full read AND write of a <c>[seq, heads·headDim]</c> tensor — 81.8 MB per call at
     /// LTX-2.5's video shape — whose only consumer is this projection, which then reads the same tensor again to
     /// quantize it. Bit-identical either way: the fused kernel reproduces the separate pass's f16 store.</remarks>
@@ -1614,18 +1569,11 @@ public sealed class CudaBackend : IBackend
         // refused and stays transient). Master kill-switch: CacheWeightCasts=false.
         => LinearImpl(output, input, quantWeight, bias, cacheWeightCast: true);
 
-    /// <summary>GEMM against a contiguous ROW RANGE of <paramref name="weight"/>, sharing the resident weight (and its
-    /// cached dtype cast) rather than materializing a slice. Rows are contiguous in <c>[outDim, inDim]</c>, so this is
-    /// a pointer offset — which is the whole point: a real sub-tensor would be a separate cache identity and would
-    /// upload a second copy of an already-resident weight. Lets a fused projection be evaluated in parts (see
-    /// <c>MiniMaxH3Transformer</c>'s chunked attention, which projects k+v and then q from one packed qkv weight).</summary>
+    /// <summary>GEMM against a contiguous ROW RANGE of <paramref name="weight"/>, sharing the resident weight (and its cached dtype cast) rather than materializing a slice. Rows are contiguous in <c>[outDim, inDim]</c>, so this is a pointer offset — which is the whole point: a real sub-tensor would be a separate cache identity and would upload a second copy of an already-resident weight. Lets a fused projection be evaluated in parts (see <c>MiniMaxH3Transformer</c>'s chunked attention, which projects k+v and then q from one packed qkv weight).</summary>
     public void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true, weightRowOffset, weightRowCount);
 
-    /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the
-    /// resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's
-    /// up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block —
-    /// writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
+    /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block — writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
     public unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         bool fused = weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
@@ -1634,13 +1582,10 @@ public sealed class CudaBackend : IBackend
         if (!fused) Gelu(output, output);
     }
 
-    /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the
-    /// bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
+    /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
     internal static bool GroupedLinear = Environment.GetEnvironmentVariable("HARTSY_GROUPED_LINEAR") != "0";
 
-    /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain
-    /// cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall
-    /// out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
+    /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
     public unsafe void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)
     {
         if (ops.Length == 0) return;
@@ -2712,15 +2657,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Builds a [B,C,inH+2*padH,inW+2*padW] host copy of <paramref name="input"/> whose border comes from
-    /// the opposite edge of the same tensor (circular/wrap padding) instead of zeros — the source data for
-    /// <see cref="SeamlessTilingX"/>/<see cref="SeamlessTilingY"/>. <paramref name="wrapH"/>/<paramref name="wrapW"/>
-    /// select which axes actually wrap (SwarmUI core's "X-Only"/"Y-Only"/"true" modes); the other axis's border is
-    /// left at its allocated zero (<see cref="Tensor"/>'s lazy host buffer is zeroed on first touch), i.e. an
-    /// ordinary zero-pad — same as passing the request straight through unset. Assumes <c>padH &lt;= inH</c> and
-    /// <c>padW &lt;= inW</c>, true for every real conv kernel pad (1-3px) against any image/latent dimension.
-    /// dtype-generic (raw byte copies keyed off <see cref="DType.SizeInBytes"/>) since UNet convs run F16/BF16
-    /// while VAE convs stay F32.</summary>
+    /// <summary>Builds a [B,C,inH+2*padH,inW+2*padW] host copy of <paramref name="input"/> whose border comes from the opposite edge of the same tensor (circular/wrap padding) instead of zeros — the source data for <see cref="SeamlessTilingX"/>/<see cref="SeamlessTilingY"/>. <paramref name="wrapH"/>/<paramref name="wrapW"/> select which axes actually wrap (SwarmUI core's "X-Only"/"Y-Only"/"true" modes); the other axis's border is left at its allocated zero (<see cref="Tensor"/>'s lazy host buffer is zeroed on first touch), i.e. an ordinary zero-pad — same as passing the request straight through unset. Assumes <c>padH &lt;= inH</c> and <c>padW &lt;= inW</c>, true for every real conv kernel pad (1-3px) against any image/latent dimension. dtype-generic (raw byte copies keyed off <see cref="DType.SizeInBytes"/>) since UNet convs run F16/BF16 while VAE convs stay F32.</summary>
     private static unsafe Tensor WrapPadForSeamlessTiling(Tensor input, int padH, int padW, bool wrapH, bool wrapW)
     {
         int batch = (int)input.Shape[0];
@@ -4076,8 +4013,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>LTX-2.5 channels-last 3D pixel shuffle — see <see cref="IBackend.Ltx25PixelShuffle"/>. The output
-    /// spans every chunk, so it is allocated once and written in place rather than recached per call.</summary>
+    /// <summary>LTX-2.5 channels-last 3D pixel shuffle — see <see cref="IBackend.Ltx25PixelShuffle"/>. The output spans every chunk, so it is allocated once and written in place rather than recached per call.</summary>
     public void Ltx25PixelShuffle(Tensor output, Tensor projected, int start, int h, int w,
         int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW)
     {
@@ -4114,10 +4050,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Prefers the query-tiled kernel,
-    /// which stages a whole tile's shared window instead of re-reading one window per query; falls back to the
-    /// per-query kernel on shapes it does not cover, and to the managed reference when <c>ltx25_na_decoder.ptx</c>
-    /// has not been deployed or the per-query kernel's scores would not fit 48 KB of shared memory.</summary>
+    /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Prefers the query-tiled kernel, which stages a whole tile's shared window instead of re-reading one window per query; falls back to the per-query kernel on shapes it does not cover, and to the managed reference when <c>ltx25_na_decoder.ptx</c> has not been deployed or the per-query kernel's scores would not fit 48 KB of shared memory.</summary>
     public void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
     {
         if (output.DType != DType.F32 || q.DType != DType.F32 || k.DType != DType.F32 || v.DType != DType.F32)
@@ -4412,9 +4345,7 @@ public sealed class CudaBackend : IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
-    /// <summary>Fused LTX-2 QK path — see <see cref="IBackend.Ltx2QkNormRopeHeadMajor"/>. Falls back to the
-    /// three-op sequence when the row is too wide to stage in shared memory; every LTX-2 geometry shipped today
-    /// (inner 4096 video / 2048 audio) fits comfortably.</summary>
+    /// <summary>Fused LTX-2 QK path — see <see cref="IBackend.Ltx2QkNormRopeHeadMajor"/>. Falls back to the three-op sequence when the row is too wide to stage in shared memory; every LTX-2 geometry shipped today (inner 4096 video / 2048 audio) fits comfortably.</summary>
     public unsafe void Ltx2QkNormRopeHeadMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
         int seq, int heads, int headDim, float eps)
     {
@@ -4466,8 +4397,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Fused LTX-2 QK path, token-major — see <see cref="IBackend.Ltx2QkNormRopeTokenMajor"/>. Same
-    /// shared-memory ceiling and composed fallback as the head-major twin.</summary>
+    /// <summary>Fused LTX-2 QK path, token-major — see <see cref="IBackend.Ltx2QkNormRopeTokenMajor"/>. Same shared-memory ceiling and composed fallback as the head-major twin.</summary>
     public unsafe void Ltx2QkNormRopeTokenMajor(Tensor output, Tensor input, Tensor normWeight, Tensor? cos, Tensor? sin,
         int seq, int heads, int headDim, float eps)
     {
@@ -4511,8 +4441,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Fused LTX-2 norm+modulate — see <see cref="IBackend.Ltx2RmsModulate"/>. The RMS weight is a ones
-    /// vector at every call site, so it folds away rather than being read per element.</summary>
+    /// <summary>Fused LTX-2 norm+modulate — see <see cref="IBackend.Ltx2RmsModulate"/>. The RMS weight is a ones vector at every call site, so it folds away rather than being read per element.</summary>
     public unsafe void Ltx2RmsModulate(Tensor output, Tensor input, Tensor onesWeight, Tensor scale, Tensor? shift, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Ltx2RmsModulate");
@@ -4747,7 +4676,6 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>GPU temporal frame extract: output[B,C,H,W] = src[B,C,Tsrc,H,W][:,:,ti,:,:]. Keeps CausalConv3d slicing on-device (no D2H).</summary>
     /// <summary>Resolves the wan_vae kernel dtype: F32 → false, BF16 → true (bias, when present, must be F32 — the BF16 kernels read it as float).</summary>
     private static bool RequireVaeFrameDtype(DType a, DType b, Tensor? bias = null)
     {
@@ -4758,6 +4686,7 @@ public sealed class CudaBackend : IBackend
         return a == DType.BF16;
     }
 
+    /// <summary>GPU temporal frame extract: output[B,C,H,W] = src[B,C,Tsrc,H,W][:,:,ti,:,:]. Keeps CausalConv3d slicing on-device (no D2H).</summary>
     public unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("ExtractVaeFrame");
@@ -4846,8 +4775,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>GPU MAGViT channel→space shuffle (SeedVR2 upsampler) — replaces the host per-element loop
-    /// that forced a multi-GB D2H+H2D round trip per upsampler.</summary>
+    /// <summary>GPU MAGViT channel→space shuffle (SeedVR2 upsampler) — replaces the host per-element loop that forced a multi-GB D2H+H2D round trip per upsampler.</summary>
     public unsafe void SeedVr2PixelShuffle(Tensor output, Tensor input, int spatialRatio, int temporalRatio)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("SeedVr2PixelShuffle");
@@ -6446,9 +6374,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Dtype-agnostic contiguous row-block slice — a raw byte-range D2D copy, so it needs no per-width
-    /// kernel and works for any non-quantized dtype including fp8, unlike <see cref="SliceRows"/>'s F32/F16/BF16
-    /// guard. Carries <see cref="Tensor.Fp8ScaleFactor"/> onto the sliced chunk.</summary>
+    /// <summary>Dtype-agnostic contiguous row-block slice — a raw byte-range D2D copy, so it needs no per-width kernel and works for any non-quantized dtype including fp8, unlike <see cref="SliceRows"/>'s F32/F16/BF16 guard. Carries <see cref="Tensor.Fp8ScaleFactor"/> onto the sliced chunk.</summary>
     public void SliceRowsGeneric(Tensor output, Tensor input, int rowOffset)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("SliceRowsGeneric");
@@ -6959,22 +6885,57 @@ public sealed class CudaBackend : IBackend
             (nuint freeBytes, _) = _context.GetMemoryInfo();
             if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || scoreBytesEst > (ulong)freeBytes / 2)
             {
-                SdpaTiledF32NoMask(output, query, key, value, scale);
+                SdpaTiledF32(output, query, key, value, scale);
+                return;
+            }
+        }
+
+        // A key-only bias (one [Skv] row broadcast over every query) is compatible with the query-tiled path, so
+        // a masked call whose score matrix would not fit is no longer forced into the full materialization. Without
+        // this, a single transient cuDNN failure mid-generation demotes to a [heads,Sq,Skv] allocation that is far
+        // larger than whatever the fused path could not get (Wan-Animate-2 at 480x800/61f: 5836 MB).
+        if (query.DType == DType.F32 && MaskIsKeyOnly(mask, sq))
+        {
+            ulong keyBiasScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
+            (nuint keyBiasFree, _) = _context.GetMemoryInfo();
+            if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
+            {
+                SdpaTiledF32(output, query, key, value, scale, mask);
                 return;
             }
         }
 
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
-        ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0;
+        ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0, pMaskBroadcast = 0, pMaskOnes = 0;
         bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
+            long maskElemCount = 0;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
+                maskElemCount = mask.ElementCount;
+                if (MaskIsKeyOnly(mask, sq))
+                {
+                    // This path indexes the mask per query row, so expand the stored [.., 1, Skv] into the
+                    // [.., Sq, Skv] it stands for. Only small/medium shapes reach here — the large ones took the
+                    // tiled branch above — so the expansion is bounded by the same budget as the score matrix.
+                    long maskBlocks = maskElemCount / skv;
+                    pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
+                    pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
+                    CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
+                    for (long blk = 0; blk < maskBlocks; blk++)
+                    {
+                        AccumulateKeyBias(
+                            pMaskBroadcast + (ulong)(blk * sq * skv * sizeof(float)),
+                            pMask + (ulong)(blk * skv * sizeof(float)),
+                            pMaskOnes, sq, skv, skv, beta: 0f);
+                    }
+                    maskElemCount = maskBlocks * sq * skv;
+                }
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
@@ -7028,7 +6989,7 @@ public sealed class CudaBackend : IBackend
 
             bool isF16 = opDtype == DType.F16;
             int elemSize = opDtype.SizeInBytes;
-            ulong opMask = pMask;
+            ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
             int maskElemSize = sizeof(float);
             if (mask is not null && isF16)
             {
@@ -7037,11 +6998,11 @@ public sealed class CudaBackend : IBackend
                 // conversion so common finite hard-mask sentinels such as -1e30 become -65504 rather than -Inf:
                 // an entirely masked row then retains the repository's finite-sentinel/uniform-row convention
                 // instead of evaluating -Inf - -Inf inside softmax and producing NaNs.
-                pMaskClamped = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(float)));
+                pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
                 _kernels!.LaunchClamp(
-                    pMaskClamped, pMask, -65_504f, 65_504f, (int)mask.ElementCount, _stream.Handle);
-                pMaskCast = CudaMemory.Allocate((nuint)(mask.ElementCount * sizeof(ushort)));
-                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)mask.ElementCount, _stream.Handle);
+                    pMaskClamped, opMask, -65_504f, 65_504f, (int)maskElemCount, _stream.Handle);
+                pMaskCast = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(ushort)));
+                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)maskElemCount, _stream.Handle);
                 opMask = pMaskCast;
                 maskElemSize = sizeof(ushort);
             }
@@ -7183,6 +7144,8 @@ public sealed class CudaBackend : IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (pMaskCast != 0) CudaMemory.FreeAsync(pMaskCast, _stream.Handle);
             if (pMaskClamped != 0) CudaMemory.FreeAsync(pMaskClamped, _stream.Handle);
+            if (pMaskBroadcast != 0) CudaMemory.FreeAsync(pMaskBroadcast, _stream.Handle);
+            if (pMaskOnes != 0) CudaMemory.FreeAsync(pMaskOnes, _stream.Handle);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
             if (pQCast != 0) CudaMemory.FreeAsync(pQCast, _stream.Handle);
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
@@ -7191,14 +7154,10 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Always true: the cuDNN fused engine takes BSHD strides directly, and anything it declines is
-    /// served by permuting into the head-major path, so the caller never has to carry a second layout.</summary>
+    /// <summary>Always true: the cuDNN fused engine takes BSHD strides directly, and anything it declines is served by permuting into the head-major path, so the caller never has to carry a second layout.</summary>
     public bool SupportsTokenMajorAttention => true;
 
-    /// <summary>Token-major SDPA — see <see cref="IBackend.ScaledDotProductAttentionTokenMajor"/>. cuDNN reads the
-    /// <c>[S, heads*headDim]</c> buffers through BSHD strides at no throughput cost, which is what lets the LTX-2
-    /// caller drop the permute pair around attention. Anything cuDNN declines (wrong head dim, mask shape, a dead
-    /// session) is permuted into the head-major dispatch so correctness never depends on the fast path.</summary>
+    /// <summary>Token-major SDPA — see <see cref="IBackend.ScaledDotProductAttentionTokenMajor"/>. cuDNN reads the <c>[S, heads*headDim]</c> buffers through BSHD strides at no throughput cost, which is what lets the LTX-2 caller drop the permute pair around attention. Anything cuDNN declines (wrong head dim, mask shape, a dead session) is permuted into the head-major dispatch so correctness never depends on the fast path.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
     {
@@ -7335,19 +7294,30 @@ public sealed class CudaBackend : IBackend
 
         bool validMask = mask.Shape.Rank switch
         {
-            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
+            2 => (mask.Shape[0] == 1 || mask.Shape[0] == sq) && mask.Shape[1] == skv,
             3 => (mask.Shape[0] == 1 || mask.Shape[0] == h)
-                && mask.Shape[1] == sq && mask.Shape[2] == skv,
+                && (mask.Shape[1] == 1 || mask.Shape[1] == sq) && mask.Shape[2] == skv,
             4 => (mask.Shape[0] == 1 || mask.Shape[0] == b)
                 && (mask.Shape[1] == 1 || mask.Shape[1] == h)
-                && mask.Shape[2] == sq && mask.Shape[3] == skv,
+                && (mask.Shape[2] == 1 || mask.Shape[2] == sq) && mask.Shape[3] == skv,
             _ => false,
         };
         if (!validMask)
             throw new ArgumentException(
                 $"SDPA mask {mask.Shape} is not broadcastable to [{b},{h},{sq},{skv}]; "
-                + "expected [Sq,Skv], [1|H,Sq,Skv], or [1|B,1|H,Sq,Skv].");
+                + "expected [1|Sq,Skv], [1|H,1|Sq,Skv], or [1|B,1|H,1|Sq,Skv].");
     }
+
+    /// <summary>Query rows the additive mask actually stores. 1 means the mask depends only on the key and one row is broadcast over every query — the [Sq,Skv] duplicate of it is what makes a masked call expensive.</summary>
+    internal static long MaskQueryRows(Tensor mask)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        return mask.Shape.Rank switch { 2 => mask.Shape[0], 3 => mask.Shape[1], _ => mask.Shape[2] };
+    }
+
+    /// <summary>True for a mask stored as one key row broadcast over more than one query row.</summary>
+    internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
+        => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
     /// <summary>Whether a mask can ride the cuDNN fused engine as an additive fp32 bias (no mask, or F32 broadcastable over heads).</summary>
     /// <remarks>Per-head ([B,H,Sq,Skv]) or non-F32 masks fall back to the materialized path.</remarks>
@@ -7356,11 +7326,11 @@ public sealed class CudaBackend : IBackend
         if (mask is null) return true;
         if (mask.DType != DType.F32) return false;
         if (mask.Shape.Rank == 2)
-            return mask.Shape[0] == sq && mask.Shape[1] == skv;
+            return (mask.Shape[0] == sq || mask.Shape[0] == 1) && mask.Shape[1] == skv;
         return mask.Shape.Rank == 4
             && (mask.Shape[0] == 1 || mask.Shape[0] == b)
             && mask.Shape[1] == 1
-            && mask.Shape[2] == sq
+            && (mask.Shape[2] == sq || mask.Shape[2] == 1)
             && mask.Shape[3] == skv;
     }
 
@@ -7410,17 +7380,19 @@ public sealed class CudaBackend : IBackend
             // ever succeeded, and a fault injected before that point would be indistinguishable from a
             // genuine init failure (permanent, session-wide), defeating the point of testing per-dim
             // retry/backoff/classification.
-            CudnnStatusException? injected = TestCudnnSdpaFaultInjector?.Invoke(d);
+            Exception? injected = TestCudnnSdpaFaultInjector?.Invoke(d);
             if (injected is not null) throw injected;
 
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            long biasB = 1;
+            long biasB = 1, biasSq = sq;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
-                biasB = mask.ElementCount / (sq * skv);
+                // From the SHAPE, not the element count: a key-only [1,Skv] bias divides to 0 that way.
+                biasSq = MaskQueryRows(mask);
+                biasB = mask.Shape.Rank == 4 ? mask.Shape[0] : 1;
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
@@ -7428,7 +7400,7 @@ public sealed class CudaBackend : IBackend
             if (query.DType == DType.F16)
             {
                 // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB);
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
             }
             else
             {
@@ -7440,7 +7412,7 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }
@@ -7462,7 +7434,7 @@ public sealed class CudaBackend : IBackend
         {
             // Init failure (lib missing) ⇒ session-dead — unconditional, this is never worth retrying (the
             // library either loads or it doesn't).
-            if (_cudnnSdpa is null)
+            if (_cudnnSdpa is null && ex is not OutOfVramException)
             {
                 _cudnnSdpaDead = true;
                 HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled for the session (init failed): {ex.Message}");
@@ -7476,7 +7448,15 @@ public sealed class CudaBackend : IBackend
             // a permanent kill: the resource pressure that causes it is typically external to this process
             // (other processes on the box) and does clear up. An exception we can't positively classify
             // (not a CudnnStatusException) stays conservative and is treated as permanent, same as today.
-            bool permanent = ex is not CudnnStatusException cse || cse.IsPermanent;
+            // A VRAM shortfall is the one failure class that is provably NOT structural: the fused path needs
+            // LESS memory than the materialized fallback it demotes to, so killing it on an OOM guarantees the
+            // next call asks for the [heads,Sq,Skv] score matrix and OOMs far harder. Always transient.
+            bool permanent = ex switch
+            {
+                OutOfVramException => false,
+                CudnnStatusException cse => cse.IsPermanent,
+                _ => true,
+            };
             if (permanent)
             {
                 _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
@@ -7585,14 +7565,11 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into
-    /// the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
+    /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
     private static readonly bool SageTokenMajorDetour =
         Environment.GetEnvironmentVariable("HARTSY_LTX2_SAGE_TOKENMAJOR") == "1";
 
-    /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash.
-    /// Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above
-    /// the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
+    /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash. Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
     private bool SageF16Preferred(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask,
         long sq, long skv, long d)
     {
@@ -7699,7 +7676,8 @@ public sealed class CudaBackend : IBackend
     /// reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
     /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
     /// (override: <c>HARTSY_SDPA_TILE</c>).</remarks>
-    private unsafe void SdpaTiledF32NoMask(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
+        Tensor? keyBias = null)
     {
         EnterOp();
         EnsureKernels();
@@ -7708,13 +7686,22 @@ public sealed class CudaBackend : IBackend
         long skv = key.Shape[2];
         long totalHeads = b * h;
 
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0, pBias = 0, pOnes = 0;
+        long biasBlocks = 0;
         bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
+            if (keyBias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(keyBias);
+                // The mask may carry one row per batch/head ([H,1,Skv] or [B,H,1,Skv]), not just a single row
+                // broadcast over everything — bh below indexes into it modulo this so each head/batch gets its
+                // own row instead of every row silently reusing block 0's.
+                biasBlocks = Math.Max(1, keyBias.ElementCount / skv);
+            }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
@@ -7729,6 +7716,11 @@ public sealed class CudaBackend : IBackend
                 Br = Math.Min(envBr, sq);
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+            if (pBias != 0)
+            {
+                pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));
+                CudaMemory.Fill32(pOnes, 0x3F80_0000u, (nuint)Br);   // 1.0f
+            }
 
             long strideQ = sq * d, strideK = skv * d, strideV = skv * d, strideOut = sq * d;
             float alpha = scale, beta = 0f, one = 1f, zero = 0f;
@@ -7754,6 +7746,19 @@ public sealed class CudaBackend : IBackend
                         &beta,
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
                         CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+
+                // A key-only additive bias needs no [Sq,Skv] duplicate — one rank-1 accumulate covers a whole
+                // head's curBr rows. Looped per head/batch (not one accumulate across totalHeads*curBr) so a
+                // mask with more than one stored row applies the block that head/batch actually owns.
+                if (pBias != 0)
+                {
+                    for (long bh = 0; bh < totalHeads; bh++)
+                    {
+                        ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
+                        ulong biasPtr = pBias + (ulong)((bh % biasBlocks) * skv * sizeof(float));
+                        AccumulateKeyBias(sPtr, biasPtr, pOnes, curBr, skv, skv, beta: 1f);
+                    }
                 }
 
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
@@ -7786,9 +7791,27 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
+            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
+            if (pOnes != 0) CudaMemory.FreeAsync(pOnes, _stream.Handle);
         }
+    }
+
+    /// <summary>Adds a key-only bias row to every row of a row-major <c>[rows, Skv]</c> F32 score block as a rank-1 GEMM (<c>ones ⊗ bias</c>) — no new kernel, and the bias stays stored once. <paramref name="beta"/> is 0 to materialize the broadcast and 1 to accumulate onto existing scores. Plain FP32 compute (k = 1, so it costs nothing) rather than TF32, so the bias value reaches the scores unrounded.</summary>
+    private unsafe void AccumulateKeyBias(ulong dst, ulong bias, ulong ones, long rows, long skv, long ldc, float beta)
+    {
+        float alpha = 1f;
+        CublasApi.cublasGemmEx(
+            _cublasHandle,
+            CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+            (int)skv, (int)rows, 1,
+            &alpha,
+            bias, CublasApi.CUDA_R_32F, (int)skv,
+            ones, CublasApi.CUDA_R_32F, 1,
+            &beta,
+            dst, CublasApi.CUDA_R_32F, (int)ldc,
+            CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
     }
 
     #endregion
@@ -8180,9 +8203,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>cuDNN transposed 1D convolution via convolution-backward-data (mapped to 2D, H=1): F32 output via
-    /// TF32 tensor cores; bias is added F32 after. Returns false on a geometry mismatch (without disabling the
-    /// route) or on any cuDNN failure (session-sticky) so the caller falls back to the direct kernel.</summary>
+    /// <summary>cuDNN transposed 1D convolution via convolution-backward-data (mapped to 2D, H=1): F32 output via TF32 tensor cores; bias is added F32 after. Returns false on a geometry mismatch (without disabling the route) or on any cuDNN failure (session-sticky) so the caller falls back to the direct kernel.</summary>
     private unsafe bool TryCudnnConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft, int padRight, int dilation)
     {
@@ -10169,10 +10190,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>
-    /// Splits <paramref name="input"/> into device-resident <paramref name="outputs"/> along
-    /// <paramref name="dim"/>, preserving every F32/F16/BF16 payload bit.
-    /// </summary>
+    /// <summary>Splits <paramref name="input"/> into device-resident <paramref name="outputs"/> along <paramref name="dim"/>, preserving every F32/F16/BF16 payload bit.</summary>
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
         SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
@@ -10381,9 +10399,7 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>This backend's cached device pointer for <paramref name="tensor"/> (weight or activation shadow),
-    /// or 0 when none. Read-only peek for the peer-copy boundary; the owning backend must be quiescent (the
-    /// per-device gate / stage sequencing guarantees the producing stage finished issuing work).</summary>
+    /// <summary>This backend's cached device pointer for <paramref name="tensor"/> (weight or activation shadow), or 0 when none. Read-only peek for the peer-copy boundary; the owning backend must be quiescent (the per-device gate / stage sequencing guarantees the producing stage finished issuing work).</summary>
     internal ulong TryGetDevicePointer(Tensor tensor)
     {
         if (_transferState.WeightCache.TryGetValue(tensor, out ulong weightPtr))
@@ -10399,11 +10415,7 @@ public sealed class CudaBackend : IBackend
     /// <inheritdoc/>
     public long GetPeerCopyCount() => Interlocked.Read(ref _peerCopies);
 
-    /// <summary>Cross-backend boundary copy. When the source lives on another CUDA device and P2P is available,
-    /// the device copy moves directly (event-ordered against the source's stream, no host round-trip and no
-    /// eviction of the source backend's resident copy). Otherwise the source's device data is staged into the
-    /// DESTINATION's host buffer — deliberately not the default interface path, which would fire the source
-    /// tensor's demote hooks and evict it from the source backend.</summary>
+    /// <summary>Cross-backend boundary copy. When the source lives on another CUDA device and P2P is available, the device copy moves directly (event-ordered against the source's stream, no host round-trip and no eviction of the source backend's resident copy). Otherwise the source's device data is staged into the DESTINATION's host buffer — deliberately not the default interface path, which would fire the source tensor's demote hooks and evict it from the source backend.</summary>
     public unsafe void CopyFromPeer(Tensor destination, Tensor source, IBackend sourceBackend)
     {
         // Raw memcpy both ways below — a dtype mismatch would bit-reinterpret silently.
@@ -10632,9 +10644,7 @@ public sealed class CudaBackend : IBackend
         ReleaseAttentionExecutionCacheCore();
     }
 
-    /// <summary>Discards cuDNN SDPA plans/workspaces without touching weights, activations, convolution plans,
-    /// retry state, or cumulative engagement diagnostics. The lock covers both the stream drain and detach so a
-    /// first-call plan build/enqueue cannot race phase-boundary teardown.</summary>
+    /// <summary>Discards cuDNN SDPA plans/workspaces without touching weights, activations, convolution plans, retry state, or cumulative engagement diagnostics. The lock covers both the stream drain and detach so a first-call plan build/enqueue cannot race phase-boundary teardown.</summary>
     private void ReleaseAttentionExecutionCacheCore()
     {
         lock (_cudnnSdpaLock)

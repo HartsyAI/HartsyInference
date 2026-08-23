@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>A stack of VITS/Bert-VITS2 FFT blocks (the <c>attentions.Encoder</c>): pre-norm relative-position
-/// multi-head attention + Conv FFN, with optional speaker conditioning (<c>x += spk_emb_linear(g)</c> before a
-/// chosen layer). Shared by the text encoder (6 layers, FFN kernel 3) and the transformer-coupling flow
-/// (3 layers, FFN kernel 5). Channels-first <c>[1, hidden, T]</c>. The attention math is validated bit-exact
-/// against the reference text encoder.</summary>
+/// <summary>A stack of VITS/Bert-VITS2 FFT blocks (the <c>attentions.Encoder</c>): pre-norm relative-position multi-head attention + Conv FFN, with optional speaker conditioning (<c>x += spk_emb_linear(g)</c> before a chosen layer); shared by the text encoder (6 layers, FFN kernel 3) and the transformer-coupling flow (3 layers, FFN kernel 5). The attention math is validated bit-exact against the reference text encoder.</summary>
 public sealed unsafe class VitsFftBlock
 {
     private readonly int _hidden, _heads, _kCh, _filter, _ffnKernel, _window;
@@ -22,8 +18,7 @@ public sealed unsafe class VitsFftBlock
         for (int i = 0; i < numLayers; i++) _layers[i] = new Layer(hidden, heads, _kCh, filterChannels, ffnKernel, window);
     }
 
-    /// <summary>Loads the per-layer attention/FFN/norm weights under <paramref name="prefix"/> (the
-    /// <c>...encoder</c> module), and the optional <c>spk_emb_linear</c> speaker projection.</summary>
+    /// <summary>Loads the per-layer attention/FFN/norm weights under <paramref name="prefix"/> (the <c>...encoder</c> module), and the optional <c>spk_emb_linear</c> speaker projection.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, prefix, i);
@@ -31,9 +26,7 @@ public sealed unsafe class VitsFftBlock
         { _spkW = sw; _spkB = w.TryGetValue($"{prefix}.spk_emb_linear.bias", out Tensor? sb) ? sb : null; }
     }
 
-    /// <summary>Runs the FFT layers over <paramref name="x"/> <c>[1, hidden, T]</c> (takes ownership, returns a new
-    /// tensor). When <paramref name="g"/> <c>[1, gin, 1]</c> and <c>spk_emb_linear</c> are present, adds the projected
-    /// speaker vector before layer <paramref name="condLayerIdx"/>.</summary>
+    /// <summary>Runs the FFT layers over <paramref name="x"/> <c>[1, hidden, T]</c> (takes ownership, returns a new tensor); when <paramref name="g"/> <c>[1, gin, 1]</c> and <c>spk_emb_linear</c> are present, adds the projected speaker vector before layer <paramref name="condLayerIdx"/>.</summary>
     public Tensor Run(IBackend backend, Tensor x, int t, Tensor? g = null, int condLayerIdx = 2)
     {
         float[]? gProj = null;

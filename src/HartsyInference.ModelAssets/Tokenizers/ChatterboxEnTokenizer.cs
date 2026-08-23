@@ -4,15 +4,9 @@ using System.Text.RegularExpressions;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Text tokenizer for Resemble AI's Chatterbox TTS (the upstream <c>EnTokenizer</c>). The model's T3 LM
-/// consumes a tiny plain-character BPE vocabulary (704 English entries, 265 merges) rather than a byte-level BPE,
-/// so this reproduces the HuggingFace <c>tokenizers</c> pipeline for that specific config: no normalizer, a
-/// <c>Whitespace</c> pre-tokenizer (<c>\w+|[^\w\s]+</c>), and BPE over the character vocab. Spaces are mapped to
-/// the literal <c>[SPACE]</c> token before encoding (the upstream convention), and the bracketed special tokens
-/// (<c>[SPACE]</c>, <c>[START]</c>, <c>[STOP]</c>, sound-effect tags, ...) are matched whole.
+/// <summary>Text tokenizer for Resemble AI's Chatterbox TTS (the upstream <c>EnTokenizer</c>). The model's T3 LM consumes a tiny plain-character BPE vocabulary (704 English entries, 265 merges) rather than a byte-level BPE, so this reproduces the HuggingFace <c>tokenizers</c> pipeline for that specific config: no normalizer, a <c>Whitespace</c> pre-tokenizer (<c>\w+|[^\w\s]+</c>), and BPE over the character vocab. Spaces are mapped to the literal <c>[SPACE]</c> token before encoding (the upstream convention), and the bracketed special tokens (<c>[SPACE]</c>, <c>[START]</c>, <c>[STOP]</c>, sound-effect tags, ...) are matched whole.
 ///
-/// <para>The vocabulary is embedded (<see cref="EmbeddedTokenizerResources.ChatterboxTokenizerJsonName"/>) so the
-/// model ships self-contained. Validated to bit-exact parity against the reference <c>tokenizers</c> library.</para></summary>
+/// <para>The vocabulary is embedded (<see cref="EmbeddedTokenizerResources.ChatterboxTokenizerJsonName"/>) so the model ships self-contained. Validated to bit-exact parity against the reference <c>tokenizers</c> library.</para></summary>
 public sealed class ChatterboxEnTokenizer
 {
     private static readonly Regex WhitespaceSplit = new(@"\w+|[^\w\s]+", RegexOptions.Compiled);
@@ -38,8 +32,7 @@ public sealed class ChatterboxEnTokenizer
     public ChatterboxEnTokenizer()
         : this(EmbeddedTokenizerResources.OpenChatterboxTokenizerJson(), ownsStream: true) { }
 
-    /// <summary>Loads from a <c>tokenizer.json</c> stream. When <paramref name="ownsStream"/> is true the stream
-    /// is disposed after parsing.</summary>
+    /// <summary>Loads from a <c>tokenizer.json</c> stream. When <paramref name="ownsStream"/> is true the stream is disposed after parsing.</summary>
     public ChatterboxEnTokenizer(Stream tokenizerJson, bool ownsStream = false)
     {
         ArgumentNullException.ThrowIfNull(tokenizerJson);
@@ -97,9 +90,7 @@ public sealed class ChatterboxEnTokenizer
         }
     }
 
-    /// <summary>Encodes text into Chatterbox token ids, reproducing the upstream <c>EnTokenizer.encode</c>: spaces
-    /// become <c>[SPACE]</c>, then the HuggingFace Whitespace+BPE pipeline runs. Does not add <c>[START]</c>/
-    /// <c>[STOP]</c> (the T3 caller wraps the sequence).</summary>
+    /// <summary>Encodes text into Chatterbox token ids, reproducing the upstream <c>EnTokenizer.encode</c>: spaces become <c>[SPACE]</c>, then the HuggingFace Whitespace+BPE pipeline runs. Does not add <c>[START]</c>/ <c>[STOP]</c> (the T3 caller wraps the sequence).</summary>
     public int[] Encode(string text)
     {
         ArgumentNullException.ThrowIfNull(text);

@@ -4,13 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>HeartCodec ResidualVQ decode (from <c>vector_quantize_pytorch.ResidualVQ.get_output_from_indices</c>).
-/// The 8 EMA codebooks each hold <c>embed [8192, 32]</c> (squeezed from the stored <c>[1, 8192, 32]</c>). For a
-/// code grid <c>[Q=8, T]</c> the decode is: per layer look up <c>embed[q][code]</c> (a 32-vector), <b>sum</b> all
-/// layers (residual reconstruction), then the shared <c>project_out</c> Linear <c>[512, 32]</c> (+bias) lifts the
-/// 32-D summed code to the 512-D codec conditioning. (<c>project_in</c> is encode-only and unused here.)
-///
-/// <para>Keys: <c>{prefix}.layers.{q}._codebook.embed [1,8192,32]</c>, <c>{prefix}.project_out.{weight,bias}</c>.</para></summary>
+/// <summary>HeartCodec ResidualVQ decode (from <c>vector_quantize_pytorch.ResidualVQ.get_output_from_indices</c>): per layer look up <c>embed[q][code]</c>, sum all 8 layers (residual reconstruction), then <c>project_out</c> lifts the 32-D summed code to the 512-D codec conditioning (<c>project_in</c> is encode-only and unused here).</summary>
+// Keys: {prefix}.layers.{q}._codebook.embed [1,8192,32], {prefix}.project_out.{weight,bias}.
 public sealed unsafe class HeartCodecRvq
 {
     private readonly int _nq, _codebookSize, _codebookDim, _dim;

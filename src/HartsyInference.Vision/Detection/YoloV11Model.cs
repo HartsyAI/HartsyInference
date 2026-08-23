@@ -180,7 +180,7 @@ public sealed class YoloV11Model : IYoloDetectModel
 
         // FPN top-down.
         Tensor x11 = Upsample(backend, x10, 2);
-        Tensor x12 = ConcatChannel(backend, x11, x6); x11.Dispose();
+        Tensor x12 = ConcatChannel(backend, x11, x6); x11.Dispose(); x6.Dispose();
         Tensor x13 = _layer13.Forward(backend, x12); x12.Dispose();
 
         Tensor x14 = Upsample(backend, x13, 2);

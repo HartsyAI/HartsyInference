@@ -10,10 +10,6 @@ public static class Conv2DKernels
     /// <param name="input">Input tensor with shape [N, Cin, H, W].</param>
     /// <param name="weight">Weight tensor with shape [Cout, Cin, KH, KW].</param>
     /// <param name="bias">Optional bias tensor with shape [Cout], or null.</param>
-    /// <param name="strideH">Vertical stride.</param>
-    /// <param name="strideW">Horizontal stride.</param>
-    /// <param name="padH">Vertical padding.</param>
-    /// <param name="padW">Horizontal padding.</param>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void Conv2D(
         Tensor output,
@@ -75,7 +71,6 @@ public static class Conv2DKernels
 
                 try
                 {
-                    // Build the im2col matrix
                     Im2Col(inputSlice, colBuffer, Cin, H, W, KH, KW, outH, outW, strideH, strideW, padH, padW);
 
                     // GEMM: output[Cout, outH*outW] = weight[Cout, Cin*KH*KW] @ colBuffer[Cin*KH*KW, outH*outW]

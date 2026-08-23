@@ -5,19 +5,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>F5-TTS DiT block. Standard "DiT-XL style" pre-norm transformer with
-/// AdaLayerNorm-Zero modulation driven by the timestep embedding. Pattern:
-/// <code>
-///   shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunk(AdaLNLinear(silu(t_emb)), 6)
-///   h = attn(modulate(LayerNorm(x), shift_msa, scale_msa))
-///   x = x + gate_msa * h
-///   h = ff(modulate(LayerNorm(x), shift_mlp, scale_mlp))
-///   x = x + gate_mlp * h
-/// </code>
-///
-/// <para>Attention uses RoPE on Q, K (interleaved / x_transformers convention — reused
-/// from <see cref="RotaryEmbedding"/>). FFN is plain GELU MLP with <c>ff_mult=2</c>
-/// (smaller than the typical 4x — note this when comparing magnitudes to other DiTs).</para></summary>
+/// <summary>F5-TTS DiT block: standard "DiT-XL style" pre-norm transformer with AdaLayerNorm-Zero modulation driven by the timestep embedding.</summary>
+// Pattern:
+//   shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunk(AdaLNLinear(silu(t_emb)), 6)
+//   h = attn(modulate(LayerNorm(x), shift_msa, scale_msa))
+//   x = x + gate_msa * h
+//   h = ff(modulate(LayerNorm(x), shift_mlp, scale_mlp))
+//   x = x + gate_mlp * h
+// Attention uses RoPE on Q, K (interleaved / x_transformers convention — reused from RotaryEmbedding).
+// FFN is plain GELU MLP with ff_mult=2 (smaller than the typical 4x — note this when comparing
+// magnitudes to other DiTs).
 internal sealed unsafe class F5DitBlock
 {
     // ── Section profiling (HARTSY_F5_PROFILE=1): sync-bracketed ms accumulators, dumped per generation ──
@@ -61,12 +58,10 @@ internal sealed unsafe class F5DitBlock
         _ffB2 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.2.bias"]);
     }
 
-    /// <summary>Forward: <paramref name="x"/> <c>[1, T, dim]</c> channels-last,
-    /// <paramref name="siluTimeEmb"/> <c>[1, dim]</c> SiLU'd timestep embedding (computed once per step by
-    /// the caller), <paramref name="ropeCos"/>/<paramref name="ropeSin"/> <c>[maxPos, headDim]</c> GPU-ready
-    /// tables. Fully backend-resident: no activation is touched on the host, so the whole block runs without
-    /// a single GPU stall — the previous version did adaLN/RoPE/GELU/reshapes as CPU pointer loops, forcing
-    /// D2H+H2D round-trips per op (the reason F5 ran ~60x slower than the reference).</summary>
+    /// <summary><paramref name="siluTimeEmb"/> is the <c>[1, dim]</c> SiLU'd timestep embedding (computed once per step by the caller); <paramref name="ropeCos"/>/<paramref name="ropeSin"/> are <c>[maxPos, headDim]</c> GPU-ready tables.</summary>
+    // Fully backend-resident: no activation is touched on the host, so the whole block runs without a
+    // single GPU stall — the previous version did adaLN/RoPE/GELU/reshapes as CPU pointer loops, forcing
+    // D2H+H2D round-trips per op (the reason F5 ran ~60x slower than the reference).
     public Tensor Forward(IBackend backend, Tensor x, Tensor siluTimeEmb, int t, Tensor ropeCos, Tensor ropeSin)
     {
         int dim = _cfg.Dim;
@@ -173,8 +168,7 @@ internal sealed unsafe class F5DitBlock
         return outX;
     }
 
-    /// <summary>On-device slice of modulation chunk <paramref name="idx"/> (a <c>[1, 1, dim]</c> tensor) out of
-    /// the packed <c>[1, 1, 6*dim]</c> projection.</summary>
+    /// <summary>On-device slice of modulation chunk <paramref name="idx"/> (a <c>[1, 1, dim]</c> tensor) out of the packed <c>[1, 1, 6*dim]</c> projection.</summary>
     private static Tensor SliceMod(IBackend backend, Tensor mods, int idx, int dim)
     {
         Tensor slice = new(new TensorShape(1, 1, dim), DType.F32);

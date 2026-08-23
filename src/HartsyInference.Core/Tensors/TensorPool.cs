@@ -4,6 +4,7 @@ using HartsyInference.Core.Memory;
 namespace HartsyInference.Core.Tensors;
 
 /// <summary>Thread-safe pool of unmanaged memory buffers for temporary tensor allocations.</summary>
+/// <remarks>No production call sites yet — kept because docs (AGENTS.md, CLEANUP.md) prescribe it as the hot-path temporaries pattern; ROADMAP tracks adopt-or-remove.</remarks>
 public sealed class TensorPool : IDisposable
 {
     private readonly ConcurrentDictionary<nuint, ConcurrentBag<NativeBuffer>> _pools = new();

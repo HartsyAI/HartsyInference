@@ -1,9 +1,6 @@
 namespace HartsyInference.ModelAssets.Registry;
 
-/// <summary>Diffusion model architecture families that <see cref="ModelArchitectureDetector"/> can
-/// recognize from a checkpoint's tensor-key layout. This is intentionally a coarse family identifier
-/// (it does not distinguish, say, Flux dev from Flux schnell) — its job is to pick the right pipeline
-/// constructor / checkpoint converter, not to capture every variant.</summary>
+/// <summary>Diffusion model architecture families that <see cref="ModelArchitectureDetector"/> can recognize from a checkpoint's tensor-key layout. This is intentionally a coarse family identifier (it does not distinguish, say, Flux dev from Flux schnell) — its job is to pick the right pipeline constructor / checkpoint converter, not to capture every variant.</summary>
 public enum ModelArchitecture
 {
     /// <summary>Could not be matched to a known family.</summary>

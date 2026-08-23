@@ -57,7 +57,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             (Lumina2CheckpointConverter.ConvertedWeights converted, IReadOnlyList<SafeTensorsLoader> transformerLoaders) =
                 Lumina2CheckpointConverter.LoadAndConvert(context.CheckpointPath);
             loaders.AddRange(transformerLoaders);
-            Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
+            Dictionary<string, Tensor> transformerWeights = VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.BF16], DType.F32);
 
             Lumina2Config config = Lumina2Config.FromWeights(transformerWeights);
             Logs.Info($"[Lumina2Recipe] Building transformer (2B NextDiT).");
@@ -95,14 +95,8 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], transformer.BlockCount, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount, transformer.EnumerateSharedWeights());
                 Logs.Info($"[Lumina2Recipe] DiT sharding enabled: layers [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
@@ -124,17 +118,6 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    private static Dictionary<string, Tensor> CastWeightsToF32(Dictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> f32 = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in weights)
-        {
-            DType dt = kvp.Value.DType;
-            f32[kvp.Key] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
-        }
-        return f32;
     }
 
     /// <summary>Locates the Gemma-2 SentencePiece model, accepting only a file whose SHA-256 matches <see cref="TokenizerSha256"/>: the canonical models path first, then siblings of the encoder checkpoint, else downloads it (hash-verified) under the models root.</summary>

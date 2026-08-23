@@ -83,15 +83,6 @@ public sealed unsafe class PsaAttention
         ComputeAttention(qkv, attnOutCHW, batch, height, width);
         qkv.Dispose();
 
-        // Positional encoding via depthwise 3×3 conv on V reshaped back to spatial.
-        // V was already laid out in the QKV tensor; rather than carrying a separate V tensor
-        // we re-extract it from the projected output using the same channel offsets. Simpler
-        // and more memory-efficient: redo the conv on the original input mapped through the
-        // V slice of the qkv projection. But we already disposed qkv. The clean solution is
-        // to compute pe on a freshly-extracted V tensor we stash before disposing qkv.
-        // For now, recompute V via a second QKV pass would be wasteful — instead extract V
-        // inside ComputeAttention into a side output. See refactor below.
-
         Tensor projOut = new Tensor(new TensorShape(batch, _dim, height, width), DType.F32);
         backend.Conv2D(projOut, attnOutCHW, _projWeight!, _projBias!, 1, 1, 0, 0);
         attnOutCHW.Dispose();

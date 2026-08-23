@@ -26,8 +26,6 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
     /// <summary>diffusers truncates the templated sequence at 512 tokens.</summary>
     private const int MaxTokens = 512;
 
-    /// <summary>Qwen-Image's guidance default when the caller does not supply one (SwarmUI loader fallback).</summary>
-    private const float DefaultCfg = 2.5f;
 
     private readonly QwenImagePipeline _pipeline;
     private readonly Qwen3Tokenizer _tokenizer;
@@ -38,9 +36,9 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly IDisposable? _ggufHandle;
 
-    /// <summary>Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
     public QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

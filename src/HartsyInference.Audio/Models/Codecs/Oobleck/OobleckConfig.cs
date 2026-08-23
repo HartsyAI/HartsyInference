@@ -1,9 +1,9 @@
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Configuration for the Oobleck waveform VAE (Stability AI's Stable-Audio autoencoder,
-/// diffusers <c>AutoencoderOobleck</c>). Field names and defaults mirror the diffusers config so a
-/// checkpoint's <c>config.json</c> maps 1:1. Used by Stable Audio Open (44.1 kHz, ratios 2·4·4·8·8)
-/// and ACE-Step 1.5 (48 kHz, ratios 2·4·4·6·10 — see <see cref="AceStep15"/>).</summary>
+/// <summary>Configuration for the Oobleck waveform VAE (Stability AI's Stable-Audio autoencoder, diffusers <c>AutoencoderOobleck</c>).</summary>
+/// <remarks>Field names and defaults mirror the diffusers config so a checkpoint's <c>config.json</c> maps 1:1.
+/// Used by Stable Audio Open (44.1 kHz, ratios 2·4·4·8·8) and ACE-Step 1.5 (48 kHz, ratios 2·4·4·6·10 — see
+/// <see cref="AceStep15"/>).</remarks>
 public record OobleckConfig
 {
     /// <summary>Encoder stem width; also the encoder output channels (= 2 × latent dim, mean+scale).</summary>
@@ -41,8 +41,7 @@ public record OobleckConfig
     /// <summary>Stable Audio Open 1.0 — stereo 44.1 kHz, 64-d latents @ ~21.5 Hz (hop 2048).</summary>
     public static OobleckConfig StableAudioOpen => new();
 
-    /// <summary>ACE-Step 1.5 — stereo 48 kHz, 64-d latents @ 25 Hz (hop 1920). Matches the
-    /// <c>vae/config.json</c> in <c>ACE-Step/Ace-Step1.5</c>.</summary>
+    /// <summary>ACE-Step 1.5 — stereo 48 kHz, 64-d latents @ 25 Hz (hop 1920). Matches the <c>vae/config.json</c> in <c>ACE-Step/Ace-Step1.5</c>.</summary>
     public static OobleckConfig AceStep15 => new()
     {
         DownsamplingRatios = [2, 4, 4, 6, 10],

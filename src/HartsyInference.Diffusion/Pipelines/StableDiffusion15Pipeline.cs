@@ -41,12 +41,11 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
 
     /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
-    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image. Initial latent is fresh Gaussian noise scaled by the scheduler's <c>InitialNoiseSigma</c>; denoise from step 0.</item>
-    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the VAE encoder, fresh noise is injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>, and denoising runs from <c>startStep = steps - round(steps * Strength)</c>. Requires a pipeline constructed with a <see cref="VaeEncoder"/>.</item>
-    /// <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="SdxlPipeline"/>).</item>
+    ///   <item>Plain <see cref="TextToImageRequest"/> → text-to-image. Initial latent is fresh Gaussian noise scaled by the scheduler's <c>InitialNoiseSigma</c>; denoise from step 0.</item>
+    ///   <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the VAE encoder, fresh noise is injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>, and denoising runs from <c>startStep = steps - round(steps * Strength)</c>. Requires a pipeline constructed with a <see cref="VaeEncoder"/>.</item>
+    ///   <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="SdxlPipeline"/>).</item>
     /// </list>
-    /// The two paths only differ in the initial latent and the start step — text encoding, denoise loop, VAE decode, and RGB conversion are identical. Strength=0 short-circuits to a byte-identical pass-through.
-    /// </summary>
+    /// The two paths only differ in the initial latent and the start step — text encoding, denoise loop, VAE decode, and RGB conversion are identical. Strength=0 short-circuits to a byte-identical pass-through.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativePromptTokenIds,

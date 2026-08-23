@@ -1,11 +1,6 @@
 namespace HartsyInference.ModelAssets.Gguf.KeyMappers;
 
-/// <summary>GGUF mapper for the GPT-2 lineage (<c>gpt2</c>). This dialect differs from the llama family in three
-/// ways: a <i>fused</i> <c>attn_qkv</c> (weight + bias) split downstream into q/k/v
-/// (<see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>), learned <i>absolute</i> position embeddings
-/// (<c>position_embd</c>, added to the token embeddings — GPT-2 uses no RoPE), and LayerNorm + projection
-/// <i>biases</i> on every block (attention output and the non-gated GELU FFN). Reusable for StarCoder-1 and the
-/// GPT-NeoX/BLOOM word-embedding lineage once their config presets land.</summary>
+/// <summary>GGUF mapper for the GPT-2 lineage (<c>gpt2</c>). This dialect differs from the llama family in three ways: a <i>fused</i> <c>attn_qkv</c> (weight + bias) split downstream into q/k/v (<see cref="HartsyInference.LLM.Generation.GgufLanguageModel"/>), learned <i>absolute</i> position embeddings (<c>position_embd</c>, added to the token embeddings — GPT-2 uses no RoPE), and LayerNorm + projection <i>biases</i> on every block (attention output and the non-gated GELU FFN). Reusable for StarCoder-1 and the GPT-NeoX/BLOOM word-embedding lineage once their config presets land.</summary>
 public sealed class Gpt2KeyMapper : IGgufKeyMapper
 {
     public string Architecture => "gpt2";

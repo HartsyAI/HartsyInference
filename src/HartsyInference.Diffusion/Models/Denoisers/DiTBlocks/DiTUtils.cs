@@ -6,14 +6,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Shared utility methods for DiT/MMDiT transformers. Consolidates helpers duplicated across FluxTransformer, Sd3Transformer, and future DiT models.</summary>
 public static unsafe class DiTUtils
 {
-    /// <summary>The checkpoint tensor widened to F32 when needed; the caller owns any cast copy for its model's
-    /// lifetime (small per-channel vectors — norms, tables, biases).</summary>
-    public static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = w[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
     /// <summary>A [n] tensor of ones — the unit affine for RmsNorm calls where the checkpoint has no weight
     /// (IBackend has LayerNormNoAffine but no no-affine RmsNorm overload, so callers synthesize one).</summary>
     public static Tensor Ones(int n)
@@ -120,55 +112,6 @@ public static unsafe class DiTUtils
             double angle = pos * omega;
             dst[k] = (float)Math.Sin(angle);
             dst[half + k] = (float)Math.Cos(angle);
-        }
-    }
-
-    /// <summary>Linear projection for 1D vectors: output = input @ weight^T + bias. Input: [B, inDim], Output: [B, outDim].</summary>
-    public static void LinearProject1D(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int inOffset = b * inDim;
-            int outOffset = b * outDim;
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                for (int i = 0; i < inDim; i++)
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                outPtr[outOffset + o] = sum;
-            }
-        }
-    }
-
-    /// <summary>Batched linear projection: output = input @ weight^T + bias. Input: [B, S, inDim], Output: [B, S, outDim].</summary>
-    public static void LinearProjectBatched(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    outPtr[outOffset + o] = sum;
-                }
-            }
         }
     }
 
@@ -380,38 +323,6 @@ public static unsafe class DiTUtils
         return output;
     }
 
-    /// <summary>Concatenates two [B, S, D1] and [B, S, D2] tensors along the last dimension → [B, S, D1+D2].</summary>
-    public static Tensor ConcatAlongLastDim(Tensor a, Tensor b)
-    {
-        int batch = (int)a.Shape[0];
-        int seqLen = (int)a.Shape[1];
-        int dimA = (int)a.Shape[2];
-        int dimB = (int)b.Shape[2];
-        int dimOut = dimA + dimB;
-
-        TensorShape outShape = new TensorShape(batch, seqLen, dimOut);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int bIdx = 0; bIdx < batch; bIdx++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int aOffset = (bIdx * seqLen + s) * dimA;
-                int bOffset = (bIdx * seqLen + s) * dimB;
-                int outOffset = (bIdx * seqLen + s) * dimOut;
-
-                Buffer.MemoryCopy(aPtr + aOffset, outPtr + outOffset, dimA * sizeof(float), dimA * sizeof(float));
-                Buffer.MemoryCopy(bPtr + bOffset, outPtr + outOffset + dimA, dimB * sizeof(float), dimB * sizeof(float));
-            }
-        }
-
-        return output;
-    }
-
     /// <summary>Concatenates two pooled tensors [B, D1] and [B, D2] along the last dimension → [B, D1+D2].</summary>
     public static Tensor ConcatPooled(Tensor a, Tensor b)
     {
@@ -480,8 +391,8 @@ public static unsafe class DiTUtils
         return result;
     }
 
-    /// <summary>Inverse of <see cref="PatchifyNCHW"/>: <c>[B, (H/p)·(W/p), p²·C]</c> → <c>[B, C, H, W]</c>.</summary>
-    public static Tensor UnpatchifyToNCHW(Tensor tokens, int channels, int hPacked, int wPacked, int patch)
+    /// <summary>Inverse of <see cref="PatchifyNCHW"/>: <c>[B, (H/p)·(W/p), p²·C]</c> → <c>[B, C, H, W]</c>. Pass <paramref name="negate"/> to write <c>-value</c> instead (models that fold a final output negation into the unpatchify).</summary>
+    public static Tensor UnpatchifyToNCHW(Tensor tokens, int channels, int hPacked, int wPacked, int patch, bool negate = false)
     {
         int batch = (int)tokens.Shape[0];
         int height = hPacked * patch;
@@ -511,12 +422,31 @@ public static unsafe class DiTUtils
                         {
                             int dstCol = wp * patch + px;
                             for (int c = 0; c < channels; c++)
-                                batchDst[c * hwStride + dstRow * width + dstCol] = tokenSrc[srcIdx++];
+                            {
+                                float v = tokenSrc[srcIdx++];
+                                batchDst[c * hwStride + dstRow * width + dstCol] = negate ? -v : v;
+                            }
                         }
                     }
                 }
         }
         return result;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device and disposes the source.</summary>
+    public static Tensor MoveAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor moved = CopyAcross(dst, src, source);
+        source.Dispose();
+        return moved;
+    }
+
+    /// <summary>Peer-copies <paramref name="source"/> onto <paramref name="dst"/>'s device; the source stays live.</summary>
+    public static Tensor CopyAcross(IBackend dst, IBackend src, Tensor source)
+    {
+        Tensor copied = new Tensor(source.Shape, source.DType);
+        dst.CopyFromPeer(copied, source, src);
+        return copied;
     }
 
     /// <summary>Pads the last dimension with zeros: [B, S, currentDim] → [B, S, targetDim].</summary>
@@ -554,7 +484,7 @@ public static unsafe class DiTUtils
     /// <summary>LayerNorm (no affine, eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, entirely on
     /// the backend so the activation stays device-resident. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>,
     /// so <paramref name="scale"/> is pre-incremented by 1 (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor —
-    /// bit-identical to the old host <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors QwenImageBlock.NormModulate.</summary>
+    /// bit-identical to the old host <c>AdaLNModulation.ApplyModulation</c>. Mirrors QwenImageBlock.NormModulate.</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps = 1e-6f)
     {
         // Intermediate follows the activation dtype (F16 activation stays F16 end-to-end; F32 callers unchanged).
@@ -568,7 +498,7 @@ public static unsafe class DiTUtils
     /// <summary>AdaLN modulation <c>out = x*(1+scale)+shift</c> on an ALREADY-normalized input, entirely on the
     /// backend. Split out of <see cref="NormModulate"/> for blocks that share one LayerNorm across two modulation
     /// paths (SD3.5 dual-attention) or use an affine <c>backend.LayerNorm</c> before modulating. Bit-identical to
-    /// the old host <see cref="AdaLNModulation.ApplyModulation"/>. Pass <paramref name="shift"/> null for scale-only
+    /// the old host <c>AdaLNModulation.ApplyModulation</c>. Pass <paramref name="shift"/> null for scale-only
     /// modulation <c>out = x*(1+scale)</c> (Z-Image / Ideogram-4 adaLN blocks that omit the shift term).</summary>
     public static Tensor Modulate(IBackend backend, Tensor x, Tensor? shift, Tensor scale, TensorShape shape)
     {

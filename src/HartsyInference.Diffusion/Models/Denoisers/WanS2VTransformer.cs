@@ -56,13 +56,13 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         _patchW2d = WanDitOps.Reshape2d(w["patch_embedding.weight"], _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
         _textW1 = w["condition_embedder.text_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.text_embedder.linear_1.bias", out _textB1);
         _textW2 = w["condition_embedder.text_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.text_embedder.linear_2.bias", out _textB2);
-        Tensor condMask = LoadF32(w, "trainable_cond_mask.weight");   // [3, dim]
+        Tensor condMask = TensorCasts.LoadF32(w, "trainable_cond_mask.weight");   // [3, dim]
         _condMask0 = CopyRow(condMask, 0, _config.InnerDim);
         _condMask1 = CopyRow(condMask, 1, _config.InnerDim);
         _onesDim = new Tensor(new TensorShape(1, _config.InnerDim), DType.F32);
@@ -71,7 +71,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         {
             _condEncW2d = WanDitOps.Reshape2d(condW, _config.InnerDim,
                 _config.VaeLatentChannels * _config.PatchSize.T * _config.PatchSize.H * _config.PatchSize.W);
-            _condEncB = LoadF32Opt(w, "cond_encoder.bias");
+            _condEncB = TensorCasts.LoadF32Opt(w, "cond_encoder.bias");
         }
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"blocks.{i}");
         _audioInjector.LoadWeights(w);
@@ -239,8 +239,6 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         return o;
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key) => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 
     public void Dispose()
     {

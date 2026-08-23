@@ -82,8 +82,9 @@ public sealed class WanEndFrameRealWeightTests
         _output.WriteLine($"Frame 0 channel means: R={meanR0:F1} G={meanG0:F1} B={meanB0:F1}");
         _output.WriteLine($"Frame {result.Frames.Count - 1} channel means: R={meanRN:F1} G={meanGN:F1} B={meanBN:F1}");
 
-        string firstPath = Path.Combine(RepoRoot.Path, "wan_endframe_first.rgb");
-        string lastPath = Path.Combine(RepoRoot.Path, "wan_endframe_last.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string firstPath = Path.Combine(TestPaths.OutputDir, "wan_endframe_first.rgb");
+        string lastPath = Path.Combine(TestPaths.OutputDir, "wan_endframe_last.rgb");
         File.WriteAllBytes(firstPath, first.Rgb);
         File.WriteAllBytes(lastPath, last.Rgb);
         _output.WriteLine($"Wrote {firstPath} and {lastPath} ({first.Width}x{first.Height}) for visual inspection.");

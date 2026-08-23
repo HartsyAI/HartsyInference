@@ -148,7 +148,7 @@ internal sealed class DiamondResBlock
         return a;
     }
 
-    private static Tensor F(Tensor t) => DiamondInnerModel.F32(t);
+    private static Tensor F(Tensor t) => TensorCasts.EnsureF32(t);
 }
 
 /// <summary>DIAMOND U-Net: symmetric encoder/decoder of <see cref="DiamondResBlock"/> groups with strided-conv
@@ -286,5 +286,5 @@ internal sealed unsafe class DiamondUNet
         return o;
     }
 
-    private static Tensor F(Tensor t) => DiamondInnerModel.F32(t);
+    private static Tensor F(Tensor t) => TensorCasts.EnsureF32(t);
 }

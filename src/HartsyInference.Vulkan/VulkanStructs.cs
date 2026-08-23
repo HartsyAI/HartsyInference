@@ -609,11 +609,7 @@ public struct VkCooperativeMatrixPropertiesKHR
     public VkScopeKHR scope;
 }
 
-/// <summary>One supported <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configuration —
-/// enumerated via <c>vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV</c>. Unlike
-/// coopmat1's fixed 16x16x16 shapes, coopmat2 reports GRANULARITIES (the M/N/K dims used must be
-/// multiples of these) plus <c>workgroupInvocations</c> (the exact workgroup size the driver expects for
-/// this configuration's <c>gl_ScopeWorkgroup</c> matrices).</summary>
+/// <summary>One supported <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configuration — enumerated via <c>vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV</c>. Unlike coopmat1's fixed 16x16x16 shapes, coopmat2 reports GRANULARITIES (the M/N/K dims used must be multiples of these) plus <c>workgroupInvocations</c> (the exact workgroup size the driver expects for this configuration's <c>gl_ScopeWorkgroup</c> matrices).</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct VkCooperativeMatrixFlexibleDimensionsPropertiesNV
 {

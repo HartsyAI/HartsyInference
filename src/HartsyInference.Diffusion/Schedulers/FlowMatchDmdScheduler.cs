@@ -33,7 +33,7 @@ public sealed unsafe class FlowMatchDmdScheduler
         }
     }
 
-    /// <summary>Number of denoising steps.</summary>
+    /// <summary>Length of the distilled <c>denoisingStepList</c> this instance was built with.</summary>
     public int NumSteps => _stepList.Length;
 
     /// <summary>The model-conditioning timestep for step <paramref name="stepIndex"/> (<c>σ · 1000</c> on the warped grid).</summary>

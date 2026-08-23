@@ -16,13 +16,13 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
     private Tensor? _prevModelOutput;
     private int _prevStepIndex;
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "dpm++2m";
 
-    /// <summary>Number of inference steps configured.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
-    /// <summary>The computed timestep schedule.</summary>
+    /// <inheritdoc/>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
     /// <summary>Initial noise sigma (always 1.0 for DPM++).</summary>
@@ -46,7 +46,6 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
         _numInferenceSteps = numInferenceSteps;
         _timesteps = NoiseSchedule.SelectTimesteps(_config.NumTrainTimesteps, numInferenceSteps, _config.TimestepSpacing);
 
-        // Compute sigmas from timesteps
         float[] trainSigmas = NoiseSchedule.ComputeSigmas(_alphasCumprod);
         _sigmas = new float[numInferenceSteps + 1];
         for (int i = 0; i < numInferenceSteps; i++)
@@ -56,7 +55,6 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
         }
         _sigmas[numInferenceSteps] = 0.0f;
 
-        // Reset multistep state
         _prevModelOutput?.Dispose();
         _prevModelOutput = null;
         _prevStepIndex = -1;
@@ -68,11 +66,9 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
         float sigma = _sigmas[stepIndex];
         float sigmaNext = _sigmas[stepIndex + 1];
 
-        // Convert sigma to alpha_t, sigma_t (continuous form)
         SigmaToAlphaSigma(sigma, out float alphaS, out float sigmaS);
         SigmaToAlphaSigma(sigmaNext, out float alphaT, out float sigmaT);
 
-        // Convert model output to data prediction (predicted x0)
         Tensor x0Pred = ConvertModelOutput(modelOutput, sample, sigma, alphaS, sigmaS);
 
         try
@@ -84,7 +80,6 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
             }
             else
             {
-                // Second order multistep update
                 float sigmaPrev = _sigmas[_prevStepIndex];
                 SigmaToAlphaSigma(sigmaPrev, out float alphaS1, out float sigmaS1);
 
@@ -106,22 +101,8 @@ public sealed class DpmPlusPlus2MScheduler : IScheduler
     }
 
     /// <summary>Adds noise to a clean sample (forward diffusion process).</summary>
-    public unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
-    {
-        int timestep = (int)_timesteps[stepIndex];
-        float sqrtAlphaCumprod = MathF.Sqrt(_alphasCumprod[timestep]);
-        float sqrtOneMinusAlphaCumprod = MathF.Sqrt(1.0f - _alphasCumprod[timestep]);
-
-        float* samplePtr = (float*)sample.DataPointer;
-        float* noisePtr = (float*)noise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)sample.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = sqrtAlphaCumprod * samplePtr[i] + sqrtOneMinusAlphaCumprod * noisePtr[i];
-        }
-    }
+    public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
+        => NoiseSchedule.AddNoise(output, sample, noise, _timesteps, _alphasCumprod, stepIndex);
 
     /// <summary>Converts sigma to (alpha_t, sigma_t) pair in continuous form.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

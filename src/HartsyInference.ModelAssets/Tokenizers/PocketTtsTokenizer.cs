@@ -3,9 +3,7 @@ using Microsoft.ML.Tokenizers;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Pocket-TTS text tokenizer — the SentencePiece <c>tokenizer.model</c> shipped with the checkpoint
-/// (vocab 4000). Mirrors upstream <c>sp.encode(text, out_type=int)</c> (no BOS/EOS); the ids index the FlowLM
-/// <c>conditioner.embed</c> LUT.</summary>
+/// <summary>Pocket-TTS text tokenizer — the SentencePiece <c>tokenizer.model</c> shipped with the checkpoint (vocab 4000). Mirrors upstream <c>sp.encode(text, out_type=int)</c> (no BOS/EOS); the ids index the FlowLM <c>conditioner.embed</c> LUT.</summary>
 public sealed class PocketTtsTokenizer
 {
     private readonly SentencePieceTokenizer _sp;

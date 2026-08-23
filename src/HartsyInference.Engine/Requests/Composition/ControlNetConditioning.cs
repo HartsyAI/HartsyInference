@@ -1,8 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>One ControlNet conditioning layer: a control type, its already-preprocessed hint image, and the strength
-/// window over the denoising schedule. Preprocessing (Canny/Depth/OpenPose/…) is done by the caller; this carries the
-/// resulting hint pixels.</summary>
+/// <summary>One ControlNet conditioning layer: a control type, its already-preprocessed hint image, and the strength window over the denoising schedule. Preprocessing (Canny/Depth/OpenPose/…) is done by the caller; this carries the resulting hint pixels.</summary>
 public sealed record ControlNetConditioning
 {
     /// <summary>Control model id or local path (the ControlNet weights to load).</summary>

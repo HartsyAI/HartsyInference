@@ -12,8 +12,9 @@ namespace HartsyInference.Audio.Models.Demucs;
 /// <b>cross</b>-attention (each stream attends to the other's pre-update state). Every layer is pre-norm with
 /// LayerScale (<c>gamma_1/2</c>), a GELU FFN, and a final <c>norm_out</c>. Attention uses a fused
 /// <c>in_proj_weight</c> [3·dim, dim] (nn.MultiheadAttention), 8 heads, <c>1/sqrt(head_dim)</c>.</summary>
-public sealed unsafe class DemucsCrossTransformer
+public sealed unsafe class DemucsCrossTransformer : IDisposable
 {
+    private readonly DemucsCastOwner _casts = new();
     private readonly HtDemucsConfig _cfg;
     private readonly int _dim, _heads, _hd, _ffn, _layers;
     private Tensor? _normInW, _normInB, _normInTW, _normInTB;
@@ -45,9 +46,9 @@ public sealed unsafe class DemucsCrossTransformer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "crosstransformer")
     {
-        _normInW = WhisperOps.EnsureF32(w[$"{prefix}.norm_in.weight"]); _normInB = WhisperOps.EnsureF32(w[$"{prefix}.norm_in.bias"]);
-        _normInTW = WhisperOps.EnsureF32(w[$"{prefix}.norm_in_t.weight"]); _normInTB = WhisperOps.EnsureF32(w[$"{prefix}.norm_in_t.bias"]);
-        for (int i = 0; i < _layers; i++) { _spec[i].LoadWeights(w, $"{prefix}.layers.{i}"); _time[i].LoadWeights(w, $"{prefix}.layers_t.{i}"); }
+        _normInW = _casts.F32(w, $"{prefix}.norm_in.weight"); _normInB = _casts.F32(w, $"{prefix}.norm_in.bias");
+        _normInTW = _casts.F32(w, $"{prefix}.norm_in_t.weight"); _normInTB = _casts.F32(w, $"{prefix}.norm_in_t.bias");
+        for (int i = 0; i < _layers; i++) { _spec[i].LoadWeights(w, $"{prefix}.layers.{i}", _casts); _time[i].LoadWeights(w, $"{prefix}.layers_t.{i}", _casts); }
     }
 
     /// <summary>Forward over the spec stream <paramref name="x"/> <c>[1, C, Fr, T1]</c> and the time stream
@@ -157,6 +158,9 @@ public sealed unsafe class DemucsCrossTransformer
         }
     }
 
+    /// <summary>Frees the F32 casts this transformer and its layers allocated at load time.</summary>
+    public void Dispose() => _casts.Dispose();
+
     /// <summary>One transformer layer. Self (even): <c>x = x + g1·sa(norm1(x)); x = x + g2·ff(norm2(x)); x = norm_out(x)</c>.
     /// Cross (odd): <c>x = q + g1·ca(norm1(q), norm2(k)); x = x + g2·ff(norm3(x)); x = norm_out(x)</c>. Fused QKV.</summary>
     private sealed class Layer
@@ -173,18 +177,18 @@ public sealed unsafe class DemucsCrossTransformer
             _cfg = cfg; _cross = cross; _dim = cfg.BottomChannels; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
         }
 
-        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, DemucsCastOwner casts)
         {
             string attn = _cross ? "cross_attn" : "self_attn";
-            _inW = WhisperOps.EnsureF32(w[$"{p}.{attn}.in_proj_weight"]); _inB = Bias(w, $"{p}.{attn}.in_proj_bias");
-            _oW = WhisperOps.EnsureF32(w[$"{p}.{attn}.out_proj.weight"]); _oB = Bias(w, $"{p}.{attn}.out_proj.bias");
-            _n1W = WhisperOps.EnsureF32(w[$"{p}.norm1.weight"]); _n1B = WhisperOps.EnsureF32(w[$"{p}.norm1.bias"]);
-            _n2W = WhisperOps.EnsureF32(w[$"{p}.norm2.weight"]); _n2B = WhisperOps.EnsureF32(w[$"{p}.norm2.bias"]);
-            if (_cross) { _n3W = WhisperOps.EnsureF32(w[$"{p}.norm3.weight"]); _n3B = WhisperOps.EnsureF32(w[$"{p}.norm3.bias"]); }
-            _noW = WhisperOps.EnsureF32(w[$"{p}.norm_out.weight"]); _noB = WhisperOps.EnsureF32(w[$"{p}.norm_out.bias"]);
-            _f1W = WhisperOps.EnsureF32(w[$"{p}.linear1.weight"]); _f1B = Bias(w, $"{p}.linear1.bias");
-            _f2W = WhisperOps.EnsureF32(w[$"{p}.linear2.weight"]); _f2B = Bias(w, $"{p}.linear2.bias");
-            _g1 = WhisperOps.EnsureF32(w[$"{p}.gamma_1.scale"]); _g2 = WhisperOps.EnsureF32(w[$"{p}.gamma_2.scale"]);
+            _inW = casts.F32(w, $"{p}.{attn}.in_proj_weight"); _inB = casts.Optional(w, $"{p}.{attn}.in_proj_bias");
+            _oW = casts.F32(w, $"{p}.{attn}.out_proj.weight"); _oB = casts.Optional(w, $"{p}.{attn}.out_proj.bias");
+            _n1W = casts.F32(w, $"{p}.norm1.weight"); _n1B = casts.F32(w, $"{p}.norm1.bias");
+            _n2W = casts.F32(w, $"{p}.norm2.weight"); _n2B = casts.F32(w, $"{p}.norm2.bias");
+            if (_cross) { _n3W = casts.F32(w, $"{p}.norm3.weight"); _n3B = casts.F32(w, $"{p}.norm3.bias"); }
+            _noW = casts.F32(w, $"{p}.norm_out.weight"); _noB = casts.F32(w, $"{p}.norm_out.bias");
+            _f1W = casts.F32(w, $"{p}.linear1.weight"); _f1B = casts.Optional(w, $"{p}.linear1.bias");
+            _f2W = casts.F32(w, $"{p}.linear2.weight"); _f2B = casts.Optional(w, $"{p}.linear2.bias");
+            _g1 = casts.F32(w, $"{p}.gamma_1.scale"); _g2 = casts.F32(w, $"{p}.gamma_2.scale");
         }
 
         public Tensor Forward(IBackend backend, Tensor q, Tensor kv, int nq, int nkv)
@@ -284,9 +288,6 @@ public sealed unsafe class DemucsCrossTransformer
             float* xp = (float*)x.DataPointer; float* gp = (float*)gamma.DataPointer;
             for (int j = 0; j < n; j++) for (int c = 0; c < _dim; c++) xp[(long)j * _dim + c] *= gp[c];
         }
-
-        private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key)
-            => w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
 
         public IEnumerable<Tensor> EnumerateWeights()
         {

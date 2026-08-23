@@ -69,9 +69,7 @@ public sealed class FluxDoubleStreamBlock
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming: transformer_blocks.{i}.* </summary>
-    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
-    /// see <see cref="ChromaF16"/>): applied to every branch-OUTPUT projection so the token stream rides at
-    /// damp scale while all branch inputs stay baseline via the scale-invariant no-affine LayerNorm. 1.0 = off.</param>
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe — see <see cref="ChromaF16"/>): applied to every branch-OUTPUT projection so the token stream rides at damp scale while all branch inputs stay baseline via the scale-invariant no-affine LayerNorm. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _imgModulation.LoadWeights(
@@ -350,7 +348,6 @@ public sealed class FluxDoubleStreamBlock
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();
 
-        // Dispose modulation tensors
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 

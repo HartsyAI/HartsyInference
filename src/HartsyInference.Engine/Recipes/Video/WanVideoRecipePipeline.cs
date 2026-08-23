@@ -17,28 +17,16 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan T2V / I2V / TI2V pipeline driven against the native <see cref="VideoRequest"/>. Encodes
-/// the prompt pair with umT5-XXL (zero-padding the rows past the real tokens — Wan cross-attends all 512 context rows
-/// with no text mask), then routes to the concat-conditioned I2V path (36-channel <c>[noise, mask, cond-latent]</c>,
-/// plus CLIP-ViT-H context on Wan2.1 I2V) or the TI2V <c>expand_timesteps</c> / plain T2V path. Mirrors the SwarmUI
-/// backend's <c>WanVideoLoader.RunPipeline</c>.</summary>
+/// <summary>A constructed Wan T2V / I2V / TI2V pipeline driven against the native <see cref="VideoRequest"/>. Encodes the prompt pair with umT5-XXL (zero-padding the rows past the real tokens — Wan cross-attends all 512 context rows with no text mask), then routes to the concat-conditioned I2V path (36-channel <c>[noise, mask, cond-latent]</c>, plus CLIP-ViT-H context on Wan2.1 I2V) or the TI2V <c>expand_timesteps</c> / plain T2V path. Mirrors the SwarmUI backend's <c>WanVideoLoader.RunPipeline</c>.</summary>
 public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>ComfyUI's Wan sampling shift (<c>WAN21_T2V</c>, inherited by I2V/VACE) — the reference look, rather
-    /// than the official repo's resolution-tied 3.0/5.0 presets which under-form structure at 15-20 steps.</summary>
+    /// <summary>ComfyUI's Wan sampling shift (<c>WAN21_T2V</c>, inherited by I2V/VACE) — the reference look, rather than the official repo's resolution-tied 3.0/5.0 presets which under-form structure at 15-20 steps.</summary>
     private const float DefaultFlowShift = 8f;
 
     private readonly IBackend _backend;
-    /// <summary>Backend the umT5 prompt encoder runs on — separable from <see cref="_backend"/> because the
-    /// embeddings are host-materialized (SliceBatchElement/ZeroPaddedRows are host loops) before the denoiser
-    /// consumes them. Wan always runs real CFG with a ~T5-XXL-class encoder, so moving it off the denoiser GPU is
-    /// the single biggest consumer-tier VRAM win in the video stack.</summary>
+    /// <summary>Backend the umT5 prompt encoder runs on — separable from <see cref="_backend"/> because the embeddings are host-materialized (SliceBatchElement/ZeroPaddedRows are host loops) before the denoiser consumes them. Wan always runs real CFG with a ~T5-XXL-class encoder, so moving it off the denoiser GPU is the single biggest consumer-tier VRAM win in the video stack.</summary>
     private readonly IBackend _textBackend;
-    /// <summary>Backend the VAE encode/decode runs on — separable from <see cref="_backend"/> for the same reason
-    /// as <see cref="_textBackend"/>. Used directly for the TI2V first-frame encode below, which calls
-    /// <see cref="IWanVaeEncoder.EncodeRgbFrame"/> instead of routing through <see cref="_pipeline"/>'s own
-    /// <see cref="WanVideoPipeline.VaeBackend"/> — this field must stay in sync with that pipeline's VaeBackend
-    /// (both are set from <c>context.VaeBackendOrDefault</c> in <c>WanVideoRecipe</c>).</summary>
+    /// <summary>Backend the VAE encode/decode runs on — separable from <see cref="_backend"/> for the same reason as <see cref="_textBackend"/>. Used directly for the TI2V first-frame encode below, which calls <see cref="IWanVaeEncoder.EncodeRgbFrame"/> instead of routing through <see cref="_pipeline"/>'s own <see cref="WanVideoPipeline.VaeBackend"/> — this field must stay in sync with that pipeline's VaeBackend (both are set from <c>context.VaeBackendOrDefault</c> in <c>WanVideoRecipe</c>).</summary>
     private readonly IBackend _vaeBackend;
     private readonly WanVideoPipeline _pipeline;
     private readonly WanVideoConfig _config;
@@ -52,9 +40,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
-    /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable.
-    /// <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/>
-    /// (single-device default).</summary>
+    /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable. <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
         T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders,
         WanVideoTransformer? transformer2 = null, MergedLoraStack? loraStack = null)
@@ -98,18 +84,11 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        // umT5 runs on the (possibly separate) text backend; the host-side slice/zero passes below ARE the
+        // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
         // cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
         // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
-        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _textBackend.Sync();
-        _textBackend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {
@@ -211,14 +190,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// <inheritdoc/>
     public bool SupportsStreaming => true;
 
-    /// <summary>Streaming sibling of <see cref="Generate"/> (Tier 3.5). Scoped tight and honestly: plain T2V only
-    /// today — no init image / end frame (the concat-I2V and TI2V-conditioned paths both add extra
-    /// encode/dispose bookkeeping around the denoise call that hasn't been exercised through this path, so they
-    /// throw rather than silently reusing the buffered branch's logic unverified). Text-encode setup is a
-    /// deliberate near-duplicate of <see cref="Generate"/>'s (not extracted into a shared helper) — the two
-    /// methods' cleanup shapes differ enough (a plain try/finally here vs. <see cref="Generate"/>'s
-    /// multi-tensor try/finally covering branches this method never takes) that a shared helper would need its
-    /// own parameter surface for "which of these five tensors exist," which isn't simpler than the duplication.</summary>
+    /// <summary>Streaming sibling of <see cref="Generate"/> (Tier 3.5). Scoped tight and honestly: plain T2V only today — no init image / end frame (the concat-I2V and TI2V-conditioned paths both add extra encode/dispose bookkeeping around the denoise call that hasn't been exercised through this path, so they throw rather than silently reusing the buffered branch's logic unverified). Text-encode setup is a deliberate near-duplicate of <see cref="Generate"/>'s (not extracted into a shared helper) — the two methods' cleanup shapes differ enough (a plain try/finally here vs. <see cref="Generate"/>'s multi-tensor try/finally covering branches this method never takes) that a shared helper would need its own parameter surface for "which of these five tensors exist," which isn't simpler than the duplication.</summary>
     public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(VideoRequest request, IProgress<StepPreview>? progress,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancel)
     {
@@ -243,15 +215,8 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _textBackend.Sync();
-        _textBackend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {

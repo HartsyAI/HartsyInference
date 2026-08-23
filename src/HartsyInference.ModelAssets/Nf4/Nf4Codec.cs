@@ -2,20 +2,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Nf4;
 
-/// <summary>Dequantizer for bitsandbytes <b>NF4</b> (4-bit NormalFloat) weights, as shipped by the
-/// <c>bitsandbytes</c> <c>Linear4bit</c> path (Flux.2 Klein nf4, Ideogram 4 nf4, many community quants).
+/// <summary>Dequantizer for bitsandbytes <b>NF4</b> (4-bit NormalFloat) weights, as shipped by the <c>bitsandbytes</c> <c>Linear4bit</c> path (Flux.2 Klein nf4, Ideogram 4 nf4, many community quants).
 ///
-/// <para>NF4 is a <b>non-linear</b> 4-bit code: each nibble indexes a fixed 16-entry codebook of normal
-/// quantiles (not the linear e2m1 grid used by MXFP4/NVFP4). Reconstruction is
-/// <c>x[i] = absmax[i / blockSize] · NF4_LUT[nibble]</c>, where <c>absmax</c> is one positive scale per
-/// block of <see cref="DefaultBlockSize"/> consecutive elements. Because the codebook is non-linear,
-/// NF4 has <b>no tensor-core dtype</b> — unlike FP4 it cannot feed a native FP4 GEMM, so the engine
-/// dequantizes it to F32 at load (the same strategy MXFP4/NVFP4 use). The native FP4 path
-/// (<c>Fp4GemmExecutor</c>) is e2m1 only.</para>
+/// <para>NF4 is a <b>non-linear</b> 4-bit code: each nibble indexes a fixed 16-entry codebook of normal quantiles (not the linear e2m1 grid used by MXFP4/NVFP4). Reconstruction is <c>x[i] = absmax[i / blockSize] · NF4_LUT[nibble]</c>, where <c>absmax</c> is one positive scale per block of <see cref="DefaultBlockSize"/> consecutive elements. Because the codebook is non-linear, NF4 has <b>no tensor-core dtype</b> — unlike FP4 it cannot feed a native FP4 GEMM, so the engine dequantizes it to F32 at load (the same strategy MXFP4/NVFP4 use). The native FP4 path (<c>Fp4GemmExecutor</c>) is e2m1 only.</para>
 ///
-/// <para>Two layers exist on disk: plain quant (an explicit F32 <c>absmax</c>) and bitsandbytes
-/// "double quant" where <c>absmax</c> is itself 8-bit quantized against a 256-entry nested codebook plus
-/// a scalar offset. <see cref="ReconstructDoubleQuantAbsmax"/> rebuilds the F32 absmax for that case.</para></summary>
+/// <para>Two layers exist on disk: plain quant (an explicit F32 <c>absmax</c>) and bitsandbytes "double quant" where <c>absmax</c> is itself 8-bit quantized against a 256-entry nested codebook plus a scalar offset. <see cref="ReconstructDoubleQuantAbsmax"/> rebuilds the F32 absmax for that case.</para></summary>
 public static unsafe class Nf4Codec
 {
     /// <summary>Default bitsandbytes NF4 block size (elements per absmax scale).</summary>
@@ -42,8 +33,7 @@ public static unsafe class Nf4Codec
          1.0f,
     ];
 
-    /// <summary>Dequantizes a plain (single-quant) NF4 tensor to F32. The packed input holds two nibbles
-    /// per byte, first element in the high nibble (bitsandbytes order).</summary>
+    /// <summary>Dequantizes a plain (single-quant) NF4 tensor to F32. The packed input holds two nibbles per byte, first element in the high nibble (bitsandbytes order).</summary>
     /// <param name="packed">U8 tensor of <c>ceil(N/2)</c> bytes holding the 4-bit codes.</param>
     /// <param name="absmaxF32">F32 per-block scales, length <c>ceil(N / blockSize)</c>.</param>
     /// <param name="outputShape">Shape of the reconstructed tensor; its element count is <c>N</c>.</param>
@@ -81,9 +71,7 @@ public static unsafe class Nf4Codec
         return output;
     }
 
-    /// <summary>Rebuilds the F32 per-block <c>absmax</c> for a bitsandbytes double-quantized NF4 tensor:
-    /// <c>absmax[b] = nestedCodebook[ qAbsmax[b] ] · nestedAbsmax[b / nestedBlockSize] + offset</c>.
-    /// Feed the result to <see cref="Dequantize"/>.</summary>
+    /// <summary>Rebuilds the F32 per-block <c>absmax</c> for a bitsandbytes double-quantized NF4 tensor: <c>absmax[b] = nestedCodebook[ qAbsmax[b] ] · nestedAbsmax[b / nestedBlockSize] + offset</c>. Feed the result to <see cref="Dequantize"/>.</summary>
     /// <param name="qAbsmax">U8 quantized absmax codes, one per primary block.</param>
     /// <param name="nestedAbsmaxF32">F32 scales for the nested blocks.</param>
     /// <param name="nestedCodebookF32">256-entry F32 nested codebook (bitsandbytes <c>nested_quant_map</c>).</param>

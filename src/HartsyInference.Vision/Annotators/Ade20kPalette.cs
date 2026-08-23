@@ -5,7 +5,6 @@ namespace HartsyInference.Vision.Annotators;
 /// <c>control_v11p_sd15_seg</c> was conditioned on. Entries are packed <c>0xRRGGBB</c>.</summary>
 public static class Ade20kPalette
 {
-    /// <summary>Number of ADE20K classes.</summary>
     public const int ClassCount = 150;
 
     private static readonly uint[] Colors =

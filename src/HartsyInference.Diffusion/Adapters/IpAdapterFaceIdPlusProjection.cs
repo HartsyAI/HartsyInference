@@ -3,24 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>The image-prompt projection used by IP-Adapter FaceID-<b>Plus</b> / Plus-<b>v2</b> (h94's
-/// <c>ProjPlusModel</c>): the FaceID MLP (<see cref="IpAdapterFaceIdProjection"/>, ArcFace 512-d →
-/// <c>num_tokens × cross_attention_dim</c> tokens) whose output tokens become the <i>latents</i> of a
-/// <c>FacePerceiverResampler</c> that cross-attends over the CLIP-Vision penultimate hidden states of the
-/// aligned face crop. The resampler is the same PerceiverAttention + FeedForward stack IP-Adapter Plus uses
-/// (<see cref="ResamplerLayer"/>), at <c>dim = cross_attention_dim, depth = 4, dim_head = 64,
-/// heads = cross_attention_dim / 64, ff_mult = 4</c>, with <c>proj_in: clipDim → dim</c>,
-/// <c>proj_out: dim → dim</c> and a final LayerNorm.
-///
-/// <para><b>v2 (shortcut):</b> Plus-v2 checkpoints were trained with the shortcut path enabled —
-/// <c>out = mlp_tokens + scale × resampler_out</c>, where <c>scale</c> is the user-facing "FaceID V2 weight"
-/// (official default 1.0). v1 checkpoints use the resampler output directly. The flag is a constructor
-/// argument because v1/v2 files are structurally identical (filename-detected).</para>
-///
-/// <para>Checkpoint keys (h94/IP-Adapter-FaceID <c>.bin</c>, flattened): the FaceID MLP under
-/// <c>image_proj.proj.{0,2}.* / image_proj.norm.*</c> plus the resampler under
-/// <c>image_proj.perceiver_resampler.{proj_in,proj_out,norm_out}.*</c> and
-/// <c>image_proj.perceiver_resampler.layers.{i}.{0,1}.*</c>.</para></summary>
+/// <summary>The image-prompt projection used by IP-Adapter FaceID-<b>Plus</b> / Plus-<b>v2</b> (h94's <c>ProjPlusModel</c>): the FaceID MLP (<see cref="IpAdapterFaceIdProjection"/>, ArcFace 512-d → <c>num_tokens × cross_attention_dim</c> tokens) whose output tokens become the <i>latents</i> of a <c>FacePerceiverResampler</c> that cross-attends over the CLIP-Vision penultimate hidden states of the aligned face crop. The resampler is the same PerceiverAttention + FeedForward stack IP-Adapter Plus uses (<see cref="ResamplerLayer"/>), at <c>dim = cross_attention_dim, depth = 4, dim_head = 64, heads = cross_attention_dim / 64, ff_mult = 4</c>, with <c>proj_in: clipDim → dim</c>, <c>proj_out: dim → dim</c> and a final LayerNorm. <b>v2 (shortcut):</b> Plus-v2 checkpoints were trained with the shortcut path enabled — <c>out = mlp_tokens + scale × resampler_out</c>, where <c>scale</c> is the user-facing "FaceID V2 weight" (official default 1.0). v1 checkpoints use the resampler output directly. The flag is a constructor argument because v1/v2 files are structurally identical (filename-detected). Checkpoint keys (h94/IP-Adapter-FaceID <c>.bin</c>, flattened): the FaceID MLP under <c>image_proj.proj.{0,2}.* / image_proj.norm.*</c> plus the resampler under <c>image_proj.perceiver_resampler.{proj_in,proj_out,norm_out}.*</c> and <c>image_proj.perceiver_resampler.layers.{i}.{0,1}.*</c>.</summary>
 public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjection
 {
     private const int Depth = 4;
@@ -43,9 +26,6 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
 
     public int NumTokens => _numTokens;
 
-    /// <summary>True for Plus-v2 checkpoints: the forward adds the MLP tokens back as a scaled shortcut.</summary>
-    public bool UseShortcut => _useShortcut;
-
     public IpAdapterFaceIdPlusProjection(int crossAttnDim, int numTokens, int clipEmbeddingDim, bool useShortcut)
     {
         if (crossAttnDim % HeadDim != 0)
@@ -67,12 +47,12 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
     {
         _mlp.LoadWeights(weights, prefix);
         string resampler = $"{prefix}.perceiver_resampler";
-        _projInWeight = EnsureF32(weights[$"{resampler}.proj_in.weight"]);
-        _projInBias = EnsureF32(weights[$"{resampler}.proj_in.bias"]);
-        _projOutWeight = EnsureF32(weights[$"{resampler}.proj_out.weight"]);
-        _projOutBias = EnsureF32(weights[$"{resampler}.proj_out.bias"]);
-        _normOutWeight = EnsureF32(weights[$"{resampler}.norm_out.weight"]);
-        _normOutBias = EnsureF32(weights[$"{resampler}.norm_out.bias"]);
+        _projInWeight = TensorCasts.EnsureF32(weights[$"{resampler}.proj_in.weight"]);
+        _projInBias = TensorCasts.EnsureF32(weights[$"{resampler}.proj_in.bias"]);
+        _projOutWeight = TensorCasts.EnsureF32(weights[$"{resampler}.proj_out.weight"]);
+        _projOutBias = TensorCasts.EnsureF32(weights[$"{resampler}.proj_out.bias"]);
+        _normOutWeight = TensorCasts.EnsureF32(weights[$"{resampler}.norm_out.weight"]);
+        _normOutBias = TensorCasts.EnsureF32(weights[$"{resampler}.norm_out.bias"]);
         if (_projInWeight.Shape[0] != _crossAttnDim || _projInWeight.Shape[1] != _clipEmbeddingDim)
         {
             throw new InvalidOperationException(
@@ -167,6 +147,4 @@ public sealed unsafe class IpAdapterFaceIdPlusProjection : IIpAdapterImageProjec
             clone.ElementCount * sizeof(float), source.ElementCount * sizeof(float));
         return clone;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }

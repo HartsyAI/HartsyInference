@@ -1,7 +1,7 @@
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Configuration for Mimi (Kyutai / Moshi codec). Used by Sesame CSM and the
-/// Moshi spoken-LM family. Three architectural pieces stacked vertically:
+/// <summary>Configuration for Mimi (Kyutai / Moshi codec), used by Sesame CSM and the Moshi spoken-LM family.</summary>
+/// <remarks>Three architectural pieces stacked vertically:
 /// <list type="number">
 ///   <item>SEANet-style causal encoder (similar to EnCodec24kHz) at 24 kHz → 12.5 Hz</item>
 ///   <item>Small causal transformer (4 layers, RoPE) over the latent sequence — adds
@@ -11,7 +11,7 @@ namespace HartsyInference.Audio.Models.Codecs.Mimi;
 /// </list>
 /// The transformer-of-codecs in the middle is what distinguishes Mimi from EnCodec —
 /// it lets each frame's quantization depend on the full preceding context, dramatically
-/// improving reconstruction quality at the same bitrate.</summary>
+/// improving reconstruction quality at the same bitrate.</remarks>
 public sealed record MimiConfig
 {
     public int SampleRate { get; init; } = 24_000;
@@ -20,23 +20,20 @@ public sealed record MimiConfig
     public IReadOnlyList<int> EncoderRates { get; init; } = [8, 6, 5, 4];     // 960× downsample → 25 Hz, halved again by upsample inside → 12.5 Hz
     public int LatentDim { get; init; } = 512;
 
-    /// <summary>Transformer-of-codecs hidden dim. Same as <see cref="LatentDim"/> in
-    /// Mimi.</summary>
+    /// <summary>Transformer-of-codecs hidden dim; same as <see cref="LatentDim"/> in Mimi.</summary>
     public int TransformerDim { get; init; } = 512;
     public int TransformerLayers { get; init; } = 8;
     public int TransformerHeads { get; init; } = 8;
     public int TransformerFfnDim { get; init; } = 2_048;
     public float TransformerRopeTheta { get; init; } = 10_000f;
 
-    /// <summary>Sliding-window attention span for the transformer-of-codecs (HF <c>sliding_window</c> = 250).
-    /// Each query attends to the previous <c>TransformerContext</c> keys (causal). Null = full causal.</summary>
+    /// <summary>Sliding-window attention span for the transformer-of-codecs (HF <c>sliding_window</c> = 250, causal); null = full causal.</summary>
     public int? TransformerContext { get; init; } = 250;
 
     /// <summary>Number of semantic RVQ codebooks (the rest are acoustic). 1 in the published Mimi.</summary>
     public int NumSemanticCodebooks { get; init; } = 1;
 
-    /// <summary>Acoustic RVQ codebook count. 7 in Mimi (codebook 0 = semantic, codebooks
-    /// 1..7 = acoustic residuals).</summary>
+    /// <summary>Acoustic RVQ codebook count; 7 in Mimi (codebook 0 = semantic, codebooks 1..7 = acoustic residuals).</summary>
     public int AcousticCodebooks { get; init; } = 7;
     public int CodebookSize { get; init; } = 2_048;
     public int CodebookDim { get; init; } = 256;
@@ -52,18 +49,16 @@ public sealed record MimiConfig
         }
     }
 
-    /// <summary>Total codebooks = 1 semantic + N acoustic. 8 in the published Mimi
-    /// checkpoint.</summary>
+    /// <summary>Total codebooks = 1 semantic + N acoustic; 8 in the published Mimi checkpoint.</summary>
     public int TotalCodebooks => 1 + AcousticCodebooks;
 
     public static MimiConfig Mimi24kHz => new();
 
-    /// <summary>Mimi preset for the Kyutai delayed-streams models (STT / TTS), which set
-    /// <c>num_quantizers=32</c> (1 semantic + 31 acoustic) vs the published 8-codebook Mimi. The DSM Mimi
-    /// checkpoint ships <b>one</b> SEANet residual block per stage (<c>n_residual_layers=1</c>), so
+    /// <summary>Mimi preset for the Kyutai delayed-streams models (STT / TTS), which set <c>num_quantizers=32</c> (1 semantic + 31 acoustic) vs the published 8-codebook Mimi.</summary>
+    /// <remarks>The DSM Mimi checkpoint ships <b>one</b> SEANet residual block per stage (<c>n_residual_layers=1</c>), so
     /// <see cref="ResidualDilations"/> is <c>[1]</c> here (a single block, dilation 1) — not the
-    /// <c>[1, 1]</c> default. <c>NResidualLayers = ResidualDilations.Count</c> (see <c>Mimi.LiftToEnCodec</c>),
+    /// <c>[1, 1]</c> default. <c>NResidualLayers = ResidualDilations.Count</c> (see <c>MimiContinuousLatent.LiftToEnCodec</c>),
     /// so the default would request a second block's weight keys that don't exist in the checkpoint.
-    /// ⚠️ The 32-vs-8 codebook count is config-authoritative but should be confirmed against a reference run.</summary>
+    /// ⚠️ The 32-vs-8 codebook count is config-authoritative but should be confirmed against a reference run.</remarks>
     public static MimiConfig Mimi24kHzDsm => new() { AcousticCodebooks = 31, ResidualDilations = [1] };
 }

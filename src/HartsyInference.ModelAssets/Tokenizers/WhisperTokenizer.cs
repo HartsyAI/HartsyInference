@@ -5,20 +5,11 @@ using Microsoft.ML.Tokenizers;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Whisper byte-level BPE tokenizer matching OpenAI / HuggingFace exactly.
-/// Whisper inherited GPT-2's byte-level BPE: every input byte is first mapped to a
-/// printable Unicode codepoint via the GPT-2 byte-encoder table, then run through a
-/// regex pre-tokenizer, then BPE-merged. Special tokens (<c>&lt;|startoftranscript|&gt;</c>,
-/// language tags, <c>&lt;|0.00|&gt;</c> timestamps, etc.) are recognized in-text and emitted
-/// as fixed IDs outside the BPE merge process.
+/// <summary>Whisper byte-level BPE tokenizer matching OpenAI / HuggingFace exactly. Whisper inherited GPT-2's byte-level BPE: every input byte is first mapped to a printable Unicode codepoint via the GPT-2 byte-encoder table, then run through a regex pre-tokenizer, then BPE-merged. Special tokens (<c>&lt;|startoftranscript|&gt;</c>, language tags, <c>&lt;|0.00|&gt;</c> timestamps, etc.) are recognized in-text and emitted as fixed IDs outside the BPE merge process.
 ///
-/// <para>Construction loads <c>vocab.json</c> + <c>merges.txt</c> + (optionally)
-/// <c>added_tokens.json</c> from a per-model HuggingFace checkout. The multilingual
-/// vocab is 51865 tokens (Whisper &lt;= v2 and turbo) or 51866 (Whisper v3+, +Cantonese).
-/// English-only models (<c>whisper-*.en</c>) ship a different 51864-token vocab.</para>
+/// <para>Construction loads <c>vocab.json</c> + <c>merges.txt</c> + (optionally) <c>added_tokens.json</c> from a per-model HuggingFace checkout. The multilingual vocab is 51865 tokens (Whisper &lt;= v2 and turbo) or 51866 (Whisper v3+, +Cantonese). English-only models (<c>whisper-*.en</c>) ship a different 51864-token vocab.</para>
 ///
-/// <para>This class is the canonical HartsyInference Whisper tokenizer; the audio
-/// package depends on it through a project reference.</para></summary>
+/// <para>This class is the canonical HartsyInference Whisper tokenizer; the audio package depends on it through a project reference.</para></summary>
 public sealed class WhisperTokenizer : IDisposable
 {
     /// <summary>End-of-text / pad token. ID 50257 in all Whisper variants.</summary>
@@ -27,9 +18,7 @@ public sealed class WhisperTokenizer : IDisposable
     /// <summary>Start-of-transcript token. ID 50258.</summary>
     public const int StartOfTranscriptId = 50_258;
 
-    /// <summary>Translate-task token in the &lt;=v2 layout. ID 50358. large-v3 added a 100th language
-    /// (<c>&lt;|yue|&gt;</c>), which shifts this and every later special up by one — prefer the instance
-    /// <see cref="TranslateId"/>, which reads the checkpoint's own <c>added_tokens.json</c>.</summary>
+    /// <summary>Translate-task token in the &lt;=v2 layout. ID 50358. large-v3 added a 100th language (<c>&lt;|yue|&gt;</c>), which shifts this and every later special up by one — prefer the instance <see cref="TranslateId"/>, which reads the checkpoint's own <c>added_tokens.json</c>.</summary>
     public const int TranslateTokenId = 50_358;
 
     /// <summary>Transcribe-task token in the &lt;=v2 layout. ID 50359. See <see cref="TranscribeId"/>.</summary>
@@ -54,18 +43,13 @@ public sealed class WhisperTokenizer : IDisposable
         @"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
         RegexOptions.Compiled);
 
-    /// <summary>GPT-2 byte encoder: maps each byte (0..255) to a printable unicode
-    /// codepoint that BPE merges can operate on. Bytes 33-126, 161-172, 174-255 map
-    /// to themselves; the remaining "non-printable" bytes are remapped above U+0100.
-    /// This table is identical across GPT-2, RoBERTa, Whisper, and every model that
-    /// uses byte-level BPE.</summary>
+    /// <summary>GPT-2 byte encoder: maps each byte (0..255) to a printable unicode codepoint that BPE merges can operate on. Bytes 33-126, 161-172, 174-255 map to themselves; the remaining "non-printable" bytes are remapped above U+0100. This table is identical across GPT-2, RoBERTa, Whisper, and every model that uses byte-level BPE.</summary>
     private static readonly char[] _byteToUnicode = BuildByteToUnicode();
 
     /// <summary>Reverse of <see cref="_byteToUnicode"/>: unicode codepoint → byte.</summary>
     private static readonly Dictionary<char, byte> _unicodeToByte = BuildUnicodeToByte();
 
-    /// <summary>Languages supported by Whisper, in the same order as the language
-    /// token IDs (50259 + index). Used by <see cref="LanguageToTokenId"/>.</summary>
+    /// <summary>Languages supported by Whisper, in the same order as the language token IDs (50259 + index). Used by <see cref="LanguageToTokenId"/>.</summary>
     public static readonly IReadOnlyList<string> Languages = WhisperLanguageTable.Codes;
 
     private readonly BpeTokenizer _bpe;
@@ -86,8 +70,7 @@ public sealed class WhisperTokenizer : IDisposable
     /// <summary>No-speech token for THIS checkpoint.</summary>
     public int NoSpeechId { get; }
 
-    /// <summary>No-timestamps token for THIS checkpoint. Feeding the &lt;=v2 constant to a v3 checkpoint lands on
-    /// <c>&lt;|nospeech|&gt;</c> instead, and the decoder answers with an immediate EOT — an empty transcript.</summary>
+    /// <summary>No-timestamps token for THIS checkpoint. Feeding the &lt;=v2 constant to a v3 checkpoint lands on <c>&lt;|nospeech|&gt;</c> instead, and the decoder answers with an immediate EOT — an empty transcript.</summary>
     public int NoTimestampsId { get; }
 
     /// <summary>First timestamp token (0.00 s) for THIS checkpoint.</summary>
@@ -102,10 +85,7 @@ public sealed class WhisperTokenizer : IDisposable
     /// <summary>Seconds encoded by one of this checkpoint's timestamp tokens (0.02 s per step).</summary>
     public double SecondsForTimestamp(int id) => (id - FirstTimestampId) * 0.02;
 
-    /// <summary>Creates a Whisper tokenizer from HuggingFace-format files. Pass the
-    /// directory holding <c>vocab.json</c>, <c>merges.txt</c>, and (optionally)
-    /// <c>added_tokens.json</c>. Multilingual models always have <c>added_tokens.json</c>;
-    /// English-only models bake their special tokens into <c>vocab.json</c>.</summary>
+    /// <summary>Creates a Whisper tokenizer from HuggingFace-format files. Pass the directory holding <c>vocab.json</c>, <c>merges.txt</c>, and (optionally) <c>added_tokens.json</c>. Multilingual models always have <c>added_tokens.json</c>; English-only models bake their special tokens into <c>vocab.json</c>.</summary>
     public WhisperTokenizer(string modelDirectory)
     {
         string vocabPath = Path.Combine(modelDirectory, "vocab.json");
@@ -149,9 +129,7 @@ public sealed class WhisperTokenizer : IDisposable
     private int SpecialId(string token, int fallback)
         => _specialTokens.TryGetValue(token, out int id) ? id : fallback;
 
-    /// <summary>Tokenizes plain text into raw BPE token IDs (no special prefix / suffix).
-    /// Use <see cref="BuildPromptIds"/> to assemble the full Whisper decoder prompt with
-    /// SOT + language + task + notimestamps.</summary>
+    /// <summary>Tokenizes plain text into raw BPE token IDs (no special prefix / suffix). Use <see cref="BuildPromptIds"/> to assemble the full Whisper decoder prompt with SOT + language + task + notimestamps.</summary>
     public int[] EncodeText(string text)
     {
         ThrowIfDisposed();
@@ -161,10 +139,7 @@ public sealed class WhisperTokenizer : IDisposable
         return result;
     }
 
-    /// <summary>Builds the canonical Whisper decoder prompt:
-    /// <c>[SOT, &lt;|lang|&gt;, transcribe/translate, &lt;|notimestamps|&gt;]</c>. Pass <c>null</c>
-    /// for <paramref name="language"/> to skip the language token (English-only models)
-    /// and <c>null</c> for <paramref name="task"/> to skip the task token.</summary>
+    /// <summary>Builds the canonical Whisper decoder prompt: <c>[SOT, &lt;|lang|&gt;, transcribe/translate, &lt;|notimestamps|&gt;]</c>. Pass <c>null</c> for <paramref name="language"/> to skip the language token (English-only models) and <c>null</c> for <paramref name="task"/> to skip the task token.</summary>
     public int[] BuildPromptIds(string? language = "en", bool translate = false, bool withTimestamps = false)
     {
         ThrowIfDisposed();
@@ -179,8 +154,7 @@ public sealed class WhisperTokenizer : IDisposable
         return ids.ToArray();
     }
 
-    /// <summary>Returns the token ID for a Whisper language code such as <c>"en"</c>,
-    /// <c>"zh"</c>, <c>"yue"</c>. Throws if the code is unknown.</summary>
+    /// <summary>Returns the token ID for a Whisper language code such as <c>"en"</c>, <c>"zh"</c>, <c>"yue"</c>. Throws if the code is unknown.</summary>
     public static int LanguageToTokenId(string code)
     {
         int idx = WhisperLanguageTable.IndexOf(NormalizeLanguageCode(code));
@@ -188,10 +162,7 @@ public sealed class WhisperTokenizer : IDisposable
         return 50_259 + idx;
     }
 
-    /// <summary>Normalizes a caller-supplied language code to the ISO-639-1 form Whisper's table uses: lowercases
-    /// and strips any BCP-47 / locale region subtag, so <c>"en-US"</c>, <c>"en_US"</c>, and <c>"EN"</c> all map to
-    /// <c>"en"</c>. Multi-letter codes without a separator (e.g. <c>"yue"</c>) pass through unchanged. Without this,
-    /// a UI/API defaulting to a locale like <c>"en-US"</c> throws "Unknown Whisper language code".</summary>
+    /// <summary>Normalizes a caller-supplied language code to the ISO-639-1 form Whisper's table uses: lowercases and strips any BCP-47 / locale region subtag, so <c>"en-US"</c>, <c>"en_US"</c>, and <c>"EN"</c> all map to <c>"en"</c>. Multi-letter codes without a separator (e.g. <c>"yue"</c>) pass through unchanged. Without this, a UI/API defaulting to a locale like <c>"en-US"</c> throws "Unknown Whisper language code".</summary>
     private static string NormalizeLanguageCode(string code)
     {
         if (string.IsNullOrWhiteSpace(code)) return code;
@@ -200,8 +171,7 @@ public sealed class WhisperTokenizer : IDisposable
         return sep > 0 ? c[..sep] : c;
     }
 
-    /// <summary>Returns the language code for a Whisper language token ID (50259..50357
-    /// or 50358 for Cantonese on v3). Returns <c>null</c> for non-language tokens.</summary>
+    /// <summary>Returns the language code for a Whisper language token ID (50259..50357 or 50358 for Cantonese on v3). Returns <c>null</c> for non-language tokens.</summary>
     public static string? TokenIdToLanguage(int id)
     {
         int idx = id - 50_259;
@@ -209,8 +179,7 @@ public sealed class WhisperTokenizer : IDisposable
         return WhisperLanguageTable.Codes[idx];
     }
 
-    /// <summary>Decodes token IDs back to text. Drops special tokens (everything ≥ 50257
-    /// and timestamp tokens) unless <paramref name="includeSpecial"/> is true.</summary>
+    /// <summary>Decodes token IDs back to text. Drops special tokens (everything ≥ 50257 and timestamp tokens) unless <paramref name="includeSpecial"/> is true.</summary>
     public string Decode(ReadOnlySpan<int> tokenIds, bool includeSpecial = false)
     {
         ThrowIfDisposed();
@@ -249,9 +218,7 @@ public sealed class WhisperTokenizer : IDisposable
         return ByteLevelDecode(raw);
     }
 
-    /// <summary>Reverses the GPT-2 byte_encoder mapping: each char → byte → UTF-8 string.
-    /// Multi-byte UTF-8 characters (CJK, emoji, accented Latin) span multiple BPE tokens;
-    /// the raw concatenation gives us a complete byte sequence that UTF-8-decodes correctly.</summary>
+    /// <summary>Reverses the GPT-2 byte_encoder mapping: each char → byte → UTF-8 string. Multi-byte UTF-8 characters (CJK, emoji, accented Latin) span multiple BPE tokens; the raw concatenation gives us a complete byte sequence that UTF-8-decodes correctly.</summary>
     private string ByteLevelDecode(string raw)
     {
         if (raw.Length == 0) return string.Empty;

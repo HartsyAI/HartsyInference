@@ -16,8 +16,7 @@ public static class Img2ImgSetup
     public static Plan TextToImage => new Plan(StartStep: 0, MaskPixel: null, PassThrough: false);
 
     /// <summary>Validates an <see cref="ImageToImageRequest"/> against the pipeline's expected image dimensions and computes the denoise loop's start step. The <paramref name="height"/> / <paramref name="width"/> are the request's image size; source and mask must match exactly (no resize is applied here — callers that want resize should do it before invoking the pipeline).
-    /// <para>Returns <see cref="TextToImage"/> immediately for plain <see cref="TextToImageRequest"/>. Returns a plan with <c>PassThrough=true</c> when <c>strength</c> clamps to 0 (no denoise needed; caller should byte-copy the source through <see cref="ImagePostProcessor.TensorToRgbBytes"/>).</para>
-    /// </summary>
+    /// <para>Returns <see cref="TextToImage"/> immediately for plain <see cref="TextToImageRequest"/>. Returns a plan with <c>PassThrough=true</c> when <c>strength</c> clamps to 0 (no denoise needed; caller should byte-copy the source through <see cref="ImagePostProcessor.TensorToRgbBytes"/>).</para></summary>
     public static Plan Prepare(TextToImageRequest request, int height, int width, int steps)
     {
         if (request is not ImageToImageRequest img2img) return TextToImage;

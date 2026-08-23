@@ -304,7 +304,7 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
                     {
                         for (int j = 0; j < xs.Length; j++)
                         {
-                            Tensor blended = CloneTensor(rows[i][j]);
+                            Tensor blended = VaeOps.Clone(rows[i][j]);
                             int planes = channels * tokens;
                             // Blend against the neighbours' RAW latents, matching the reference's bookkeeping — using
                             // an already-blended neighbour would compound the ramp across a row.
@@ -623,13 +623,6 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
         return outT;
     }
 
-    private static Tensor CloneTensor(Tensor x)
-    {
-        Tensor outT = new Tensor(x.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)outT.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
-        return outT;
-    }
-
     /// <summary>A <c>[1, planes, H, W]</c> view of a latent tile for the blend helpers, which are pure host loops —
     /// safe to write through a view precisely because no device op binds its result to the object it was handed.</summary>
     private static Tensor BlendView(Tensor tile, int planes) =>
@@ -651,7 +644,7 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
         int c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         if (cropH == h && cropW == w)
         {
-            return CloneTensor(x);
+            return VaeOps.Clone(x);
         }
         Tensor outT = new Tensor(new TensorShape([1L, c, t, cropH, cropW]), DType.F32);
         float* src = (float*)x.DataPointer;

@@ -22,6 +22,22 @@ public static class FlowMatchSampling
     /// including that one.</para></summary>
     public static bool IsAnySelection(string? selection) => !string.IsNullOrWhiteSpace(selection);
 
+    /// <summary>Refuses any selection on a UniPC-sampled family, which has no sampler seam to drive.</summary>
+    /// <remarks>Separate from <see cref="Resolve"/> because these families never build an <see cref="ISampler"/> at
+    /// all; accepting the request and stepping with UniPC anyway is the silently-dropped selection this guard exists
+    /// to prevent. Each caller places the call where refusing costs the least — several refuse before a VAE encode.</remarks>
+    /// <exception cref="NotSupportedException"><paramref name="selection"/> names any sampler or sigma schedule.</exception>
+    public static void ThrowIfSamplerSelected(string? selection, string family)
+    {
+        if (IsAnySelection(selection))
+        {
+            throw new NotSupportedException(
+                $"Sampler/schedule '{selection}' is not available on {family} — the family samples with a "
+                + "UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. "
+                + "This family samples with UniPC (a multistep solver with a corrector), so even an explicit 'euler' cannot be honoured here. Leave the sampler unset.");
+        }
+    }
+
     /// <summary>Whether <paramref name="selection"/> asks for anything other than the family's default Euler. Pipelines
     /// use this to narrow incompatible fast paths (step-graph capture, step-cache, DiT sharding) for that generation
     /// only, rather than refusing the sampler outright.</summary>

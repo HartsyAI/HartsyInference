@@ -66,7 +66,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
-            transformer.LoadWeights(CastToF32(converted.Transformer));
+            transformer.LoadWeights(VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.BF16], DType.F32));
 
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             if (converted.ClipL.Count > 0)
@@ -114,7 +114,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> vaeWeights;
             if (converted.Vae.Count > 0)
             {
-                vaeWeights = CastToF32(converted.Vae);
+                vaeWeights = VaePrecisionHelper.CastWeights(converted.Vae, [DType.F16, DType.BF16], DType.F32);
             }
             else
             {
@@ -139,24 +139,9 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                long[] perBlockBytes = new long[transformer.BlockCount];
-                for (int i = 0; i < transformer.BlockCount; i++)
-                {
-                    long bytes = 0;
-                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
-                    {
-                        bytes += t.DType.ComputeByteCount(t.ElementCount);
-                    }
-                    perBlockBytes[i] = bytes;
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount,
+                    transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
                 Logs.Info($"[HiDreamRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
@@ -187,44 +172,11 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(path);
         loaders.Add(loader);
-        Dictionary<string, Tensor> weights = StripStandalonePrefix(loader.GetAllTensors(), comfyPrefix);
+        Dictionary<string, Tensor> weights = LoaderPrefixUtils.StripPrefixes(loader.GetAllTensors(), [comfyPrefix], LoaderPrefixUtils.PositionIdsBuffer);
         if (weights.Count == 0)
         {
             throw new InvalidOperationException($"Side model '{path}' has no usable tensors.");
         }
         return weights;
-    }
-
-    /// <summary>Casts F16/BF16 weights to F32 (the precision the HiDream transformer and the Flux VAE decoder are validated at), passing already-F32 tensors through.</summary>
-    private static Dictionary<string, Tensor> CastToF32(Dictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            result[kv.Key] = (kv.Value.DType == DType.F16 || kv.Value.DType == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
-        }
-        return result;
-    }
-
-    /// <summary>Strips a Comfy <c>text_encoders.*.transformer.</c> wrapper prefix and drops the <c>position_ids</c> buffer the encoders don't consume.</summary>
-    private static Dictionary<string, Tensor> StripStandalonePrefix(IReadOnlyDictionary<string, Tensor> raw, string comfyPrefix)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            if (kv.Key.StartsWith(comfyPrefix, StringComparison.Ordinal))
-            {
-                string rest = kv.Key[comfyPrefix.Length..];
-                if (!rest.EndsWith("position_ids", StringComparison.Ordinal))
-                {
-                    result[rest] = kv.Value;
-                }
-            }
-            else
-            {
-                result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
     }
 }

@@ -1,10 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Applies a language's letter-to-sound rules to a word, ported from espeak-ng's <c>TranslateRules</c> +
-/// <c>MatchRule</c> (dictionary.c). Given a word buffer it walks left to right, picks the best-scoring rule chain for
-/// each letter (single-letter, two-letter, and offset groups), and emits the matched phoneme code bytes. This is the
-/// fallback path for words not found in the dictionary word list; the dictionary lookup and stress placement layer on
-/// top of it. Holds the per-word counters (<c>word_vowel_count</c>, <c>word_stressed_count</c>) the rules query.</summary>
+/// <summary>Applies a language's letter-to-sound rules to a word, ported from espeak-ng's <c>TranslateRules</c> + <c>MatchRule</c> (dictionary.c): walks the word buffer left to right, picks the best-scoring rule chain for each letter (single-letter, two-letter, and offset groups), and emits the matched phoneme code bytes. This is the fallback path for words not found in the dictionary word list; the dictionary lookup and stress placement layer on top of it.</summary>
 internal sealed class EspeakTranslator
 {
     private readonly EspeakDictFile _dict;
@@ -14,13 +10,10 @@ internal sealed class EspeakTranslator
 
     // Language options exercised by the rule matcher; defaults match English (base Latin).
     private int _dictCondition;
-    private bool _toneNumbers;
-    private int _loptSuffix;
 
     // Per-word mutable state read by the rules.
     private int _wordVowelCount;
     private int _wordStressedCount;
-    private bool _expectVerb;
 
     public EspeakTranslator(EspeakDictFile dict, EspeakPhonemeTable phonemeTable, EspeakLetters letters, int dictCondition = 0)
     {
@@ -31,14 +24,9 @@ internal sealed class EspeakTranslator
 
         // Variant rules (e.g. en-us) enable extra dictionary conditions; default English (en-gb) sets none.
         _dictCondition = dictCondition;
-        _toneNumbers = false;
-        _loptSuffix = 0;
-        _expectVerb = false;
     }
 
-    /// <summary>Convenience for tests/diagnostics: lowercases <paramref name="word"/>, frames it with spaces, applies
-    /// the letter-to-sound rules, and returns the decoded phoneme mnemonics (no stress placement or dictionary
-    /// lookup). The production phonemizer drives <see cref="TranslateRules"/> directly with its own buffer.</summary>
+    /// <summary>Convenience for tests/diagnostics: lowercases <paramref name="word"/>, frames it with spaces, applies the letter-to-sound rules, and returns the decoded phoneme mnemonics (no stress placement or dictionary lookup). The production phonemizer drives <see cref="TranslateRules"/> directly with its own buffer.</summary>
     public string TranslateWordToMnemonics(string word)
     {
         byte[] buf = BuildWordBuffer(word);
@@ -61,17 +49,11 @@ internal sealed class EspeakTranslator
         return buf;
     }
 
-    /// <summary>Translates the word in <paramref name="buf"/> starting at <paramref name="start"/> (the byte at
-    /// <c>start-1</c> must be a space) using the letter-to-sound rules, returning the matched phoneme code bytes.
-    /// Suffix/ending re-translation and dictionary-list lookup are handled by higher layers; this is the raw rule
-    /// translation.</summary>
+    /// <summary>Translates the word in <paramref name="buf"/> starting at <paramref name="start"/> (the byte at <c>start-1</c> must be a space) using the letter-to-sound rules, returning the matched phoneme code bytes; suffix/ending re-translation and dictionary-list lookup are handled by higher layers.</summary>
     public List<byte> TranslateRules(byte[] buf, int start, int wordFlags = 0)
         => TranslateRules(buf, start, out _, out _, wordFlags);
 
-    /// <summary>As <see cref="TranslateRules(byte[],int,int)"/> but also reports a matched suffix ending: when a
-    /// dictionary suffix rule fires, <paramref name="endType"/> is non-zero, <paramref name="endPhonemes"/> holds the
-    /// suffix's phoneme codes, and the returned list is the stem translated so far. The caller then strips the suffix
-    /// (<see cref="RemoveEnding"/>), re-translates the stem, and appends the suffix phonemes.</summary>
+    /// <summary>As <see cref="TranslateRules(byte[],int,int)"/> but also reports a matched suffix ending: when a dictionary suffix rule fires, <paramref name="endType"/> is non-zero, <paramref name="endPhonemes"/> holds the suffix's phoneme codes, and the returned list is the stem translated so far, for the caller to strip the suffix (<see cref="RemoveEnding"/>), re-translate the stem, and append the suffix phonemes.</summary>
     public List<byte> TranslateRules(byte[] buf, int start, out int endType, out List<byte> endPhonemes, int wordFlags = 0)
     {
         endType = 0;
@@ -168,10 +150,7 @@ internal sealed class EspeakTranslator
         return codes;
     }
 
-    /// <summary>Strips a standard suffix from the word in <paramref name="buf"/> (suffix length and flags come from
-    /// <paramref name="endType"/>), reversing the English spelling changes the suffix caused (y&lt;-i, silent-e
-    /// restoration) so the stem can be re-translated. Ported from <c>RemoveEnding</c> (English path). Returns the
-    /// end-flags describing the removed suffix.</summary>
+    /// <summary>Strips a standard suffix from the word in <paramref name="buf"/> (suffix length and flags come from <paramref name="endType"/>), reversing the English spelling changes the suffix caused (y&lt;-i, silent-e restoration) so the stem can be re-translated. Ported from <c>RemoveEnding</c> (English path); returns the end-flags describing the removed suffix.</summary>
     public int RemoveEnding(byte[] buf, int start, int endType)
     {
         int wordEnd = start;
@@ -488,15 +467,11 @@ internal sealed class EspeakTranslator
                 postPtr += letterXbytes;
                 break;
             case EspeakRuleCodes.RuleDigit:
+                // espeak's tone_numbers option (a digit matching as a tone mark) is not ported.
                 if (IsDigit(letterW))
                 {
                     addPoints = 20 - distanceRight;
                     postPtr += letterXbytes;
-                }
-                else if (_toneNumbers)
-                {
-                    addPoints = 20 - distanceRight;
-                    postPtr--;
                 }
                 else return 1;
                 break;
@@ -561,9 +536,8 @@ internal sealed class EspeakTranslator
                 break;
             case EspeakRuleCodes.RuleEnding:
                 {
+                    // espeak additionally rejects a vowel-less stem here under lopt[LOPT_SUFFIX], which is not ported.
                     int endType = (_data[rule] << 16) + ((_data[rule + 1] & 0x7f) << 8) + (_data[rule + 2] & 0x7f);
-                    if (_wordVowelCount == 0 && (endType & EspeakRuleCodes.SufxP) == 0 && (_loptSuffix & 1) != 0)
-                        return 1;
                     match.EndType = endType;
                     rule += 3;
                     break;
@@ -671,10 +645,7 @@ internal sealed class EspeakTranslator
                     break;
                 }
             case EspeakRuleCodes.RuleIfVerb:
-                if (_expectVerb)
-                    addPoints = 1;
-                else return 1;
-                break;
+                return 1;   // espeak's expect_verb tracking is not ported, so this never matches
             case EspeakRuleCodes.RuleCapital:
                 if ((wordFlags & FlagFirstUpper) != 0)
                     addPoints = 1;

@@ -83,10 +83,10 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
     /// <summary>Loads weights using upstream naming. <paramref name="prefix"/> is e.g. <c>"layers.0"</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _attnNorm1 = LoadAsF32(weights, $"{prefix}.attention_norm1.weight");
-        _attnNorm2 = LoadAsF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1 = LoadAsF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2 = LoadAsF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attnNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
+        _attnNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
+        _ffnNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
+        _ffnNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
 
         _qkvWeight = weights[$"{prefix}.attention.qkv.weight"];
         _oWeight = weights[$"{prefix}.attention.o.weight"];
@@ -212,9 +212,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return result;
     }
 
-    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend
-    /// ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout)
-    /// and the head permutes reuse <c>Permute0213</c>.</summary>
+    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout) and the head permutes reuse <c>Permute0213</c>.</summary>
     private Tensor Attention(IBackend backend, Tensor input, Tensor cos, Tensor sin,
         Tensor? attentionMask, int batch, int seqLen)
     {
@@ -276,9 +274,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return projected;
     }
 
-    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c>
-    /// (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode
-    /// the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
+    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape ff = new TensorShape(batch, seqLen, _ffnHidden);
@@ -323,11 +319,5 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         backend.Linear(output, combined, _w2!, null);
         combined.Dispose();
         return output;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

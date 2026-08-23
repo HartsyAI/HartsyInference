@@ -87,10 +87,10 @@ public sealed unsafe class LensTransformerBlock
             weights[$"{prefix}.txt_mod.1.weight"],
             weights.TryGetValue($"{prefix}.txt_mod.1.bias", out Tensor? txtModBias) ? txtModBias : null);
 
-        _imgNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.img_norm1.weight"]);
-        _imgNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.img_norm2.weight"]);
-        _txtNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.txt_norm1.weight"]);
-        _txtNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.txt_norm2.weight"]);
+        _imgNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.img_norm1.weight"]);
+        _imgNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.img_norm2.weight"]);
+        _txtNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.txt_norm1.weight"]);
+        _txtNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.txt_norm2.weight"]);
 
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
         _toKWeight = weights[$"{prefix}.attn.to_k.weight"];
@@ -168,7 +168,7 @@ public sealed unsafe class LensTransformerBlock
     // GPU-concatenated joint [img, txt] sequence on the PRE-permute [B, S, H, D] layout (per-row independent, so
     // identical to the old per-stream post-permute host pass); the cos/sin tables are position-only and cached
     // across blocks/steps. Batch is always 1 in the pipeline (CFG runs as two batch-1 passes); the batch>1
-    /// fallback ropes via the host LensRope.ApplyJoint after the head permute.
+    // fallback ropes via the host LensRope.ApplyJoint after the head permute.
     public (Tensor text, Tensor image) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         LensRope rope, int imgPackedH, int imgPackedW, int txtPositionStart)
     {
@@ -339,7 +339,4 @@ public sealed unsafe class LensTransformerBlock
 
         return (txtFinal, imgFinal);
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

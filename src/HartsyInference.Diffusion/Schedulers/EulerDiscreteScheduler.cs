@@ -13,16 +13,16 @@ public sealed class EulerDiscreteScheduler : IScheduler
     private int _numInferenceSteps;
     private bool _useKarrasSigmas;
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "euler";
 
-    /// <summary>Number of inference steps configured.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
-    /// <summary>The computed timestep schedule.</summary>
+    /// <inheritdoc/>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
-    /// <summary>Returns the initial noise scale factor.</summary>
+    /// <summary><c>sigma[0]</c> for linspace/trailing spacing; <c>sqrt(sigma[0]^2 + 1)</c> otherwise, matching diffusers' variance-preserving init scale.</summary>
     public float InitialNoiseSigma
     {
         get

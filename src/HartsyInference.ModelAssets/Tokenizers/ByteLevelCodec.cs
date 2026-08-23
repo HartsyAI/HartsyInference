@@ -2,19 +2,13 @@ using System.Text;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>GPT-2 byte-level BPE codec: the reversible byte↔unicode mapping HuggingFace/GPT-2 use so every byte
-/// is a printable codepoint. Byte-level BPE tokenizers (Qwen, Llama-3, Mistral, GPT-OSS, DeepSeek) store and
-/// emit token text in this remapped space, where a leading space is <c>Ġ</c> (U+0120) and newline is <c>Ċ</c>.
-/// <see cref="Decode"/> reverses it back to real UTF-8 text — without it, decoded output leaks <c>Ġ</c> for
-/// spaces. Lifted from the working implementation in <c>WhisperTokenizer</c> into a shared util.</summary>
+/// <summary>GPT-2 byte-level BPE codec: the reversible byte↔unicode mapping HuggingFace/GPT-2 use so every byte is a printable codepoint. Byte-level BPE tokenizers (Qwen, Llama-3, Mistral, GPT-OSS, DeepSeek) store and emit token text in this remapped space, where a leading space is <c>Ġ</c> (U+0120) and newline is <c>Ċ</c>. <see cref="Decode"/> reverses it back to real UTF-8 text — without it, decoded output leaks <c>Ġ</c> for spaces. Lifted from the working implementation in <c>WhisperTokenizer</c> into a shared util.</summary>
 public static class ByteLevelCodec
 {
     private static readonly char[] ByteToChar = BuildByteToUnicode();
     private static readonly Dictionary<char, byte> CharToByte = BuildUnicodeToByte();
 
-    /// <summary>Reverses the GPT-2 byte_encoder mapping on a raw BPE-decoded string: each char → byte → UTF-8.
-    /// Multi-byte UTF-8 characters span multiple tokens; concatenating the raw pieces yields a complete byte
-    /// sequence that decodes correctly. Unknown codepoints are skipped.</summary>
+    /// <summary>Reverses the GPT-2 byte_encoder mapping on a raw BPE-decoded string: each char → byte → UTF-8. Multi-byte UTF-8 characters span multiple tokens; concatenating the raw pieces yields a complete byte sequence that decodes correctly. Unknown codepoints are skipped.</summary>
     public static string Decode(string raw)
     {
         if (raw.Length == 0) return string.Empty;
@@ -27,8 +21,7 @@ public static class ByteLevelCodec
         return Encoding.UTF8.GetString(bytes, 0, n);
     }
 
-    /// <summary>Encodes a UTF-8 string into the GPT-2 byte-level space (each byte → its remapped char). The
-    /// inverse of <see cref="Decode"/>; used to look up byte-level token strings for special-token matching.</summary>
+    /// <summary>Encodes a UTF-8 string into the GPT-2 byte-level space (each byte → its remapped char). The inverse of <see cref="Decode"/>; used to look up byte-level token strings for special-token matching.</summary>
     public static string Encode(string text)
     {
         if (text.Length == 0) return string.Empty;

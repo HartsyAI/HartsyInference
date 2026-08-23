@@ -4,10 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS <c>SynthesizerTrn</c> inference assembly: text encoder → duration predictor → monotonic
-/// length regulation → prior sample → reverse flow → HiFi-GAN decoder. The shared TTS core behind Piper /
-/// MeloTTS / GPT-SoVITS / OpenVoice. Single-speaker (deterministic duration) path; the stochastic duration
-/// predictor and speaker conditioning are staged. Reuses every sub-module's <c>IBackend</c> ops.</summary>
+/// <summary>VITS <c>SynthesizerTrn</c> inference assembly: text encoder → duration predictor (deterministic or stochastic, per <see cref="VitsConfig.UseSdp"/>) → monotonic length regulation → prior sample → reverse flow → HiFi-GAN decoder — the shared TTS core behind Piper / MeloTTS / GPT-SoVITS / OpenVoice.</summary>
+/// <remarks>Speaker conditioning is not wired at this level, though the sub-modules support it.</remarks>
 public sealed unsafe class VitsSynthesizer : IDisposable
 {
     private readonly VitsConfig _cfg;

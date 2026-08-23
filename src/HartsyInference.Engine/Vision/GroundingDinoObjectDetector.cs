@@ -9,8 +9,7 @@ using HartsyInference.Vision.Detection.GroundingDino;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Open-vocabulary, text-prompted detection with the pure-C# Grounding DINO (<c>grounding-dino-tiny</c>):
-/// DETR-style preprocessing → BERT tokenization → Swin backbone + cross-modality encoder + two-stage decoder.</summary>
+/// <summary>Open-vocabulary, text-prompted detection with the pure-C# Grounding DINO (<c>grounding-dino-tiny</c>): DETR-style preprocessing → BERT tokenization → Swin backbone + cross-modality encoder + two-stage decoder.</summary>
 public sealed class GroundingDinoObjectDetector : IDisposable
 {
     private const int ShortestEdge = 800;
@@ -79,8 +78,7 @@ public sealed class GroundingDinoObjectDetector : IDisposable
         }
     }
 
-    /// <summary>Builds the DETR-preprocessed pixel tensor: aspect-preserving resize to shortest edge 800 / longest
-    /// ≤ 1333, snapped even, then ImageNet-normalized. Boxes come back in the source frame via post-processing.</summary>
+    /// <summary>Builds the DETR-preprocessed pixel tensor: aspect-preserving resize to shortest edge 800 / longest ≤ 1333, snapped even, then ImageNet-normalized. Boxes come back in the source frame via post-processing.</summary>
     private static Tensor BuildPixels(ImageData image)
     {
         double scale = (double)ShortestEdge / Math.Min(image.Width, image.Height);

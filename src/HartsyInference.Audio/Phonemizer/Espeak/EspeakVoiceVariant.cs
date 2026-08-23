@@ -2,11 +2,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>A language/voice variant resolved from an espeak-ng <c>lang/&lt;group&gt;/&lt;name&gt;</c> file. Captures the
-/// pieces that change the phonemized output: which phoneme table to use (<c>phonemes</c>), which conditional dictionary
-/// rules to enable (<c>dictrules</c> → <c>dict_condition</c> bits), the American flap-t option (<c>option reduce_t</c>),
-/// and phoneme <c>replace</c>s. English (en-gb) sets none of these; <c>en-us</c> switches to the American phoneme table
-/// and enables conditions 3 and 6.</summary>
+/// <summary>A language/voice variant resolved from an espeak-ng <c>lang/&lt;group&gt;/&lt;name&gt;</c> file, capturing the pieces that change the phonemized output: the phoneme table (<c>phonemes</c>), conditional dictionary rules (<c>dictrules</c> → <c>dict_condition</c> bits), the American flap-t option (<c>option reduce_t</c>), and phoneme <c>replace</c>s. English (en-gb) sets none of these; <c>en-us</c> switches to the American phoneme table and enables conditions 3 and 6.</summary>
 internal sealed class EspeakVoiceVariant
 {
     /// <summary>Base language whose <c>&lt;name&gt;_dict</c> is loaded (region stripped: <c>en-us</c> → <c>en</c>).</summary>
@@ -24,8 +20,7 @@ internal sealed class EspeakVoiceVariant
     /// <summary>Phoneme replacements: <c>(condition, fromMnemonic, toMnemonic)</c> applied to the output.</summary>
     public IReadOnlyList<(int Cond, string From, string To)> Replaces { get; private init; } = [];
 
-    /// <summary>Resolves the variant for <paramref name="language"/> (e.g. "en", "en-us") from the espeak data dir. If
-    /// no lang file is found, returns a sensible default (dict + table = the language's base, no conditions).</summary>
+    /// <summary>Resolves the variant for <paramref name="language"/> (e.g. "en", "en-us") from the espeak data dir; if no lang file is found, returns a sensible default (dict + table = the language's base, no conditions).</summary>
     public static EspeakVoiceVariant Resolve(string dataDir, string language)
     {
         string baseName = language.Split('-')[0];

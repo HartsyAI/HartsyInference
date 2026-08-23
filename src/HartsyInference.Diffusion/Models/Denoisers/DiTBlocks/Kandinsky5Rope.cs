@@ -44,11 +44,7 @@ public sealed unsafe class Kandinsky5Rope
     /// <summary>Total head dimension covered by this rope.</summary>
     public int HeadDim => _headDim;
 
-    /// <summary>Cached sequence length from the last <see cref="Precompute1D"/> / <see cref="Precompute3D"/> call.</summary>
-    public int CachedSeqLen => _cachedSeqLen;
-
-    /// <summary>Precomputes the 1D RoPE tables for a sequence of integer positions. Mirrors
-    /// <c>args = pos[:, None] * freqs[None, :]</c> with <c>freqs = get_freqs(head_dim/2, theta)</c>.</summary>
+    /// <summary>Precomputes the 1D RoPE tables for a sequence of integer positions. Mirrors <c>args = pos[:, None] * freqs[None, :]</c> with <c>freqs = get_freqs(head_dim/2, theta)</c>.</summary>
     /// <param name="positions">Per-token positions, shape <c>[seqLen]</c> as int32 (we read as int32 ptr).</param>
     public void Precompute1D(ReadOnlySpan<int> positions)
     {
@@ -82,9 +78,7 @@ public sealed unsafe class Kandinsky5Rope
         }
     }
 
-    /// <summary>Precomputes the 3D RoPE tables for visual tokens flattened in <c>(t, h, w)</c> order.
-    /// Each axis contributes <c>axesDims[i]/2</c> frequency pairs concatenated along the head dim.
-    /// Position grid is <c>[duration, height, width]</c> in patch units (after <c>patch_size</c>).</summary>
+    /// <summary>Precomputes the 3D RoPE tables for visual tokens flattened in <c>(t, h, w)</c> order. Each axis contributes <c>axesDims[i]/2</c> frequency pairs concatenated along the head dim. Position grid is <c>[duration, height, width]</c> in patch units (after <c>patch_size</c>).</summary>
     /// <param name="axesDims">Per-axis dim split (e.g. <c>[32, 48, 48]</c>). Must sum to <see cref="HeadDim"/>.</param>
     /// <param name="duration">Number of temporal patches (1 for image t2i).</param>
     /// <param name="height">Number of vertical patches.</param>
@@ -165,8 +159,7 @@ public sealed unsafe class Kandinsky5Rope
         }
     }
 
-    /// <summary>Applies RoPE rotation to Q and K in-place. Q/K are <c>[B, numHeads, seqLen, headDim]</c>
-    /// contiguous floats. Each pair <c>(x[2i], x[2i+1])</c> is rotated by <c>(cos[i], sin[i])</c>.</summary>
+    /// <summary>Applies RoPE rotation to Q and K in-place. Q/K are <c>[B, numHeads, seqLen, headDim]</c> contiguous floats. Each pair <c>(x[2i], x[2i+1])</c> is rotated by <c>(cos[i], sin[i])</c>.</summary>
     public void Apply(Tensor q, Tensor k, int batch, int numHeads, int seqLen)
     {
         if (_cosCache is null || _sinCache is null)
@@ -197,12 +190,7 @@ public sealed unsafe class Kandinsky5Rope
         }
     }
 
-    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the
-    /// <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is
-    /// the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host
-    /// excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The
-    /// duplicated-pair cos/sin tables are built ONCE per Precompute (version-keyed) and preloaded to the GPU
-    /// weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
+    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The duplicated-pair cos/sin tables are built ONCE per Precompute (version-keyed) and preloaded to the GPU weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, int seqLen)
     {
         if (_cosCache is null || _sinCache is null)
@@ -244,9 +232,7 @@ public sealed unsafe class Kandinsky5Rope
         backend.WanRopeInterleaved(k, _tableCos, _tableSin!, seqLen, numHeads, _headDim);
     }
 
-    /// <summary>Rotates each consecutive pair via <c>x[2i]'   = cos·x[2i]   - sin·x[2i+1]</c>
-    /// and <c>x[2i+1]' = sin·x[2i] + cos·x[2i+1]</c>. Equivalent to the diffusers'
-    /// <c>(rope * x.unsqueeze(-1)).sum(-1)</c> with rope viewed as <c>[c, -s; s, c]</c>.</summary>
+    /// <summary>Rotates each consecutive pair via <c>x[2i]'   = cos·x[2i]   - sin·x[2i+1]</c> and <c>x[2i+1]' = sin·x[2i] + cos·x[2i+1]</c>. Equivalent to the diffusers' <c>(rope * x.unsqueeze(-1)).sum(-1)</c> with rope viewed as <c>[c, -s; s, c]</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ApplyRotation(float* vec, float* cos, float* sin, int halfDim)
     {

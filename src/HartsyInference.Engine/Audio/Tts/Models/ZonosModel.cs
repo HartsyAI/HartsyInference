@@ -9,16 +9,13 @@ using HartsyInference.Audio.Phonemizer.Espeak;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Zonos v0.1 (Zyphra/Zonos-v0.1-transformer) — transformer backbone over 9 DAC codebooks → 44.1 kHz
-/// voice-cloning TTS, wiring the ResNet293 speaker encoder, the espeak phoneme tokenizer, the prefix conditioner,
-/// and the delayed-AR generator. A voice-reference clip is required.</summary>
+/// <summary>Zonos v0.1 (Zyphra/Zonos-v0.1-transformer) — transformer backbone over 9 DAC codebooks → 44.1 kHz voice-cloning TTS, wiring the ResNet293 speaker encoder, the espeak phoneme tokenizer, the prefix conditioner, and the delayed-AR generator. A voice-reference clip is required.</summary>
 internal static class ZonosModel
 {
     private const string ModelRepo = "Zyphra/Zonos-v0.1-transformer";
     private const string SpeakerRepo = "Zyphra/Zonos-v0.1-speaker-embedding";
     private const string EspeakLanguage = "en-us";
 
-    /// <summary>The Zonos descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => ModelRepo,

@@ -41,8 +41,7 @@ public sealed unsafe class Flux2SingleBlock
         _normK = new QkNorm(_headDim, qkNormEps);
     }
 
-    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (see <see cref="ChromaF16"/>);
-    /// damps the fused output projection (the only write into the residual stream). 1.0 = off.</param>
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (see <see cref="ChromaF16"/>); damps the fused output projection (the only write into the residual stream). 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         // Split-from-linear1 projections (converter responsibility — see Flux2CheckpointConverter)

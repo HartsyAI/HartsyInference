@@ -23,30 +23,36 @@ public static class AudioKernels
             outPtr[2 * i + 1] = 0f;
         }
 
+        FftInPlaceComplex(outPtr, (int)n);
+    }
+
+    /// <summary>In-place Cooley-Tukey radix-2 FFT over interleaved complex data [n·2]. n must be a power of 2.</summary>
+    private static unsafe void FftInPlaceComplex(float* data, int n)
+    {
         // Bit-reversal permutation
         int bits = BitOperations.Log2((uint)n);
-        for (int i = 0; i < (int)n; i++)
+        for (int i = 0; i < n; i++)
         {
             int j = ReverseBits(i, bits);
             if (j > i)
             {
                 // Swap complex pairs
-                float tempReal = outPtr[2 * i];
-                float tempImag = outPtr[2 * i + 1];
-                outPtr[2 * i] = outPtr[2 * j];
-                outPtr[2 * i + 1] = outPtr[2 * j + 1];
-                outPtr[2 * j] = tempReal;
-                outPtr[2 * j + 1] = tempImag;
+                float tempReal = data[2 * i];
+                float tempImag = data[2 * i + 1];
+                data[2 * i] = data[2 * j];
+                data[2 * i + 1] = data[2 * j + 1];
+                data[2 * j] = tempReal;
+                data[2 * j + 1] = tempImag;
             }
         }
 
         // Butterfly passes
-        for (int size = 2; size <= (int)n; size *= 2)
+        for (int size = 2; size <= n; size *= 2)
         {
             int halfSize = size / 2;
             float angleStep = -2.0f * MathF.PI / size;
 
-            for (int i = 0; i < (int)n; i += size)
+            for (int i = 0; i < n; i += size)
             {
                 for (int k = 0; k < halfSize; k++)
                 {
@@ -57,13 +63,13 @@ public static class AudioKernels
                     int evenIdx = 2 * (i + k);
                     int oddIdx = 2 * (i + k + halfSize);
 
-                    float oddReal = outPtr[oddIdx] * twiddleReal - outPtr[oddIdx + 1] * twiddleImag;
-                    float oddImag = outPtr[oddIdx] * twiddleImag + outPtr[oddIdx + 1] * twiddleReal;
+                    float oddReal = data[oddIdx] * twiddleReal - data[oddIdx + 1] * twiddleImag;
+                    float oddImag = data[oddIdx] * twiddleImag + data[oddIdx + 1] * twiddleReal;
 
-                    outPtr[oddIdx] = outPtr[evenIdx] - oddReal;
-                    outPtr[oddIdx + 1] = outPtr[evenIdx + 1] - oddImag;
-                    outPtr[evenIdx] += oddReal;
-                    outPtr[evenIdx + 1] += oddImag;
+                    data[oddIdx] = data[evenIdx] - oddReal;
+                    data[oddIdx + 1] = data[evenIdx + 1] - oddImag;
+                    data[evenIdx] += oddReal;
+                    data[evenIdx + 1] += oddImag;
                 }
             }
         }
@@ -111,49 +117,7 @@ public static class AudioKernels
                     frameOut[2 * i + 1] = 0f;
                 }
 
-                // Bit-reversal
-                int bits = BitOperations.Log2((uint)fftSize);
-                for (int i = 0; i < fftSize; i++)
-                {
-                    int j = ReverseBits(i, bits);
-                    if (j > i)
-                    {
-                        float tR = frameOut[2 * i];
-                        float tI = frameOut[2 * i + 1];
-                        frameOut[2 * i] = frameOut[2 * j];
-                        frameOut[2 * i + 1] = frameOut[2 * j + 1];
-                        frameOut[2 * j] = tR;
-                        frameOut[2 * j + 1] = tI;
-                    }
-                }
-
-                // Butterfly
-                for (int size = 2; size <= fftSize; size *= 2)
-                {
-                    int halfSize = size / 2;
-                    float angleStep = -2.0f * MathF.PI / size;
-
-                    for (int i = 0; i < fftSize; i += size)
-                    {
-                        for (int k = 0; k < halfSize; k++)
-                        {
-                            float angle = angleStep * k;
-                            float tR = MathF.Cos(angle);
-                            float tI = MathF.Sin(angle);
-
-                            int eIdx = 2 * (i + k);
-                            int oIdx = 2 * (i + k + halfSize);
-
-                            float oR = frameOut[oIdx] * tR - frameOut[oIdx + 1] * tI;
-                            float oI = frameOut[oIdx] * tI + frameOut[oIdx + 1] * tR;
-
-                            frameOut[oIdx] = frameOut[eIdx] - oR;
-                            frameOut[oIdx + 1] = frameOut[eIdx + 1] - oI;
-                            frameOut[eIdx] += oR;
-                            frameOut[eIdx + 1] += oI;
-                        }
-                    }
-                }
+                FftInPlaceComplex(frameOut, fftSize);
             }
         }
         finally

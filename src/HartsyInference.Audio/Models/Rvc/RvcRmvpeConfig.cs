@@ -18,8 +18,6 @@ public sealed record RvcRmvpeConfig
     public double Fmin { get; init; } = 30.0;
     public double Fmax { get; init; } = 8_000.0;
 
-    public int GruHidden { get; init; } = 256;
-
     /// <summary>Number of pitch-classification bins.</summary>
     public int NumBins { get; init; } = 360;
 

@@ -57,7 +57,7 @@ public sealed unsafe class LensTransformer : IDisposable
         _imgInBias = weights["img_in.bias"];
 
         for (int i = 0; i < _config.SelectedEncoderLayers.Length; i++)
-            _txtNormWeights[i] = CastToF32IfNeeded(weights[$"txt_norm.{i}.weight"]);
+            _txtNormWeights[i] = TensorCasts.EnsureF32(weights[$"txt_norm.{i}.weight"]);
 
         _txtInWeight = weights["txt_in.weight"];
         _txtInBias = weights["txt_in.bias"];
@@ -280,9 +280,6 @@ public sealed unsafe class LensTransformer : IDisposable
 
         return projected;
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     /// <summary>Releases all tensor references and the per-prompt text-token cache.</summary>
     public void Dispose()

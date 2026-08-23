@@ -12,7 +12,6 @@ public sealed record GenerationResult
     /// <summary>The prompt length in tokens (for throughput accounting).</summary>
     public required int PromptTokens { get; init; }
 
-    /// <summary>True when generation stopped on an end-of-turn / end-of-text / stop token rather than the
-    /// <c>MaxTokens</c> limit.</summary>
+    /// <summary>True when generation stopped on an end-of-turn/end-of-text/stop token rather than the <c>MaxTokens</c> limit.</summary>
     public required bool StoppedOnStopToken { get; init; }
 }

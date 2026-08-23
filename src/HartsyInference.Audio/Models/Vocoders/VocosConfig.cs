@@ -61,19 +61,4 @@ public sealed record VocosConfig
     /// <summary>Standard preset: <c>charactr/vocos-mel-24khz</c>. 24 kHz mono, 100 mel input,
     /// 512 hidden, 8 ConvNeXt blocks, n_fft=1024, hop=256.</summary>
     public static VocosConfig Mel24k => new();
-
-    /// <summary>EnCodec preset: <c>charactr/vocos-encodec-24khz</c>. 24 kHz mono, 128 input channels,
-    /// 384 hidden, 1152 intermediate, 8 ConvNeXt blocks, n_fft=1280, hop=320, AdaLayerNorm with
-    /// 4 bandwidth embeddings, "same" STFT padding.</summary>
-    public static VocosConfig Encodec24k => new()
-    {
-        InputChannels = 128,
-        HiddenDim = 384,
-        IntermediateDim = 1_152,
-        NumLayers = 8,
-        NFft = 1_280,
-        HopLength = 320,
-        AdaNormNumEmbeddings = 4,
-        Padding = "same",
-    };
 }

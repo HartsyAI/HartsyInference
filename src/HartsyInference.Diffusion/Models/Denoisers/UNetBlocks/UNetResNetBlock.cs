@@ -93,7 +93,6 @@ public sealed class UNetResNetBlock
 
         DType dtype = input.DType;
 
-        // 1. Fused GroupNorm+SiLU → conv1
         TensorShape inShape = new TensorShape(batch, _inChannels, height, width);
         Tensor silu1Out = new Tensor(inShape, dtype);
         backend.GroupNormSilu(silu1Out, input, _norm1Weight!, _norm1Bias!, _normGroups, _normEps);
@@ -103,12 +102,10 @@ public sealed class UNetResNetBlock
         backend.Conv2D(conv1Out, silu1Out, _conv1Weight!, _conv1Bias, 1, 1, 1, 1);
         silu1Out.Dispose();
 
-        // 2. Project timestep embedding and add to hidden: temb [B, timeDim] → [B, outCh] → broadcast add
         Tensor tembProj = ProjectTimestepEmbedding(backend, temb, batch);
         backend.BroadcastAdd(conv1Out, tembProj, _outChannels, height * width);
         tembProj.Dispose();
 
-        // 3. Fused GroupNorm+SiLU → conv2
         Tensor silu2Out = new Tensor(outShape, dtype);
         backend.GroupNormSilu(silu2Out, conv1Out, _norm2Weight!, _norm2Bias!, _normGroups, _normEps);
         conv1Out.Dispose();
@@ -117,7 +114,6 @@ public sealed class UNetResNetBlock
         backend.Conv2D(conv2Out, silu2Out, _conv2Weight!, _conv2Bias, 1, 1, 1, 1);
         silu2Out.Dispose();
 
-        // 4. Skip connection
         Tensor skip;
         if (_hasShortcut)
         {
@@ -129,7 +125,6 @@ public sealed class UNetResNetBlock
             skip = input;
         }
 
-        // 5. Residual: output = conv2_out + skip
         Tensor output = new Tensor(outShape, dtype);
         backend.Add(output, conv2Out, skip);
         conv2Out.Dispose();
@@ -150,7 +145,6 @@ public sealed class UNetResNetBlock
         Tensor tembSilu = new Tensor(tembShape, temb.DType);
         backend.Silu(tembSilu, temb);
 
-        // Linear: [B, timeDim] → [B, outChannels]
         TensorShape projShape = new TensorShape(batch, _outChannels);
         Tensor projected = new Tensor(projShape, temb.DType);
         backend.Linear(projected, tembSilu, _timeEmbProjWeight!, _timeEmbProjBias!);

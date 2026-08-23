@@ -31,11 +31,11 @@ public sealed unsafe class WanAnimateFaceEncoder
     /// keys are <c>conv1_local.conv.weight</c> / <c>conv2.conv.weight</c> / <c>conv3.conv.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        _conv1W = LoadF32(w, $"{p}.conv1_local.conv.weight"); w.TryGetValue($"{p}.conv1_local.conv.bias", out _conv1B);
-        _conv2W = LoadF32(w, $"{p}.conv2.conv.weight"); w.TryGetValue($"{p}.conv2.conv.bias", out _conv2B);
-        _conv3W = LoadF32(w, $"{p}.conv3.conv.weight"); w.TryGetValue($"{p}.conv3.conv.bias", out _conv3B);
+        _conv1W = TensorCasts.LoadF32(w, $"{p}.conv1_local.conv.weight"); w.TryGetValue($"{p}.conv1_local.conv.bias", out _conv1B);
+        _conv2W = TensorCasts.LoadF32(w, $"{p}.conv2.conv.weight"); w.TryGetValue($"{p}.conv2.conv.bias", out _conv2B);
+        _conv3W = TensorCasts.LoadF32(w, $"{p}.conv3.conv.weight"); w.TryGetValue($"{p}.conv3.conv.bias", out _conv3B);
         _outW = w[$"{p}.out_proj.weight"]; w.TryGetValue($"{p}.out_proj.bias", out _outB);
-        _paddingTokens = LoadF32(w, $"{p}.padding_tokens");
+        _paddingTokens = TensorCasts.LoadF32(w, $"{p}.padding_tokens");
         _inDim = (int)_conv1W.Shape[1];
         _hiddenDim = (int)_conv2W.Shape[1];
         _numHeads = (int)(_conv1W.Shape[0] / _hiddenDim);
@@ -58,23 +58,23 @@ public sealed unsafe class WanAnimateFaceEncoder
 
         // conv1_local: [in_dim, T] → [hidden·num_heads, T] (stride 1, causal replicate pad). Channel layout is
         // head-major ("b (n c) t"), so head h owns rows [h·hidden, (h+1)·hidden) and runs independently below.
-        Tensor c1 = Conv1dCausal(backend, Transpose(motion, tIn, _inDim), _inDim, _hiddenDim * _numHeads, _conv1W!, _conv1B, 1, tIn);
+        Tensor c1 = Conv1dCausal(backend, WanEncoderOps.TokensToChannels(motion, _inDim, tIn), _inDim, _hiddenDim * _numHeads, _conv1W!, _conv1B, 1, tIn);
         int t1 = (int)c1.Shape[1];
         Tensor[] headOut = new Tensor[_numHeads];
         int tFinal = -1;
         for (int h = 0; h < _numHeads; h++)
         {
             Tensor headSeq = SliceRowsBlock(c1, h * _hiddenDim, _hiddenDim, t1);   // [hidden, T]
-            Tensor x = ChannelsToTokens(headSeq, _hiddenDim, t1); headSeq.Dispose();   // [T, hidden]
-            LayerNormSilu(x, t1, _hiddenDim);
-            Tensor c2 = Conv1dCausal(backend, Transpose(x, t1, _hiddenDim), _hiddenDim, _hiddenDim, _conv2W!, _conv2B, 2, t1); x.Dispose();
+            Tensor x = WanEncoderOps.ChannelsToTokens(headSeq, _hiddenDim, t1); headSeq.Dispose();   // [T, hidden]
+            WanEncoderOps.LayerNormSilu(x, t1, _hiddenDim, _eps);
+            Tensor c2 = Conv1dCausal(backend, WanEncoderOps.TokensToChannels(x, _hiddenDim, t1), _hiddenDim, _hiddenDim, _conv2W!, _conv2B, 2, t1); x.Dispose();
             int t2 = (int)c2.Shape[1];
-            Tensor x2 = ChannelsToTokens(c2, _hiddenDim, t2); c2.Dispose();
-            LayerNormSilu(x2, t2, _hiddenDim);
-            Tensor c3 = Conv1dCausal(backend, Transpose(x2, t2, _hiddenDim), _hiddenDim, _hiddenDim, _conv3W!, _conv3B, 2, t2); x2.Dispose();
+            Tensor x2 = WanEncoderOps.ChannelsToTokens(c2, _hiddenDim, t2); c2.Dispose();
+            WanEncoderOps.LayerNormSilu(x2, t2, _hiddenDim, _eps);
+            Tensor c3 = Conv1dCausal(backend, WanEncoderOps.TokensToChannels(x2, _hiddenDim, t2), _hiddenDim, _hiddenDim, _conv3W!, _conv3B, 2, t2); x2.Dispose();
             int t3 = (int)c3.Shape[1];
-            Tensor x3 = ChannelsToTokens(c3, _hiddenDim, t3); c3.Dispose();
-            LayerNormSilu(x3, t3, _hiddenDim);
+            Tensor x3 = WanEncoderOps.ChannelsToTokens(c3, _hiddenDim, t3); c3.Dispose();
+            WanEncoderOps.LayerNormSilu(x3, t3, _hiddenDim, _eps);
             Tensor o = new Tensor(new TensorShape(t3, _outDim), DType.F32);
             backend.Linear(o, x3, _outW!, _outB); x3.Dispose();
             headOut[h] = o;
@@ -124,50 +124,10 @@ public sealed unsafe class WanAnimateFaceEncoder
         return flat;
     }
 
-    /// <summary>[T, C] → [1, C, T] for Conv1d (channels-first with a batch dim).</summary>
-    private static Tensor Transpose(Tensor x, int t, int c)
-    {
-        Tensor o = new Tensor(new TensorShape(1, c, t), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        for (int ti = 0; ti < t; ti++)
-            for (int ci = 0; ci < c; ci++) op[(long)ci * t + ti] = xp[(long)ti * c + ci];
-        return o;
-    }
-
-    /// <summary>[C, T] → [T, C].</summary>
-    private static Tensor ChannelsToTokens(Tensor x, int c, int t)
-    {
-        Tensor o = new Tensor(new TensorShape(t, c), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        for (int ci = 0; ci < c; ci++)
-            for (int ti = 0; ti < t; ti++) op[(long)ti * c + ci] = xp[(long)ci * t + ti];
-        return o;
-    }
-
     private static Tensor SliceRowsBlock(Tensor x, int startRow, int rows, int t)
     {
         Tensor o = new Tensor(new TensorShape(rows, t), DType.F32);
         Buffer.MemoryCopy((float*)x.DataPointer + (long)startRow * t, (float*)o.DataPointer, (long)rows * t * 4, (long)rows * t * 4);
         return o;
     }
-
-    /// <summary>In-place no-affine LayerNorm over the channel dim followed by SiLU, on a <c>[T, C]</c> tensor.</summary>
-    private void LayerNormSilu(Tensor x, int t, int c)
-    {
-        float* xp = (float*)x.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            long off = (long)i * c;
-            double mean = 0; for (int d = 0; d < c; d++) mean += xp[off + d]; mean /= c;
-            double var = 0; for (int d = 0; d < c; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / c) + _eps);
-            for (int d = 0; d < c; d++)
-            {
-                float n = (float)((xp[off + d] - mean) * inv);
-                xp[off + d] = n / (1f + MathF.Exp(-n));   // SiLU
-            }
-        }
-    }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

@@ -7,8 +7,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Text-to-music service: picks a descriptor from the model spec and runs the generation on the shared audio
-/// device under the generation lock. Covers MusicGen, AudioGen, ACE-Step, YuE, and HeartMuLa.</summary>
+/// <summary>Text-to-music service: picks a descriptor from the model spec and runs the generation on the shared audio device under the generation lock. Covers MusicGen, AudioGen, ACE-Step, YuE, and HeartMuLa.</summary>
 public sealed class MusicService : IMusicService
 {
     private readonly InferenceEngine _engine;
@@ -62,9 +61,7 @@ public sealed class MusicService : IMusicService
         }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
     }
 
-    /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior)
-    /// unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the
-    /// resolved shard backends and default to un-quantized weights pooled across them.</summary>
+    /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior) unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the resolved shard backends and default to un-quantized weights pooled across them.</summary>
     private MusicLoadContext BuildLoadContext(IBackend primary, MusicRequest request)
     {
         IReadOnlyList<string> shardDevices = _engine.Placement.ShardDevices;
@@ -88,12 +85,7 @@ public sealed class MusicService : IMusicService
         };
     }
 
-    /// <summary>Gates the audio-conditioned editing modes: they are mutually exclusive, and only ACE-Step 1.5 has an
-    /// edit path (its DiT reads <c>context_latents = [src_latent ‖ chunk_mask]</c>) — every other music family is
-    /// text-conditioned only and is refused by name. ACE-Step requests fall through to
-    /// <c>AceStepMusicModel</c>, which decodes the clip and builds the src/mask/start-sigma plan.
-    /// <b>Parity-pending:</b> the edit modes have not been validated against real weights, and cover approximates
-    /// upstream's FSQ-detokenized 5 Hz hints with raw 25 Hz Oobleck latents.</summary>
+    /// <summary>Gates the audio-conditioned editing modes: they are mutually exclusive, and only ACE-Step 1.5 has an edit path (its DiT reads <c>context_latents = [src_latent ‖ chunk_mask]</c>) — every other music family is text-conditioned only and is refused by name. ACE-Step requests fall through to <c>AceStepMusicModel</c>, which decodes the clip and builds the src/mask/start-sigma plan. <b>Parity-pending:</b> the edit modes have not been validated against real weights, and cover approximates upstream's FSQ-detokenized 5 Hz hints with raw 25 Hz Oobleck latents.</summary>
     private static void ValidateEditingModes(MusicRequest request, string modelId)
     {
         int selected = (request.Continuation is not null ? 1 : 0) + (request.Repaint is not null ? 1 : 0)

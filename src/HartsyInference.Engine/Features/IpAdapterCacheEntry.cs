@@ -8,9 +8,7 @@ using EngineIpAdapter = HartsyInference.Diffusion.Adapters.IpAdapter;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>A loaded IP-Adapter plus its image encoder, held across generations (the weights are identical for repeat
-/// gens and CLIP-Vision-H is a ~600 MB upload — don't thrash). Keyed by the adapter file path. Standard/Plus entries hold
-/// CLIP-Vision; FaceID entries hold the ArcFace embedder + pose/face detectors + the companion LoRA path.</summary>
+/// <summary>A loaded IP-Adapter plus its image encoder, held across generations (the weights are identical for repeat gens and CLIP-Vision-H is a ~600 MB upload — don't thrash). Keyed by the adapter file path. Standard/Plus entries hold CLIP-Vision; FaceID entries hold the ArcFace embedder + pose/face detectors + the companion LoRA path.</summary>
 public sealed class IpAdapterCacheEntry : IDisposable
 {
     /// <summary>Path the adapter was loaded from; the cache key.</summary>
@@ -37,8 +35,7 @@ public sealed class IpAdapterCacheEntry : IDisposable
     /// <summary>YOLO11-pose keypoint detector used for the fallback face alignment (FaceID entries only).</summary>
     public YoloPosePipeline? PosePipeline { get; init; }
 
-    /// <summary>Dedicated YOLOv8-Face detector; when present it supersedes <see cref="PosePipeline"/> for locating and
-    /// aligning the face, and null falls back to the pose keypoints.</summary>
+    /// <summary>Dedicated YOLOv8-Face detector; when present it supersedes <see cref="PosePipeline"/> for locating and aligning the face, and null falls back to the pose keypoints.</summary>
     public FaceDetector? FaceDetector { get; init; }
 
     /// <summary>Path of the FaceID companion UNet LoRA (kohya format), or null.</summary>

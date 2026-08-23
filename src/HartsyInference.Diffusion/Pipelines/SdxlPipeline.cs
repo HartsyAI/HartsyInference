@@ -41,10 +41,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private Tensor? _cachedTextEmb;
     private Tensor? _cachedPooled;
 
-    /// <summary>The VAE encoder, when constructed with one — null for the text-to-image-only overload. Exposed
-    /// (by convention this pipeline does not own it, see <see cref="DiffusionPipelineBase"/>'s class doc) so a
-    /// caller can build a cross-pipeline PostApply refiner (<see cref="SdxlRefinerPipeline"/>) that reuses these
-    /// already-loaded weights instead of loading its own copy of the SDXL VAE.</summary>
+    /// <summary>The VAE encoder, when constructed with one — null for the text-to-image-only overload. Exposed (by convention this pipeline does not own it, see <see cref="DiffusionPipelineBase"/>'s class doc) so a caller can build a cross-pipeline PostApply refiner (<see cref="SdxlRefinerPipeline"/>) that reuses these already-loaded weights instead of loading its own copy of the SDXL VAE.</summary>
     public VaeEncoder? VaeEncoder => _vaeEncoder;
 
     /// <summary>The VAE decoder. Exposed for the same cross-pipeline-reuse reason as <see cref="VaeEncoder"/>.</summary>
@@ -70,11 +67,10 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
     /// <summary>Generates an image from pre-tokenized dual-CLIP input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
-    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = noise * initSigma, denoise from step 0).</item>
-    /// <item><see cref="ImageToImageRequest"/> → image-to-image (initial latent = VAE-encoded source + noise * sigma[startStep], denoise from <c>startStep = steps - round(steps * Strength)</c>). Requires a <see cref="VaeEncoder"/>.</item>
+    ///   <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = noise * initSigma, denoise from step 0).</item>
+    ///   <item><see cref="ImageToImageRequest"/> → image-to-image (initial latent = VAE-encoded source + noise * sigma[startStep], denoise from <c>startStep = steps - round(steps * Strength)</c>). Requires a <see cref="VaeEncoder"/>.</item>
     /// </list>
-    /// The two paths share the entire dual-CLIP encoding, ADM conditioning, denoise loop, and VAE decode pipeline. Strength=0 short-circuits to byte-identical pass-through.
-    /// </summary>
+    /// The two paths share the entire dual-CLIP encoding, ADM conditioning, denoise loop, and VAE decode pipeline. Strength=0 short-circuits to byte-identical pass-through.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
         int[] negativePromptTokenIdsL,
@@ -714,9 +710,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Drain-free denoise loop: cond+uncond run as ONE batch-2 UNet forward per step (halving host op-dispatch), the CFG combine + Euler update run in-place on the device-resident latent (<c>IBackend.CfgEulerStep</c>, dt = σ[i+1]−σ[i]), and the step-invariant conditioning (batched text embedding in the UNet dtype, ADM micro-conditioning embedding) is built once before the loop. Zero host round-trips per step — the host CFG/scheduler loops and the per-step conditioning re-slices of the reference path each forced a full GPU pipeline drain. Latent previews are throttled to every 4th step + final (each preview is a deliberate D2H sync). At <c>cfgScale ≤ 1</c> the uncond branch is skipped entirely (batch 1, guidance 1 ⇒ pure cond Euler step). The final latent is host-materialized before returning because the tiled VAE fallback slices it on the host.</summary>
-    /// <summary>The fused loop's step body as an <see cref="IDenoisePredictor"/>: scale the latent for the noise level,
-    /// run ONE batch-2 UNet forward carrying cond and uncond together, and slice the two halves back out.
-    ///
+    /// <summary>The fused loop's step body as an <see cref="IDenoisePredictor"/>: scale the latent for the noise level, run ONE batch-2 UNet forward carrying cond and uncond together, and slice the two halves back out.
     /// <para>Everything step-invariant (the batched text embedding already in the UNet dtype, the ADM
     /// micro-conditioning embedding) was built once by the caller and is borrowed here, not owned — this type disposes
     /// nothing it did not allocate.</para>
@@ -884,14 +878,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         return latent;
     }
 
-    /// <summary>CFG-branch parallelism: the fused loop's batch=2 single-GPU forward split into two batch=1
-    /// forwards — cond on <see cref="DiffusionPipelineBase.Backend"/>, uncond concurrently on
-    /// <see cref="DiffusionPipelineBase.CfgParallelBackend"/> via <see cref="CfgBranchRunner"/> — combined with
-    /// the same in-place <c>CfgEulerStep</c> the fused loop uses. Weights are preloaded on both backends before
-    /// this runs (see <see cref="TryPreloadCfgParallel"/>), so every in-loop weight read is a per-backend cache
-    /// hit. The shared latent stays resident on <see cref="DiffusionPipelineBase.Backend"/> across the whole
-    /// loop; <see cref="IBackend.CopyFromPeer"/> clones it onto the second backend once per step (device-resident
-    /// hop, no host round trip) — the same hand-off <c>FluxPipeline</c>'s true-CFG concurrent branch uses.</summary>
+    /// <summary>CFG-branch parallelism: the fused loop's batch=2 single-GPU forward split into two batch=1 forwards — cond on <see cref="DiffusionPipelineBase.Backend"/>, uncond concurrently on <see cref="DiffusionPipelineBase.CfgParallelBackend"/> via <see cref="CfgBranchRunner"/> — combined with the same in-place <c>CfgEulerStep</c> the fused loop uses. Weights are preloaded on both backends before this runs (see <see cref="TryPreloadCfgParallel"/>), so every in-loop weight read is a per-backend cache hit. The shared latent stays resident on <see cref="DiffusionPipelineBase.Backend"/> across the whole loop; <see cref="IBackend.CopyFromPeer"/> clones it onto the second backend once per step (device-resident hop, no host round trip) — the same hand-off <c>FluxPipeline</c>'s true-CFG concurrent branch uses.</summary>
     private Tensor RunDenoiseLoopCfgParallel(
         Tensor latent,
         TensorShape latentShape,
@@ -1009,9 +996,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         return latent;
     }
 
-    /// <summary>Scales the input latent, casts to the UNet's activation dtype, and runs one CFG-parallel branch's
-    /// UNet forward on <paramref name="backend"/> — factored out so <see cref="CfgBranchRunner.Run"/> can invoke
-    /// the cond/uncond branches as independent thunks, each against its own backend.</summary>
+    /// <summary>Scales the input latent, casts to the UNet's activation dtype, and runs one CFG-parallel branch's UNet forward on <paramref name="backend"/> — factored out so <see cref="CfgBranchRunner.Run"/> can invoke the cond/uncond branches as independent thunks, each against its own backend.</summary>
     private Tensor ForwardCfgParallelBranch(IBackend backend, Tensor latent, float timestep, Tensor textForUnet, Tensor? admEmb, float inputScale, DType unetDtype)
     {
         Tensor scaled = new Tensor(latent.Shape, DType.F32);
@@ -1022,10 +1007,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         return noisePred;
     }
 
-    /// <summary>Attempts to preload the UNet onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so the
-    /// uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>. Never
-    /// throws — a second card that can't also hold the UNet resident (~2× a single card's worth of VRAM) falls
-    /// back to the batched fused loop with one log line, exactly like Flux's true-CFG preload.</summary>
+    /// <summary>Attempts to preload the UNet onto <see cref="DiffusionPipelineBase.CfgParallelBackend"/> so the uncond branch can run there concurrently with cond on <see cref="DiffusionPipelineBase.Backend"/>. Never throws — a second card that can't also hold the UNet resident (~2× a single card's worth of VRAM) falls back to the batched fused loop with one log line, exactly like Flux's true-CFG preload.</summary>
     private bool TryPreloadCfgParallel()
     {
         try
@@ -1046,12 +1028,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private static bool TokensEqual(int[]? cached, int[] incoming)
         => cached is not null && cached.AsSpan().SequenceEqual(incoming);
 
-    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond) — or,
-    /// when <paramref name="tcfg"/> is set, <see cref="CfgHelper.ApplyTcfg"/>'s tangentially-damped variant of
-    /// that same combine — then optionally CFG-Rescale (<see cref="CfgHelper.ApplyCfgRescale"/>) when
-    /// <paramref name="cfgRescale"/> > 0. When ControlNet residuals are supplied they're applied to both UNet
-    /// branches (single CN pass per step, residuals shared — matches diffusers' guess_mode=True; strict
-    /// per-branch CN passes are a future optimization).
+    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond) — or, when <paramref name="tcfg"/> is set, <see cref="CfgHelper.ApplyTcfg"/>'s tangentially-damped variant of that same combine — then optionally CFG-Rescale (<see cref="CfgHelper.ApplyCfgRescale"/>) when <paramref name="cfgRescale"/> > 0. When ControlNet residuals are supplied they're applied to both UNet branches (single CN pass per step, residuals shared — matches diffusers' guess_mode=True; strict per-branch CN passes are a future optimization).
     /// <para>The optional <paramref name="overrideUnet"/> + <paramref name="sizeConditionUncond"/> parameters drive refiner StepSwap mode: during the refiner phase the loop calls this with the refiner UNet and a separate uncond ADM array (so the cond/uncond branches use different aesthetic_score values, matching the refiner's training).</para></summary>
     private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, Tensor pooledOutput, float[] sizeCondition, float cfgScale, float cfgRescale = 0f, bool tcfg = false,
         IReadOnlyList<Tensor>? cnDownRes = null, Tensor? cnMidRes = null,

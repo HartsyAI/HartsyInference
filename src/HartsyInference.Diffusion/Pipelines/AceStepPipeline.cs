@@ -10,14 +10,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>ACE-Step v1 (ACE Studio + StepFun, Apache-2.0) text/lyrics-to-music pipeline — the 3.5B flow-matching DiT
-/// over Music-DCAE mel latents: pre-computed UMT5-base features + VoiceBpe lyric ids → tri-source cross-attention
-/// context → shift-3 flow-match denoise (Euler / Heun / PingPong) with CFG / APG / CFG-Zero★ guidance → DCAE decode
-/// to stereo log-mel → ADaMoS HiFi-GAN per channel → 44.1 kHz stereo waveform. Token rate ≈ 10.77 Hz (a 4-minute
-/// song ≈ 2585 DiT tokens). Encode UMT5 upstream with the shared <c>T5TextEncoder</c>
-/// (<c>T5TextEncoderConfig.Umt5Base</c>) and tokenize lyrics with <c>AceStepLyricTokenizer</c>.
-/// <b>Status: built, first-run validation pending</b> — guidance defaults (CFG 7.0 / 27 steps) per the model card;
-/// APG momentum drifts from the Python reference by design (validation uses plain CFG).
+/// <summary>ACE-Step v1 (ACE Studio + StepFun, Apache-2.0) text/lyrics-to-music pipeline — the 3.5B flow-matching DiT over Music-DCAE mel latents: pre-computed UMT5-base features + VoiceBpe lyric ids → tri-source cross-attention context → shift-3 flow-match denoise (Euler / Heun / PingPong) with CFG / APG / CFG-Zero★ guidance → DCAE decode to stereo log-mel → ADaMoS HiFi-GAN per channel → 44.1 kHz stereo waveform. Token rate ≈ 10.77 Hz (a 4-minute song ≈ 2585 DiT tokens). Encode UMT5 upstream with the shared <c>T5TextEncoder</c> (<c>T5TextEncoderConfig.Umt5Base</c>) and tokenize lyrics with <c>AceStepLyricTokenizer</c>. <b>Status: built, first-run validation pending</b> — guidance defaults (CFG 7.0 / 27 steps) per the model card; APG momentum drifts from the Python reference by design (validation uses plain CFG).
 /// <para><b>CUDA (3060/12 GB):</b> runs end-to-end with bf16 weights resident (F32 won't fit), but the bf16 GEMM
 /// truncates F32 activations and the latent NaNs over the CFG loop. The caller MUST set
 /// <c>CudaBackend.HighPrecisionGemm = true</c> before constructing this pipeline — it upcasts bf16 weights to F32 for
@@ -56,8 +49,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates stereo audio from pre-computed UMT5 style features <c>[T_text, 768]</c> and ACE lyric token
-    /// ids (empty array → instrumental via prompt tags). Returns one <c>float[]</c> per channel at 44.1 kHz.
+    /// <summary>Generates stereo audio from pre-computed UMT5 style features <c>[T_text, 768]</c> and ACE lyric token ids (empty array → instrumental via prompt tags). Returns one <c>float[]</c> per channel at 44.1 kHz.
     /// <para>The full upstream <c>pipeline_ace_step.py</c> guidance controls are exposed per-call (all default to the
     /// config): <paramref name="guidanceInterval"/> (0.5, CFG only over the centered trajectory fraction),
     /// <paramref name="guidanceIntervalDecay"/> (0.0) toward <paramref name="minGuidanceScale"/> (3.0),
@@ -269,8 +261,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return vCond;
     }
 
-    /// <summary>Clones the full context and zeroes the lyric rows (everything after speaker + text), leaving the
-    /// speaker + UMT5 text conditioning active — the "text-only" branch for double-condition CFG.</summary>
+    /// <summary>Clones the full context and zeroes the lyric rows (everything after speaker + text), leaving the speaker + UMT5 text conditioning active — the "text-only" branch for double-condition CFG.</summary>
     private Tensor BuildOnlyTextContext(Tensor ctx, int textRows)
     {
         Tensor o = Clone(ctx);
@@ -310,8 +301,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return sigmas;
     }
 
-    /// <summary>Custom (OSS) sigma schedule: build the full grid of <c>max(ossSteps)</c> steps, then keep the sigmas
-    /// at the (1-indexed) <paramref name="ossSteps"/> positions plus a terminal 0 (upstream <c>oss_steps</c>).</summary>
+    /// <summary>Custom (OSS) sigma schedule: build the full grid of <c>max(ossSteps)</c> steps, then keep the sigmas at the (1-indexed) <paramref name="ossSteps"/> positions plus a terminal 0 (upstream <c>oss_steps</c>).</summary>
     private static float[] BuildOssSigmas(int[] ossSteps, float shift)
     {
         int maxStep = 0;
@@ -324,8 +314,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return sel;
     }
 
-    /// <summary>Flow-match Euler step with ACE-Step's omega granularity rescale: the mean of the Euler delta is
-    /// preserved while its residual is scaled by <paramref name="omegaNorm"/> (upstream <c>omega_scale</c> effect).</summary>
+    /// <summary>Flow-match Euler step with ACE-Step's omega granularity rescale: the mean of the Euler delta is preserved while its residual is scaled by <paramref name="omegaNorm"/> (upstream <c>omega_scale</c> effect).</summary>
     private static void EulerStep(Tensor target, Tensor value, float dt, float omegaNorm)
     {
         float* tp = (float*)target.DataPointer;

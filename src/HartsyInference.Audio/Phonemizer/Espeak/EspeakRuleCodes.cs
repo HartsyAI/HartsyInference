@@ -1,8 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Byte opcodes and flag bits used inside a compiled espeak-ng <c>*_dict</c> file, ported verbatim from
-/// espeak-ng v1.50 <c>translate.h</c>. These drive <see cref="EspeakDictFile"/> (dictionary layout) and
-/// <see cref="EspeakRuleInterpreter"/> (letter-to-sound rule matching), so the values must match espeak exactly.</summary>
+/// <summary>Byte opcodes and flag bits used inside a compiled espeak-ng <c>*_dict</c> file, ported verbatim from espeak-ng v1.50 <c>translate.h</c>; these drive <see cref="EspeakDictFile"/> (dictionary layout) and <see cref="EspeakTranslator"/> (letter-to-sound rule matching), so the values must match espeak exactly.</summary>
 internal static class EspeakRuleCodes
 {
     /// <summary>Number of hash-table buckets in the compiled dictionary word list.</summary>

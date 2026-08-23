@@ -1,8 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Engine-native raw audio: planar float PCM in [-1, 1] plus its sample rate. The decoded counterpart to
-/// <see cref="AudioClip"/> (encoded container bytes in) and <see cref="AudioResult"/> (encoded container bytes out) —
-/// use this whenever a waveform moves between engine components without a container around it.</summary>
+/// <summary>Engine-native raw audio: planar float PCM in [-1, 1] plus its sample rate. The decoded counterpart to <see cref="AudioClip"/> (encoded container bytes in) and <see cref="AudioResult"/> (encoded container bytes out) — use this whenever a waveform moves between engine components without a container around it.</summary>
 public sealed record AudioBuffer
 {
     /// <summary>Planar per-channel samples; index 0 is left, 1 is right. Borrowed, not copied — accessors hand back these arrays.</summary>

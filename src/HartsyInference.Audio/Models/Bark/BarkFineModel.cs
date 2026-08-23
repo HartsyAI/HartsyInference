@@ -97,6 +97,7 @@ public sealed unsafe class BarkFineModel : IDisposable
     /// <paramref name="codes"/> grid <c>[NumCodebooks, T]</c>. Matches HF <c>BarkFineModel.forward(codebook_idx,
     /// input_ids)</c>: sum embeds of codebooks <c>[0, codebookIdx]</c> inclusive → non-causal body →
     /// <c>lm_heads[codebookIdx - NCodesGiven]</c>. Returns <c>[1, T, fineVocab]</c>.</summary>
+    /// <remarks>Kept unwired as the C# half of the <c>tests/python-reference/bark_reference/</c> oracle; the inclusive-sum convention it encodes is the fix recorded in PARITY_VERIFICATION.md.</remarks>
     public Tensor DebugLogits(IBackend backend, int[,] codes, int codebookIdx, int t)
     {
         if (_inputEmbeds[0] is null) throw new InvalidOperationException("BarkFineModel weights not loaded.");
@@ -133,7 +134,6 @@ public sealed unsafe class BarkFineModel : IDisposable
 
     private Tensor SumEmbeds(int[,] codes, int upTo, int t, int h)
     {
-        // Sum the embeddings of all known codebooks [0, upTo).
         Tensor outT = new(new TensorShape(1, t, h), DType.F32);
         float* op = (float*)outT.DataPointer;
         for (int cb = 0; cb < upTo; cb++)

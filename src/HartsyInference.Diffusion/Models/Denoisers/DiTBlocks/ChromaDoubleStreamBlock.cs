@@ -249,8 +249,8 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         TensorShape jointMh = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
 
         // ── 2. LayerNorm (no affine, eps=1e-6) + modulate: x*(1+scale)+shift ──
-        Tensor imgModulated = NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
-        Tensor txtModulated = NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
+        Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
+        Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
 
         // ── 3+4. Q/K/V projections + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): one qkv GEMM per
         //         stream + QkvSplitNorm (split + per-head RMSNorm + v copy in one kernel — 3 GEMMs +
@@ -387,7 +387,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         txtAttnProj.Dispose();
 
         // ── 13. Image MLP path ──
-        Tensor imgMlpModulated = NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
+        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
         ChromaF16.Probe("dbl-imgMlpOut", imgMlpOut);
@@ -397,7 +397,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         imgAfterAttn.Dispose();
 
         // ── 14. Text MLP path ──
-        Tensor txtMlpModulated = NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
+        Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
         Tensor txtFinal = new Tensor(txtShape, act);
@@ -405,7 +405,6 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();
 
-        // Dispose modulation slices
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 
@@ -414,30 +413,9 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         return (imgFinal, txtFinal);
     }
 
-    /// <summary>LayerNorm (no affine, eps=1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on
-    /// the GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented
-    /// by 1 (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor — bit-for-bit the old CPU modulation.
-    /// Activation dtype follows <paramref name="x"/>; scale/shift stay F32.</summary>
-    private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
-    {
-        Tensor normed = new Tensor(shape, x.DType);
-        backend.LayerNormNoAffine(normed, x, 1e-6f);
-        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(shape, x.DType);
-        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
-        normed.Dispose();
-        scalePlus1.Dispose();
-        return output;
-    }
-
-    /// <summary>Slices <paramref name="rowCount"/> consecutive rows out of a <c>[B, K, hidden]</c> modulation
-    /// table starting at <paramref name="rowStart"/>, returning each row as its own <c>[B, hidden]</c> tensor.
-    /// Lets <see cref="AdaLNModulation.ApplyModulation"/> / <see cref="AdaLNModulation.ApplyGatedResidual"/>
-    /// consume them with the same per-batch broadcast semantics as Flux's modulation outputs.</summary>
     /// <summary>Device twin of <see cref="SliceModRows"/> (B=1): per-row <c>backend.SliceRows</c> so the
     /// device-resident temb is never drained to the host mid-forward.</summary>
-    private static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowStart, int rowCount)
+    internal static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowStart, int rowCount)
     {
         int hidden = (int)temb.Shape[2];
         Tensor[] rows = new Tensor[rowCount];
@@ -450,7 +428,9 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         return rows;
     }
 
-    private Tensor[] SliceModRows(Tensor temb, int batch, int rowStart, int rowCount)
+    /// <summary>Slices <paramref name="rowCount"/> consecutive rows out of a <c>[B, K, hidden]</c> modulation table
+    /// starting at <paramref name="rowStart"/>, returning each row as its own <c>[B, hidden]</c> tensor (B&gt;1 host path).</summary>
+    internal static Tensor[] SliceModRows(Tensor temb, int batch, int rowStart, int rowCount)
     {
         int totalRows = (int)temb.Shape[1];
         int hidden = (int)temb.Shape[2];
@@ -473,9 +453,4 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         }
         return rows;
     }
-
-    /// <summary>Builds an additive SDPA mask <c>[B, 1, S, S]</c> from a per-token boolean mask <c>[B, S]</c>.
-    /// Diffusers does <c>mask[:, None, None, :] * mask[:, None, :, None]</c> producing a 0/1 outer-product mask;
-    /// we reproduce the same semantics by writing 0 where attention is allowed and a large negative value where
-    /// it must be killed (additive-mask convention used by <see cref="IBackend.ScaledDotProductAttention"/>).</summary>
 }

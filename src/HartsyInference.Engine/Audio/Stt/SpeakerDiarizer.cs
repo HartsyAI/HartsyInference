@@ -2,11 +2,9 @@ using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Audio.Wake.Speakers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
-using HartsyInference.ModelAssets.PyTorch;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Audio;
 
@@ -59,8 +57,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         _loaders = loaders;
     }
 
-    /// <summary>The process-wide instance, loaded from disk on first use. Callers run under the audio generation
-    /// lock, which is what makes the shared (non-thread-safe) encoder safe to reuse.</summary>
+    /// <summary>The process-wide instance, loaded from disk on first use. Callers run under the audio generation lock, which is what makes the shared (non-thread-safe) encoder safe to reuse.</summary>
     internal static SpeakerDiarizer Shared()
     {
         lock (_gate)
@@ -69,8 +66,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         }
     }
 
-    /// <summary>Attributes speakers to <paramref name="mono16k"/>, cutting on <paramref name="segments"/> when the
-    /// transcriber produced timestamps and on a fixed sliding window otherwise.</summary>
+    /// <summary>Attributes speakers to <paramref name="mono16k"/>, cutting on <paramref name="segments"/> when the transcriber produced timestamps and on a fixed sliding window otherwise.</summary>
     internal IReadOnlyList<DiarizedSegment> Diarize(IBackend backend, float[] mono16k, IReadOnlyList<SttSegment>? segments,
         CancellationToken cancel)
     {
@@ -107,8 +103,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         return Merge(kept, labels);
     }
 
-    /// <summary>Loads CAM++ from a user-placed checkpoint. Never downloads: diarization is a side capability and a
-    /// silent multi-GB fetch inside a transcription call is not acceptable.</summary>
+    /// <summary>Loads CAM++ from a user-placed checkpoint. Never downloads: diarization is a side capability and a silent multi-GB fetch inside a transcription call is not acceptable.</summary>
     private static SpeakerDiarizer Load()
     {
         string[] names = ["campplus_cn_common.bin", "campplus_cn_common.safetensors", "campplus.safetensors", "s3gen.safetensors"];
@@ -130,49 +125,7 @@ internal sealed class SpeakerDiarizer : IDisposable
                 + "'s3gen.safetensors' under the audio models root works too.");
         }
 
-        IDisposable[] loaders;
-        IReadOnlyDictionary<string, Tensor> weights;
-        try
-        {
-            if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-            {
-                SafeTensorsLoader safetensors = new SafeTensorsLoader();
-                safetensors.Load(path);
-                weights = safetensors.GetAllTensors();
-                loaders = [safetensors];
-            }
-            else
-            {
-                PytorchPickleLoader pickle = new PytorchPickleLoader();
-                pickle.Load(path);
-                weights = pickle.GetAllTensors();
-                loaders = [pickle];
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Audio][Diarize] Failed to read the CAM++ checkpoint '{path}'", ex);
-            throw;
-        }
-
-        // Standalone campplus checkpoints are unprefixed; the CosyVoice/Chatterbox bundle nests it under speaker_encoder.
-        string prefix = weights.ContainsKey("xvector.dense.linear.weight") ? string.Empty : "speaker_encoder";
-        CamPlusSpeakerEncoder encoder = new CamPlusSpeakerEncoder(192);
-        try
-        {
-            encoder.LoadWeights(weights, prefix);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Audio][Diarize] '{path}' does not carry CAM++ weights under prefix '{prefix}'", ex);
-            encoder.Dispose();
-            foreach (IDisposable loader in loaders)
-            {
-                loader.Dispose();
-            }
-            throw;
-        }
-        Logs.Info($"[Audio][Diarize] Loaded the CAM++ speaker encoder from '{path}'.");
+        (CamPlusSpeakerEncoder encoder, IDisposable[] loaders) = CamPlusLoader.Load(path, "[Audio][Diarize]", CamPlusEmbedder.EmbeddingDimension);
         return new SpeakerDiarizer(encoder, loaders);
     }
 
@@ -201,9 +154,8 @@ internal sealed class SpeakerDiarizer : IDisposable
         return spans;
     }
 
-    /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector.
-    /// Returns null when the span has too few frames for the encoder's strided front end.</summary>
-    private unsafe float[]? Embed(IBackend backend, float[] mono16k, SttSegment span)
+    /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector. Returns null when the span has too few frames for the encoder's strided front end.</summary>
+    private float[]? Embed(IBackend backend, float[] mono16k, SttSegment span)
     {
         int from = Math.Clamp((int)(span.Start * SampleRate), 0, mono16k.Length);
         int to = Math.Clamp((int)(span.End * SampleRate), from, mono16k.Length);
@@ -213,57 +165,23 @@ internal sealed class SpeakerDiarizer : IDisposable
         }
         float[,] fbank = _fbank.Compute(new ReadOnlySpan<float>(mono16k, from, to - from));
         int frames = fbank.GetLength(0);
-        int bins = fbank.GetLength(1);
-        if (frames < 16)
+        if (frames < CamPlusEmbedder.MinimumFrames)
         {
             return null;
         }
 
-        Tensor features = new Tensor(new TensorShape(1, frames, bins), DType.F32);
         try
         {
-            float* destination = (float*)features.DataPointer;
-            for (int bin = 0; bin < bins; bin++)
-            {
-                // Cepstral mean normalization, per bin over time — what CosyVoice feeds CAM++.
-                double mean = 0d;
-                for (int frame = 0; frame < frames; frame++)
-                {
-                    mean += fbank[frame, bin];
-                }
-                mean /= frames;
-                for (int frame = 0; frame < frames; frame++)
-                {
-                    destination[(long)frame * bins + bin] = (float)(fbank[frame, bin] - mean);
-                }
-            }
-            Tensor embedding = _encoder.Forward(backend, features);
-            try
-            {
-                int dim = (int)embedding.Shape[embedding.Shape.Rank - 1];
-                float[] vector = new float[dim];
-                new ReadOnlySpan<float>((float*)embedding.DataPointer, dim).CopyTo(vector);
-                Normalize(vector);
-                return vector;
-            }
-            finally
-            {
-                embedding.Dispose();
-            }
+            return CamPlusLoader.Embed(backend, _encoder, fbank);
         }
         catch (Exception ex)
         {
             Logs.Error($"[Audio][Diarize] CAM++ failed on the span {span.Start:0.00}-{span.End:0.00}s", ex);
             throw;
         }
-        finally
-        {
-            features.Dispose();
-        }
     }
 
-    /// <summary>Agglomerative average-linkage clustering over cosine distance: merge the closest pair while it is
-    /// under <see cref="MergeDistance"/>, or while more than <see cref="MaxSpeakers"/> clusters remain.</summary>
+    /// <summary>Agglomerative average-linkage clustering over cosine distance: merge the closest pair while it is under <see cref="MergeDistance"/>, or while more than <see cref="MaxSpeakers"/> clusters remain.</summary>
     private static int[] Cluster(List<float[]> embeddings, CancellationToken cancel)
     {
         int count = embeddings.Count;
@@ -355,20 +273,6 @@ internal sealed class SpeakerDiarizer : IDisposable
             start = i;
         }
         return result;
-    }
-
-    private static void Normalize(float[] vector)
-    {
-        double sum = 0d;
-        foreach (float value in vector)
-        {
-            sum += value * value;
-        }
-        float inverse = (float)(1d / Math.Sqrt(Math.Max(sum, 1e-12d)));
-        for (int i = 0; i < vector.Length; i++)
-        {
-            vector[i] *= inverse;
-        }
     }
 
     private static int Min(List<int> indices)

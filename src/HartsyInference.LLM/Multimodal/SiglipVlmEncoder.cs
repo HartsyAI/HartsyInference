@@ -4,40 +4,23 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>Connector that turns the vision patch grid into a small set of image embeddings in the text hidden
-/// space. Different VLM families use different connectors.</summary>
+/// <summary>Connector that turns the vision patch grid into a small set of image embeddings in the text hidden space; different VLM families use different connectors.</summary>
 public enum VlmProjectorKind
 {
-    /// <summary>Gemma-3: average-pool the patch grid (pool×pool) → RMSNorm (<c>mm.soft_emb_norm</c>) →
-    /// Linear (<c>mm.input_projection</c>, a raw <c>[in,out]</c> parameter).</summary>
+    /// <summary>Gemma-3: average-pool the patch grid (pool×pool) → RMSNorm (<c>mm.soft_emb_norm</c>) → Linear (<c>mm.input_projection</c>, a raw <c>[in,out]</c> parameter).</summary>
     Gemma3,
-    /// <summary>Idefics3 / SmolVLM: pixel-shuffle the patch grid (scale_factor → fold s×s spatial into channels)
-    /// → Linear (<c>mm.model.fc</c>, an nn.Linear).</summary>
+    /// <summary>Idefics3/SmolVLM: pixel-shuffle the patch grid (scale_factor → fold s×s spatial into channels) → Linear (<c>mm.model.fc</c>, an nn.Linear).</summary>
     Idefics3,
-    /// <summary>LLaVA: drop the CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>) over the patch
-    /// tokens. No token reduction (576 patches → 576 image tokens).</summary>
+    /// <summary>LLaVA: drop the CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>) over the patch tokens; no token reduction (576 patches → 576 image tokens).</summary>
     Llava,
-    /// <summary>InternVL (InternViT + dynamic high-res): drop the CLS token, pixel-shuffle the patch grid
-    /// (scale_factor → fold s×s into channels, same mapping as Idefics3), then LayerNorm (<c>mm.model.mlp.0</c>) →
-    /// Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>). The InternViT blocks carry LayerScale
-    /// (<c>ls1</c>/<c>ls2</c>).</summary>
+    /// <summary>InternVL (InternViT + dynamic high-res): drop the CLS token, pixel-shuffle the patch grid (same mapping as Idefics3), then LayerNorm → Linear → GELU → Linear; the InternViT blocks carry LayerScale (<c>ls1</c>/<c>ls2</c>).</summary>
     InternVL,
-    /// <summary>MiniCPM-V: a SigLIP tower (with integer-bucketed position selection into the 70×70 learned table)
-    /// feeding a <b>perceiver resampler</b> — <c>query_num</c> learnable queries cross-attend the vision features
-    /// (K = features + 2D-sincos pos, separate q/k/v/out projections, LayerNorms) → <c>resampler.proj</c> into the
-    /// text hidden size.</summary>
+    /// <summary>MiniCPM-V: a SigLIP tower (integer-bucketed position selection into the 70×70 learned table) feeding a <b>perceiver resampler</b> — <c>query_num</c> learnable queries cross-attend the vision features → <c>resampler.proj</c> into the text hidden size.</summary>
     MiniCpmV,
 }
 
-/// <summary>The vision tower + connector of llama.cpp <c>mmproj-*.gguf</c> VLMs. Covers both ViT flavours that
-/// share the <c>v.blk.*</c> tensor dialect: SigLIP (Gemma-3, SmolVLM/Idefics3 — no CLS, post-LN, GELU-tanh) and
-/// CLIP (LLaVA — CLS token, pre-LN, quick-GELU, penultimate layer). A patch-embed Conv → (+CLS) → +position →
-/// (pre-LN) → N pre-norm transformer blocks → (post-LN) produces per-patch features; a family-specific
-/// <see cref="VlmProjectorKind">projector</see> then maps them into the text hidden size. The result is spliced
-/// into the text decoder's input sequence (see <see cref="MultimodalGenerator"/>).
-///
-/// <para>All math runs through <see cref="IBackend"/>. ViT attention is bidirectional (non-causal); it reuses the
-/// decoder's FlashAttention with <c>causal: false</c>.</para></summary>
+/// <summary>The vision tower + connector of llama.cpp <c>mmproj-*.gguf</c> VLMs, covering both ViT flavours sharing the <c>v.blk.*</c> tensor dialect: SigLIP (Gemma-3, SmolVLM/Idefics3 — no CLS, post-LN, GELU-tanh) and CLIP (LLaVA — CLS token, pre-LN, quick-GELU, penultimate layer).</summary>
+/// <remarks>A patch-embed Conv → (+CLS) → +position → (pre-LN) → N pre-norm transformer blocks → (post-LN) produces per-patch features; a family-specific <see cref="VlmProjectorKind">projector</see> then maps them into the text hidden size, spliced into the text decoder's input sequence (see <see cref="MultimodalGenerator"/>). All math runs through <see cref="IBackend"/>; ViT attention is bidirectional, reusing the decoder's FlashAttention with <c>causal: false</c>.</remarks>
 public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
 {
     /// <summary>Prompt-format family tag (see <see cref="IVlmImageEncoder.Family"/>).</summary>
@@ -95,9 +78,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             : (PatchGrid / scaleFactor) * (PatchGrid / scaleFactor);
     }
 
-    /// <summary>Transposes a 2D F32 weight to row-major <c>[d0, d1]</c>. Used for Gemma-3's
-    /// <c>mm.input_projection</c>, which is a raw parameter <c>[vision_in, text_out]</c> (applied as <c>x · W</c>),
-    /// whereas <see cref="IBackend.Linear"/> wants <c>[out, in]</c> — so an actual data transpose is required.</summary>
+    /// <summary>Transposes a 2D F32 weight to row-major <c>[d0, d1]</c>; used for Gemma-3's <c>mm.input_projection</c>, a raw <c>[vision_in, text_out]</c> parameter applied as <c>x · W</c>, whereas <see cref="IBackend.Linear"/> wants <c>[out, in]</c> so an actual data transpose is required.</summary>
     private static Tensor TransposeWeight(Tensor t)
     {
         int d0 = (int)t.Shape[0], d1 = (int)t.Shape[1];   // engine Shape = ggml ne; data is row-major [d1, d0]
@@ -107,16 +88,6 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         for (int i = 0; i < d0; i++)
             for (int j = 0; j < d1; j++)
                 dst[(long)i * d1 + j] = src[(long)j * d0 + i];
-        return outp;
-    }
-
-    /// <summary>Relabels a 2D weight from engine shape <c>[a, b]</c> (= ggml ne) to <c>[b, a]</c> without moving data
-    /// — the raw GGUF bytes are already row-major <c>[b, a]</c> = <c>[out, in]</c>, so this just fixes the shape for
-    /// <see cref="IBackend.Linear"/>. Copies into an owned tensor (avoids aliasing the loader's memory).</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
         return outp;
     }
 
@@ -153,7 +124,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
                     || key == "resampler.kv.weight" || key == "resampler.proj.weight"      // MiniCPM-V resampler Linears
                     || key == "resampler.attn.q.weight" || key == "resampler.attn.k.weight"
                     || key == "resampler.attn.v.weight" || key == "resampler.attn.out.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int hidden = (int)m.GetUInt32("clip.vision.embedding_length");
@@ -198,9 +169,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     private Tensor W(string key) => _w[key];
     private Tensor? Wopt(string key) => _w.TryGetValue(key, out Tensor? t) ? t : null;
 
-    /// <summary>Raw mmproj weights and GGUF metadata, for <see cref="LlavaNextEncoder"/> to read
-    /// <c>clip.vision.image_grid_pinpoints</c> / <c>model.image_newline</c> off the SAME loaded instance instead
-    /// of re-loading (and re-dequantizing) the mmproj file a second time.</summary>
+    /// <summary>Raw mmproj weights and GGUF metadata, for <see cref="LlavaNextEncoder"/> to read <c>clip.vision.image_grid_pinpoints</c>/<c>model.image_newline</c> off the SAME loaded instance instead of re-loading (and re-dequantizing) the mmproj file a second time.</summary>
     internal IReadOnlyDictionary<string, Tensor> Weights => _w;
     internal GgufMetadata Metadata => _handle.Metadata;
 
@@ -223,8 +192,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         }
     }
 
-    /// <summary>Encodes a preprocessed image <c>[1, 3, imageSize, imageSize]</c> into <c>[tokensPerImage, projectionDim]</c>
-    /// image embeddings, ready to splice into the text decoder's input sequence.</summary>
+    /// <summary>Encodes a preprocessed image <c>[1, 3, imageSize, imageSize]</c> into <c>[tokensPerImage, projectionDim]</c> image embeddings, ready to splice into the text decoder's input sequence.</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
         int hidden = Hidden, np = NumPatches, grid = PatchGrid, seqLen = SeqLen, cls = HasClsToken ? 1 : 0;
@@ -360,8 +328,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return result;
     }
 
-    /// <summary>InternViT LayerScale: scales the sublayer output by a learned per-channel vector (<c>ls1</c>/<c>ls2</c>,
-    /// shape <c>[hidden]</c>) before the residual add. No-op when the tensor is absent (SigLIP/CLIP/LLaVA).</summary>
+    /// <summary>InternViT LayerScale: scales the sublayer output by a learned per-channel vector (<c>ls1</c>/<c>ls2</c>, shape <c>[hidden]</c>) before the residual add; no-op when the tensor is absent (SigLIP/CLIP/LLaVA).</summary>
     private void ApplyLayerScale(IBackend backend, Tensor x, string lsKey)
     {
         Tensor? ls = Wopt(lsKey);
@@ -412,8 +379,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>Idefics3 / SmolVLM projector: pixel-shuffle the patch grid (fold s×s spatial neighbours into the
-    /// channel dim, reducing the token count by s²) → Linear (<c>mm.model.fc</c>) into the text hidden size.</summary>
+    /// <summary>Idefics3/SmolVLM projector: pixel-shuffle the patch grid (fold s×s spatial neighbours into the channel dim, reducing the token count by s²) → Linear (<c>mm.model.fc</c>) into the text hidden size.</summary>
     private Tensor ProjectIdefics3(IBackend backend, Tensor patches)
     {
         int hidden = Hidden, grid = PatchGrid, s = ScaleFactor, outGrid = grid / s, nTok = outGrid * outGrid, shuf = hidden * s * s;
@@ -441,9 +407,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>InternVL projector: drop the CLS token, pixel-shuffle the patch grid (fold s×s neighbours into the
-    /// channel dim — same mapping as Idefics3, reducing tokens by s²) → LayerNorm (<c>mm.model.mlp.0</c>) →
-    /// Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>) into the text hidden size.</summary>
+    /// <summary>InternVL projector: drop the CLS token, pixel-shuffle the patch grid (same mapping as Idefics3, reducing tokens by s²) → LayerNorm (<c>mm.model.mlp.0</c>) → Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>) into the text hidden size.</summary>
     private Tensor ProjectInternVL(IBackend backend, Tensor h, int cls)
     {
         int hidden = Hidden, grid = PatchGrid, s = ScaleFactor, outGrid = grid / s, nTok = outGrid * outGrid, shuf = hidden * s * s;
@@ -482,9 +446,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>MiniCPM-V perceiver resampler: <c>query_num</c> learnable queries cross-attend the vision features.
-    /// v = ln_kv(kv_proj(features)); q = ln_q(query); K = v + 2D-sincos-pos, V = v; MHA(d_head=128) → out_proj →
-    /// ln_post → proj into the text hidden size. Returns <c>[1, query_num, projDim]</c>.</summary>
+    /// <summary>MiniCPM-V perceiver resampler: <c>query_num</c> learnable queries cross-attend the vision features (v = ln_kv(kv_proj(features)); q = ln_q(query); K = v + 2D-sincos-pos, V = v; MHA(d_head=128) → out_proj → ln_post → proj); returns <c>[1, query_num, projDim]</c>.</summary>
     private Tensor ProjectMiniCpmV(IBackend backend, Tensor h)
     {
         int np = NumPatches, grid = PatchGrid, dim = ProjectionDim, nq = QueryNum;
@@ -542,8 +504,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>2D sinusoidal position embedding for the resampler keys: for patch p at grid (row = p/grid,
-    /// col = p%grid), <c>[sin(col·ω), cos(col·ω), sin(row·ω), cos(row·ω)]</c> with <c>ω_k = base^(−k/(dim/4))</c>.</summary>
+    /// <summary>2D sinusoidal position embedding for the resampler keys: for patch p at grid (row = p/grid, col = p%grid), <c>[sin(col·ω), cos(col·ω), sin(row·ω), cos(row·ω)]</c> with <c>ω_k = base^(−k/(dim/4))</c>.</summary>
     private static Tensor BuildResamplerPos(int np, int grid, int dim)
     {
         int quarter = dim / 4;
@@ -566,8 +527,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return pos;
     }
 
-    /// <summary>LLaVA projector: drop the leading CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>)
-    /// over the patch tokens into the text hidden size.</summary>
+    /// <summary>LLaVA projector: drop the leading CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>) over the patch tokens into the text hidden size.</summary>
     private Tensor ProjectLlava(IBackend backend, Tensor h, int cls)
     {
         int hidden = Hidden, np = NumPatches;

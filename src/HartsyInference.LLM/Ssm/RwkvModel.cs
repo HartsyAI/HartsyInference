@@ -4,14 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>RWKV-6 ("Finch") decoder loaded from a llama.cpp <c>rwkv6</c> GGUF. A non-transformer linear-attention
-/// recurrence: each block is a <b>time-mix</b> (data-dependent token-shift via LoRA → r/k/v/g + a data-dependent
-/// per-channel decay → WKV6 outer-product state recurrence → per-head GroupNorm → gate → out) and a <b>channel-mix</b>
-/// (token-shift → squared-ReLU gated MLP), both with LayerNorm + residual. llama.cpp pre-divides the deep-layer
-/// output weights by 2^(layer/rescale); we apply the matching runtime <c>x *= 0.5</c> every <c>rescale</c> layers.
-///
-/// <para>Big projections run through <see cref="IBackend.Linear"/>; the token-shift LoRAs, WKV6 scan, GroupNorm and
-/// LayerNorms run host-side (the recurrence is inherently sequential).</para></summary>
+/// <summary>RWKV-6 ("Finch") decoder loaded from a llama.cpp <c>rwkv6</c> GGUF: a non-transformer linear-attention recurrence, each block a <b>time-mix</b> (token-shift LoRA → r/k/v/g + data-dependent decay → WKV6 outer-product state recurrence → per-head GroupNorm → gate → out) and a <b>channel-mix</b> (token-shift → squared-ReLU gated MLP), both with LayerNorm + residual.</summary>
+/// <remarks>llama.cpp pre-divides the deep-layer output weights by 2^(layer/rescale); we apply the matching runtime <c>x *= 0.5</c> every <c>rescale</c> layers. Big projections run through <see cref="IBackend.Linear"/>; the token-shift LoRAs, WKV6 scan, GroupNorm and LayerNorms run host-side (the recurrence is inherently sequential).</remarks>
 public sealed unsafe class RwkvModel : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -96,38 +90,11 @@ public sealed unsafe class RwkvModel : IDisposable, ISsmModel
 
     private Tensor W(string key) => _w[key];
 
-    /// <summary>x[T,in] @ W[out,in]ᵀ → [T,out], via backend.Linear.</summary>
-    private float[] Lin(IBackend backend, float[] x, int t, int inDim, string key)
-    {
-        Tensor wt = W(key);
-        int outDim = (int)wt.Shape[0];
-        using Tensor xt = new(new TensorShape(1, t, inDim), DType.F32);
-        fixed (float* s = x) Buffer.MemoryCopy(s, (void*)xt.DataPointer, (long)t * inDim * 4, (long)t * inDim * 4);
-        using Tensor o = new(new TensorShape(1, t, outDim), DType.F32);
-        backend.Linear(o, xt, wt, null);
-        backend.Sync();
-        float[] r = new float[(long)t * outDim];
-        fixed (float* d = r) Buffer.MemoryCopy((void*)o.DataPointer, d, r.Length * 4L, r.Length * 4L);
-        return r;
-    }
+    private float[] Lin(IBackend backend, float[] x, int t, int inDim, string key) => RwkvOps.Lin(backend, x, t, inDim, W(key));
 
-    private void LayerNorm(float[] x, int t, float* w, float* b)
-    {
-        int d = DModel;
-        fixed (float* xp = x)
-            for (int s = 0; s < t; s++)
-            {
-                float* row = xp + (long)s * d;
-                double mean = 0; for (int c = 0; c < d; c++) mean += row[c]; mean /= d;
-                double var = 0; for (int c = 0; c < d; c++) { double dd = row[c] - mean; var += dd * dd; } var /= d;
-                float inv = (float)(1.0 / Math.Sqrt(var + Eps));
-                for (int c = 0; c < d; c++) row[c] = (float)((row[c] - mean) * inv) * w[c] + b[c];
-            }
-    }
+    private void LayerNorm(float[] x, int t, float* w, float* b) => RwkvOps.LayerNorm(x, t, DModel, Eps, w, b);
 
-    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each
-    /// layer's carried recurrent state, and returns the next-token logits (last position). Call
-    /// <see cref="ResetState"/> before the first call of a new generation.</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -157,16 +124,8 @@ public sealed unsafe class RwkvModel : IDisposable, ISsmModel
         return logits;
     }
 
-    // sx[t] = xx[t-1] - xx[t]  (token-shift difference). xx[-1] is the carried last row from the previous call
-    // (zero at true sequence position 0).
-    private float[] ShiftDiff(float[] xx, int t, float[] prevRow)
-    {
-        int d = DModel; float[] sx = new float[(long)t * d];
-        for (int s = 0; s < t; s++)
-            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? prevRow[c] : xx[(s - 1) * d + c]) - xx[s * d + c];
-        Array.Copy(xx, ((long)t - 1) * d, prevRow, 0, d);
-        return sx;
-    }
+    // xx[-1] is the carried last row from the previous call (zero at true sequence position 0).
+    private float[] ShiftDiff(float[] xx, int t, float[] prevRow) => RwkvOps.ShiftDiff(xx, t, DModel, prevRow);
 
     private void TimeMix(IBackend backend, float[] x, int t, int il)
     {

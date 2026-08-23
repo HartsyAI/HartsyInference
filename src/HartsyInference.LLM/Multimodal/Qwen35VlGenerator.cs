@@ -6,12 +6,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>Vision-language generation on the Qwen3.5-VL SSM backbone (<see cref="Qwen35Model"/>): encodes an image
-/// with <see cref="Qwen3VlEncoder"/>, splices the image embeddings into the ChatML prompt's token-embedding
-/// sequence, prefills via <see cref="Qwen35Model.ForwardEmbedsLastLogits"/>, then light-sampled decodes one token
-/// at a time. Unlike <see cref="MultimodalGenerator"/> (transformer backbone + external KV cache), the SSM decoder
-/// carries its own Gated-DeltaNet state + KV internally, so decode is just repeated single-token
-/// <see cref="Qwen35Model.ForwardLastLogits"/> calls after the spliced prefill — no cache is threaded.</summary>
+/// <summary>Vision-language generation on the Qwen3.5-VL SSM backbone (<see cref="Qwen35Model"/>): splices image embeddings into the ChatML prompt, prefills via <see cref="Qwen35Model.ForwardEmbedsLastLogits"/>, then decodes one token at a time; unlike <see cref="MultimodalGenerator"/>'s transformer + external KV cache, the SSM decoder carries its own Gated-DeltaNet state internally, so decode is just repeated single-token <see cref="Qwen35Model.ForwardLastLogits"/> calls with no cache threaded.</summary>
 public sealed class Qwen35VlGenerator
 {
     private readonly Qwen35Model _model;

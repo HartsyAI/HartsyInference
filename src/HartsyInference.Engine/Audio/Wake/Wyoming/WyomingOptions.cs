@@ -8,8 +8,7 @@ public sealed record WyomingOptions
     /// <summary>Interface to bind. All interfaces, because Home Assistant dials in from the LAN.</summary>
     public string BindAddress { get; init; } = "0.0.0.0";
 
-    /// <summary>TCP port Home Assistant connects to. Deliberately not 10800: the satellite listener owns that
-    /// one and both run in the same process. 0 binds an ephemeral port, which tests use.</summary>
+    /// <summary>TCP port Home Assistant connects to. Deliberately not 10800: the satellite listener owns that one and both run in the same process. 0 binds an ephemeral port, which tests use.</summary>
     public int Port { get; init; } = 10_600;
 
     /// <summary>Largest binary payload accepted on one frame.</summary>
@@ -32,24 +31,19 @@ public sealed record WyomingOptions
     public IReadOnlyList<WyomingArtifact> TtsVoices { get; init; } =
         [new WyomingArtifact { Name = "kokoro", Description = "Kokoro-82M text-to-speech" }];
 
-    /// <summary>Wake models offered. Only advertised when <see cref="WakeDetectorFactory"/> is also set — a
-    /// service Home Assistant lists but that can never fire is worse than one it never sees.</summary>
+    /// <summary>Wake models offered. Only advertised when <see cref="WakeDetectorFactory"/> is also set — a service Home Assistant lists but that can never fire is worse than one it never sees.</summary>
     public IReadOnlyList<WyomingArtifact> WakeModels { get; init; } = [];
 
-    /// <summary>Builds the detector for one wake connection from the words Home Assistant asked for (empty means
-    /// every configured word). Null leaves wake unadvertised and every stream answered <c>not-detected</c>.</summary>
+    /// <summary>Builds the detector for one wake connection from the words Home Assistant asked for (empty means every configured word). Null leaves wake unadvertised and every stream answered <c>not-detected</c>.</summary>
     public Func<IReadOnlyList<string>, IWyomingWakeDetector>? WakeDetectorFactory { get; init; }
 
-    /// <summary>Wraps every transcription so the host can put it behind its own admission gate. The engine is not
-    /// safely re-entrant per backend, so a host with other traffic must route this through the same
-    /// <c>InferenceQueue</c> its HTTP routes use. Null runs it directly on the socket's task.</summary>
+    /// <summary>Wraps every transcription so the host can put it behind its own admission gate. The engine is not safely re-entrant per backend, so a host with other traffic must route this through the same <c>InferenceQueue</c> its HTTP routes use. Null runs it directly on the socket's task.</summary>
     public Func<Func<Task<TranscriptResult>>, Task<TranscriptResult>>? TranscribeGate { get; init; }
 
     /// <summary>The synthesis half of <see cref="TranscribeGate"/>; same reasoning, different result type.</summary>
     public Func<Func<Task<AudioResult>>, Task<AudioResult>>? SynthesizeGate { get; init; }
 
-    /// <summary>Ceiling on one buffered utterance (default ~60 s at 16 kHz mono). A client that never sends
-    /// <c>audio-stop</c> would otherwise grow this without limit.</summary>
+    /// <summary>Ceiling on one buffered utterance (default ~60 s at 16 kHz mono). A client that never sends <c>audio-stop</c> would otherwise grow this without limit.</summary>
     public int MaxUtteranceBytes { get; init; } = 16_000 * 2 * 60;
 
     /// <summary>Bytes per outgoing synthesized <c>audio-chunk</c>.</summary>

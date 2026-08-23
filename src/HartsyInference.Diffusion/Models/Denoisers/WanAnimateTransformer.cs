@@ -78,7 +78,7 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
         }
 
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = LoadF32(w, "scale_shift_table");
+        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -142,6 +142,12 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
     /// <inheritdoc/>
     public Action<int>? BeforeBlockForward { get; set; }
 
+    /// <summary>Precomputed face-motion features for <see cref="Forward"/>'s <c>motion</c> parameter. The face clip is
+    /// constant across the denoise, so encode it ONCE per CFG branch — the StyleGAN motion encoder is host-side and
+    /// running it inside every forward (2×/step) makes a 14B run impractically slow.</summary>
+    public Tensor EncodeMotion(IBackend backend, Tensor facePixels, int latentFrames) =>
+        BuildMotion(backend, facePixels, latentFrames / _config.PatchSize.T);
+
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c> (noise + concat
     /// conditioning); <paramref name="pose"/> is the pose-video latent <c>[1, poseC, Tpose, H, W]</c> (added to
     /// frames 1..Tpose, clamped to T−1); <paramref name="facePixels"/> is <c>[1, 3, Tface, 512, 512]</c> in [-1, 1];
@@ -149,12 +155,6 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
     /// optional CLIP-ViT-H penultimate hidden state for the per-block image cross-attention;
     /// <paramref name="referenceLatent"/> is the optional <c>ref_conv</c> reference latent <c>[1, refC, H, W]</c>
     /// (token-prepend variant — mutually exclusive with the face pathway, as in the reference).</summary>
-    /// <summary>Precomputed face-motion features for <see cref="Forward"/>'s <c>motion</c> parameter. The face clip is
-    /// constant across the denoise, so encode it ONCE per CFG branch — the StyleGAN motion encoder is host-side and
-    /// running it inside every forward (2×/step) makes a 14B run impractically slow.</summary>
-    public Tensor EncodeMotion(IBackend backend, Tensor facePixels, int latentFrames) =>
-        BuildMotion(backend, facePixels, latentFrames / _config.PatchSize.T);
-
     public Tensor Forward(IBackend backend, Tensor latent, Tensor? pose, Tensor? facePixels, Tensor encoder,
         float timestep, Tensor? clipImageEmbeds = null, Tensor? referenceLatent = null, Tensor? motion = null)
     {
@@ -413,8 +413,6 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
             (long)len * cols * 4, (long)len * cols * 4);
         return o;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 
     public void Dispose()
     {

@@ -1026,7 +1026,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Middle latent frame <c>[1, C, H, W]</c> for latent2rgb previews.</summary>
-    private static Tensor ExtractMiddleFrame(Tensor tokens, int t, int h, int w, int channels)
+    internal static Tensor ExtractMiddleFrame(Tensor tokens, int t, int h, int w, int channels)
     {
         Tensor outT = new Tensor(new TensorShape([1L, channels, h, w]), DType.F32);
         float* sp = (float*)tokens.DataPointer;

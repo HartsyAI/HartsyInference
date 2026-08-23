@@ -18,14 +18,7 @@ using HartsyInference.Vision.Clip;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan-Animate pipeline driven against the native <see cref="VideoRequest"/>:
-/// <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) is the driving
-/// pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and
-/// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference
-/// latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's
-/// <c>WanAnimateLoader.Generate</c>. <see cref="VideoRequest.AnimateTotalFrames"/> turns the single generation into a
-/// chunk loop, each chunk conditioned on the tail of the previous one (ComfyUI <c>continue_motion</c>) and assembled
-/// here so trim/boomerang still apply once, to the whole video.</summary>
+/// <summary>A constructed Wan-Animate pipeline driven against the native <see cref="VideoRequest"/>: <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) is the driving pose/motion input, resolved into the pose/face clips by <see cref="WanAnimateDrivingResolver"/>, and <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, which is VAE-encoded to the reference latent and (when the checkpoint ships the i2v embedder) CLIP-ViT-H context. Mirrors the SwarmUI backend's <c>WanAnimateLoader.Generate</c>. <see cref="VideoRequest.AnimateTotalFrames"/> turns the single generation into a chunk loop, each chunk conditioned on the tail of the previous one (ComfyUI <c>continue_motion</c>) and assembled here so trim/boomerang still apply once, to the whole video.</summary>
 public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image.</summary>
@@ -87,6 +80,17 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 $"Wan-Animate samples with UniPC and has no '{request.Sampler}' implementation — upstream's other "
                 + "choice, dpm++ (FlowDPMSolverMultistep), isn't ported. Clear the sampler or set it to 'unipc'.");
         }
+        // Refused by name at any non-default value, not silently ignored: these scale attention pathways only the
+        // Animate-2 frame-local attention has.
+        List<string> unsupportedStrengths = [];
+        if (request.AnimatePoseStrength is double ps && ps != 1.0) unsupportedStrengths.Add($"{nameof(VideoRequest.AnimatePoseStrength)}={ps}");
+        if (request.AnimateReferenceImageStrength is double rs && rs != 1.0) unsupportedStrengths.Add($"{nameof(VideoRequest.AnimateReferenceImageStrength)}={rs}");
+        if (unsupportedStrengths.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"Wan-Animate (V1) has no pose or reference-image attention-strength pathway — {string.Join(", ", unsupportedStrengths)} "
+                + "are Wan-Animate-2 controls and cannot be applied here. Leave them at 1.0 (or untoggled), or select an Animate-2 checkpoint.");
+        }
         // A sigma schedule needs the Euler seam to re-space; UniPC owns its own spacing, so a named schedule cannot
         // be honored here either and is refused rather than dropped.
         if (!string.IsNullOrWhiteSpace(request.Scheduler))
@@ -119,15 +123,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         Tensor? clipEmbeds = null;
         Tensor? referenceRgb = null;
@@ -136,17 +133,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         {
             if (_clipVision is not null)
             {
-                _backend.PreloadWeights(_clipVision.EnumerateWeights());
-                ClipImagePreprocessor preprocessor = new ClipImagePreprocessor(imageSize: 224);
-                Tensor pixels = preprocessor.Preprocess(reference.Rgb, reference.Width, reference.Height);
-                Tensor batched = _clipVision.EncodeHiddenStates(_backend, pixels);
-                pixels.Dispose();
-                _backend.Sync();
-                _backend.FreeWeights(_clipVision.EnumerateWeights());
-                Tensor dropped = VideoRecipeUtils.DropBatch(batched);
-                batched.Dispose();
-                clipEmbeds = VideoRecipeUtils.HostCopy(dropped);
-                dropped.Dispose();
+                clipEmbeds = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, reference.Rgb, reference.Width, reference.Height);
             }
 
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.LetterboxRgb24(reference, width, height), width, height);
@@ -164,6 +151,13 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 Seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed(),
                 FlowShift = request.FlowShift ?? DefaultFlowShift,
             };
+
+            // Anti-drift stats come from the reference image's OWN pixels — content only, never the letterboxed
+            // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
+            float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
+            VideoColorMatch.LabStats refColorStats = colorStrength > 0f
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
+                : default;
 
             List<byte[]> assembled = new List<byte[]>();
             int chunkLen = numFrames;
@@ -234,6 +228,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                     StoreConditioning(cacheable, cacheKey, used);
                     outW = chunkW;
                     outH = chunkH;
+                    // Before the trim/append, so the emitted frames and the carried motion prefix are fixed in one pass.
+                    VideoRecipeUtils.CorrectContinuationChunk(frames, chunkW, chunkH, chunkIndex, refColorStats, colorStrength);
                     for (int i = trimImage; i < frames.Length; i++)
                     {
                         assembled.Add(frames[i]);
@@ -276,8 +272,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Keeps a chunk-0 conditioning for the next generation with identical inputs, disposing whatever it
-    /// replaces; anything else (a continuation chunk) is disposed outright.</summary>
+    /// <summary>Keeps a chunk-0 conditioning for the next generation with identical inputs, disposing whatever it replaces; anything else (a continuation chunk) is disposed outright.</summary>
     private void StoreConditioning(bool cacheable, string key, WanAnimateConditioning conditioning)
     {
         if (!cacheable)
@@ -294,9 +289,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         _conditioningCacheKey = key;
     }
 
-    /// <summary>Content key for the cross-generation conditioning cache — every input the VAE + motion encode reads.
-    /// A hit derives its geometry from the cached pose latent, so anything that can move the geometry or the encoded
-    /// pixels must be in here or a stale entry would silently generate at the wrong size.</summary>
+    /// <summary>Content key for the cross-generation conditioning cache — every input the VAE + motion encode reads. A hit derives its geometry from the cached pose latent, so anything that can move the geometry or the encoded pixels must be in here or a stale entry would silently generate at the wrong size.</summary>
     private static string BuildConditioningKey(VideoRequest request, ImageData reference, int width, int height, int frames)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

@@ -20,16 +20,14 @@ namespace HartsyInference.Engine.Audio.Wake.Speakers;
 /// own private <c>CpuBackend</c> rather than contending for a shared one.</para></summary>
 public sealed class SpeakerVerifier : IDisposable
 {
-    /// <summary>Below roughly this much speech the score is dominated by phonetic content rather than by the speaker,
-    /// so a match is logged as low-confidence. Not a hard floor — <see cref="CamPlusEmbedder.MinimumSeconds"/> is.</summary>
+    /// <summary>Below roughly this much speech the score is dominated by phonetic content rather than by the speaker, so a match is logged as low-confidence. Not a hard floor — <see cref="CamPlusEmbedder.MinimumSeconds"/> is.</summary>
     public const double ReliableSeconds = 2.0;
 
     private readonly CamPlusEmbedder _embedder;
     private readonly bool _ownsEmbedder;
     private int _disposed;
 
-    /// <summary>Composes an already-loaded encoder with a store. Set <paramref name="ownsEmbedder"/> false when the
-    /// encoder is shared with another subsystem and must outlive this verifier.</summary>
+    /// <summary>Composes an already-loaded encoder with a store. Set <paramref name="ownsEmbedder"/> false when the encoder is shared with another subsystem and must outlive this verifier.</summary>
     public SpeakerVerifier(SpeakerProfileStore store, CamPlusEmbedder embedder, bool ownsEmbedder = true)
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -39,27 +37,20 @@ public sealed class SpeakerVerifier : IDisposable
         _ownsEmbedder = ownsEmbedder;
     }
 
-    /// <summary>Loads CAM++ from disk and pairs it with <paramref name="store"/> (or a default-located one). Throws
-    /// an actionable <see cref="InvalidOperationException"/> when the checkpoint is absent — callers that treat
-    /// speaker gating as optional should catch it, log, and run without speaker identification rather than refusing
-    /// to start the wake listener.</summary>
+    /// <summary>Loads CAM++ from disk and pairs it with <paramref name="store"/> (or a default-located one). Throws an actionable <see cref="InvalidOperationException"/> when the checkpoint is absent — callers that treat speaker gating as optional should catch it, log, and run without speaker identification rather than refusing to start the wake listener.</summary>
     public static SpeakerVerifier Load(SpeakerProfileStore? store = null) =>
         new SpeakerVerifier(store ?? new SpeakerProfileStore(), CamPlusEmbedder.Load());
 
-    /// <summary>Whether a CAM++ checkpoint is on disk, so a host can decide whether to offer speaker gating at all
-    /// without catching an exception from <see cref="Load"/>.</summary>
+    /// <summary>Whether a CAM++ checkpoint is on disk, so a host can decide whether to offer speaker gating at all without catching an exception from <see cref="Load"/>.</summary>
     public static bool IsAvailable => CamPlusEmbedder.LocateWeights() is not null;
 
     /// <summary>The enrolled household. Mutating it (enroll/remove) takes effect on the next identification.</summary>
     public SpeakerProfileStore Store { get; }
 
-    /// <summary>L2-normalized 192-d embedding of one mono 16 kHz clip. Amplitude scale is irrelevant (cepstral mean
-    /// normalization removes constant gain), but a single clip must not splice differently-scaled audio together.</summary>
+    /// <summary>L2-normalized 192-d embedding of one mono 16 kHz clip. Amplitude scale is irrelevant (cepstral mean normalization removes constant gain), but a single clip must not splice differently-scaled audio together.</summary>
     public float[] Embed(IBackend backend, ReadOnlySpan<float> mono16k) => _embedder.Embed(backend, mono16k);
 
-    /// <summary>Identifies the speaker of the wake phrase <b>plus</b> the command that followed it — the intended
-    /// call. Both spans are mono 16 kHz and are scored as one clip, which is what makes the decision survive the
-    /// wake phrase's ~1 s of audio. Either span may be empty.</summary>
+    /// <summary>Identifies the speaker of the wake phrase <b>plus</b> the command that followed it — the intended call. Both spans are mono 16 kHz and are scored as one clip, which is what makes the decision survive the wake phrase's ~1 s of audio. Either span may be empty.</summary>
     public SpeakerMatch Identify(IBackend backend, ReadOnlySpan<float> wakeAudio16k, ReadOnlySpan<float> commandAudio16k)
     {
         if (commandAudio16k.Length == 0)

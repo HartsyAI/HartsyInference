@@ -5,9 +5,7 @@ namespace HartsyInference.LLM.Transformer;
 /// <summary>One contiguous decoder-layer range bound to one backend; ranges are [Start, End).</summary>
 public sealed record LlmStage(IBackend Backend, int StartLayer, int EndLayer);
 
-/// <summary>A resolved layer-split plan for one model: ordered stages whose ranges tile [0, layerCount).
-/// Single-stage = today's single-device behavior. The embedding gather is host-side (stage-agnostic); the final
-/// norm, lm_head and logits belong to the LAST stage's backend.</summary>
+/// <summary>A resolved layer-split plan for one model: ordered stages whose ranges tile [0, layerCount); single-stage is today's single-device behavior. The embedding gather is host-side (stage-agnostic); the final norm, lm_head and logits belong to the LAST stage's backend.</summary>
 public sealed record LlmPlacement
 {
     /// <summary>Ordered pipeline stages; ranges are contiguous, ascending, and tile the full layer stack.</summary>

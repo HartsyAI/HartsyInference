@@ -14,11 +14,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Kandinsky 5 T2V-Lite pipeline driven against the native <see cref="VideoRequest"/>.
-/// <see cref="Kandinsky5VideoPipeline"/> takes only pre-computed embeddings, so — mirroring
-/// <see cref="Image.Kandinsky5RecipePipeline"/> — this owns the dual text stack via the shared
-/// <see cref="Kandinsky5TextEncoding"/> helper: Qwen2.5-VL-7B for the sequence embeddings, CLIP-L for the pooled
-/// vector, both through Kandinsky's fixed "promt engineer" ChatML template.</summary>
+/// <summary>A constructed Kandinsky 5 T2V-Lite pipeline driven against the native <see cref="VideoRequest"/>. <see cref="Kandinsky5VideoPipeline"/> takes only pre-computed embeddings, so — mirroring <see cref="Image.Kandinsky5RecipePipeline"/> — this owns the dual text stack via the shared <see cref="Kandinsky5TextEncoding"/> helper: Qwen2.5-VL-7B for the sequence embeddings, CLIP-L for the pooled vector, both through Kandinsky's fixed "promt engineer" ChatML template.</summary>
 public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
 {
     private readonly Kandinsky5VideoPipeline _pipeline;

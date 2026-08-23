@@ -70,7 +70,7 @@ public sealed unsafe class OasisVitVae
             _encoder[i] = new VitBlock(this);
             _encoder[i].LoadWeights(w, $"encoder.{i}");
         }
-        _encNormW = LoadF32(w, "enc_norm.weight"); w.TryGetValue("enc_norm.bias", out _encNormB);
+        _encNormW = TensorCasts.LoadF32(w, "enc_norm.weight"); w.TryGetValue("enc_norm.bias", out _encNormB);
         _quantW = w["quant_conv.weight"]; w.TryGetValue("quant_conv.bias", out _quantB);
         _postQuantW = w["post_quant_conv.weight"]; w.TryGetValue("post_quant_conv.bias", out _postQuantB);
 
@@ -80,7 +80,7 @@ public sealed unsafe class OasisVitVae
             _decoder[i] = new VitBlock(this);
             _decoder[i].LoadWeights(w, $"decoder.{i}");
         }
-        _decNormW = LoadF32(w, "dec_norm.weight"); w.TryGetValue("dec_norm.bias", out _decNormB);
+        _decNormW = TensorCasts.LoadF32(w, "dec_norm.weight"); w.TryGetValue("dec_norm.bias", out _decNormB);
         _predictorW = w["predictor.weight"]; w.TryGetValue("predictor.bias", out _predictorB);
     }
 
@@ -241,8 +241,6 @@ public sealed unsafe class OasisVitVae
         }
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-
     /// <summary>One ViT block: affine LN → fused-QKV axial-RoPE self-attention → residual; affine LN → GELU-tanh MLP → residual.</summary>
     private sealed class VitBlock
     {
@@ -255,8 +253,8 @@ public sealed unsafe class OasisVitVae
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _norm1W = LoadF32(w, $"{p}.norm1.weight"); w.TryGetValue($"{p}.norm1.bias", out _norm1B);
-            _norm2W = LoadF32(w, $"{p}.norm2.weight"); w.TryGetValue($"{p}.norm2.bias", out _norm2B);
+            _norm1W = TensorCasts.LoadF32(w, $"{p}.norm1.weight"); w.TryGetValue($"{p}.norm1.bias", out _norm1B);
+            _norm2W = TensorCasts.LoadF32(w, $"{p}.norm2.weight"); w.TryGetValue($"{p}.norm2.bias", out _norm2B);
             _qkvW = w[$"{p}.attn.qkv.weight"]; w.TryGetValue($"{p}.attn.qkv.bias", out _qkvB);
             _projW = w[$"{p}.attn.proj.weight"]; w.TryGetValue($"{p}.attn.proj.bias", out _projB);
             _fc1W = w[$"{p}.mlp.fc1.weight"]; w.TryGetValue($"{p}.mlp.fc1.bias", out _fc1B);
@@ -272,7 +270,7 @@ public sealed unsafe class OasisVitVae
         public Tensor Forward(IBackend backend, Tensor x, Tensor cos, Tensor sin, int s)
         {
             int dim = _vae._dim, heads = _vae._heads, hd = _vae._headDim;
-            Tensor normed = Clone(x);
+            Tensor normed = VaeOps.Clone(x);
             _vae.LayerNormRows(normed, _norm1W!, _norm1B, s, dim);
             Tensor qkv = new Tensor(new TensorShape(s, 3 * dim), DType.F32);
             backend.Linear(qkv, normed, _qkvW!, _qkvB);
@@ -300,7 +298,7 @@ public sealed unsafe class OasisVitVae
             Tensor h1 = AddRows(x, proj, s, dim);
             proj.Dispose();
 
-            Tensor n2 = Clone(h1);
+            Tensor n2 = VaeOps.Clone(h1);
             _vae.LayerNormRows(n2, _norm2W!, _norm2B, s, dim);
             Tensor mid = new Tensor(new TensorShape(s, _vae._mlpHidden), DType.F32);
             backend.Linear(mid, n2, _fc1W!, _fc1B);
@@ -357,14 +355,6 @@ public sealed unsafe class OasisVitVae
             float* bp = (float*)b.DataPointer;
             float* op = (float*)o.DataPointer;
             for (long i = 0; i < n; i++) op[i] = ap[i] + bp[i];
-            return o;
-        }
-
-        private static Tensor Clone(Tensor x)
-        {
-            Tensor o = new Tensor(x.Shape, DType.F32);
-            long bytes = x.Shape.ElementCount * 4;
-            Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
             return o;
         }
     }

@@ -167,7 +167,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _registers = DiTUtils.LoadF32(w, $"{p}.learnable_registers");
+            _registers = TensorCasts.LoadF32(w, $"{p}.learnable_registers");
             for (int i = 0; i < _numBlocks; i++)
             {
                 _attn[i].LoadWeights(w, $"{p}.transformer_1d_blocks.{i}.attn1");
@@ -264,14 +264,6 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             return o;
         }
 
-        private void AddInPlace(Tensor acc, Tensor add)
-        {
-            float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-            long n = acc.Shape.ElementCount;
-            for (long e = 0; e < n; e++) ap[e] += dp[e];
-        }
-
         public void Dispose() => _ones.Dispose();
     }
-
 }

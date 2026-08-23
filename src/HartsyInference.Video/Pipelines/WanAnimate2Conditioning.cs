@@ -117,17 +117,37 @@ public static unsafe class WanAnimate2Conditioning
     public static Tensor TrimReferenceFrame(Tensor latents)
     {
         ArgumentNullException.ThrowIfNull(latents);
-        int c = (int)latents.Shape[1], t = (int)latents.Shape[2];
-        int h = (int)latents.Shape[3], w = (int)latents.Shape[4];
+        int t = (int)latents.Shape[2];
         if (t < 2) throw new ArgumentException($"latents must carry the reference frame plus at least one generated frame; got T={t}.", nameof(latents));
-        Tensor o = new Tensor(new TensorShape([1L, c, t - 1, h, w]), DType.F32);
-        float* src = (float*)latents.DataPointer, dst = (float*)o.DataPointer;
+        return DropLeadingFrames(latents, 1);
+    }
+
+    /// <summary>Drops the leading <paramref name="skip"/> latent frames of a <c>[1, C, T, H, W]</c> tensor
+    /// → <c>[1, C, T−skip, H, W]</c>; <c>skip = 0</c> is a plain copy.</summary>
+    internal static Tensor DropLeadingFrames(Tensor x, int skip)
+    {
+        int c = (int)x.Shape[1], t = (int)x.Shape[2];
+        int h = (int)x.Shape[3], w = (int)x.Shape[4];
+        Tensor o = new Tensor(new TensorShape([1L, c, t - skip, h, w]), DType.F32);
+        float* src = (float*)x.DataPointer, dst = (float*)o.DataPointer;
         long frame = (long)h * w;
-        long bytes = (long)(t - 1) * frame * sizeof(float);
+        long bytes = (long)(t - skip) * frame * sizeof(float);
         for (int ci = 0; ci < c; ci++)
         {
-            Buffer.MemoryCopy(src + ((long)ci * t + 1) * frame, dst + (long)ci * (t - 1) * frame, bytes, bytes);
+            Buffer.MemoryCopy(src + ((long)ci * t + skip) * frame, dst + (long)ci * (t - skip) * frame, bytes, bytes);
         }
+        return o;
+    }
+
+    /// <summary>Fresh host-materialized copy of a (possibly device-resident) tensor, preserving shape and dtype —
+    /// the cross-generation cache form that survives per-step activation sweeps and re-faults to device on use.</summary>
+    /// <remarks>Deliberately NOT <c>Tensor.To(x.Device)</c>: that preserves the SOURCE device tag, and the whole point
+    /// here is to land a host-tagged tensor the activation sweep will not reclaim.</remarks>
+    internal static Tensor HostCopy(Tensor x)
+    {
+        Tensor o = new Tensor(x.Shape, x.DType);
+        long bytes = x.DType.ComputeByteCount(x.ElementCount);
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, bytes, bytes);
         return o;
     }
 }

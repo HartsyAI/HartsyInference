@@ -23,7 +23,6 @@ internal static class GptSoVitsModel
     private const string S1File = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt";
     private const string HubertFile = "chinese-hubert-base/pytorch_model.bin";
 
-    /// <summary>The GPT-SoVITS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,

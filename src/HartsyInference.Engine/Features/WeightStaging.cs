@@ -5,8 +5,7 @@ namespace HartsyInference.Engine.Features;
 /// <summary>Staging helpers that sever a checkpoint's mmap so the loader can be released before the pipeline runs.</summary>
 public static class WeightStaging
 {
-    /// <summary>Copies every weight into an owned F32 tensor and releases any source that owned its memory; the result
-    /// no longer borrows the safetensors mmap, so the loader can be disposed immediately.</summary>
+    /// <summary>Copies every weight into an owned F32 tensor and releases any source that owned its memory; the result no longer borrows the safetensors mmap, so the loader can be disposed immediately.</summary>
     public static Dictionary<string, Tensor> ToOwnedF32(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);

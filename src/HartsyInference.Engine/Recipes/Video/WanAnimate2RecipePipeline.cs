@@ -1,4 +1,6 @@
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -16,22 +18,11 @@ using HartsyInference.Vision.Clip;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan-Animate-2 pipeline driven against the native <see cref="VideoRequest"/>.
-/// <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) supplies the driving
-/// motion as <b>raw RGB</b> — there is no pose render, no face crop and no retargeting, so the pose/face/background/
-/// mask override clips V1 accepts are refused here by name rather than silently dropped.
-/// <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, whose aspect ratio (not the request's)
-/// shapes the output; <c>--width</c>/<c>--height</c> are an AREA BUDGET, exactly as upstream's
-/// <c>resize_by_area</c> treats them.
-///
-/// <para>Two umT5 prompts are encoded: <see cref="VideoRequest.Prompt"/> describes the character's appearance and
-/// background (upstream tells you NOT to describe motion there), and <c>Extra["AnimateDrivingPrompt"]</c> describes
-/// the driving video, defaulting to upstream's boilerplate. The negative prompt applies to the generation stream
-/// only — the driving stream is built once, outside the guidance loop.</para></summary>
+/// <summary>A constructed Wan-Animate-2 pipeline driven against the native <see cref="VideoRequest"/>. <see cref="VideoRequest.DrivingVideo"/> (else a tiled <see cref="VideoRequest.InitImage"/>) supplies the driving motion as <b>raw RGB</b> — there is no pose render, no face crop and no retargeting, so the pose/face/background/mask override clips V1 accepts are refused here by name rather than silently dropped. <c>Extra["AnimateReferenceImage"]</c> carries the character identity image, whose aspect ratio (not the request's) shapes the output; <c>--width</c>/<c>--height</c> are an AREA BUDGET, exactly as upstream's <c>resize_by_area</c> treats them.</summary>
+/// <remarks>Two umT5 prompts are encoded: <see cref="VideoRequest.Prompt"/> describes the character's appearance and background (upstream tells you NOT to describe motion there), and <c>Extra["AnimateDrivingPrompt"]</c> describes the driving video, defaulting to upstream's boilerplate. The negative prompt applies to the generation stream only — the driving stream is built once, outside the guidance loop.</remarks>
 public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image, shared with the
-    /// V1 recipe so a caller wiring both does not need two keys.</summary>
+    /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the character identity image, shared with the V1 recipe so a caller wiring both does not need two keys.</summary>
     public const string ReferenceImageKey = WanAnimateRecipePipeline.ReferenceImageKey;
 
     /// <summary>Request <see cref="VideoRequest.Extra"/> key carrying the driving stream's own umT5 prompt.</summary>
@@ -40,12 +31,10 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     /// <summary>Upstream's default <c>prompt_ref</c> — "reference video of the character's motion".</summary>
     public const string DefaultDrivingPrompt = "人物动作的参考视频";
 
-    /// <summary>Output dimensions are multiples of this (upstream <c>resize_by_area(divisor=16)</c>), which is also
-    /// the VAE stride times the patch size, so the token grid is exact.</summary>
+    /// <summary>Output dimensions are multiples of this (upstream <c>resize_by_area(divisor=16)</c>), which is also the VAE stride times the patch size, so the token grid is exact.</summary>
     private const int SizeDivisor = 16;
 
-    /// <summary>Source frames decoded per output frame requested, before fps resampling. Bounds the decode of a long
-    /// driving video: a source above this multiple of the target rate is truncated rather than materialized.</summary>
+    /// <summary>Source frames decoded per output frame requested, before fps resampling. Bounds the decode of a long driving video: a source above this multiple of the target rate is truncated rather than materialized.</summary>
     private const int MaxSourceFpsRatio = 6;
 
     private readonly IBackend _backend;
@@ -108,6 +97,9 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         {
             throw new InvalidOperationException($"Wan-Animate-2 needs at least 5 frames per chunk; got {chunkLen}.");
         }
+        // Once per generation, before any encode: refuses infeasible geometry and fixes the driving-cache dtype
+        // for every chunk (per-chunk resolution could mix dtypes as free VRAM shifts between chunks).
+        bool bf16DrivingCache = PlanDrivingCache(width, height, chunkLen);
 
         string negative = string.IsNullOrWhiteSpace(request.NegativePrompt)
             ? WanVideoRecipe.DefaultNegativePrompt
@@ -119,18 +111,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         int[] promptTokens = _tokenizer.Encode(request.Prompt);
         int[] negTokens = _tokenizer.Encode(negative);
         int[] drivingTokens = _tokenizer.Encode(drivingPrompt);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens, drivingTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens),
-             T5Tokenizer.CreateAttentionMask(drivingTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor drivingEmbeds = CfgHelper.SliceBatchElement(batch, 2, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(drivingEmbeds, drivingTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds, Tensor drivingEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens, drivingTokens);
 
         Tensor? referenceRgb = null, referenceClip = null;
         try
@@ -142,7 +124,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
 
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(
                 VideoRecipeUtils.LetterboxRgb24(reference, width, height), width, height);
-            referenceClip = EncodeClipVision(reference.Rgb, reference.Width, reference.Height);
+            referenceClip = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, reference.Rgb, reference.Width, reference.Height);
 
             // One seed for the whole request: the chunks are separate denoises, so leaving it null would re-roll per
             // chunk and make a run unreproducible. Upstream draws fresh noise per chunk; offsetting by the chunk
@@ -154,6 +136,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 Logs.Info($"[WanAnimate2RecipePipeline] Chunked: {totalFrames} frames as ~{plannedChunks} chunk(s) of "
                     + $"{chunkLen}f with a {WanAnimate2Pipeline.ChunkOverlapFrames}-frame carry.");
             }
+
+            // Anti-drift stats come from the reference image's OWN pixels — content only, never the letterboxed
+            // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
+            float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
+            VideoColorMatch.LabStats refColorStats = colorStrength > 0f
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
+                : default;
 
             List<byte[]> assembled = new List<byte[]>();
             byte[]? carriedFrame = null;
@@ -176,7 +165,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 {
                     // Recomputed per chunk: the driving stream's image context is THIS chunk's frame 0, not the
                     // reference image's, and the frame changes as start advances.
-                    drivingClipEmbeds = EncodeClipVision(slice[0], width, height);
+                    drivingClipEmbeds = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, slice[0], width, height);
                     if (carriedFrame is not null)
                     {
                         carriedTensor = VideoRecipeUtils.RgbToReferenceTensor(carriedFrame, width, height);
@@ -197,6 +186,9 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         CfgScale = cfgScale,
                         Seed = baseSeed + chunkIndex,
                         FlowShift = request.FlowShift ?? WanAnimate2Pipeline.DefaultFlowShift,
+                        Animate2Bf16DrivingCache = bf16DrivingCache,
+                        AnimatePoseStrength = (float?)request.AnimatePoseStrength,
+                        AnimateReferenceImageStrength = (float?)request.AnimateReferenceImageStrength,
                     };
                     (byte[][] frames, int chunkW, int chunkH, int _) = _pipeline.GenerateChunk(
                         promptEmbeds, negEmbeds, drivingEmbeds, referenceRgb, drivingClip, inner,
@@ -204,6 +196,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         carriedRgbFrame: carriedTensor, sampler: request.Sampler, onProgress: bridge);
                     outW = chunkW;
                     outH = chunkH;
+                    // Before the trim/append, so the emitted frames and the carried anchor are fixed in one pass.
+                    VideoRecipeUtils.CorrectContinuationChunk(frames, chunkW, chunkH, chunkIndex, refColorStats, colorStrength);
                     // Chunk > 0 re-renders the carried frame; upstream drops exactly first_num leading frames.
                     int trim = chunkIndex == 0 ? 0 : WanAnimate2Pipeline.ChunkOverlapFrames;
                     for (int i = trim; i < frames.Length; i++)
@@ -251,9 +245,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>Rejects, by name, every conditioning object Animate-2 physically cannot consume. V1 accepted these
-    /// because it had a pose/face/background/mask pathway; Animate-2 deleted all of it, so accepting them would
-    /// produce a plausible clip with the user's input discarded.</summary>
+    /// <summary>Rejects, by name, every conditioning object Animate-2 physically cannot consume. V1 accepted these because it had a pose/face/background/mask pathway; Animate-2 deleted all of it, so accepting them would produce a plausible clip with the user's input discarded.</summary>
     private static void Validate(VideoRequest request)
     {
         if (request.DrivingVideo is null && request.InitImage is null)
@@ -284,6 +276,76 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
     }
 
+    /// <summary>One trim + one free-VRAM query serving two decisions: resolves the driving-cache dtype for the whole
+    /// generation via <see cref="WanAnimate2DrivingCachePolicy"/>, then refuses a geometry that cannot fit the
+    /// SELECTED cache plus a fully-streamed DiT (naming the largest chunk length that would). Runs before any
+    /// encode, so an infeasible request costs nothing. Backends reporting no VRAM (CPU) skip the refusal and
+    /// resolve to F32.</summary>
+    /// <remarks>The feasibility floor deliberately excludes the per-token activation reserve: that reserve is a
+    /// planning allowance the streaming scope clamps against, and it over-predicts the measured peak — charging it
+    /// here would refuse geometries that demonstrably run (480x800/61f). The cache is the immovable resident
+    /// object; activations are elastic under per-step frees. Dtype must resolve BEFORE this floor is sized: a
+    /// forced/low-VRAM F32 pin (<see cref="WanAnimate2DrivingCachePolicy.EnvironmentVariable"/>=off, or the global
+    /// low-VRAM policy forcing it off) needs the larger F32 cache checked here — checking the smaller BF16 size
+    /// regardless of the pin let an F32-pinned geometry pass preflight and OOM mid-generation instead.</remarks>
+    private bool PlanDrivingCache(int width, int height, int chunkLen)
+    {
+        (int T, int H, int W) genGrid = GenerationGrid(width, height, chunkLen);
+        long tokenLoad = (long)genGrid.T * genGrid.H * genGrid.W;
+        long f32Cache = _transformer.DrivingCacheBytes(genGrid, bf16Cache: false);
+        long bf16Cache = _transformer.DrivingCacheBytes(genGrid, bf16Cache: true);
+        long weightFloor = WanAnimate2Pipeline.StreamedWeightFloorBytes(_transformer);
+        // Pooled frees under-report until trimmed — the VramPlanner.TrimBeforeQuery rationale.
+        _backend.TrimMemoryPool();
+        (long freeBytes, _) = _backend.GetVramInfo();
+        bool bf16DrivingCache = WanAnimate2DrivingCachePolicy.Resolve(_backend, f32Cache, bf16Cache,
+            WanAnimate2Pipeline.ActivationReserveBytes(tokenLoad), weightFloor, measuredFreeBytes: freeBytes);
+        long selectedCache = bf16DrivingCache ? bf16Cache : f32Cache;
+        long floorBytes = selectedCache + WanAnimate2Pipeline.FixedHeadroomBytes + weightFloor;
+        if (freeBytes > 0 && floorBytes > freeBytes)
+        {
+            int feasible = LargestFeasibleChunkFrames(width, height, chunkLen, freeBytes - weightFloor, bf16DrivingCache);
+            string advice = feasible > 0
+                ? $" At {width}x{height} the longest chunk that fits is {feasible} frames — lower --frames (or "
+                    + "animatetotalframes chunking will still need --frames at or below that)."
+                : $" Not even the shortest chunk fits at {width}x{height} — lower the resolution.";
+            string cacheLabel = bf16DrivingCache ? "BF16" : "F32";
+            string pinNote = bf16DrivingCache ? "" : $" Unsetting {WanAnimate2DrivingCachePolicy.EnvironmentVariable} "
+                + "(or setting it to 'on') allows the smaller BF16 cache instead.";
+            throw new OutOfVramException(
+                $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the {cacheLabel} driving cache "
+                + $"({ByteFormat.Mb(selectedCache)}) plus workspace ({ByteFormat.Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
+                + $"streamed DiT ({ByteFormat.Mb(weightFloor)}) needs {ByteFormat.Mb(floorBytes)}, but only {ByteFormat.Mb(freeBytes)} is free."
+                + advice + pinNote);
+        }
+        return bf16DrivingCache;
+    }
+
+    /// <summary>The generation stream's token grid for a chunk — the same divisions <c>GenerateChunk</c> performs, so the up-front decision and the chunk placement cannot drift apart.</summary>
+    private (int T, int H, int W) GenerationGrid(int width, int height, int chunkFrames)
+    {
+        (int pt, int ph, int pw) = _config.PatchSize;
+        int sp = _config.VaeSpatialCompression;
+        int tTotal = WanAnimate2Pipeline.GenerationLatentFrames(chunkFrames, _config.VaeTemporalCompression);
+        return (tTotal / pt, height / sp / ph, width / sp / pw);
+    }
+
+    /// <summary>The longest chunk whose selected-dtype cache + workspace fits <paramref name="budgetBytes"/>, walking the causal-VAE frame grid down from the request; 0 = the resolution is the problem, not the length.</summary>
+    private int LargestFeasibleChunkFrames(int width, int height, int chunkLen, long budgetBytes, bool bf16Cache)
+    {
+        for (int candidate = chunkLen - _config.VaeTemporalCompression; candidate >= 5;
+            candidate -= _config.VaeTemporalCompression)
+        {
+            long bytes = _transformer.DrivingCacheBytes(GenerationGrid(width, height, candidate), bf16Cache);
+            if (bytes + WanAnimate2Pipeline.FixedHeadroomBytes <= budgetBytes)
+            {
+                return candidate;
+            }
+        }
+        return 0;
+    }
+
+
     /// <summary>The driving stream's umT5 prompt, or upstream's boilerplate when the caller supplied none.</summary>
     private static string ResolveDrivingPrompt(VideoRequest request)
     {
@@ -294,9 +356,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return DefaultDrivingPrompt;
     }
 
-    /// <summary>Decodes the driving video (or tiles the init-image still) into raw RGB frames at
-    /// <paramref name="targetFps"/>, letterboxed into the output geometry. No skeleton, no face crop — the frames go
-    /// straight to the VAE.</summary>
+    /// <summary>Decodes the driving video (or tiles the init-image still) into raw RGB frames at <paramref name="targetFps"/>, letterboxed into the output geometry. No skeleton, no face crop — the frames go straight to the VAE.</summary>
     private static List<byte[]> ResolveDrivingFrames(VideoRequest request, int width, int height, int chunkLen,
         int targetFps, CancellationToken cancel)
     {
@@ -336,9 +396,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return resampled;
     }
 
-    /// <summary>Upstream's <c>get_frame_indices</c>: a nearest-frame resample, <c>idx = round(i / targetFps · srcFps)</c>
-    /// clamped into range, over <c>floor(count / srcFps · targetFps)</c> output frames. A non-positive or unknown
-    /// source rate passes the frames through 1:1.</summary>
+    /// <summary>Upstream's <c>get_frame_indices</c>: a nearest-frame resample, <c>idx = round(i / targetFps · srcFps)</c> clamped into range, over <c>floor(count / srcFps · targetFps)</c> output frames. A non-positive or unknown source rate passes the frames through 1:1.</summary>
     internal static List<byte[]> ResampleToFps(List<byte[]> frames, double sourceFps, int targetFps)
     {
         ArgumentNullException.ThrowIfNull(frames);
@@ -360,9 +418,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return output;
     }
 
-    /// <summary>Snaps a chunk down onto the causal VAE's <c>step·n + 1</c> grid. Upstream's <c>zigzag_padding</c>
-    /// instead pads the tail up by ping-ponging through the frames; both only affect frames that get trimmed, and
-    /// ComfyUI takes the same snap-and-hold route.</summary>
+    /// <summary>Snaps a chunk down onto the causal VAE's <c>step·n + 1</c> grid. Upstream's <c>zigzag_padding</c> instead pads the tail up by ping-ponging through the frames; both only affect frames that get trimmed, and ComfyUI takes the same snap-and-hold route.</summary>
     internal static int SnapChunkLength(int frames, int temporalStep) =>
         frames < 1 ? 0 : 1 + (frames - 1) / temporalStep * temporalStep;
 
@@ -377,9 +433,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return 1 + (int)Math.Ceiling((totalFrames - chunkLen) / (double)stride);
     }
 
-    /// <summary>Upstream's <c>calculate_new_size</c>: the largest <c>(w, h)</c> whose product fits
-    /// <paramref name="areaBudget"/>, both multiples of 16, minimising the deviation from the SOURCE aspect ratio.
-    /// This is why <c>--width 720 --height 1280</c> means "budget 921600 px" and not "produce 720x1280".</summary>
+    /// <summary>Upstream's <c>calculate_new_size</c>: the largest <c>(w, h)</c> whose product fits <paramref name="areaBudget"/>, both multiples of 16, minimising the deviation from the SOURCE aspect ratio. This is why <c>--width 720 --height 1280</c> means "budget 921600 px" and not "produce 720x1280".</summary>
     internal static (int Width, int Height) ShapeToAreaBudget(long areaBudget, int sourceWidth, int sourceHeight)
     {
         if (areaBudget < SizeDivisor * SizeDivisor || sourceWidth < 1 || sourceHeight < 1)
@@ -411,24 +465,6 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
             }
         }
         return (bestW, bestH);
-    }
-
-    /// <summary>CLIP-ViT-H penultimate hidden state of one RGB24 frame, host-materialized — 257 image tokens that get
-    /// prepended to that stream's umT5 context.</summary>
-    private Tensor EncodeClipVision(byte[] rgb24, int width, int height)
-    {
-        _backend.PreloadWeights(_clipVision.EnumerateWeights());
-        ClipImagePreprocessor preprocessor = new ClipImagePreprocessor(imageSize: 224);
-        Tensor pixels = preprocessor.Preprocess(rgb24, width, height);
-        Tensor batched = _clipVision.EncodeHiddenStates(_backend, pixels);
-        pixels.Dispose();
-        _backend.Sync();
-        _backend.FreeWeights(_clipVision.EnumerateWeights());
-        Tensor dropped = VideoRecipeUtils.DropBatch(batched);
-        batched.Dispose();
-        Tensor host = VideoRecipeUtils.HostCopy(dropped);
-        dropped.Dispose();
-        return host;
     }
 
     /// <summary>Pulls the character identity image out of the request's arch-specific bag, or null when absent.</summary>

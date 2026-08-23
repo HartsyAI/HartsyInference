@@ -5,18 +5,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>HiDream-I1 image transformer (HiDreamImageTransformer2DModel) — text-to-image only.
-/// <para>Architecture: 16 double-stream blocks (joint MM-attention) + 32 single-stream blocks
-/// (parallel image+text attention), MoE SwiGLU FFN with a shared expert + top-2-of-4 routed experts on the
-/// image side (see <see cref="HiDreamBlock"/> for the gate softmax / top-k renorm), 3-axis RoPE on
-/// (layer-id, row, col).</para>
-/// <para>Text conditioning is the concatenation of:
-/// <list type="bullet">
-/// <item>Each Llama-3.1 hidden state (one per block) projected through its OWN <c>caption_projection[i]</c> (sequential, i = block index);</item>
-/// <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c> (the final, 49th entry);</item>
-/// <item>The "initial encoder hidden states" = concat(T5 projection, last Llama projection); each block appends its own Llama projection to the running encoder.</item>
-/// </list>
-/// The pooled CLIP-L+CLIP-G embedding is fed into the timestep MLP via the pooled embedder.</para></summary>
+/// <summary>HiDream-I1 image transformer (HiDreamImageTransformer2DModel) — text-to-image only. <para>Architecture: 16 double-stream blocks (joint MM-attention) + 32 single-stream blocks (parallel image+text attention), MoE SwiGLU FFN with a shared expert + top-2-of-4 routed experts on the image side (see <see cref="HiDreamBlock"/> for the gate softmax / top-k renorm), 3-axis RoPE on (layer-id, row, col).</para> <para>Text conditioning is the concatenation of: <list type="bullet"> <item>Each Llama-3.1 hidden state (one per block) projected through its OWN <c>caption_projection[i]</c> (sequential, i = block index);</item> <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c> (the final, 49th entry);</item> <item>The "initial encoder hidden states" = concat(T5 projection, last Llama projection); each block appends its own Llama projection to the running encoder.</item> </list> The pooled CLIP-L+CLIP-G embedding is fed into the timestep MLP via the pooled embedder.</para></summary>
 public sealed unsafe class HiDreamTransformer : IDisposable
 {
     private readonly HiDreamConfig _config;
@@ -153,15 +142,10 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
     }
 
-    /// <summary>The number of streamable blocks, flat-indexed double-then-single: <c>[0, NumLayers)</c> are
-    /// double-stream, <c>[NumLayers, NumLayers+NumSingleLayers)</c> are single-stream. See
-    /// <see cref="ForwardSharded"/> for how a block-range split crosses this boundary.</summary>
+    /// <summary>The number of streamable blocks, flat-indexed double-then-single: <c>[0, NumLayers)</c> are double-stream, <c>[NumLayers, NumLayers+NumSingleLayers)</c> are single-stream. See <see cref="ForwardSharded"/> for how a block-range split crosses this boundary.</summary>
     public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
 
-    /// <summary>The non-block weights: x_embedder, t_embedder, p_embedder, ALL <c>caption_projection[]</c>
-    /// entries (every Llama layer + T5 is projected once, up front, before the block loop), and the final
-    /// AdaLN + linear. Always resident on the block-range split's FIRST backend — see
-    /// <see cref="ForwardSharded"/>.</summary>
+    /// <summary>The non-block weights: x_embedder, t_embedder, p_embedder, ALL <c>caption_projection[]</c> entries (every Llama layer + T5 is projected once, up front, before the block loop), and the final AdaLN + linear. Always resident on the block-range split's FIRST backend — see <see cref="ForwardSharded"/>.</summary>
     public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
@@ -187,9 +171,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         if (_finalProjBias is not null) yield return _finalProjBias;
     }
 
-    /// <summary>Enumerates only blocks <c>[startBlock, endBlock)</c>'s weights (flat double-then-single index,
-    /// including every routed MoE expert) — the asymmetric preload a block-range shard needs (see
-    /// <see cref="ForwardSharded"/>).</summary>
+    /// <summary>Enumerates only blocks <c>[startBlock, endBlock)</c>'s weights (flat double-then-single index, including every routed MoE expert) — the asymmetric preload a block-range shard needs (see <see cref="ForwardSharded"/>).</summary>
     public IEnumerable<Tensor> EnumerateBlockRangeWeights(int startBlock, int endBlock)
     {
         for (int i = startBlock; i < Math.Min(endBlock, _doubleBlocks.Length); i++)
@@ -198,21 +180,13 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             foreach (Tensor w in _singleBlocks[i - _doubleBlocks.Length].EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Forward pass for one denoising step. Predicts velocity in patchified-and-projected
-    /// latent space and returns it in the same [B, C_out, H, W] layout as the input latent.</summary>
+    /// <summary>Forward pass for one denoising step. Predicts velocity in patchified-and-projected latent space and returns it in the same [B, C_out, H, W] layout as the input latent.</summary>
     /// <param name="latent">Noisy latent [B, in_channels, H, W].</param>
     /// <param name="timestep">Scalar timestep value (sigma * 1000 in flow matching).</param>
     /// <param name="t5Hidden">T5-XXL hidden states already projected to [B, S_t5, inner_dim] by the pipeline (caption_projection is run inside this method, so pass the raw T5 hidden of shape [B, S_t5, 4096]).</param>
     /// <param name="llamaHiddenLayers">List of Llama hidden states, one per <see cref="HiDreamConfig.LlamaLayers"/> entry. Each tensor is shape [B, S_l, caption_channels[0]] (= 4096). Length must equal NumLayers + NumSingleLayers.</param>
     /// <param name="pooledEmbeds">[B, text_emb_dim=2048] pooled CLIP-L+CLIP-G embedding.</param>
-    /// <param name="stepCache">Optional across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2;
-    /// same pattern as <see cref="Sd3Transformer.Forward"/>). HiDream is double-stream-then-single-stream, not
-    /// SD3's uniform dual-stream loop, but the image token tensor stays the same shape (<c>[B, imgSeqLen,
-    /// InnerDim]</c>) from the first double block's output through to the final pre-projection <c>imgFinal</c> —
-    /// so the same "cache block 0's image output, skip straight to the final layer on a hit" trick applies across
-    /// the double→single transition unchanged. On a hit, the entire rest of both block stacks is skipped,
-    /// including the per-block Llama-conditioning concat every remaining block would have consumed (those
-    /// projections are computed once up front regardless — this doesn't affect the caption-projection cost).</param>
+    /// <param name="stepCache">Optional across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2; same pattern as <see cref="Sd3Transformer.Forward"/>). HiDream is double-stream-then-single-stream, not SD3's uniform dual-stream loop, but the image token tensor stays the same shape (<c>[B, imgSeqLen, InnerDim]</c>) from the first double block's output through to the final pre-projection <c>imgFinal</c> — so the same "cache block 0's image output, skip straight to the final layer on a hit" trick applies across the double→single transition unchanged. On a hit, the entire rest of both block stacks is skipped, including the per-block Llama-conditioning concat every remaining block would have consumed (those projections are computed once up front regardless — this doesn't affect the caption-projection cost).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep,
         Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, DeviceFeatureCache? stepCache = null)
     {
@@ -390,7 +364,6 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             imgFinal = SliceSeq(backend, curJoint, imgSeqLen);
             curJoint.Dispose();
 
-            // Free per-layer projections.
             for (int i = 0; i < llamaProj.Length; i++) llamaProj[i].Dispose();
             t5Proj.Dispose();
 
@@ -416,19 +389,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Predicts velocity for one denoising step with the flat double-then-single block loop split
-    /// across two backends: blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, blocks
-    /// <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/> — a sequential pipeline split, not
-    /// tensor-parallel, so there is <b>no latency win</b>; the win is VRAM pooling. <paramref name="backendA"/>
-    /// must hold <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/><c>(0,
-    /// splitBlock)</c>; <paramref name="backendB"/> must hold ONLY <see cref="EnumerateBlockRangeWeights"/>
-    /// <c>(splitBlock, BlockCount)</c>.
-    /// <para>The double→single transition (concat image+encoder into one joint stream) happens exactly once,
-    /// on whichever backend's range first crosses block index <see cref="HiDreamConfig.NumLayers"/> — see
-    /// <see cref="ForwardBlocksRange"/>. The per-block Llama conditioning (<paramref name="llamaHiddenLayers"/>,
-    /// one entry per block) is projected once up front (backendA, shared weights) and the entries B's range
-    /// needs are peer-copied alongside the activation hand-off — they are activations, not weights, so they
-    /// are NOT covered by <see cref="EnumerateBlockRangeWeights"/>.</para></summary>
+    /// <summary>Predicts velocity for one denoising step with the flat double-then-single block loop split across two backends: blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/>, blocks <c>[splitBlock, BlockCount)</c> on <paramref name="backendB"/> — a sequential pipeline split, not tensor-parallel, so there is <b>no latency win</b>; the win is VRAM pooling. <paramref name="backendA"/> must hold <see cref="EnumerateSharedWeights"/> + <see cref="EnumerateBlockRangeWeights"/><c>(0, splitBlock)</c>; <paramref name="backendB"/> must hold ONLY <see cref="EnumerateBlockRangeWeights"/><c>(splitBlock, BlockCount)</c>. <para>The double→single transition (concat image+encoder into one joint stream) happens exactly once, on whichever backend's range first crosses block index <see cref="HiDreamConfig.NumLayers"/> — see <see cref="ForwardBlocksRange"/>. The per-block Llama conditioning (<paramref name="llamaHiddenLayers"/>, one entry per block) is projected once up front (backendA, shared weights) and the entries B's range needs are peer-copied alongside the activation hand-off — they are activations, not weights, so they are NOT covered by <see cref="EnumerateBlockRangeWeights"/>.</para></summary>
     public Tensor ForwardSharded(IBackend backendA, IBackend backendB, Tensor latent, float timestep,
         Tensor t5Hidden, IReadOnlyList<Tensor> llamaHiddenLayers, Tensor pooledEmbeds, int splitBlock)
     {
@@ -533,13 +494,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Runs blocks <c>[startBlock, endBlock)</c> in order — the seam a block-range shard splits on
-    /// (see <see cref="ForwardSharded"/>). State is either a <c>(img, encoder)</c> pair (still double-stream)
-    /// or a single joint tensor (<paramref name="encoder"/> null, already past the transition) — mirrors
-    /// <see cref="Forward"/>'s own double-then-single sequencing exactly, just windowed and with the
-    /// double→single concat happening inline the moment the range crosses block index
-    /// <see cref="HiDreamConfig.NumLayers"/> (never twice: a range that ends exactly at that boundary returns
-    /// the pair form un-transitioned, and the NEXT range does it when IT crosses).</summary>
+    /// <summary>Runs blocks <c>[startBlock, endBlock)</c> in order — the seam a block-range shard splits on (see <see cref="ForwardSharded"/>). State is either a <c>(img, encoder)</c> pair (still double-stream) or a single joint tensor (<paramref name="encoder"/> null, already past the transition) — mirrors <see cref="Forward"/>'s own double-then-single sequencing exactly, just windowed and with the double→single concat happening inline the moment the range crosses block index <see cref="HiDreamConfig.NumLayers"/> (never twice: a range that ends exactly at that boundary returns the pair form un-transitioned, and the NEXT range does it when IT crosses).</summary>
     private (Tensor img, Tensor? encoder) ForwardBlocksRange(IBackend backend, Tensor img, Tensor? encoder,
         Tensor temb, Tensor[] llamaProj, int initialEncoderSeqLen, int imgSeqLen, int doubleStreamTotalSeqLen,
         int singleStreamBaseSeqLen, int singleStreamTotalSeqLen, int startBlock, int endBlock)
@@ -592,9 +547,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent.</summary>
     public static void DumpFinalLatent(Tensor latent) => HiDreamDebugDump.Dump("final_latent", latent);
 
-    /// <summary>Computes <c>temb = timestep_embed(timesteps) + pooled_embed(pooled)</c>. Both run through
-    /// a TimestepEmbedding (Linear → SiLU → Linear) — same shape recipe as Flux/SD3 except the pooled
-    /// path takes the 2048-dim CLIP concat directly (no separate sinusoidal stage).</summary>
+    /// <summary>Computes <c>temb = timestep_embed(timesteps) + pooled_embed(pooled)</c>. Both run through a TimestepEmbedding (Linear → SiLU → Linear) — same shape recipe as Flux/SD3 except the pooled path takes the 2048-dim CLIP concat directly (no separate sinusoidal stage).</summary>
     private Tensor ComputeTimestepAndPooledEmbedding(IBackend backend, float timestep, Tensor pooled, int batch)
     {
         int hidden = _config.InnerDim;
@@ -637,8 +590,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return temb;
     }
 
-    /// <summary>Projects a caption hidden state [B, S, in_dim] through caption_projection[i].linear (no bias)
-    /// to [B, S, inner_dim].</summary>
+    /// <summary>Projects a caption hidden state [B, S, in_dim] through caption_projection[i].linear (no bias) to [B, S, inner_dim].</summary>
     private static Tensor ProjectCaption(IBackend backend, Tensor caption, Tensor weight)
     {
         int batch = (int)caption.Shape[0];
@@ -650,8 +602,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Final layer: SiLU(temb) → Linear → split [shift, scale]; LayerNorm(no affine) on hidden;
-    /// modulate by (1+scale)*norm + shift; final Linear to [B, S, p²*out_channels].</summary>
+    /// <summary>Final layer: SiLU(temb) → Linear → split [shift, scale]; LayerNorm(no affine) on hidden; modulate by (1+scale)*norm + shift; final Linear to [B, S, p²*out_channels].</summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.InnerDim;
@@ -694,10 +645,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return projected;
     }
 
-    /// <summary>Patchifies [B, C, H, W] → [B, S_img, C * patch_size²] for a square latent (the only
-    /// shape we accept here — t2i always produces a square or rectangular latent that's already aligned
-    /// to <c>patch_size</c>). The diffusers reference also has a non-square branch that pads to
-    /// <c>max_seq</c> and produces a hidden_states_mask; we don't need that for fixed-resolution t2i.</summary>
+    /// <summary>Patchifies [B, C, H, W] → [B, S_img, C * patch_size²] for a square latent (the only shape we accept here — t2i always produces a square or rectangular latent that's already aligned to <c>patch_size</c>). The diffusers reference also has a non-square branch that pads to <c>max_seq</c> and produces a hidden_states_mask; we don't need that for fixed-resolution t2i.</summary>
     private static Tensor PatchifyLatent(Tensor latent, int batch, int channels, int patH, int patW, int patchSize)
     {
         int S = patH * patW;
@@ -743,9 +691,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Unpatchifies [B, S, p²*C] → [B, C, H, W] (matching diffusers' inference branch, which
-    /// permutes (0, 5, 1, 3, 2, 4) on the [B, pH, pW, p, p, C] view). The value is <b>negated</b> to match the
-    /// ComfyUI reference, which returns <c>-output</c> (HiDream's velocity-prediction sign convention).</summary>
+    /// <summary>Unpatchifies [B, S, p²*C] → [B, C, H, W] (matching diffusers' inference branch, which permutes (0, 5, 1, 3, 2, 4) on the [B, pH, pW, p, p, C] view). The value is <b>negated</b> to match the ComfyUI reference, which returns <c>-output</c> (HiDream's velocity-prediction sign convention).</summary>
     private static Tensor UnpatchifyLatent(Tensor input, int batch, int channels, int patH, int patW, int patchSize)
     {
         int height = patH * patchSize;
@@ -799,8 +745,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>GPU-resident slice of the first <paramref name="firstSeqLen"/> sequence positions of a [B, S, D]
-    /// tensor (contiguous row-block, <see cref="IBackend.SliceRows"/>).</summary>
+    /// <summary>GPU-resident slice of the first <paramref name="firstSeqLen"/> sequence positions of a [B, S, D] tensor (contiguous row-block, <see cref="IBackend.SliceRows"/>).</summary>
     private static Tensor SliceSeq(IBackend backend, Tensor input, int firstSeqLen)
     {
         int batch = (int)input.Shape[0];

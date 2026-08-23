@@ -2,9 +2,7 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
-/// <summary>Output of a 3D pipeline. Holds a <see cref="Mesh"/> today (mesh models); the
-/// <see cref="Splats"/> slot is reserved for the Gaussian-splat pipelines that arrive with later models.
-/// Exactly one representation is populated per result.</summary>
+/// <summary>Output of a 3D pipeline: exactly one of <see cref="Mesh"/> or <see cref="Splats"/> is populated, depending on which representation the pipeline produces.</summary>
 public sealed class ThreeDResult
 {
     /// <summary>The generated triangle mesh, or null if this result is a splat cloud.</summary>

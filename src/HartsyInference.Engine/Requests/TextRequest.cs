@@ -1,8 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native chat/completion request. Carries the conversation, sampling knobs, tool definitions, and the decode
-/// hints the local backend honors. Per-request knobs (temperature/topP/seed/maxTokens) live here; nullable knobs fall
-/// back to the model/engine default when unset.</summary>
+/// <summary>Native chat/completion request. Carries the conversation, sampling knobs, tool definitions, and the decode hints the local backend honors. Per-request knobs (temperature/topP/seed/maxTokens) live here; nullable knobs fall back to the model/engine default when unset.</summary>
 public sealed record TextRequest
 {
     /// <summary>The conversation so far, oldest first.</summary>
@@ -35,9 +33,7 @@ public sealed record TextRequest
     /// <summary>Force greedy decoding regardless of temperature.</summary>
     public bool Greedy { get; init; }
 
-    /// <summary>Sets the model's chat-template <c>enable_thinking</c> variable (Qwen3-family reasoning-block
-    /// toggle); null leaves it undefined so the template falls back to its own default. Ignored by templates
-    /// without a thinking slot.</summary>
+    /// <summary>Sets the model's chat-template <c>enable_thinking</c> variable (Qwen3-family reasoning-block toggle); null leaves it undefined so the template falls back to its own default. Ignored by templates without a thinking slot.</summary>
     public bool? EnableThinking { get; init; }
 
     /// <summary>Target device key (e.g. "cpu", "cuda:0"); null uses the backend's primary device.</summary>

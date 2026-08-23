@@ -8,16 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native interactive-world session routes. The genuinely novel piece of Phase 5: <see cref="IWorldSession"/>
-/// is stateful and long-lived (open → repeatedly action/stream → close) instead of every other route's one-request-
-/// in-one-response-out shape, so an HTTP client needs a way to find the same session again across separate
-/// requests — that's what <see cref="WorldSessionRegistry"/> is for.
-///
-/// <para><b>Scope boundary, stated plainly:</b> opening a session (which loads a model) is gated through the
-/// long-running queue as a bounded operation, same as every other queue-gated call. Once open, the session's
-/// ongoing action/stream traffic does NOT hold a queue slot for its whole lifetime — arbitrating GPU contention
-/// across multiple simultaneously-open sessions is left to <see cref="IWorldSession"/>'s own implementation, not
-/// enforced at this HTTP layer. This is a deliberate v1 scope cut, not an oversight.</para></summary>
+/// <summary>Native interactive-world session routes. The genuinely novel piece of Phase 5: <see cref="IWorldSession"/> is stateful and long-lived (open → repeatedly action/stream → close) instead of every other route's one-request-in-one-response-out shape, so an HTTP client needs a way to find the same session again across separate requests — that's what <see cref="WorldSessionRegistry"/> is for. <para><b>Scope boundary, stated plainly:</b> opening a session (which loads a model) is gated through the long-running queue as a bounded operation, same as every other queue-gated call. Once open, the session's ongoing action/stream traffic does NOT hold a queue slot for its whole lifetime — arbitrating GPU contention across multiple simultaneously-open sessions is left to <see cref="IWorldSession"/>'s own implementation, not enforced at this HTTP layer. This is a deliberate v1 scope cut, not an oversight.</para></summary>
 public static class WorldEndpoints
 {
     /// <summary>Maps session open/action/stream/close.</summary>

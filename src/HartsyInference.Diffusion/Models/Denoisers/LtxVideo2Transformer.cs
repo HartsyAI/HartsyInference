@@ -147,8 +147,8 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         _audioProjInW = w["audio_proj_in.weight"]; w.TryGetValue("audio_proj_in.bias", out _audioProjInB);
         _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
         _audioProjOutW = w["audio_proj_out.weight"]; w.TryGetValue("audio_proj_out.bias", out _audioProjOutB);
-        _scaleShift = DiTUtils.LoadF32(w, "scale_shift_table");
-        _audioScaleShift = DiTUtils.LoadF32(w, "audio_scale_shift_table");
+        _scaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
+        _audioScaleShift = TensorCasts.LoadF32(w, "audio_scale_shift_table");
 
         _timeEmbed.LoadWeights(w, "time_embed");
         _audioTimeEmbed.LoadWeights(w, "audio_time_embed");
@@ -271,11 +271,6 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     /// backend the tensors are device-resident, so read them from a CPU-backend run (or sync) when dumping.</summary>
     public Action<int, Tensor, Tensor>? OnBlockOutput { get; set; }
 
-    /// <summary>Velocity prediction over both streams. <paramref name="videoTokens"/> is <c>[Sv, inChannels]</c>
-    /// (f,h,w order); <paramref name="audioTokens"/> is <c>[Sa, audioInChannels]</c>; <paramref name="encoderVideo"/>
-    /// /<paramref name="encoderAudio"/> are the per-modality text-connector outputs (<c>[Lv, 4096]</c>/<c>[La,
-    /// 2048]</c>); <paramref name="timestep"/> is the scheduler timestep (≈0..1000). Returns the (video, audio)
-    /// velocities <c>[Sv, outChannels]</c>/<c>[Sa, audioOutChannels]</c>; the inputs are consumed.</summary>
     /// <summary>The ten per-step timestep-derived tensors every forward variant consumes. One producer
     /// (<see cref="ComputeTimestepTables"/>) — the eager, CFG-pair, and graph paths used to each carry a copy of
     /// the 8-modulator block, and a fix to one copy could silently miss the others.</summary>
@@ -360,6 +355,11 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
     };
 
+    /// <summary>Velocity prediction over both streams. <paramref name="videoTokens"/> is <c>[Sv, inChannels]</c>
+    /// (f,h,w order); <paramref name="audioTokens"/> is <c>[Sa, audioInChannels]</c>; <paramref name="encoderVideo"/>
+    /// /<paramref name="encoderAudio"/> are the per-modality text-connector outputs (<c>[Lv, 4096]</c>/<c>[La,
+    /// 2048]</c>); <paramref name="timestep"/> is the scheduler timestep (≈0..1000). Returns the (video, audio)
+    /// velocities <c>[Sv, outChannels]</c>/<c>[Sa, audioOutChannels]</c>; the inputs are consumed.</summary>
     public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor videoTokens, Tensor audioTokens,
         Tensor encoderVideo, Tensor encoderAudio, float timestep,
         (int Frames, int Height, int Width) grid, int audioFrames, double fps,

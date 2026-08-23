@@ -4,34 +4,18 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converts a HunyuanVideo DiT checkpoint into the "hybrid" key naming
-/// <see cref="HartsyInference.Diffusion.Models.Denoisers.HunyuanVideoDit"/> expects — original Tencent head keys
-/// (<c>img_in</c>, <c>time_in.0/2</c>, <c>vector_in.0/2</c>, <c>guidance_in.0/2</c>, <c>txt_in.*</c>,
-/// <c>final_layer.mod/proj</c>) with the reused <see cref="HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.HunyuanImageBlock"/>
-/// diffusers block sub-keys (<c>double_blocks.{i}.norm1.linear</c>, <c>attn.to_q</c>, <c>ff.net.0.proj</c>, …).
+/// <summary>Converts a HunyuanVideo DiT checkpoint into the "hybrid" key naming <see cref="HartsyInference.Diffusion.Models.Denoisers.HunyuanVideoDit"/> expects — original Tencent head keys (<c>img_in</c>, <c>time_in.0/2</c>, <c>vector_in.0/2</c>, <c>guidance_in.0/2</c>, <c>txt_in.*</c>, <c>final_layer.mod/proj</c>) with the reused <see cref="HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.HunyuanImageBlock"/> diffusers block sub-keys (<c>double_blocks.{i}.norm1.linear</c>, <c>attn.to_q</c>, <c>ff.net.0.proj</c>, …).
 ///
-/// <para>Two source layouts:
-/// (1) <b>Tencent/Comfy single-file</b> (the common Comfy-Org repacked <c>hunyuan_video_t2v_720p_*.safetensors</c>):
-/// Flux-style names — <c>img_in.proj</c> (Conv3d, reshaped to a 2D patch-embed Linear), <c>double_blocks.*.img_attn.qkv</c>
-/// (fused, split into Q/K/V), <c>single_blocks.*.linear1</c> (split into Q/K/V + <c>proj_mlp</c>),
-/// <c>*_mod.lin</c>/<c>modulation.lin</c>, <c>img_mlp.0/2</c>, <c>final_layer.linear</c>/<c>adaLN_modulation.1</c>.
-/// The token refiner <c>txt_in.*</c> passes through 1:1 (the refiner reads Comfy naming directly).
-/// (2) <b>diffusers folder</b> (<c>hunyuanvideo-community/HunyuanVideo transformer/</c>): <c>x_embedder</c>,
-/// <c>context_embedder</c>, <c>time_text_embed</c>, <c>transformer_blocks</c>/<c>single_transformer_blocks</c>,
-/// <c>norm_out.linear</c> (chunked <c>[scale, shift]</c> — <b>swapped</b> to the Tencent <c>[shift, scale]</c> the DiT
-/// reads), <c>proj_out</c>. Block sub-keys map through unchanged; the refiner's split Q/K/V are re-fused to
-/// <c>self_attn.qkv</c>.</para>
+/// <para>Two source layouts: (1) <b>Tencent/Comfy single-file</b> (the common Comfy-Org repacked <c>hunyuan_video_t2v_720p_*.safetensors</c>): Flux-style names — <c>img_in.proj</c> (Conv3d, reshaped to a 2D patch-embed Linear), <c>double_blocks.*.img_attn.qkv</c> (fused, split into Q/K/V), <c>single_blocks.*.linear1</c> (split into Q/K/V + <c>proj_mlp</c>), <c>*_mod.lin</c>/<c>modulation.lin</c>, <c>img_mlp.0/2</c>, <c>final_layer.linear</c>/<c>adaLN_modulation.1</c>. The token refiner <c>txt_in.*</c> passes through 1:1 (the refiner reads Comfy naming directly). (2) <b>diffusers folder</b> (<c>hunyuanvideo-community/HunyuanVideo transformer/</c>): <c>x_embedder</c>, <c>context_embedder</c>, <c>time_text_embed</c>, <c>transformer_blocks</c>/<c>single_transformer_blocks</c>, <c>norm_out.linear</c> (chunked <c>[scale, shift]</c> — <b>swapped</b> to the Tencent <c>[shift, scale]</c> the DiT reads), <c>proj_out</c>. Block sub-keys map through unchanged; the refiner's split Q/K/V are re-fused to <c>self_attn.qkv</c>.</para>
 ///
-/// <para>fp8 <c>_scaled</c> checkpoints are dequantized first via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>
-/// (same as LTX/Flux). The VAE + text encoders ship separately and are not handled here.</para></summary>
+/// <para>fp8 <c>_scaled</c> checkpoints are dequantized first via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> (same as LTX/Flux). The VAE + text encoders ship separately and are not handled here.</para></summary>
 public static unsafe class HunyuanVideoCheckpointConverter
 {
     // Bundling prefixes seen in the wild: diffusers-style `model.diffusion_model.` and the Comfy-Org repacked
     // single-file's `model.model.` (hunyuan_video_t2v_720p_bf16 wraps everything under model.model.*).
     private static readonly string[] DmPrefixes = ["model.diffusion_model.", "model.model."];
 
-    /// <summary>Converts a flat DiT weight dictionary into the hybrid naming. Sliced/reshaped/re-fused tensors are
-    /// newly allocated (owned by the returned dict); pass-through tensors reference the source (keep the loader alive).</summary>
+    /// <summary>Converts a flat DiT weight dictionary into the hybrid naming. Sliced/reshaped/re-fused tensors are newly allocated (owned by the returned dict); pass-through tensors reference the source (keep the loader alive).</summary>
     public static Dictionary<string, Tensor> Convert(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
@@ -73,10 +57,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         return outW;
     }
 
-    /// <summary>Rewrites a raw Tencent hyvideo key (Kijai repacks: <c>img_attn_qkv</c>, <c>mlp.fc1</c>,
-    /// <c>mod.linear</c>, <c>t_embedder.mlp.0</c>, <c>c_embedder.linear_1</c>) to the Comfy Flux-style name
-    /// <see cref="MapOriginal"/> expects. Order matters: embedder <c>.mlp.0/.2</c> renames run BEFORE the refiner
-    /// <c>mlp.fc1/fc2 → mlp.0/mlp.2</c> renames so the two never collide.</summary>
+    /// <summary>Rewrites a raw Tencent hyvideo key (Kijai repacks: <c>img_attn_qkv</c>, <c>mlp.fc1</c>, <c>mod.linear</c>, <c>t_embedder.mlp.0</c>, <c>c_embedder.linear_1</c>) to the Comfy Flux-style name <see cref="MapOriginal"/> expects. Order matters: embedder <c>.mlp.0/.2</c> renames run BEFORE the refiner <c>mlp.fc1/fc2 → mlp.0/mlp.2</c> renames so the two never collide.</summary>
     private static string NormalizeTencentRaw(string key) => key
         .Replace(".mlp.0.", ".in_layer.")                      // time_in/guidance_in/t_embedder MLPs
         .Replace(".mlp.2.", ".out_layer.")
@@ -197,8 +178,8 @@ public static unsafe class HunyuanVideoCheckpointConverter
         if (Rename(key, "time_text_embed.text_embedder.linear_1", "vector_in.0", t, o)) return;
         if (Rename(key, "time_text_embed.text_embedder.linear_2", "vector_in.2", t, o)) return;
         if (key.StartsWith("context_embedder.", StringComparison.Ordinal)) { MapRefinerDiffusers(key, t, o); return; }
-        if (key == "norm_out.linear.weight") { o["final_layer.mod.weight"] = SwapHalves(t, (int)t.Shape[0] / 2); return; }
-        if (key == "norm_out.linear.bias") { o["final_layer.mod.bias"] = SwapHalves(t, (int)t.Shape[0] / 2); return; }
+        if (key == "norm_out.linear.weight") { o["final_layer.mod.weight"] = CheckpointConvertUtils.SwapScaleShiftHalves(t, castToF32: true); return; }
+        if (key == "norm_out.linear.bias") { o["final_layer.mod.bias"] = CheckpointConvertUtils.SwapScaleShiftHalves(t, castToF32: true); return; }
         if (key == "proj_out.weight") { o["final_layer.proj.weight"] = t; return; }
         if (key == "proj_out.bias") { o["final_layer.proj.bias"] = t; return; }
         if (key.StartsWith("transformer_blocks.", StringComparison.Ordinal))
@@ -245,8 +226,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         }
     }
 
-    /// <summary>Fuses buffered diffusers refiner <c>attn.to_q/to_k/to_v</c> into a single <c>self_attn.qkv</c> once all
-    /// three (weight or bias) are present, then removes the temporaries.</summary>
+    /// <summary>Fuses buffered diffusers refiner <c>attn.to_q/to_k/to_v</c> into a single <c>self_attn.qkv</c> once all three (weight or bias) are present, then removes the temporaries.</summary>
     private static void TryFuseRefinerQkv(string pre, Dictionary<string, Tensor> o)
     {
         foreach (string suf in new[] { "weight", "bias" })
@@ -287,8 +267,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         o[pre + vName + "." + suf] = RowSlice(fused, 2 * h, h);
     }
 
-    /// <summary>Splits the single-block <c>linear1</c> ([3H + mlp, ...]) into Q/K/V ([H,…]) + <c>proj_mlp</c> ([mlp,…]).
-    /// Applies to weight and bias by the tensor's dim-0.</summary>
+    /// <summary>Splits the single-block <c>linear1</c> ([3H + mlp, ...]) into Q/K/V ([H,…]) + <c>proj_mlp</c> ([mlp,…]). Applies to weight and bias by the tensor's dim-0.</summary>
     private static void SplitLinear1(Tensor fused, string pre, Dictionary<string, Tensor> o)
     {
         // hidden is inferred from the trailing (input) dim for weights, or must be derived from 3H+mlp for bias.
@@ -303,8 +282,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         o[pre + "proj_mlp." + suf] = RowSlice(fused, 3 * hidden, mlp);
     }
 
-    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of <paramref name="src"/> into a new tensor (same dtype).
-    /// A "row" is the product of all dims after dim-0 (or 1 for a rank-1 bias).</summary>
+    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of <paramref name="src"/> into a new tensor (same dtype). A "row" is the product of all dims after dim-0 (or 1 for a rank-1 bias).</summary>
     private static Tensor RowSlice(Tensor src, int startRow, int numRows)
     {
         long cols = src.Shape.Rank == 1 ? 1 : src.ElementCount / src.Shape[0];
@@ -337,8 +315,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         return dst;
     }
 
-    /// <summary>Reshapes a Conv3d patch-embed weight [out, in, kt, kh, kw] to a 2D Linear weight [out, in·kt·kh·kw]
-    /// (identity byte layout; the flattened (in, kt, kh, kw) order matches the DiT's patchify vector order).</summary>
+    /// <summary>Reshapes a Conv3d patch-embed weight [out, in, kt, kh, kw] to a 2D Linear weight [out, in·kt·kh·kw] (identity byte layout; the flattened (in, kt, kh, kw) order matches the DiT's patchify vector order).</summary>
     private static Tensor Reshape2D(Tensor src, int rows)
     {
         long cols = src.ElementCount / rows;
@@ -350,27 +327,7 @@ public static unsafe class HunyuanVideoCheckpointConverter
         return dst;
     }
 
-    /// <summary>Swaps the two halves along dim-0 of a modulation tensor: diffusers <c>norm_out</c> chunks
-    /// <c>[scale, shift]</c>; the DiT's final <c>Modulate</c> reads <c>[shift, scale]</c>. F32 only (dequant runs first).</summary>
-    private static Tensor SwapHalves(Tensor src, int half)
-    {
-        Tensor f = src.DType == DType.F32 ? src : src.CastTo(DType.F32);
-        long cols = f.Shape.Rank == 1 ? 1 : f.ElementCount / f.Shape[0];
-        Tensor dst = new(f.Shape, DType.F32);
-        float* sp = (float*)f.DataPointer; float* dp = (float*)dst.DataPointer;
-        long block = half * cols;
-        Buffer.MemoryCopy(sp + block, dp, block * 4, block * 4);   // src second half (shift) → dst first half
-        Buffer.MemoryCopy(sp, dp + block, block * 4, block * 4);   // src first half  (scale) → dst second half
-        return dst;
-    }
-
-    /// <summary>Converts a HunyuanVideo VAE checkpoint's DECODER from ldm/Tencent naming to the diffusers naming
-    /// <see cref="HartsyInference.Diffusion.Models.Vae.HunyuanVideoVaeDecoder"/> expects: <c>decoder.up.N</c>
-    /// (reversed) → <c>decoder.up_blocks.(numUp−1−N)</c>, <c>mid.block_1/2</c> → <c>mid_block.resnets.0/1</c>,
-    /// <c>mid.attn_1.{norm,q,k,v,proj_out}</c> → <c>mid_block.attentions.0.{group_norm,to_q,to_k,to_v,to_out.0}</c>
-    /// (attn projections reshaped <c>[C,C,1,1,1]→[C,C]</c>), <c>nin_shortcut</c> → <c>conv_shortcut</c>,
-    /// <c>norm_out</c> → <c>conv_norm_out</c>. Keeps <c>post_quant_conv</c>; drops the encoder + <c>quant_conv</c>
-    /// (decode-only). fp8 dequant runs first.</summary>
+    /// <summary>Converts a HunyuanVideo VAE checkpoint's DECODER from ldm/Tencent naming to the diffusers naming <see cref="HartsyInference.Diffusion.Models.Vae.HunyuanVideoVaeDecoder"/> expects: <c>decoder.up.N</c> (reversed) → <c>decoder.up_blocks.(numUp−1−N)</c>, <c>mid.block_1/2</c> → <c>mid_block.resnets.0/1</c>, <c>mid.attn_1.{norm,q,k,v,proj_out}</c> → <c>mid_block.attentions.0.{group_norm,to_q,to_k,to_v,to_out.0}</c> (attn projections reshaped <c>[C,C,1,1,1]→[C,C]</c>), <c>nin_shortcut</c> → <c>conv_shortcut</c>, <c>norm_out</c> → <c>conv_norm_out</c>. Keeps <c>post_quant_conv</c>; drops the encoder + <c>quant_conv</c> (decode-only). fp8 dequant runs first.</summary>
     public static Dictionary<string, Tensor> ConvertVaeDecoder(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);

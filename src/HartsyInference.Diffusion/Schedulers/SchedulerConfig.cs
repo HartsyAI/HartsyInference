@@ -18,7 +18,7 @@ public sealed record SchedulerConfig
     /// <summary>Model prediction type: "epsilon" predicts noise, "v_prediction" predicts velocity.</summary>
     public PredictionType PredictionType { get; init; } = PredictionType.Epsilon;
 
-    /// <summary>Timestep spacing strategy for inference.</summary>
+    /// <summary>Which of the three <see cref="Schedulers.TimestepSpacing"/> stride formulas selects the training-schedule subset used at inference.</summary>
     public TimestepSpacing TimestepSpacing { get; init; } = TimestepSpacing.Leading;
 }
 

@@ -37,9 +37,9 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
     private string? _cachedNegPrompt;
     private Tensor? _cachedNegEmbeds;
 
-    /// <summary>Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
     public OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

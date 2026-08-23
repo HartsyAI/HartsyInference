@@ -12,7 +12,6 @@ internal static class F5TtsModel
 {
     private const string Repo = "SWivid/F5-TTS";
 
-    /// <summary>The F5-TTS descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,

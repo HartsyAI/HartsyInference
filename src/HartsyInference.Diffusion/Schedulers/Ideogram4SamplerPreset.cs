@@ -1,10 +1,10 @@
 namespace HartsyInference.Diffusion.Schedulers;
 
-/// <summary>A named Ideogram 4 sampler preset (upstream <c>sampler_configs.py</c>). Bundles step count, the per-step guidance schedule, and the logit-normal mean/std.
+/// <summary>A named Ideogram 4 sampler preset (upstream <c>sampler_configs.py</c>): bundles step count, the per-step guidance schedule, and the logit-normal mean/std.
 ///
-/// <see cref="GuidanceSchedule"/> is in **loop-index order**: index 0 is the LAST (polish) step, index <c>NumSteps − 1</c> is the FIRST sampling step. Each preset runs the bulk of steps at gw=7, then a few "polish" steps at gw=3 near <c>t→0</c>. The denoise loop iterates <c>i = NumSteps−1 … 0</c> and reads <c>GuidanceSchedule[i]</c>.
+/// <para><see cref="GuidanceSchedule"/> is in <b>loop-index order</b>: index 0 is the LAST (polish) step, index <c>NumSteps − 1</c> is the FIRST sampling step. Each preset runs the bulk of steps at gw=7, then a few "polish" steps at gw=3 near <c>t→0</c>. The denoise loop iterates <c>i = NumSteps−1 … 0</c> and reads <c>GuidanceSchedule[i]</c>.</para>
 ///
-/// <see cref="Mu"/> is the base mean passed to <see cref="LogitNormalSchedule.ForResolution"/> as <c>knownMean</c> (before the resolution adjust); <see cref="Std"/> is the logit-normal spread.</summary>
+/// <para><see cref="Mu"/> is the base mean passed to <see cref="LogitNormalSchedule.ForResolution"/> as <c>knownMean</c> (before the resolution adjust); <see cref="Std"/> is the logit-normal spread.</para></summary>
 public sealed record Ideogram4SamplerPreset
 {
     /// <summary>Preset name (e.g. <c>"V4_QUALITY_48"</c>).</summary>

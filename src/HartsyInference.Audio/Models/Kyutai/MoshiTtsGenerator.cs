@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -180,7 +181,7 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 // Sample the text token (moshi sample_token, temp_text/top_k_text) — NOT argmax; the sampled
                 // new_word/pad choice paces the words. textLogits is [1,1,TextCard]; sample on the host.
                 ReadOnlySpan<float> textSpan = new((void*)textLogits.DataPointer, TextCard);
-                int textTok = textTemp > 0f ? SampleTopK(textSpan, textTemp, textTopK, rng) : ArgMax(textSpan);
+                int textTok = textTemp > 0f ? LogitSampling.SampleTopK(textSpan, textTemp, textTopK, rng) : LogitSampling.ArgMax(textSpan);
                 textLogits.Dispose();
 
                 int outTok = scheduler.Process(offset, state, textTok, out _);
@@ -229,32 +230,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     {
         foreach (int c in frame) if (c < 0 || c >= AudioCard) return false;
         return true;
-    }
-
-    private static int ArgMax(ReadOnlySpan<float> v)
-    {
-        int best = 0; float bv = v[0];
-        for (int i = 1; i < v.Length; i++) if (v[i] > bv) { bv = v[i]; best = i; }
-        return best;
-    }
-
-    // Top-k temperature sampling (moshi sample_token): scale by temp, keep the topK highest, softmax, multinomial.
-    private static int SampleTopK(ReadOnlySpan<float> logits, float temp, int topK, Random rng)
-    {
-        int n = logits.Length;
-        int k = topK <= 0 ? n : Math.Min(topK, n);
-        int[] idx = new int[n];
-        for (int i = 0; i < n; i++) idx[i] = i;
-        float[] vals = new float[n];
-        for (int i = 0; i < n; i++) vals[i] = logits[i];
-        Array.Sort(idx, (a, b) => vals[b].CompareTo(vals[a]));   // descending by logit
-        float max = vals[idx[0]] / temp;
-        double sum = 0;
-        double[] p = new double[k];
-        for (int j = 0; j < k; j++) { p[j] = Math.Exp(vals[idx[j]] / temp - max); sum += p[j]; }
-        double r = rng.NextDouble() * sum, acc = 0;
-        for (int j = 0; j < k; j++) { acc += p[j]; if (r <= acc) return idx[j]; }
-        return idx[k - 1];
     }
 
     private static Tensor Row(Tensor table, int row)

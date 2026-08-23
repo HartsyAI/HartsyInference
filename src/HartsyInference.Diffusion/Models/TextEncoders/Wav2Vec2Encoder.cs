@@ -41,27 +41,27 @@ public sealed unsafe class Wav2Vec2Encoder
         _convW = new Tensor?[nConv]; _convB = new Tensor?[nConv];
         for (int i = 0; i < nConv; i++)
         {
-            _convW[i] = LoadF32(w, $"feature_extractor.conv_layers.{i}.conv.weight");
+            _convW[i] = TensorCasts.LoadF32(w, $"feature_extractor.conv_layers.{i}.conv.weight");
             w.TryGetValue($"feature_extractor.conv_layers.{i}.conv.bias", out _convB[i]);
         }
         if (_config.GroupNormFirstConvOnly)
         {
-            _conv0NormW = LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.weight");
-            _conv0NormB = LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.bias");
+            _conv0NormW = TensorCasts.LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.weight");
+            _conv0NormB = TensorCasts.LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.bias");
         }
         else
         {
             _convLnW = new Tensor?[nConv]; _convLnB = new Tensor?[nConv];
             for (int i = 0; i < nConv; i++)
             {
-                _convLnW[i] = LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.weight");
-                _convLnB[i] = LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.bias");
+                _convLnW[i] = TensorCasts.LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.weight");
+                _convLnB[i] = TensorCasts.LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.bias");
             }
         }
-        _fpNormW = LoadF32(w, "feature_projection.layer_norm.weight"); _fpNormB = LoadF32(w, "feature_projection.layer_norm.bias");
+        _fpNormW = TensorCasts.LoadF32(w, "feature_projection.layer_norm.weight"); _fpNormB = TensorCasts.LoadF32(w, "feature_projection.layer_norm.bias");
         _fpProjW = w["feature_projection.projection.weight"]; w.TryGetValue("feature_projection.projection.bias", out _fpProjB);
         _posConvW = LoadPosConv(w); w.TryGetValue("encoder.pos_conv_embed.conv.bias", out _posConvB);
-        _encNormW = LoadF32(w, "encoder.layer_norm.weight"); _encNormB = LoadF32(w, "encoder.layer_norm.bias");
+        _encNormW = TensorCasts.LoadF32(w, "encoder.layer_norm.weight"); _encNormB = TensorCasts.LoadF32(w, "encoder.layer_norm.bias");
         for (int i = 0; i < _layers.Length; i++)
         {
             string p = $"encoder.layers.{i}";
@@ -70,10 +70,10 @@ public sealed unsafe class Wav2Vec2Encoder
             l.KW = w[$"{p}.attention.k_proj.weight"]; w.TryGetValue($"{p}.attention.k_proj.bias", out l.KB);
             l.VW = w[$"{p}.attention.v_proj.weight"]; w.TryGetValue($"{p}.attention.v_proj.bias", out l.VB);
             l.OW = w[$"{p}.attention.out_proj.weight"]; w.TryGetValue($"{p}.attention.out_proj.bias", out l.OB);
-            l.AttnNormW = LoadF32(w, $"{p}.layer_norm.weight"); l.AttnNormB = LoadF32(w, $"{p}.layer_norm.bias");
+            l.AttnNormW = TensorCasts.LoadF32(w, $"{p}.layer_norm.weight"); l.AttnNormB = TensorCasts.LoadF32(w, $"{p}.layer_norm.bias");
             l.FfInW = w[$"{p}.feed_forward.intermediate_dense.weight"]; w.TryGetValue($"{p}.feed_forward.intermediate_dense.bias", out l.FfInB);
             l.FfOutW = w[$"{p}.feed_forward.output_dense.weight"]; w.TryGetValue($"{p}.feed_forward.output_dense.bias", out l.FfOutB);
-            l.FinalNormW = LoadF32(w, $"{p}.final_layer_norm.weight"); l.FinalNormB = LoadF32(w, $"{p}.final_layer_norm.bias");
+            l.FinalNormW = TensorCasts.LoadF32(w, $"{p}.final_layer_norm.weight"); l.FinalNormB = TensorCasts.LoadF32(w, $"{p}.final_layer_norm.bias");
         }
     }
 
@@ -82,11 +82,11 @@ public sealed unsafe class Wav2Vec2Encoder
     /// both = g·v/‖v‖).</summary>
     private Tensor LoadPosConv(IReadOnlyDictionary<string, Tensor> w)
     {
-        if (w.TryGetValue("encoder.pos_conv_embed.conv.weight", out Tensor? merged)) return LoadF32In(merged);
+        if (w.TryGetValue("encoder.pos_conv_embed.conv.weight", out Tensor? merged)) return TensorCasts.EnsureF32(merged);
         Tensor g = w.TryGetValue("encoder.pos_conv_embed.conv.weight_g", out Tensor? legacyG)
-            ? LoadF32In(legacyG) : LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
+            ? TensorCasts.EnsureF32(legacyG) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
         Tensor v = w.TryGetValue("encoder.pos_conv_embed.conv.weight_v", out Tensor? legacyV)
-            ? LoadF32In(legacyV) : LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
+            ? TensorCasts.EnsureF32(legacyV) : TensorCasts.LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
         // weight = g * v / ||v|| over the (in,k) dims per output channel (HF weight_norm dim=2 → norm over dims 0,1).
         int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];
         Tensor o = new Tensor(v.Shape, DType.F32);
@@ -328,7 +328,4 @@ public sealed unsafe class Wav2Vec2Encoder
         for (int ti = 0; ti < t; ti++)
             Buffer.MemoryCopy(hp + (long)ti * dim, sp + ((long)ti * numStates + stateIdx) * dim, (long)dim * 4, (long)dim * 4);
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-    private static Tensor LoadF32In(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

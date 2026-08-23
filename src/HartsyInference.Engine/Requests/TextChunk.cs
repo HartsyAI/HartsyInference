@@ -1,8 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>One streamed event from text generation. <see cref="Kind"/> selects which payload is meaningful:
-/// <see cref="Text"/> for Chunk/Result/Status, <see cref="Stop"/> for StopReason, <see cref="ToolCall"/> for
-/// NativeToolCall.</summary>
+/// <summary>One streamed event from text generation. <see cref="Kind"/> selects which payload is meaningful: <see cref="Text"/> for Chunk/Result/Status, <see cref="Stop"/> for StopReason, <see cref="ToolCall"/> for NativeToolCall.</summary>
 public sealed record TextChunk
 {
     /// <summary>The event kind.</summary>

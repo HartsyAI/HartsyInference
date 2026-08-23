@@ -4,8 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 
-/// <summary>SEANet residual block. Two-conv bottleneck with ELU activations between,
-/// gated residual add. Mirrors <c>SEANetResnetBlock</c> from <c>facebookresearch/encodec</c>:
+/// <summary>SEANet residual block — two-conv bottleneck with ELU activations between and a gated residual add, mirroring <c>SEANetResnetBlock</c> from <c>facebookresearch/encodec</c>.</summary>
+/// <remarks>
 /// <code>
 ///   r = x
 ///   y = Conv1d(dim, dim/compress, k=kernel_size, dilation=d)(ELU(x))
@@ -22,7 +22,8 @@ namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 ///
 /// <para>The shortcut path is always identity here — the published EnCodec uses
 /// <c>true_skip=True</c>. If a checkpoint flips that flag we'd need an additional 1×1
-/// projection on the shortcut, but no shipping config exercises that path.</para></summary>
+/// projection on the shortcut, but no shipping config exercises that path.</para>
+/// </remarks>
 internal sealed unsafe class SeaNetBlock
 {
     private readonly EnCodecConfig _cfg;
@@ -91,8 +92,7 @@ internal sealed unsafe class SeaNetBlock
         }
     }
 
-    /// <summary>Forward — <paramref name="x"/> channels-first <c>[B, dim, T]</c>.
-    /// Returns a fresh <c>[B, dim, T]</c> tensor (caller-owned). Input is NOT disposed.</summary>
+    /// <summary>Forward — <paramref name="x"/> channels-first <c>[B, dim, T]</c>. Returns a fresh <c>[B, dim, T]</c> tensor (caller-owned). Input is NOT disposed.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int batch, int t)
     {
         if (_conv1W is null) throw new InvalidOperationException($"SeaNetBlock '{_prefix}' weights not loaded.");
@@ -175,23 +175,12 @@ internal sealed unsafe class SeaNetBlock
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
-    /// <summary>Loads a weight-normed conv weight by reading <c>weight_g</c> + <c>weight_v</c>
-    /// and fusing them. Used wherever EnCodec / SEANet checkpoints store reparametrized
-    /// conv weights.</summary>
+    /// <summary>Loads a weight-normed conv weight by reading <c>weight_g</c> + <c>weight_v</c> and fusing them. Used wherever EnCodec / SEANet checkpoints store reparametrized conv weights.</summary>
     private static Tensor LoadFusedConvWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         // Accept weight-normed (weight_g/weight_v) and pre-composed (weight) conv checkpoints.
         if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
             return WeightNormFusion.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
-    }
-
-    /// <summary>Replicates the upstream <c>get_extra_padding_for_conv1d</c> stride-alignment
-    /// rule so encoder-side convs produce sequence lengths that round up cleanly.</summary>
-    private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)
-    {
-        float nFrames = ((float)tIn - kernel + padTotal) / stride + 1f;
-        int idealLength = ((int)MathF.Ceiling(nFrames) - 1) * stride + (kernel - padTotal);
-        return Math.Max(0, idealLength - tIn);
     }
 }

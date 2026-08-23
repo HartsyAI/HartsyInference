@@ -9,13 +9,10 @@ internal sealed record PickleStorage(DType DType, string Key, long NumEl);
 /// <summary>A tensor reconstruction recovered from <c>torch._utils._rebuild_tensor_v2</c>.</summary>
 internal sealed record PickleTensor(PickleStorage Storage, long Offset, long[] Size, long[] Stride);
 
-/// <summary>A pickle <c>GLOBAL</c> reference (module + qualified name) — only torch reduce funcs and storage
-/// types are interpreted; everything else is inert.</summary>
+/// <summary>A pickle <c>GLOBAL</c> reference (module + qualified name) — only torch reduce funcs and storage types are interpreted; everything else is inert.</summary>
 internal sealed record PickleGlobal(string Module, string Name);
 
-/// <summary>Minimal, side-effect-free pickle interpreter covering exactly the opcodes a torch <c>state_dict</c>
-/// emits (protocols 2–5). It builds plain CLR objects (dicts, lists, tuples, longs, strings) plus the torch
-/// markers above. It never imports modules or executes code — unknown reduce targets resolve to null.</summary>
+/// <summary>Minimal, side-effect-free pickle interpreter covering exactly the opcodes a torch <c>state_dict</c> emits (protocols 2–5). It builds plain CLR objects (dicts, lists, tuples, longs, strings) plus the torch markers above. It never imports modules or executes code — unknown reduce targets resolve to null.</summary>
 internal sealed class PickleMachine
 {
     private static readonly object Mark = new();
@@ -26,8 +23,7 @@ internal sealed class PickleMachine
 
     public PickleMachine(byte[] data, int start = 0) { _b = data; _i = start; }
 
-    /// <summary>Byte offset just past the <c>STOP</c> opcode after <see cref="Run"/> returns. Used to parse the
-    /// legacy <c>torch.save</c> format's five back-to-back pickle streams from one buffer.</summary>
+    /// <summary>Byte offset just past the <c>STOP</c> opcode after <see cref="Run"/> returns. Used to parse the legacy <c>torch.save</c> format's five back-to-back pickle streams from one buffer.</summary>
     public int Position => _i;
 
     public object? Run()

@@ -3,10 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Holds espeak-ng's compiled <c>phonindex</c> file: a flat array of 16-bit program words. Each phoneme's
-/// <see cref="EspeakPhoneme.Program"/> is an index into this array where its bytecode program begins. The program is
-/// executed by <see cref="EspeakPhonemeInterpreter"/> to drive context-dependent allophone selection and to emit the
-/// phoneme's IPA name. The big <c>phondata</c> spectrum/wave file is NOT needed for phonemization (audio only).</summary>
+/// <summary>Holds espeak-ng's compiled <c>phonindex</c> file: a flat array of 16-bit program words, indexed by each phoneme's <see cref="EspeakPhoneme.Program"/> and executed by <see cref="EspeakPhonemeInterpreter"/> for context-dependent allophone selection and IPA name output; the big <c>phondata</c> spectrum/wave file is NOT needed for phonemization (audio only).</summary>
 internal sealed class EspeakPhonemeIndex
 {
     /// <summary>The program words, indexed directly by <see cref="EspeakPhoneme.Program"/>.</summary>

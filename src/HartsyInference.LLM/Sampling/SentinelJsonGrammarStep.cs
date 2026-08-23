@@ -2,23 +2,11 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Grammar-masks output to valid JSON only for the span that follows a literal text sentinel (e.g. a
-/// prompted <c>&lt;tool_call&gt;</c> tag) — everywhere else, generation is completely unconstrained plain
-/// text. Unlike <see cref="JsonGrammarStep"/> (which masks the entire response from token 0), this lets a
-/// model answer normally in natural language and only pays the JSON-grammar cost/constraint for the one
-/// structured blob it's asked to emit — matching how every major chat API (Claude tool_use, OpenAI
-/// tool_calls, self-hosted grammar-constrained servers) scopes structured output to just the tool-call
-/// arguments rather than the whole reply.
-///
-/// <para><b>Activation</b>: while inactive, a small rolling tail of recently decoded text (bounded to twice
-/// the sentinel's length) is checked for the sentinel; once it matches, a fresh <see cref="JsonGrammarState"/>
-/// starts constraining every subsequent token.</para>
-///
-/// <para><b>Deactivation</b>: happens automatically the instant the constrained JSON value completes
-/// (<see cref="JsonGrammarState.IsComplete"/>) — not by matching a closing tag, since the model literally
-/// cannot type a closing tag like <c>&lt;/tool_call&gt;</c> while still masked to valid JSON (<c>&lt;</c> is
-/// not a valid JSON continuation). The caller's own prompt convention is expected to close the tag itself
-/// once masking lifts.</para></summary>
+/// <summary>Grammar-masks output to valid JSON only for the span that follows a literal text sentinel (e.g. a prompted <c>&lt;tool_call&gt;</c> tag); unlike <see cref="JsonGrammarStep"/> (masks from token 0), this lets a model answer normally in natural language and only pays the JSON-grammar cost for the one structured blob it's asked to emit — matching how major chat APIs scope structured output to just the tool-call arguments.</summary>
+/// <remarks>
+/// <para><b>Activation</b>: while inactive, a small rolling tail of recently decoded text (bounded to twice the sentinel's length) is checked for the sentinel; once it matches, a fresh <see cref="JsonGrammarState"/> starts constraining every subsequent token.</para>
+/// <para><b>Deactivation</b>: happens automatically the instant the constrained JSON value completes (<see cref="JsonGrammarState.IsComplete"/>) — not by matching a closing tag, since the model literally cannot type a closing tag like <c>&lt;/tool_call&gt;</c> while still masked to valid JSON. The caller's own prompt convention is expected to close the tag itself once masking lifts.</para>
+/// </remarks>
 public sealed class SentinelJsonGrammarStep : ISamplerStep
 {
     private readonly string[] _vocabText;
@@ -79,5 +67,5 @@ public sealed class SentinelJsonGrammarStep : ISamplerStep
         }
     }
 
-    private string TokenText(int id) => (uint)id < (uint)_vocabText.Length ? _vocabText[id] : string.Empty;
+    private string TokenText(int id) => JsonVocabText.TokenText(_vocabText, id);
 }

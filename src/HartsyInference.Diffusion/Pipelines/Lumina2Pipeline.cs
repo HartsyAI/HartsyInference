@@ -264,8 +264,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         return (t2iNoise, null);
     }
 
-    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when
-    /// configured, else the normal single-backend path.</summary>
+    /// <summary>Routes one denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path.</summary>
     private Tensor RunForward(Tensor latent, Tensor captionEmbeddings, float invertedSigma)
     {
         if (DitShardBackend is not null)

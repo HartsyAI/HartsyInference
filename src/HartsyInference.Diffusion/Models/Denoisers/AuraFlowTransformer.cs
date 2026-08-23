@@ -49,7 +49,6 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
     private Tensor? _cachedPosEmbedSlab;
     private int _posSlabBatch = -1, _posSlabGridH = -1, _posSlabGridW = -1;
 
-    /// <summary>Creates an AuraFlow transformer from configuration.</summary>
     public AuraFlowTransformer(AuraFlowConfig config)
     {
         _config = config;
@@ -602,7 +601,6 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Releases all tensor references held by this transformer.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)

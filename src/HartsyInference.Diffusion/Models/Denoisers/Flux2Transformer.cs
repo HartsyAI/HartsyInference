@@ -624,7 +624,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         }
         else
         {
-            LayerNormNoAffine(normed, hidden, batch, seqLen, dim, _config.LayerNormEps);
+            DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim, _config.LayerNormEps);
             modulated = new Tensor(seqShape, DType.F32);
             float* normPtr = (float*)normed.DataPointer;
             float* modPtr = (float*)modParams.DataPointer;
@@ -652,27 +652,6 @@ public sealed unsafe class Flux2Transformer : IDisposable
         backend.Linear(projected, modulated, _projOutWeight!, null);
         modulated.Dispose();
         return projected;
-    }
-
-    private static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim, float eps)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-                float mean = 0f;
-                for (int d = 0; d < dim; d++) mean += inPtr[offset + d];
-                mean /= dim;
-                float variance = 0f;
-                for (int d = 0; d < dim; d++) { float diff = inPtr[offset + d] - mean; variance += diff * diff; }
-                variance /= dim;
-                float invStd = 1.0f / MathF.Sqrt(variance + eps);
-                for (int d = 0; d < dim; d++) outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
-            }
-        }
     }
 
     private static void ExtractImageTokens(Tensor output, Tensor input, int batch, int txtSeqLen, int imgSeqLen, int dim)

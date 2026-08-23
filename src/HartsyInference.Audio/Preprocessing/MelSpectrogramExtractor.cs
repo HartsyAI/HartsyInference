@@ -4,9 +4,8 @@ namespace HartsyInference.Audio.Preprocessing;
 /// <see cref="MelFilterbank"/> into a single audio → log-mel pipeline that matches
 /// the model-specific preprocessing exactly.
 ///
-/// <para>Three preset configurations are provided as static factories — these are the
-/// parameter sets needed by every audio model in scope. Custom configurations are
-/// constructed directly via the constructor.</para>
+/// <para>Preset configurations are provided as static factories — one per model family in
+/// scope. Custom configurations are constructed directly via the constructor.</para>
 ///
 /// <para><b>Allocation contract:</b> the extractor pre-allocates all scratch buffers
 /// at construction. <see cref="Compute"/> writes into a caller-provided output buffer
@@ -207,8 +206,8 @@ public sealed class MelSpectrogramExtractor
     {
         _cfg = cfg;
         _window = HannWindow.Get(cfg.WinLength);
-        // FFT size must be a power of two; round up if win_length is not.
-        _fftSize = NextPow2(cfg.NFft);
+        // FFT size must be a power of two; round up if NFft is not.
+        _fftSize = Fft.NextPow2(cfg.NFft);
         _numBins = _fftSize / 2 + 1;
         _filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);
 
@@ -241,7 +240,7 @@ public sealed class MelSpectrogramExtractor
             throw new ArgumentException($"output must be [{_cfg.NMels}, >={frames}]");
 
         // torch.stft(center=True): reflect-pad by n_fft/2 so frame t is centered at t*hop.
-        float[]? padded = _cfg.Center ? ReflectPad(audio, _cfg.NFft / 2) : null;
+        float[]? padded = _cfg.Center ? SignalPadding.Reflect(audio, _cfg.NFft / 2) : null;
         ReadOnlySpan<float> src = padded ?? audio;
 
         float globalMax = float.MinValue;
@@ -378,31 +377,5 @@ public sealed class MelSpectrogramExtractor
         float[,] result = new float[_cfg.NMels, frames];
         Compute(audio, result);
         return result;
-    }
-
-    private static int NextPow2(int n)
-    {
-        int p = 1;
-        while (p < n) p <<= 1;
-        return p;
-    }
-
-    /// <summary>Reflect-pads <paramref name="audio"/> by <paramref name="pad"/> samples each side using the
-    /// edge-excluding ("reflect-101") convention that <c>torch.stft(center=True, pad_mode="reflect")</c> uses.</summary>
-    private static float[] ReflectPad(ReadOnlySpan<float> audio, int pad)
-    {
-        int len = audio.Length;
-        float[] outp = new float[len + 2 * pad];
-        for (int i = 0; i < outp.Length; i++)
-            outp[i] = audio[ReflectIndex(i - pad, len)];
-        return outp;
-    }
-
-    private static int ReflectIndex(int j, int len)
-    {
-        if (len <= 1) return 0;
-        int period = 2 * (len - 1);
-        int m = ((j % period) + period) % period;
-        return m < len ? m : period - m;
     }
 }

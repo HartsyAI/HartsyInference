@@ -35,8 +35,8 @@ public sealed unsafe class WanAnimateFaceBlock
             if (w.TryGetValue($"{p}.linear1_kv.bias", out Tensor? kvB)) (_kB, _vB) = SplitRows1d(kvB, _dim);
             _qW = w[$"{p}.linear1_q.weight"]; w.TryGetValue($"{p}.linear1_q.bias", out _qB);
             _oW = w[$"{p}.linear2.weight"]; w.TryGetValue($"{p}.linear2.bias", out _oB);
-            _nq = LoadF32(w, $"{p}.q_norm.weight");
-            _nk = LoadF32(w, $"{p}.k_norm.weight");
+            _nq = TensorCasts.LoadF32(w, $"{p}.q_norm.weight");
+            _nk = TensorCasts.LoadF32(w, $"{p}.k_norm.weight");
         }
         else
         {
@@ -45,8 +45,8 @@ public sealed unsafe class WanAnimateFaceBlock
             _kW = w[$"{p}.to_k.weight"]; w.TryGetValue($"{p}.to_k.bias", out _kB);
             _vW = w[$"{p}.to_v.weight"]; w.TryGetValue($"{p}.to_v.bias", out _vB);
             _oW = w[$"{p}.to_out.weight"]; w.TryGetValue($"{p}.to_out.bias", out _oB);
-            _nq = LoadF32(w, $"{p}.norm_q.weight");
-            _nk = LoadF32(w, $"{p}.norm_k.weight");
+            _nq = TensorCasts.LoadF32(w, $"{p}.norm_q.weight");
+            _nk = TensorCasts.LoadF32(w, $"{p}.norm_k.weight");
         }
     }
 
@@ -186,6 +186,4 @@ public sealed unsafe class WanAnimateFaceBlock
         Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, (long)rows * dim * 4, (long)rows * dim * 4);
         return o;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

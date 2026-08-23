@@ -42,14 +42,10 @@ public sealed class VulkanBackend : IBackend
     private long _coopmatGemmTicks;
     private long _tiledGemmTicks;
 
-    /// <summary>Test/diagnostic accessor for the GEMM fast-path engagement counters — lets a test prove
-    /// WHICH path actually handled a dispatch (coopmat2 vs coopmat1 vs tiled fallback), since correctness
-    /// alone can't distinguish them (all three produce the same numeric result for a shape all three can
-    /// handle).</summary>
+    /// <summary>Test/diagnostic accessor for the GEMM fast-path engagement counters — lets a test prove WHICH path actually handled a dispatch (coopmat2 vs coopmat1 vs tiled fallback), since correctness alone can't distinguish them (all three produce the same numeric result for a shape all three can handle).</summary>
     internal (long CoopMat2, long CoopMat, long Tiled) GemmEngagementCounts => (_coopmat2GemmCount, _coopmatGemmCount, _tiledGemmCount);
 
-    /// <summary>Diagnostic pass-through to <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/> —
-    /// isolates driver allocation cost from everything else a GEMM call pays for.</summary>
+    /// <summary>Diagnostic pass-through to <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/> — isolates driver allocation cost from everything else a GEMM call pays for.</summary>
     internal (long CallCount, double TotalMs) VkAllocateMemoryStats => _allocator.VkAllocateMemoryStats;
 
     /// <summary>Diagnostic pass-through to <see cref="VulkanMemoryAllocator.SnapshotBlocks"/>.</summary>
@@ -63,19 +59,13 @@ public sealed class VulkanBackend : IBackend
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
 
-    /// <summary>Count of lazy D2H syncs since <see cref="ResetD2hSyncCount"/>; mirrors <c>CudaBackend</c>'s
-    /// counter of the same name — ~0 means the traced region stayed GPU-resident.</summary>
+    /// <summary>Count of lazy D2H syncs since <see cref="ResetD2hSyncCount"/>; mirrors <c>CudaBackend</c>'s counter of the same name — ~0 means the traced region stayed GPU-resident.</summary>
     public long GetD2hSyncCount() => _xfer.GetSyncCount();
 
     /// <summary>Resets the D2H sync counter.</summary>
     public void ResetD2hSyncCount() => _xfer.ResetSyncCount();
 
-    /// <summary>Weight/activation transfer-cache hit and miss counts since backend construction (a miss
-    /// is a fresh H2D upload — the other half of a residency break that <see cref="GetD2hSyncCount"/>
-    /// alone doesn't show, since a CPU-loop-default <c>IBackend</c> member that reads a GPU-resident
-    /// tensor pays a D2H sync going in AND forces an H2D re-upload the next time a GPU op needs that
-    /// tensor back). Cumulative since construction, not reset by <see cref="ResetD2hSyncCount"/> — diff
-    /// two calls around the region you're measuring.</summary>
+    /// <summary>Weight/activation transfer-cache hit and miss counts since backend construction (a miss is a fresh H2D upload — the other half of a residency break that <see cref="GetD2hSyncCount"/> alone doesn't show, since a CPU-loop-default <c>IBackend</c> member that reads a GPU-resident tensor pays a D2H sync going in AND forces an H2D re-upload the next time a GPU op needs that tensor back). Cumulative since construction, not reset by <see cref="ResetD2hSyncCount"/> — diff two calls around the region you're measuring.</summary>
     public (long hits, long misses) GetTransferCacheStats()
     {
         (_, long hits, long misses) = _xfer.GetStats();
@@ -182,20 +172,14 @@ public sealed class VulkanBackend : IBackend
     /// <summary>Preloads weights to GPU memory. Cached by Tensor reference.</summary>
     public void PreloadWeights(IEnumerable<Tensor> weights) => _xfer.PreloadWeights(weights);
 
-    /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c>
-    /// exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set
-    /// (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for
-    /// memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever.
-    /// Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
+    /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c> exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever. Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
     public bool CacheWeightCasts
     {
         get => _xfer.CacheWeightCasts;
         set => _xfer.CacheWeightCasts = value;
     }
 
-    /// <summary>Peak per-tile im2col buffer size for <see cref="Conv2D"/> (see its tiling comment). Settable
-    /// so tests can force a small value and exercise the multi-tile path deterministically without needing
-    /// a multi-GB conv shape; production code never needs to touch this. Default 256 MiB.</summary>
+    /// <summary>Peak per-tile im2col buffer size for <see cref="Conv2D"/> (see its tiling comment). Settable so tests can force a small value and exercise the multi-tile path deterministically without needing a multi-GB conv shape; production code never needs to touch this. Default 256 MiB.</summary>
     public ulong Conv2DMaxColTileBytes { get; set; } = 256UL * 1024 * 1024;
 
     public void Sync()
@@ -207,10 +191,7 @@ public sealed class VulkanBackend : IBackend
 
     public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(weights);
 
-    /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync
-    /// callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface
-    /// no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used
-    /// to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
+    /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
     public unsafe void OffloadActivation(Tensor tensor)
     {
         ArgumentNullException.ThrowIfNull(tensor);
@@ -542,14 +523,7 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
-    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31) —
-    /// NOT called from <see cref="DispatchMatmul"/> or any production path. Exists purely so
-    /// correctness/throughput can be measured in isolation (unit test + GPU benchmark) before any decision
-    /// to integrate register blocking into the real dispatch path. Fixed BM=BN=64, WM=WN=32 (no device-
-    /// aware tile shrinking yet — this is a diagnostic, not production code); requires N, K exact multiples
-    /// of 16 (M may be anything — the shader bounds-checks it the same way
-    /// <c>matmul_coopmat_partial_m.comp.glsl</c> does) and F16 GEMM dtype. See
-    /// docs/Checklists/TROUBLESHOOTING.md for the full writeup and benchmark results.</summary>
+    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31) — NOT called from <see cref="DispatchMatmul"/> or any production path. Exists purely so correctness/throughput can be measured in isolation (unit test + GPU benchmark) before any decision to integrate register blocking into the real dispatch path. Fixed BM=BN=64, WM=WN=32 (no device-aware tile shrinking yet — this is a diagnostic, not production code); requires N, K exact multiples of 16 (M may be anything — the shader bounds-checks it the same way <c>matmul_coopmat_partial_m.comp.glsl</c> does) and F16 GEMM dtype. See docs/Checklists/TROUBLESHOOTING.md for the full writeup and benchmark results.</summary>
     internal bool TryDispatchCoopmatBlockedDiagnostic(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint wm = 32, uint wn = 32)
     {
@@ -642,38 +616,10 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
-    /// <summary>Switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>)
-    /// from <see cref="DispatchMatmul"/>. Default-ON as of 2026-07-31 (settable/overridable via
-    /// <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>) after a full validation pass against real Krea2 weights on the
-    /// RTX 4090: correctness held byte-identical to the coopmat1 baseline across every configuration tested
-    /// — 2-step, 4-step, and 8-step generations (the exact step count at which an EARLIER, unrelated
-    /// coopmat1 M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` — see
-    /// docs/Checklists/TROUBLESHOOTING.md), aligned and non-16-aligned M, with and without bias, F16 and F32
-    /// output, across dozens of real generations. Performance: a controlled same-session comparison (4 runs
-    /// each config, alternating, isolating this box's real GPU-contention variance) showed a statistically
-    /// significant ~4% real-wall-clock win at 2 steps (Welch's t≈2.88) and a ~10% win at 8 steps — this
-    /// SUPERSEDES an earlier same-day finding of a "~5% regression," which turned out to be a cross-session
-    /// comparison artifact (this shared box's run-to-run variance from contending processes, not a real
-    /// property of coopmat2 — see the full writeup for how that got sorted out). The only failure mode found
-    /// anywhere in this investigation (a step-graph-capture VRAM peak causing a graceful OOM-and-fallback on
-    /// this box at 4+ steps) is root-caused, unrelated to coopmat2 specifically (reproduces identically with
-    /// this flag off), and already recovers correctly via the existing capture-fallback path.</summary>
+    /// <summary>Switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>) from <see cref="DispatchMatmul"/>. Default-ON as of 2026-07-31 (settable/overridable via <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>) after a full validation pass against real Krea2 weights on the RTX 4090: correctness held byte-identical to the coopmat1 baseline across every configuration tested — 2-step, 4-step, and 8-step generations (the exact step count at which an EARLIER, unrelated coopmat1 M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` — see docs/Checklists/TROUBLESHOOTING.md), aligned and non-16-aligned M, with and without bias, F16 and F32 output, across dozens of real generations. Performance: a controlled same-session comparison (4 runs each config, alternating, isolating this box's real GPU-contention variance) showed a statistically significant ~4% real-wall-clock win at 2 steps (Welch's t≈2.88) and a ~10% win at 8 steps — this SUPERSEDES an earlier same-day finding of a "~5% regression," which turned out to be a cross-session comparison artifact (this shared box's run-to-run variance from contending processes, not a real property of coopmat2 — see the full writeup for how that got sorted out). The only failure mode found anywhere in this investigation (a step-graph-capture VRAM peak causing a graceful OOM-and-fallback on this box at 4+ steps) is root-caused, unrelated to coopmat2 specifically (reproduces identically with this flag off), and already recovers correctly via the existing capture-fallback path.</summary>
     public bool EnableCoopMat2 { get; set; } = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_COOPMAT2") != "0";
 
-    /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before
-    /// <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on
-    /// <c>matmul_coopmat2.comp.glsl</c> (<c>VK_NV_cooperative_matrix2</c> — workgroup-scope,
-    /// tensor-layout-addressed, hardware-clamped GEMM; see docs/Checklists/TROUBLESHOOTING.md for the full
-    /// coopmat1-vs-coopmat2 investigation this came out of). Unlike <see cref="TryDispatchCoopmat"/>, this
-    /// has NO M/N/K alignment requirement at all — the hardware clamp mode zero-fills/drops out-of-bounds
-    /// tensor accesses. Specialized for transposeA=false, transposeB=true (the only combination
-    /// <see cref="Linear"/> — the real caller this exists for — ever uses) — throws for any other
-    /// combination rather than silently computing the wrong answer. Bias is fused directly into the shader
-    /// via a broadcast tensorLayoutNV (2026-07-31 revision) — an earlier follow-up-BroadcastAdd-dispatch
-    /// design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in a real Krea2 e2e run: the
-    /// extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see
-    /// ROADMAP.md's "per-dispatch barrier scoping" entry) isn't visible to VkQueryPool-timestamp-only
-    /// measurement, but it's very real — see docs/Checklists/TROUBLESHOOTING.md for the full writeup.</summary>
+    /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on <c>matmul_coopmat2.comp.glsl</c> (<c>VK_NV_cooperative_matrix2</c> — workgroup-scope, tensor-layout-addressed, hardware-clamped GEMM; see docs/Checklists/TROUBLESHOOTING.md for the full coopmat1-vs-coopmat2 investigation this came out of). Unlike <see cref="TryDispatchCoopmat"/>, this has NO M/N/K alignment requirement at all — the hardware clamp mode zero-fills/drops out-of-bounds tensor accesses. Specialized for transposeA=false, transposeB=true (the only combination <see cref="Linear"/> — the real caller this exists for — ever uses) — throws for any other combination rather than silently computing the wrong answer. Bias is fused directly into the shader via a broadcast tensorLayoutNV (2026-07-31 revision) — an earlier follow-up-BroadcastAdd-dispatch design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in a real Krea2 e2e run: the extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see ROADMAP.md's "per-dispatch barrier scoping" entry) isn't visible to VkQueryPool-timestamp-only measurement, but it's very real — see docs/Checklists/TROUBLESHOOTING.md for the full writeup.</summary>
     internal bool TryDispatchCoopMat2(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint bk = 0)
     {
@@ -771,11 +717,7 @@ public sealed class VulkanBackend : IBackend
         return true;
     }
 
-    /// <summary>Diagnostic-only: measures PURE GPU execution time (via <see cref="VulkanGpuTimer"/>'s
-    /// <c>VkQueryPool</c> timestamps) of <paramref name="iterations"/> calls to <paramref name="dispatchOne"/>
-    /// — separates real kernel execution time from host-side submission/dispatch/wait overhead, which a
-    /// plain <c>Stopwatch</c>-around-<c>Sync()</c> measurement cannot do (it includes both). Not used on any
-    /// production path. See docs/Checklists/TROUBLESHOOTING.md for what this was built to answer.</summary>
+    /// <summary>Diagnostic-only: measures PURE GPU execution time (via <see cref="VulkanGpuTimer"/>'s <c>VkQueryPool</c> timestamps) of <paramref name="iterations"/> calls to <paramref name="dispatchOne"/> — separates real kernel execution time from host-side submission/dispatch/wait overhead, which a plain <c>Stopwatch</c>-around-<c>Sync()</c> measurement cannot do (it includes both). Not used on any production path. See docs/Checklists/TROUBLESHOOTING.md for what this was built to answer.</summary>
     internal double MeasureGpuTimeMs(int iterations, Action dispatchOne)
     {
         using VulkanGpuTimer timer = new(_vkDevice.Handle, Vk.TimestampPeriod);
@@ -789,10 +731,7 @@ public sealed class VulkanBackend : IBackend
         return timer.ReadElapsedMs();
     }
 
-    /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
-    /// <summary>Dequantizes a GGUF weight (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K) to F32 via <see cref="CastIfNeeded"/>'s
-    /// dequant path; test/tooling hook (mirrors <c>CudaBackend.DequantizeToF32</c>), not a hot path — the
-    /// hot path dequantizes lazily inside <c>Linear</c>/<c>MatMul</c>'s own weight-cast-to-gemm-dtype call.</summary>
+    /// <summary>Dequantizes a GGUF weight (Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K) to F32 via <see cref="CastIfNeeded"/>'s dequant path; test/tooling hook (mirrors <c>CudaBackend.DequantizeToF32</c>), not a hot path — the hot path dequantizes lazily inside <c>Linear</c>/<c>MatMul</c>'s own weight-cast-to-gemm-dtype call.</summary>
     public Tensor DequantizeToF32(Tensor quant)
     {
         using OpScope _op = EnterOp();
@@ -804,6 +743,7 @@ public sealed class VulkanBackend : IBackend
         return output;
     }
 
+    /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
         if (src.DType == want) return (srcBuf, null);
@@ -950,10 +890,7 @@ public sealed class VulkanBackend : IBackend
         DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
     }
 
-    /// <summary>Opt-in switch for <see cref="Linear"/>'s INT8 dot-product GEMM path (see
-    /// <see cref="TryDispatchInt8Linear"/>). Defaults from <c>HARTSYINFERENCE_VK_INT8=1</c> at construction,
-    /// same as <c>CudaBackend.EnableW8A8</c>; settable afterward so tests/tooling can toggle it without an
-    /// env var and a fresh process.</summary>
+    /// <summary>Opt-in switch for <see cref="Linear"/>'s INT8 dot-product GEMM path (see <see cref="TryDispatchInt8Linear"/>). Defaults from <c>HARTSYINFERENCE_VK_INT8=1</c> at construction, same as <c>CudaBackend.EnableW8A8</c>; settable afterward so tests/tooling can toggle it without an env var and a fresh process.</summary>
     public bool EnableInt8Linear { get; set; }
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
@@ -964,19 +901,7 @@ public sealed class VulkanBackend : IBackend
         DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
     }
 
-    /// <summary>Opt-in INT8 dot-product GEMM path for <see cref="Linear"/> (<c>HARTSYINFERENCE_VK_INT8=1</c>),
-    /// wiring the already-validated <see cref="MatMulInt8"/>/<see cref="Int8Quantizer"/> pair (bit-exact
-    /// on the 3060 per <c>docs/Research/VULKAN_OPTIMIZATION.md</c>) into the normal model-code call path —
-    /// the explicit open item both that doc and <c>ROADMAP.md</c> tracked as "wire the INT8 quantizer into
-    /// Vulkan model loading." Re-quantizes BOTH weight and activation on EVERY call via the CPU-side
-    /// <see cref="Int8Quantizer.RowwiseSymmetric"/> — correct and wired end-to-end, but not yet
-    /// perf-optimal: caching the weight's quantized form across calls (weights don't change between
-    /// calls, only activations do) is the natural follow-up and is intentionally NOT done here, to keep
-    /// this pass bounded — a persistent per-weight INT8 cache needs its own lifecycle wiring (freed
-    /// alongside <see cref="FreeWeights"/>) that deserves its own review, not a rushed addition here.
-    /// Narrowly scoped to the plain 2-D F32 case (K%4==0, F32 in/out) on a device exposing the integer
-    /// dot-product feature; anything else (F16, batched, non-4-divisible K, feature unavailable, opted
-    /// out) falls through to the normal GEMM path completely unchanged.</summary>
+    /// <summary>Opt-in INT8 dot-product GEMM path for <see cref="Linear"/> (<c>HARTSYINFERENCE_VK_INT8=1</c>), wiring the already-validated <see cref="MatMulInt8"/>/<see cref="Int8Quantizer"/> pair (bit-exact on the 3060 per <c>docs/Research/VULKAN_OPTIMIZATION.md</c>) into the normal model-code call path — the explicit open item both that doc and <c>ROADMAP.md</c> tracked as "wire the INT8 quantizer into Vulkan model loading." Re-quantizes BOTH weight and activation on EVERY call via the CPU-side <see cref="Int8Quantizer.RowwiseSymmetric"/> — correct and wired end-to-end, but not yet perf-optimal: caching the weight's quantized form across calls (weights don't change between calls, only activations do) is the natural follow-up and is intentionally NOT done here, to keep this pass bounded — a persistent per-weight INT8 cache needs its own lifecycle wiring (freed alongside <see cref="FreeWeights"/>) that deserves its own review, not a rushed addition here. Narrowly scoped to the plain 2-D F32 case (K%4==0, F32 in/out) on a device exposing the integer dot-product feature; anything else (F16, batched, non-4-divisible K, feature unavailable, opted out) falls through to the normal GEMM path completely unchanged.</summary>
     private unsafe bool TryDispatchInt8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         if (!EnableInt8Linear || !Vk.HasInt8DotProduct) return false;
@@ -1015,35 +940,79 @@ public sealed class VulkanBackend : IBackend
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
         long batch = a.Shape[0];
-        long M = a.Shape[1];
-        long K = a.Shape[2];
         bool bIs2D = b.Shape.Rank == 2;
-        long N = bIs2D ? b.Shape[1] : b.Shape[2];
-
-        // Fall back to per-batch matmul. Works correctly though slower than a single
-        // batched dispatch — Phase-4 optimization will fuse this.
-        for (long bi = 0; bi < batch; bi++)
+        if (bIs2D || batch == 1)
         {
-            // Slice through views/sub-tensors is non-trivial without TensorView ops here.
-            // Simplest correct approach: dispatch one matmul per batch using offset push constants.
-            DispatchMatmulBatched(output, a, b, bi, bIs2D);
+            // [B, M, K] @ [K, N] is exactly the flattened (B·M, K) @ (K, N) GEMM — one dispatch
+            // through the shared matmul path covers every batch.
+            DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+            return;
+        }
+
+        // Per-batch weight ([B, K, N]): one offset dispatch per slice into a shared output buffer.
+        long M = a.Shape[1], K = a.Shape[2], N = b.Shape[2];
+        if ((ulong)(batch * M * K) > uint.MaxValue || (ulong)(batch * K * N) > uint.MaxValue || (ulong)(batch * M * N) > uint.MaxValue)
+            throw new NotSupportedException("VulkanBackend.BatchedMatMul: operand exceeds the shader's uint element-offset range.");
+        DType gemmDtype = ResolveGemmDtype(output.DType);
+        VulkanBuffer aBuf = GetBuffer(a);
+        VulkanBuffer bBuf = GetBuffer(b);
+        (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, gemmDtype);
+        (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, gemmDtype);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * gemmDtype.SizeInBytes));
+        try
+        {
+            for (long bi = 0; bi < batch; bi++)
+            {
+                DispatchMatmulWithOffsets(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K,
+                    transposeA: false, transposeB: false, alpha: 1.0f, beta: 0.0f,
+                    aOffset: (uint)(bi * M * K), bOffset: (uint)(bi * K * N), cOffset: (uint)(bi * M * N),
+                    dtype: gemmDtype);
+            }
+            CacheOutputCastingFrom(output, outBuf, gemmDtype, "BatchedMatMul");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan BatchedMatMul dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (aOwned is not null) _xfer.FreeDevice(aOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
         }
     }
 
-    private void DispatchMatmulBatched(Tensor output, Tensor a, Tensor b, long batchIndex, bool bIs2D)
+    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype. Takes ownership of <paramref name="computed"/> (freed after a cast, cached otherwise).</summary>
+    private void CacheOutputCastingFrom(Tensor output, VulkanBuffer computed, DType computedDtype, string what)
     {
-        // For Phase-3.5 we promote each batch slice to a virtual matmul by bumping the offset
-        // baked into push-constants, but keep the same dispatch shape. Implemented by reusing
-        // DispatchMatmul on whole tensors — falls back to general kernel.
-        // (A truly batched kernel is a Phase-4 optimization.)
-        // The matmul shader uses lda/ldb/ldc; we set them so the tile loads from the right
-        // slice. Easiest: reuse non-batched path by treating the batched slice as a separate
-        // (M, N, K) GEMM. Since strides are baked in lda/ldb/ldc and we don't yet expose
-        // explicit offset push constants, we delegate to DispatchMatmul on the entire tensor,
-        // and rely on the kernel's bounds checks. This produces correct results when batch=1.
-        if (a.Shape[0] != 1)
-            throw new NotImplementedException("VulkanBackend.BatchedMatMul: batch > 1 needs a per-slice dispatch. Use the CPU backend or split the batch in the caller until the v2 path lands.");
-        DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+        if (output.DType == computedDtype)
+        {
+            CacheOutput(output, computed);
+            return;
+        }
+        ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
+        try
+        {
+            string castShader;
+            if (computedDtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
+            else if (computedDtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
+            else throw new NotSupportedException($"{what} dtype mismatch {computedDtype.Name}->{output.DType.Name}");
+
+            VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
+            Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)output.ElementCount);
+            Span<ulong> castBufs = stackalloc ulong[] { computed.Handle, finalBuf.Handle };
+            Dispatch(castK, castBufs, castPc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, finalBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Vulkan {what} output-dtype cast dispatch failed", ex);
+            finalBuf.Dispose();
+            throw;
+        }
+        _xfer.FreeDevice(computed);
     }
 
     /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
@@ -1649,16 +1618,7 @@ public sealed class VulkanBackend : IBackend
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
     }
 
-    /// <summary>Wan2.2 VAE channel-wise RMS norm (mirrors <c>CudaBackend.WanRmsNormChannel</c>). No override
-    /// existed at all before this — every call fell through to <c>IBackend</c>'s CPU-loop default, which reads
-    /// <c>input.DataPointer</c>/writes <c>output.DataPointer</c> directly: a full D2H sync, a single-threaded
-    /// scalar reduction over C with a cache-hostile stride-<c>spatial</c> access pattern (each channel step is
-    /// a full row apart), then an H2D re-upload for whatever consumes the result. Found via the Krea2 VAE
-    /// decode profiling pass (2026-07-31): the decoder's one call site (<c>QwenImageVaeDecoder</c>'s final
-    /// head norm) runs at the FULL 1024×1024 output resolution — <c>[1,96,1024,1024]</c>, ~402 MB — the worst
-    /// possible shape for this fallthrough, and a real contributor to Krea2's ~2300× VAE-decode gap vs CUDA
-    /// (which has always had a real kernel for this op). F32 only, matching both references (CUDA and the CPU
-    /// default read/write <c>float*</c> unconditionally); anything else falls back to the CPU default.</summary>
+    /// <summary>Wan2.2 VAE channel-wise RMS norm (mirrors <c>CudaBackend.WanRmsNormChannel</c>). No override existed at all before this — every call fell through to <c>IBackend</c>'s CPU-loop default, which reads <c>input.DataPointer</c>/writes <c>output.DataPointer</c> directly: a full D2H sync, a single-threaded scalar reduction over C with a cache-hostile stride-<c>spatial</c> access pattern (each channel step is a full row apart), then an H2D re-upload for whatever consumes the result. Found via the Krea2 VAE decode profiling pass (2026-07-31): the decoder's one call site (<c>QwenImageVaeDecoder</c>'s final head norm) runs at the FULL 1024×1024 output resolution — <c>[1,96,1024,1024]</c>, ~402 MB — the worst possible shape for this fallthrough, and a real contributor to Krea2's ~2300× VAE-decode gap vs CUDA (which has always had a real kernel for this op). F32 only, matching both references (CUDA and the CPU default read/write <c>float*</c> unconditionally); anything else falls back to the CPU default.</summary>
     public void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
     {
         using OpScope _op = EnterOp();
@@ -1698,10 +1658,7 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    /// <summary>DiT adaLN modulation: <c>out = in*scale + (shift ?? 0)</c>, broadcasting scale/shift
-    /// <c>[B,C]</c> over input/output <c>[B,seqLen,C]</c>. No override existed at all before this — every
-    /// call fell through to IBackend's F32-only CPU default, which throws on an F16 activation (the shape
-    /// Krea2's DiT actually uses — found via a real Krea2-on-Vulkan run, not a synthetic test).</summary>
+    /// <summary>DiT adaLN modulation: <c>out = in*scale + (shift ?? 0)</c>, broadcasting scale/shift <c>[B,C]</c> over input/output <c>[B,seqLen,C]</c>. No override existed at all before this — every call fell through to IBackend's F32-only CPU default, which throws on an F16 activation (the shape Krea2's DiT actually uses — found via a real Krea2-on-Vulkan run, not a synthetic test).</summary>
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
         using OpScope _op = EnterOp();
@@ -1797,11 +1754,7 @@ public sealed class VulkanBackend : IBackend
 
     #region Attention
 
-    /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head.</summary>
-    // FlashAttention-style fusion is a Phase-4 optimization.
-    /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold
-    /// (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some
-    /// SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
+    /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
     private const int FlashMaxHeadDim = 128;
 
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
@@ -1809,6 +1762,17 @@ public sealed class VulkanBackend : IBackend
         using OpScope _op = EnterOp();
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
+
+        // A mask whose query axis is 1 stores one [Skv] row broadcast over every query (a bias that depends only
+        // on the key — Wan-Animate-2's log_scale band). Every shader below indexes it as [Sq, Skv], so expand it
+        // here; handing them the short buffer would read past the allocation and go unnoticed. Gated on F32/rank
+        // first: ExpandKeyOnlyMask reads the mask as float* unconditionally, so an F16 mask (which every shader
+        // below rejects anyway) must fail that check BEFORE this native read, not after.
+        long sqRows = query.Shape[2], skvRows = key.Shape[2];
+        using Tensor? expandedMask = mask is not null && mask.DType == DType.F32
+            && mask.Shape.Rank is 2 or 3 or 4 && MaskQueryRows(mask) == 1 && sqRows > 1
+            ? ExpandKeyOnlyMask(mask, sqRows, skvRows) : null;
+        mask = expandedMask ?? mask;
 
         int hq = (int)query.Shape[1], hkv = (int)key.Shape[1], headDim = (int)query.Shape[3];
         if (headDim <= FlashMaxHeadDim && hkv > 0 && hq % hkv == 0)
@@ -1822,10 +1786,7 @@ public sealed class VulkanBackend : IBackend
         ScaledDotProductAttentionNaive(output, query, key, value, mask, scale, allowF16);
     }
 
-    /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both
-    /// <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and
-    /// <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated
-    /// beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>
+    /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>
     private void DispatchFlashAttention(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         float scale, bool causal, int qOffset, int slidingWindow, int skv, int kvGroup)
@@ -1879,35 +1840,7 @@ public sealed class VulkanBackend : IBackend
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, (uint)sq, (uint)hq, (uint)batch);
 
-            if (output.DType == dtype)
-            {
-                CacheOutput(output, outBuf);
-            }
-            else
-            {
-                ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-                VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
-                try
-                {
-                    string castShader;
-                    if (dtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
-                    else if (dtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
-                    else throw new NotSupportedException($"sdpa_flash dtype mismatch {dtype.Name}->{output.DType.Name}");
-
-                    VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
-                    Span<byte> castPc = stackalloc byte[4]; BinaryWriteUInt(castPc, 0, (uint)output.ElementCount);
-                    Span<ulong> castBufs = stackalloc ulong[] { outBuf.Handle, finalBuf.Handle };
-                    Dispatch(castK, castBufs, castPc, GroupCount(output.ElementCount, LocalX1D));
-                    CacheOutput(output, finalBuf);
-                }
-                catch (Exception ex)
-                {
-                    Logs.Error("Vulkan sdpa_flash output-dtype cast dispatch failed", ex);
-                    finalBuf.Dispose();
-                    throw;
-                }
-                _xfer.FreeDevice(outBuf);
-            }
+            CacheOutputCastingFrom(output, outBuf, dtype, "sdpa_flash");
         }
         catch (Exception ex)
         {
@@ -1923,8 +1856,7 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    /// <summary>True — the flash kernel above gives Vulkan the GPU-resident autoregressive decode toolkit
-    /// this flag advertises (e.g. unblocks Zonos onto the fast path instead of CUDA-only host glue).</summary>
+    /// <summary>True — the flash kernel above gives Vulkan the GPU-resident autoregressive decode toolkit this flag advertises (e.g. unblocks Zonos onto the fast path instead of CUDA-only host glue).</summary>
     public bool FlashDecodeSupported => true;
 
     // ── Step-graph capture (see VulkanStepGraph's doc comment for the full design) ─────────────────────────
@@ -1936,8 +1868,7 @@ public sealed class VulkanBackend : IBackend
 
     public bool StepGraphReady => _stepGraph?.IsReady == true && !_capturingStepGraph;
 
-    /// <summary>Owner token for the single step-graph slot (see IBackend.StepGraphOwner) — shared across models
-    /// the way CudaBackend's is, so alternating models under KEEP_MODELS correctly force a recapture.</summary>
+    /// <summary>Owner token for the single step-graph slot (see IBackend.StepGraphOwner) — shared across models the way CudaBackend's is, so alternating models under KEEP_MODELS correctly force a recapture.</summary>
     public object? StepGraphOwner { get; set; }
 
     public void StepGraphBegin()
@@ -1986,10 +1917,7 @@ public sealed class VulkanBackend : IBackend
         _xfer.ReleaseStepGraphRetained();
     }
 
-    /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common
-    /// case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses —
-    /// for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile
-    /// can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
+    /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
         int headDim = (int)query.Shape[query.Shape.Rank - 1];
@@ -2002,6 +1930,23 @@ public sealed class VulkanBackend : IBackend
         AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
     }
 
+    /// <summary>Query rows the additive mask stores; 1 means it depends only on the key.</summary>
+    private static long MaskQueryRows(Tensor mask)
+        => mask.Shape.Rank switch { 2 => mask.Shape[0], 3 => mask.Shape[1], _ => mask.Shape[2] };
+
+    /// <summary>Materializes the <c>[blocks·Sq, Skv]</c> duplicate of a key-only mask row, which is the layout the mask_add dispatch indexes.</summary>
+    private static unsafe Tensor ExpandKeyOnlyMask(Tensor mask, long sq, long skv)
+    {
+        long blocks = mask.ElementCount / skv;
+        Tensor full = new Tensor(new TensorShape(blocks * sq, skv), DType.F32);
+        float* src = (float*)mask.DataPointer, dst = (float*)full.DataPointer;
+        for (long blk = 0; blk < blocks; blk++)
+            for (long q = 0; q < sq; q++)
+                Buffer.MemoryCopy(src + blk * skv, dst + (blk * sq + q) * skv, skv * 4, skv * 4);
+        return full;
+    }
+
+    /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head. FlashAttention-style fusion is a Phase-4 optimization.</summary>
     private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         if (query.Shape.Rank != 4)
@@ -2119,37 +2064,7 @@ public sealed class VulkanBackend : IBackend
                 }
             }
 
-            // Cast result back to output dtype if needed (should match if model uses consistent dtype).
-            if (output.DType == dtype)
-            {
-                CacheOutput(output, outBufLocal);
-            }
-            else
-            {
-                // Cast outBufLocal (dtype) to output.DType
-                ulong outBytesFinal = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-                VulkanBuffer finalBuf = _xfer.AllocateDevice(outBytesFinal);
-                try
-                {
-                    string shader;
-                    if (dtype == DType.F16 && output.DType == DType.F32) shader = "cast_f16_f32";
-                    else if (dtype == DType.F32 && output.DType == DType.F16) shader = "cast_f32_f16";
-                    else throw new NotSupportedException($"SDPA dtype mismatch {dtype.Name}->{output.DType.Name}");
-
-                    VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
-                    Span<byte> pc = stackalloc byte[4]; BinaryWriteUInt(pc, 0, (uint)output.ElementCount);
-                    Span<ulong> bufs = stackalloc ulong[] { outBufLocal.Handle, finalBuf.Handle };
-                    Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
-                    CacheOutput(output, finalBuf);
-                }
-                catch (Exception ex)
-                {
-                    Logs.Error("Vulkan SDPA output-dtype cast dispatch failed", ex);
-                    finalBuf.Dispose();
-                    throw;
-                }
-                _xfer.FreeDevice(outBufLocal);
-            }
+            CacheOutputCastingFrom(output, outBufLocal, dtype, "SDPA");
         }
         catch (Exception ex)
         {
@@ -2416,11 +2331,7 @@ public sealed class VulkanBackend : IBackend
     public void Clamp(Tensor output, Tensor input, float min, float max)
         => DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
 
-    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override
-    /// existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via
-    /// a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>,
-    /// called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT
-    /// block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>, called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
     public void AddScalar(Tensor output, Tensor input, float scalar) => DispatchElementwise(10u, output, input, null, scalar, minVal: 0, maxVal: 0);
 
     private void DispatchElementwise(uint op, Tensor output, Tensor a, Tensor? b, float scalar, float minVal, float maxVal)
@@ -2579,15 +2490,7 @@ public sealed class VulkanBackend : IBackend
 
     #region Shape ops
 
-    /// <summary>CPU fallback for concat — dtypes/strides handling is non-trivial, and concat is rare on hot paths.</summary>
-    /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region
-    /// when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at
-    /// the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure
-    /// data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real
-    /// <c>HARTSY_DIT_GRAPH=1</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the
-    /// text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which
-    /// is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode).
-    /// Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
+    /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode). Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
         long elemSize = output.DType.SizeInBytes;
@@ -3026,15 +2929,7 @@ public sealed class VulkanBackend : IBackend
         Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, hostByteCount, hostByteCount);
     }
 
-    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos +
-    /// (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors
-    /// <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a
-    /// GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it
-    /// from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan
-    /// generation (not just step-graph mode — this call happens once per denoise step regardless), and the
-    /// exact bug that broke step-graph capture (found via a genuine `HARTSY_DIT_GRAPH=1` Krea2 run: capture
-    /// failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it
-    /// uncached by the time the next capture attempt read it).</summary>
+    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos + (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan generation (not just step-graph mode — this call happens once per denoise step regardless), and the exact bug that broke step-graph capture (found via a genuine `HARTSY_DIT_GRAPH=1` Krea2 run: capture failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it uncached by the time the next capture attempt read it).</summary>
     public unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         using OpScope _op = EnterOp();
@@ -3060,11 +2955,7 @@ public sealed class VulkanBackend : IBackend
         _xfer.FreeDevice(negBuf);
     }
 
-    /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph
-    /// boundary refresh; mirrors <c>CudaBackend.CopyInto</c>). First call materializes a device buffer for dst;
-    /// subsequent calls reuse it. Host src is uploaded; device src is device-to-device copied. Capture-aware:
-    /// <c>Krea2Transformer.ForwardPatched</c> issues this as the graph's LAST captured op (the velocity-output
-    /// boundary write), so it must record onto the capture buffer exactly like a kernel dispatch when capturing.</summary>
+    /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph boundary refresh; mirrors <c>CudaBackend.CopyInto</c>). First call materializes a device buffer for dst; subsequent calls reuse it. Host src is uploaded; device src is device-to-device copied. Capture-aware: <c>Krea2Transformer.ForwardPatched</c> issues this as the graph's LAST captured op (the velocity-output boundary write), so it must record onto the capture buffer exactly like a kernel dispatch when capturing.</summary>
     public unsafe void CopyInto(Tensor dst, Tensor src)
     {
         if (_capturingStepGraph)
@@ -3149,15 +3040,6 @@ public sealed class VulkanBackend : IBackend
             CacheOutput(output, cast);
             return;
         }
-
-        // CPU fallback for paths the Vulkan kernel suite doesn't yet cover.
-        if (input.DType == DType.F32 && output.DType == DType.F16)
-        {
-            float* src = (float*)input.DataPointer;
-            Half* dst = (Half*)output.DataPointer;
-            for (long i = 0; i < input.ElementCount; i++) dst[i] = (Half)src[i];
-            return;
-        }
         throw new NotSupportedException($"VulkanBackend.CastToF16: {input.DType.Name} -> F16 not implemented.");
     }
 
@@ -3205,22 +3087,13 @@ public sealed class VulkanBackend : IBackend
     // FlashAttentionDev/KvCacheAppendDev/ArgMaxInto every step by hand, at greatly reduced D2H sync count
     // vs. the eager ApplyRope/KvCacheAppend/host-argmax path, even before a graph wraps them.
 
-    /// <summary>Settable, default OFF: several real production call sites (Qwen35Model, GenericTransformer,
-    /// SsmGenerationPipeline, CsmModel, MusicGenDecoder) gate straight onto the graph-decode path the
-    /// instant this is true, with no separate opt-in of their own. Flip only after a real end-to-end
-    /// decode-loop parity test (not just the per-op unit tests below) confirms this device-buffer path
-    /// matches the eager path on a real model — matching the same staged-rollout discipline used for
-    /// <see cref="EnableInt8Linear"/>, and for the same reason: a capability flag this many callers trust
-    /// unconditionally must not flip on unit-level confidence alone.</summary>
+    /// <summary>Settable, default OFF: several real production call sites (Qwen35Model, GenericTransformer, SsmGenerationPipeline, CsmModel, MusicGenDecoder) gate straight onto the graph-decode path the instant this is true, with no separate opt-in of their own. Flip only after a real end-to-end decode-loop parity test (not just the per-op unit tests below) confirms this device-buffer path matches the eager path on a real model — matching the same staged-rollout discipline used for <see cref="EnableInt8Linear"/>, and for the same reason: a capability flag this many callers trust unconditionally must not flip on unit-level confidence alone.</summary>
     public bool GraphDecodeSupported { get; set; }
 
-    /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/>
-    /// (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning
-    /// buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
+    /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/> (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
     private readonly Dictionary<ulong, VulkanBuffer> _scalarBuffers = new();
 
-    /// <summary>Capacity (element count) of each <see cref="AllocDeviceHistory"/> buffer, since
-    /// <see cref="AppendTokenHistoryStep"/>'s IBackend signature carries only the handle, not the size.</summary>
+    /// <summary>Capacity (element count) of each <see cref="AllocDeviceHistory"/> buffer, since <see cref="AppendTokenHistoryStep"/>'s IBackend signature carries only the handle, not the size.</summary>
     private readonly Dictionary<ulong, int> _historyCapacity = new();
 
     private ulong AllocScalarBuffer(int elementCount)
@@ -3240,8 +3113,7 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    /// <summary>Writes <paramref name="values"/> into a scalar control buffer outside any capture region —
-    /// the "refresh fixed-address contents between replays" half of the decode-graph design.</summary>
+    /// <summary>Writes <paramref name="values"/> into a scalar control buffer outside any capture region — the "refresh fixed-address contents between replays" half of the decode-graph design.</summary>
     /// <remarks>MUST sync first: <see cref="Dispatch"/> batches multiple dispatches into one command
     /// buffer, submitted only at <c>FlushThreshold</c> or on an explicit sync — a dispatch that reads this
     /// buffer may still be sitting unsubmitted when this is called. Without waiting for it to actually
@@ -3265,9 +3137,7 @@ public sealed class VulkanBackend : IBackend
         _xfer.Upload(buf, scratch);
     }
 
-    /// <summary>D2H sync read of a 1-int scalar control buffer — the one blocking readback a decode step
-    /// needs (to hand the sampled token back to CPU orchestration code), waiting on exactly the work
-    /// queued so far rather than the whole stream's backlog.</summary>
+    /// <summary>D2H sync read of a 1-int scalar control buffer — the one blocking readback a decode step needs (to hand the sampled token back to CPU orchestration code), waiting on exactly the work queued so far rather than the whole stream's backlog.</summary>
     private unsafe int ReadScalarBufferInt(ulong handle)
     {
         if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf))
@@ -3532,16 +3402,7 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
-    /// <summary>Self-attention whose kvLen/qOffset come from the device position buffer — the
-    /// <c>FlashAttentionDev</c> counterpart to <see cref="KvCacheAppendDev"/>. Same scope boundary as
-    /// <see cref="FlashAttention"/> (head dim &lt;= <see cref="FlashMaxHeadDim"/>, no softcap/sink/ALiBi,
-    /// no mask — <c>FlashAttentionDev</c>'s signature has none) — anything outside that falls back to the
-    /// IBackend default, which forwards the CALLER's placeholder <paramref name="kvLen"/>/
-    /// <paramref name="qOffset"/> host ints straight to <see cref="FlashAttention"/>. That default is ONLY
-    /// correct when those placeholders happen to be right for the eager (non-graph) case; real graph-decode
-    /// callers pass 0s expecting devicePos to be authoritative, so anything reaching that fallback with
-    /// devicePos-dependent placeholders would be silently wrong — scoped narrowly here specifically so it
-    /// doesn't reach that default in the cases graph decode actually exercises.</summary>
+    /// <summary>Self-attention whose kvLen/qOffset come from the device position buffer — the <c>FlashAttentionDev</c> counterpart to <see cref="KvCacheAppendDev"/>. Same scope boundary as <see cref="FlashAttention"/> (head dim &lt;= <see cref="FlashMaxHeadDim"/>, no softcap/sink/ALiBi, no mask — <c>FlashAttentionDev</c>'s signature has none) — anything outside that falls back to the IBackend default, which forwards the CALLER's placeholder <paramref name="kvLen"/>/<paramref name="qOffset"/> host ints straight to <see cref="FlashAttention"/>. That default is ONLY correct when those placeholders happen to be right for the eager (non-graph) case; real graph-decode callers pass 0s expecting devicePos to be authoritative, so anything reaching that fallback with devicePos-dependent placeholders would be silently wrong — scoped narrowly here specifically so it doesn't reach that default in the cases graph decode actually exercises.</summary>
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {

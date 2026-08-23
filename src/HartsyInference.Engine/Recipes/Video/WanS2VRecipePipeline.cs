@@ -18,11 +18,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Wan2.2-S2V pipeline driven against the native <see cref="VideoRequest"/>: the driving speech
-/// comes from <see cref="VideoRequest.VideoAudioReference"/> (falling back to <see cref="VideoRequest.VideoAudioInput"/>),
-/// is Wav2Vec2-encoded to stacked layer features, resampled from 50 Hz to the clip's 16 fps buckets, and injected
-/// per-frame; an optional identity portrait in <see cref="VideoRequest.InitImage"/> becomes appended reference tokens.
-/// Mirrors the SwarmUI backend's <c>WanS2VLoader.Generate</c>.</summary>
+/// <summary>A constructed Wan2.2-S2V pipeline driven against the native <see cref="VideoRequest"/>: the driving speech comes from <see cref="VideoRequest.VideoAudioReference"/> (falling back to <see cref="VideoRequest.VideoAudioInput"/>), is Wav2Vec2-encoded to stacked layer features, resampled from 50 Hz to the clip's 16 fps buckets, and injected per-frame; an optional identity portrait in <see cref="VideoRequest.InitImage"/> becomes appended reference tokens. Mirrors the SwarmUI backend's <c>WanS2VLoader.Generate</c>.</summary>
 public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
 {
     /// <summary>ComfyUI's Wan sampling shift — <c>WAN22_S2V</c> inherits <c>WAN21_T2V</c>'s sampling settings.</summary>
@@ -77,15 +73,8 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         Tensor? audioLayers = null;
         Tensor? resampled = null;

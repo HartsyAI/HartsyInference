@@ -81,7 +81,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
     /// latent at <c>DecodeNoiseScale</c> and decodes at <c>DecodeTimestep</c>.</summary>
     private Tensor DecodeLatent(Tensor latent, int seed)
     {
-        // LOAD-BEARING for VaeDevice: `latent` reaches here via UnpackLatents (a host loop off the stepped token
+        // LOAD-BEARING for VaeDevice: `latent` reaches here via UnpackVideoLatents (a host loop off the stepped token
         // buffer), so it's already host-current — a VaeBackend on another device just uploads from there.
         VaeBackend.PreloadWeights(_vae.EnumerateWeights());
         if (!_config.VaeTimestepConditioned)
@@ -165,7 +165,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         long frame0Bytes = (long)frame0Tokens * _latentChannels * 4;
         if (firstFrameLatent is not null)
         {
-            packedFirstFrame = PackLatents(firstFrameLatent, 1, hLat, wLat, _latentChannels);   // [hLat*wLat, C]
+            packedFirstFrame = LtxVideo2Pipeline.PackVideoLatents(firstFrameLatent, _latentChannels);   // [hLat*wLat, C]
             Buffer.MemoryCopy((float*)packedFirstFrame.DataPointer, (float*)latents.DataPointer, frame0Bytes, frame0Bytes);
 
             conditioningMask = new Tensor(new TensorShape(s), DType.F32);
@@ -256,7 +256,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
                 // The working latent is token-packed [S, C]; hand preview encoders an NCHW
                 // middle-frame slice instead (small copy: h·w·128 floats). Owned here, disposed
                 // after the callback returns — encoders must not retain it.
-                Tensor previewFrame = ExtractMiddleFrame(stepLatent, tLat, hLat, wLat, _latentChannels);
+                Tensor previewFrame = LtxVideo2Pipeline.ExtractMiddleFrame(stepLatent, tLat, hLat, wLat, _latentChannels);
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
                     Latent = previewFrame,
@@ -279,68 +279,11 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
 
         // Unpack from the working latent (the transformer-owned fixed buffer on the graph path); dispose only the
         // original noise tensor — the fixed buffer persists for the next generation (freed in the transformer).
-        Tensor vaeLatent = UnpackLatents(stepLatent, tLat, hLat, wLat, _latentChannels);   // [1,C,T_lat,H_lat,W_lat]
+        Tensor vaeLatent = LtxVideo2Pipeline.UnpackVideoLatents(stepLatent, tLat, hLat, wLat, _latentChannels);   // [1,C,T_lat,H_lat,W_lat]
         latents.Dispose();
         packedFirstFrame?.Dispose();
         conditioningMask?.Dispose();
         return vaeLatent;
-    }
-
-    /// <summary>Extracts the middle latent frame from packed tokens <c>[S, C]</c> (f,h,w order,
-    /// channel-last) as an NCHW <c>[1, C, H, W]</c> tensor for latent2rgb previews. Caller owns the result.</summary>
-    private static Tensor ExtractMiddleFrame(Tensor tokens, int t, int h, int w, int channels)
-    {
-        Tensor outT = new Tensor(new TensorShape([1L, channels, h, w]), DType.F32);
-        float* sp = (float*)tokens.DataPointer;
-        float* dp = (float*)outT.DataPointer;
-        long frameBase = (long)(t / 2) * h * w;
-        for (int hi = 0; hi < h; hi++)
-            for (int wi = 0; wi < w; wi++)
-            {
-                long token = frameBase + (long)hi * w + wi;
-                long pix = (long)hi * w + wi;
-                for (int c = 0; c < channels; c++)
-                    dp[(long)c * h * w + pix] = sp[token * channels + c];
-            }
-        return outT;
-    }
-
-    /// <summary>Packs <c>[1, C, T, H, W]</c> → tokens <c>[T·H·W, C]</c> (f,h,w order, channel-last) — the inverse of
-    /// <see cref="UnpackLatents"/>. Used to fold a VAE-encoded conditioning latent (Tier 3.4 I2V) into the same
-    /// token layout the transformer works in.</summary>
-    private static Tensor PackLatents(Tensor latent, int t, int h, int w, int channels)
-    {
-        Tensor outT = new Tensor(new TensorShape((long)t * h * w, channels), DType.F32);
-        float* sp = (float*)latent.DataPointer;
-        float* dp = (float*)outT.DataPointer;
-        long spatial = (long)t * h * w;
-        for (int ti = 0; ti < t; ti++)
-            for (int hi = 0; hi < h; hi++)
-                for (int wi = 0; wi < w; wi++)
-                {
-                    long token = ((long)ti * h + hi) * w + wi;
-                    for (int c = 0; c < channels; c++)
-                        dp[token * channels + c] = sp[(long)c * spatial + token];
-                }
-        return outT;
-    }
-
-    /// <summary>Unpacks tokens <c>[S, C]</c> (f,h,w order, channel-last) → <c>[1, C, T, H, W]</c> (inverse of the patch-1 pack).</summary>
-    private static Tensor UnpackLatents(Tensor tokens, int t, int h, int w, int channels)
-    {
-        Tensor outT = new Tensor(new TensorShape([1L, channels, t, h, w]), DType.F32);
-        float* sp = (float*)tokens.DataPointer;
-        float* dp = (float*)outT.DataPointer;
-        long spatial = (long)t * h * w;
-        for (int ti = 0; ti < t; ti++)
-            for (int hi = 0; hi < h; hi++)
-                for (int wi = 0; wi < w; wi++)
-                {
-                    long token = ((long)ti * h + hi) * w + wi;
-                    for (int c = 0; c < channels; c++)
-                        dp[(long)c * spatial + token] = sp[token * channels + c];
-                }
-        return outT;
     }
 
     private static byte[] FrameToBytes(Tensor rgb, int frameIndex) => VideoRgbFrames.ExtractFrame(rgb, frameIndex);

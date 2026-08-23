@@ -16,13 +16,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>LTX-2.3 recipe (Lightricks, 22B audiovisual; SwarmUI compat class <c>lightricks-ltx-video-2</c>). The
-/// bundled single-file/sharded checkpoint carries the dual-stream DiT, the per-modality text connectors, the video
-/// VAE, the audio VAE, the vocoder, and — when present — the Gemma-3-12B text tower; a SPLIT LTX-2.3 model ships the
-/// DiT alone and the video VAE (<see cref="SideModels.Ltx23VideoVae"/>), audio VAE
-/// (<see cref="SideModels.Ltx23AudioVae"/>), and text projection (<see cref="SideModels.Ltx23TextProjection"/>) are
-/// resolved as side models, with the standalone Gemma tower (<see cref="SideModels.GemmaLtx2"/>) when the checkpoint
-/// omits it. Lifted from the SwarmUI backend's <c>LtxVideo2Loader</c>.</summary>
+/// <summary>LTX-2.3 recipe (Lightricks, 22B audiovisual; SwarmUI compat class <c>lightricks-ltx-video-2</c>). The bundled single-file/sharded checkpoint carries the dual-stream DiT, the per-modality text connectors, the video VAE, the audio VAE, the vocoder, and — when present — the Gemma-3-12B text tower; a SPLIT LTX-2.3 model ships the DiT alone and the video VAE (<see cref="SideModels.Ltx23VideoVae"/>), audio VAE (<see cref="SideModels.Ltx23AudioVae"/>), and text projection (<see cref="SideModels.Ltx23TextProjection"/>) are resolved as side models, with the standalone Gemma tower (<see cref="SideModels.GemmaLtx2"/>) when the checkpoint omits it. Lifted from the SwarmUI backend's <c>LtxVideo2Loader</c>.</summary>
 public sealed class LtxVideo2Recipe : IVideoRecipe
 {
     /// <summary>Gemma context length fed to the connectors (padded to a register multiple inside the pipeline).</summary>
@@ -37,9 +31,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Constructs the recipe for the dev/base LTX-2 families.</summary>
     public LtxVideo2Recipe() : this(distilled: false) { }
 
-    /// <summary>Constructs the recipe. <paramref name="distilled"/> selects the 2.5 distilled sampling contract,
-    /// which cannot be detected from a checkpoint — the dev and distilled 2.5 transformers share a model version,
-    /// architecture config and tensor keys, so the choice has to arrive as user intent via the model id.</summary>
+    /// <summary>Constructs the recipe. <paramref name="distilled"/> selects the 2.5 distilled sampling contract, which cannot be detected from a checkpoint — the dev and distilled 2.5 transformers share a model version, architecture config and tensor keys, so the choice has to arrive as user intent via the model id.</summary>
     public LtxVideo2Recipe(bool distilled)
     {
         _distilled = distilled;
@@ -68,10 +60,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         ? string.Equals(familyId, LtxVideo2DistilledRouting.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
         : LtxVideo2DistilledRouting.IsDevFamilyId(familyId);
 
-    /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks
-    /// ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile
-    /// from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The
-    /// distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
+    /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
     public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
 
     /// <inheritdoc/>
@@ -293,10 +282,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         }
     }
 
-    /// <summary>The distilled sampling contract over a DETECTED architecture config. The 8-step base schedule is
-    /// shared by every 2.x distilled template, but two-stage stays 2.5-only: distilled builds exist for older
-    /// generations too (2.0's templates ship a 0.909375-head refine; a 2.3 distilled LoRA is documented), and the
-    /// x2 upsampler is a 2.5 model — running it on 2.3 latents is unverified numerics.</summary>
+    /// <summary>The distilled sampling contract over a DETECTED architecture config. The 8-step base schedule is shared by every 2.x distilled template, but two-stage stays 2.5-only: distilled builds exist for older generations too (2.0's templates ship a 0.909375-head refine; a 2.3 distilled LoRA is documented), and the x2 upsampler is a 2.5 model — running it on 2.3 latents is unverified numerics.</summary>
     internal static LtxVideo2Config ApplyDistilledContract(LtxVideo2Config detected) => detected with
     {
         FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
@@ -305,12 +291,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         TwoStage = detected.UseKeyframesAbsPosEmbedding && LtxVideo2Config.V25Distilled.TwoStage,
     };
 
-    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow
-    /// is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries
-    /// <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in
-    /// probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration,
-    /// so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped
-    /// name is resolved under <c>Models/latent_upscale_models/</c> (auto-downloaded when absent).</summary>
+    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration, so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c> (auto-downloaded when absent).</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!EnvSwitch.IsEnabled("HARTSY_LTX2_TWO_STAGE", defaultOn: config.TwoStage))
@@ -358,8 +339,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         return upsampler;
     }
 
-    /// <summary>Any safetensors under the upsampler folder whose name looks like a latent upscaler — the shipped
-    /// file carries a version suffix that a future release will bump.</summary>
+    /// <summary>Any safetensors under the upsampler folder whose name looks like a latent upscaler — the shipped file carries a version suffix that a future release will bump.</summary>
     private static string? FindAnyLatentUpsampler()
     {
         string dir = Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir);
@@ -415,8 +395,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         throw new FileNotFoundException($"LTX-2 file not found: {path}");
     }
 
-    /// <summary>Reads the per-channel latent normalization stats from a converted VAE bucket, trying the original
-    /// Lightricks names first and the diffusers names second; nulls mean "no denormalization".</summary>
+    /// <summary>Reads the per-channel latent normalization stats from a converted VAE bucket, trying the original Lightricks names first and the diffusers names second; nulls mean "no denormalization".</summary>
     private static (float[]? Mean, float[]? Std) ReadStats(Dictionary<string, Tensor> vae, int channels)
     {
         Tensor? mean = Find(vae, "per_channel_statistics.mean-of-means", "latents_mean");
@@ -455,8 +434,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         return result;
     }
 
-    /// <summary>Builds the Gemma 4 tokenizer from the <c>tokenizer_json</c> U8 tensor LTX-2.5 embeds in its text
-    /// encoder — a ~32 MB HuggingFace <c>tokenizer.json</c> with no side file anywhere to fall back to.</summary>
+    /// <summary>Builds the Gemma 4 tokenizer from the <c>tokenizer_json</c> U8 tensor LTX-2.5 embeds in its text encoder — a ~32 MB HuggingFace <c>tokenizer.json</c> with no side file anywhere to fall back to.</summary>
     private static unsafe Gemma4Tokenizer ReadGemma4Tokenizer(Tensor tokenizerJson)
     {
         if (tokenizerJson.DType != DType.U8)
@@ -468,8 +446,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             new ReadOnlySpan<byte>(tokenizerJson.DataPointer, (int)tokenizerJson.ElementCount));
     }
 
-    /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower —
-    /// Gemma ships no embedded tokenizer in the engine.</summary>
+    /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower — Gemma ships no embedded tokenizer in the engine.</summary>
     private static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
     {
         List<string> dirs = new List<string>();

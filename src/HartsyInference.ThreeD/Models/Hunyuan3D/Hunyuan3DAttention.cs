@@ -3,15 +3,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Multi-head attention helper shared by the Hunyuan3D DiT (self + cross) and ShapeVAE decoder
-/// (cross). Wraps the head reshape + <see cref="IBackend.ScaledDotProductAttention"/> + merge so query and
-/// key/value can have different sequence lengths (required for cross-attention to image/latent tokens).</summary>
+/// <summary>Multi-head attention helper shared by the Hunyuan3D DiT and ShapeVAE decoder, wrapping head reshape + <see cref="IBackend.ScaledDotProductAttention"/> + merge with independent query/key-value sequence lengths.</summary>
 internal static unsafe class Hunyuan3DAttention
 {
-    /// <summary>Attends queries <paramref name="q"/> <c>[1,Sq,D]</c> over keys/values <paramref name="k"/>,
-    /// <paramref name="v"/> <c>[1,Sk,D]</c> with <paramref name="numHeads"/> heads. Returns <c>[1,Sq,D]</c>.
-    /// Head split/merge are device <see cref="IBackend.Permute0213"/> (the reshape is implicit in its s/h/d
-    /// args — no host round-trip). cuDNN fused SDPA is opt-in via <c>HARTSY_SDPA_NO_F16</c> kill-switch.</summary>
+    /// <summary>Attends queries <paramref name="q"/> <c>[1,Sq,D]</c> over keys/values <paramref name="k"/>, <paramref name="v"/> <c>[1,Sk,D]</c> with <paramref name="numHeads"/> heads, returning <c>[1,Sq,D]</c>.</summary>
     public static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int numHeads)
     {
         int sq = (int)q.Shape[1], d = (int)q.Shape[2], sk = (int)k.Shape[1];

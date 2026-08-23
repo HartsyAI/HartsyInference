@@ -3,15 +3,13 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>Configuration for HeartMuLa (HeartMuLa-oss-3B) music/song generation. Architecturally it is the
-/// **CSM/Sesame two-transformer pattern** applied to music: a Llama-3B global backbone predicts codebook 0, a
-/// Llama-300M depth decoder predicts the remaining RVQ codebooks (8 total, vocab 8197), conditioned on Llama
-/// lyrics tokens + a MuQ-MuLan style embedding, decoded by the HeartCodec (48 kHz / 12.5 Hz, flow-matching
-/// decoder). See <c>docs/Research/HEARTMULA_ARCHITECTURE.md</c>.
-///
-/// <para><b>Reuse:</b> the LM is the already-built+verified <see cref="CsmModel"/> (dual <see cref="Qwen2Model"/>
-/// + codebook heads) — HeartMuLa just supplies the music config. HeartCodec (flow-matching codec) + MuQ
-/// embedder are net-new (the codec reuses <c>ConditionalCfm</c>).</para></summary>
+/// <summary>Configuration for HeartMuLa (HeartMuLa-oss-3B) music/song generation — the CSM/Sesame two-transformer pattern applied to music. See <c>docs/Research/HEARTMULA_ARCHITECTURE.md</c>.</summary>
+// A Llama-3B global backbone predicts codebook 0, a Llama-300M depth decoder predicts the remaining RVQ
+// codebooks (8 total, vocab 8197), conditioned on Llama lyrics tokens + a MuQ-MuLan style embedding,
+// decoded by the HeartCodec (48 kHz / 12.5 Hz, flow-matching decoder).
+// Reuse: the LM is the already-built+verified CsmModel (dual Qwen2Model + codebook heads) — HeartMuLa
+// just supplies the music config. HeartCodec (flow-matching codec) + MuQ embedder are net-new (the codec
+// reuses ConditionalCfm).
 public sealed record HeartMulaConfig
 {
     /// <summary>The CSM-shaped LM config (global Llama-3B backbone + Llama-300M depth decoder, 8 codebooks).</summary>
@@ -62,8 +60,7 @@ public sealed record HeartMulaConfig
     public float Temperature { get; init; } = 1.0f;
     public int TopK { get; init; } = 50;
     public float TopP { get; init; } = 1.0f;
-    /// <summary>Classifier-free guidance scale (upstream <c>cfg_scale</c> = 1.5). Applied by re-running the
-    /// backbone+depth decoder on an unconditional context (no lyrics/style) and blending logits; 1.0 disables it.</summary>
+    /// <summary>Classifier-free guidance scale (upstream <c>cfg_scale</c> = 1.5); applied by re-running the backbone+depth decoder on an unconditional context (no lyrics/style) and blending logits, 1.0 disables it.</summary>
     public float CfgScale { get; init; } = 1.5f;
 
     // ── HeartCodec (HeartCodec-oss): 48 kHz, 12.5 Hz, 8-codebook RVQ ──

@@ -4,9 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>The CosyVoice 2 flow-matching token encoder
-/// (<c>cosyvoice/transformer/upsample_encoder.py:UpsampleConformerEncoder</c>), reimplemented to match the
-/// real checkpoint exactly. Pipeline: <c>embed</c> (Linear → LayerNorm → ×√d scale, plus a relative-position
+/// <summary>The CosyVoice 2 flow-matching token encoder (<c>cosyvoice/transformer/upsample_encoder.py:UpsampleConformerEncoder</c>), reimplemented to match the real checkpoint exactly.</summary>
+/// <remarks>Pipeline: <c>embed</c> (Linear → LayerNorm → ×√d scale, plus a relative-position
 /// table) → <c>pre_lookahead_layer</c> (two causal-ish convs + residual) → 6 relative-position Transformer
 /// blocks → <c>up_layer</c> (<see cref="Upsample1D"/>: nearest ×2 + left-pad + conv) → <c>up_embed</c>
 /// (Linear → LayerNorm → ×√d) → 4 relative-position Transformer blocks → <c>after_norm</c>. Output feeds
@@ -15,7 +14,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// <para><b>Block</b> (ESPnet <c>ConformerEncoderLayer</c> with <c>macaron_style=False</c>,
 /// <c>use_cnn_module=False</c>): <c>x += RelPosMHSA(norm_mha(x)); x += FFN(norm_ff(x))</c>. Sub-layer norms
 /// use eps 1e-12; the encoder-level <c>after_norm</c> and the embed LayerNorms use eps 1e-5. Attention is
-/// Transformer-XL relative position (linear_pos + pos_bias_u/v + rel_shift), NOT plain dot-product.</para></summary>
+/// Transformer-XL relative position (linear_pos + pos_bias_u/v + rel_shift), NOT plain dot-product.</para></remarks>
 public sealed unsafe class UpsampleConformerEncoder : IDisposable
 {
     public const int TokenMelRatio = 2;
@@ -86,8 +85,7 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
     // RelPosBlock rel-pos attention (scores/softmax/bias) all use host `(float*)DataPointer` loops, which force
     // device→host syncs on CUDA and break GPU residency. Port these to PTX kernels / backend ops for a fully
     // on-device flow encoder.
-    /// <summary>Forwards embedded speech tokens <c>[1, T, inputSize]</c> → upsampled features
-    /// <c>[1, T·<see cref="TokenMelRatio"/>, outputSize]</c>.</summary>
+    /// <summary>Forwards embedded speech tokens <c>[1, T, inputSize]</c> → upsampled features <c>[1, T·<see cref="TokenMelRatio"/>, outputSize]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor tokenEmb, int inputSize)
     {
         if (_embLinW is null) throw new InvalidOperationException("UpsampleConformerEncoder weights not loaded.");
@@ -143,8 +141,7 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
         return normed;
     }
 
-    /// <summary>PreLookaheadLayer: transpose → right-pad(k1-1) → conv1 → LeakyReLU → left-pad(k2-1) → conv2 →
-    /// transpose, added to the input residual. All on a channels-first <c>[1, C, T]</c> view.</summary>
+    /// <summary>PreLookaheadLayer: transpose → right-pad(k1-1) → conv1 → LeakyReLU → left-pad(k2-1) → conv2 → transpose, added to the input residual. All on a channels-first <c>[1, C, T]</c> view.</summary>
     private Tensor PreLookahead(IBackend backend, Tensor seq, int t)
     {
         int c = _outputSize;
@@ -177,8 +174,7 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
         return outSeq;
     }
 
-    /// <summary>Upsample1D: nearest-neighbour ×ratio upsample, left-pad by ratio·2, then conv (kernel k,
-    /// stride 1, no pad) → exactly ratio·T frames. Channels-last in/out.</summary>
+    /// <summary>Upsample1D: nearest-neighbour ×ratio upsample, left-pad by ratio·2, then conv (kernel k, stride 1, no pad) → exactly ratio·T frames. Channels-last in/out.</summary>
     private Tensor Upsample(IBackend backend, Tensor seq, int t)
     {
         int c = _outputSize;
@@ -217,9 +213,7 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
         return outSeq;
     }
 
-    /// <summary>Builds the ESPnet relative-position table <c>[1, 2T-1, outputSize]</c>: index 0 is relative
-    /// position +(T-1), descending through 0 to -(T-1). Even dims sin, odd dims cos, with the standard
-    /// 1/10000^(2k/d) frequencies.</summary>
+    /// <summary>Builds the ESPnet relative-position table <c>[1, 2T-1, outputSize]</c>: index 0 is relative position +(T-1), descending through 0 to -(T-1). Even dims sin, odd dims cos, with the standard 1/10000^(2k/d) frequencies.</summary>
     private Tensor BuildRelPos(int t)
     {
         int d = _outputSize;
@@ -265,9 +259,7 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
     }
 }
 
-/// <summary>One CosyVoice 2 relative-position Transformer encoder block (ESPnet ConformerEncoderLayer with no
-/// macaron FFN and no conv module): <c>x += RelPosMHSA(norm_mha(x), pos); x += FFN(norm_ff(x))</c>. Sub-layer
-/// LayerNorms use eps 1e-12. The FFN is <c>Linear → SiLU → Linear</c> with scale 1.0.</summary>
+/// <summary>One CosyVoice 2 relative-position Transformer encoder block (ESPnet ConformerEncoderLayer with no macaron FFN and no conv module): <c>x += RelPosMHSA(norm_mha(x), pos); x += FFN(norm_ff(x))</c>. Sub-layer LayerNorms use eps 1e-12. The FFN is <c>Linear → SiLU → Linear</c> with scale 1.0.</summary>
 internal sealed unsafe class RelPosBlock
 {
     private const float NormEps = 1e-12f;
@@ -327,9 +319,7 @@ internal sealed unsafe class RelPosBlock
         return x;
     }
 
-    /// <summary>Transformer-XL relative-position multi-head attention (ESPnet
-    /// RelPositionMultiHeadedAttention): per head, <c>scores = ((q+u)·kᵀ + rel_shift((q+v)·pᵀ)) / √d</c>,
-    /// softmax, then <c>·v</c>. <paramref name="posEmb"/> is <c>[1, 2T-1, C]</c>.</summary>
+    /// <summary>Transformer-XL relative-position multi-head attention (ESPnet RelPositionMultiHeadedAttention): per head, <c>scores = ((q+u)·kᵀ + rel_shift((q+v)·pᵀ)) / √d</c>, softmax, then <c>·v</c>. <paramref name="posEmb"/> is <c>[1, 2T-1, C]</c>.</summary>
     private Tensor RelPosAttention(IBackend backend, Tensor x, Tensor posEmb, int t, int c)
     {
         int h = _numHeads, d = _headDim, posLen = 2 * t - 1;

@@ -3,20 +3,13 @@ using Microsoft.ML.Tokenizers;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Spark-TTS prompt tokenizer. Spark's LM is a Qwen2.5-0.5B whose base byte-level BPE vocab
-/// (151,643 entries shipped as the checkpoint's <c>vocab.json</c> + <c>merges.txt</c>) is extended with
-/// ~13.5k atomic control/audio tokens listed in <c>added_tokens.json</c> (<c>&lt;|task_tts|&gt;</c>,
-/// <c>&lt;|bicodec_global_0|&gt;</c>, <c>&lt;|gender_0|&gt;</c>, …). This class composes the shared
-/// <see cref="BpeTokenizer"/> + <see cref="ByteLevelCodec"/> (the same byte-level path validated for
-/// Qwen3) and only adds the Spark-specific pieces: the added-token map and the <c>&lt;|…|&gt;</c> split.
-/// Added tokens are matched atomically (never BPE-merged); the text between them is byte-level BPE'd.</summary>
+/// <summary>Spark-TTS prompt tokenizer. Spark's LM is a Qwen2.5-0.5B whose base byte-level BPE vocab (151,643 entries shipped as the checkpoint's <c>vocab.json</c> + <c>merges.txt</c>) is extended with ~13.5k atomic control/audio tokens listed in <c>added_tokens.json</c> (<c>&lt;|task_tts|&gt;</c>, <c>&lt;|bicodec_global_0|&gt;</c>, <c>&lt;|gender_0|&gt;</c>, …). This class composes the shared <see cref="BpeTokenizer"/> + <see cref="ByteLevelCodec"/> (the same byte-level path validated for Qwen3) and only adds the Spark-specific pieces: the added-token map and the <c>&lt;|…|&gt;</c> split. Added tokens are matched atomically (never BPE-merged); the text between them is byte-level BPE'd.</summary>
 public sealed class SparkTtsTokenizer
 {
     private readonly Tokenizer _bpe;
     private readonly IReadOnlyDictionary<string, int> _added;
 
-    /// <summary>Builds from the Spark <c>LLM/</c> directory files: <c>vocab.json</c>, <c>merges.txt</c>,
-    /// <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map).</summary>
+    /// <summary>Builds from the Spark <c>LLM/</c> directory files: <c>vocab.json</c>, <c>merges.txt</c>, <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map).</summary>
     public SparkTtsTokenizer(string vocabPath, string mergesPath, string addedTokensPath)
     {
         using FileStream vocab = File.OpenRead(vocabPath);
@@ -35,9 +28,7 @@ public sealed class SparkTtsTokenizer
         Path.Combine(llmDir, "vocab.json"), Path.Combine(llmDir, "merges.txt"),
         Path.Combine(llmDir, "added_tokens.json"));
 
-    /// <summary>Encodes a prompt that may interleave plain text with atomic <c>&lt;|…|&gt;</c> added tokens.
-    /// Added tokens map to their ids; runs of plain text are GPT-2 byte-level BPE'd (so leading spaces map to
-    /// <c>Ġ</c> exactly, via <see cref="ByteLevelCodec"/>).</summary>
+    /// <summary>Encodes a prompt that may interleave plain text with atomic <c>&lt;|…|&gt;</c> added tokens. Added tokens map to their ids; runs of plain text are GPT-2 byte-level BPE'd (so leading spaces map to <c>Ġ</c> exactly, via <see cref="ByteLevelCodec"/>).</summary>
     public int[] Encode(string text)
     {
         List<int> ids = new(text.Length / 2 + 8);

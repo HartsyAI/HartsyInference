@@ -65,13 +65,13 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         try
         {
             (Dictionary<string, Tensor> transformerW, SafeTensorsLoader transformerL) =
-                LoadComponent(context.CheckpointPath, StripTransformerPrefix, applyFp8Dequant: true);
+                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
             loaders.Add(transformerL);
 
             // TODO(E-IMG-4): the reference-image edit path also loads the Qwen3-VL vision tower (visual.* keys) and
             // wires a Qwen3VlMultimodalEncoder. Text-to-image only here, so the language tower alone is loaded.
             (Dictionary<string, Tensor> teW, SafeTensorsLoader teL) =
-                LoadComponent(tePath, RemapQwenLanguageKey, applyFp8Dequant: true);
+                ComponentLoader.Load(tePath, "BooguImageRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teL);
 
             // The auto-downloaded flux_ae.safetensors ships BFL-native LDM keys; ConvertVaeKey remaps LDM → diffusers
@@ -111,79 +111,5 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Loads one safetensors component, routing every key through <paramref name="keyTransform"/> (null drops the key) and optionally folding fp8 scale companions.</summary>
-    private static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-            {
-                if (kvp.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kvp.Key == "scaled_fp8")
-                {
-                    continue;
-                }
-                string? mapped = keyTransform(kvp.Key);
-                if (mapped is not null)
-                {
-                    merged[mapped] = kvp.Value;
-                }
-            }
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[BooguImageRecipe] Failed to load component '{filePath}'.", ex);
-            loader.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Strips the Comfy/diffusers transformer prefixes from a Boogu DiT key.</summary>
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["model.diffusion_model.".Length..];
-        }
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["diffusion_model.".Length..];
-        }
-        if (key.StartsWith("transformer.", StringComparison.Ordinal))
-        {
-            return key["transformer.".Length..];
-        }
-        return key;
-    }
-
-    /// <summary>Maps a Qwen3-VL language-tower key to the <see cref="LlamaStyleEncoder"/> convention, or null to drop it (vision tower, <c>lm_head</c>).</summary>
-    private static string? RemapQwenLanguageKey(string key)
-    {
-        if (key.Contains(".visual.") || key.StartsWith("visual.", StringComparison.Ordinal))
-        {
-            return null;
-        }
-        if (key.Contains("lm_head"))
-        {
-            return null;
-        }
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal))
-        {
-            suffix = suffix["model.".Length..];
-        }
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
-        {
-            return "model." + suffix;
-        }
-        return null;
     }
 }

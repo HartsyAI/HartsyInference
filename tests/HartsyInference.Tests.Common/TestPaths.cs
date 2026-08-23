@@ -166,6 +166,8 @@ public static class TestPaths
         public static string Umt5XxlSpiece => Tokenizers.Umt5XxlSpiece;
         /// <summary>Optional Wan LoRA applied by the generation test when present (kohya/musubi, Comfy diffusion_model, or diffusers-PEFT format).</summary>
         public static string LoraPath      => Resolve("WAN_LORA_PATH",        Path.Combine(ModelsDir, "Lora", "wan_lora.safetensors"));
+        /// <summary>The lightx2v I2V-14B step-distill LoRA — the real-world Comfy repack carrying full-weight .diff/.diff_b entries. Override with WAN_LIGHTX2V_LORA_PATH.</summary>
+        public static string Lightx2vLora  => Resolve("WAN_LIGHTX2V_LORA_PATH", Path.Combine(ModelsDir, "Lora", "Wan", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"));
     }
 
     /// <summary>LTX-Video paths. The single file bundles DiT + VAE (original naming — <c>LtxVideoCheckpointConverter</c>

@@ -4,22 +4,11 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>The Llama-3.2-Vision (mllama) vision tower + projector, loaded from a <c>mmproj-*.gguf</c>. Unlike the
-/// SigLIP/CLIP VLMs, mllama does not splice image tokens into the text sequence; this encoder produces
-/// <c>cross_attention_states</c> <c>[numTiles·seqLen, textHidden]</c> that the gated cross-attention decoder
-/// layers (<see cref="MllamaCrossAttentionLayer"/>) read.
-///
-/// <para>Architecture (560px tiles, patch 14 → 1600+1 CLS = 1601 tokens, hidden 1280, 16 heads, 32 local + 8 gated
-/// global blocks): patch Conv → +pre-tile aspect embed → +CLS → +gated (base position + tile position) → pre-LN →
-/// 32 local ViT blocks (collecting the intermediate layers <c>[3,7,15,23,30]</c>) → post-LN → +post-tile aspect
-/// embed → 8 gated global blocks → concat(global, 5 intermediates) = 6·1280 = 7680 → <c>mm.0</c> Linear → 4096.</para>
-///
-/// <para><b>Gates are pre-tanh'd in the GGUF</b> (Ollama's converter applies <c>tanh()</c> at conversion, and
-/// <c>1-tanh</c> for <c>position_embd.gate</c>), so the forward multiplies by the stored gate value directly — no
-/// tanh at inference. The MLP names are clip-swapped (<c>ffn_down</c> is fc1/up, <c>ffn_up</c> is fc2/down). The
-/// converter's q/k weight permute is a no-op here (no RoPE in the vision tower), so q/k load as-is. Single-tile
-/// (aspect-ratio (1,1), id 1) covers square inputs and the synthetic harness; HF's multiple-of-8 padding is a
-/// masked-out no-op for the real tokens and is skipped.</para></summary>
+/// <summary>The Llama-3.2-Vision (mllama) vision tower + projector, loaded from a <c>mmproj-*.gguf</c>; unlike the SigLIP/CLIP VLMs, mllama does not splice image tokens into the text sequence — this encoder produces <c>cross_attention_states</c> that the gated cross-attention decoder layers (<see cref="MllamaCrossAttentionLayer"/>) read.</summary>
+/// <remarks>
+/// <para>Architecture (560px tiles, patch 14 → 1600+1 CLS = 1601 tokens, hidden 1280, 16 heads, 32 local + 8 gated global blocks): patch Conv → +pre-tile aspect embed → +CLS → +gated (base position + tile position) → pre-LN → 32 local ViT blocks (collecting the intermediate layers <c>[3,7,15,23,30]</c>) → post-LN → +post-tile aspect embed → 8 gated global blocks → concat(global, 5 intermediates) = 6·1280 = 7680 → <c>mm.0</c> Linear → 4096.</para>
+/// <para><b>Gates are pre-tanh'd in the GGUF</b> (Ollama's converter applies <c>tanh()</c> at conversion, and <c>1-tanh</c> for <c>position_embd.gate</c>), so the forward multiplies by the stored gate value directly — no tanh at inference. The MLP names are clip-swapped (<c>ffn_down</c> is fc1/up, <c>ffn_up</c> is fc2/down). The converter's q/k weight permute is a no-op here (no RoPE in the vision tower), so q/k load as-is. Single-tile (aspect-ratio (1,1), id 1) covers square inputs and the synthetic harness; HF's multiple-of-8 padding is a masked-out no-op for the real tokens and is skipped.</para>
+/// </remarks>
 public sealed unsafe class MllamaVisionEncoder : IDisposable
 {
     public int Hidden { get; }
@@ -54,15 +43,6 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
         IntermediateLayers = interIdx;
     }
 
-    /// <summary>Relabels a 2D GGUF weight from engine shape <c>[in, out]</c> to <c>[out, in]</c> for
-    /// <see cref="IBackend.Linear"/> (data is already row-major <c>[out, in]</c> — shape relabel only).</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor o = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)o.DataPointer, o.ElementCount * 4, t.ElementCount * 4);
-        return o;
-    }
-
     public static MllamaVisionEncoder Load(string mmprojPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(mmprojPath, DType.F32);
@@ -75,7 +55,7 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
                 if (key.Contains("position_embd") || key.Contains("patch_embd")) continue;
                 if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_out")
                     || key.Contains("ffn_up") || key.Contains("ffn_down") || key == "mm.0.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int hidden = (int)m.GetUInt32("mllama.vision.embedding_length");
@@ -94,8 +74,7 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
         catch { foreach (Tensor t in w.Values) t.Dispose(); handle.Dispose(); throw; }
     }
 
-    /// <summary>Encodes a preprocessed image <c>[1, 3, 560, 560]</c> into cross-attention states
-    /// <c>[1, SeqLen, ProjectionDim]</c> (single tile).</summary>
+    /// <summary>Encodes a preprocessed image <c>[1, 3, 560, 560]</c> into cross-attention states <c>[1, SeqLen, ProjectionDim]</c> (single tile).</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
         int hidden = Hidden, grid = PatchGrid, np = grid * grid, seq = SeqLen, heads = NumHeads, d = HeadDim;

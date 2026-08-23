@@ -5,10 +5,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
-/// <summary>An <see cref="IChatTemplate"/> driven by a model's own Jinja <c>chat_template</c> (from GGUF
-/// metadata / <c>tokenizer_config.json</c>), rendered by <see cref="JinjaEngine"/>. This is how non-Qwen models
-/// (Llama-3, Mistral, Phi, Gemma, DeepSeek) get their correct prompt format instead of a hardcoded one. The
-/// rendered string is tokenized special-token-aware so control-token literals map to their ids.</summary>
+/// <summary>Drives an <see cref="IChatTemplate"/> from a model's own Jinja <c>chat_template</c> (GGUF metadata / <c>tokenizer_config.json</c>) via <see cref="JinjaEngine"/>, giving non-Qwen models (Llama-3, Mistral, Phi, Gemma, DeepSeek) their correct prompt format instead of a hardcoded one.</summary>
 public sealed class JinjaChatTemplate : IChatTemplate
 {
     private readonly JinjaEngine _engine;
@@ -59,10 +56,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
         return tokenizer.Encode(rendered, addSpecial: true);
     }
 
-    /// <summary>Renders the conversation through the model's Jinja template. <paramref name="enableThinking"/> is
-    /// only added to the context when set — an unset value leaves <c>enable_thinking</c> undefined so
-    /// <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of
-    /// being forced off.</summary>
+    /// <summary>Renders the conversation through the model's Jinja template; an unset <paramref name="enableThinking"/> leaves <c>enable_thinking</c> undefined so <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of being forced off.</summary>
     private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking)
     {
         List<object?> msgList = new(messages.Count);
@@ -83,10 +77,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
         return _engine.Render(context);
     }
 
-    /// <summary>Rewrites a conversation into the shape a system-less, strictly-alternating template accepts:
-    /// system content folded into the first user turn, and consecutive same-role turns merged. Idempotent on
-    /// already-valid conversations is not guaranteed (it always merges), but the result always alternates
-    /// user/assistant starting with user.</summary>
+    /// <summary>Rewrites a conversation into the shape a system-less, strictly-alternating template accepts: system content folded into the first user turn, consecutive same-role turns merged (always merges, even if already valid).</summary>
     private static List<ChatMessage> NormalizeForStrictTemplate(IReadOnlyList<ChatMessage> messages)
     {
         // Pull system content aside (preserving order) and keep the rest.

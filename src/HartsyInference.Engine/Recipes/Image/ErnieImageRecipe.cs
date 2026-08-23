@@ -58,10 +58,10 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> transformerWeights = LoadShardedComponent(context.CheckpointPath, applyFp8Dequant: true, loaders);
 
             Logs.Info($"[ErnieImageRecipe] Loading Ministral-3-3B text encoder: {Path.GetFileName(tePath)}.");
-            Dictionary<string, Tensor> teWeights = LoadComponent(tePath, applyFp8Dequant: true, loaders);
+            Dictionary<string, Tensor> teWeights = ComponentLoader.Load(tePath, "ErnieImageRecipe", keyTransform: null, applyFp8Dequant: true, loaders);
 
             Logs.Info($"[ErnieImageRecipe] Loading Flux.2 VAE: {Path.GetFileName(vaePath)}.");
-            Dictionary<string, Tensor> vaeWeights = LoadComponent(vaePath, applyFp8Dequant: false, loaders);
+            Dictionary<string, Tensor> vaeWeights = ComponentLoader.Load(vaePath, "ErnieImageRecipe", keyTransform: null, applyFp8Dequant: false, loaders);
 
             ErnieImageConfig config = ErnieImageConfig.V1;
 
@@ -146,24 +146,6 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
                 }
                 merged[kv.Key] = kv.Value;
             }
-        }
-        return applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged;
-    }
-
-    /// <summary>Loads one component from a single safetensors file with no key remapping (ERNIE's converter is folder-layout-only, and each component here is its own resolved side-model file): drops fp8 <c>scaled_fp8</c> markers and optionally folds <c>*.scale_weight</c> companions.</summary>
-    private static Dictionary<string, Tensor> LoadComponent(string filePath, bool applyFp8Dequant, List<SafeTensorsLoader> loaders)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        loaders.Add(loader);
-        Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-        foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
-        {
-            if (kv.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kv.Key == "scaled_fp8")
-            {
-                continue;
-            }
-            merged[kv.Key] = kv.Value;
         }
         return applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged;
     }

@@ -5,21 +5,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
 
-/// <summary>F5-TTS text embedding: token IDs → 512-dim text features.
-///
-/// <para>Pipeline:
-/// <list type="number">
-///   <item>Token embedding lookup (vocab+1 → text_dim, ID 0 reserved as filler).</item>
-///   <item>Sinusoidal positional embedding added in-place (precomputed table of shape
-///         <c>[max_pos, text_dim]</c> with format <c>cat([cos_half], [sin_half])</c>).</item>
-///   <item>4× ConvNeXt-V2 blocks at <c>text_dim=512</c> with <c>intermediate=1024</c>,
-///         <see cref="F5Ops.Grn"/> instead of layer-scale.</item>
-/// </list></para>
-///
-/// <para>Per the upstream impl, the filler/padding positions (the text is shorter than the mel length, so
-/// the tail is padded) are masked to zero before AND after every ConvNeXt block, so the depthwise conv never
-/// leaks across the text→filler boundary. This masking is required for parity — text is essentially always
-/// shorter than the audio.</para></summary>
+/// <summary>F5-TTS text embedding: token IDs → 512-dim text features via embedding lookup, sinusoidal positional embedding, then 4x ConvNeXt-V2 blocks (<see cref="F5Ops.Grn"/> instead of layer-scale).</summary>
+// Per the upstream impl, the filler/padding positions (the text is shorter than the mel length, so the
+// tail is padded) are masked to zero before AND after every ConvNeXt block, so the depthwise conv never
+// leaks across the text→filler boundary. This masking is required for parity — text is essentially
+// always shorter than the audio.
 internal sealed unsafe class F5TextEmbedding
 {
     private readonly F5TtsConfig _cfg;
@@ -47,10 +37,7 @@ internal sealed unsafe class F5TextEmbedding
         _freqsCis = BuildFreqsCis(_cfg.TextDim, _cfg.TextMaxPos, theta: 10_000f);
     }
 
-    /// <summary>Forward: token IDs <c>[1, T_text]</c>, target sequence length <c>seq_len</c>
-    /// (= audio mel frame count). Returns text features <c>[1, seq_len, text_dim]</c> —
-    /// the text is padded/truncated to <paramref name="seqLen"/> with the filler token (ID 0)
-    /// for positions beyond the input text length.</summary>
+    /// <summary>Returns text features <c>[1, seqLen, text_dim]</c>; <paramref name="seqLen"/> is the target audio mel frame count, and the text is padded/truncated to it with the filler token (ID 0) for positions beyond the input text length.</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> textIds, int seqLen, bool dropText = false)
     {
         if (_embedWeight is null || _freqsCis is null)
@@ -112,9 +99,7 @@ internal sealed unsafe class F5TextEmbedding
         }
     }
 
-    /// <summary>Computes the same sinusoidal table that <c>precompute_freqs_cis</c> returns
-    /// in the upstream Python code: <c>[end, dim]</c> with the first half cosines and the
-    /// second half sines, all using <c>theta=10000</c> per the F5-TTS default.</summary>
+    /// <summary>Computes the same sinusoidal table that <c>precompute_freqs_cis</c> returns in the upstream Python code: <c>[end, dim]</c> with the first half cosines and the second half sines.</summary>
     private static Tensor BuildFreqsCis(int dim, int end, float theta)
     {
         int half = dim / 2;
@@ -146,10 +131,7 @@ internal sealed unsafe class F5TextEmbedding
     }
 }
 
-/// <summary>F5-TTS ConvNeXt-V2 block. Same shape as the original ConvNeXt block but
-/// with GRN (Global Response Normalization) in place of layer scale + no skip mod.
-/// All operations channels-last <c>[B, T, dim]</c> except the depthwise conv which
-/// transposes to channels-first <c>[B, dim, T]</c>.</summary>
+/// <summary>F5-TTS ConvNeXt-V2 block: same shape as the original ConvNeXt block but with GRN in place of layer scale and no skip mod; all operations are channels-last <c>[B, T, dim]</c> except the depthwise conv, which transposes to channels-first.</summary>
 internal sealed unsafe class F5ConvNeXtV2Block
 {
     private readonly int _dim;
@@ -227,8 +209,7 @@ internal sealed unsafe class F5ConvNeXtV2Block
         return outX;
     }
 
-    /// <summary>Depthwise Conv1D (groups=channels). Each output channel reads only from
-    /// the same-indexed input channel; weight shape is <c>[channels, 1, kernel]</c>.</summary>
+    /// <summary>Depthwise Conv1D (groups=channels): each output channel reads only from the same-indexed input channel; weight shape is <c>[channels, 1, kernel]</c>.</summary>
     private static void DepthwiseConv1D(Tensor output, Tensor input, Tensor weight, Tensor bias, int channels, int t, int kernel, int pad)
     {
         float* o = (float*)output.DataPointer;

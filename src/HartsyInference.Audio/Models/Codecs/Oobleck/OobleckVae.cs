@@ -4,8 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Oobleck waveform VAE (Stability AI's Stable-Audio autoencoder; diffusers
-/// <c>AutoencoderOobleck</c>). Continuous 64-d latents at <c>sample_rate / hop</c> Hz ↔ stereo PCM.
+/// <summary>Oobleck waveform VAE (Stability AI's Stable-Audio autoencoder; diffusers <c>AutoencoderOobleck</c>) — continuous 64-d latents at <c>sample_rate / hop</c> Hz ↔ stereo PCM.</summary>
+/// <remarks>
 /// Consumers: ACE-Step 1.5 (48 kHz, 25 Hz latents — <see cref="OobleckConfig.AceStep15"/>),
 /// Stable Audio Open, and LTX-2's audio track.
 ///
@@ -13,7 +13,7 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// weight-normed convs as <c>weight_g</c>/<c>weight_v</c> fused at load, logscale snake params
 /// exponentiated at load). Decode-only checkpoints (no <c>encoder.*</c> keys) are accepted —
 /// <see cref="EncodeMode"/> then throws. <b>Numerics are validation-pending vs the Python
-/// reference</b> (no weights in this environment); structure and shapes are CPU-tested.</para></summary>
+/// reference</b> (no weights in this environment); structure and shapes are CPU-tested.</para></remarks>
 public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
 {
     private readonly OobleckConfig _config;
@@ -41,8 +41,7 @@ public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
     /// <summary>PCM channel count (1 = mono, 2 = stereo).</summary>
     public int AudioChannels => _config.AudioChannels;
 
-    /// <summary>Loads decoder (always) and encoder (when its keys are present) from a
-    /// diffusers-layout weight dict.</summary>
+    /// <summary>Loads decoder (always) and encoder (when its keys are present) from a diffusers-layout weight dict.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _decoder.LoadWeights(w);
@@ -53,9 +52,7 @@ public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
         }
     }
 
-    /// <summary>Decodes latents <c>[B, latent_dim, T]</c> → PCM <c>[B, audio_channels, T · hop]</c>
-    /// in (approximately) <c>[-1, 1]</c> — the decoder has no output tanh, so callers should clamp
-    /// when converting to integer sample formats.</summary>
+    /// <summary>Decodes latents <c>[B, latent_dim, T]</c> → PCM <c>[B, audio_channels, T · hop]</c> in (approximately) <c>[-1, 1]</c> — the decoder has no output tanh, so callers should clamp when converting to integer sample formats.</summary>
     public Tensor Decode(IBackend backend, Tensor latent)
     {
         if (latent.Shape.Rank != 3 || (int)latent.Shape[1] != _config.DecoderInputChannels)
@@ -64,9 +61,7 @@ public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
         return _decoder.Forward(backend, latent, (int)latent.Shape[0], (int)latent.Shape[2]);
     }
 
-    /// <summary>Encodes PCM <c>[B, audio_channels, T]</c> (T a multiple of <see cref="HopLength"/>)
-    /// to the deterministic latent mean <c>[B, latent_dim, T / hop]</c> — diffusers'
-    /// <c>latent_dist.mode()</c>, the convention ACE-Step and Stable Audio use for conditioning.</summary>
+    /// <summary>Encodes PCM <c>[B, audio_channels, T]</c> (T a multiple of <see cref="HopLength"/>) to the deterministic latent mean <c>[B, latent_dim, T / hop]</c> — diffusers' <c>latent_dist.mode()</c>, the convention ACE-Step and Stable Audio use for conditioning.</summary>
     public unsafe Tensor EncodeMode(IBackend backend, Tensor pcm)
     {
         if (_encoder is null)

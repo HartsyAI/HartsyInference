@@ -4,21 +4,14 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>The gated cross-attention decoder layer of Llama-3.2-Vision (mllama) — the one genuinely new core
-/// primitive the model adds over the verified Llama text decoder. Unlike every other VLM in the engine, mllama
-/// does NOT splice image tokens into the sequence; it injects vision features through cross-attention layers
-/// interleaved in the text decoder (layers <c>[3,8,13,18,23,28,33,38]</c> for 11B). Each such layer is:
-///
+/// <summary>The gated cross-attention decoder layer of Llama-3.2-Vision (mllama), interleaved into the text decoder at layers <c>[3,8,13,18,23,28,33,38]</c> (11B) instead of splicing image tokens into the sequence like every other VLM here.</summary>
+/// <remarks>
 /// <code>
 ///   h = text + tanh(attn_gate) · o_proj( cross_attn( q=q_norm(q_proj(rms(text))), k=k_norm(k_proj(vision)), v=v_proj(vision) ) )
 ///   out = h    + tanh(mlp_gate)  · mlp( rms(h) )
 /// </code>
-///
-/// The query comes from the text hidden states; the keys/values from the (fixed) vision features, so the attention
-/// is bidirectional over all vision tokens (no causal mask). Q/K are RMSNorm-ed per head. Two learned scalar gates
-/// (<c>cross_attn_attn_gate</c>, <c>cross_attn_mlp_gate</c>) are passed through <c>tanh</c>; both are ≈0 at init so
-/// a freshly-initialized layer is a no-op (a strong correctness signal). All math runs through <see cref="IBackend"/>;
-/// the attention reuses the decoder's GQA FlashAttention with <c>causal:false</c>.</summary>
+/// The query comes from the text hidden states; the keys/values from the (fixed) vision features, so the attention is bidirectional over all vision tokens (no causal mask). Q/K are RMSNorm-ed per head. Two learned scalar gates (<c>cross_attn_attn_gate</c>, <c>cross_attn_mlp_gate</c>) are passed through <c>tanh</c>; both are ≈0 at init so a freshly-initialized layer is a no-op (a strong correctness signal). All math runs through <see cref="IBackend"/>; the attention reuses the decoder's GQA FlashAttention with <c>causal:false</c>.
+/// </remarks>
 public sealed unsafe class MllamaCrossAttentionLayer
 {
     private readonly int _hidden, _numHeads, _numKvHeads, _headDim, _inter;
@@ -54,8 +47,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
         _mlpGate = Scalar(w[$"{prefix}.cross_attn_mlp_gate"]);
     }
 
-    /// <summary>Cross-attention + gated FFN. <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query),
-    /// <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features). Returns <c>[1, t, hidden]</c>.</summary>
+    /// <summary>Cross-attention + gated FFN: <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query), <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features); returns <c>[1, t, hidden]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen)
     {
         int hq = _numHeads, hkv = _numKvHeads, d = _headDim, group = hq / hkv;

@@ -7,8 +7,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Voice-conversion service: decodes the source (and optional target) at the descriptor's input rate and
-/// runs the conversion on the shared audio device under the generation lock.</summary>
+/// <summary>Voice-conversion service: decodes the source (and optional target) at the descriptor's input rate and runs the conversion on the shared audio device under the generation lock.</summary>
 public sealed class VoiceConversionService : IVoiceConversionService
 {
     private readonly InferenceEngine _engine;

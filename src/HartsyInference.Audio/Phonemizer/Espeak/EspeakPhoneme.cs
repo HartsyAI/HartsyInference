@@ -1,9 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>One phoneme-table entry, a 16-byte record in espeak-ng's compiled <c>phontab</c> file (mirrors
-/// <c>PHONEME_TAB</c> in <c>phoneme.h</c>). Holds the data the text path needs: the up-to-4-char mnemonic, the
-/// phoneme type/flags used for stress placement, and the internal code byte that dictionary phoneme strings
-/// reference.</summary>
+/// <summary>One phoneme-table entry, a 16-byte record in espeak-ng's compiled <c>phontab</c> file (mirrors <c>PHONEME_TAB</c> in <c>phoneme.h</c>); holds the data the text path needs: the up-to-4-char mnemonic, the phoneme type/flags used for stress placement, and the internal code byte that dictionary phoneme strings reference.</summary>
 internal readonly struct EspeakPhoneme
 {
     /// <summary>Up to four characters packed little-endian (first char in the least-significant byte).</summary>

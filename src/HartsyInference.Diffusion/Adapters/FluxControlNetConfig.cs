@@ -3,14 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Adapters;
 
-/// <summary>Configuration for Flux DiT ControlNets (diffusers <c>FluxControlNetModel</c>). The adapter is a
-/// reduced copy of the base FluxTransformer — its own <c>x_embedder</c> / <c>context_embedder</c> /
-/// <c>time_text_embed</c> plus <see cref="Depth"/> double-stream and <see cref="DepthSingleBlocks"/>
-/// single-stream blocks — with a zero-init <c>controlnet_x_embedder</c> that injects the packed VAE-encoded
-/// control image, and one zero-init output Linear per block producing the residuals the base transformer adds
-/// onto its image stream. Union checkpoints (InstantX Union / Shakker Union-Pro) carry an extra
-/// <c>controlnet_mode_embedder</c> whose <see cref="NumMode"/> rows select the conditioning type per request;
-/// Union-Pro-2.0 removed it (<see cref="NumMode"/> = null) and infers the mode from the control image alone.</summary>
+/// <summary>Configuration for Flux DiT ControlNets (diffusers <c>FluxControlNetModel</c>). The adapter is a reduced copy of the base FluxTransformer — its own <c>x_embedder</c> / <c>context_embedder</c> / <c>time_text_embed</c> plus <see cref="Depth"/> double-stream and <see cref="DepthSingleBlocks"/> single-stream blocks — with a zero-init <c>controlnet_x_embedder</c> that injects the packed VAE-encoded control image, and one zero-init output Linear per block producing the residuals the base transformer adds onto its image stream. Union checkpoints (InstantX Union / Shakker Union-Pro) carry an extra <c>controlnet_mode_embedder</c> whose <see cref="NumMode"/> rows select the conditioning type per request; Union-Pro-2.0 removed it (<see cref="NumMode"/> = null) and infers the mode from the control image alone.</summary>
 public sealed record FluxControlNetConfig
 {
     /// <summary>Transformer hidden dimension (3072 for Flux.1).</summary>
@@ -37,8 +30,7 @@ public sealed record FluxControlNetConfig
     /// <summary>Whether the checkpoint carries a guidance embedding MLP (true for FLUX.1-dev ControlNets).</summary>
     public bool GuidanceEmbed { get; init; } = true;
 
-    /// <summary>Union-mode embedding count (<c>controlnet_mode_embedder</c> rows), or null for single-mode /
-    /// mode-free checkpoints. InstantX Union uses 7 (canny/tile/depth/blur/pose/gray/lq).</summary>
+    /// <summary>Union-mode embedding count (<c>controlnet_mode_embedder</c> rows), or null for single-mode / mode-free checkpoints. InstantX Union uses 7 (canny/tile/depth/blur/pose/gray/lq).</summary>
     public int? NumMode { get; init; }
 
     /// <summary>RoPE axis dimensions; must sum to the head dim. Default [16, 56, 56] (Flux.1).</summary>
@@ -59,10 +51,7 @@ public sealed record FluxControlNetConfig
     /// <summary>True when this is a union checkpoint requiring a per-request control mode id.</summary>
     public bool IsUnion => NumMode is not null;
 
-    /// <summary>Derives the config from a diffusers-layout Flux ControlNet checkpoint header: block depths from
-    /// the <c>transformer_blocks.*</c> / <c>single_transformer_blocks.*</c> key ranges, union mode count from the
-    /// <c>controlnet_mode_embedder.weight</c> rows (absent on Union-Pro-2.0), guidance from
-    /// <c>time_text_embed.guidance_embedder.*</c> presence, and dims from the embedder weight shapes.</summary>
+    /// <summary>Derives the config from a diffusers-layout Flux ControlNet checkpoint header: block depths from the <c>transformer_blocks.*</c> / <c>single_transformer_blocks.*</c> key ranges, union mode count from the <c>controlnet_mode_embedder.weight</c> rows (absent on Union-Pro-2.0), guidance from <c>time_text_embed.guidance_embedder.*</c> presence, and dims from the embedder weight shapes.</summary>
     public static FluxControlNetConfig FromDescriptors(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
     {
         foreach (string key in descriptors.Keys)

@@ -2,8 +2,7 @@ using System.Runtime.CompilerServices;
 
 namespace HartsyInference.Core.Tensors;
 
-/// <summary>ComfyUI's <c>nvfp4</c> weight format read back on the HOST, for backends and layers that cannot consume
-/// a <see cref="DType.F4E2M1"/> weight packed.</summary>
+/// <summary>ComfyUI's <c>nvfp4</c> weight format read back on the HOST, for backends and layers that cannot consume a <see cref="DType.F4E2M1"/> weight packed.</summary>
 /// <remarks><para>Sibling of <see cref="Int8ConvRotCodec"/> and here for the same reason: a backend needs a dequant
 /// fallback for the layers its packed path refuses, and the backend packages reference only Core. The eager
 /// load-time dequant used by the checkpoint converters lives in <c>HartsyInference.ModelAssets.Nvfp4.Nvfp4Codec</c>
@@ -35,8 +34,7 @@ public static unsafe class Nvfp4ResidentCodec
     /// rather than a NaN encoding (<c>Tensor</c>'s float→E4M3 direction saturates NaN to that same byte).</remarks>
     public static readonly float[] E4M3Decode = BuildE4M3Decode();
 
-    /// <summary>Flat element index of the scale for a logical <c>(row, blockColumn)</c> inside the swizzled
-    /// <c>[paddedRows, paddedCols]</c> scale buffer.</summary>
+    /// <summary>Flat element index of the scale for a logical <c>(row, blockColumn)</c> inside the swizzled <c>[paddedRows, paddedCols]</c> scale buffer.</summary>
     /// <param name="paddedCols">The scale tensor's stored last-dim length (always a multiple of 4).</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static long SwizzledScaleIndex(long row, long blockColumn, long paddedCols)
@@ -52,10 +50,8 @@ public static unsafe class Nvfp4ResidentCodec
         return (g * 32 + b) * 16 + a * 4 + d;
     }
 
-    /// <summary>Dequantizes a packed <see cref="DType.F4E2M1"/> weight <c>[N, K]</c> into the BF16 <c>[N, K]</c>
-    /// layout <c>IBackend.Linear</c> consumes.</summary>
-    /// <param name="blockScale">F8-E4M3 swizzled block scales <c>[paddedRows, paddedCols]</c>; its
-    /// <see cref="Tensor.Fp8ScaleFactor"/> is part of the arithmetic and must not be dropped.</param>
+    /// <summary>Dequantizes a packed <see cref="DType.F4E2M1"/> weight <c>[N, K]</c> into the BF16 <c>[N, K]</c> layout <c>IBackend.Linear</c> consumes.</summary>
+    /// <param name="blockScale">F8-E4M3 swizzled block scales <c>[paddedRows, paddedCols]</c>; its <see cref="Tensor.Fp8ScaleFactor"/> is part of the arithmetic and must not be dropped.</param>
     /// <param name="globalScale">F32 scalar (a single-element tensor).</param>
     public static Tensor DequantToBf16(Tensor packed, Tensor blockScale, Tensor globalScale)
     {
@@ -85,8 +81,7 @@ public static unsafe class Nvfp4ResidentCodec
         return result;
     }
 
-    /// <summary>Row-major dequant, parallel over rows: packed reads and BF16 writes are both sequential and the
-    /// block scale is decoded once per 8 packed bytes.</summary>
+    /// <summary>Row-major dequant, parallel over rows: packed reads and BF16 writes are both sequential and the block scale is decoded once per 8 packed bytes.</summary>
     private static void DequantToBf16Core(byte* w, byte* bs, float scaleFactor, float global,
         long outDim, long inHalf, long paddedCols, ushort* dst)
     {
@@ -105,15 +100,12 @@ public static unsafe class Nvfp4ResidentCodec
                 if (k % bytesPerGroup == 0)
                     scale = e4m3[bs[SwizzledScaleIndex(r, k / bytesPerGroup, paddedCols)]] * scaleFactor * global;
                 byte packed = wr[k];
-                dr[2 * k] = ToBf16(lut[(packed >> 4) & 0x0F] * scale);   // high nibble = even element
-                dr[2 * k + 1] = ToBf16(lut[packed & 0x0F] * scale);      // low nibble = odd element
+                dr[2 * k] = TensorCasts.F32ToBf16Bits(lut[(packed >> 4) & 0x0F] * scale);   // high nibble = even element
+                dr[2 * k + 1] = TensorCasts.F32ToBf16Bits(lut[packed & 0x0F] * scale);      // low nibble = odd element
             }
         });
     }
 
-    /// <summary>Truncating F32→BF16, matching <see cref="Tensor.CastTo"/> bit for bit.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ushort ToBf16(float value) => (ushort)(BitConverter.SingleToUInt32Bits(value) >> 16);
 
     private static float[] BuildE4M3Decode()
     {

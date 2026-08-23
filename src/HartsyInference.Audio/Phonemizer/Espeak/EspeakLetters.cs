@@ -1,17 +1,13 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Per-language letter classification, ported from the default Latin setup in espeak-ng
-/// <c>NewTranslator</c> (tr_languages.c). The rule interpreter asks "is this letter a vowel / hard consonant / front
-/// vowel?" through <see cref="IsLetter"/>; espeak answers from a 256-entry bit table whose groups 0-7 correspond to
-/// the <c>A B C H F G Y</c> rule classes plus the include-y vowel set. English uses these defaults unchanged.</summary>
+/// <summary>Per-language letter classification, ported from the default Latin setup in espeak-ng <c>NewTranslator</c> (tr_languages.c); the rule interpreter asks "is this letter a vowel / hard consonant / front vowel?" through <see cref="IsLetter"/>, answered from a 256-entry bit table whose groups 0-7 correspond to the <c>A B C H F G Y</c> rule classes plus the include-y vowel set. English uses these defaults unchanged.</summary>
 internal sealed class EspeakLetters
 {
     private const int RemoveAccentBase = 0xc0;
 
     private readonly byte[] _letterBits = new byte[256];
 
-    /// <summary>Offset applied to letters before indexing <see cref="_letterBits"/> for non-Latin alphabets; 0 for
-    /// Latin/English so codepoints index the table directly.</summary>
+    /// <summary>Offset applied to letters before indexing <see cref="_letterBits"/> for non-Latin alphabets; 0 for Latin/English so codepoints index the table directly.</summary>
     public int LetterBitsOffset { get; }
 
     private EspeakLetters()
@@ -31,8 +27,7 @@ internal sealed class EspeakLetters
     /// <summary>The default Latin classification used by English and other Latin-script languages.</summary>
     public static EspeakLetters Latin() => new();
 
-    /// <summary>Port of <c>IsLetter</c>: returns true when <paramref name="letter"/> belongs to rule class
-    /// <paramref name="group"/> (0-7). Accented Latin letters fold to their base letter first.</summary>
+    /// <summary>Port of <c>IsLetter</c>: returns true when <paramref name="letter"/> belongs to rule class <paramref name="group"/> (0-7); accented Latin letters fold to their base letter first.</summary>
     public bool IsLetter(int letter, int group)
     {
         if (group > 7)

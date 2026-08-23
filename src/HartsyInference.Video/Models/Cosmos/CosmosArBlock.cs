@@ -80,9 +80,9 @@ public sealed unsafe class CosmosArBlock
         Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
         Tensor k = new(new TensorShape(1, t, hkv, d), DType.F32);
         Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
-        Project(backend,q, pre, _wq, null, lowVram: false);
-        Project(backend,k, pre, _wk, null, lowVram: false);
-        Project(backend,v, pre, _wv, null, lowVram: false);
+        Project(backend, q, pre, _wq, null);
+        Project(backend, k, pre, _wk, null);
+        Project(backend, v, pre, _wv, null);
         pre.Dispose();
 
         if (_cfg.QkNorm)
@@ -117,7 +117,7 @@ public sealed unsafe class CosmosArBlock
         backend.Permute0213(attnFlat, attn, hq, t, d);
         attn.Dispose();
         Tensor attnOut = new(flat, DType.F32);
-        Project(backend,attnOut, attnFlat, _wo, null, lowVram: false);
+        Project(backend, attnOut, attnFlat, _wo, null);
         attnFlat.Dispose();
 
         Tensor h = new(flat, DType.F32);
@@ -154,12 +154,12 @@ public sealed unsafe class CosmosArBlock
         backend.RmsNorm(pre, h, _crossNorm!, _cfg.NormEps);
 
         Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
-        Project(backend,q, pre, _cwq!, null, lowVram: false);
+        Project(backend, q, pre, _cwq!, null);
         pre.Dispose();
         Tensor k = new(new TensorShape(1, ctxLen, hkv, d), DType.F32);
-        Project(backend,k, context, _cwk!, null, lowVram: false);
+        Project(backend, k, context, _cwk!, null);
         Tensor v = new(new TensorShape(1, ctxLen, hkv, d), DType.F32);
-        Project(backend,v, context, _cwv!, null, lowVram: false);
+        Project(backend, v, context, _cwv!, null);
 
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, q, t, hq, d);
         Tensor kMh = new(new TensorShape(1, hkv, ctxLen, d), DType.F32); backend.Permute0213(kMh, k, ctxLen, hkv, d);
@@ -174,7 +174,7 @@ public sealed unsafe class CosmosArBlock
         backend.Permute0213(attnFlat, attn, hq, t, d);
         attn.Dispose();
         Tensor cout = new(flat, DType.F32);
-        Project(backend,cout, attnFlat, _cwo!, null, lowVram: false);
+        Project(backend, cout, attnFlat, _cwo!, null);
         attnFlat.Dispose();
         return cout;
     }
@@ -183,24 +183,24 @@ public sealed unsafe class CosmosArBlock
     {
         TensorShape ff = new(1, t, _cfg.FfnHiddenSize);
         Tensor gate = new(ff, DType.F32);
-        Project(backend,gate, x, _w1, null, lowVram: false);
+        Project(backend, gate, x, _w1, null);
         Tensor act = new(ff, DType.F32);
         backend.Silu(act, gate);
         gate.Dispose();
         Tensor up = new(ff, DType.F32);
-        Project(backend,up, x, _w3, null, lowVram: false);
+        Project(backend, up, x, _w3, null);
         Tensor comb = new(ff, DType.F32);
         backend.Mul(comb, act, up);
         act.Dispose(); up.Dispose();
         Tensor outp = new(new TensorShape(1, t, _cfg.Dim), DType.F32);
-        Project(backend,outp, comb, _w2, null, lowVram: false);
+        Project(backend, outp, comb, _w2, null);
         comb.Dispose();
         return outp;
     }
 
     // Float weights take the cuBLAS Linear path (quantized weights aren't used on this AR path). Mirrors the LLM
     // decoder's internal projection dispatch, which is assembly-internal and not reachable across the package edge.
-    private static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool lowVram)
+    private static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias)
         => backend.Linear(output, input, weight, bias);
 
     private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);

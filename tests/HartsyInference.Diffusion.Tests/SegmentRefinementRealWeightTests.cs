@@ -85,8 +85,9 @@ public sealed class SegmentRefinementRealWeightTests
         double diff = MeanAbsDiff(baseline.Rgb, refined.Rgb);
         _output.WriteLine($"Mean absolute per-byte difference (baseline vs segment-refined): {diff:F2}.");
 
-        string basePath = Path.Combine(RepoRoot.Path, "segment_refinement_baseline.rgb");
-        string refPath = Path.Combine(RepoRoot.Path, "segment_refinement_refined.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string basePath = Path.Combine(TestPaths.OutputDir, "segment_refinement_baseline.rgb");
+        string refPath = Path.Combine(TestPaths.OutputDir, "segment_refinement_refined.rgb");
         File.WriteAllBytes(basePath, baseline.Rgb);
         File.WriteAllBytes(refPath, refined.Rgb);
         _output.WriteLine($"Wrote {basePath} and {refPath} for visual inspection.");

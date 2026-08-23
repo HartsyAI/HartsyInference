@@ -28,10 +28,10 @@ public sealed class ReduxImageEncoder : IDisposable
             if (weights.TryGetValue("image_embedder." + name, out t)) return t;
             throw new HartsyInferenceException($"Redux checkpoint is missing tensor '{name}'.");
         }
-        _upWeight = EnsureF32(Get("redux_up.weight"));
-        _upBias = EnsureF32(Get("redux_up.bias"));
-        _downWeight = EnsureF32(Get("redux_down.weight"));
-        _downBias = EnsureF32(Get("redux_down.bias"));
+        _upWeight = TensorCasts.EnsureF32(Get("redux_up.weight"));
+        _upBias = TensorCasts.EnsureF32(Get("redux_up.bias"));
+        _downWeight = TensorCasts.EnsureF32(Get("redux_down.weight"));
+        _downBias = TensorCasts.EnsureF32(Get("redux_down.bias"));
         if (_upWeight.Shape[1] != ReduxDim || _downWeight.Shape[0] != TxtInFeatures)
         {
             throw new HartsyInferenceException(
@@ -65,8 +65,6 @@ public sealed class ReduxImageEncoder : IDisposable
         up.Dispose();
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     public void Dispose()
     {

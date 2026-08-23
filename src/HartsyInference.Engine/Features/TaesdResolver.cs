@@ -4,10 +4,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Lazy-loads and process-wide-caches the per-architecture TAESD preview decoders. The first call for an
-/// architecture downloads the weights and mmaps them; later calls are dictionary lookups. The mmap-backed tensors are
-/// read-only, so one decoder instance is safe to share across concurrent generations. Returns null for architectures
-/// with no published TAESD checkpoint (Flux.2's 32-channel latent, AuraFlow, F-Lite) — callers fall back to latent2rgb.</summary>
+/// <summary>Lazy-loads and process-wide-caches the per-architecture TAESD preview decoders. The first call for an architecture downloads the weights and mmaps them; later calls are dictionary lookups. The mmap-backed tensors are read-only, so one decoder instance is safe to share across concurrent generations. Returns null for architectures with no published TAESD checkpoint (Flux.2's 32-channel latent, AuraFlow, F-Lite) — callers fall back to latent2rgb.</summary>
 public static class TaesdResolver
 {
     /// <summary>One slot per arch; lazy so toggling previews on doesn't download every checkpoint, only the one in use.</summary>
@@ -16,9 +13,7 @@ public static class TaesdResolver
     /// <summary>Serializes the download+load so two concurrent generations on the same arch don't both fetch the file.</summary>
     private static readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
 
-    /// <summary>Returns a TAESD decoder for <paramref name="arch"/>, downloading + loading on first call, or null when no
-    /// published checkpoint exists (caller falls back to <see cref="LatentPreview"/>). A failed download or corrupt file
-    /// also yields null rather than breaking generation.</summary>
+    /// <summary>Returns a TAESD decoder for <paramref name="arch"/>, downloading + loading on first call, or null when no published checkpoint exists (caller falls back to <see cref="LatentPreview"/>). A failed download or corrupt file also yields null rather than breaking generation.</summary>
     public static async Task<TaesdDecoder?> ResolveAsync(LatentArchitecture arch, Action<string> log, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(log);

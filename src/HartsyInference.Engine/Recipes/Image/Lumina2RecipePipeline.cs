@@ -34,9 +34,9 @@ public sealed class Lumina2RecipePipeline : IRecipePipeline
     private string? _cachedNegPrompt;
     private Tensor? _cachedNegEmbeds;
 
-    /// <summary>Wraps the constructed Lumina-2 pipeline plus its text encoder + tokenizer, taking ownership of every disposable. The backend is retained because the caption encode runs outside the pipeline.</summary>
     private readonly MergedLoraStack? _loraStack;
 
+    /// <summary>Wraps the constructed Lumina-2 pipeline plus its text encoder + tokenizer, taking ownership of every disposable. The backend is retained because the caption encode runs outside the pipeline.</summary>
     public Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend backend, LlamaStyleEncoder textEncoder, GemmaTokenizer tokenizer, Lumina2Transformer transformer, string systemPrompt, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;

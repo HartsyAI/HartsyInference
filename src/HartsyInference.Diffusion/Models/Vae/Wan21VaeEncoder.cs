@@ -58,7 +58,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         int[] dims = BuildDims();
-        _convIn = new CausalConv3d(w["encoder.conv1.weight"], Bias(w, "encoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
+        _convIn = new CausalConv3d(w["encoder.conv1.weight"], VaeOps.Bias(w, "encoder.conv1.bias"), padT: 1, padH: 1, padW: 1);
 
         int numStages = _dimMult.Length;
         int flat = 0;
@@ -95,8 +95,8 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
 
         _headNorm = new WanRmsNorm(headDim);
         _headNorm.LoadWeights(w["encoder.head.0.gamma"]);
-        _headConv = new CausalConv3d(w["encoder.head.2.weight"], Bias(w, "encoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
-        _quantConv = new CausalConv3d(w["conv1.weight"], Bias(w, "conv1.bias"), padT: 0, padH: 0, padW: 0);
+        _headConv = new CausalConv3d(w["encoder.head.2.weight"], VaeOps.Bias(w, "encoder.head.2.bias"), padT: 1, padH: 1, padW: 1);
+        _quantConv = new CausalConv3d(w["conv1.weight"], VaeOps.Bias(w, "conv1.bias"), padT: 0, padH: 0, padW: 0);
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -157,7 +157,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
                 parts.Add(EncodeChunk(backend, chunk, cache));
                 chunk.Dispose();
             }
-            Tensor joined = parts.Count == 1 ? parts[0] : Vae3dLayout.ConcatFrames(parts);
+            Tensor joined = parts.Count == 1 ? parts[0] : Vae3dLayout.ConcatFrames(backend, parts);
             if (parts.Count != 1) foreach (Tensor part in parts) part.Dispose();
             return FinishEncode(backend, joined);
         }
@@ -196,7 +196,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
         Tensor m1 = _midAttn!.Forward(backend, m0); m0.Dispose();
         Tensor cur = _midRes2!.Forward(backend, m1, cache); m1.Dispose();
 
-        Tensor hn = _headNorm!.Forward(cur);
+        Tensor hn = _headNorm!.Forward(backend, cur);
         cur.Dispose();
         backend.Silu(hn, hn);
         Tensor? hcc = cache?.StepConv(backend, hn);
@@ -211,7 +211,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
     {
         Tensor quant = _quantConv!.Forward(backend, doubled);
         doubled.Dispose();
-        Tensor mu = SliceChannels(quant, 0, _zDim);
+        Tensor mu = VaeOps.SliceChannels(quant, 0, _zDim);
         quant.Dispose();
         Wan21VaeLatentNorm.Normalize(mu);
         return mu;
@@ -237,22 +237,4 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
             rgb.Dispose();
         }
     }
-
-    private static Tensor SliceChannels(Tensor x, int start, int count)
-    {
-        int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        Tensor o = new Tensor(new TensorShape([(long)b, count, t, h, w]), DType.F32);
-        long per = (long)t * h * w;
-        float* sp = (float*)x.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            Buffer.MemoryCopy(
-                sp + ((long)bi * c + start) * per,
-                op + (long)bi * count * per,
-                (long)count * per * 4, (long)count * per * 4);
-        return o;
-    }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? b : null;
 }

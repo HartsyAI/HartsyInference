@@ -2,14 +2,10 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
-/// <summary>Point-set sampling used by VecSet-style 3D encoders and as a generic geometry utility.
-/// Farthest-point sampling (FPS) gives an even, coverage-maximizing subset — the standard input
-/// reduction for point-conditioned shape encoders.</summary>
+/// <summary>Farthest-point sampling (FPS): gives an even, coverage-maximizing point subset — the standard input reduction for point-conditioned shape encoders.</summary>
 public static class SurfaceSampler
 {
-    /// <summary>Farthest-point sampling: returns <paramref name="count"/> indices into
-    /// <paramref name="points"/> (length 3*N) whose selected points are maximally spread. Deterministic:
-    /// seeds from <paramref name="startIndex"/>. If <paramref name="count"/> ≥ N, returns all indices.</summary>
+    /// <summary>Returns <paramref name="count"/> indices into <paramref name="points"/> (length 3*N) whose selected points are maximally spread, deterministically seeded from <paramref name="startIndex"/>.</summary>
     public static int[] FarthestPointIndices(ReadOnlySpan<float> points, int count, int startIndex = 0)
     {
         int n = points.Length / 3;

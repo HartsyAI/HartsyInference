@@ -5,9 +5,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Loads the second-pass SDXL refiner UNet named by a resolved <see cref="RefinerResolver.RefinerSpec"/>.
-/// Only the UNet is taken — the refiner phase reuses the base pass's CLIP-G conditioning and VAE, which is what the
-/// mid-loop StepSwap (<c>RefinerSwapConfig</c>) requires.</summary>
+/// <summary>Loads the second-pass SDXL refiner UNet named by a resolved <see cref="RefinerResolver.RefinerSpec"/>. Only the UNet is taken — the refiner phase reuses the base pass's CLIP-G conditioning and VAE, which is what the mid-loop StepSwap (<c>RefinerSwapConfig</c>) requires.</summary>
 public static class SdxlRefinerLoader
 {
     /// <summary>Models-root-relative folders searched for the refiner checkpoint.</summary>

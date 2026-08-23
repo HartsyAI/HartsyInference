@@ -4,11 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS text encoder (<c>enc_p</c>): phoneme embedding → N pre-norm transformer layers with
-/// <b>relative-position</b> multi-head attention + Conv FFN → project to <c>2·inter</c> → split into the
-/// prior mean/log-std <c>(m_p, logs_p)</c>. The relative-position term is computed directly (per query, a
-/// clipped offset into the learned <c>emb_rel_k/v</c> tables) rather than via the pad-reshape rel↔abs
-/// gymnastics — equivalent and far less error-prone, and cheap since the phoneme length is small.</summary>
+/// <summary>VITS text encoder (<c>enc_p</c>): phoneme embedding → N pre-norm transformer layers with <b>relative-position</b> multi-head attention + Conv FFN → project to <c>2·inter</c> → split into the prior mean/log-std <c>(m_p, logs_p)</c>.</summary>
+/// <remarks>The relative-position term is computed directly (per query, a clipped offset into the learned <c>emb_rel_k/v</c> tables) rather than via the pad-reshape rel↔abs gymnastics — equivalent and far less error-prone, and cheap since the phoneme length is small.</remarks>
 public sealed unsafe class VitsTextEncoder
 {
     private readonly VitsConfig _cfg;
@@ -30,16 +27,14 @@ public sealed unsafe class VitsTextEncoder
         LoadWeightsLayersOnly(w, prefix);
     }
 
-    /// <summary>Loads only the encoder layers + projection (no phoneme embedding) — used by MeloTTS, which
-    /// supplies its own summed phoneme/tone/language/BERT embedding via <see cref="ForwardFromEmbedding"/>.</summary>
+    /// <summary>Loads only the encoder layers + projection (no phoneme embedding) — used by MeloTTS, which supplies its own summed phoneme/tone/language/BERT embedding via <see cref="ForwardFromEmbedding"/>.</summary>
     public void LoadWeightsLayersOnly(IReadOnlyDictionary<string, Tensor> w, string prefix = "enc_p")
     {
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.encoder", i);
         _projW = VitsWeights.Conv(w, $"{prefix}.proj"); _projB = VitsWeights.Bias(w, $"{prefix}.proj");
     }
 
-    /// <summary>Encodes phoneme ids → the encoder hidden <c>[1, hidden, T]</c> (consumed by the duration
-    /// predictor) and the prior <c>(m_p, logs_p)</c>, each <c>[1, inter, T]</c> (channels-first).</summary>
+    /// <summary>Encodes phoneme ids → the encoder hidden <c>[1, hidden, T]</c> (consumed by the duration predictor) and the prior <c>(m_p, logs_p)</c>, each <c>[1, inter, T]</c>.</summary>
     public (Tensor Hidden, Tensor MP, Tensor LogsP) Forward(IBackend backend, ReadOnlySpan<int> tokens)
     {
         int t = tokens.Length, h = _cfg.HiddenChannels;
@@ -52,11 +47,7 @@ public sealed unsafe class VitsTextEncoder
         return ForwardFromEmbedding(backend, x, t);
     }
 
-    /// <summary>Runs the encoder layers + projection over a prebuilt input embedding <c>[1, hidden, T]</c>
-    /// (takes ownership). The MeloTTS entry point (caller sums phoneme + tone + language + BERT embeddings). When a
-    /// speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and the <paramref name="spkW"/>/<paramref name="spkB"/>
-    /// <c>spk_emb_linear</c> weights are supplied, <c>x += spk_emb_linear(g)</c> is added before layer
-    /// <paramref name="condLayerIdx"/> (VITS2 speaker-conditioned encoder).</summary>
+    /// <summary>Runs the encoder layers + projection over a prebuilt input embedding <c>[1, hidden, T]</c> (takes ownership) — the MeloTTS entry point, for a caller-summed phoneme + tone + language + BERT embedding; when a speaker embedding <paramref name="g"/> and <c>spk_emb_linear</c> weights are supplied, <c>x += spk_emb_linear(g)</c> is added before layer <paramref name="condLayerIdx"/> (VITS2 speaker-conditioned encoder).</summary>
     public (Tensor Hidden, Tensor MP, Tensor LogsP) ForwardFromEmbedding(IBackend backend, Tensor embed, int t,
         Tensor? g = null, Tensor? spkW = null, Tensor? spkB = null, int condLayerIdx = 2)
     {

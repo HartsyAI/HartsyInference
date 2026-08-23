@@ -185,7 +185,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> vaeWeights;
             if (converted.Vae.Count > 0)
             {
-                vaeWeights = CastToF32(converted.Vae);
+                vaeWeights = VaePrecisionHelper.CastWeights(converted.Vae, [DType.F16, DType.BF16], DType.F32);
             }
             else
             {
@@ -193,7 +193,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
                 vaeLoader.Load(vaePath);
                 loaders.Add(vaeLoader);
-                vaeWeights = CastToF32(vaeLoader.GetAllTensors());
+                vaeWeights = VaePrecisionHelper.CastWeights(vaeLoader.GetAllTensors(), [DType.F16, DType.BF16], DType.F32);
                 Logs.Info("[QwenImageRecipe] Qwen-Image VAE resolved as side model.");
             }
             QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
@@ -221,17 +221,5 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             ggufHandle?.Dispose();
             throw;
         }
-    }
-
-    /// <summary>Upcasts 16-bit VAE weights to F32 (the Qwen-Image VAE runs on the F32 path); other dtypes pass through untouched.</summary>
-    private static Dictionary<string, Tensor> CastToF32(IReadOnlyDictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            DType dtype = kv.Value.DType;
-            result[kv.Key] = (dtype == DType.F16 || dtype == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
-        }
-        return result;
     }
 }

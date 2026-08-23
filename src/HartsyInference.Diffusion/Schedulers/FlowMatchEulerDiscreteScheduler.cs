@@ -12,10 +12,10 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     private float[] _timesteps;
     private int _numInferenceSteps;
 
-    /// <summary>Name of this scheduler.</summary>
+    /// <inheritdoc/>
     public string Name => "flow_match_euler";
 
-    /// <summary>Number of inference steps configured.</summary>
+    /// <inheritdoc/>
     public int NumInferenceSteps => _numInferenceSteps;
 
     /// <summary>The computed timestep schedule (sigma values scaled to 0-1000 range).</summary>
@@ -51,10 +51,7 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
 
         for (int i = 0; i <= numInferenceSteps; i++)
         {
-            // t goes from 1.0 to 0.0 linearly
             float t = 1.0f - (float)i / numInferenceSteps;
-
-            // Apply shift: sigma = shift * t / (1 + (shift - 1) * t)
             float sigma = _shift * t / (1.0f + (_shift - 1.0f) * t);
             _sigmas[i] = sigma;
         }
@@ -72,7 +69,6 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
             }
         }
 
-        // Timesteps are sigmas scaled to 0-1000 range (for model conditioning)
         for (int i = 0; i < numInferenceSteps; i++)
         {
             _timesteps[i] = _sigmas[i] * 1000.0f;
@@ -119,7 +115,6 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         float* outPtr = (float*)output.DataPointer;
         int count = (int)sample.ElementCount;
 
-        // Velocity prediction: x_next = x + v * dt
         for (int i = 0; i < count; i++)
         {
             outPtr[i] = samplePtr[i] + modelPtr[i] * dt;
@@ -137,7 +132,6 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         float* outPtr = (float*)output.DataPointer;
         int count = (int)sample.ElementCount;
 
-        // Flow matching forward process: x_t = (1 - sigma) * x_0 + sigma * noise
         for (int i = 0; i < count; i++)
         {
             outPtr[i] = oneMinusSigma * samplePtr[i] + sigma * noisePtr[i];
@@ -159,7 +153,6 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         float maxShift = 1.15f,
         float? shiftTerminal = null)
     {
-        // Linear interpolation of mu based on image sequence length
         float m = (maxShift - baseShift) / (maxSeqLen - baseSeqLen);
         float b = baseShift - m * baseSeqLen;
         float mu = m * imageSeqLen + b;

@@ -4,8 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>CAM++ speaker encoder (3D-Speaker <c>campplus_cn_common</c>) producing the speaker embedding
-/// CosyVoice2 feeds to its flow-matching stage. Faithful to the upstream <c>CAMPPlus</c>: an FCM ResNet front
+/// <summary>CAM++ speaker encoder (3D-Speaker <c>campplus_cn_common</c>) producing the speaker embedding CosyVoice2 feeds to its flow-matching stage.</summary>
+/// <remarks>Faithful to the upstream <c>CAMPPlus</c>: an FCM ResNet front
 /// over the [B,1,freq,time] fbank (all strides reduce frequency 80→10, time preserved) → a TDNN stem →
 /// three DenseTDNN blocks (12 / 24 / 16 <c>CAMDenseTDNNLayer</c>s, each BN+ReLU → 1×1 bottleneck → BN+ReLU →
 /// context-aware <c>CAMLayer</c>) with transition layers between → BN+ReLU → statistics pooling → a dense
@@ -15,7 +15,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// Weights load from the upstream PyTorch checkpoint's clean names (<c>head.*</c> / <c>xvector.*</c>) — the same
 /// weights CosyVoice2 ships as <c>campplus.onnx</c>, so they validate against an ONNX-Runtime reference. Convs
 /// route through <see cref="IBackend"/>; BatchNorm / pooling / CAM gating are CPU sweeps (the encoder is a
-/// one-shot reference pass, not a hot loop).</para></summary>
+/// one-shot reference pass, not a hot loop).</para></remarks>
 public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
 {
     private const float BnEps = 1e-5f;
@@ -268,8 +268,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         public IEnumerable<Tensor> Weights() { if (W is not null) yield return W; }
     }
 
-    /// <summary>An FCM <c>BasicResBlock</c>: conv1(stride freq)+bn1+relu → conv2+bn2, plus an optional 1×1
-    /// shortcut (present only on the downsampling first block of each layer), then residual add + ReLU.</summary>
+    /// <summary>An FCM <c>BasicResBlock</c>: conv1(stride freq)+bn1+relu → conv2+bn2, plus an optional 1×1 shortcut (present only on the downsampling first block of each layer), then residual add + ReLU.</summary>
     private sealed class ResBlock
     {
         private Conv2dW _conv1 = new(), _conv2 = new(), _scConv = new();
@@ -351,8 +350,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         }
     }
 
-    /// <summary>A <c>CAMDenseTDNNLayer</c>: BN+ReLU → 1×1 bottleneck (in→128) → BN+ReLU → CAM context-attention
-    /// layer (local Conv1d gated by a sigmoid of mean + segment-pooled context) producing <c>growth</c> channels.</summary>
+    /// <summary>A <c>CAMDenseTDNNLayer</c>: BN+ReLU → 1×1 bottleneck (in→128) → BN+ReLU → CAM context-attention layer (local Conv1d gated by a sigmoid of mean + segment-pooled context) producing <c>growth</c> channels.</summary>
     private sealed class DenseLayerW
     {
         private Bn _norm1 = new(), _norm2 = new();
@@ -396,8 +394,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
             return y;
         }
 
-        /// <summary>CAM context: <c>x.mean(time) + seg_pool(x)</c>, where seg_pool averages each 100-frame
-        /// segment (ceil mode) and broadcasts it back over the frames it covers.</summary>
+        /// <summary>CAM context: <c>x.mean(time) + seg_pool(x)</c>, where seg_pool averages each 100-frame segment (ceil mode) and broadcasts it back over the frames it covers.</summary>
         private static Tensor ContextPool(Tensor x)
         {
             int C = (int)x.Shape[1], T = (int)x.Shape[2];

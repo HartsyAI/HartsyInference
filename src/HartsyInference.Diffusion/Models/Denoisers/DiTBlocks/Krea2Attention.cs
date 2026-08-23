@@ -36,8 +36,7 @@ public sealed unsafe class Krea2Attention
         _eps = eps;
     }
 
-    /// <summary>Loads <c>{prefix}.to_q/to_k/to_v/to_gate.weight</c>, <c>{prefix}.to_out.0.weight</c> and the per-head
-    /// <c>{prefix}.norm_q/norm_k.weight</c> (zero-centered: 1.0 is added at load).</summary>
+    /// <summary>Loads <c>{prefix}.to_q/to_k/to_v/to_gate.weight</c>, <c>{prefix}.to_out.0.weight</c> and the per-head <c>{prefix}.norm_q/norm_k.weight</c> (zero-centered: 1.0 is added at load).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
         _toQ = w[$"{p}.to_q.weight"];
@@ -56,8 +55,7 @@ public sealed unsafe class Krea2Attention
             if (t is not null) yield return t;
     }
 
-    /// <summary>Runs attention over <paramref name="x"/> <c>[B, S, hidden]</c>. Pass <paramref name="rope"/> (already
-    /// <c>Precompute</c>d for this sequence) for the main blocks; pass null for the text-fusion blocks.</summary>
+    /// <summary>Runs attention over <paramref name="x"/> <c>[B, S, hidden]</c>. Pass <paramref name="rope"/> (already <c>Precompute</c>d for this sequence) for the main blocks; pass null for the text-fusion blocks.</summary>
     // GPU-residency rewrite (mirrors the verified FluxSingleStreamBlock / HunyuanImageSingleBlock): every glue op
     // (head split/merge, per-head QK-norm, GQA K/V repeat, the sigmoid output gate) runs as an IBackend op so the
     // activation chain stays device-resident — no per-op DataPointer D2H sync barriers (the old ReshapeTo/FromMultiHead
@@ -173,8 +171,7 @@ public sealed unsafe class Krea2Attention
     }
 }
 
-/// <summary>Helper for Krea 2's zero-centered RMSNorm scales (<c>F.rms_norm(x, weight = weight + 1)</c>): loads a norm
-/// weight as F32 and folds the <c>+1</c> so the runtime can use plain <see cref="IBackend.RmsNorm"/>.</summary>
+/// <summary>Helper for Krea 2's zero-centered RMSNorm scales (<c>F.rms_norm(x, weight = weight + 1)</c>): loads a norm weight as F32 and folds the <c>+1</c> so the runtime can use plain <see cref="IBackend.RmsNorm"/>.</summary>
 public static unsafe class Krea2Norm
 {
     /// <summary>Returns an F32 copy of <paramref name="raw"/> with 1.0 added to every element.</summary>

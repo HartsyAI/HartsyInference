@@ -53,8 +53,8 @@ public sealed unsafe class AceStep15Dit : IDisposable
             _layers[i].LoadWeights(w, $"decoder.layers.{i}");
         }
 
-        _normOutW = EnsureF32(w["decoder.norm_out.weight"]);
-        _globalScaleShift = EnsureF32(w["decoder.scale_shift_table"]);
+        _normOutW = TensorCasts.EnsureF32(w["decoder.norm_out.weight"]);
+        _globalScaleShift = TensorCasts.EnsureF32(w["decoder.scale_shift_table"]);
         // Flattened [1, 2·dim] view for the device SliceRows split in FinalLayer (host indexing i·dim unchanged).
         _globalScaleShiftFlat = _globalScaleShift.Reshape(new TensorShape(1, 2 * _config.HiddenSize));
         _projOutW = w["decoder.proj_out.1.weight"];
@@ -218,8 +218,6 @@ public sealed unsafe class AceStep15Dit : IDisposable
         return output;
     }
 
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0) _layers = [];
@@ -247,10 +245,10 @@ public sealed unsafe class AceStep15Dit : IDisposable
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
             // Flattened [1, 6·dim] for the device modulation split (SplitModulation); host indexing i·dim unchanged.
-            _scaleShift = EnsureF32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _c.HiddenSize));
-            _selfNorm = EnsureF32(w[$"{p}.self_attn_norm.weight"]);
-            _crossNorm = EnsureF32(w[$"{p}.cross_attn_norm.weight"]);
-            _mlpNorm = EnsureF32(w[$"{p}.mlp_norm.weight"]);
+            _scaleShift = TensorCasts.EnsureF32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _c.HiddenSize));
+            _selfNorm = TensorCasts.EnsureF32(w[$"{p}.self_attn_norm.weight"]);
+            _crossNorm = TensorCasts.EnsureF32(w[$"{p}.cross_attn_norm.weight"]);
+            _mlpNorm = TensorCasts.EnsureF32(w[$"{p}.mlp_norm.weight"]);
             _selfAttn.LoadWeights(w, $"{p}.self_attn");
             _crossAttn.LoadWeights(w, $"{p}.cross_attn");
             _mlp.LoadSwiGluWeights(
@@ -329,7 +327,5 @@ public sealed unsafe class AceStep15Dit : IDisposable
             packed.Dispose();
             return mod;
         }
-
-        private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

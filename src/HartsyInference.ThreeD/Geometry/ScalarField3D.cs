@@ -1,10 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry;
 
-/// <summary>A dense scalar field sampled on a regular 3D grid — the occupancy / signed-distance volume
-/// that mesh-extraction (<see cref="Ops.MarchingCubes"/>) consumes. Values are laid out
-/// <c>[z, y, x]</c> row-major (x fastest), length <c>ResX * ResY * ResZ</c>. The grid spans the axis-aligned
-/// box <c>[Min, Max]</c> in object space, so a sample at integer index (ix,iy,iz) maps to world coord
-/// <c>Min + (i / (Res-1)) * (Max - Min)</c>.</summary>
+/// <summary>A dense occupancy/SDF volume on a regular 3D grid, laid out <c>[z, y, x]</c> row-major (x fastest), spanning the axis-aligned box <c>[Min, Max]</c> in object space; consumed by <see cref="Ops.MarchingCubes"/>.</summary>
 public sealed class ScalarField3D
 {
     /// <summary>Field values, length <c>ResX*ResY*ResZ</c>, indexed <c>x + ResX*(y + ResY*z)</c>.</summary>

@@ -19,14 +19,12 @@ public sealed unsafe class MageMlpResBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        _inLnW = w.TryGetValue($"{p}.in_ln.weight", out Tensor? lw) ? F32(lw) : Ones(_c);
-        _inLnB = w.TryGetValue($"{p}.in_ln.bias", out Tensor? lb) ? F32(lb) : Zeros(_c);
-        _mlp0W = F32(w[$"{p}.mlp.0.weight"]); _mlp0B = F32(w[$"{p}.mlp.0.bias"]);
-        _mlp2W = F32(w[$"{p}.mlp.2.weight"]); _mlp2B = F32(w[$"{p}.mlp.2.bias"]);
-        _adaW = F32(w[$"{p}.adaLN_modulation.1.weight"]); _adaB = F32(w[$"{p}.adaLN_modulation.1.bias"]);
+        _inLnW = w.TryGetValue($"{p}.in_ln.weight", out Tensor? lw) ? TensorCasts.EnsureF32(lw) : Ones(_c);
+        _inLnB = w.TryGetValue($"{p}.in_ln.bias", out Tensor? lb) ? TensorCasts.EnsureF32(lb) : Zeros(_c);
+        _mlp0W = TensorCasts.EnsureF32(w[$"{p}.mlp.0.weight"]); _mlp0B = TensorCasts.EnsureF32(w[$"{p}.mlp.0.bias"]);
+        _mlp2W = TensorCasts.EnsureF32(w[$"{p}.mlp.2.weight"]); _mlp2B = TensorCasts.EnsureF32(w[$"{p}.mlp.2.bias"]);
+        _adaW = TensorCasts.EnsureF32(w[$"{p}.adaLN_modulation.1.weight"]); _adaB = TensorCasts.EnsureF32(w[$"{p}.adaLN_modulation.1.bias"]);
     }
-
-    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); new Span<float>((float*)t.DataPointer, n).Fill(1f); return t; }
     private static Tensor Zeros(int n) { Tensor t = new(new TensorShape(n), DType.F32); new Span<float>((float*)t.DataPointer, n).Clear(); return t; }
 

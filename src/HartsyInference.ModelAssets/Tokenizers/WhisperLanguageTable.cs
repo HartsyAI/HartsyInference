@@ -1,12 +1,9 @@
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>The 99-language table that backs Whisper's language token IDs (50259..50357
-/// for &lt;= v2; large-v3 adds Cantonese at 50358 for 100 total). Order matches OpenAI's
-/// <c>whisper/tokenizer.py LANGUAGES</c> dict.</summary>
+/// <summary>The 99-language table that backs Whisper's language token IDs (50259..50357 for &lt;= v2; large-v3 adds Cantonese at 50358 for 100 total). Order matches OpenAI's <c>whisper/tokenizer.py LANGUAGES</c> dict.</summary>
 internal static class WhisperLanguageTable
 {
-    /// <summary>ISO-639-1 language codes in token-id order. Index 0 → token 50259
-    /// (English), index 1 → 50260 (Chinese), and so on.</summary>
+    /// <summary>ISO-639-1 language codes in token-id order. Index 0 → token 50259 (English), index 1 → 50260 (Chinese), and so on.</summary>
     public static readonly IReadOnlyList<string> Codes =
     [
         "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr",

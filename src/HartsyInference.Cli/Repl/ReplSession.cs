@@ -3,7 +3,6 @@ using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Vision.Codec;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Repl;
@@ -209,9 +208,7 @@ public sealed class ReplSession : IDisposable
         }
         try
         {
-            (byte[] rgb, int width, int height) = path.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase)
-                ? BmpEncoder.Decode(File.ReadAllBytes(path))
-                : PngDecoder.DecodeFromFile(path);
+            (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
             AnsiConsole.WriteLine();
             TerminalImage.Render(rgb, width, height);
             AnsiConsole.MarkupLine($"[#9aa4af]{width}x{height} · {Markup.Escape(Path.GetFileName(path))}[/]");

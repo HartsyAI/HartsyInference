@@ -2,11 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Per-layer, per-sample history buffer for streaming causal Conv1D / ConvTranspose1D
-/// in the VibeVoice acoustic and semantic VAEs. Mirrors the Python
-/// <c>VibeVoiceTokenizerStreamingCache</c> in
-/// <c>vibevoice/modular/modular_vibevoice_tokenizer.py</c>.
-///
+/// <summary>Per-layer, per-sample history buffer for streaming causal Conv1D / ConvTranspose1D in the VibeVoice acoustic and semantic VAEs, mirroring the Python <c>VibeVoiceTokenizerStreamingCache</c> in <c>vibevoice/modular/modular_vibevoice_tokenizer.py</c>.</summary>
+/// <remarks>
 /// <para>Each <see cref="SConv1d"/>-style wrapper stores its trailing
 /// <c>(kernel-1) * dilation - (stride-1)</c> input samples (or, for the transpose path,
 /// the trailing <c>kernel-1</c> input samples) keyed by <c>(layer_id, sample_index)</c>.
@@ -22,23 +19,14 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// <para><strong>Per-sample keys</strong> support batching independent streams (e.g. up to
 /// 4 speakers in a podcast each producing audio in their own buffer). Internally we store
 /// tensors per <c>(layer_id, sample_idx)</c> and reassemble batched outputs in
-/// <see cref="Get"/> with left-padding to the longest entry.</para></summary>
+/// <see cref="Get"/> with left-padding to the longest entry.</para></remarks>
 public sealed class VibeVoiceTokenizerStreamingCache : IDisposable
 {
     private readonly Dictionary<(string LayerId, int SampleIndex), Tensor> _cache = new();
     private bool _disposed;
 
-    /// <summary>Looks up the cached history tensors for the given layer + sample indices and
-    /// returns them stacked along a fresh batch axis. Tensors are left-padded with zeros to
-    /// the longest entry so the result is rectangular.
-    ///
-    /// <para>Returns <c>null</c> if any of the requested sample indices is missing — the
-    /// caller treats that as "first chunk, initialize to zeros" (the canonical first-chunk
-    /// behavior in the Python reference).</para>
-    ///
-    /// <para>Output shape: <c>[len(sampleIndices), C, max_T]</c>. The caller passes
-    /// <paramref name="channels"/> so we can verify and allocate the stacked buffer in F32
-    /// without inspecting every entry's shape.</para></summary>
+    /// <summary>Looks up the cached history tensors for the given layer + sample indices and returns them stacked along a fresh batch axis <c>[len(sampleIndices), C, max_T]</c>, left-padded with zeros to the longest entry.</summary>
+    /// <returns><c>null</c> if any requested sample index is missing — the caller treats that as "first chunk, initialize to zeros" (the canonical first-chunk behavior in the Python reference).</returns>
     public Tensor? Get(string layerId, ReadOnlySpan<int> sampleIndices, int channels)
     {
         ThrowIfDisposed();
@@ -84,10 +72,7 @@ public sealed class VibeVoiceTokenizerStreamingCache : IDisposable
         return result;
     }
 
-    /// <summary>Stores the trailing-history slice produced by a conv layer for each sample
-    /// in the batch. <paramref name="batched"/> has shape <c>[batch, C, T]</c>; we split
-    /// along the batch axis and store one detached owning copy per <c>(layerId, sampleIndices[i])</c>.
-    /// Any pre-existing entries under those keys are disposed first.</summary>
+    /// <summary>Stores the trailing-history slice produced by a conv layer for each sample in the batch <paramref name="batched"/> <c>[batch, C, T]</c>, as one detached owning copy per <c>(layerId, sampleIndices[i])</c>, disposing any pre-existing entry under those keys first.</summary>
     public void Set(string layerId, ReadOnlySpan<int> sampleIndices, Tensor batched)
     {
         ThrowIfDisposed();
@@ -120,9 +105,7 @@ public sealed class VibeVoiceTokenizerStreamingCache : IDisposable
         }
     }
 
-    /// <summary>Zeros (in place) all cached entries for the given sample indices across all
-    /// layers. Invoked by the inference loop on the <c>speech_end</c> token to reset the
-    /// per-speaker streaming state without throwing away the layer-ID bookkeeping.</summary>
+    /// <summary>Zeros (in place) all cached entries for the given sample indices across all layers; invoked on the <c>speech_end</c> token to reset per-speaker streaming state without discarding layer-ID bookkeeping.</summary>
     public void SetToZero(ReadOnlySpan<int> sampleIndices)
     {
         ThrowIfDisposed();
@@ -141,10 +124,7 @@ public sealed class VibeVoiceTokenizerStreamingCache : IDisposable
         }
     }
 
-    /// <summary>Clears cache entries. With no args, drops everything. With
-    /// <paramref name="layerId"/>, drops only that layer (any sample). With both
-    /// <paramref name="layerId"/> and <paramref name="sampleIndices"/>, drops just those
-    /// specific keys.</summary>
+    /// <summary>Clears cache entries: no args drops everything, <paramref name="layerId"/> alone drops only that layer (any sample), both args drop just those specific keys.</summary>
     public void Clear(string? layerId = null, ReadOnlySpan<int> sampleIndices = default)
     {
         ThrowIfDisposed();

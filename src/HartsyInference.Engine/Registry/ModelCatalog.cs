@@ -2,9 +2,7 @@ using HartsyInference.Engine.Audio;
 
 namespace HartsyInference.Engine.Registry;
 
-/// <summary>Static, data-driven catalog of the models the engine can drive, mirroring the README support table.
-/// Shared single source of truth: backs the CLI's <c>hartsy list</c>/REPL/shell-completion as well as the HTTP
-/// API's <c>/admin/catalog</c>.</summary>
+/// <summary>Static, data-driven catalog of the models the engine can drive, mirroring the README support table. Shared single source of truth: backs the CLI's <c>hartsy list</c>/REPL/shell-completion as well as the HTTP API's <c>/admin/catalog</c>.</summary>
 public static class ModelCatalog
 {
     private static readonly List<CatalogEntry> Entries = Build();

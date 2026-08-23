@@ -4,14 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>The Qwen2.5-VL vision tower + patch-merger, loaded from llama.cpp's <c>mmproj-*.gguf</c>. Unlike the
-/// SigLIP/CLIP towers (<see cref="SiglipVlmEncoder"/>), Qwen2.5-VL uses: a Conv3D patch embed (2 temporal frames),
-/// 2D rotary position embeddings (no learned position table), window attention (full attention only on layers
-/// 7/15/23/31), RMSNorm (no bias), a SwiGLU MLP, and a 2×2 patch-merger. Patches are processed in merge-block
-/// order and reordered into window-contiguous groups for the windowed layers.
-///
-/// <para>The 2D-RoPE application, window partitioning, and merge-block patchify run host-side (one-time, off the
-/// decode hot path); the heavy matmuls/attention run through <see cref="IBackend"/>.</para></summary>
+/// <summary>The Qwen2.5-VL vision tower + patch-merger, loaded from llama.cpp's <c>mmproj-*.gguf</c>; unlike the SigLIP/CLIP towers, it uses a Conv3D patch embed, 2D rotary position embeddings (no learned position table), window attention (full attention only on layers 7/15/23/31), RMSNorm, a SwiGLU MLP, and a 2×2 patch-merger.</summary>
+/// <remarks>Patches are processed in merge-block order and reordered into window-contiguous groups for the windowed layers. The 2D-RoPE application, window partitioning, and merge-block patchify run host-side (one-time, off the decode hot path); the heavy matmuls/attention run through <see cref="IBackend"/>.</remarks>
 public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -51,13 +45,6 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         int g = image / patch; TokensPerImage = (g * g) / (merge * merge);
     }
 
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     public static Qwen25VlEncoder Load(string mmprojPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(mmprojPath, DType.F32);
@@ -95,7 +82,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
                 if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_out")
                     || key.Contains("ffn_gate") || key.Contains("ffn_up") || key.Contains("ffn_down")
                     || key == "mm.0.weight" || key == "mm.2.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             // Patch embed: two temporal conv weights [hidden,3,patch,patch] → [hidden, 3*patch*patch]; summed because
             // the single image fills both temporal frames identically.
@@ -138,29 +125,10 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
     {
         int hidden = Hidden, patch = PatchSize, m = Merge, heads = NumHeads, hd = HeadDim;
         int H = (int)pixelValues.Shape[2], Wd = (int)pixelValues.Shape[3];
-        int gh = H / patch, gw = Wd / patch, np = gh * gw, pin = 3 * patch * patch;
+        int gh = H / patch, gw = Wd / patch, np = gh * gw;
         TokensPerImage = np / (m * m);
 
-        // 1. Patchify into merge-block order: [np, 3*patch*patch], each patch flattened [c,h,w].
-        Tensor patches = new(new TensorShape(np, pin), DType.F32);
-        float* px = (float*)pixelValues.DataPointer;   // [3,H,W] (D2H sync)
-        backend.Sync();
-        float* pp = (float*)patches.DataPointer;
-        int idx = 0;
-        for (int bh = 0; bh < gh / m; bh++)
-            for (int bw = 0; bw < gw / m; bw++)
-                for (int mh = 0; mh < m; mh++)
-                    for (int mw = 0; mw < m; mw++)
-                    {
-                        int ph = (bh * m + mh) * patch, pw = (bw * m + mw) * patch;
-                        float* dst = pp + (long)idx * pin;
-                        int o = 0;
-                        for (int c = 0; c < 3; c++)
-                            for (int yy = 0; yy < patch; yy++)
-                                for (int xx = 0; xx < patch; xx++)
-                                    dst[o++] = px[((long)c * H + (ph + yy)) * Wd + (pw + xx)];
-                        idx++;
-                    }
+        Tensor patches = QwenVlOps.Patchify(backend, pixelValues, gh, gw, m, patch);
         Dbg(backend, "patches", patches);
 
         // 2. Patch embed: [np, hidden].
@@ -170,7 +138,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         Dbg(backend, "embed", embed);
 
         // 3. 2D RoPE cos/sin [np, headDim] + window index, then reorder hidden + cos/sin into window order.
-        (float[] cos, float[] sin) = BuildRope(gh, gw);
+        (float[] cos, float[] sin) = QwenVlOps.BuildRope(gh, gw, hd, m);
         (int[] winIdx, int[] cuWin) = WindowIndex(gh, gw);
         int[] mergeOrder = ExpandToPatches(winIdx, m);   // patch-level permutation (np)
         Tensor h = ReorderRows(embed, mergeOrder, hidden); embed.Dispose();
@@ -219,8 +187,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return img;
     }
 
-    /// <summary>Vision-tower norm: RMSNorm (Qwen2.5-VL) or LayerNorm with bias (Qwen2-VL), keyed by
-    /// <paramref name="prefix"/> (<c>.weight</c>/<c>.bias</c>).</summary>
+    /// <summary>Vision-tower norm: RMSNorm (Qwen2.5-VL) or LayerNorm with bias (Qwen2-VL), keyed by <paramref name="prefix"/> (<c>.weight</c>/<c>.bias</c>).</summary>
     private void Norm(IBackend backend, Tensor outp, Tensor inp, string prefix)
     {
         if (UseRmsNorm) backend.RmsNorm(outp, inp, W($"{prefix}.weight"), Eps);
@@ -295,47 +262,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return result;
     }
 
-    /// <summary>2D rotary cos/sin tables [np, headDim] in raster (pre-window) order.</summary>
-    private (float[] cos, float[] sin) BuildRope(int gh, int gw)
-    {
-        int hd = HeadDim, m = Merge, np = gh * gw, ropeDim = hd / 2;   // ropeDim=40
-        int freqN = ropeDim / 2;                                       // 20 inv-freqs
-        float[] inv = new float[freqN];
-        for (int i = 0; i < freqN; i++) inv[i] = 1f / MathF.Pow(10000f, (2f * i) / ropeDim);
-        // merge-permuted (h,w) position ids, matching the patchify order.
-        int[] hpos = new int[np], wpos = new int[np];
-        int idx = 0;
-        for (int bh = 0; bh < gh / m; bh++)
-            for (int bw = 0; bw < gw / m; bw++)
-                for (int mh = 0; mh < m; mh++)
-                    for (int mw = 0; mw < m; mw++)
-                    { hpos[idx] = bh * m + mh; wpos[idx] = bw * m + mw; idx++; }
-        float[] cos = new float[(long)np * hd <= int.MaxValue ? np * hd : 0];
-        float[] sin = new float[np * hd];
-        for (int pos = 0; pos < np; pos++)
-        {
-            // rot = [h*inv (20) ++ w*inv (20)] = 40; emb = [rot, rot] = 80.
-            for (int j = 0; j < freqN; j++)
-            {
-                float fh = hpos[pos] * inv[j], fw = wpos[pos] * inv[j];
-                // rot index j → h, freqN+j → w; then duplicated at +ropeDim.
-                SetCosSin(cos, sin, pos, hd, j, fh);
-                SetCosSin(cos, sin, pos, hd, freqN + j, fw);
-                SetCosSin(cos, sin, pos, hd, ropeDim + j, fh);
-                SetCosSin(cos, sin, pos, hd, ropeDim + freqN + j, fw);
-            }
-        }
-        return (cos, sin);
-    }
-
-    private static void SetCosSin(float[] cos, float[] sin, int pos, int hd, int e, float ang)
-    {
-        cos[pos * hd + e] = MathF.Cos(ang);
-        sin[pos * hd + e] = MathF.Sin(ang);
-    }
-
-    /// <summary>Window index in merge-units (matches HF Qwen2.5-VL get_window_index): returns the merge-unit
-    /// permutation and the cumulative patch-level window boundaries (cu_seqlens) for the block-diagonal mask.</summary>
+    /// <summary>Window index in merge-units (matches HF Qwen2.5-VL get_window_index): returns the merge-unit permutation and the cumulative patch-level window boundaries (cu_seqlens) for the block-diagonal mask.</summary>
     private (int[] winIdx, int[] cuWin) WindowIndex(int gh, int gw)
     {
         int m = Merge, vw = WindowPatches;     // merged units per window side (4)
@@ -388,8 +315,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return o;
     }
 
-    /// <summary>Builds a [1,1,np,np] additive attention mask (0 visible, -inf masked). Full attention if
-    /// <paramref name="full"/>, else block-diagonal over the window boundaries <paramref name="cuWin"/>.</summary>
+    /// <summary>Builds a [1,1,np,np] additive attention mask (0 visible, -inf masked): full attention if <paramref name="full"/>, else block-diagonal over the window boundaries <paramref name="cuWin"/>.</summary>
     private static Tensor BuildMask(int np, int[] cuWin, bool full)
     {
         Tensor mask = new(new TensorShape(1, 1, np, np), DType.F32);

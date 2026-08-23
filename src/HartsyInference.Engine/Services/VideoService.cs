@@ -7,10 +7,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Video-generation service: resolves the checkpoint's family recipe from the
-/// <see cref="VideoRecipeRegistry"/>, constructs (and caches) the pipeline, and returns the decoded frames plus the
-/// soundtrack <see cref="VideoAudioResolver"/> selects for them. Composition features are applied by the
-/// feature-resolver phase (E-IMG-4); a request that sets one is rejected rather than silently ignored.</summary>
+/// <summary>Video-generation service: resolves the checkpoint's family recipe from the <see cref="VideoRecipeRegistry"/>, constructs (and caches) the pipeline, and returns the decoded frames plus the soundtrack <see cref="VideoAudioResolver"/> selects for them. Composition features are applied by the feature-resolver phase (E-IMG-4); a request that sets one is rejected rather than silently ignored.</summary>
 public sealed class VideoService : IVideoService
 {
     private readonly InferenceEngine _engine;
@@ -53,8 +50,7 @@ public sealed class VideoService : IVideoService
         return features;
     }
 
-    /// <summary>Throws naming the family and the exact conditioning it cannot apply. Before this existed a video family
-    /// that ignored <c>InitImage</c> returned a text-to-video clip with nothing to indicate the image was discarded.</summary>
+    /// <summary>Throws naming the family and the exact conditioning it cannot apply. Before this existed a video family that ignored <c>InitImage</c> returned a text-to-video clip with nothing to indicate the image was discarded.</summary>
     internal static void RejectUnsupported(ModelSpec spec, VideoRequest request)
     {
         VideoFeatures requested = RequestedFeatures(request);

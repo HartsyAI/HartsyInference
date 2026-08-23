@@ -3,11 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Acoustic VAE — the encoder + decoder pair that turns 24 kHz mono PCM into
-/// 64-d latents at 7.5 Hz and back. Mirrors the Python
-/// <c>VibeVoiceAcousticTokenizerModel</c>: thin glue around
-/// <see cref="VibeVoiceTokenizerEncoder"/> and <see cref="VibeVoiceTokenizerDecoder"/> with
-/// Gaussian sampling on the encoder output.
+/// <summary>Acoustic VAE — the encoder + decoder pair that turns 24 kHz mono PCM into 64-d latents at 7.5 Hz and back, mirroring the Python <c>VibeVoiceAcousticTokenizerModel</c>.</summary>
+/// <remarks>Thin glue around <see cref="VibeVoiceTokenizerEncoder"/> and <see cref="VibeVoiceTokenizerDecoder"/>
+/// with Gaussian sampling on the encoder output.
 ///
 /// <para>Sampling modes (per <c>std_dist_type</c>):
 /// <list type="bullet">
@@ -20,7 +18,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// <para>Output of <see cref="Encode"/> is the channel-last <c>[B, T, vae_dim]</c> mean
 /// tensor (the Python <c>VibeVoiceTokenizerEncoderOutput.mean</c>). Call
 /// <see cref="Sample"/> to draw the actual latent; <see cref="Decode"/> takes the latent
-/// back to PCM.</para></summary>
+/// back to PCM.</para></remarks>
 internal sealed unsafe class VibeVoiceAcousticTokenizerModel
 {
     private readonly VibeVoiceTokenizerConfig _config;
@@ -39,9 +37,8 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         _decoder = new VibeVoiceTokenizerDecoder(config, $"{prefix}.decoder");
     }
 
-    /// <summary><paramref name="decodeOnly"/> skips the encoder — for a checkpoint that genuinely ships no
-    /// encoder weights at all (VibeVoice-Realtime-0.5B: only ever decodes precomputed/cached latents, never
-    /// encodes a live reference clip). <see cref="Encode"/> throws if called on an instance loaded this way.</summary>
+    /// <summary><paramref name="decodeOnly"/> skips the encoder, for a checkpoint that genuinely ships no encoder weights (e.g. VibeVoice-Realtime-0.5B, which only ever decodes precomputed/cached latents).</summary>
+    /// <remarks><see cref="Encode"/> throws if called on an instance loaded this way.</remarks>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool decodeOnly = false)
     {
         if (!decodeOnly) _encoder.LoadWeights(w);
@@ -49,9 +46,7 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         _decoder.LoadWeights(w);
     }
 
-    /// <summary>Encodes a PCM waveform into a channel-last latent mean tensor.
-    /// Input <c>[batch, 1, T_pcm]</c>, output <c>[batch, T_pcm / 3200, vae_dim]</c>.
-    /// Streaming when <paramref name="cache"/> is non-null.</summary>
+    /// <summary>Encodes PCM <c>[batch, 1, T_pcm]</c> into a channel-last latent mean tensor <c>[batch, T_pcm / 3200, vae_dim]</c>; streams when <paramref name="cache"/> is non-null.</summary>
     public Tensor Encode(IBackend backend, Tensor pcm, int batch, int tPcm,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {
@@ -70,12 +65,9 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         return mean;
     }
 
-    /// <summary>Samples from the VAE posterior. <paramref name="mean"/> is
-    /// channels-last <c>[batch, T, vae_dim]</c>. Returns a fresh tensor of the same
-    /// shape; caller owns disposal.
-    ///
-    /// <para>For <c>"none"</c> distType, this just clones the mean — the semantic VAE
-    /// case (encoder-only, deterministic).</para></summary>
+    /// <summary>Samples from the VAE posterior; for <c>"none"</c> distType (the semantic VAE case) this just clones the mean.</summary>
+    /// <param name="mean">Channels-last <c>[batch, T, vae_dim]</c>.</param>
+    /// <returns>A fresh tensor of the same shape; caller owns disposal.</returns>
     public Tensor Sample(Tensor mean, Random rng, string? distTypeOverride = null)
     {
         string mode = distTypeOverride ?? _config.StdDistType;
@@ -124,12 +116,7 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         }
     }
 
-    /// <summary>Decodes a channels-last latent back to PCM. Input
-    /// <c>[batch, T_latent, vae_dim]</c>; if the input is already channels-first
-    /// <c>[batch, vae_dim, T_latent]</c> (the Python code checks
-    /// <c>latents.shape[1] == config.vae_dim</c>) it's used directly.
-    ///
-    /// <para>Output is <c>[batch, 1, T_latent * 3200]</c>.</para></summary>
+    /// <summary>Decodes a latent back to PCM <c>[batch, 1, T_latent * 3200]</c>; accepts either channels-last <c>[batch, T_latent, vae_dim]</c> or channels-first <c>[batch, vae_dim, T_latent]</c> (detected via <c>latents.shape[1] == config.vae_dim</c>, matching the Python check).</summary>
     public Tensor Decode(IBackend backend, Tensor latent, int batch,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {
@@ -163,10 +150,7 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
         foreach (Tensor t in _decoder.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Box-Muller draw of one standard normal sample. Used inside the per-element
-    /// VAE sampling loop. Not the fastest option but matches Python's
-    /// <c>torch.randn_like</c> distribution shape and is fully deterministic given the
-    /// caller's <see cref="Random"/>.</summary>
+    /// <summary>Box-Muller draw of one standard normal sample, matching Python's <c>torch.randn_like</c> distribution shape and deterministic given the caller's <see cref="Random"/>.</summary>
     private static float SampleStandardNormal(Random rng)
     {
         double u1 = 1.0 - rng.NextDouble();

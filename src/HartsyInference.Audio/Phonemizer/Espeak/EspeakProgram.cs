@@ -1,8 +1,6 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Instruction opcodes and parameter ids for espeak-ng phoneme bytecode programs, ported from
-/// <c>synthesize.h</c>. The phonemizer interprets the control-flow + allophone + IPA instructions; the
-/// audio-synthesis instructions (FMT/WAV/formants/envelopes) are parsed for control flow but their data is ignored.</summary>
+/// <summary>Instruction opcodes and parameter ids for espeak-ng phoneme bytecode programs, ported from <c>synthesize.h</c>; the phonemizer interprets the control-flow + allophone + IPA instructions, while audio-synthesis instructions (FMT/WAV/formants/envelopes) are parsed for control flow but their data is ignored.</summary>
 internal static class EspeakProgram
 {
     public const int NumParam = 16; // N_PHONEME_DATA_PARAM

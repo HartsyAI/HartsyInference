@@ -21,8 +21,7 @@ public sealed record WyomingArtifact
 
     public string? Version { get; init; }
 
-    /// <summary>ISO language codes. Required by Wyoming on every model and voice; an empty array parses but
-    /// leaves Home Assistant with nothing to match a pipeline language against.</summary>
+    /// <summary>ISO language codes. Required by Wyoming on every model and voice; an empty array parses but leaves Home Assistant with nothing to match a pipeline language against.</summary>
     public IReadOnlyList<string> Languages { get; init; } = ["en"];
 
     /// <summary>Spoken phrase for a wake model, when it differs from the model name.</summary>

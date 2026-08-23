@@ -4,32 +4,17 @@ using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.TextEncoders;
 
-/// <summary>Normalizes a HuggingFace-style text-encoder weight dictionary that may carry ComfyUI
-/// quantization companions into a form the runtime <c>Linear</c> can consume directly. Concretely it:
+/// <summary>Normalizes a HuggingFace-style text-encoder weight dictionary that may carry ComfyUI quantization companions into a form the runtime <c>Linear</c> can consume directly. Concretely it:
 /// <list type="bullet">
-///   <item>Folds per-tensor fp8 <c>.weight_scale</c> / <c>.scale_weight</c> scalars into
-///   <see cref="Tensor.Fp8ScaleFactor"/> (applied for free as the cuBLAS GEMM alpha), via
-///   <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
-///   <item>Folds <c>int8_tensorwise</c>'s per-output-row <c>.weight_scale</c> and its <c>.comfy_quant</c> descriptor
-///   onto <see cref="Tensor.QuantInfo"/>, leaving the weight packed at 1 byte/param (the Gemma 4 12B LTX 2.5 encoder
-///   is 15.4 GB int8 against 26 GB BF16), via <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/>.</item>
-///   <item>Drops the <c>.comfy_quant</c> / <c>*_scale</c> companion tensors so they never reach the model.</item>
-///   <item>Leaves plain BF16/F16/F32 checkpoints untouched (no copy when there are no companions).</item>
+/// <item>Folds per-tensor fp8 <c>.weight_scale</c> / <c>.scale_weight</c> scalars into <see cref="Tensor.Fp8ScaleFactor"/> (applied for free as the cuBLAS GEMM alpha), via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
+/// <item>Folds <c>int8_tensorwise</c>'s per-output-row <c>.weight_scale</c> and its <c>.comfy_quant</c> descriptor onto <see cref="Tensor.QuantInfo"/>, leaving the weight packed at 1 byte/param (the Gemma 4 12B LTX 2.5 encoder is 15.4 GB int8 against 26 GB BF16), via <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/>.</item>
+/// <item>Drops the <c>.comfy_quant</c> / <c>*_scale</c> companion tensors so they never reach the model.</item>
+/// <item>Leaves plain BF16/F16/F32 checkpoints untouched (no copy when there are no companions).</item>
 /// </list>
-/// <para>If a weight is still in a U8-packed quant format we don't dequantize yet (NVFP4 / MXFP4 /
-/// svdquant), this throws a clear, format-named error <b>at load time</b> instead of letting a raw U8
-/// weight reach the GPU and surface as the opaque <c>"GPU cast from U8 to F32 not supported"</c> kernel
-/// error mid-generation. The <c>.comfy_quant</c> blob's declared <c>format</c> is included so the message
-/// is actionable.</para>
-/// Why this exists: text encoders like Qwen3-4B are loaded straight from a raw safetensors file and handed
-/// to <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> with no converter in the
-/// path, so the per-tensor scale handling every diffusion-backbone converter already does was being skipped
-/// for the encoder. Running every encoder load through here closes that gap for all callers at once.</summary>
+/// <para>If a weight is still in a U8-packed quant format we don't dequantize yet (NVFP4 / MXFP4 / svdquant), this throws a clear, format-named error <b>at load time</b> instead of letting a raw U8 weight reach the GPU and surface as the opaque <c>"GPU cast from U8 to F32 not supported"</c> kernel error mid-generation. The <c>.comfy_quant</c> blob's declared <c>format</c> is included so the message is actionable.</para> Why this exists: text encoders like Qwen3-4B are loaded straight from a raw safetensors file and handed to <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> with no converter in the path, so the per-tensor scale handling every diffusion-backbone converter already does was being skipped for the encoder. Running every encoder load through here closes that gap for all callers at once.</summary>
 public static unsafe class TextEncoderQuantNormalizer
 {
-    /// <summary>Normalizes <paramref name="weights"/> as described on the type. Returns a dictionary safe to
-    /// pass to a text-encoder's <c>LoadWeights</c>. The input is not mutated structurally (a new dict is
-    /// returned), though <see cref="Tensor.Fp8ScaleFactor"/> may be set on shared fp8 weight tensors.</summary>
+    /// <summary>Normalizes <paramref name="weights"/> as described on the type. Returns a dictionary safe to pass to a text-encoder's <c>LoadWeights</c>. The input is not mutated structurally (a new dict is returned), though <see cref="Tensor.Fp8ScaleFactor"/> may be set on shared fp8 weight tensors.</summary>
     public static Dictionary<string, Tensor> Normalize(IReadOnlyDictionary<string, Tensor> weights)
     {
         // Capture the comfy_quant format declarations before ApplyFp8ScaledDequant drops them, so an

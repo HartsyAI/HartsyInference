@@ -28,7 +28,7 @@ namespace HartsyInference.Audio.Pipelines;
 ///   for (t, dt) in zip(sigmas[:-1], deltas):
 ///     v_cond  = dit(x_cond_audio_text)
 ///     v_uncond = dit(x_drop_audio_drop_text)
-///     v       = v_uncond + cfg_scale * (v_cond - v_uncond)
+///     v       = v_cond + cfg_scale * (v_cond - v_uncond)
 ///     x       = x + dt * v        # update ONLY the target portion
 ///
 ///   # x[T_ref:] is the generated mel
@@ -99,30 +99,6 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         F5Tokenizer tok = new(baseCacheDir);
 
         return new F5TtsPipeline("SWivid/F5-TTS", resolved, dit, vocos, tok, ditLoader, vocosLoader);
-    }
-
-    /// <summary>Runs one forward pass of the DiT on synthetic inputs. Used by the
-    /// integration test to verify the model assembles and produces sensible-magnitude
-    /// output without crashing — a real audio generation pipeline is layered on top.</summary>
-    public Tensor SmokeForward(IBackend backend, int t, int textLen)
-    {
-        Tensor noisyMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
-        Tensor condMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
-        unsafe
-        {
-            // Fill with deterministic small values so we don't depend on a RNG.
-            float* n = (float*)noisyMel.DataPointer;
-            float* c = (float*)condMel.DataPointer;
-            for (long i = 0; i < noisyMel.ElementCount; i++) n[i] = MathF.Sin(i * 0.01f) * 0.1f;
-            for (long i = 0; i < condMel.ElementCount; i++) c[i] = MathF.Cos(i * 0.01f) * 0.05f;
-        }
-        int[] textIds = new int[textLen];
-        for (int i = 0; i < textLen; i++) textIds[i] = (i % 50) + 1;
-
-        Tensor v = _dit.Forward(backend, noisyMel, condMel, textIds, timestep: 0.5f);
-        noisyMel.Dispose();
-        condMel.Dispose();
-        return v;
     }
 
     /// <summary>Generates audio for <paramref name="targetText"/> in the voice of
@@ -417,8 +393,8 @@ public sealed record F5TtsOptions
     /// <summary>Sway sampling coefficient. -1.0 default (biases toward noise end).</summary>
     public float SwayCoef { get; init; } = -1.0f;
 
-    /// <summary>CFG strength. Convention: <c>v = v_uncond + cfg * (v_cond - v_uncond)</c>.
-    /// F5-TTS upstream calls this <c>cfg_strength=2.0</c> for their default.</summary>
+    /// <summary>CFG strength for the cond-anchored formula <c>v = v_cond + cfg * (v_cond - v_uncond)</c> (see
+    /// <see cref="F5TtsPipeline.ApplyCfgAndStep"/>); F5-TTS upstream default is <c>cfg_strength=2.0</c>.</summary>
     public float CfgStrength { get; init; } = 2.0f;
 
     /// <summary>Speech speed multiplier. 1.0 = natural. Larger = faster (shorter target duration).</summary>

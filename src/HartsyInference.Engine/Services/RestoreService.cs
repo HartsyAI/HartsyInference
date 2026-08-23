@@ -12,10 +12,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>SeedVR2 restoration service: decodes the input (ffmpeg subprocess for containers, passthrough
-/// for frames/stills), constructs and caches the pipeline per checkpoint, and streams restored frames.
-/// The three weight files (DiT / VAE / frozen embeddings) resolve from catalog asset roles when the spec
-/// carries a catalog entry, else from safetensors siblings of the explicit --model-path file.</summary>
+/// <summary>SeedVR2 restoration service: decodes the input (ffmpeg subprocess for containers, passthrough for frames/stills), constructs and caches the pipeline per checkpoint, and streams restored frames. The three weight files (DiT / VAE / frozen embeddings) resolve from catalog asset roles when the spec carries a catalog entry, else from safetensors siblings of the explicit --model-path file.</summary>
 public sealed class RestoreService : IRestoreService
 {
     private readonly InferenceEngine _engine;

@@ -58,7 +58,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         _inputProjW = weights["input_proj.weight"];
         weights.TryGetValue("input_proj.bias", out _inputProjB);
 
-        _llmCondNormW = LoadAsF32(weights, "llm_cond_norm.weight");
+        _llmCondNormW = TensorCasts.LoadF32(weights, "llm_cond_norm.weight");
         _llmCondProjW = weights["llm_cond_proj.weight"];
         weights.TryGetValue("llm_cond_proj.bias", out _llmCondProjB);
 
@@ -70,7 +70,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         _adalnProjW = weights["adaln_proj.weight"];
         weights.TryGetValue("adaln_proj.bias", out _adalnProjB);
 
-        _imageIndicatorW = LoadAsF32(weights, "embed_image_indicator.weight");
+        _imageIndicatorW = TensorCasts.LoadF32(weights, "embed_image_indicator.weight");
 
         _finalLinearW = weights["final_layer.linear.weight"];
         weights.TryGetValue("final_layer.linear.bias", out _finalLinearB);
@@ -422,12 +422,6 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         for (int pos = 0; pos < batch * seqLen; pos++)
             p[pos] = indicator[pos] == OutputImageIndicator ? 1 : 0;
         return idx;
-    }
-
-    private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
-    {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
     /// <summary>Drops tensor references (underlying weight storage is owned by the mmap loader) and releases the

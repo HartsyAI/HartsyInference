@@ -5,31 +5,20 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converts <c>lodestones/Chroma</c> single-file safetensors (BFL-style native naming) to
-/// diffusers-format weight dictionaries for our C# <see cref="HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer"/>.
+/// <summary>Converts <c>lodestones/Chroma</c> single-file safetensors (BFL-style native naming) to diffusers-format weight dictionaries for our C# <see cref="HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer"/>.
 ///
-/// Mirrors <c>diffusers/loaders/single_file_utils.py:convert_chroma_transformer_checkpoint_to_diffusers</c>
-/// (lines 3491-3657). Top-level changes vs Flux:
+/// Mirrors <c>diffusers/loaders/single_file_utils.py:convert_chroma_transformer_checkpoint_to_diffusers</c> (lines 3491-3657). Top-level changes vs Flux:
 /// <list type="bullet">
-///   <item>Distilled-guidance approximator (<c>distilled_guidance_layer.{in_proj,out_proj,layers,norms}.*</c>) —
-///         BFL stores the inner PixArtAlphaTextProjection linears as <c>in_layer/out_layer</c>; we rename to
-///         <c>linear_1/linear_2</c>. RMSNorm scales (<c>norms.{i}.scale</c>) become <c>norms.{i}.weight</c>.</item>
-///   <item>Single-block <c>linear1</c> splits 4-way: Q + K + V + proj_mlp. The diffusers naming for the MLP half
-///         is <c>proj_mlp</c> (NOT <c>ff.net.0.proj</c> like double blocks), and the attention out is <c>proj_out</c>
-///         (NOT <c>attn.to_out.0</c>). The Chroma single block is FluxSingleBlock-shaped, so we reuse the
-///         <c>FluxCheckpointConverter</c>-style 4-way split here.</item>
-///   <item>NO per-block <c>img_mod</c> / <c>txt_mod</c> / <c>modulation</c> linears in the BFL checkpoint — Chroma's
-///         architecture replaces them with the shared approximator, so there's nothing to rename.</item>
-///   <item>NO <c>swap_scale_shift</c> for the final norm — Chroma's <c>ChromaAdaLayerNormContinuousPruned</c>
-///         consumes its scale+shift from the runtime modulation table, not from a checkpoint linear.</item>
-///   <item><c>final_layer.linear.{weight,bias}</c> → <c>proj_out.{weight,bias}</c>.</item>
+/// <item>Distilled-guidance approximator (<c>distilled_guidance_layer.{in_proj,out_proj,layers,norms}.*</c>) — BFL stores the inner PixArtAlphaTextProjection linears as <c>in_layer/out_layer</c>; we rename to <c>linear_1/linear_2</c>. RMSNorm scales (<c>norms.{i}.scale</c>) become <c>norms.{i}.weight</c>.</item>
+/// <item>Single-block <c>linear1</c> splits 4-way: Q + K + V + proj_mlp. The diffusers naming for the MLP half is <c>proj_mlp</c> (NOT <c>ff.net.0.proj</c> like double blocks), and the attention out is <c>proj_out</c> (NOT <c>attn.to_out.0</c>). The Chroma single block is FluxSingleBlock-shaped, so we reuse the <c>FluxCheckpointConverter</c>-style 4-way split here.</item>
+/// <item>NO per-block <c>img_mod</c> / <c>txt_mod</c> / <c>modulation</c> linears in the BFL checkpoint — Chroma's architecture replaces them with the shared approximator, so there's nothing to rename.</item>
+/// <item>NO <c>swap_scale_shift</c> for the final norm — Chroma's <c>ChromaAdaLayerNormContinuousPruned</c> consumes its scale+shift from the runtime modulation table, not from a checkpoint linear.</item>
+/// <item><c>final_layer.linear.{weight,bias}</c> → <c>proj_out.{weight,bias}</c>.</item>
 /// </list>
-/// The pipeline-side T5-XXL text encoder + Flux VAE weights are shipped as separate files alongside the
-/// Chroma single-file checkpoint and are not handled by this converter (mirrors <see cref="AuraFlowCheckpointConverter"/>).</summary>
+/// The pipeline-side T5-XXL text encoder + Flux VAE weights are shipped as separate files alongside the Chroma single-file checkpoint and are not handled by this converter (mirrors <see cref="AuraFlowCheckpointConverter"/>).</summary>
 public sealed class ChromaCheckpointConverter
 {
-    /// <summary>Result of converting a single-file Chroma checkpoint. Transformer weights only; text encoder + VAE
-    /// must be loaded separately from their own safetensors.</summary>
+    /// <summary>Result of converting a single-file Chroma checkpoint. Transformer weights only; text encoder + VAE must be loaded separately from their own safetensors.</summary>
     public sealed class ConvertedWeights
     {
         /// <summary>Chroma transformer weights in diffusers format.</summary>
@@ -39,8 +28,7 @@ public sealed class ChromaCheckpointConverter
     private const int InnerDim = 3072;
     private const int MlpDim = 12288;
 
-    /// <summary>Converts a flat Chroma single-file weight dictionary to diffusers naming. Folds any
-    /// ComfyUI / BFL fp8_scaled companion tensors into <see cref="Tensor.Fp8ScaleFactor"/> first.</summary>
+    /// <summary>Converts a flat Chroma single-file weight dictionary to diffusers naming. Folds any ComfyUI / BFL fp8_scaled companion tensors into <see cref="Tensor.Fp8ScaleFactor"/> first.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
@@ -233,8 +221,7 @@ public sealed class ChromaCheckpointConverter
         return new ConvertedWeights { Transformer = transformer };
     }
 
-    /// <summary>True when a raw (pre- or post-conversion) Chroma-family dict is a Radiance checkpoint —
-    /// the NeRF head replaces <c>final_layer</c>. Handles wrapped/compiled key prefixes.</summary>
+    /// <summary>True when a raw (pre- or post-conversion) Chroma-family dict is a Radiance checkpoint — the NeRF head replaces <c>final_layer</c>. Handles wrapped/compiled key prefixes.</summary>
     public static bool ContainsRadianceKeys(IReadOnlyDictionary<string, Tensor> weights)
     {
         foreach (string key in weights.Keys)
@@ -245,8 +232,7 @@ public sealed class ChromaCheckpointConverter
         return false;
     }
 
-    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader
-    /// (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
+    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
     public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
     {
         SafeTensorsLoader loader = new();
@@ -282,10 +268,7 @@ public sealed class ChromaCheckpointConverter
         if (source.TryGetValue(srcKey, out Tensor? t)) output[dstKey] = t;
     }
 
-    /// <summary>Publishes one freshly-split chunk. With <paramref name="fp8Blocks"/> set, a chunk that qualifies for
-    /// the Radiance block requant is quantized on the spot and its BF16 buffer freed, so the split set never coexists
-    /// with the fp8 set in host RAM. Chunks that don't qualify (biases, sub-1M weights, non-block keys) pass through
-    /// unchanged, which is also the whole classic-Chroma path.</summary>
+    /// <summary>Publishes one freshly-split chunk. With <paramref name="fp8Blocks"/> set, a chunk that qualifies for the Radiance block requant is quantized on the spot and its BF16 buffer freed, so the split set never coexists with the fp8 set in host RAM. Chunks that don't qualify (biases, sub-1M weights, non-block keys) pass through unchanged, which is also the whole classic-Chroma path.</summary>
     private static void EmitSplit(Dictionary<string, Tensor> output, string key, Tensor chunk, bool fp8Blocks)
     {
         if (fp8Blocks && key.Contains("transformer_blocks.", StringComparison.Ordinal)
@@ -297,8 +280,7 @@ public sealed class ChromaCheckpointConverter
         output[key] = chunk;
     }
 
-    /// <summary>Splits a BFL fused QKV weight+bias along dim 0 into three diffusers-named tensors. Reuses the
-    /// row-copy pattern from <see cref="FluxCheckpointConverter"/>; identical layout per dim 0 split.</summary>
+    /// <summary>Splits a BFL fused QKV weight+bias along dim 0 into three diffusers-named tensors. Reuses the row-copy pattern from <see cref="FluxCheckpointConverter"/>; identical layout per dim 0 split.</summary>
     private static unsafe void SplitFusedQkv(Dictionary<string, Tensor> source,
         string weightKey, string biasKey, string dstPrefix,
         string qName, string kName, string vName, int innerDim, Dictionary<string, Tensor> output, bool fp8Blocks)
@@ -346,8 +328,7 @@ public sealed class ChromaCheckpointConverter
         }
     }
 
-    /// <summary>Splits Chroma's single-block fused <c>linear1.weight</c> [3*inner + mlpDim, inner] along dim 0
-    /// into <c>(to_q, to_k, to_v, proj_mlp)</c>. Same layout as <see cref="FluxCheckpointConverter"/>'s splitter.</summary>
+    /// <summary>Splits Chroma's single-block fused <c>linear1.weight</c> [3*inner + mlpDim, inner] along dim 0 into <c>(to_q, to_k, to_v, proj_mlp)</c>. Same layout as <see cref="FluxCheckpointConverter"/>'s splitter.</summary>
     private static unsafe void SplitFusedLinear1Weight(Dictionary<string, Tensor> source, string srcKey,
         string dstPrefix, Dictionary<string, Tensor> output, bool fp8Blocks)
     {

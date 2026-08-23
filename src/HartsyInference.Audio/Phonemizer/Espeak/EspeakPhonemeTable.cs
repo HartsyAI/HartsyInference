@@ -3,11 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Parses espeak-ng's compiled <c>phontab</c> file and resolves the active phoneme table for a named
-/// language (ported from <c>LoadPhData</c> + <c>SetUpPhonemeTable</c> in <c>synthdata.c</c>). A language table such as
-/// <c>en</c> overlays a chain of base tables via its <c>includes</c> field; this class follows that chain to build the
-/// <c>phoneme_tab</c> indexed by code byte, which the rule interpreter and stress placer use to classify phonemes and
-/// to decode dictionary phoneme strings back to mnemonics.</summary>
+/// <summary>Parses espeak-ng's compiled <c>phontab</c> file and resolves the active phoneme table for a named language (ported from <c>LoadPhData</c> + <c>SetUpPhonemeTable</c> in <c>synthdata.c</c>); a language table such as <c>en</c> overlays a chain of base tables via its <c>includes</c> field, and this class follows that chain to build the <c>phoneme_tab</c> indexed by code byte.</summary>
 internal sealed class EspeakPhonemeTable
 {
     private const int PhonemeRecordSize = 16;
@@ -28,8 +24,7 @@ internal sealed class EspeakPhonemeTable
         BuildActive(phontab, tables, index);
     }
 
-    /// <summary>Loads <c>phontab</c> from <paramref name="path"/> and resolves the active table for
-    /// <paramref name="tableName"/> (e.g. <c>"en"</c>).</summary>
+    /// <summary>Loads <c>phontab</c> from <paramref name="path"/> and resolves the active table for <paramref name="tableName"/> (e.g. <c>"en"</c>).</summary>
     public static EspeakPhonemeTable Load(string path, string tableName)
     {
         try
@@ -58,8 +53,7 @@ internal sealed class EspeakPhonemeTable
         return false;
     }
 
-    /// <summary>Decodes a sequence of phoneme code bytes back to their concatenated mnemonic text (espeak
-    /// <c>DecodePhonemes</c>), skipping codes that are not in the table.</summary>
+    /// <summary>Decodes a sequence of phoneme code bytes back to their concatenated mnemonic text (espeak <c>DecodePhonemes</c>), skipping codes that are not in the table.</summary>
     public string Decode(IReadOnlyList<byte> codes)
     {
         System.Text.StringBuilder sb = new(codes.Count * 2);

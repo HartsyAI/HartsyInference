@@ -14,21 +14,14 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with
-/// diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/>
-/// preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>,
-/// already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side
-/// models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through
-/// <see cref="MageFlowRecipePipeline"/>.
-/// <para><b>Quant-native</b>: a GGUF (Q4/Q5) or fp8 DiT loads without upcasting so a 4B backbone streams onto a 12 GB
-/// card — the official repo only ships bf16, but the community quant/GGUF path is what you run on smaller GPUs.</para></summary>
+/// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/> preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>, already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through <see cref="MageFlowRecipePipeline"/>.</summary>
+/// <remarks><b>Quant-native</b>: a GGUF (Q4/Q5) or fp8 DiT loads without upcasting so a 4B backbone streams onto a 12 GB card — the official repo only ships bf16, but the community quant/GGUF path is what you run on smaller GPUs.</remarks>
 public sealed class MageFlowRecipe : IArchitectureRecipe
 {
     public string Name => "mage-flow";
     public bool Matches(string familyId) => string.Equals(familyId, "mage-flow", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to
-    /// in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
+    /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
     /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.
@@ -59,11 +52,11 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             {
                 GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
                 ggufHandle = gguf;
-                ditWeights = Remap(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights), StripTransformerPrefix);
+                ditWeights = Remap(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights), CheckpointConvertUtils.StripTransformerPrefix);
             }
             else
             {
-                (ditWeights, SafeTensorsLoader ditLoader) = LoadComponent(context.CheckpointPath, StripTransformerPrefix, applyFp8Dequant: true);
+                (ditWeights, SafeTensorsLoader ditLoader) = ComponentLoader.Load(context.CheckpointPath, "MageFlowRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
                 loaders.Add(ditLoader);
             }
             if (ditWeights.Count == 0)
@@ -80,7 +73,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = LoadComponent(encoderPath, RemapQwenKey, applyFp8Dequant: true);
+            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = ComponentLoader.Load(encoderPath, "MageFlowRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teLoader);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
@@ -88,7 +81,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             // ── MageVAE: split the file into decoder (`pipeline.*`) and encoder (`student.dconv_encoder.*`). Encoder is
             // only needed for edit; a decode-only VAE file simply has no encoder keys. ──
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> allVae, SafeTensorsLoader vaeLoader) = LoadComponent(vaePath, key => key, applyFp8Dequant: false);
+            (Dictionary<string, Tensor> allVae, SafeTensorsLoader vaeLoader) = ComponentLoader.Load(vaePath, "MageFlowRecipe", keyTransform: null, applyFp8Dequant: false);
             loaders.Add(vaeLoader);
             (Dictionary<string, Tensor> decW, Dictionary<string, Tensor> encW) = SplitMageVae(allVae);
             MageVaeDecoder vae = new MageVaeDecoder();
@@ -110,23 +103,6 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
         }
     }
 
-    private static (Dictionary<string, Tensor>, SafeTensorsLoader) LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> merged = Remap(loader.GetAllTensors(), keyTransform);
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[MageFlowRecipe] Failed to load component '{Path.GetFileName(filePath)}'.", ex);
-            loader.Dispose();
-            throw;
-        }
-    }
-
     private static Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> src, Func<string, string?> keyTransform)
     {
         Dictionary<string, Tensor> merged = new();
@@ -137,27 +113,6 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             if (mapped is not null) merged[mapped] = kv.Value;
         }
         return merged;
-    }
-
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal)) return key["model.diffusion_model.".Length..];
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal)) return key["diffusion_model.".Length..];
-        if (key.StartsWith("transformer.", StringComparison.Ordinal)) return key["transformer.".Length..];
-        return key;
-    }
-
-    // Qwen3-VL → LlamaStyleEncoder: drop vision tower + lm_head, keep language_model.model.* as model.*.
-    private static string? RemapQwenKey(string key)
-    {
-        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal)) return null;
-        if (key.Contains("lm_head", StringComparison.Ordinal)) return null;
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal)) suffix = suffix["model.".Length..];
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal) || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal) || suffix == "norm.weight")
-            return "model." + suffix;
-        return null;
     }
 
     // Split a loaded MageVAE file: decoder keys are `pipeline.*` (minus the FLUX2 encoder side y_embedder.encoder/

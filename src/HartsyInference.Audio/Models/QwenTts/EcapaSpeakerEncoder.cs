@@ -280,7 +280,6 @@ public sealed unsafe class EcapaSpeakerEncoder : IDisposable
             r.Dispose();
             Relu(c);
 
-            // Squeeze-excite gate.
             SqueezeExcite(backend, c, _outCh, t);
 
             // Residual (in==out).

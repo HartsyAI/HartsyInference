@@ -4,10 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>
-/// Patch embedding for SD3 / SD3.5 MMDiT. Converts a latent <c>[B,C,H,W]</c> into
-/// <c>[B,numPatches,embedDim]</c> with a strided projection and center-cropped learned 2D positions.
-/// </summary>
+/// <summary>Patch embedding for SD3 / SD3.5 MMDiT: converts a latent <c>[B,C,H,W]</c> into <c>[B,numPatches,embedDim]</c> via a strided projection plus center-cropped learned 2D positions.</summary>
 public sealed class PatchEmbed : IDisposable
 {
     private readonly int _patchSize;
@@ -45,11 +42,7 @@ public sealed class PatchEmbed : IDisposable
         _embedDim = embedDim;
     }
 
-    /// <summary>
-    /// Loads borrowed projection tensors and an optional positional embedding of shape
-    /// <c>[1,maxGrid*maxGrid,embedDim]</c>. A non-F32 positional tensor is converted once and owned by this layer;
-    /// caller-provided tensors remain caller-owned.
-    /// </summary>
+    /// <summary>Loads borrowed projection tensors and an optional positional embedding shaped <c>[1,maxGrid*maxGrid,embedDim]</c>; a non-F32 positional tensor is converted once and owned by this layer, other caller-provided tensors remain caller-owned.</summary>
     public void LoadWeights(Tensor projWeight, Tensor projBias, Tensor? posEmbed = null)
     {
         ArgumentNullException.ThrowIfNull(projWeight);
@@ -129,11 +122,7 @@ public sealed class PatchEmbed : IDisposable
         }
     }
 
-    /// <summary>
-    /// Patch-embeds a latent entirely through backend operations. The convolution result is physically
-    /// <c>[B,C,gridH,gridW]</c>; treating its contiguous spatial plane as <c>P=gridH*gridW</c> lets
-    /// <see cref="IBackend.Permute0213"/> produce <c>[B,P,C]</c> without a host readback.
-    /// </summary>
+    /// <summary>Patch-embeds a latent entirely through backend operations: the convolution result is physically <c>[B,C,gridH,gridW]</c>, so treating its contiguous spatial plane as <c>P=gridH*gridW</c> lets <see cref="IBackend.Permute0213"/> produce <c>[B,P,C]</c> without a host readback.</summary>
     public Tensor Forward(IBackend backend, Tensor input)
     {
         ArgumentNullException.ThrowIfNull(backend);

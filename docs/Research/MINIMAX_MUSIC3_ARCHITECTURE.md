@@ -1,5 +1,10 @@
 # MiniMax Music 3 — architecture notes
 
+> **Stub.** This model is built and parity-verified (AR corr 0.9999989, flow corr 0.999996 — see
+> `MODEL_STATUS_AUDIO.md` and `PARITY_VERIFICATION.md`), so the C# is the source of truth for *how it works*.
+> This file only carries what the code cannot tell you: upstream provenance, constants to diff a suspect port
+> against, and bring-up traps.
+
 Provenance for `minimaxmusic3`. Everything derivable from the code lives in the code; this records what the
 checkpoint does not tell you and what cost time to establish.
 

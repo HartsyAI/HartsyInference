@@ -6,11 +6,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Shared multi-GPU placement options for the generation commands, mirroring the SwarmUI extension's
-/// settings (TextEncoderGpuId/VaeGpuId/CfgParallelGpuId/DitShardGpuId) so the same placements are drivable from
-/// the CLI for testing and headless operation, plus <c>--cp-gpu</c> for context parallelism (no extension
-/// counterpart yet). All numbers are CUDA ordinals (fastest-first — NOT nvidia-smi order; run
-/// <c>nvidia-smi</c> during a generation to confirm which physical card an ordinal is).</summary>
+/// <summary>Shared multi-GPU placement options mirroring the SwarmUI extension's settings; all numbers are CUDA ordinals (fastest-first — NOT nvidia-smi order).</summary>
 public class PlacementCliSettings : CommandSettings
 {
     [CommandOption("--gpu")]
@@ -46,12 +42,10 @@ public class PlacementCliSettings : CommandSettings
     public string? Parallel { get; init; }
 }
 
-/// <summary>Builds the engine placement from CLI options with the same eager validation the extension does — a
-/// bad ordinal fails at startup with a clear message, never mid-generation.</summary>
+/// <summary>Builds the engine placement from CLI options with the same eager validation the extension does, so a bad ordinal fails at startup rather than mid-generation.</summary>
 public static class PlacementCli
 {
-    /// <summary>Resolves (primary ordinal, EngineOptions) from placement settings; both null when no
-    /// placement flag was passed (byte-identical single-GPU default path).</summary>
+    /// <summary>Resolves (primary ordinal, EngineOptions) from placement settings; both null when no placement flag was passed.</summary>
     public static (int? Gpu, EngineOptions? Options) Build(PlacementCliSettings settings, string backendSelector,
         HartsyInference.Engine.Modality? modality = null, long modelBytes = 0)
     {
@@ -129,9 +123,7 @@ public static class PlacementCli
         return (primary, new EngineOptions { Placement = placement });
     }
 
-    /// <summary>Best-effort model size for the auto planner: the file's length when the -m argument is an
-    /// on-disk path, else 0 (catalog ids resolve later in the engine — unknown size makes the planner assume
-    /// the model fits and consider only latency strategies, the safe direction).</summary>
+    /// <summary>Best-effort model size for the auto planner: the file's length when <paramref name="model"/> is an on-disk path, else 0 (the safe "assume it fits" direction).</summary>
     public static long TryModelBytes(string? model)
     {
         try
@@ -151,9 +143,7 @@ public static class PlacementCli
     private static string? SelectorFor(int? ordinal, int primary) =>
         ordinal.HasValue && ordinal.Value != primary ? BackendFactory.WithOrdinal("cuda", ordinal.Value) : null;
 
-    /// <summary>Builds <see cref="PlacementConfig.ContextParallelDevices"/> from repeated <c>--cp-gpu</c> values:
-    /// entry 0 is always the primary device, so the primary's own ordinal (and any duplicate) is dropped with a
-    /// warning rather than an error, mirroring how the same-ordinal CFG/TE/VAE flags degrade to "primary".</summary>
+    /// <summary>Builds <see cref="PlacementConfig.ContextParallelDevices"/> from repeated <c>--cp-gpu</c> values, dropping the primary's own ordinal (or a duplicate) with a warning rather than an error.</summary>
     private static IReadOnlyList<string> ContextParallelDevicesFor(int[]? ordinals, int primary, string backendSelector)
     {
         if (ordinals is not { Length: > 0 })

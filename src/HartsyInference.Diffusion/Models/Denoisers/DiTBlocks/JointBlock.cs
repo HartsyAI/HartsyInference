@@ -496,7 +496,6 @@ public sealed class JointBlock
             ctxFinal = ctxAfterAttn;
         }
 
-        // Dispose modulation tensors
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < ctxMod.Length; i++) ctxMod[i].Dispose();
 

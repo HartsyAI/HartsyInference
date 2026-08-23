@@ -13,9 +13,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>ERNIE-Image (Baidu, ~8B params, Apache-2.0) text-to-image pipeline. Orchestrates a custom Baidu text encoder → ERNIE-Image transformer (single-stream DiT with shared AdaLN) → Flux2-style 128-channel VAE → RGB output. Reference: <c>diffusers/pipelines/ernie_image/pipeline_ernie_image.py</c>.
-///
-/// Pipeline-level deltas vs other DiT pipelines:
+/// <summary>ERNIE-Image (Baidu, ~8B params, Apache-2.0) text-to-image pipeline. Orchestrates a custom Baidu text encoder → ERNIE-Image transformer (single-stream DiT with shared AdaLN) → Flux2-style 128-channel VAE → RGB output. Reference: <c>diffusers/pipelines/ernie_image/pipeline_ernie_image.py</c>. Pipeline-level deltas vs other DiT pipelines:
 /// <list type="bullet">
 ///   <item>**Text encoder swappable.** This pipeline accepts any <see cref="IErnieTextEncoder"/>; the published <c>baidu/ERNIE-Image</c> encoder is Mistral3-shaped and served by <see cref="ErnieImageLlamaTextEncoder"/>.</item>
 ///   <item>**Per-batch text length is tracked separately** and forwarded into the transformer so 3D RoPE can offset image positions by the actual non-padded text length.</item>
@@ -23,7 +21,6 @@ namespace HartsyInference.Diffusion.Pipelines;
 ///   <item>**BatchNorm-style latent normalization.** The Flux2 VAE ships <c>bn.running_mean</c>/<c>bn.running_var</c>; the pipeline un-normalizes via these stats just before VAE decode.</item>
 ///   <item>**Standard CFG dual-pass.**</item>
 /// </list>
-///
 /// The pipeline does NOT own the BN stats — it accepts an optional <c>vaeBnMean</c>/<c>vaeBnVar</c> pair via the constructor. If <c>null</c>, the latent is fed to the VAE without un-normalization (works for VAEs that don't ship BN-style stats).</summary>
 public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 {
@@ -37,8 +34,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     private readonly float _vaeBnEps;
     private readonly float _schedulerShift;
 
-    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): transformer weights stay
-    /// GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
+    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): transformer weights stay GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
@@ -64,10 +60,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// <param name="vaeBnMean">Optional <c>[1, 32, 1, 1]</c> running-mean tensor for the Flux2 VAE BN-style un-normalization. Pass <c>null</c> to skip un-normalization.</param>
     /// <param name="vaeBnVar">Optional running-var tensor (same shape as <paramref name="vaeBnMean"/>).</param>
     /// <param name="vaeBnEps">Numerical epsilon used in <c>std = sqrt(var + eps)</c>. Default 1e-5 (matches diffusers' BN default).</param>
-    /// <param name="schedulerShift">Flow-match scheduler shift. Default <b>4.0</b> per ERNIE-Image's
-    /// <c>scheduler_config.json</c> (<c>shift=4.0</c>, static); ERNIE-Image-Turbo may differ.</param>
-    /// <param name="vaeEncoder">Optional Flux2-style VAE encoder (configure with <c>VaeConfig.Flux2</c>) — required
-    /// for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</param>
+    /// <param name="schedulerShift">Flow-match scheduler shift. Default <b>4.0</b> per ERNIE-Image's <c>scheduler_config.json</c> (<c>shift=4.0</c>, static); ERNIE-Image-Turbo may differ.</param>
+    /// <param name="vaeEncoder">Optional Flux2-style VAE encoder (configure with <c>VaeConfig.Flux2</c>) — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</param>
     public ErnieImagePipeline(IBackend backend, IErnieTextEncoder textEncoder, ErnieImageTransformer transformer,
         VaeDecoder vaeDecoder, ErnieImageConfig config,
         Tensor? vaeBnMean = null, Tensor? vaeBnVar = null, float vaeBnEps = 1e-5f,
@@ -437,11 +431,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Builds the initial 128-channel latent. T2I: noise * initSigma. Img2img: the source goes
-    /// VAE-encode (<c>[1, 32, 2·latentH, 2·latentW]</c>, VaeConfig.Flux2 scaling is identity) → 2×2 patchify
-    /// (<c>[1, 128, latentH, latentW]</c>, inverse of <see cref="UnpatchifyLatent"/>) → BN-normalize
-    /// (<c>(z − mean)/std</c>, inverse of <see cref="ApplyBnUnnormalize"/>; skipped when no BN stats were supplied,
-    /// symmetric with decode) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.
+    /// <summary>Builds the initial 128-channel latent. T2I: noise * initSigma. Img2img: the source goes VAE-encode (<c>[1, 32, 2·latentH, 2·latentW]</c>, VaeConfig.Flux2 scaling is identity) → 2×2 patchify (<c>[1, 128, latentH, latentW]</c>, inverse of <see cref="UnpatchifyLatent"/>) → BN-normalize (<c>(z − mean)/std</c>, inverse of <see cref="ApplyBnUnnormalize"/>; skipped when no BN stats were supplied, symmetric with decode) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean normalized source latent
     /// is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for
     /// txt2img and plain img2img.</para></summary>
@@ -490,8 +480,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         return (t2iNoise, null);
     }
 
-    /// <summary>Temporary diagnostic: logs mean/std/min/max/NaN of a tensor (forces D2H). Localizes the
-    /// flat-black-output bug (conditioning vs velocity vs latent vs BN-unnorm vs VAE). Remove once ERNIE is verified.</summary>
+    /// <summary>Temporary diagnostic: logs mean/std/min/max/NaN of a tensor (forces D2H). Localizes the flat-black-output bug (conditioning vs velocity vs latent vs BN-unnorm vs VAE). Remove once ERNIE is verified.</summary>
     private static unsafe void ErnieDiag(string name, Tensor t)
     {
         if (Environment.GetEnvironmentVariable("ERNIE_DIAG") is null) return;  // env-gated: off in production
@@ -570,9 +559,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Inverse of <see cref="UnpatchifyLatent"/> — the pipeline-level 2×2 channel-fold used by img2img:
-    /// <c>[1, 32, 2H, 2W] → [1, 128, H, W]</c> with <c>packed[b, oc·4 + ph·2 + pw, h, w] = src[b, oc, 2h+ph, 2w+pw]</c>
-    /// (mirrors <c>pipeline_ernie_image.py:_patchify_latents</c>).</summary>
+    /// <summary>Inverse of <see cref="UnpatchifyLatent"/> — the pipeline-level 2×2 channel-fold used by img2img: <c>[1, 32, 2H, 2W] → [1, 128, H, W]</c> with <c>packed[b, oc·4 + ph·2 + pw, h, w] = src[b, oc, 2h+ph, 2w+pw]</c> (mirrors <c>pipeline_ernie_image.py:_patchify_latents</c>).</summary>
     private static Tensor PatchifyLatent(Tensor unpacked)
     {
         int batch = (int)unpacked.Shape[0];
@@ -615,8 +602,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Inverse of <see cref="ApplyBnUnnormalize"/>: <c>(z - mean) / sqrt(var + eps)</c>. Used by img2img to
-    /// renormalize the VAE-encoded source into the BN-normalized space the transformer denoises in.</summary>
+    /// <summary>Inverse of <see cref="ApplyBnUnnormalize"/>: <c>(z - mean) / sqrt(var + eps)</c>. Used by img2img to renormalize the VAE-encoded source into the BN-normalized space the transformer denoises in.</summary>
     private static Tensor ApplyBnNormalize(Tensor latent, Tensor bnMean, Tensor bnVar, float eps)
     {
         int batch = (int)latent.Shape[0];

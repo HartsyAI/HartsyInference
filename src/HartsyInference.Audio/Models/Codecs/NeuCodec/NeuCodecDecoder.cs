@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Dia;
 using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
@@ -5,10 +6,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>NeuCodec decode path (the part NeuTTS needs), faithful to the on-disk
-/// <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c> layout, verified against
-/// transformers PR #47143 <c>modeling_neucodec.py</c>). Flow:
-/// FSQ index → codebook de-quant (8-d in [-1,1]) → <c>quantizer.project_out</c> (8→2048) →
+/// <summary>NeuCodec decode path (the part NeuTTS needs), faithful to the on-disk <c>neuphonic/neucodec</c> checkpoint (HF <c>NeuCodecModel</c> layout, verified against transformers PR #47143 <c>modeling_neucodec.py</c>).</summary>
+/// <remarks>
+/// Flow: FSQ index → codebook de-quant (8-d in [-1,1]) → <c>quantizer.project_out</c> (8→2048) →
 /// <c>acoustic_decoder.fc</c> (2048→1024) → Conv1d embed (k7) → 2× ResNet prior-net →
 /// 12 transformer layers (RMSNorm + full bidirectional MHA + SiLU MLP) → 2× ResNet post-net →
 /// final LayerNorm → ISTFT head (Linear 1024→n_fft+2, "same"-padding iSTFT) → 24 kHz PCM.
@@ -20,7 +20,7 @@ namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 /// <c>position_ids = arange(num_heads)</c> (a per-head-constant angle, identical for q and k and
 /// uniform across time). Because that rotation is orthogonal and identical on q and k, it cancels
 /// in every q·kᵀ score — RoPE is a mathematical no-op here, so we omit it for bit-identical output.
-/// (This mirrors the original torchtune misuse the HF port faithfully reproduces.)</para></summary>
+/// (This mirrors the original torchtune misuse the HF port faithfully reproduces.)</para></remarks>
 public sealed unsafe class NeuCodecDecoder : IDisposable
 {
     private readonly NeuCodecConfig _cfg;
@@ -48,10 +48,7 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
         _blocks = new TxWeights[cfg.Depth];
     }
 
-    /// <summary>Loads the decode-side weights straight from the checkpoint dictionary (raw
-    /// safetensors key names, no prefix rewriting). The encode-side stacks
-    /// (<c>acoustic_encoder</c>, <c>semantic_encoder</c>, <c>semantic_adapter</c>, <c>fc_encoder</c>,
-    /// <c>quantizer.project_in</c>) are not needed for token→audio and are ignored.</summary>
+    /// <summary>Loads the decode-side weights straight from the checkpoint dictionary (raw safetensors key names, no prefix rewriting); the encode-side stacks (<c>acoustic_encoder</c>, <c>semantic_encoder</c>, <c>semantic_adapter</c>, <c>fc_encoder</c>, <c>quantizer.project_in</c>) are not needed for token→audio and are ignored.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "acoustic_decoder")
     {
         _projOutW = WhisperOps.EnsureF32(w["quantizer.project_out.weight"]);
@@ -192,15 +189,15 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
         Tensor qMh = new(new TensorShape(1, heads, t, hd), DType.F32);
         Tensor kMh = new(new TensorShape(1, heads, t, hd), DType.F32);
         Tensor vMh = new(new TensorShape(1, heads, t, hd), DType.F32);
-        FlatToHeads(qFlat, qMh, t, heads, hd); qFlat.Dispose();
-        FlatToHeads(kFlat, kMh, t, heads, hd); kFlat.Dispose();
-        FlatToHeads(vFlat, vMh, t, heads, hd); vFlat.Dispose();
+        DiaHeads.FlatToHeads(qMh, qFlat, t, heads, hd); qFlat.Dispose();
+        DiaHeads.FlatToHeads(kMh, kFlat, t, heads, hd); kFlat.Dispose();
+        DiaHeads.FlatToHeads(vMh, vFlat, t, heads, hd); vFlat.Dispose();
 
         Tensor attn = new(new TensorShape(1, heads, t, hd), DType.F32);
         backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(hd));
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
         Tensor attnFlat = new(new TensorShape(1, t, dim), DType.F32);
-        HeadsToFlat(attn, attnFlat, t, heads, hd); attn.Dispose();
+        DiaHeads.HeadsToFlat(attnFlat, attn, t, heads, hd); attn.Dispose();
         Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, b.OW!, null, 1, t, dim, dim); attnFlat.Dispose();
 
         Tensor afterAttn = new(x.Shape, DType.F32);
@@ -241,34 +238,6 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
     }
 
     // Flat [1,T,heads*hd] (channel = h*hd + d) → heads [1,heads,T,hd].
-    private static void FlatToHeads(Tensor flat, Tensor heads4, int t, int heads, int hd)
-    {
-        float* src = (float*)flat.DataPointer;
-        float* dst = (float*)heads4.DataPointer;
-        int dim = heads * hd;
-        for (int s = 0; s < t; s++)
-            for (int h = 0; h < heads; h++)
-            {
-                long srcOff = (long)s * dim + (long)h * hd;
-                long dstOff = ((long)h * t + s) * hd;
-                Buffer.MemoryCopy(src + srcOff, dst + dstOff, hd * 4, hd * 4);
-            }
-    }
-
-    private static void HeadsToFlat(Tensor attn, Tensor flat, int t, int heads, int hd)
-    {
-        float* ip = (float*)attn.DataPointer;
-        float* op = (float*)flat.DataPointer;
-        int dim = heads * hd;
-        for (int s = 0; s < t; s++)
-            for (int h = 0; h < heads; h++)
-            {
-                long inOff = ((long)h * t + s) * hd;
-                long outOff = (long)s * dim + (long)h * hd;
-                Buffer.MemoryCopy(ip + inOff, op + outOff, hd * 4, hd * 4);
-            }
-    }
-
     private ResnetWeights LoadResnet(IReadOnlyDictionary<string, Tensor> w, string p) => new()
     {
         Norm1W = WhisperOps.EnsureF32(w[$"{p}.norm1.weight"]),

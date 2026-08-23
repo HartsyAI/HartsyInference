@@ -39,18 +39,18 @@ public sealed unsafe class LtxVaeResnetBlock3d
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _conv1 = new CausalConv3d(w[$"{prefix}.conv1.conv.weight"], Bias(w, $"{prefix}.conv1.conv.bias"),
+        _conv1 = new CausalConv3d(w[$"{prefix}.conv1.conv.weight"], VaeOps.Bias(w, $"{prefix}.conv1.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
-        _conv2 = new CausalConv3d(w[$"{prefix}.conv2.conv.weight"], Bias(w, $"{prefix}.conv2.conv.bias"),
+        _conv2 = new CausalConv3d(w[$"{prefix}.conv2.conv.weight"], VaeOps.Bias(w, $"{prefix}.conv2.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
         if (_inC != _outC)
         {
-            _norm3W = LoadF32(w, $"{prefix}.norm3.weight");
+            _norm3W = TensorCasts.LoadF32(w, $"{prefix}.norm3.weight");
             w.TryGetValue($"{prefix}.norm3.bias", out _norm3B);
-            _convShortcut = new CausalConv3d(w[$"{prefix}.conv_shortcut.conv.weight"], Bias(w, $"{prefix}.conv_shortcut.conv.bias"),
+            _convShortcut = new CausalConv3d(w[$"{prefix}.conv_shortcut.conv.weight"], VaeOps.Bias(w, $"{prefix}.conv_shortcut.conv.bias"),
                 padT: 0, padH: 0, padW: 0, replicateFirstPad: true, causal: _isCausal, computeDtype: _computeDtype);
         }
-        if (_timestepCond) _scaleShift = LoadF32(w, $"{prefix}.scale_shift_table");
+        if (_timestepCond) _scaleShift = TensorCasts.LoadF32(w, $"{prefix}.scale_shift_table");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -201,7 +201,4 @@ public sealed unsafe class LtxVaeResnetBlock3d
     }
 
     private static void Silu(IBackend backend, Tensor t) => backend.Silu(t, t);
-    /// <summary>Optional bias lookup shared by the LTX VAE family (one copy, per the shared-primitive rule).</summary>
-    internal static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string k) => w.TryGetValue(k, out Tensor? b) ? b : null;
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

@@ -38,8 +38,7 @@ internal sealed class VulkanProfiler
         _totalOps++;
     }
 
-    /// <summary>Dumps the top 20 ops by total time. Output goes to stderr unless
-    /// <c>HARTSYINFERENCE_VK_PROFILE_FILE</c> points to a writable path.</summary>
+    /// <summary>Dumps the top 20 ops by total time. Output goes to stderr unless <c>HARTSYINFERENCE_VK_PROFILE_FILE</c> points to a writable path.</summary>
     public void Dump()
     {
         if (!_enabled || _totalOps == 0) return;

@@ -2,8 +2,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Mask buffer helpers: bounding-box rasterization (the fallback when SAM 2 isn't installed) and packing an
-/// L8 mask into the contract's RGB24 <see cref="ImageData"/>.</summary>
+/// <summary>Mask buffer helpers: bounding-box rasterization (the fallback when SAM 2 isn't installed) and packing an L8 mask into the contract's RGB24 <see cref="ImageData"/>.</summary>
 public static class VisionMasks
 {
     /// <summary>Rasterizes an axis-aligned pixel-space box into an <c>W*H</c> L8 buffer (255 inside).</summary>
@@ -25,8 +24,7 @@ public static class VisionMasks
         return bytes;
     }
 
-    /// <summary>Wraps an L8 mask as an <see cref="ImageData"/> by replicating the single channel into R, G and B —
-    /// the contract carries masks as RGB24, so a mask reads as a grayscale image in any consumer.</summary>
+    /// <summary>Wraps an L8 mask as an <see cref="ImageData"/> by replicating the single channel into R, G and B — the contract carries masks as RGB24, so a mask reads as a grayscale image in any consumer.</summary>
     public static ImageData ToImageData(byte[] gray, int width, int height)
     {
         ArgumentNullException.ThrowIfNull(gray);

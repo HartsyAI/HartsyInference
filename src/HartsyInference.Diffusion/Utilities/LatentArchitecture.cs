@@ -1,10 +1,6 @@
 namespace HartsyInference.Diffusion.Utilities;
 
-/// <summary>Latent-space architecture identifier used by preview encoders
-/// (latent2rgb / TAESD) to pick the right factor matrix or weight set.
-/// The values track each model family's VAE channel count and scale conventions.
-/// <see cref="Unknown"/> means the producer didn't tag the latent — preview
-/// encoders should skip rather than guess.</summary>
+/// <summary>Latent-space architecture identifier used by preview encoders (latent2rgb / TAESD) to pick the right factor matrix or weight set, tracking each model family's VAE channel count and scale conventions; <see cref="Unknown"/> means the producer didn't tag the latent, so preview encoders should skip rather than guess.</summary>
 public enum LatentArchitecture
 {
     Unknown = 0,
@@ -16,8 +12,7 @@ public enum LatentArchitecture
     Sd3 = 3,
     /// <summary>Flux.1 (dev / schnell) — 16-channel latent, 8x downscale.</summary>
     Flux = 4,
-    /// <summary>Flux.2 — 16-channel latent, distinct factors from Flux.1.
-    /// Falls back to Flux.1 factors if Flux.2-specific ones aren't published.</summary>
+    /// <summary>Flux.2 — 16-channel latent, distinct factors from Flux.1; falls back to Flux.1 factors if Flux.2-specific ones aren't published.</summary>
     Flux2 = 5,
     /// <summary>Chroma — reuses the Flux VAE, so Flux factors apply.</summary>
     Chroma = 6,
@@ -27,19 +22,14 @@ public enum LatentArchitecture
     FLite = 8,
     /// <summary>Z-Image — reuses the Flux VAE, so Flux factors apply.</summary>
     ZImage = 9,
-    /// <summary>Anima (Cosmos-Predict2 2B) — 16-channel Qwen-Image VAE, 8× downscale. Same channel count as Flux/SD3
-    /// so Flux factors are a reasonable preview approximation until Qwen-Image-specific factors are derived.</summary>
+    /// <summary>Anima (Cosmos-Predict2 2B) — 16-channel Qwen-Image VAE, 8× downscale; same channel count as Flux/SD3 so Flux factors are a reasonable preview approximation until Qwen-Image-specific factors are derived.</summary>
     Anima = 10,
-    /// <summary>Wan2.2 video — 48-channel 3-D latent <c>[1, 48, T, H, W]</c>, 16× spatial downscale.
-    /// Previews decode the middle latent frame.</summary>
+    /// <summary>Wan2.2 video — 48-channel 3-D latent <c>[1, 48, T, H, W]</c>, 16× spatial downscale; previews decode the middle latent frame.</summary>
     Wan = 11,
-    /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale. The pipeline hands the
-    /// preview a single-frame <c>[1, 128, H, W]</c> slice (its working latent is token-packed).</summary>
+    /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale. The pipeline hands the preview a single-frame <c>[1, 128, H, W]</c> slice (its working latent is token-packed).</summary>
     Ltx = 12,
-    /// <summary>Chroma Radiance — pixel-space (no VAE). The "latent" IS the RGB image in [-1, 1];
-    /// previews convert it directly without a factor matrix.</summary>
+    /// <summary>Chroma Radiance — pixel-space (no VAE); the "latent" IS the RGB image in [-1, 1], so previews convert it directly without a factor matrix.</summary>
     ChromaRadiance = 13,
-    /// <summary>Zeta-Chroma — pixel-space Z-Image S3-DiT (no VAE). Direct RGB preview like
-    /// <see cref="ChromaRadiance"/>.</summary>
+    /// <summary>Zeta-Chroma — pixel-space Z-Image S3-DiT (no VAE). Direct RGB preview like <see cref="ChromaRadiance"/>.</summary>
     ZetaChroma = 14,
 }

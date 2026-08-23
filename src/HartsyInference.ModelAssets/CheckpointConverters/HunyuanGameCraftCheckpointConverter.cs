@@ -5,14 +5,8 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Splits a Hunyuan-GameCraft checkpoint (loaded from <c>.pt</c> via <c>PytorchPickleLoader</c> or a
-/// converted safetensors) into the component weight dicts the pipeline loads: the <c>Dit</c> (HunyuanVideo MM-DiT
-/// incl. <c>camera_in</c>… no — camera kept separate), the <c>CameraNet</c>, the <c>Vae</c>, and the
-/// <c>Llava</c> + <c>Clip</c> text encoders. Routes by coarse prefix.
-/// <para><b>Numerics validation-pending</b> — the per-block key remap from the original HunyuanVideo naming
-/// (<c>double_blocks.*.img_attn_qkv</c>, <c>single_blocks.*.linear1</c>, …) to the diffusers names the reused
-/// <c>HunyuanImageBlock</c>/<c>HunyuanImageSingleBlock</c> expect is <b>validation-gated</b> and finalized during
-/// the diff pass; this router classifies by prefix so the structural pipeline can load a converted checkpoint.</para></summary>
+/// <summary>Splits a Hunyuan-GameCraft checkpoint (loaded from <c>.pt</c> via <c>PytorchPickleLoader</c> or a converted safetensors) into the component weight dicts the pipeline loads: the <c>Dit</c> (HunyuanVideo MM-DiT incl. <c>camera_in</c>… no — camera kept separate), the <c>CameraNet</c>, the <c>Vae</c>, and the <c>Llava</c> + <c>Clip</c> text encoders. Routes by coarse prefix.
+/// <para><b>Numerics validation-pending</b> — the per-block key remap from the original HunyuanVideo naming (<c>double_blocks.*.img_attn_qkv</c>, <c>single_blocks.*.linear1</c>, …) to the diffusers names the reused <c>HunyuanImageBlock</c>/<c>HunyuanImageSingleBlock</c> expect is <b>validation-gated</b> and finalized during the diff pass; this router classifies by prefix so the structural pipeline can load a converted checkpoint.</para></summary>
 public static class HunyuanGameCraftCheckpointConverter
 {
     public sealed class ConvertedWeights
@@ -50,12 +44,7 @@ public static class HunyuanGameCraftCheckpointConverter
         return false;
     }
 
-    /// <summary>Loads a raw tensor dict from a Hunyuan-GameCraft component checkpoint file, sniffing the container
-    /// by extension: <c>.pt</c>/<c>.pth</c> via <see cref="PytorchPickleLoader"/> (the DiT+CameraNet dump ships this
-    /// way — see <c>mp_rank_00_model_states.pt</c>), anything else via <see cref="SafeTensorsLoader"/> (fp8-scaled
-    /// dequantized, matching the Comfy-repacked side-model convention <c>HunyuanVideoRecipe</c> already uses for the
-    /// VAE/Llava/CLIP components). The caller owns and disposes the returned loader — its tensors alias the loader's
-    /// backing memory (see <see cref="PytorchPickleLoader.Dispose"/> / <see cref="SafeTensorsLoader"/>).</summary>
+    /// <summary>Loads a raw tensor dict from a Hunyuan-GameCraft component checkpoint file, sniffing the container by extension: <c>.pt</c>/<c>.pth</c> via <see cref="PytorchPickleLoader"/> (the DiT+CameraNet dump ships this way — see <c>mp_rank_00_model_states.pt</c>), anything else via <see cref="SafeTensorsLoader"/> (fp8-scaled dequantized, matching the Comfy-repacked side-model convention <c>HunyuanVideoRecipe</c> already uses for the VAE/Llava/CLIP components). The caller owns and disposes the returned loader — its tensors alias the loader's backing memory (see <see cref="PytorchPickleLoader.Dispose"/> / <see cref="SafeTensorsLoader"/>).</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadRaw(string path)
     {
         if (!File.Exists(path))

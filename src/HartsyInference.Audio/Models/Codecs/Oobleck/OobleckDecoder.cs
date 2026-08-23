@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Oobleck decoder (diffusers <c>OobleckDecoder</c>):
+/// <summary>Oobleck decoder (diffusers <c>OobleckDecoder</c>) — stem conv, N upsample+residual blocks, final conv, no tanh (unbounded PCM).</summary>
+/// <remarks>
 /// <code>
 ///   conv1: WNConv1d(latent_dim → channels·mult[-1], k=7, padding=3)
 ///   for stride in reversed(downsampling_ratios):
@@ -14,7 +15,7 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// </code>
 /// All strides published so far are even, so each transpose conv exactly multiplies T by its stride
 /// (T_out = T·s with padLeft = padRight = s/2) and the full stack expands T by the hop length.
-/// No final tanh — Stable-Audio-family decoders emit unbounded PCM that callers clamp.</summary>
+/// No final tanh — Stable-Audio-family decoders emit unbounded PCM that callers clamp.</remarks>
 internal sealed class OobleckDecoder
 {
     private readonly OobleckConfig _cfg;
@@ -57,7 +58,7 @@ internal sealed class OobleckDecoder
         //   layers.{n+1}        = final Snake
         //   layers.{n+2}        = output WNConv1d (-> audio_channels, k=7, bias=False)
         // Inside a DecoderBlock: .layers.0 Snake, .layers.1 ConvTranspose, .layers.{2,3,4} ResUnits.
-        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.0.bias"]);
 
         int n = _strides.Length;
@@ -81,7 +82,7 @@ internal sealed class OobleckDecoder
         }
 
         (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.{n + 1}", _dims[^1]);
-        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.{n + 2}");   // bias=False upstream
+        _outW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.{n + 2}");   // bias=False upstream
     }
 
     /// <summary>Forward — latent <c>[B, latent_dim, T]</c> → PCM <c>[B, audio_channels, T · hop]</c>.</summary>

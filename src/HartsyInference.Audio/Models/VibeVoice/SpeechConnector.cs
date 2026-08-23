@@ -4,14 +4,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Projects VAE latents into the LM hidden space. Used twice on the multi-speaker
-/// variants — once for acoustic (64 → lm_hidden) and once for semantic (128 → lm_hidden) —
-/// and once on the streaming variant (acoustic only).
-///
-/// <para>Architecture: <c>fc1 → LlamaRMSNorm(eps=1e-6) → fc2</c>. Both linears carry bias.
+/// <summary>Projects VAE latents into the LM hidden space via <c>fc1 → LlamaRMSNorm(eps=1e-6) → fc2</c>.</summary>
+/// <remarks>Used twice on the multi-speaker variants — once for acoustic (64 → lm_hidden) and once for
+/// semantic (128 → lm_hidden) — and once on the streaming variant (acoustic only). Both linears carry bias.
 /// Identical math on the Python side (<c>vibevoice/modular/modeling_vibevoice.py::SpeechConnector</c>).
 /// Inputs and outputs are channels-last <c>[B, T, D]</c>; <c>T</c> on the inference hot
-/// path is typically 1 (single VAE frame per LM step).</para></summary>
+/// path is typically 1 (single VAE frame per LM step).</remarks>
 internal sealed unsafe class SpeechConnector
 {
     private readonly int _inputDim;
@@ -38,8 +36,7 @@ internal sealed unsafe class SpeechConnector
         _fc2B = WhisperOps.EnsureF32(w[$"{prefix}.fc2.bias"]);
     }
 
-    /// <summary>Forward: <paramref name="x"/> <c>[B, T, in_dim]</c> → <c>[B, T, out_dim]</c>.
-    /// Allocates and returns a fresh tensor; caller owns disposal.</summary>
+    /// <summary>Projects <paramref name="x"/> <c>[B, T, in_dim]</c> to <c>[B, T, out_dim]</c>; caller owns disposal of the result.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int batch, int seqLen)
     {
         if (_fc1W is null) throw new InvalidOperationException("SpeechConnector weights not loaded.");

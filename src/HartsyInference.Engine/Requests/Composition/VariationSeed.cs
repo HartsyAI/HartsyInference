@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Variation-seed blending: mixes a secondary seed's noise into the primary seed to produce a controlled
-/// variation of a base image.</summary>
+/// <summary>Variation-seed blending: mixes a secondary seed's noise into the primary seed to produce a controlled variation of a base image.</summary>
 public sealed record VariationSeed
 {
     /// <summary>The variation seed.</summary>

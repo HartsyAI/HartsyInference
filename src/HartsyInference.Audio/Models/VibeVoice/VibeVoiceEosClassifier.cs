@@ -4,11 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>VibeVoice-Realtime's stop signal: a 2-layer MLP (<c>Linear(hidden→hidden) → ReLU →
-/// Linear(hidden→1)</c>) on the TTS backbone's last hidden state, thresholded after a sigmoid. Replaces the
-/// multi-speaker variant's token-based EOS (there is no <c>lm_head</c> on this variant at all — real weight
-/// keys confirm the checkpoint has no vocabulary projection for the TTS backbone). Top-level checkpoint keys
-/// (<c>tts_eos_classifier.fc1.*</c> / <c>fc2.*</c> — not under the <c>model.</c> prefix everything else uses).</summary>
+/// <summary>VibeVoice-Realtime's stop signal: a 2-layer MLP (<c>Linear(hidden→hidden) → ReLU → Linear(hidden→1)</c>) on the TTS backbone's last hidden state, thresholded after a sigmoid.</summary>
+/// <remarks>Replaces the multi-speaker variant's token-based EOS (there is no <c>lm_head</c> on this variant at
+/// all — real weight keys confirm the checkpoint has no vocabulary projection for the TTS backbone). Top-level
+/// checkpoint keys (<c>tts_eos_classifier.fc1.*</c> / <c>fc2.*</c> — not under the <c>model.</c> prefix
+/// everything else uses).</remarks>
 internal sealed unsafe class VibeVoiceEosClassifier
 {
     private readonly int _hidden;
@@ -28,8 +28,7 @@ internal sealed unsafe class VibeVoiceEosClassifier
         _fc2B = WhisperOps.EnsureF32(w["tts_eos_classifier.fc2.bias"]);
     }
 
-    /// <summary>Sigmoid stop probability for the last hidden state <paramref name="lastHidden"/> <c>[1,1,hidden]</c>.
-    /// Upstream stops when this exceeds 0.5.</summary>
+    /// <summary>Sigmoid stop probability for the last hidden state <paramref name="lastHidden"/> <c>[1,1,hidden]</c>; upstream stops when this exceeds 0.5.</summary>
     public float StopProbability(IBackend backend, Tensor lastHidden)
     {
         if (_fc1W is null) throw new InvalidOperationException("VibeVoiceEosClassifier weights not loaded.");

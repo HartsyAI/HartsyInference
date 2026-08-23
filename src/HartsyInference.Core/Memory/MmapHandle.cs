@@ -24,7 +24,7 @@ public sealed unsafe class MmapHandle : IDisposable
     /// <summary>File path that was mapped.</summary>
     public string FilePath { get; }
 
-    /// <summary>Base pointer to the start of the mapped memory.</summary>
+    /// <summary>Base pointer to the start of the mapped memory. Throws if disposed.</summary>
     public byte* BasePointer
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -58,7 +58,7 @@ public sealed unsafe class MmapHandle : IDisposable
         return new MmapHandle(mmf, accessor, pointer, fileLength, filePath);
     }
 
-    /// <summary>Returns a pointer offset from the base by the given number of bytes.</summary>
+    /// <summary>Returns a pointer offset from the base; allows an offset equal to <see cref="ByteLength"/> so trailing zero-byte marker tensors resolve to a valid past-the-end pointer.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte* PointerAt(long byteOffset)
     {

@@ -33,7 +33,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _scaleShift = LoadF32(w, $"{prefix}.scale_shift_table");   // [1,6,dim] → flat 6*dim
+        _scaleShift = TensorCasts.LoadF32(w, $"{prefix}.scale_shift_table");   // [1,6,dim] → flat 6*dim
         LoadAttn(w, $"{prefix}.attn1", 0);
         LoadAttn(w, $"{prefix}.attn2", 1);
         // I2V image cross-attention (only present in image-conditioned checkpoints).
@@ -41,11 +41,11 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         {
             _addK = addK; w.TryGetValue($"{prefix}.attn2.add_k_proj.bias", out _addKB);
             _addV = w[$"{prefix}.attn2.add_v_proj.weight"]; w.TryGetValue($"{prefix}.attn2.add_v_proj.bias", out _addVB);
-            _normAddedK = LoadF32(w, $"{prefix}.attn2.norm_added_k.weight");
+            _normAddedK = TensorCasts.LoadF32(w, $"{prefix}.attn2.norm_added_k.weight");
         }
         // norm2 affine is read by the manual host-pointer LayerNorm loop → cast BOTH weight and bias to F32
         // (bf16 checkpoints else feed garbage bias bytes reinterpreted as f32).
-        if (_crossAttnNorm) { _norm2W = LoadF32(w, $"{prefix}.norm2.weight"); _norm2B = w.TryGetValue($"{prefix}.norm2.bias", out Tensor? n2b) ? (n2b.DType == DType.F32 ? n2b : n2b.CastTo(DType.F32)) : null; }
+        if (_crossAttnNorm) { _norm2W = TensorCasts.LoadF32(w, $"{prefix}.norm2.weight"); _norm2B = w.TryGetValue($"{prefix}.norm2.bias", out Tensor? n2b) ? (n2b.DType == DType.F32 ? n2b : n2b.CastTo(DType.F32)) : null; }
         _ffProjW = w[$"{prefix}.ffn.net.0.proj.weight"]; w.TryGetValue($"{prefix}.ffn.net.0.proj.bias", out _ffProjB);
         _ffOutW = w[$"{prefix}.ffn.net.2.weight"]; w.TryGetValue($"{prefix}.ffn.net.2.bias", out _ffOutB);
         long bytes = 0;
@@ -64,8 +64,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         _k[i] = w[$"{p}.to_k.weight"]; w.TryGetValue($"{p}.to_k.bias", out Tensor? kb); _kB[i] = kb;
         _v[i] = w[$"{p}.to_v.weight"]; w.TryGetValue($"{p}.to_v.bias", out Tensor? vb); _vB[i] = vb;
         _o[i] = w[$"{p}.to_out.0.weight"]; w.TryGetValue($"{p}.to_out.0.bias", out Tensor? ob); _oB[i] = ob;
-        _nq[i] = LoadF32(w, $"{p}.norm_q.weight");
-        _nk[i] = LoadF32(w, $"{p}.norm_k.weight");
+        _nq[i] = TensorCasts.LoadF32(w, $"{p}.norm_q.weight");
+        _nk[i] = TensorCasts.LoadF32(w, $"{p}.norm_k.weight");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -241,6 +241,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         if (ctx.PoseStrength != 1.0f) backend.Scale(drivingV, drivingV, ctx.PoseStrength);
         backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
 
+        ScaleReferenceRows(backend, v, hw, _dim, ctx.ReferenceImageStrength);
         Tensor kGen = ToBhsd(backend, kn, s);
         Tensor vGen = ToBhsd(backend, v, s);
         backend.ScatterSeqHeadMajor(ctx.KeyBuffer, kGen, 0);
@@ -291,6 +292,17 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     }
 
     /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>
+    /// <summary>ComfyUI Animate-2's <c>v[:, :hw] *= ref_strength</c>: scales the reference-image slot's V rows
+    /// <c>[0, hw)</c> in place, leaving every other row untouched; exact no-op at 1.0.</summary>
+    internal static void ScaleReferenceRows(IBackend backend, Tensor v, int hw, int dim, float strength)
+    {
+        if (strength == 1.0f) return;
+        using Tensor rows = new Tensor(new TensorShape(hw, dim), DType.F32);
+        backend.SliceRows(rows, v, 0);
+        backend.Scale(rows, rows, strength);
+        backend.ScatterRowsGeneric(v, rows, 0);
+    }
+
     private void ScatterDrivingFrame(IBackend backend, Tensor buffer, Tensor source, int frame, int hw, int tailOffset)
     {
         using Tensor rows = new Tensor(new TensorShape(hw, _dim), DType.F32);
@@ -605,6 +617,4 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         backend.Permute0213(o, x, _heads, s, _headDim);
         return o;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

@@ -14,13 +14,7 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Wan-Animate-2 recipe — the Wan2.1 I2V-14B backbone driven by a raw video through a second token stream
-/// rather than by a pose/face pathway. The checkpoint adds no module of its own, so it is key-for-key an I2V-14B one
-/// and is recognised only by <c>__metadata__["config"].transformer.model_type == "animate2"</c>; see
-/// <see cref="WanVideoRecipe.DetectVariant"/>. Side models are the family's usual set: umT5-XXL
-/// (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>) and CLIP-ViT-H
-/// (<see cref="SideModels.ClipVisionH14"/>), which is <b>required</b> here — both token streams carry a 257-token
-/// image context.</summary>
+/// <summary>Wan-Animate-2 recipe — the Wan2.1 I2V-14B backbone driven by a raw video through a second token stream rather than by a pose/face pathway. The checkpoint adds no module of its own, so it is key-for-key an I2V-14B one and is recognised only by <c>__metadata__["config"].transformer.model_type == "animate2"</c>; see <see cref="WanVideoRecipe.DetectVariant"/>. Side models are the family's usual set: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>) and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>), which is <b>required</b> here — both token streams carry a 257-token image context.</summary>
 public sealed class WanAnimate2Recipe : IVideoRecipe
 {
     /// <inheritdoc/>
@@ -35,10 +29,7 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate-2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an
-    /// 81-frame clip at 24 fps. The distillation build wants 10 steps at guidance 1.0 instead; only its
-    /// <c>log_scale</c> is routed automatically (<see cref="WanAnimate2Transformer.ResolveLogScale"/>) — the step
-    /// count and guidance stay the caller's, because a filename is too weak a signal to override them on.</summary>
+    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an 81-frame clip at 24 fps. The distillation build wants 10 steps at guidance 1.0 instead; only its <c>log_scale</c> is routed automatically (<see cref="WanAnimate2Transformer.ResolveLogScale"/>) — the step count and guidance stay the caller's, because a filename is too weak a signal to override them on.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 40, CfgScale = 3.0f, Frames = 81, Fps = 24 };
 
     /// <inheritdoc/>
@@ -90,13 +81,7 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
             WanAnimate2Transformer transformer = new WanAnimate2Transformer(config);
             transformer.LoadWeights(conv.Transformer);
 
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-            Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder();
-            vaeDecoder.LoadWeights(vaeWeights);
-            Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder();
-            vaeEncoder.LoadWeights(vaeWeights);
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);
 
             string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             SafeTensorsLoader clipLoader = new SafeTensorsLoader();
@@ -105,13 +90,7 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
             ClipVisionEncoder clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
             clipVision.LoadWeights(clipLoader.GetAllTensors());
 
-            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-            umt5Loader.Load(umt5Path);
-            loaders.Add(umt5Loader);
-            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-            umt5.LoadWeights(umt5Weights);
-            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: WanVideoRecipe.TokenLength);
+            (T5TextEncoder umt5, T5Tokenizer tokenizer) = VideoRecipeUtils.LoadUmt5(umt5Path, loaders);
 
             WanAnimate2Pipeline pipeline = new WanAnimate2Pipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanAnimate2Recipe] Wan-Animate-2 ready (raw driving video, no pose/face preprocessing).");

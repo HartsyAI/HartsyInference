@@ -1,14 +1,12 @@
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>Configuration for a VITS <c>SynthesizerTrn</c> (the shared end-to-end TTS core behind Piper,
-/// MeloTTS, GPT-SoVITS's SoVITS half, and OpenVoice). Inference path: phonemes → TextEncoder (relative-pos
-/// MHA) → (m_p, logs_p) → duration predictor → monotonic length regulation → prior sample → normalizing
-/// flow (reverse) → HiFi-GAN decoder → waveform. See <c>docs/Research/VITS_ARCHITECTURE.md</c>.
+/// <summary>Configuration for a VITS <c>SynthesizerTrn</c> — the shared end-to-end TTS core behind Piper, MeloTTS, GPT-SoVITS's SoVITS half, and OpenVoice.</summary>
+/// <remarks>Inference path: phonemes → TextEncoder (relative-pos MHA) → (m_p, logs_p) → duration predictor → monotonic length regulation → prior sample → normalizing flow (reverse) → HiFi-GAN decoder → waveform. See <c>docs/Research/VITS_ARCHITECTURE.md</c>.
 ///
 /// <para><b>Reuse:</b> all convs/transposed-convs/LayerNorm via <see cref="HartsyInference.Core.Backends.IBackend"/>,
 /// attention via <c>ScaledDotProductAttention</c> (+ rel-pos bias), weight-norm via <c>WeightNormFusion</c>,
 /// seeded noise via <c>DeterministicRng</c>. Net-new: rel-pos attention, WN residual coupling, the monotonic
-/// length regulator, and the stochastic duration predictor's spline (staged).</para></summary>
+/// length regulator, and the stochastic duration predictor's spline (staged).</para></remarks>
 public sealed record VitsConfig
 {
     public int NumVocab { get; init; } = 256;
@@ -25,8 +23,7 @@ public sealed record VitsConfig
     public int DpFilterChannels { get; init; } = 256;   // deterministic DP
     public int DpKernelSize { get; init; } = 3;
     public int SdpFlows { get; init; } = 4;
-    /// <summary>State-dict prefix of the stochastic duration predictor. Real VITS/Piper checkpoints store it under
-    /// <c>dp</c>; the synthetic-weight tests use <c>sdp</c>, which stays the default.</summary>
+    /// <summary>State-dict prefix of the stochastic duration predictor — real VITS/Piper checkpoints store it under <c>dp</c>; the synthetic-weight tests use <c>sdp</c>, which stays the default.</summary>
     public string SdpPrefix { get; init; } = "sdp";
     /// <summary>Number of rational-quadratic spline bins in the stochastic duration predictor's flows.</summary>
     public int DurationPredictorFlowBins { get; init; } = 10;
@@ -71,8 +68,7 @@ public sealed record VitsConfig
         get { int p = 1; for (int i = 0; i < UpsampleRates.Count; i++) p *= UpsampleRates[i]; return p; }
     }
 
-    /// <summary>Piper "medium" preset (22.05 kHz, resblock 2, 3-stage [8,8,4] upsampler, SDP). Piper stores the
-    /// stochastic duration predictor under the <c>dp</c> prefix.</summary>
+    /// <summary>Piper "medium" preset (22.05 kHz, resblock 2, 3-stage [8,8,4] upsampler, SDP); Piper stores the stochastic duration predictor under the <c>dp</c> prefix.</summary>
     public static VitsConfig PiperMedium => new() { SdpPrefix = "dp" };
 
     /// <summary>Piper "high" preset (resblock 1, 4-stage upsampler).</summary>

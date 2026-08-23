@@ -3,20 +3,16 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>Sparse-voxel ops for TRELLIS stage 2. The two coord-changing novelties are implemented without a sparse
-/// library: <b>submanifold conv</b> = scatter features onto a dense grid → dense <see cref="IBackend.Conv3d"/> →
-/// gather at the active voxels (inactive neighbours are zero, so a dense conv equals the submanifold conv exactly),
-/// and <b>downsample</b> = average-pool over <c>coord/factor</c> groups. Correctness-first (host scatter/gather);
-/// the grid is one-shot per conv. See <c>docs/Research/TRELLIS_ARCHITECTURE.md</c>.</summary>
+/// <summary>Sparse-voxel ops for TRELLIS stage 2, implemented without a sparse library: submanifold conv via scatter→dense <see cref="IBackend.Conv3d"/>→gather, and downsample via average-pool over <c>coord/factor</c> groups.</summary>
 public static unsafe class SparseOps
 {
-    /// <summary>Reorders an spconv conv weight <c>[Cout, kD, kH, kW, Cin]</c> → <c>[Cout, Cin, kD, kH, kW]</c>
-    /// (the <see cref="IBackend.Conv3d"/> layout). One-time at load.</summary>
+    /// <summary>Reorders an spconv conv weight <c>[Cout, kD, kH, kW, Cin]</c> → <c>[Cout, Cin, kD, kH, kW]</c> (the <see cref="IBackend.Conv3d"/> layout), one-time at load.</summary>
+    /// <remarks>No production call sites: retained as the weight prep for the dense <see cref="SubmanifoldConv3d"/> path, which <c>TrellisSparseOpsParityTests</c> checks against the numpy reference alongside the sparse path.</remarks>
     public static Tensor PermuteConvWeight(Tensor w)
     {
         int cout = (int)w.Shape[0], k = (int)w.Shape[1], cin = (int)w.Shape[4];
         Tensor o = new(new TensorShape(new long[] { cout, cin, k, k, k }), DType.F32);
-        Tensor wf = w.DType != DType.F32 ? w.CastTo(DType.F32) : w;
+        Tensor wf = TensorCasts.EnsureF32(w);
         float* s = (float*)wf.DataPointer, d = (float*)o.DataPointer;
         for (int co = 0; co < cout; co++)
             for (int kd = 0; kd < k; kd++)
@@ -28,8 +24,8 @@ public static unsafe class SparseOps
         return o;
     }
 
-    /// <summary>Submanifold 3D conv (stride 1, k3, pad 1): output voxel set = input's. <paramref name="weightP"/> is
-    /// the permuted <c>[Cout,Cin,kD,kH,kW]</c> weight (see <see cref="PermuteConvWeight"/>).</summary>
+    /// <summary>Submanifold 3D conv (stride 1, k3, pad 1) whose output voxel set equals the input's; <paramref name="weightP"/> is the permuted weight from <see cref="PermuteConvWeight"/>.</summary>
+    /// <remarks>Superseded in production by <see cref="SubmanifoldConv3dSparse"/> (rulebook GEMM, no dense grid): retained as the scatter→dense-<see cref="IBackend.Conv3d"/>→gather formulation that <c>TrellisSparseOpsParityTests</c> validates against the same numpy reference the sparse path is checked against — so a regression in either implementation is attributable.</remarks>
     public static SparseTensor SubmanifoldConv3d(IBackend backend, SparseTensor x, Tensor weightP, Tensor? bias)
     {
         int r = x.Resolution, n = x.Count, cin = x.Channels, cout = (int)weightP.Shape[0];
@@ -52,14 +48,11 @@ public static unsafe class SparseOps
         return x.Replace(outFeats);
     }
 
-    /// <summary>Extracts the 27 <c>[Cout,Cin]</c> per-kernel-offset weight slices from an spconv conv weight
-    /// <c>[Cout, kD, kH, kW, Cin]</c> — the GEMM weights for the sparse-conv rulebook. Offset index = (kd·3+kh)·3+kw.
-    /// <paramref name="f16"/> keeps the slices native F16 so the rulebook GEMM runs on the F16 tensor cores with F32
-    /// accumulation (the F32-activation gather still resolves to an F16 GEMM) — halves the slice VRAM, parity-safe.</summary>
+    /// <summary>Extracts the 27 <c>[Cout,Cin]</c> per-kernel-offset weight slices from an spconv conv weight — the GEMM weights for the sparse-conv rulebook; <paramref name="f16"/> keeps them native F16 to halve slice VRAM.</summary>
     public static Tensor[] ConvWeightSlices(Tensor w, bool f16 = false)
     {
         int cout = (int)w.Shape[0], k = (int)w.Shape[1], cin = (int)w.Shape[4];
-        Tensor wf = w.DType != DType.F32 ? w.CastTo(DType.F32) : w;
+        Tensor wf = TensorCasts.EnsureF32(w);
         float* s = (float*)wf.DataPointer;
         Tensor[] slices = new Tensor[k * k * k];
         for (int kd = 0; kd < k; kd++)
@@ -77,9 +70,7 @@ public static unsafe class SparseOps
         return slices;
     }
 
-    /// <summary>Submanifold 3D conv via the spconv rulebook (no dense grid): a coord hash finds active neighbours per
-    /// kernel offset, then per offset gather → cuBLAS GEMM (<paramref name="wSlices"/>) → scatter-add. ~20-90× less
-    /// compute than the dense-grid path at high channel counts (and no multi-GB grid). Output = input voxel set.</summary>
+    /// <summary>Submanifold 3D conv via the spconv rulebook (no dense grid): per kernel offset, gather → cuBLAS GEMM (<paramref name="wSlices"/>) → scatter-add, ~20-90× less compute than the dense-grid path at high channel counts.</summary>
     public static SparseTensor SubmanifoldConv3dSparse(IBackend backend, SparseTensor x, Tensor[] wSlices, Tensor? bias)
     {
         int n = x.Count, cin = x.Channels, cout = (int)wSlices[0].Shape[0];
@@ -108,11 +99,7 @@ public static unsafe class SparseOps
         return x.Replace(outFeats);
     }
 
-    /// <summary>Presents sparse feats as a <c>[1,N,C]</c> rank-3 tensor for the transformer/GEMM/norm ops WITHOUT a
-    /// cache-missing reshape when it is already <c>[1,N,C]</c>. A fresh <c>Reshape</c> is a new Tensor identity that
-    /// cache-misses the activation and round-trips the whole feature buffer D2H+H2D — the dominant stage-2 H2D_MISS
-    /// (572× 6.6 MB res-64 feats + 265× 10.7 MB res-32 feats/gen). Only a genuine rank-2 <c>[N,C]</c> input reshapes.
-    /// See [[cuda-activation-cache-reshape-identity]].</summary>
+    /// <summary>Presents sparse feats as a <c>[1,N,C]</c> rank-3 tensor without a cache-missing reshape when it is already that shape — a fresh <c>Reshape</c> would round-trip the whole feature buffer through host memory every forward.</summary>
     public static Tensor As3D(Tensor feats)
     {
         if (feats.Shape.Rank == 3 && feats.Shape[0] == 1) return feats;
@@ -159,9 +146,7 @@ public static unsafe class SparseOps
         return rb;
     }
 
-    /// <summary>Average-pool downsample by <paramref name="factor"/> (coord/factor + dedup, mean over each group).
-    /// Returns the downsampled tensor + the per-input-voxel group index (<c>idx[i]</c>) so a paired upsample can
-    /// gather back (<c>up_feats[i] = down_feats[idx[i]]</c>, restoring the input coords).</summary>
+    /// <summary>Average-pool downsample by <paramref name="factor"/>, returning the downsampled tensor plus the per-input-voxel group index so a paired <see cref="Upsample"/> can gather back to the input coords.</summary>
     private sealed class DownGeom { public int[] Idx = null!, Coords = null!, Counts = null!; public int M; }
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<int[], DownGeom> _downCache = new();
 
@@ -210,11 +195,7 @@ public static unsafe class SparseOps
         return (new SparseTensor(outFeats, g.Coords, x.Resolution / factor), g.Idx);
     }
 
-    /// <summary>Nearest-neighbour upsample: restores the pre-downsample voxel set (<paramref name="upCoords"/> /
-    /// <paramref name="upResolution"/>) by gathering each input voxel's downsampled-group feature via
-    /// <paramref name="idx"/> (from the paired <see cref="Downsample"/>). Runs on-device via <see cref="IBackend.RowGather"/>
-    /// (out[i] = in[idx[i]]) — a host loop here would D2H-read the feats, gather on CPU, then re-upload the whole
-    /// (up to ~100 MB) result as an H2D miss every forward. The idx→I32 upload is small and auto-promotes.</summary>
+    /// <summary>Nearest-neighbour upsample: restores the pre-downsample voxel set by gathering each input voxel's downsampled-group feature on-device via <paramref name="idx"/>, avoiding a full feature-buffer D2H/H2D round trip.</summary>
     public static SparseTensor Upsample(IBackend backend, SparseTensor x, int[] idx, int[] upCoords, int upResolution)
     {
         int n = idx.Length, c = x.Channels;

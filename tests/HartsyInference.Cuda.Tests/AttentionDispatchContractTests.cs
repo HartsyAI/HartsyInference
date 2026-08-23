@@ -144,10 +144,23 @@ public sealed class AttentionDispatchContractTests
     public void CudnnSdpaPlanKey_DistinguishesScaleBits()
     {
         CudnnSdpa.PlanKey first = new CudnnSdpa.PlanKey(
-            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), false, 1, CudnnSdpa.SdpaLayout.HeadMajor);
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), false, 1, 256, CudnnSdpa.SdpaLayout.HeadMajor);
         CudnnSdpa.PlanKey second = new CudnnSdpa.PlanKey(
-            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(4.0f), false, 1, CudnnSdpa.SdpaLayout.HeadMajor);
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(4.0f), false, 1, 256, CudnnSdpa.SdpaLayout.HeadMajor);
 
         Assert.NotEqual(first, second);
+    }
+
+    /// <summary>A key-only bias and a full [Sq,Skv] one build DIFFERENT graphs at the same attention shape, so the
+    /// plan cache must not hand one the other's plan.</summary>
+    [Fact]
+    public void CudnnSdpaPlanKey_DistinguishesBiasQueryRows()
+    {
+        CudnnSdpa.PlanKey broadcast = new CudnnSdpa.PlanKey(
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), true, 1, 1, CudnnSdpa.SdpaLayout.HeadMajor);
+        CudnnSdpa.PlanKey duplicate = new CudnnSdpa.PlanKey(
+            1, 4, 256, 256, 64, BitConverter.SingleToInt32Bits(0.125f), true, 1, 256, CudnnSdpa.SdpaLayout.HeadMajor);
+
+        Assert.NotEqual(broadcast, duplicate);
     }
 }

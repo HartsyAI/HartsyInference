@@ -45,8 +45,7 @@ public sealed class FluxSingleStreamBlock
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming: single_transformer_blocks.{i}.* </summary>
-    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
-    /// see <see cref="ChromaF16"/>): applied to the block's single branch-output projection. 1.0 = off.</param>
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe — see <see cref="ChromaF16"/>): applied to the block's single branch-output projection. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _modulation.LoadWeights(

@@ -3,18 +3,7 @@ using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Convolution forward via cuDNN's backend graph API. Replaces the im2col→cuBLAS GEMM path for
-/// F16/BF16 NCHW convolutions: cuDNN's heuristics pick tensor-core implicit-GEMM/Winograd engines that
-/// never materialize the im2col matrix (an extra kH·kW-times-input-sized HBM write+read per conv —
-/// the dominant conv cost in the SDXL UNet, which runs ~50 convolutions per step).
-///
-/// Graph = a single CONVOLUTION_FORWARD op (X ⊛ W → Y) or CONVOLUTION_BACKWARD_DATA op (transposed
-/// convolution: DY ⊛ W → DX) — cross-correlation, fp32 accumulate — over NCHW
-/// strided tensors, alpha 1 / beta 0. Bias stays a separate kernel in the caller — same numerics as the
-/// GEMM path's bias add. Execution plans (heuristics + JIT) are cached by shape+dtype; workspace comes from
-/// the stream-ordered pool per execution (capped per plan). Instances are per <see cref="CudaBackend"/> (one cuDNN handle
-/// bound to the compute stream). Any failure is caught by the caller, which self-disables the route for
-/// the session and falls back to im2col — a wrong shape costs one warning, never a session kill.</summary>
+/// <summary>Convolution forward via cuDNN's backend graph API. Replaces the im2col→cuBLAS GEMM path for F16/BF16 NCHW convolutions: cuDNN's heuristics pick tensor-core implicit-GEMM/Winograd engines that never materialize the im2col matrix (an extra kH·kW-times-input-sized HBM write+read per conv — the dominant conv cost in the SDXL UNet, which runs ~50 convolutions per step). Graph = a single CONVOLUTION_FORWARD op (X ⊛ W → Y) or CONVOLUTION_BACKWARD_DATA op (transposed convolution: DY ⊛ W → DX) — cross-correlation, fp32 accumulate — over NCHW strided tensors, alpha 1 / beta 0. Bias stays a separate kernel in the caller — same numerics as the GEMM path's bias add. Execution plans (heuristics + JIT) are cached by shape+dtype; workspace comes from the stream-ordered pool per execution (capped per plan). Instances are per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream). Any failure is caught by the caller, which self-disables the route for the session and falls back to im2col — a wrong shape costs one warning, never a session kill.</summary>
 internal sealed class CudnnConv : IDisposable
 {
     // Engine configs demanding more scratch than this are skipped in favor of the next candidate — the audio
@@ -59,11 +48,7 @@ internal sealed class CudnnConv : IDisposable
 
     private const long UidX = 1, UidW = 2, UidY = 3;
 
-    /// <summary>Runs X[n,c,h,w] ⊛ W[k,c,r,s] → Y[n,k,outH,outW]. All pointers are device buffers of
-    /// <paramref name="dataType"/> (CUDNN_DATA_HALF / CUDNN_DATA_BFLOAT16), contiguous NCHW. W-padding may be
-    /// asymmetric (<paramref name="padWPre"/> zeros before, <paramref name="padWPost"/> after) — the backend
-    /// graph API keeps PRE/POST paddings as separate attributes, which lets causal (left-padded) 1D convs run
-    /// without an explicit pad-copy.</summary>
+    /// <summary>Runs X[n,c,h,w] ⊛ W[k,c,r,s] → Y[n,k,outH,outW]. All pointers are device buffers of <paramref name="dataType"/> (CUDNN_DATA_HALF / CUDNN_DATA_BFLOAT16), contiguous NCHW. W-padding may be asymmetric (<paramref name="padWPre"/> zeros before, <paramref name="padWPost"/> after) — the backend graph API keeps PRE/POST paddings as separate attributes, which lets causal (left-padded) 1D convs run without an explicit pad-copy.</summary>
     public unsafe void Execute(ulong x, ulong w, ulong y,
         long n, long c, long h, long wIn, long k, long r, long s,
         long outH, long outW, long strideH, long strideW, long padH, long padWPre, long padWPost, int dataType,
@@ -75,10 +60,7 @@ internal sealed class CudnnConv : IDisposable
         Run(plan, x, w, y);
     }
 
-    /// <summary>Transposed convolution as cuDNN convolution-backward-data: DY[n,k,h,wIn] (the transpose-conv
-    /// input) ⊛ W[k,c,r,s] → DX[n,c,outH,outW]. Geometry attributes describe the corresponding FORWARD conv
-    /// (DX is the conv input), so the pads crop the full transposed output:
-    /// outW = (wIn−1)·strideW + dilationW·(s−1) + 1 − padWPre − padWPost.</summary>
+    /// <summary>Transposed convolution as cuDNN convolution-backward-data: DY[n,k,h,wIn] (the transpose-conv input) ⊛ W[k,c,r,s] → DX[n,c,outH,outW]. Geometry attributes describe the corresponding FORWARD conv (DX is the conv input), so the pads crop the full transposed output: outW = (wIn−1)·strideW + dilationW·(s−1) + 1 − padWPre − padWPost.</summary>
     public unsafe void ExecuteBackwardData(ulong dy, ulong w, ulong dx,
         long n, long k, long c, long h, long wIn, long r, long s,
         long outH, long outW, long strideH, long strideW, long padH, long padWPre, long padWPost, int dataType,
@@ -186,7 +168,7 @@ internal sealed class CudnnConv : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            (nint exec, long wsBytes) = BuildExecutionPlan(graph, owned);
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv");
             return new Plan
             {
                 Execution = exec,
@@ -200,96 +182,6 @@ internal sealed class CudnnConv : IDisposable
         }
     }
 
-    private unsafe (nint exec, long wsBytes) BuildExecutionPlan(nint graph, List<nint> owned)
-    {
-        foreach (int mode in new[] { CUDNN_HEUR_MODE_A, CUDNN_HEUR_MODE_FALLBACK })
-        {
-            nint heur;
-            if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR, out heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-            owned.Add(heur);
-            void* gp = (void*)graph;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &gp);
-            int m = mode;
-            SetAttr(heur, CUDNN_ATTR_ENGINEHEUR_MODE, CUDNN_TYPE_HEUR_MODE, 1, &m);
-            if (cudnnBackendFinalize(heur) != CUDNN_STATUS_SUCCESS)
-                continue;
-
-            const int maxCfgs = 32;
-            nint[] cfgs = new nint[maxCfgs];
-            for (int i = 0; i < maxCfgs; i++)
-                cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR, out cfgs[i]);
-            long returned;
-            fixed (nint* cfgPtr = cfgs)
-            {
-                int gst = cudnnBackendGetAttribute(heur, CUDNN_ATTR_ENGINEHEUR_RESULTS,
-                    CUDNN_TYPE_BACKEND_DESCRIPTOR, maxCfgs, out returned, cfgPtr);
-                if (gst != CUDNN_STATUS_SUCCESS) returned = 0;
-            }
-            // See CudnnSdpa.BuildExecutionPlan's identical pattern for why this try/finally exists: TryPlan
-            // can throw (SetAttr failure) instead of returning ok=false, and without this, an exception
-            // mid-loop would leak up to 32 backend descriptors — worsening exactly the kind of
-            // resource-pressure condition that causes such a throw.
-            bool[] destroyed = new bool[maxCfgs];
-            try
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                {
-                    if (i < returned)
-                    {
-                        (nint exec, long ws, bool ok) = TryPlan(cfgs[i]);
-                        if (ok && ws > MaxWorkspaceBytes)
-                        {
-                            cudnnBackendDestroyDescriptor(exec);
-                            ok = false;
-                        }
-                        if (ok)
-                        {
-                            for (int j = 0; j < maxCfgs; j++)
-                            {
-                                if (!destroyed[j]) { cudnnBackendDestroyDescriptor(cfgs[j]); destroyed[j] = true; }
-                            }
-                            return (exec, ws);
-                        }
-                    }
-                    cudnnBackendDestroyDescriptor(cfgs[i]);
-                    destroyed[i] = true;
-                }
-            }
-            finally
-            {
-                for (int i = 0; i < maxCfgs; i++)
-                    if (!destroyed[i]) cudnnBackendDestroyDescriptor(cfgs[i]);
-            }
-        }
-        throw new InvalidOperationException("cuDNN conv: no engine config produced a valid execution plan");
-    }
-
-    private unsafe (nint exec, long ws, bool ok) TryPlan(nint cfg)
-    {
-        if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR, out nint p) != CUDNN_STATUS_SUCCESS)
-            return (0, 0, false);
-        try
-        {
-            void* hp = (void*)_handle;
-            void* cp = (void*)cfg;
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
-            SetAttr(p, CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &cp);
-        }
-        catch
-        {
-            cudnnBackendDestroyDescriptor(p);
-            throw;
-        }
-        if (cudnnBackendFinalize(p) != CUDNN_STATUS_SUCCESS)
-        {
-            cudnnBackendDestroyDescriptor(p);
-            return (0, 0, false);
-        }
-        long ws = 0;
-        Check(cudnnBackendGetAttribute(p, CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64, 1, out _, &ws), "workspace size get");
-        return (p, ws, true);
-    }
 
     private unsafe nint Tensor(List<nint> owned, long uid, long* dims, long* strides, int dtype)
     {
@@ -309,18 +201,6 @@ internal sealed class CudnnConv : IDisposable
         return t;
     }
 
-    private static unsafe void SetAttr(nint desc, int attr, int type, long count, void* vals)
-    {
-        int st = cudnnBackendSetAttribute(desc, attr, type, count, vals);
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, $"cudnnBackendSetAttribute(attr={attr})");
-    }
-
-    private static void Check(int st, string what)
-    {
-        if (st != CUDNN_STATUS_SUCCESS)
-            throw new CudnnStatusException(st, what);
-    }
 
     public void Dispose()
     {

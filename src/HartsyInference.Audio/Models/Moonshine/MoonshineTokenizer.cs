@@ -3,23 +3,13 @@ using System.Text.Json;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>Minimal Moonshine tokenizer that reads a HuggingFace
-/// <c>tokenizer.json</c> directly and supports decode. Moonshine inference only needs
-/// decode — the decoder prompt is just <c>[BOS]</c>, so we don't have to implement BPE
-/// encode for the v1 STT path.
-///
-/// <para>The tokenizer is SentencePiece byte-fallback BPE (Llama-2 style):
-/// <list type="bullet">
-///   <item>Token 0 = <c>&lt;unk&gt;</c>, 1 = <c>&lt;s&gt;</c>, 2 = <c>&lt;/s&gt;</c>.</item>
-///   <item>IDs 3..258 are byte-fallback tokens <c>&lt;0x00&gt;</c>..<c>&lt;0xFF&gt;</c>.</item>
-///   <item>IDs 259..31999 are BPE merges over <c>▁</c>-prefixed sequences (SentencePiece "Metaspace"
-///         encoding where U+2581 stands in for space).</item>
-///   <item>IDs 32000..32767 are reserved special tokens (<c>&lt;&lt;ST_0&gt;&gt;</c>..<c>&lt;&lt;ST_767&gt;&gt;</c>).</item>
-/// </list></para>
-///
-/// <para>Decode rules: walk the IDs, accumulate runs of byte-fallback tokens as raw
-/// bytes (UTF-8 multi-byte sequences span multiple BPE tokens), flush runs to a
-/// <see cref="StringBuilder"/> with the standard <c>▁</c> → space replacement.</para></summary>
+/// <summary>Minimal Moonshine tokenizer that reads a HuggingFace <c>tokenizer.json</c> directly and supports decode only — the decoder prompt is just <c>[BOS]</c>, so BPE encode isn't needed for the v1 STT path.</summary>
+// SentencePiece byte-fallback BPE (Llama-2 style): token 0 = <unk>, 1 = <s>, 2 = </s>; IDs 3..258 are
+// byte-fallback tokens <0x00>..<0xFF>; IDs 259..31999 are BPE merges over ▁-prefixed sequences
+// (SentencePiece "Metaspace" encoding where U+2581 stands in for space); IDs 32000..32767 are reserved
+// special tokens (<<ST_0>>..<<ST_767>>).
+// Decode walks the IDs, accumulates runs of byte-fallback tokens as raw bytes (UTF-8 multi-byte
+// sequences span multiple BPE tokens), and flushes runs with the standard ▁ → space replacement.
 public sealed class MoonshineTokenizer : IDisposable
 {
     private readonly string?[] _idToToken;
@@ -31,8 +21,7 @@ public sealed class MoonshineTokenizer : IDisposable
     /// <summary>Returns the total vocab size (includes special tokens + byte-fallback).</summary>
     public int VocabSize => _vocabSize;
 
-    /// <summary>Loads the tokenizer from a HuggingFace-format <c>tokenizer.json</c>
-    /// living next to <c>model.safetensors</c> in the model directory.</summary>
+    /// <summary>Loads the tokenizer from a HuggingFace-format <c>tokenizer.json</c> living next to <c>model.safetensors</c> in the model directory.</summary>
     public MoonshineTokenizer(string modelDirectory)
     {
         string path = Path.Combine(modelDirectory, "tokenizer.json");
@@ -85,9 +74,7 @@ public sealed class MoonshineTokenizer : IDisposable
         }
     }
 
-    /// <summary>Decodes a sequence of token IDs to text. Drops special tokens
-    /// (<c>&lt;s&gt;</c>, <c>&lt;/s&gt;</c>, <c>&lt;unk&gt;</c>, the <c>&lt;&lt;ST_x&gt;&gt;</c> reserved range)
-    /// unless <paramref name="includeSpecial"/> is true.</summary>
+    /// <summary>Drops special tokens (<c>&lt;s&gt;</c>, <c>&lt;/s&gt;</c>, <c>&lt;unk&gt;</c>, the <c>&lt;&lt;ST_x&gt;&gt;</c> reserved range) unless <paramref name="includeSpecial"/> is true.</summary>
     public string Decode(ReadOnlySpan<int> tokenIds, bool includeSpecial = false)
     {
         ThrowIfDisposed();
@@ -112,7 +99,6 @@ public sealed class MoonshineTokenizer : IDisposable
                 byteRun.Clear();
             }
 
-            // Skip special tokens unless requested.
             if (IsSpecial(id, tok))
             {
                 if (includeSpecial) sb.Append(tok);
@@ -130,22 +116,6 @@ public sealed class MoonshineTokenizer : IDisposable
         // Flush any trailing byte-fallback run.
         if (byteRun.Count > 0) sb.Append(Encoding.UTF8.GetString(byteRun.ToArray()));
 
-        return sb.ToString();
-    }
-
-    /// <summary>Returns the text for a single token ID. Used by streaming code that
-    /// emits per-token output. Byte-fallback singletons return the bytes as a raw
-    /// Latin-1 string — the caller is responsible for buffering until a complete
-    /// UTF-8 character lands.</summary>
-    public string DecodeOne(int id)
-    {
-        ThrowIfDisposed();
-        if ((uint)id >= (uint)_vocabSize) return string.Empty;
-        string? tok = _idToToken[id];
-        if (tok is null) return string.Empty;
-        if (_isByteFallback[id]) return Encoding.Latin1.GetString([_byteFallbackValue[id]]);
-        StringBuilder sb = new(tok.Length);
-        foreach (char c in tok) sb.Append(c == '▁' ? ' ' : c);
         return sb.ToString();
     }
 

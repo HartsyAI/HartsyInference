@@ -4,11 +4,7 @@ using HartsyInference.Vision.Dinov2;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>TRELLIS image conditioner: the <c>dinov2_vitl14_reg</c> backbone tapped at <c>x_prenorm</c> (block
-/// output before the final norm), then a <b>non-affine</b> LayerNorm over the last dim → <c>[1, 1374, 1024]</c>
-/// conditioning tokens (1 CLS + 4 registers + 37² patches) that both flow stages cross-attend to. Mirrors the
-/// reference exactly: <c>dino(t, is_training=True)['x_prenorm']</c> then <c>F.layer_norm(feats, feats.shape[-1:])</c>
-/// (torch default eps 1e-5). Weights = the torch.hub checkpoint remapped to HF keys (<c>convert_dinov2_reg.py</c>).</summary>
+/// <summary>TRELLIS image conditioner: the <c>dinov2_vitl14_reg</c> backbone tapped at <c>x_prenorm</c> (pre-final-norm), then a non-affine LayerNorm producing the <c>[1, 1374, 1024]</c> conditioning tokens both flow stages cross-attend to.</summary>
 public sealed class TrellisImageConditioner
 {
     private readonly Dinov2VisionEncoder _dino = new(Dinov2Preset.LargeReg);

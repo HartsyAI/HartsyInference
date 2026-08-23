@@ -14,10 +14,7 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed LTX-2.3 pipeline driven against the native <see cref="VideoRequest"/>. Tokenizes the prompt
-/// pair with the Gemma SentencePiece tokenizer — the pipeline runs the text tower and the per-modality connectors
-/// itself — and calls <see cref="LtxVideo2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's
-/// <c>LtxVideo2Loader.Generate</c>.</summary>
+/// <summary>A constructed LTX-2.3 pipeline driven against the native <see cref="VideoRequest"/>. Tokenizes the prompt pair with the Gemma SentencePiece tokenizer — the pipeline runs the text tower and the per-modality connectors itself — and calls <see cref="LtxVideo2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LtxVideo2Loader.Generate</c>.</summary>
 public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
 {
     private readonly LtxVideo2Pipeline _pipeline;

@@ -4,20 +4,15 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>HeartCodec flow-matching velocity estimator — the upstream <c>LlamaTransformer</c>
-/// (heartcodec/models/transformer.py). A two-stage adaLN-single DiT that predicts the CFM velocity over the
-/// codec latent:
-/// <list type="number">
-///   <item><b>proj_in</b> (<see cref="ProjectLayer"/>): in_channels(1024) → inner(1536).</item>
-///   <item><b>24 blocks @1536</b> (24 heads, head_dim 64), each adaLN-single modulated by the stage-1
-///   timestep embedding.</item>
-///   <item><b>norm_out</b> (affine-free LN) + <c>scale_shift_table[2,1536]</c> + embedded_timestep.</item>
-///   <item><b>connection_proj</b>: cat(original input, stage-1 out) [1024+1536=2560] → inner_2(3072).</item>
-///   <item><b>6 blocks @3072</b> (24 heads, head_dim 128), adaLN-single from a second timestep embedding.</item>
-///   <item><b>norm_out_2</b> + <c>scale_shift_table_2[2,3072]</c> + proj_out → out_channels(256).</item>
-/// </list>
-/// RMSNorm (eps 1e-6), interleaved (GPT-J) RoPE on the full head_dim, SwiGLU MLP, full bidirectional
-/// attention (no causal mask), scale 1/√head_dim.</summary>
+/// <summary>HeartCodec flow-matching velocity estimator — the upstream <c>LlamaTransformer</c> (heartcodec/models/transformer.py), a two-stage adaLN-single DiT that predicts the CFM velocity over the codec latent.</summary>
+// Stage 1: proj_in (ProjectLayer) in_channels(1024) → inner(1536); 24 blocks @1536 (24 heads, head_dim
+// 64), each adaLN-single modulated by the stage-1 timestep embedding; norm_out (affine-free LN) +
+// scale_shift_table[2,1536] + embedded_timestep.
+// Bridge: connection_proj cat(original input, stage-1 out) [1024+1536=2560] → inner_2(3072).
+// Stage 2: 6 blocks @3072 (24 heads, head_dim 128), adaLN-single from a second timestep embedding;
+// norm_out_2 + scale_shift_table_2[2,3072] + proj_out → out_channels(256).
+// RMSNorm (eps 1e-6), interleaved (GPT-J) RoPE on the full head_dim, SwiGLU MLP, full bidirectional
+// attention (no causal mask), scale 1/√head_dim.
 public sealed unsafe class HeartCodecEstimator
 {
     private readonly int _inCh, _outCh, _inner, _inner2, _heads, _headDim, _headDim2, _nLayers, _nLayers2;
@@ -64,9 +59,7 @@ public sealed unsafe class HeartCodecEstimator
         for (int i = 0; i < _nLayers2; i++) _blocks2[i].Load(w, $"{prefix}.transformer_blocks_2.{i}");
     }
 
-    /// <summary>Velocity estimate. <paramref name="input"/> is the concatenated estimator input
-    /// <c>[B, T, in_channels]</c> = cat(x, incontext, mu). <paramref name="timestep"/> is the flow time per
-    /// batch (length B). Returns <c>[B, T, out_channels]</c>.</summary>
+    /// <summary>Velocity estimate. <paramref name="input"/> is the concatenated estimator input <c>[B, T, in_channels]</c> = cat(x, incontext, mu); <paramref name="timestep"/> is the flow time per batch (length B).</summary>
     public Tensor Forward(IBackend backend, Tensor input, float[] timestep)
     {
         int b = (int)input.Shape[0];

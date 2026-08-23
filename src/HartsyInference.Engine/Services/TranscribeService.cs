@@ -6,9 +6,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the
-/// shared audio device under the generation lock. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens
-/// (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
+/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
 public sealed class TranscribeService : ITranscribeService
 {
     private readonly InferenceEngine _engine;
@@ -82,10 +80,7 @@ public sealed class TranscribeService : ITranscribeService
         }, cancel);
     }
 
-    /// <summary>Projects the model's timestamp spans onto <see cref="WordSegment"/>s. <b>These are segment-level, not
-    /// word-level:</b> Whisper's <c>&lt;|t|&gt;</c> tokens delimit phrases, and true word alignment would need
-    /// cross-attention DTW, which the decoder does not expose — so <see cref="WordSegment.Word"/> carries the whole
-    /// span's text. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
+    /// <summary>Projects the model's timestamp spans onto <see cref="WordSegment"/>s. <b>These are segment-level, not word-level:</b> Whisper's <c>&lt;|t|&gt;</c> tokens delimit phrases, and true word alignment would need cross-attention DTW, which the decoder does not expose — so <see cref="WordSegment.Word"/> carries the whole span's text. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
     private static IReadOnlyList<WordSegment>? BuildWords(IReadOnlyList<SttSegment>? segments,
         IReadOnlyList<DiarizedSegment>? speakers)
     {

@@ -9,8 +9,6 @@ internal sealed class MusicModelDescriptor
     /// <summary>Stable cache key for a resolved selector (an HF repo id, or the local checkpoint path).</summary>
     internal required Func<AudioModelSelector, string> CacheKey { get; init; }
 
-    /// <summary>Loads the model into a runner. The context carries the primary backend (pipelines that bind to
-    /// a device at construction — ACE-Step) plus the shard/quant placement the big-LM families (YuE) consume;
-    /// the others ignore it.</summary>
+    /// <summary>Loads the model into a runner. The context carries the primary backend (pipelines that bind to a device at construction — ACE-Step) plus the shard/quant placement the big-LM families (YuE) consume; the others ignore it.</summary>
     internal required Func<MusicLoadContext, AudioModelSelector, CancellationToken, Task<IMusicRunner>> LoadAsync { get; init; }
 }

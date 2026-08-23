@@ -1,7 +1,6 @@
 namespace HartsyInference.Core.Tensors;
 
-/// <summary>Quantization companions a ComfyUI checkpoint ships alongside a weight, carried on the weight itself so a
-/// backend can consume it <b>packed</b> instead of materializing a dequantized copy.</summary>
+/// <summary>Quantization companions a ComfyUI checkpoint ships alongside a weight, carried on the weight itself so a backend can consume it <b>packed</b> instead of materializing a dequantized copy.</summary>
 /// <remarks><para>The scalar <see cref="Tensor.Fp8ScaleFactor"/> covers <c>fp8_scaled</c>, where one float folds into
 /// the GEMM's alpha. Formats whose companions are tensors (<c>int8_tensorwise</c>'s per-output-row scale, nvfp4's
 /// block scales) need this instead. Attaching it to the weight rather than to a per-model linear wrapper is what lets

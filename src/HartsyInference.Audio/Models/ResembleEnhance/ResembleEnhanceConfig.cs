@@ -35,19 +35,7 @@ public sealed record ResembleEnhanceConfig
     public float Tau { get; init; } = 0.5f;              // prior temperature
     public int TimeMappingDivisor { get; init; } = 4;
 
-    // ── Denoiser (UNet) ──
-    /// <summary>Base hidden channel width of the denoiser UNet.</summary>
-    public int DenoiserHiddenDim { get; init; } = 16;
-    /// <summary>Number of down/up sampling blocks in the denoiser UNet.</summary>
-    public int DenoiserNumBlocks { get; init; } = 4;
-    /// <summary>Number of bottleneck (middle) blocks in the denoiser UNet.</summary>
-    public int DenoiserNumMiddleBlocks { get; init; } = 2;
-    /// <summary>Convolution kernel size used throughout the denoiser UNet.</summary>
-    public int DenoiserKernel { get; init; } = 3;
-
     // ── UnivNet vocoder ──
-    /// <summary>UnivNet base channel count (nc).</summary>
-    public int UnivNetNc { get; init; } = 96;
     /// <summary>Extra latent dimension fed into the vocoder.</summary>
     public int VocoderExtraDim { get; init; } = 32;
 

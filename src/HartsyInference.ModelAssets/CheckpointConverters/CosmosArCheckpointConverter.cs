@@ -4,19 +4,9 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads Cosmos-Predict1 Video2World <c>model.pt</c> (a BF16 PyTorch pickle; the 5B is 9.17 GB, the 13B
-/// 26.6 GB — no safetensors ship) into the state-dict names
-/// <see cref="HartsyInference.Video.Models.Cosmos.CosmosArTransformer"/> expects: <c>tok_embeddings.weight</c>,
-/// <c>layers.{i}.attention.{wq,wk,wv,wo,q_norm,k_norm}.weight</c>,
-/// <c>layers.{i}.cross_attention.{wq,wk,wv,wo}.weight</c>, <c>layers.{i}.cross_attention_norm.weight</c>,
-/// <c>layers.{i}.attention_norm.weight</c>, <c>layers.{i}.ffn_norm.weight</c>,
-/// <c>layers.{i}.feed_forward.{w1,w2,w3}.weight</c>, <c>norm.weight</c>, <c>output.weight</c>, and (V2W)
-/// <c>pos_emb.weight</c>.
+/// <summary>Loads Cosmos-Predict1 Video2World <c>model.pt</c> (a BF16 PyTorch pickle; the 5B is 9.17 GB, the 13B 26.6 GB — no safetensors ship) into the state-dict names <see cref="HartsyInference.Video.Models.Cosmos.CosmosArTransformer"/> expects: <c>tok_embeddings.weight</c>, <c>layers.{i}.attention.{wq,wk,wv,wo,q_norm,k_norm}.weight</c>, <c>layers.{i}.cross_attention.{wq,wk,wv,wo}.weight</c>, <c>layers.{i}.cross_attention_norm.weight</c>, <c>layers.{i}.attention_norm.weight</c>, <c>layers.{i}.ffn_norm.weight</c>, <c>layers.{i}.feed_forward.{w1,w2,w3}.weight</c>, <c>norm.weight</c>, <c>output.weight</c>, and (V2W) <c>pos_emb.weight</c>.
 ///
-/// <para>The expected keys already match Cosmos's own module hierarchy (research-doc §Data Layouts), so conversion
-/// is a prefix strip plus a small rename table for the variations a real dump may show. The exact source keys are
-/// research-doc Open Q §1 (the pickle is too large for the HF web viewer) — run the key-dump snippet in that
-/// section against a real <c>model.pt</c> and extend <see cref="Renames"/> if any key falls outside the strip.</para>
+/// <para>The expected keys already match Cosmos's own module hierarchy (research-doc §Data Layouts), so conversion is a prefix strip plus a small rename table for the variations a real dump may show. The exact source keys are research-doc Open Q §1 (the pickle is too large for the HF web viewer) — run the key-dump snippet in that section against a real <c>model.pt</c> and extend <see cref="Renames"/> if any key falls outside the strip.</para>
 ///
 /// <para>Reuses <see cref="PytorchPickleLoader"/> for the <c>.pt</c> pickle — no off-ship Python conversion.</para></summary>
 public static class CosmosArCheckpointConverter
@@ -36,9 +26,7 @@ public static class CosmosArCheckpointConverter
         (".attention.wqkv.", ".attention.wqkv."),   // fused (fuse_qkv) — left as-is; split is an integration step
     ];
 
-    /// <summary>Reads <paramref name="path"/> (<c>.pt</c>/<c>.pth</c>/<c>.bin</c> pickle or <c>.safetensors</c>) and
-    /// returns the Cosmos-named weights plus the backing loader (dispose after preload). <paramref name="castToF32"/>
-    /// forces every tensor to F32 (CPU / structural runs); leave false to keep BF16 for GPU residency.</summary>
+    /// <summary>Reads <paramref name="path"/> (<c>.pt</c>/<c>.pth</c>/<c>.bin</c> pickle or <c>.safetensors</c>) and returns the Cosmos-named weights plus the backing loader (dispose after preload). <paramref name="castToF32"/> forces every tensor to F32 (CPU / structural runs); leave false to keep BF16 for GPU residency.</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadAndConvert(string path, bool castToF32 = false)
     {
         (Dictionary<string, Tensor> raw, IDisposable loader) = ReadRaw(path);

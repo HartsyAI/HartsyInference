@@ -2,14 +2,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>Turns a raw decoded RGB image into the normalized pixel tensor a VLM vision tower expects:
-/// bilinear-resize to a square <c>size×size</c>, scale to [0,1], then per-channel <c>(x - mean) / std</c>.
-/// Decoding (PNG/JPG → RGB bytes) is the caller's responsibility (e.g. SwarmUI supplies pixels, or
-/// <c>HartsyInference.Vision.Codec.PngDecoder</c>); this keeps the LLM package dependency-free.</summary>
+/// <summary>Turns a raw decoded RGB image into the normalized pixel tensor a VLM vision tower expects: bilinear-resize to a square <c>size×size</c>, scale to [0,1], then per-channel <c>(x - mean) / std</c>; decoding (PNG/JPG → RGB bytes) is the caller's responsibility, keeping the LLM package dependency-free.</summary>
 public static class VlmImagePreprocessor
 {
-    /// <summary>Resizes interleaved <paramref name="rgb"/> (<c>H*W*3</c> bytes, row-major HWC) to
-    /// <c>[1, 3, size, size]</c> and normalizes with <paramref name="mean"/>/<paramref name="std"/> (length 3).</summary>
+    /// <summary>Resizes interleaved <paramref name="rgb"/> (<c>H*W*3</c> bytes, row-major HWC) to <c>[1, 3, size, size]</c> and normalizes with <paramref name="mean"/>/<paramref name="std"/> (length 3).</summary>
     public static unsafe Tensor Preprocess(ReadOnlySpan<byte> rgb, int width, int height, int size, float[] mean, float[] std)
     {
         if (rgb.Length < (long)width * height * 3)

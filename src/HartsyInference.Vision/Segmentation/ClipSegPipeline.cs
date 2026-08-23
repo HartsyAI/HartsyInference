@@ -9,16 +9,14 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Vision.Segmentation;
 
-/// <summary>
-/// CLIPSeg (rd64-refined) text-prompted image segmentation — the missing half of <c>&lt;segment:text&gt;</c>/<c>&lt;clear:text&gt;</c>.
-/// A CLIP ViT-B/16 vision tower is run on the image with intermediate activations captured at layers [3,6,9]; a CLIP
-/// text tower encodes the prompt into a 512-d conditional embedding; the CLIPSeg decoder fuses the three activations
-/// (each linearly reduced 768→64), FiLM-conditions on the text embedding at the first decoder layer, runs three
-/// post-norm transformer layers, then upsamples to a per-pixel mask via a 3-stage transposed-convolution head.
-///
-/// <para>Runs at the vision tower's native 224² (position-embeddings match, no interpolation). Weights are the
-/// HuggingFace <c>CIDAS/clipseg-rd64-refined</c> layout under a <c>clip.</c> prefix + a <c>decoder.</c> block.</para>
-/// </summary>
+/// <summary>CLIPSeg (rd64-refined) text-prompted image segmentation — the missing half of
+/// <c>&lt;segment:text&gt;</c>/<c>&lt;clear:text&gt;</c>: a CLIP ViT-B/16 vision tower is run on the image
+/// with intermediate activations captured at layers [3,6,9]; a CLIP text tower encodes the prompt into a
+/// 512-d conditional embedding; the decoder fuses the three activations (each linearly reduced 768→64),
+/// FiLM-conditions on the text embedding at the first decoder layer, runs three post-norm transformer
+/// layers, then upsamples to a per-pixel mask via a 3-stage transposed-convolution head. Runs at the vision
+/// tower's native 224² (position-embeddings match, no interpolation); weights are the HuggingFace
+/// <c>CIDAS/clipseg-rd64-refined</c> layout under a <c>clip.</c> prefix + a <c>decoder.</c> block.</summary>
 public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
 {
     private const int ImageSize = 224;

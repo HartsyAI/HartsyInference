@@ -3,10 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Vits;
 
-/// <summary>VITS normalizing flow (<c>ResidualCouplingBlock</c>): <c>n_flows</c> mean-only affine coupling
-/// layers interleaved with channel flips. At inference it runs in reverse: <c>x1 = x1 − m</c> where <c>m</c>
-/// is produced by <c>pre → WaveNet → post</c> over the untouched half <c>x0</c>. Reuses
-/// <see cref="VitsWaveNet"/>. Channels-first <c>[1, channels, T]</c>.</summary>
+/// <summary>VITS normalizing flow (<c>ResidualCouplingBlock</c>): <c>n_flows</c> mean-only affine coupling layers interleaved with channel flips, reusing <see cref="VitsWaveNet"/>; at inference it runs in reverse, <c>x1 = x1 − m</c> where <c>m</c> is produced by <c>pre → WaveNet → post</c> over the untouched half <c>x0</c>.</summary>
 public sealed unsafe class VitsFlow
 {
     private readonly int _channels, _half, _nFlows;
@@ -28,8 +25,7 @@ public sealed unsafe class VitsFlow
         for (int i = 0; i < _nFlows; i++) _layers[i].LoadWeights(w, $"{prefix}.flows.{2 * i}");
     }
 
-    /// <summary>Reverse pass: applies (flip, coupling) for each flow in reverse order. <paramref name="g"/>
-    /// is the optional speaker embedding for the WaveNet conditioning.</summary>
+    /// <summary>Reverse pass: applies (flip, coupling) for each flow in reverse order; <paramref name="g"/> is the optional speaker embedding for the WaveNet conditioning.</summary>
     public Tensor Reverse(IBackend backend, Tensor zP, int t, Tensor? g = null)
     {
         Tensor x = Clone(zP);
@@ -43,8 +39,7 @@ public sealed unsafe class VitsFlow
         return x;
     }
 
-    /// <summary>Forward pass: applies (coupling, flip) for each flow in order — used by the OpenVoice tone
-    /// converter to map the posterior into the prior latent under the source speaker.</summary>
+    /// <summary>Forward pass: applies (coupling, flip) for each flow in order — used by the OpenVoice tone converter to map the posterior into the prior latent under the source speaker.</summary>
     public Tensor Forward(IBackend backend, Tensor z, int t, Tensor? g = null)
     {
         Tensor x = Clone(z);

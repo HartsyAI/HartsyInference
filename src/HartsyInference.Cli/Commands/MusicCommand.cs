@@ -9,8 +9,7 @@ namespace HartsyInference.Cli.Commands;
 /// <summary>Generates music from a text prompt with MusicGen, saving a WAV.</summary>
 public sealed class MusicCommand : Command<MusicCommand.Settings>
 {
-    /// <summary>Options for <c>hartsy music</c>. Inherits the shared placement options so multi-GPU layer
-    /// splits (<c>--lm-shard-gpu</c> — YuE Stage-1 un-quantized across two cards) work from the CLI.</summary>
+    /// <summary>Options for <c>hartsy music</c>; inherits placement options so multi-GPU layer splits (<c>--lm-shard-gpu</c>) work from the CLI.</summary>
     public sealed class Settings : PlacementCliSettings
     {
         /// <summary>The music description.</summary>

@@ -105,7 +105,8 @@ public sealed class VaeDecodeTiledPreflightRealWeightTests
 
             (byte[] rgbData, int outW, int outH, int seed) = pipeline.GenerateFromTokens(tokens, neg, tokens, neg, posEosG, negEosG, req);
 
-            string outPath = Path.Combine(RepoRoot.Path, $"sdxl_tiled_decode_preflight_output_{width}x{height}.rgb");
+            Directory.CreateDirectory(TestPaths.OutputDir);
+            string outPath = Path.Combine(TestPaths.OutputDir, $"sdxl_tiled_decode_preflight_output_{width}x{height}.rgb");
             File.WriteAllBytes(outPath, rgbData);
             _output.WriteLine($"Wrote raw RGB24 output to {outPath} ({rgbData.Length} bytes, {width}x{height}). First byte: {rgbData[0]}.");
 

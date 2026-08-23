@@ -1,53 +1,36 @@
 namespace HartsyInference.Core.Backends;
 
-/// <summary>Declarative multi-device placement for one engine. Device tokens are backend selectors
-/// (<c>"cuda:0"</c>). Null/empty members mean "the engine's primary backend" — the all-defaults instance is
-/// exactly today's single-device behavior, byte-for-byte (see <see cref="IsSingle"/> and <see cref="CacheKey"/>).
-/// Config, not new model classes: pipelines and loaders consume this record; nothing else changes shape.</summary>
+/// <summary>Declarative multi-device placement for one engine. Device tokens are backend selectors (<c>"cuda:0"</c>). Null/empty members mean "the engine's primary backend" — the all-defaults instance is exactly today's single-device behavior, byte-for-byte (see <see cref="IsSingle"/> and <see cref="CacheKey"/>). Config, not new model classes: pipelines and loaders consume this record; nothing else changes shape.</summary>
 public sealed record PlacementConfig
 {
     /// <summary>The single-device default; placement-disabled paths compare against this.</summary>
     public static readonly PlacementConfig Single = new();
 
-    /// <summary>Ordered pipeline-stage devices for sharded execution (LLM layer split / DiT block split),
-    /// e.g. <c>["cuda:0","cuda:1"]</c>. Empty = no sharding. When <see cref="TensorParallelDegree"/> &gt; 1
-    /// these are instead the TP rank devices (count must equal the degree) and the layer split is off.</summary>
+    /// <summary>Ordered pipeline-stage devices for sharded execution (LLM layer split / DiT block split), e.g. <c>["cuda:0","cuda:1"]</c>. Empty = no sharding. When <see cref="TensorParallelDegree"/> &gt; 1 these are instead the TP rank devices (count must equal the degree) and the layer split is off.</summary>
     public IReadOnlyList<string> ShardDevices { get; init; } = [];
 
-    /// <summary>Explicit proportional layer split across <see cref="ShardDevices"/> (the llama.cpp
-    /// <c>--tensor-split</c> shape); null = auto-plan by free VRAM. Length must match <see cref="ShardDevices"/>.</summary>
+    /// <summary>Explicit proportional layer split across <see cref="ShardDevices"/> (the llama.cpp <c>--tensor-split</c> shape); null = auto-plan by free VRAM. Length must match <see cref="ShardDevices"/>.</summary>
     public IReadOnlyList<float>? ShardRatios { get; init; }
 
-    /// <summary>Device for diffusion text encoders (CLIP/T5/umT5/LLM-style); null = primary. Safe without any
-    /// peer-copy support because the encoder→denoiser handoff host-materializes.</summary>
+    /// <summary>Device for diffusion text encoders (CLIP/T5/umT5/LLM-style); null = primary. Safe without any peer-copy support because the encoder→denoiser handoff host-materializes.</summary>
     public string? TextEncoderDevice { get; init; }
 
     /// <summary>Device for VAE encode/decode; null = primary.</summary>
     public string? VaeDevice { get; init; }
 
-    /// <summary>Device that runs the negative/uncond CFG branch with replicated denoiser weights, concurrent with
-    /// the positive branch on the primary; null = off. Requires the denoiser to fit on BOTH devices.</summary>
+    /// <summary>Device that runs the negative/uncond CFG branch with replicated denoiser weights, concurrent with the positive branch on the primary; null = off. Requires the denoiser to fit on BOTH devices.</summary>
     public string? CfgParallelDevice { get; init; }
 
-    /// <summary>Opt-in gate for experimental DiT block-sharding (<see cref="ShardDevices"/> then applies to the
-    /// denoiser). Off = ShardDevices only affects LLMs.</summary>
+    /// <summary>Opt-in gate for experimental DiT block-sharding (<see cref="ShardDevices"/> then applies to the denoiser). Off = ShardDevices only affects LLMs.</summary>
     public bool EnableDitSharding { get; init; }
 
-    /// <summary>Ordered devices for context parallelism: the video DiT's token sequence is split across them with
-    /// weights REPLICATED on each (a latency feature, not VRAM pooling). ≥2 entries enable it; entry 0 must resolve
-    /// to the primary backend. Empty = off. Mutually exclusive with <see cref="EnableDitSharding"/> and
-    /// <see cref="CfgParallelDevice"/>.</summary>
+    /// <summary>Ordered devices for context parallelism: the video DiT's token sequence is split across them with weights REPLICATED on each (a latency feature, not VRAM pooling). ≥2 entries enable it; entry 0 must resolve to the primary backend. Empty = off. Mutually exclusive with <see cref="EnableDitSharding"/> and <see cref="CfgParallelDevice"/>.</summary>
     public IReadOnlyList<string> ContextParallelDevices { get; init; } = [];
 
-    /// <summary>LLM tensor-parallel rank count (Megatron-style: each rank owns a slice of every layer's Q/KV
-    /// heads and FFN columns, with two AllReduce seams per layer); 1 = off. When &gt; 1,
-    /// <see cref="ShardDevices"/> lists the rank devices (count == degree) and does NOT mean a layer split;
-    /// mutually exclusive with <see cref="ShardRatios"/>, <see cref="EnableDitSharding"/>,
-    /// <see cref="CfgParallelDevice"/>, and <see cref="ContextParallelDevices"/>.</summary>
+    /// <summary>LLM tensor-parallel rank count (Megatron-style: each rank owns a slice of every layer's Q/KV heads and FFN columns, with two AllReduce seams per layer); 1 = off. When &gt; 1, <see cref="ShardDevices"/> lists the rank devices (count == degree) and does NOT mean a layer split; mutually exclusive with <see cref="ShardRatios"/>, <see cref="EnableDitSharding"/>, <see cref="CfgParallelDevice"/>, and <see cref="ContextParallelDevices"/>.</summary>
     public int TensorParallelDegree { get; init; } = 1;
 
-    /// <summary>True when every member is at its default — the engine must then behave byte-identically to a
-    /// build without placement support.</summary>
+    /// <summary>True when every member is at its default — the engine must then behave byte-identically to a build without placement support.</summary>
     public bool IsSingle =>
         ShardDevices.Count == 0
         && ShardRatios is null
@@ -58,8 +41,7 @@ public sealed record PlacementConfig
         && ContextParallelDevices.Count == 0
         && TensorParallelDegree == 1;
 
-    /// <summary>Stable, order-sensitive identity for pipeline cache keys. Empty for <see cref="IsSingle"/> so
-    /// existing cache keys stay byte-identical when placement is unused.</summary>
+    /// <summary>Stable, order-sensitive identity for pipeline cache keys. Empty for <see cref="IsSingle"/> so existing cache keys stay byte-identical when placement is unused.</summary>
     public string CacheKey()
     {
         if (IsSingle)

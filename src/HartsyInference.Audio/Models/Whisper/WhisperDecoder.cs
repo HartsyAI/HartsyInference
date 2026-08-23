@@ -3,18 +3,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
 
-/// <summary>Whisper text decoder. Autoregressive transformer over token IDs that
-/// cross-attends to the encoder's audio features.
+/// <summary>Whisper text decoder — an autoregressive transformer over token IDs that cross-attends to the encoder's audio features.</summary>
+/// <remarks><b>KV-cache pattern:</b> on each decode step the self-attention K/V tensors are appended for the new position; the encoder cross-attention K/V are computed once via <see cref="PrecomputeCrossKv"/> and reused. We expose <see cref="StartDecode"/> / <see cref="DecodeStep"/> so the pipeline owns the growing token buffer and can stop on EOT without per-step reallocation. The cache is sized to <c>MaxTextPositions = 448</c> at start to avoid per-step grow.
 ///
-/// <para><b>KV-cache pattern:</b> on each decode step the self-attention K/V tensors
-/// are appended for the new position; the encoder cross-attention K/V are computed
-/// once via <see cref="PrecomputeCrossKv"/> and reused. We expose
-/// <see cref="StartDecode"/> / <see cref="DecodeStep"/> so the pipeline owns the
-/// growing token buffer and can stop on EOT without per-step reallocation. The cache
-/// is sized to <c>MaxTextPositions = 448</c> at start to avoid per-step grow.</para>
-///
-/// <para><b>Weight tying:</b> HF safetensors usually omit <c>proj_out.weight</c>;
-/// when missing we use <c>model.decoder.embed_tokens.weight</c> transposed.</para></summary>
+/// <para><b>Weight tying:</b> HF safetensors usually omit <c>proj_out.weight</c>; when missing we use <c>model.decoder.embed_tokens.weight</c> transposed.</para></remarks>
 public sealed unsafe class WhisperDecoder : IDisposable
 {
     private readonly WhisperConfig _cfg;
@@ -35,7 +27,6 @@ public sealed unsafe class WhisperDecoder : IDisposable
     private bool _weightsLoaded;
     private int _disposed;
 
-    /// <summary>Config this decoder was built with.</summary>
     public WhisperConfig Config => _cfg;
 
     public WhisperDecoder(WhisperConfig cfg)
@@ -46,9 +37,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
             _layers[i] = new WhisperDecoderLayer(cfg);
     }
 
-    /// <summary>Loads weights from a HF safetensors dictionary. Standard layout uses
-    /// the <c>model.decoder.*</c> prefix; <c>proj_out.weight</c> sits at the root and
-    /// is auto-tied to <c>embed_tokens.weight</c> when absent.</summary>
+    /// <summary>Loads weights from a HF safetensors dictionary; standard layout uses the <c>model.decoder.*</c> prefix, with <c>proj_out.weight</c> at the root, auto-tied to <c>embed_tokens.weight</c> when absent.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "model.decoder")
     {
         _embedTokens = WhisperOps.EnsureF32(weights[$"{prefix}.embed_tokens.weight"]);
@@ -75,17 +64,14 @@ public sealed unsafe class WhisperDecoder : IDisposable
         _weightsLoaded = true;
     }
 
-    /// <summary>State carried across decode steps. The pipeline owns one of these for
-    /// the duration of a single transcription.</summary>
+    /// <summary>State carried across decode steps; the pipeline owns one of these for the duration of a single transcription.</summary>
     public sealed class DecodeState : IDisposable
     {
         private readonly WhisperConfig _cfg;
         /// <summary>Cross-attention K/V precomputed from the encoder output. Indexed by layer.</summary>
         public Tensor[] CrossKey { get; }
         public Tensor[] CrossValue { get; }
-        /// <summary>Self-attention K/V cache for each layer. Pre-allocated to
-        /// <c>[1, num_heads, MaxTextPositions, head_dim]</c>; the valid prefix is
-        /// <see cref="CurrentPos"/> entries.</summary>
+        /// <summary>Self-attention K/V cache for each layer, pre-allocated to <c>[1, num_heads, MaxTextPositions, head_dim]</c>; the valid prefix is <see cref="CurrentPos"/> entries.</summary>
         public Tensor[] SelfKey { get; }
         public Tensor[] SelfValue { get; }
         /// <summary>Number of tokens written into the self-attention cache so far.</summary>
@@ -118,8 +104,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         }
     }
 
-    /// <summary>Allocates fresh decoder state and precomputes cross-attention K/V from
-    /// the encoder output. The pipeline calls this once per audio chunk.</summary>
+    /// <summary>Allocates fresh decoder state and precomputes cross-attention K/V from the encoder output; the pipeline calls this once per audio chunk.</summary>
     public DecodeState StartDecode(IBackend backend, Tensor encoderHidden)
     {
         ThrowIfDisposed();
@@ -135,14 +120,8 @@ public sealed unsafe class WhisperDecoder : IDisposable
         return state;
     }
 
-    /// <summary>Runs the decoder for a single new token position. <paramref name="tokenIds"/>
-    /// is a span of <see cref="WhisperDecoder.DecodeState.CurrentPos"/> existing tokens plus
-    /// the newest token at the end — i.e. on first call pass the full prompt sequence
-    /// (e.g. <c>[SOT, lang, transcribe, notimestamps]</c>) and on subsequent calls pass
-    /// either the full sequence so far or just the newly appended token; the decoder
-    /// uses positions <c>[CurrentPos, CurrentPos + len(tokenIds))</c> of the cache.</summary>
-    /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in
-    /// <paramref name="tokenIds"/>.</returns>
+    /// <summary>Runs the decoder for a single new token position; on first call pass the full prompt sequence (e.g. <c>[SOT, lang, transcribe, notimestamps]</c>) and on subsequent calls pass either the full sequence so far or just the newly appended token — the decoder uses positions <c>[CurrentPos, CurrentPos + len(tokenIds))</c> of the cache.</summary>
+    /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in <paramref name="tokenIds"/>.</returns>
     public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state)
     {
         ThrowIfDisposed();
@@ -246,10 +225,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
     public void Dispose() { Interlocked.Exchange(ref _disposed, 1); }
 }
 
-/// <summary>Single Whisper decoder block. Pre-norm self-attention (causal, with KV
-/// cache) → pre-norm cross-attention (against precomputed encoder K/V) → pre-norm MLP.
-/// Weight names match the HF transformers Whisper layout
-/// (<c>self_attn / encoder_attn / fc1 / fc2</c>).</summary>
+/// <summary>Single Whisper decoder block: pre-norm self-attention (causal, with KV cache) → pre-norm cross-attention (against precomputed encoder K/V) → pre-norm MLP; weight names match the HF transformers Whisper layout (<c>self_attn / encoder_attn / fc1 / fc2</c>).</summary>
 internal sealed unsafe class WhisperDecoderLayer
 {
     private readonly WhisperConfig _cfg;
@@ -305,9 +281,7 @@ internal sealed unsafe class WhisperDecoderLayer
         _finalLnB = WhisperOps.EnsureF32(weights[$"{prefix}.final_layer_norm.bias"]);
     }
 
-    /// <summary>Precomputes cross-attention K and V from the encoder hidden state.
-    /// Run once per audio chunk at decode start; the result is held in
-    /// <see cref="WhisperDecoder.DecodeState"/>.</summary>
+    /// <summary>Precomputes cross-attention K and V from the encoder hidden state, run once per audio chunk at decode start; the result is held in <see cref="WhisperDecoder.DecodeState"/>.</summary>
     public void PrecomputeCrossKv(IBackend backend, Tensor encHidden, Tensor outK, Tensor outV, int encSeqLen)
     {
         int d = _cfg.HiddenSize;
@@ -320,9 +294,7 @@ internal sealed unsafe class WhisperDecoderLayer
         k.Dispose(); v.Dispose();
     }
 
-    /// <summary>Forward pass for a chunk of <paramref name="newCount"/> new positions
-    /// starting at absolute position <paramref name="posStart"/>. Updates the self-attn
-    /// KV cache slots [posStart, posStart+newCount).</summary>
+    /// <summary>Forward pass for a chunk of <paramref name="newCount"/> new positions starting at absolute position <paramref name="posStart"/>; updates the self-attn KV cache slots [posStart, posStart+newCount).</summary>
     public Tensor Forward(IBackend backend, Tensor hidden,
         Tensor selfK, Tensor selfV, Tensor crossK, Tensor crossV,
         int posStart, int newCount)
@@ -413,8 +385,7 @@ internal sealed unsafe class WhisperDecoderLayer
         return res3;
     }
 
-    /// <summary>Writes <paramref name="src"/> ([1, H, newCount, D]) into <paramref name="cache"/>
-    /// ([1, H, MaxPos, D]) starting at position <paramref name="posStart"/>.</summary>
+    /// <summary>Writes <paramref name="src"/> ([1, H, newCount, D]) into <paramref name="cache"/> ([1, H, MaxPos, D]) starting at position <paramref name="posStart"/>.</summary>
     private static void AppendToKvCache(Tensor cache, Tensor src, int posStart, int heads, int maxPos, int headDim, int newCount)
     {
         float* cPtr = (float*)cache.DataPointer;
@@ -428,9 +399,7 @@ internal sealed unsafe class WhisperDecoderLayer
             }
     }
 
-    /// <summary>Returns a fresh [1, H, totalPos, D] tensor copied out of the
-    /// MaxPos-allocated cache. We materialize rather than view because SDPA expects a
-    /// contiguous [S_kv, D] inner block per head and the cache is over-allocated.</summary>
+    /// <summary>Returns a fresh [1, H, totalPos, D] tensor copied out of the MaxPos-allocated cache; materialized rather than viewed because SDPA expects a contiguous [S_kv, D] inner block per head and the cache is over-allocated.</summary>
     private static Tensor SliceKvPrefix(Tensor cache, int heads, int totalPos, int maxPos, int headDim)
     {
         Tensor sliced = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
@@ -450,9 +419,7 @@ internal sealed unsafe class WhisperDecoderLayer
         return sliced;
     }
 
-    /// <summary>Builds the mask for new-token self-attention. Shape [1, 1, newCount, totalPos];
-    /// position s in the new chunk (= absolute position posStart+s) can see cache positions
-    /// [0..posStart+s], everything beyond is -inf.</summary>
+    /// <summary>Builds the mask for new-token self-attention, shape [1, 1, newCount, totalPos]: position s in the new chunk (= absolute position posStart+s) can see cache positions [0..posStart+s], everything beyond is -inf.</summary>
     private static Tensor BuildIncrementalCausalMask(int posStart, int newCount, int totalPos)
     {
         Tensor mask = new(new TensorShape(1, 1, newCount, totalPos), DType.F32);

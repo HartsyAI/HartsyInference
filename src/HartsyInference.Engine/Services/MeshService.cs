@@ -8,11 +8,7 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Image-to-3D service: loads TripoSR (feed-forward), Hunyuan3D (flow-match, mesh), or TRELLIS
-/// (two-stage flow, Gaussian splat) from the spec's model directory, runs one image-to-3D pass, and returns the
-/// geometry encoded as GLB (mesh models) or binary-PLY (splat models — TRELLIS's flexicubes mesh decoder is not
-/// yet ported, so it only ever emits splats). Loaded pipelines are cached per checkpoint for the life of the
-/// service; text-to-3D has no wired pipeline yet, so a request without an image is rejected by name.</summary>
+/// <summary>Image-to-3D service: loads TripoSR (feed-forward), Hunyuan3D (flow-match, mesh), or TRELLIS (two-stage flow, Gaussian splat) from the spec's model directory, runs one image-to-3D pass, and returns the geometry encoded as GLB (mesh models) or binary-PLY (splat models — TRELLIS's flexicubes mesh decoder is not yet ported, so it only ever emits splats). Loaded pipelines are cached per checkpoint for the life of the service; text-to-3D has no wired pipeline yet, so a request without an image is rejected by name.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
     private readonly InferenceEngine _engine;
@@ -120,8 +116,7 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
-    /// <summary>A loaded image-to-3D pipeline plus its uniform generate entry point, so the service does not branch
-    /// on the concrete pipeline type per request.</summary>
+    /// <summary>A loaded image-to-3D pipeline plus its uniform generate entry point, so the service does not branch on the concrete pipeline type per request.</summary>
     private sealed class LoadedMesh
     {
         /// <summary>Wraps <paramref name="pipeline"/> with its <paramref name="generate"/> entry point.</summary>

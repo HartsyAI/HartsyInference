@@ -12,7 +12,6 @@ internal static class ZipVoiceModel
 {
     private const string Repo = "k2-fsa/ZipVoice";
 
-    /// <summary>The ZipVoice descriptor.</summary>
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,

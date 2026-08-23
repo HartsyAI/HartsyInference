@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>The result of a transcription: the full text and detected language, plus optional word-level timestamps
-/// and speaker diarization when the request asked for them and the model produced them.</summary>
+/// <summary>The result of a transcription: the full text and detected language, plus optional word-level timestamps and speaker diarization when the request asked for them and the model produced them.</summary>
 public sealed record TranscriptResult
 {
     /// <summary>The full transcript text.</summary>

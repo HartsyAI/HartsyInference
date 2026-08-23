@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Oobleck residual unit (diffusers <c>OobleckResidualUnit</c>):
+/// <summary>Oobleck residual unit (diffusers <c>OobleckResidualUnit</c>) — SnakeBeta → dilated WNConv1d(k7) → SnakeBeta → WNConv1d(k1) → residual add.</summary>
+/// <remarks>
 /// <code>
 ///   y = SnakeBeta(x)                                  # logscale alpha/beta snake
 ///   y = WNConv1d(dim, dim, k=7, dilation=d, padding=(7-1)*d/2)(y)
@@ -20,7 +21,7 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// <para>State-dict keys (real ACE-Step 1.5 / descript <c>nn.Sequential</c> layout — the residual
 /// unit is itself a <c>Sequential</c> of [Snake, WNConv1d k=7, Snake, WNConv1d k=1]):
 /// <c>{prefix}.layers.0.{alpha,beta}</c>, <c>{prefix}.layers.1.{weight_g,weight_v,bias}</c>,
-/// <c>{prefix}.layers.2.{alpha,beta}</c>, <c>{prefix}.layers.3.{weight_g,weight_v,bias}</c>.</para></summary>
+/// <c>{prefix}.layers.2.{alpha,beta}</c>, <c>{prefix}.layers.3.{weight_g,weight_v,bias}</c>.</para></remarks>
 internal sealed class OobleckResidualUnit
 {
     private const int Kernel = 7;
@@ -44,10 +45,10 @@ internal sealed class OobleckResidualUnit
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         (_snake1Alpha, _snake1Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.0", _dim);
-        _conv1W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.1");
+        _conv1W = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.1");
         _conv1B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.1.bias"]);
         (_snake2Alpha, _snake2Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.2", _dim);
-        _conv2W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.3");
+        _conv2W = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.3");
         _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.3.bias"]);
     }
 

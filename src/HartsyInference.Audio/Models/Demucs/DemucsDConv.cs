@@ -1,4 +1,3 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -10,8 +9,9 @@ namespace HartsyInference.Audio.Models.Demucs;
 /// dilation doubling per layer (1, 2, …). The released depth-4 main convs keep this branch on for the shallow
 /// encoder/decoder layers; the LSTM and local-attention variants are OFF in HTDemucs. Reuses the backend
 /// <c>Conv1d</c>/<c>GroupNorm</c>/<c>Gelu</c>.</summary>
-public sealed unsafe class DemucsDConv
+public sealed unsafe class DemucsDConv : IDisposable
 {
+    private readonly DemucsCastOwner _casts = new();
     private readonly int _channels, _depth, _hidden;
     private readonly bool _norm;
     private readonly Layer[] _layers;
@@ -26,7 +26,7 @@ public sealed unsafe class DemucsDConv
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        for (int i = 0; i < _depth; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
+        for (int i = 0; i < _depth; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", _casts);
     }
 
     /// <summary>Adds the residual DConv branch in place onto <paramref name="x"/> (<c>[1, C, T]</c>).</summary>
@@ -40,6 +40,9 @@ public sealed unsafe class DemucsDConv
         for (int i = 0; i < _depth; i++) foreach (Tensor w in _layers[i].EnumerateWeights()) yield return w;
     }
 
+    /// <summary>Frees the F32 casts this DConv stack allocated at load time.</summary>
+    public void Dispose() => _casts.Dispose();
+
     private sealed class Layer
     {
         private readonly int _channels, _dilation;
@@ -52,7 +55,7 @@ public sealed unsafe class DemucsDConv
             _channels = channels; _hidden = hidden; _dilation = dilation; _norm = norm;
         }
 
-        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, DemucsCastOwner casts)
         {
             // Demucs DConv Sequential indices: 0=Conv1d, (1=GroupNorm), GELU, Conv1d, (GroupNorm), GLU, LayerScale.
             // With norm on: 0 conv, 1 norm, 2 gelu(no params), 3 conv, 4 norm, 5 glu, 6 layerscale.
@@ -60,16 +63,16 @@ public sealed unsafe class DemucsDConv
             int c1 = 0, c2, ls;
             if (_norm)
             {
-                _n1W = WhisperOps.EnsureF32(w[$"{p}.1.weight"]); _n1B = WhisperOps.EnsureF32(w[$"{p}.1.bias"]);
+                _n1W = casts.F32(w, $"{p}.1.weight"); _n1B = casts.F32(w, $"{p}.1.bias");
                 c2 = 3;
-                _n2W = WhisperOps.EnsureF32(w[$"{p}.4.weight"]); _n2B = WhisperOps.EnsureF32(w[$"{p}.4.bias"]);
+                _n2W = casts.F32(w, $"{p}.4.weight"); _n2B = casts.F32(w, $"{p}.4.bias");
                 ls = 6;
             }
             else { c2 = 2; ls = 4; }
-            _conv1W = WhisperOps.EnsureF32(w[$"{p}.{c1}.weight"]); _conv1B = Bias(w, $"{p}.{c1}.bias");
+            _conv1W = casts.F32(w, $"{p}.{c1}.weight"); _conv1B = casts.Optional(w, $"{p}.{c1}.bias");
             _hidden = (int)_conv1W.Shape[0];      // htdemucs uses compress=8 (hidden = channels/8)
-            _conv2W = WhisperOps.EnsureF32(w[$"{p}.{c2}.weight"]); _conv2B = Bias(w, $"{p}.{c2}.bias");
-            _scale = WhisperOps.EnsureF32(w[$"{p}.{ls}.scale"]);
+            _conv2W = casts.F32(w, $"{p}.{c2}.weight"); _conv2B = casts.Optional(w, $"{p}.{c2}.bias");
+            _scale = casts.F32(w, $"{p}.{ls}.scale");
         }
 
         public void Forward(IBackend backend, Tensor x, int t)
@@ -123,8 +126,5 @@ public sealed unsafe class DemucsDConv
             Tensor?[] all = [_conv1W, _conv1B, _conv2W, _conv2B, _n1W, _n1B, _n2W, _n2B, _scale];
             foreach (Tensor? w in all) if (w is not null) yield return w;
         }
-
-        private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key)
-            => w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
     }
 }

@@ -11,8 +11,7 @@ using NativeImageData = HartsyInference.Engine.Requests.ImageData;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native vision route: embed/detect/segment/depth/edge/lineart/normal/segmap/background-removal, one
-/// call for all nine modes (<see cref="VisionRequest.Mode"/> selects which). One-shot, no progress/streaming.</summary>
+/// <summary>Native vision route: embed/detect/segment/depth/edge/lineart/normal/segmap/background-removal, one call for all nine modes (<see cref="VisionRequest.Mode"/> selects which). One-shot, no progress/streaming.</summary>
 public static class VisionEndpoints
 {
     /// <summary>Maps <c>/v1/native/vision</c>.</summary>

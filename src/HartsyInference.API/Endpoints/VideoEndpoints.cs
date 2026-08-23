@@ -9,13 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native video route. <see cref="IVideoService"/> only exposes a frame stream
-/// (<see cref="IAsyncEnumerable{T}"/> of <see cref="VideoFrame"/>, no <c>Task&lt;VideoResult&gt;</c>) — there's no
-/// way to build a non-streaming variant without buffering an entire video's frames in server memory first. An
-/// H.264 muxer DOES exist (<c>HartsyInference.Video.Encoding.FfmpegProcessEncoder</c>, ffmpeg subprocess — the
-/// CLI's restore path uses it), but it isn't reachable from this project (API references Core + Engine only), so
-/// this ships SSE-streamed raw frames; a muxed-download variant is future work. Runs through the long-running
-/// queue (video generation can take minutes), not the fast one every other route uses.</summary>
+/// <summary>Native video route. <see cref="IVideoService"/> only exposes a frame stream (<see cref="IAsyncEnumerable{T}"/> of <see cref="VideoFrame"/>, no <c>Task&lt;VideoResult&gt;</c>) — there's no way to build a non-streaming variant without buffering an entire video's frames in server memory first. An H.264 muxer DOES exist (<c>HartsyInference.Video.Encoding.FfmpegProcessEncoder</c>, ffmpeg subprocess — the CLI's restore path uses it), but it isn't reachable from this project (API references Core + Engine only), so this ships SSE-streamed raw frames; a muxed-download variant is future work. Runs through the long-running queue (video generation can take minutes), not the fast one every other route uses.</summary>
 public static class VideoEndpoints
 {
     /// <summary>Maps <c>/v1/native/video/stream</c>.</summary>
@@ -59,8 +53,7 @@ public static class VideoEndpoints
         });
     }
 
-    /// <summary>Writes the frame sequence (and the soundtrack beside it) into a numbered directory under the output
-    /// root, the same layout the CLI produces. Null when the request opted out or the write failed.</summary>
+    /// <summary>Writes the frame sequence (and the soundtrack beside it) into a numbered directory under the output root, the same layout the CLI produces. Null when the request opted out or the write failed.</summary>
     private static string? Persist(NativeVideoRequest req, VideoGenerationResult result)
     {
         if (req.Save == false || result.Frames.Count == 0)

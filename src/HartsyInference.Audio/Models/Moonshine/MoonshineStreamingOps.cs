@@ -2,16 +2,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
 
-/// <summary>Low-level helpers specific to the 2nd-gen streaming Moonshine encoder (verified against
-/// <c>transformers/models/moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1): frame-wise
-/// CMVN + asinh compression (the raw-waveform front end, replacing the original 3-conv stem) and the
-/// encoder's "unit-offset gamma" LayerNorm variant (distinct from the plain weight-only
-/// <see cref="MoonshineOps.LayerNormNoBias"/> the decoder still uses unchanged).</summary>
+/// <summary>Low-level helpers specific to the 2nd-gen streaming Moonshine encoder (verified against <c>transformers/models/moonshine_streaming/modeling_moonshine_streaming.py</c> 5.14.1): frame-wise CMVN + asinh compression (the raw-waveform front end) and the encoder's "unit-offset gamma" LayerNorm variant.</summary>
 internal static unsafe class MoonshineStreamingOps
 {
-    /// <summary>Per-frame cepstral mean/variance normalization: for each row of
-    /// <paramref name="frameLen"/> raw samples, zero-mean then divide by RMS (biased variance, eps
-    /// inside the sqrt). <c>MoonshineStreamingFrameCMVN</c>, eps=1e-6.</summary>
+    /// <summary>Per-frame cepstral mean/variance normalization (<c>MoonshineStreamingFrameCMVN</c>, eps=1e-6): for each row of <paramref name="frameLen"/> raw samples, zero-mean then divide by RMS.</summary>
     public static void FrameCmvn(Tensor output, Tensor input, int frameLen)
     {
         long rows = input.ElementCount / frameLen;
@@ -31,8 +25,7 @@ internal static unsafe class MoonshineStreamingOps
         }
     }
 
-    /// <summary>Learned-scale asinh compression: <c>asinh(exp(logK) * x)</c>, in place.
-    /// <c>MoonshineStreamingAsinhCompression</c> — <paramref name="logK"/> is a loaded scalar weight.</summary>
+    /// <summary>Learned-scale asinh compression (<c>MoonshineStreamingAsinhCompression</c>): <c>asinh(exp(logK) * x)</c> in place, where <paramref name="logK"/> is a loaded scalar weight.</summary>
     public static void AsinhCompressInPlace(Tensor t, float logK)
     {
         float k = MathF.Exp(logK);
@@ -53,11 +46,7 @@ internal static unsafe class MoonshineStreamingOps
         }
     }
 
-    /// <summary>The streaming encoder's <c>MoonshineStreamingLayerNorm</c>: parameterless LayerNorm
-    /// (mean/var over the last dim, PyTorch default eps=1e-5, no learned weight/bias inside) followed
-    /// by a "unit-offset" learned scale <c>gamma + 1.0</c> (gamma is zero-initialized at training start,
-    /// so the layer begins as an identity scale — NOT the same normalization as
-    /// <see cref="MoonshineOps.LayerNormNoBias"/>, which multiplies by <c>gamma</c> directly).</summary>
+    /// <summary>The streaming encoder's <c>MoonshineStreamingLayerNorm</c>: parameterless LayerNorm followed by a "unit-offset" learned scale <c>gamma + 1.0</c> (gamma is zero-initialized at training start, so the layer begins as identity) — NOT the same as <see cref="MoonshineOps.LayerNormNoBias"/>, which multiplies by <c>gamma</c> directly.</summary>
     public static void UnitOffsetLayerNorm(Tensor output, Tensor input, Tensor gamma, float eps = 1e-5f)
     {
         int d = (int)input.Shape[input.Shape.Rank - 1];
@@ -79,12 +68,7 @@ internal static unsafe class MoonshineStreamingOps
         }
     }
 
-    /// <summary>Builds a dense additive <c>[1, 1, seqLen, seqLen]</c> sliding-window mask: query <c>q</c>
-    /// attends to key <c>kv</c> iff <c>(kv &lt;= q &amp;&amp; q-kv &lt; left) || (kv &gt; q &amp;&amp; kv-q &lt; right)</c>
-    /// (0 where allowed, -inf where masked). Applied unconditionally regardless of any padding mask —
-    /// the HF reference conditionally skips the window when no external padding mask is supplied, which
-    /// is a reference-code quirk (see the streaming architecture parity notes), not the intended
-    /// architecture; this port always applies the trained window.</summary>
+    /// <summary>Builds a dense additive <c>[1, 1, seqLen, seqLen]</c> sliding-window mask (0 where allowed, -inf where masked); applied unconditionally, unlike the HF reference which skips the window when no external padding mask is supplied (a reference-code quirk, not the intended architecture).</summary>
     public static Tensor BuildSlidingWindowMask(int seqLen, int left, int right)
     {
         Tensor mask = new(new TensorShape(1, 1, seqLen, seqLen), DType.F32);

@@ -139,12 +139,7 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
         }
     }
 
-    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c>
-    /// parts, null otherwise (Tier 3.7). Each region's text is templated + drop-indexed the SAME way the base
-    /// prompt is (<see cref="EncodeWithTemplate"/>) and encoded through <see cref="Krea2Pipeline.EncodeRegionText"/>
-    /// — the same tapped-layer text encoder the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required
-    /// field on the resolver's signature that <see cref="Krea2Pipeline.GenerateFromTokens"/>'s regional path never
-    /// reads (same as Flux.1/Flux.2 — confirmed by inspection) — a throwaway placeholder satisfies it.</summary>
+    /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> parts, null otherwise (Tier 3.7). Each region's text is templated + drop-indexed the SAME way the base prompt is (<see cref="EncodeWithTemplate"/>) and encoded through <see cref="Krea2Pipeline.EncodeRegionText"/> — the same tapped-layer text encoder the base prompt uses. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature that <see cref="Krea2Pipeline.GenerateFromTokens"/>'s regional path never reads (same as Flux.1/Flux.2 — confirmed by inspection) — a throwaway placeholder satisfies it.</summary>
     private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)
     {
         if (!RegionalPromptResolver.HasRegionParts(prompt))

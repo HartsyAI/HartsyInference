@@ -18,10 +18,7 @@ using HartsyInference.Vision.Siglip;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Vision service: routes an embed/detect/segment request to the pure-C# detectors lifted from the SwarmUI
-/// extension (RT-DETR, YOLO, Grounding DINO, CLIPSeg, with SAM 2 box refinement) and to the standalone CLIP /
-/// SigLIP / DINOv2 image towers for embeddings, selected by the requested catalog id. Loaded models are cached per
-/// checkpoint path for the life of the service.</summary>
+/// <summary>Vision service: routes an embed/detect/segment request to the pure-C# detectors lifted from the SwarmUI extension (RT-DETR, YOLO, Grounding DINO, CLIPSeg, with SAM 2 box refinement) and to the standalone CLIP / SigLIP / DINOv2 image towers for embeddings, selected by the requested catalog id. Loaded models are cached per checkpoint path for the life of the service.</summary>
 public sealed class VisionService : IVisionService, IDisposable
 {
     /// <summary>Aux key a caller may set on <see cref="ModelSpec"/> to point at a specific SAM 2 checkpoint.</summary>
@@ -82,9 +79,7 @@ public sealed class VisionService : IVisionService, IDisposable
             cancel);
     }
 
-    /// <summary>Embed: routes to the standalone CLIP / SigLIP / DINOv2 tower matching the requested catalog id
-    /// (default CLIP ViT-L/14, matching <c>openai/clip-vit-large-patch14</c> — the family with a real-weight
-    /// parity test).</summary>
+    /// <summary>Embed: routes to the standalone CLIP / SigLIP / DINOv2 tower matching the requested catalog id (default CLIP ViT-L/14, matching <c>openai/clip-vit-large-patch14</c> — the family with a real-weight parity test).</summary>
     private VisionResult Embed(ModelSpec spec, VisionRequest request)
     {
         string id = (spec.Catalog?.Id ?? spec.Requested ?? "").ToLowerInvariant();
@@ -99,8 +94,7 @@ public sealed class VisionService : IVisionService, IDisposable
         };
     }
 
-    /// <summary>CLIP ViT-L/14 embed via the standalone <see cref="ClipModelLoader"/> (not the diffusion-package's
-    /// hardcoded ViT-H/14 IP-Adapter tower — this is the family with a real-weight parity test).</summary>
+    /// <summary>CLIP ViT-L/14 embed via the standalone <see cref="ClipModelLoader"/> (not the diffusion-package's hardcoded ViT-H/14 IP-Adapter tower — this is the family with a real-weight parity test).</summary>
     private float[] EmbedClip(string path, VisionRequest request)
     {
         ClipModelLoader loader = GetOrLoad(_clipCache, path, () =>
@@ -122,8 +116,7 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>SigLIP embed (attention-pooled, then L2-normalized here — <see cref="SiglipVisionEncoder.Encode"/>
-    /// returns the raw projection).</summary>
+    /// <summary>SigLIP embed (attention-pooled, then L2-normalized here — <see cref="SiglipVisionEncoder.Encode"/> returns the raw projection).</summary>
     private float[] EmbedSiglip(string path, VisionRequest request)
     {
         SiglipVisionEncoder encoder = GetOrLoad(_siglipCache, path, () =>
@@ -155,8 +148,7 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>DINOv2 embed: the CLS token (index 0 of the sequence) — DINOv2 has no contrastive projection head,
-    /// so the CLS token is the natural pooled representation for downstream cosine comparison.</summary>
+    /// <summary>DINOv2 embed: the CLS token (index 0 of the sequence) — DINOv2 has no contrastive projection head, so the CLS token is the natural pooled representation for downstream cosine comparison.</summary>
     private float[] EmbedDinov2(string path, VisionRequest request)
     {
         Dinov2VisionEncoder encoder = GetOrLoad(_dinov2Cache, path, () =>
@@ -236,8 +228,7 @@ public sealed class VisionService : IVisionService, IDisposable
         return new VisionResult { Image = GrayscaleResult(unit, image.Width, image.Height) };
     }
 
-    /// <summary>Lineart: ControlNet-style line map (white lines on black), realistic by default — pass
-    /// <c>-p coarse</c> for the sk_model2 variant.</summary>
+    /// <summary>Lineart: ControlNet-style line map (white lines on black), realistic by default — pass <c>-p coarse</c> for the sk_model2 variant.</summary>
     private VisionResult LineartMode(ModelSpec spec, VisionRequest request)
     {
         string path = RequirePath(spec, "lineart");
@@ -306,8 +297,7 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5, matching what the image→3D
-    /// pipelines (TripoSR / Hunyuan3D) expect from their background-removal step.</summary>
+    /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5, matching what the image→3D pipelines (TripoSR / Hunyuan3D) expect from their background-removal step.</summary>
     private VisionResult BackgroundRemoval(ModelSpec spec, VisionRequest request)
     {
         string path = RequirePath(spec, "rmbg");
@@ -326,8 +316,7 @@ public sealed class VisionService : IVisionService, IDisposable
         return new VisionResult { Image = new ImageData { Rgb = cutout, Width = image.Width, Height = image.Height } };
     }
 
-    /// <summary>UperNet-Seg: ADE20K semantic-segmentation palette map. The reference pipeline stretch-resizes
-    /// to a fixed 512×512 detect resolution.</summary>
+    /// <summary>UperNet-Seg: ADE20K semantic-segmentation palette map. The reference pipeline stretch-resizes to a fixed 512×512 detect resolution.</summary>
     private VisionResult SegMap(ModelSpec spec, VisionRequest request)
     {
         string path = RequirePath(spec, "upernet-seg");
@@ -362,15 +351,13 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>Resolves the checkpoint path for a single-asset catalog model, or throws with the model id in
-    /// the message (mirrors the Embed-mode error, generalized to any single-primary-asset vision mode).</summary>
+    /// <summary>Resolves the checkpoint path for a single-asset catalog model, or throws with the model id in the message (mirrors the Embed-mode error, generalized to any single-primary-asset vision mode).</summary>
     private static string RequirePath(ModelSpec spec, string label) =>
         spec.LocalPath
         ?? throw new InvalidOperationException(
             $"'{label}' checkpoint not found. Pass --model-path, or select -m {label} to auto-download.");
 
-    /// <summary>Loads a raw <c>.pt</c>/<c>.pth</c> checkpoint and tracks its loader for the service's lifetime
-    /// (its tensors are only valid while the loader is alive — see <see cref="_annotatorLoaders"/>).</summary>
+    /// <summary>Loads a raw <c>.pt</c>/<c>.pth</c> checkpoint and tracks its loader for the service's lifetime (its tensors are only valid while the loader is alive — see <see cref="_annotatorLoaders"/>).</summary>
     private Dictionary<string, Tensor> LoadPickle(string path)
     {
         lock (_embedLock)
@@ -382,13 +369,11 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>A sibling file in the same directory as <paramref name="path"/> — used to switch the Lineart
-    /// checkpoint between its two co-located variants without re-resolving the catalog spec.</summary>
+    /// <summary>A sibling file in the same directory as <paramref name="path"/> — used to switch the Lineart checkpoint between its two co-located variants without re-resolving the catalog spec.</summary>
     private static string SiblingPath(string path, string fileName) =>
         Path.Combine(Path.GetDirectoryName(path) ?? ".", fileName);
 
-    /// <summary>Diagnostic: when <c>HARTSY_VISION_PROBE=1</c>, logs min/max/mean/NaN/Inf for a named
-    /// intermediate tensor. Used to bisect where a CUDA-backend forward pass first diverges.</summary>
+    /// <summary>Diagnostic: when <c>HARTSY_VISION_PROBE=1</c>, logs min/max/mean/NaN/Inf for a named intermediate tensor. Used to bisect where a CUDA-backend forward pass first diverges.</summary>
     private static unsafe void ProbeStats(string label, Tensor t)
     {
         Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
@@ -502,8 +487,7 @@ public sealed class VisionService : IVisionService, IDisposable
         return new VisionResult { Detections = Select(detections, target) };
     }
 
-    /// <summary>Segment: CLIPSeg for a free-text prompt, otherwise a detector's boxes refined by SAM 2 (falling back
-    /// to box rasterization). Masks come back at source resolution as grayscale replicated into RGB.</summary>
+    /// <summary>Segment: CLIPSeg for a free-text prompt, otherwise a detector's boxes refined by SAM 2 (falling back to box rasterization). Masks come back at source resolution as grayscale replicated into RGB.</summary>
     private VisionResult Segment(ModelSpec spec, VisionRequest request, CancellationToken cancel)
     {
         VisionTarget target = VisionTargetRouter.Parse(request.Prompt, VisionMode.Segment);
@@ -590,8 +574,7 @@ public sealed class VisionService : IVisionService, IDisposable
         return threshold > 0f && threshold < 1f ? threshold : 0.25f;
     }
 
-    /// <summary>Applies the target's class filter, sorts left-to-right, and narrows to a single detection when the
-    /// target carried an explicit index.</summary>
+    /// <summary>Applies the target's class filter, sorts left-to-right, and narrows to a single detection when the target carried an explicit index.</summary>
     private static IReadOnlyList<Detection> Select(IReadOnlyList<Detection> detections, VisionTarget target)
     {
         IEnumerable<Detection> query = detections;

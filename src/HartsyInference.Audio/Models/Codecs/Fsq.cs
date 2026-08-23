@@ -2,9 +2,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
 
-/// <summary>Finite Scalar Quantization primitives. FSQ replaces VQ-VAE's learned
-/// codebooks with a deterministic round-to-grid in a small set of per-axis levels —
-/// each axis of the continuous latent is bounded by tanh and rounded to one of
+/// <summary>Finite Scalar Quantization primitives — a deterministic round-to-grid alternative to VQ-VAE's learned codebooks.</summary>
+/// <remarks>
+/// Each axis of the continuous latent is bounded by tanh and rounded to one of
 /// <c>L_d</c> discrete values, then the per-axis "digits" pack into a single integer
 /// code via positional base-L encoding.
 ///
@@ -22,25 +22,18 @@ namespace HartsyInference.Audio.Models.Codecs;
 /// exactly <c>L</c> points centered around zero.</para>
 ///
 /// <para>Inference-only: no straight-through estimator (no gradient), and the
-/// <c>round</c> uses C#'s default banker's rounding which matches PyTorch.</para></summary>
+/// <c>round</c> uses C#'s default banker's rounding which matches PyTorch.</para>
+/// </remarks>
 public static unsafe class Fsq
 {
     /// <summary>Vocabulary size for the given per-axis level configuration.</summary>
     public static int VocabSize(ReadOnlySpan<int> levels) => Core.Codecs.Fsq.VocabSize(levels);
 
-    /// <summary>Quantizes a continuous latent into integer codes. Input
-    /// <paramref name="z"/> is channels-last <c>[B, T, D]</c>; output
-    /// <paramref name="codes"/> is <c>[B, T]</c> Int32. <paramref name="levels"/> length
-    /// must equal <c>D</c>. Delegates to the canonical <see cref="Core.Codecs.Fsq.Quantize"/> — the tanh-bound +
-    /// mixed-radix index packing is byte-identical to the shared implementation.</summary>
+    /// <summary>Quantizes a continuous latent into integer codes. Input <paramref name="z"/> is channels-last <c>[B, T, D]</c>; output <paramref name="codes"/> is <c>[B, T]</c> Int32; <paramref name="levels"/> length must equal <c>D</c>. Delegates to the canonical <see cref="Core.Codecs.Fsq.Quantize"/> — the tanh-bound + mixed-radix index packing is byte-identical to the shared implementation.</summary>
     public static void Quantize(Tensor codes, Tensor z, ReadOnlySpan<int> levels)
         => Core.Codecs.Fsq.Quantize(codes, z, levels);
 
-    /// <summary>Inverse — turns integer codes back into the continuous quantized vector
-    /// <paramref name="zHat"/>. The reconstructed value is normalized to <c>[-1, 1]</c>
-    /// per axis: integer digit <c>k ∈ [0, L)</c> maps to <c>(k - L/2) / halfL</c>.
-    /// Useful when the decoder consumes the continuous quantized vector rather than the
-    /// integer code itself.</summary>
+    /// <summary>Inverse — turns integer codes back into the continuous quantized vector <paramref name="zHat"/>, normalized to <c>[-1, 1]</c> per axis: integer digit <c>k ∈ [0, L)</c> maps to <c>(k - L/2) / halfL</c>. Useful when the decoder consumes the continuous quantized vector rather than the integer code itself.</summary>
     public static void Dequantize(Tensor zHat, Tensor codes, ReadOnlySpan<int> levels)
     {
         if (zHat.Shape.Rank != 3) throw new ArgumentException($"zHat must be rank-3 [B, T, D], got {zHat.Shape}.");

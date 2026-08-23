@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -55,7 +56,7 @@ public sealed unsafe class SparkTtsLm : IDisposable
         for (int step = 0; step < maxTokens; step++)
         {
             int t = (int)hidden.Shape[1];
-            Tensor last = SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
+            Tensor last = VibeVoiceOps.SliceLastFrame(hidden, _cfg.Llm.HiddenSize);
             hidden.Dispose();
             Tensor logits = _backbone.ProjectLogits(backend, last, batch: 1, t: 1);
             last.Dispose();
@@ -90,15 +91,6 @@ public sealed unsafe class SparkTtsLm : IDisposable
     }
 
     public IEnumerable<Tensor> EnumerateWeights() => _backbone.EnumerateWeights();
-
-    private Tensor SliceLastFrame(Tensor hidden, int h)
-    {
-        int t = (int)hidden.Shape[1];
-        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* sp = (float*)hidden.DataPointer + (long)(t - 1) * h;
-        Buffer.MemoryCopy(sp, (void*)last.DataPointer, h * 4, h * 4);
-        return last;
-    }
 
     public void Dispose()
     {

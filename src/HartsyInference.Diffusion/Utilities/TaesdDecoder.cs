@@ -4,11 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Utilities;
 
-/// <summary>"Tiny AutoEncoder for Stable Diffusion" preview decoder
-/// (<see href="https://github.com/madebyollin/taesd"/>). Takes a noisy in-flight latent
-/// <c>[1, C, H, W]</c> and produces an 8×-upscaled <c>[1, 3, H*8, W*8]</c> RGB tensor in
-/// <c>[0, 1]</c>. ~30–80 ms per call on GPU — much higher fidelity than
-/// <see cref="LatentPreview"/> at the cost of a ~10 MB safetensors file per architecture.
+/// <summary>"Tiny AutoEncoder for Stable Diffusion" preview decoder (<see href="https://github.com/madebyollin/taesd"/>): takes a noisy in-flight latent <c>[1, C, H, W]</c> and produces an 8×-upscaled <c>[1, 3, H*8, W*8]</c> RGB tensor in <c>[0, 1]</c>, ~30–80 ms per call on GPU — much higher fidelity than <see cref="LatentPreview"/> at the cost of a ~10 MB safetensors file per architecture.
 ///
 /// <para><b>Reference architecture</b> — a single <c>nn.Sequential</c>, exactly:
 /// <code>
@@ -32,15 +28,9 @@ namespace HartsyInference.Diffusion.Utilities;
 /// 64→64 so the 1×1 skip conv is omitted), and <c>fuse</c> is a final <c>ReLU</c>.
 /// Final output is clamped to <c>[0, 1]</c>.</para>
 ///
-/// <para><b>Latent channel count</b> varies by family — SD/SDXL = 4, SD3/Flux/etc = 16,
-/// Flux.2 = 32. The safetensors weight files are family-specific (taesd /
-/// taesdxl / taesd3 / taef1). Pass the matching <see cref="LatentArchitecture"/> at load
-/// time; the loader validates the conv-in weight shape against the expected channel count.</para>
+/// <para><b>Latent channel count</b> varies by family — SD/SDXL = 4, SD3/Flux/etc = 16, Flux.2 = 32. The safetensors weight files are family-specific (taesd / taesdxl / taesd3 / taef1). Pass the matching <see cref="LatentArchitecture"/> at load time; the loader validates the conv-in weight shape against the expected channel count.</para>
 ///
-/// <para><b>Weight key naming</b> follows PyTorch's <c>nn.Sequential</c> state-dict convention,
-/// i.e. flat numeric indices: <c>1.weight</c> / <c>1.bias</c> for conv_in, <c>3.conv.0.weight</c>
-/// for the first conv inside Block-1, <c>19.weight</c> / <c>19.bias</c> for conv_out, etc.
-/// This matches the format Comfy loads via <c>taesd_decoder.load_state_dict(...)</c> directly.</para></summary>
+/// <para><b>Weight key naming</b> follows PyTorch's <c>nn.Sequential</c> state-dict convention, i.e. flat numeric indices: <c>1.weight</c> / <c>1.bias</c> for conv_in, <c>3.conv.0.weight</c> for the first conv inside Block-1, <c>19.weight</c> / <c>19.bias</c> for conv_out, etc. This matches the format Comfy loads via <c>taesd_decoder.load_state_dict(...)</c> directly.</para></summary>
 public sealed unsafe class TaesdDecoder : IDisposable
 {
     /// <summary>Sequential indices where the 10 ResBlocks live in the decoder graph.</summary>
@@ -86,9 +76,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
     public int LatentChannels => _latentChannels;
     public LatentArchitecture Architecture => _arch;
 
-    /// <summary>Latent channel count expected for each architecture family. SD/SDXL/AuraFlow
-    /// use the 4-channel SD VAE, SD3/Flux/Chroma/FLite/ZImage use 16-channel VAEs, and
-    /// Flux.2 uses a 32-channel VAE.</summary>
+    /// <summary>Latent channel count expected for each architecture family: SD/SDXL/AuraFlow use the 4-channel SD VAE, SD3/Flux/Chroma/FLite/ZImage use 16-channel VAEs, and Flux.2 uses a 32-channel VAE.</summary>
     public static int GetLatentChannels(LatentArchitecture arch) => arch switch
     {
         LatentArchitecture.Sd15 or LatentArchitecture.Sdxl or LatentArchitecture.AuraFlow => 4,
@@ -98,10 +86,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         _ => throw new ArgumentException($"TAESD not defined for arch {arch}.", nameof(arch)),
     };
 
-    /// <summary>Loads a TAESD decoder from a safetensors file. The file must contain the
-    /// decoder-only state dict (taesd_decoder.safetensors, taesdxl_decoder.safetensors, etc.).
-    /// Throws if the conv_in channel count doesn't match the architecture's expected latent
-    /// channels (e.g. loading a 4-channel SD checkpoint for SD3 which expects 16).</summary>
+    /// <summary>Loads a TAESD decoder from a safetensors file containing the decoder-only state dict (taesd_decoder.safetensors, taesdxl_decoder.safetensors, etc.); throws if the conv_in channel count doesn't match the architecture's expected latent channels (e.g. loading a 4-channel SD checkpoint for SD3 which expects 16).</summary>
     public static TaesdDecoder LoadFromSafetensors(LatentArchitecture arch, string path)
     {
         int expectedChannels = GetLatentChannels(arch);
@@ -160,8 +145,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         return dec;
     }
 
-    /// <summary>Runs the tiny decoder over <paramref name="latent"/> and returns an RGB tensor
-    /// <c>[1, 3, H*8, W*8]</c> in <c>[0, 1]</c>. The caller owns the result and must dispose it.</summary>
+    /// <summary>Runs the tiny decoder over <paramref name="latent"/> and returns an RGB tensor <c>[1, 3, H*8, W*8]</c> in <c>[0, 1]</c>. The caller owns the result and must dispose it.</summary>
     public Tensor Forward(IBackend backend, Tensor latent)
     {
         ThrowIfDisposed();
@@ -217,8 +201,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         return rgb;
     }
 
-    /// <summary>Runs one ResBlock at the current resolution. Returns a fresh tensor and
-    /// disposes <paramref name="input"/>. All 10 blocks are 64→64 so no shape change.</summary>
+    /// <summary>Runs one ResBlock at the current resolution. Returns a fresh tensor and disposes <paramref name="input"/>. All 10 blocks are 64→64 so no shape change.</summary>
     private Tensor ApplyBlock(IBackend backend, Tensor input, int blockIdx)
     {
         TensorShape shape = input.Shape;
@@ -247,8 +230,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         return sum;
     }
 
-    /// <summary>Sequential pattern <c>Upsample(2×) → Conv(3×3, no bias)</c>. Returns a tensor
-    /// at 2× spatial resolution; disposes <paramref name="input"/>.</summary>
+    /// <summary>Sequential pattern <c>Upsample(2×) → Conv(3×3, no bias)</c>. Returns a tensor at 2× spatial resolution; disposes <paramref name="input"/>.</summary>
     private Tensor Upsample2xAndConv(IBackend backend, Tensor input, int upIdx)
     {
         int batch = (int)input.Shape[0];
@@ -267,9 +249,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         return convOut;
     }
 
-    /// <summary>Copies <paramref name="src"/> into <paramref name="dst"/>, casting from F16/BF16
-    /// to F32 if needed. The forward pass runs in F32 — the source latent might be F16 when it
-    /// comes from a half-precision pipeline.</summary>
+    /// <summary>Copies <paramref name="src"/> into <paramref name="dst"/>, casting from F16/BF16 to F32 if needed — the forward pass runs in F32, but the source latent might be F16 when it comes from a half-precision pipeline.</summary>
     private static void CopyLatentToF32(Tensor dst, Tensor src)
     {
         if (src.DType == DType.F32)
@@ -290,9 +270,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         throw new NotSupportedException($"Unsupported latent dtype for TAESD preview: {src.DType}.");
     }
 
-    /// <summary>The published TAESD's input <c>Clamp()</c> module: <c>x ← tanh(x/3) * 3</c>.
-    /// Acts as a soft saturation: leaves <c>|x| &lt; 1</c> nearly unchanged, smoothly compresses
-    /// larger magnitudes so an outlier noisy latent can't drive the decoder to nonsense.</summary>
+    /// <summary>The published TAESD's input <c>Clamp()</c> module: <c>x ← tanh(x/3) * 3</c>. Acts as a soft saturation: leaves <c>|x| &lt; 1</c> nearly unchanged, smoothly compresses larger magnitudes so an outlier noisy latent can't drive the decoder to nonsense.</summary>
     private static void SoftClampInPlace(Tensor t)
     {
         float* p = (float*)t.DataPointer;
@@ -303,10 +281,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         }
     }
 
-    /// <summary>In-place ReLU: <c>x ← max(x, 0)</c>. Implemented as a scalar loop rather than
-    /// going through the backend because (a) <see cref="IBackend"/> has no ReLU primitive (it
-    /// has SiLU / GELU but TAESD uses ReLU), and (b) the tensors here are small enough that
-    /// the device→host round-trip cost would dwarf the work itself for GPU backends.</summary>
+    /// <summary>In-place ReLU: <c>x ← max(x, 0)</c>. Implemented as a scalar loop rather than going through the backend because (a) <see cref="IBackend"/> has no ReLU primitive (it has SiLU / GELU but TAESD uses ReLU), and (b) the tensors here are small enough that the device→host round-trip cost would dwarf the work itself for GPU backends.</summary>
     private static void ReluInPlace(Tensor t)
     {
         float* p = (float*)t.DataPointer;
@@ -317,8 +292,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         }
     }
 
-    /// <summary>In-place clamp to <c>[min, max]</c> — used after the final conv to pin RGB
-    /// output into the displayable range, since the decoder has no terminal activation.</summary>
+    /// <summary>In-place clamp to <c>[min, max]</c> — used after the final conv to pin RGB output into the displayable range, since the decoder has no terminal activation.</summary>
     private static void ClampInPlace(Tensor t, float min, float max)
     {
         float* p = (float*)t.DataPointer;
@@ -331,10 +305,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
         }
     }
 
-    /// <summary>Reads the <c>[0, 1]</c>-valued RGB tensor that <see cref="Forward"/> returned
-    /// and emits HWC bytes (the layout <c>RgbToImage.FromHwcRgb</c> consumes on the SwarmUI
-    /// side). Saves a redundant clamp+scale pass vs <see cref="ImagePostProcessor.TensorToRgbBytes"/>
-    /// which expects <c>[-1, 1]</c> input.</summary>
+    /// <summary>Reads the <c>[0, 1]</c>-valued RGB tensor that <see cref="Forward"/> returned and emits HWC bytes (the layout <c>RgbToImage.FromHwcRgb</c> consumes on the SwarmUI side). Saves a redundant clamp+scale pass vs <see cref="ImagePostProcessor.TensorToRgbBytes"/> which expects <c>[-1, 1]</c> input.</summary>
     public static byte[] ToHwcRgbBytes(Tensor rgb01, out int width, out int height)
     {
         height = (int)rgb01.Shape[2];

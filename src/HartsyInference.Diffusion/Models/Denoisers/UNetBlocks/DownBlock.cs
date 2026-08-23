@@ -6,7 +6,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 /// <summary>UNet down block: sequence of (ResNet + optional CrossAttention) layers followed by an optional downsample Conv2d(stride=2).</summary>
 public sealed class DownBlock
 {
-    private readonly int _inChannels;
     private readonly int _outChannels;
     private readonly int _numLayers;
     private readonly bool _hasAttention;
@@ -34,10 +33,8 @@ public sealed class DownBlock
     private Tensor? _downsampleWeight;
     private Tensor? _downsampleBias;
 
-    /// <summary>Creates a UNet down block.</summary>
     public DownBlock(int inChannels, int outChannels, int timeDim, int numLayers, bool hasAttention, bool hasDownsample, int numHeads = 8, int crossAttentionDim = 768, int numTransformerBlocks = 1)
     {
-        _inChannels = inChannels;
         _outChannels = outChannels;
         _numLayers = numLayers;
         _hasAttention = hasAttention;
@@ -93,7 +90,7 @@ public sealed class DownBlock
         if (_downsampleBias is not null) yield return _downsampleBias;
     }
 
-    /// <summary>Forward pass without IPA injection. Returns (output, skipConnections).</summary>
+    /// <summary>Forward pass without IPA injection.</summary>
     public (Tensor output, List<Tensor> skips) Forward(IBackend backend, Tensor input, Tensor temb, Tensor context)
     {
         return Forward(backend, input, temb, context, ipaImageTokens: null, ipaToKIpAll: null, ipaToVIpAll: null, ipaStartIndex: 0, ipaScalePerLayer: null);
@@ -126,7 +123,6 @@ public sealed class DownBlock
             skips.Add(UNetBlockHelpers.CloneOnDevice(backend, hidden));
         }
 
-        // Downsample
         if (_hasDownsample)
         {
             int batch = (int)hidden.Shape[0];

@@ -1,12 +1,9 @@
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
-/// <summary>Continuous sampling of 3D feature volumes and triplanes — the read primitive every
-/// implicit-field decoder needs (occupancy/SDF grids today; triplane/NeRF models later). Pure managed C#.</summary>
+/// <summary>Continuous sampling of 3D feature volumes and triplanes — the read primitive every implicit-field decoder needs.</summary>
 public static class GridSampler
 {
-    /// <summary>Trilinearly samples a single-channel grid <c>[resZ, resY, resX]</c> (x fastest) at the
-    /// normalized coordinate <paramref name="u"/>,<paramref name="v"/>,<paramref name="w"/> in [0,1].
-    /// Out-of-range coords clamp to the edge.</summary>
+    /// <summary>Trilinearly samples a single-channel grid <c>[resZ, resY, resX]</c> (x fastest) at normalized coordinate <paramref name="u"/>,<paramref name="v"/>,<paramref name="w"/> in [0,1]; out-of-range coords clamp to the edge.</summary>
     public static float Trilinear(ReadOnlySpan<float> grid, int resX, int resY, int resZ, float u, float v, float w)
     {
         float fx = Math.Clamp(u, 0f, 1f) * (resX - 1);
@@ -27,9 +24,7 @@ public static class GridSampler
         return c0 + (c1 - c0) * tz;
     }
 
-    /// <summary>Bilinearly samples one feature plane <c>[channels, h, w]</c> (channel-major) at normalized
-    /// (u,v) in [0,1], writing <paramref name="channels"/> values into <paramref name="dst"/>. The building
-    /// block for triplane decoders (call three times, one per orthogonal plane, then sum).</summary>
+    /// <summary>Bilinearly samples one feature plane <c>[channels, h, w]</c> (channel-major) at normalized (u,v) in [0,1]; call once per orthogonal plane and sum for a triplane decoder.</summary>
     public static void BilinearPlane(ReadOnlySpan<float> plane, int channels, int h, int w, float u, float v, Span<float> dst)
     {
         float fx = Math.Clamp(u, 0f, 1f) * (w - 1);
@@ -48,11 +43,7 @@ public static class GridSampler
         }
     }
 
-    /// <summary>Samples one feature plane <c>[channels, h, w]</c> like PyTorch
-    /// <c>F.grid_sample(align_corners=False, padding_mode="zeros", mode="bilinear")</c>: grid coords
-    /// <paramref name="gx"/>,<paramref name="gy"/> are in [−1,1] (gx→width, gy→height); samples outside the
-    /// plane contribute 0. This is the convention triplane NeRF renderers use (not the [0,1]+clamp
-    /// <see cref="BilinearPlane"/>).</summary>
+    /// <summary>Samples one feature plane like PyTorch <c>F.grid_sample(align_corners=False, padding_mode="zeros", mode="bilinear")</c> — coords in [−1,1], out-of-plane samples contribute 0 (unlike the [0,1]+clamp <see cref="BilinearPlane"/>).</summary>
     public static void GridSamplePlane(ReadOnlySpan<float> plane, int channels, int h, int w, float gx, float gy, Span<float> dst)
     {
         // align_corners=False: pixel = ((coord+1)*size - 1) / 2

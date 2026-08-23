@@ -104,16 +104,16 @@ public sealed unsafe class OmniGen2Block
         {
             _norm1ModulationWeight = weights[$"{prefix}.norm1.linear.weight"];
             _norm1ModulationBias = weights[$"{prefix}.norm1.linear.bias"];
-            _norm1Weight = CastToF32IfNeeded(weights[$"{prefix}.norm1.norm.weight"]);
+            _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm1.norm.weight"]);
         }
         else
         {
-            _norm1Weight = CastToF32IfNeeded(weights[$"{prefix}.norm1.weight"]);
+            _norm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm1.weight"]);
         }
 
-        _norm2Weight = CastToF32IfNeeded(weights[$"{prefix}.norm2.weight"]);
-        _ffnNorm1Weight = CastToF32IfNeeded(weights[$"{prefix}.ffn_norm1.weight"]);
-        _ffnNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.ffn_norm2.weight"]);
+        _norm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.norm2.weight"]);
+        _ffnNorm1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.ffn_norm1.weight"]);
+        _ffnNorm2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.ffn_norm2.weight"]);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -139,8 +139,7 @@ public sealed unsafe class OmniGen2Block
         if (_ffnNorm2Weight is not null) yield return _ffnNorm2Weight;
     }
 
-    /// <summary>Forward pass.</summary>
-    /// <param name="backend">Compute backend.</param>
+    /// <summary>Runs self-attention (rotated per <paramref name="ropeMode"/>) then the SwiGLU FFN, gated by AdaLN modulation when <see cref="Modulation"/> is true.</summary>
     /// <param name="hidden">Block input <c>[B, S, hiddenSize]</c>. Caller owns the lifetime — this method allocates a new output tensor.</param>
     /// <param name="rope">Shared 3-axis RoPE.</param>
     /// <param name="ropeMode">How to position tokens for RoPE. Either <see cref="RopeApplyMode.Text"/> (positions <c>(s,s,s)</c>) or <see cref="RopeApplyMode.Image"/> (positions <c>(timeOffset, row, col)</c>).</param>
@@ -532,9 +531,6 @@ public sealed unsafe class OmniGen2Block
         gateTanh.Dispose();
         return output;
     }
-
-    private static Tensor CastToF32IfNeeded(Tensor t) =>
-        t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }
 
 /// <summary>How an <see cref="OmniGen2Block"/> should rotate Q/K. Picked at the call site: text-stream blocks

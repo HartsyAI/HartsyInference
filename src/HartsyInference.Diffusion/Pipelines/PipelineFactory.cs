@@ -9,8 +9,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Constructs <see cref="DiffusionPipelineBase"/> instances from on-disk model artifacts.
-/// Resolves the five concerns the previous scaffolding flagged:
+/// <summary>Constructs <see cref="DiffusionPipelineBase"/> instances from on-disk model artifacts. Resolves the five concerns the previous scaffolding flagged:
 /// <list type="number">
 ///   <item><b>Model-type detection</b> via <see cref="ModelArchitectureDetector"/> (shared tensor-key signatures).</item>
 ///   <item><b>Component-file discovery</b> via <see cref="ModelLayoutResolver"/> (single-file / sharded / diffusers).</item>
@@ -28,17 +27,14 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// is mechanical: add a case to the switch that drives the matching <c>*CheckpointConverter</c>.</para></summary>
 public static class PipelineFactory
 {
-    /// <summary>Detects the architecture of the checkpoint or diffusers directory at <paramref name="path"/>
-    /// by reading only tensor headers (no weight data is materialized).</summary>
+    /// <summary>Detects the architecture of the checkpoint or diffusers directory at <paramref name="path"/> by reading only tensor headers (no weight data is materialized).</summary>
     public static ModelArchitecture DetectArchitecture(string path)
     {
         ModelLayout layout = ModelLayoutResolver.Resolve(path);
         return ModelArchitectureDetector.DetectFromFile(layout.RepresentativeFile);
     }
 
-    /// <summary>Loads a diffusion pipeline by inspecting the checkpoint at <paramref name="path"/> and
-    /// dispatching to the matching per-model loader. SDXL is fully supported; other detected families
-    /// throw <see cref="NotSupportedException"/> with the detected architecture named.</summary>
+    /// <summary>Loads a diffusion pipeline by inspecting the checkpoint at <paramref name="path"/> and dispatching to the matching per-model loader. SDXL is fully supported; other detected families throw <see cref="NotSupportedException"/> with the detected architecture named.</summary>
     /// <param name="path">A safetensors file, a sharded checkpoint directory, or a diffusers-layout directory.</param>
     /// <param name="backend">Compute backend the pipeline will use for inference.</param>
     public static DiffusionPipelineBase LoadAuto(string path, IBackend backend)
@@ -57,9 +53,7 @@ public static class PipelineFactory
         };
     }
 
-    /// <summary>Builds an <see cref="SdxlPipeline"/> from a single-file SDXL checkpoint. Loads + converts
-    /// the LDM checkpoint, casts every component to F32 owned tensors (severing the mmap so the loader can
-    /// be released), and wires CLIP-L, CLIP-G, the UNet, and the VAE decoder.</summary>
+    /// <summary>Builds an <see cref="SdxlPipeline"/> from a single-file SDXL checkpoint. Loads + converts the LDM checkpoint, casts every component to F32 owned tensors (severing the mmap so the loader can be released), and wires CLIP-L, CLIP-G, the UNet, and the VAE decoder.</summary>
     public static SdxlPipeline LoadSdxl(string checkpointPath, IBackend backend)
     {
         (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
@@ -92,9 +86,7 @@ public static class PipelineFactory
         }
     }
 
-    /// <summary>Copies each weight into an owned F32 tensor. <see cref="Tensor.CastTo"/> always allocates
-    /// (F32→F32 falls back to a memory copy), so the result no longer borrows the safetensors mmap and the
-    /// source — when it owns its memory — is released to avoid a transient double of resident weights.</summary>
+    /// <summary>Copies each weight into an owned F32 tensor. <see cref="Tensor.CastTo"/> always allocates (F32→F32 falls back to a memory copy), so the result no longer borrows the safetensors mmap and the source — when it owns its memory — is released to avoid a transient double of resident weights.</summary>
     private static Dictionary<string, Tensor> ToOwnedF32(Dictionary<string, Tensor> weights)
     {
         Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);

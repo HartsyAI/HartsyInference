@@ -1,7 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Native voice-conversion request: re-voice the source audio, optionally toward a target voice (for models
-/// that condition on one, e.g. OpenVoice tone-color transfer; RVC carries the target in its weights).</summary>
+/// <summary>Native voice-conversion request: re-voice the source audio, optionally toward a target voice (for models that condition on one, e.g. OpenVoice tone-color transfer; RVC carries the target in its weights).</summary>
 public sealed record VoiceConversionRequest
 {
     /// <summary>The source audio to re-voice.</summary>

@@ -4,15 +4,8 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Ssm;
 
-/// <summary>RWKV-7 ("Goose") decoder loaded from a llama.cpp <c>rwkv7</c> GGUF. A non-transformer recurrence built
-/// on the generalized <b>delta rule</b> (vs RWKV-6's WKV6 outer-product). Each block is a <b>time-mix</b>
-/// (fused token-shift lerp for r/w/k/v/a/g → receptance/key/value + a data-dependent decay <c>w</c>, an
-/// in-context-learning-rate <c>a</c>, a value-residual mix, and a gate, all via small LoRAs → an L2-normalized
-/// key <c>kk</c> and modified key <c>k</c> → the <b>WKV7 delta-rule state recurrence</b>
-/// <c>S = S·w + v⊗k + (a·S)⊗b</c> with <c>a=−kk, b=kk·iclr</c>, out = S·r → per-head GroupNorm → r·k bonus → gate
-/// → out_proj) and a <b>channel-mix</b> (token-shift → squared-ReLU MLP, no receptance). LayerNorm + residual
-/// around each. Big projections run through <see cref="IBackend.Linear"/>; the LoRAs, scan, GroupNorm and
-/// LayerNorms run host-side (the recurrence is sequential).</summary>
+/// <summary>RWKV-7 ("Goose") decoder loaded from a llama.cpp <c>rwkv7</c> GGUF: a non-transformer recurrence built on the generalized <b>delta rule</b> (vs RWKV-6's WKV6 outer-product).</summary>
+/// <remarks>Each block is a <b>time-mix</b> (fused token-shift lerp for r/w/k/v/a/g → receptance/key/value + a data-dependent decay <c>w</c>, an in-context-learning-rate <c>a</c>, a value-residual mix, and a gate, all via small LoRAs → an L2-normalized key <c>kk</c> and modified key <c>k</c> → the <b>WKV7 delta-rule state recurrence</b> <c>S = S·w + v⊗k + (a·S)⊗b</c> with <c>a=−kk, b=kk·iclr</c>, out = S·r → per-head GroupNorm → r·k bonus → gate → out_proj) and a <b>channel-mix</b> (token-shift → squared-ReLU MLP, no receptance), LayerNorm + residual around each. Big projections run through <see cref="IBackend.Linear"/>; the LoRAs, scan, GroupNorm and LayerNorms run host-side (the recurrence is sequential).</remarks>
 public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -55,9 +48,7 @@ public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
         }
     }
 
-    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation (the
-    /// model instance persists across chat turns via the provider's device slot; without this a fresh prompt
-    /// would continue from the previous conversation's WKV state).</summary>
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation, since the model instance persists across chat turns via the provider's device slot.</summary>
     public void ResetState()
     {
         foreach (float[] s in _wkvState) Array.Clear(s);
@@ -100,39 +91,11 @@ public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
 
     private Tensor W(string key) => _w[key];
 
-    /// <summary>x[t,in] @ W[out,in]ᵀ → [t,out] via backend.Linear (outDim from the weight shape).</summary>
-    private float[] Lin(IBackend backend, float[] x, int t, int inDim, string key)
-    {
-        Tensor wt = W(key);
-        int outDim = (int)wt.Shape[0];
-        using Tensor xt = new(new TensorShape(1, t, inDim), DType.F32);
-        fixed (float* s = x) Buffer.MemoryCopy(s, (void*)xt.DataPointer, (long)t * inDim * 4, (long)t * inDim * 4);
-        using Tensor o = new(new TensorShape(1, t, outDim), DType.F32);
-        backend.Linear(o, xt, wt, null);
-        backend.Sync();
-        float[] r = new float[(long)t * outDim];
-        fixed (float* d = r) Buffer.MemoryCopy((void*)o.DataPointer, d, r.Length * 4L, r.Length * 4L);
-        return r;
-    }
+    private float[] Lin(IBackend backend, float[] x, int t, int inDim, string key) => RwkvOps.Lin(backend, x, t, inDim, W(key));
 
-    private void LayerNorm(float[] x, int t, float* w, float* b)
-    {
-        int d = DModel;
-        fixed (float* xp = x)
-            for (int s = 0; s < t; s++)
-            {
-                float* row = xp + (long)s * d;
-                double mean = 0; for (int c = 0; c < d; c++) mean += row[c]; mean /= d;
-                double var = 0; for (int c = 0; c < d; c++) { double dd = row[c] - mean; var += dd * dd; } var /= d;
-                float inv = (float)(1.0 / Math.Sqrt(var + Eps));
-                for (int c = 0; c < d; c++) row[c] = (float)((row[c] - mean) * inv) * w[c] + b[c];
-            }
-    }
+    private void LayerNorm(float[] x, int t, float* w, float* b) => RwkvOps.LayerNorm(x, t, DModel, Eps, w, b);
 
-    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call (the whole
-    /// prompt for the first/prefill call, exactly one token per decode step) — advancing each layer's carried
-    /// recurrent state, and returns the next-token logits (last position). Call <see cref="ResetState"/> before
-    /// the first call of a new generation.</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -160,16 +123,9 @@ public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
         return logits;
     }
 
-    // sx[t] = xx[t-1] - xx[t]  (shift difference). xx[-1] is the carried last row from the previous call
-    // (zero at true sequence position 0 — prevRow starts zeroed and ResetState() re-zeros it).
-    private float[] ShiftDiff(float[] xx, int t, float[] prevRow)
-    {
-        int d = DModel; float[] sx = new float[(long)t * d];
-        for (int s = 0; s < t; s++)
-            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? prevRow[c] : xx[(s - 1) * d + c]) - xx[s * d + c];
-        Array.Copy(xx, ((long)t - 1) * d, prevRow, 0, d);
-        return sx;
-    }
+    // xx[-1] is the carried last row from the previous call (zero at true sequence position 0 — prevRow starts
+    // zeroed and ResetState() re-zeros it).
+    private float[] ShiftDiff(float[] xx, int t, float[] prevRow) => RwkvOps.ShiftDiff(xx, t, DModel, prevRow);
 
     private void TimeMix(IBackend backend, float[] x, int t, int il, ref float[]? vFirst)
     {

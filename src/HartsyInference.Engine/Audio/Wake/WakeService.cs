@@ -16,9 +16,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.Engine.Audio.Wake;
 
-/// <summary>What a wake word firing produced: the word, the device, and — when transcription is enabled — the
-/// command that followed it. <see cref="Route"/> is the caller's own tag from configuration, so one engine can
-/// feed several agents without knowing anything about them.</summary>
+/// <summary>What a wake word firing produced: the word, the device, and — when transcription is enabled — the command that followed it. <see cref="Route"/> is the caller's own tag from configuration, so one engine can feed several agents without knowing anything about them.</summary>
 public sealed record WakeEvent
 {
     public required string DeviceId { get; init; }
@@ -53,8 +51,7 @@ public sealed class WakeService : IDisposable
     /// <summary>Raised on every detection, after transcription when it is enabled.</summary>
     public event Action<WakeEvent>? Detected;
 
-    /// <summary>Devices with a session, connected or not — a session outlives its connection so a reconnecting
-    /// device keeps its configuration.</summary>
+    /// <summary>Devices with a session, connected or not — a session outlives its connection so a reconnecting device keeps its configuration.</summary>
     public IReadOnlyCollection<string> Devices => [.. _sessions.Keys];
 
     /// <summary>Wake words currently loaded.</summary>
@@ -69,8 +66,7 @@ public sealed class WakeService : IDisposable
         _options = options ?? new WakeServiceOptions();
     }
 
-    /// <summary>Loads the models, starts the detection worker, then opens the listener. In that order, so a
-    /// satellite is never accepted into a service that cannot yet score its audio.</summary>
+    /// <summary>Loads the models, starts the detection worker, then opens the listener. In that order, so a satellite is never accepted into a service that cannot yet score its audio.</summary>
     public void Start()
     {
         string root = _options.ModelRoot ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake");

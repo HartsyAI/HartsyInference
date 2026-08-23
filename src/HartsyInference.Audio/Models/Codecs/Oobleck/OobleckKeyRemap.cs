@@ -2,14 +2,13 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Renames real diffusers <c>AutoencoderOobleck</c> named-submodule keys (verified against the
-/// released Stable Audio Open Small <c>vae/diffusion_pytorch_model.safetensors</c>: <c>encoder.conv1</c>,
-/// <c>encoder.block.{i}.res_unit1.snake1</c>, <c>decoder.block.{i}.conv_t1</c>, ...) to the flat
-/// <c>nn.Sequential</c> numeric-index layout <see cref="OobleckEncoder"/>/<see cref="OobleckDecoder"/> expect
-/// (the dialect ACE-Step 1.5's checkpoint ships as — <c>encoder.layers.0</c>, <c>encoder.layers.{i+1}.layers.{j}</c>,
-/// ...). Pure key rename, same <see cref="Tensor"/> references, no data copy. Already-flat checkpoints and
+/// <summary>Renames real diffusers <c>AutoencoderOobleck</c> named-submodule keys to the flat <c>nn.Sequential</c> numeric-index layout <see cref="OobleckEncoder"/>/<see cref="OobleckDecoder"/> expect.</summary>
+/// <remarks>Verified against the released Stable Audio Open Small <c>vae/diffusion_pytorch_model.safetensors</c>:
+/// <c>encoder.conv1</c>, <c>encoder.block.{i}.res_unit1.snake1</c>, <c>decoder.block.{i}.conv_t1</c>, ... map to
+/// the dialect ACE-Step 1.5's checkpoint ships as — <c>encoder.layers.0</c>, <c>encoder.layers.{i+1}.layers.{j}</c>,
+/// ... Pure key rename, same <see cref="Tensor"/> references, no data copy. Already-flat checkpoints and
 /// unrelated keys pass through unchanged, so it is safe to call unconditionally before
-/// <see cref="OobleckVae.LoadWeights"/>.</summary>
+/// <see cref="OobleckVae.LoadWeights"/>.</remarks>
 public static class OobleckKeyRemap
 {
     public static Dictionary<string, Tensor> ToFlatSequentialLayout(IReadOnlyDictionary<string, Tensor> named, OobleckConfig cfg)
@@ -69,8 +68,7 @@ public static class OobleckKeyRemap
             };
     }
 
-    /// <summary>A residual unit's own flat layout: <c>layers.0</c>=snake1, <c>layers.1</c>=conv1,
-    /// <c>layers.2</c>=snake2, <c>layers.3</c>=conv2 — see <see cref="OobleckResidualUnit"/>.</summary>
+    /// <summary>A residual unit's own flat layout: <c>layers.0</c>=snake1, <c>layers.1</c>=conv1, <c>layers.2</c>=snake2, <c>layers.3</c>=conv2 — see <see cref="OobleckResidualUnit"/>.</summary>
     private static string? MapResidualUnit(string blockPrefix, int slot, string tail)
     {
         string ruPrefix = $"{blockPrefix}.layers.{slot}";

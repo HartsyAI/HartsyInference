@@ -37,7 +37,6 @@ public sealed class GgufLoader : IDisposable
         long remaining = _handle.ByteLength;
         long offset = 0;
 
-        // Magic
         if (remaining < 4)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException("GGUF file too small for magic number.");
         uint magic = *(uint*)(ptr + offset);
@@ -45,18 +44,15 @@ public sealed class GgufLoader : IDisposable
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Invalid GGUF magic: 0x{magic:X8}, expected 0x{GgufMagic:X8}.");
         offset += 4;
 
-        // Version
         uint version = *(uint*)(ptr + offset);
         offset += 4;
         if (version < 2 || version > SupportedVersion)
             throw new HartsyInference.Core.Exceptions.UnsupportedModelException($"Unsupported GGUF version: {version}.", null, "GGUF");
         Version = (int)version;
 
-        // Tensor count
         ulong tensorCount = *(ulong*)(ptr + offset);
         offset += 8;
 
-        // Metadata KV count
         ulong metadataKvCount = *(ulong*)(ptr + offset);
         offset += 8;
 

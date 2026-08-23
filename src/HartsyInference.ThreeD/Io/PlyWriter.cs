@@ -5,12 +5,10 @@ using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
 
-/// <summary>Writes PLY files: an ASCII triangle mesh, and the de-facto Gaussian-splat binary PLY
-/// (INRIA layout) for the splat pipelines that land with later models. Pure managed C#.</summary>
+/// <summary>Writes PLY files: an ASCII triangle mesh, and the de-facto Gaussian-splat binary PLY (INRIA layout) for splat pipelines.</summary>
 public static class PlyWriter
 {
-    /// <summary>Serializes <paramref name="mesh"/> to ASCII PLY text (vertices + triangle faces, with
-    /// optional normals and per-vertex RGB).</summary>
+    /// <summary>Serializes <paramref name="mesh"/> to ASCII PLY text (vertices + triangle faces, with optional normals and per-vertex RGB).</summary>
     public static string WriteMesh(Mesh mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
@@ -46,10 +44,7 @@ public static class PlyWriter
     /// <summary>Writes <paramref name="mesh"/> as ASCII PLY to <paramref name="path"/>.</summary>
     public static void SaveMesh(string path, Mesh mesh) => File.WriteAllText(path, WriteMesh(mesh));
 
-    /// <summary>Serializes <paramref name="cloud"/> to a binary-little-endian Gaussian-splat PLY (INRIA layout:
-    /// x,y,z, nx,ny,nz, f_dc_{0..2}, f_rest_*, opacity, scale_{0..2}, rot_{0..3}). The conventional format
-    /// read by splat viewers. <paramref name="cloud"/>'s SH coefficients are stored coeff-major RGB and
-    /// reordered here to INRIA's channel-major DC+rest ordering.</summary>
+    /// <summary>Serializes <paramref name="cloud"/> to a binary-little-endian Gaussian-splat PLY (INRIA layout), reordering the coeff-major RGB SH coefficients to INRIA's channel-major DC+rest ordering.</summary>
     public static byte[] WriteSplats(GaussianSplatCloud cloud)
     {
         ArgumentNullException.ThrowIfNull(cloud);

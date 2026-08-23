@@ -3,23 +3,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Megatron-style tensor-parallel dense decoder (v1, correctness-first): every rank holds the FULL
-/// layer stack but only its slice of each layer — a contiguous range of Q and KV heads plus a contiguous range
-/// of gate/up FFN columns (column-parallel: weight rows, since weights are row-major <c>[out, in]</c>), with
-/// o_proj and down_proj split along IN (row-parallel: each rank's partial output is summed across ranks).
-/// Exactly two <see cref="ICollectiveComm.AllReduceSum"/> seams per layer — after attention-out and after
-/// down_proj — after which the residual stream is replicated on every rank again. Final norm, lm_head, and the
-/// (host-gathered) embedding table live on rank 0. Each rank's KV cache holds only its own KV-head slice.
-///
-/// <para>Execution model (v1): ONE driving thread runs the per-rank partial loops sequentially between the
-/// collectives — no rendezvous machinery, trivially testable on CPU backends with <see cref="HostStagedComm"/>.
-/// Upgrading to one thread per rank (a RankRunner meeting at the collectives) is a deliberate follow-up; the
-/// phase-split structure here (rank loop inside each phase, collectives at the seams) is shaped so that upgrade
-/// changes the driver only. Graph decode, speculative decoding, and the batching scheduler are out of scope —
-/// none of those paths can reach this type.</para>
-///
-/// <para>Scope: the dense pre-norm GQA/RoPE + gated-FFN decoder shape (Llama / Qwen2 / Qwen3, incl. QKV bias
-/// and per-head QK-norm). Everything else is refused loudly at construction — see <c>ValidateConfig</c>.</para></summary>
+/// <summary>Megatron-style tensor-parallel dense decoder (v1, correctness-first): every rank holds the FULL layer stack but only its slice of each layer — a contiguous range of Q/KV heads plus gate/up FFN columns (column-parallel), with o_proj and down_proj split along IN (row-parallel: each rank's partial output is summed across ranks) via exactly two <see cref="ICollectiveComm.AllReduceSum"/> seams per layer. Final norm, lm_head, and the (host-gathered) embedding table live on rank 0; each rank's KV cache holds only its own KV-head slice.</summary>
+/// <remarks>
+/// <para>Execution model (v1): ONE driving thread runs the per-rank partial loops sequentially between the collectives — no rendezvous machinery, trivially testable on CPU backends with <see cref="HostStagedComm"/>. Upgrading to one thread per rank (a RankRunner meeting at the collectives) is a deliberate follow-up; the phase-split structure here is shaped so that upgrade changes the driver only. Graph decode, speculative decoding, and the batching scheduler are out of scope — none of those paths can reach this type.</para>
+/// <para>Scope: the dense pre-norm GQA/RoPE + gated-FFN decoder shape (Llama/Qwen2/Qwen3, incl. QKV bias and per-head QK-norm). Everything else is refused loudly at construction — see <c>ValidateConfig</c>.</para>
+/// </remarks>
 public sealed unsafe class TensorParallelTransformer : IDisposable
 {
     private readonly TransformerConfig _cfg;
@@ -38,8 +26,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
     /// <summary>Tensor-parallel degree (rank count).</summary>
     public int Degree => _placement.Degree;
 
-    /// <summary>Validates the architecture and geometry against <paramref name="placement"/>'s degree
-    /// (weights loaded separately via <see cref="LoadWeights"/>).</summary>
+    /// <summary>Validates the architecture and geometry against <paramref name="placement"/>'s degree (weights loaded separately via <see cref="LoadWeights"/>).</summary>
     public TensorParallelTransformer(TransformerConfig cfg, TpPlacement placement)
     {
         ArgumentNullException.ThrowIfNull(cfg);
@@ -54,8 +41,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Refuses architectures outside the v1 dense shape and geometries that don't tile: every rank
-    /// needs a whole number of Q heads, KV heads, and FFN columns.</summary>
+    /// <summary>Refuses architectures outside the v1 dense shape and geometries that don't tile: every rank needs a whole number of Q heads, KV heads, and FFN columns.</summary>
     private static void ValidateConfig(TransformerConfig cfg, int degree)
     {
         List<string> unsupported = [];
@@ -107,12 +93,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Loads and partitions weights from an HF-style key dict (same keys/prefix contract as
-    /// <see cref="GenericTransformer.LoadWeights"/>). Per-rank slices are COPIED sub-tensors (not views) so
-    /// each tensor has exactly one owning rank backend — the safe default against the borrowed-View-as-op-output
-    /// hazard, and it lets a caller free the full checkpoint tensors afterwards. Norms are small and copied per
-    /// rank; the embedding table, final norm, and lm_head stay rank-0-only (the residual stream is replicated
-    /// after the last reduce, so only rank 0 needs the head-side weights).</summary>
+    /// <summary>Loads and partitions weights from an HF-style key dict (same keys/prefix contract as <see cref="GenericTransformer.LoadWeights"/>). Per-rank slices are COPIED sub-tensors (not views) so each tensor has exactly one owning rank backend, letting a caller free the full checkpoint tensors afterwards. Norms are copied per rank; the embedding table, final norm, and lm_head stay rank-0-only since the residual stream is replicated after the last reduce.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string? lmHeadKey = null)
     {
         ThrowIfDisposed();
@@ -181,8 +162,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>One device KV cache per rank, sized to that rank's KV-head slice
-    /// (<c>NumKvHeads / Degree</c> heads).</summary>
+    /// <summary>One device KV cache per rank, sized to that rank's KV-head slice (<c>NumKvHeads / Degree</c> heads).</summary>
     public KvCache[] CreateKvCaches(int batch = 1)
     {
         ThrowIfDisposed();
@@ -194,10 +174,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return caches;
     }
 
-    /// <summary>Rank <paramref name="rank"/>'s resident weight set (its sliced projections + per-rank norm
-    /// copies; rank 0 additionally the final norm and lm_head) for <see cref="IBackend.PreloadWeights"/> on
-    /// that rank's backend. The union over all ranks covers every device-consumed tensor exactly once — the
-    /// embedding table is host-gathered and never uploaded (unless it doubles as the tied F32 head).</summary>
+    /// <summary>Rank <paramref name="rank"/>'s resident weight set (its sliced projections + per-rank norm copies; rank 0 additionally the final norm and lm_head) for <see cref="IBackend.PreloadWeights"/> on that rank's backend. The union over all ranks covers every device-consumed tensor exactly once — the embedding table is host-gathered and never uploaded (unless it doubles as the tied F32 head).</summary>
     public IEnumerable<Tensor> EnumerateRankWeights(int rank)
     {
         ThrowIfDisposed();
@@ -230,8 +207,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Token-IDs-in convenience over <see cref="ForwardEmbedsTp"/> (host embedding gather on rank 0's
-    /// table), mirroring <see cref="GenericTransformer.Forward"/>.</summary>
+    /// <summary>Token-IDs-in convenience over <see cref="ForwardEmbedsTp"/> (host embedding gather on rank 0's table), mirroring <see cref="GenericTransformer.Forward"/>.</summary>
     public Tensor ForwardTp(ReadOnlySpan<int> tokenIds, int posStart, IReadOnlyList<IKvCache> caches)
     {
         ThrowIfDisposed();
@@ -243,11 +219,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Runs the full stack tensor-parallel and returns the final-normed <c>[1, T, hidden]</c> hidden
-    /// state on rank 0's backend. <paramref name="caches"/> is one per-rank KV cache (rank r's KV-head slice —
-    /// see <see cref="CreateKvCaches"/>); each advances by <paramref name="t"/> exactly once per call, mirroring
-    /// the unstaged contract. The input <paramref name="embeds"/> is host-materialized once and cloned per rank,
-    /// so it may live on any backend; the caller keeps ownership.</summary>
+    /// <summary>Runs the full stack tensor-parallel and returns the final-normed <c>[1, T, hidden]</c> hidden state on rank 0's backend; <paramref name="caches"/> is one per-rank KV cache (see <see cref="CreateKvCaches"/>), each advancing by <paramref name="t"/> exactly once per call. The input <paramref name="embeds"/> is host-materialized once and cloned per rank, so it may live on any backend; the caller keeps ownership.</summary>
     public Tensor ForwardEmbedsTp(Tensor embeds, int t, int posStart, IReadOnlyList<IKvCache> caches)
     {
         ThrowIfDisposed();
@@ -340,8 +312,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Projects rank 0's hidden <c>[1, T, hidden]</c> → logits <c>[1, T, vocab]</c> via the (tied)
-    /// lm_head on rank 0's backend, with Granite logit scale and the Gemma-2 final soft-cap.</summary>
+    /// <summary>Projects rank 0's hidden <c>[1, T, hidden]</c> → logits <c>[1, T, vocab]</c> via the (tied) lm_head on rank 0's backend, with Granite logit scale and the Gemma-2 final soft-cap.</summary>
     public Tensor ProjectLogits(Tensor hidden, int t)
     {
         ThrowIfDisposed();
@@ -363,8 +334,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return logits;
     }
 
-    /// <summary>Host embedding gather into <paramref name="output"/> <c>[1, T, hidden]</c> (rank-0 table),
-    /// mirroring <see cref="GenericTransformer.EmbedLookup"/> including <see cref="TransformerConfig.EmbeddingScale"/>.</summary>
+    /// <summary>Host embedding gather into <paramref name="output"/> <c>[1, T, hidden]</c> (rank-0 table), mirroring <see cref="GenericTransformer.EmbedLookup"/> including <see cref="TransformerConfig.EmbeddingScale"/>.</summary>
     public void EmbedLookup(Tensor output, ReadOnlySpan<int> tokenIds)
     {
         ThrowIfDisposed();
@@ -395,10 +365,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Rank <paramref name="rank"/>'s attention partial for one layer: pre-norm → its Q/KV head
-    /// slice's projections (+QK-norm, RoPE, per-rank KV append, FlashAttention over its heads) → its o_proj
-    /// column slice. The return is a PARTIAL <c>[1, T, hidden]</c> sum — callers AllReduce before the residual
-    /// add. Same op sequence as <c>GenericTransformer.Layer.Forward</c>'s dense path restricted to the slice.</summary>
+    /// <summary>Rank <paramref name="rank"/>'s attention partial for one layer: pre-norm → its Q/KV head slice's projections (+QK-norm, RoPE, per-rank KV append, FlashAttention over its heads) → its o_proj column slice. The return is a PARTIAL <c>[1, T, hidden]</c> sum — callers AllReduce before the residual add.</summary>
     private Tensor AttnPartial(int rank, int layer, Tensor hidden, int t, int posStart, IKvCache cache, Tensor cos, Tensor sin)
     {
         RankLayer rl = _layers[rank][layer];
@@ -476,9 +443,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return outp;
     }
 
-    /// <summary>Rank <paramref name="rank"/>'s FFN partial for one layer: pre-MLP norm → its gate/up column
-    /// slice → activation·up → its down_proj column slice. Returns a PARTIAL <c>[1, T, hidden]</c> sum —
-    /// callers AllReduce before the residual add.</summary>
+    /// <summary>Rank <paramref name="rank"/>'s FFN partial for one layer: pre-MLP norm → its gate/up column slice → activation·up → its down_proj column slice. Returns a PARTIAL <c>[1, T, hidden]</c> sum — callers AllReduce before the residual add.</summary>
     private Tensor MlpPartial(int rank, int layer, Tensor afterAttn, int t)
     {
         RankLayer rl = _layers[rank][layer];
@@ -506,8 +471,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return outp;
     }
 
-    /// <summary>Gate activation (elementwise, so column-parallel slices activate identically to the full
-    /// tensor) — mirrors <c>GenericTransformer.Layer.Activate</c>.</summary>
+    /// <summary>Gate activation (elementwise, so column-parallel slices activate identically to the full tensor) — mirrors <c>GenericTransformer.Layer.Activate</c>.</summary>
     private void Activate(IBackend backend, Tensor outp, Tensor inp)
     {
         switch (_cfg.Activation)
@@ -522,10 +486,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         }
     }
 
-    /// <summary>Column-parallel slice: rank <paramref name="rank"/>'s contiguous OUT-row range of a row-major
-    /// <c>[out, in]</c> weight (or <c>[out]</c> bias-shaped vector). A contiguous byte copy for any dtype —
-    /// GGUF quant blocks run along IN, so every OUT row is a whole number of blocks and a row range never
-    /// splits a block (same invariant <c>GenericTransformer.ConcatRows</c> relies on).</summary>
+    /// <summary>Column-parallel slice: rank <paramref name="rank"/>'s contiguous OUT-row range of a row-major <c>[out, in]</c> weight (or <c>[out]</c> bias-shaped vector); a contiguous byte copy for any dtype since GGUF quant blocks run along IN, so every OUT row is a whole number of blocks and a row range never splits a block.</summary>
     internal static Tensor SliceOutRows(Tensor w, int rank, int degree, string name)
     {
         long rows = w.Shape[0];
@@ -545,10 +506,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return slice;
     }
 
-    /// <summary>Row-parallel slice: rank <paramref name="rank"/>'s contiguous IN-column range of a row-major
-    /// <c>[out, in]</c> weight — a strided per-row byte copy. For block-quantized dtypes the per-rank column
-    /// count must be a whole number of blocks (blocks run along IN); refused loudly otherwise so a misaligned
-    /// shard can never silently corrupt a projection.</summary>
+    /// <summary>Row-parallel slice: rank <paramref name="rank"/>'s contiguous IN-column range of a row-major <c>[out, in]</c> weight — a strided per-row byte copy. For block-quantized dtypes the per-rank column count must be a whole number of blocks; refused loudly otherwise so a misaligned shard can never silently corrupt a projection.</summary>
     internal static Tensor SliceInCols(Tensor w, int rank, int degree, string name)
     {
         long outRows = w.Shape[0];
@@ -590,8 +548,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return slice;
     }
 
-    /// <summary>Always-owned F32 copy of a norm/bias vector, optionally baking Gemma's <c>(1 + weight)</c>
-    /// offset — a copy even when the source is already F32, so every rank's tensor has exactly one owner.</summary>
+    /// <summary>Always-owned F32 copy of a norm/bias vector, optionally baking Gemma's <c>(1 + weight)</c> offset — a copy even when the source is already F32, so every rank's tensor has exactly one owner.</summary>
     private static Tensor CopyNormF32(Tensor t, bool addOne)
     {
         Tensor f = GenericTransformer.EnsureF32(t);
@@ -610,8 +567,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         return copy;
     }
 
-    /// <summary>Fresh host clone of <paramref name="src"/> (the DataPointer read demotes a device copy first,
-    /// so the clone starts from the authoritative bytes).</summary>
+    /// <summary>Fresh host clone of <paramref name="src"/> (the DataPointer read demotes a device copy first, so the clone starts from the authoritative bytes).</summary>
     private static Tensor HostClone(Tensor src)
     {
         Tensor copy = new(src.Shape, src.DType);

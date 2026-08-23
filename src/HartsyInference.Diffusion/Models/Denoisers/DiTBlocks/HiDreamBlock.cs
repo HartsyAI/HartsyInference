@@ -140,8 +140,7 @@ public sealed unsafe class HiDreamBlock
         }
     }
 
-    /// <summary>Yields every weight tensor in this block, including all routed experts (all of which
-    /// participate in the top-k routed forward).</summary>
+    /// <summary>Yields every weight tensor in this block, including all routed experts (all of which participate in the top-k routed forward).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_adaLnLinearWeight is not null) yield return _adaLnLinearWeight;
@@ -213,12 +212,12 @@ public sealed unsafe class HiDreamBlock
         // ── 2. Pre-attention norms + AdaLN modulation ──
         Tensor imgNormed = new Tensor(imgShape, DType.F32);
         backend.LayerNormNoAffine(imgNormed, image, 1e-6f);
-        Tensor imgMod = GpuModulate(backend, imgNormed, mods[0], mods[1], batch, imgSeqLen, _hiddenSize);
+        Tensor imgMod = DiTUtils.Modulate(backend, imgNormed, mods[0], mods[1], imgShape);
         imgNormed.Dispose();
 
         Tensor txtNormed = new Tensor(txtShape, DType.F32);
         backend.LayerNormNoAffine(txtNormed, text, 1e-6f);
-        Tensor txtMod = GpuModulate(backend, txtNormed, mods[6], mods[7], batch, txtSeqLen, _hiddenSize);
+        Tensor txtMod = DiTUtils.Modulate(backend, txtNormed, mods[6], mods[7], txtShape);
         txtNormed.Dispose();
 
         // ── 3. Joint MM-attention ──
@@ -236,7 +235,7 @@ public sealed unsafe class HiDreamBlock
         // ── 5. Image FFN (MoE single-expert fallback) ──
         Tensor imgPreFfn = new Tensor(imgShape, DType.F32);
         backend.LayerNormNoAffine(imgPreFfn, imgAfterAttn, 1e-6f);
-        Tensor imgFfnIn = GpuModulate(backend, imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
+        Tensor imgFfnIn = DiTUtils.Modulate(backend, imgPreFfn, mods[3], mods[4], imgShape);
         imgPreFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
@@ -250,7 +249,7 @@ public sealed unsafe class HiDreamBlock
         // ── 6. Text FFN (vanilla SwiGLU) ──
         Tensor txtPreFfn = new Tensor(txtShape, DType.F32);
         backend.LayerNormNoAffine(txtPreFfn, txtAfterAttn, 1e-6f);
-        Tensor txtFfnIn = GpuModulate(backend, txtPreFfn, mods[9], mods[10], batch, txtSeqLen, _hiddenSize);
+        Tensor txtFfnIn = DiTUtils.Modulate(backend, txtPreFfn, mods[9], mods[10], txtShape);
         txtPreFfn.Dispose();
 
         Tensor txtFfnOut = SwiGluForward(backend, txtFfnIn, _ffTW1!, _ffTW3!, _ffTW2!, batch, txtSeqLen);
@@ -264,9 +263,7 @@ public sealed unsafe class HiDreamBlock
         return (imgFinal, txtFinal);
     }
 
-    /// <summary>Forward pass for single-stream blocks. The hidden states already contain
-    /// image tokens followed by all relevant text tokens; one set of Q/K/V projections is run
-    /// over the joint sequence.</summary>
+    /// <summary>Forward pass for single-stream blocks. The hidden states already contain image tokens followed by all relevant text tokens; one set of Q/K/V projections is run over the joint sequence.</summary>
     public Tensor ForwardSingle(IBackend backend, Tensor hidden, Tensor temb, HiDreamRope rope, int imgSeqLen, int totalRopeSeqLen)
     {
         if (!_isSingle)
@@ -284,7 +281,7 @@ public sealed unsafe class HiDreamBlock
         // ── 2. Pre-attention norm + modulate ──
         Tensor preAttn = new Tensor(hiddenShape, DType.F32);
         backend.LayerNormNoAffine(preAttn, hidden, 1e-6f);
-        Tensor preAttnMod = GpuModulate(backend, preAttn, mods[0], mods[1], batch, seqLen, _hiddenSize);
+        Tensor preAttnMod = DiTUtils.Modulate(backend, preAttn, mods[0], mods[1], hiddenShape);
         preAttn.Dispose();
 
         // ── 3. Self-attention over the joint sequence (only image side has RoPE; text positions are zero) ──
@@ -297,7 +294,7 @@ public sealed unsafe class HiDreamBlock
         // ── 4. MoE FFN over the joint sequence ──
         Tensor preFfn = new Tensor(hiddenShape, DType.F32);
         backend.LayerNormNoAffine(preFfn, afterAttn, 1e-6f);
-        Tensor ffnIn = GpuModulate(backend, preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
+        Tensor ffnIn = DiTUtils.Modulate(backend, preFfn, mods[3], mods[4], hiddenShape);
         preFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
@@ -312,9 +309,7 @@ public sealed unsafe class HiDreamBlock
         return result;
     }
 
-    /// <summary>Computes <paramref name="numParams"/> AdaLN modulation tensors (each [B, hiddenSize])
-    /// from a [B, hiddenSize] timestep embedding using SiLU + Linear. <paramref name="numParams"/> is
-    /// 12 for double blocks, 6 for single blocks, 2 for the final layer.</summary>
+    /// <summary>Computes <paramref name="numParams"/> AdaLN modulation tensors (each [B, hiddenSize]) from a [B, hiddenSize] timestep embedding using SiLU + Linear. <paramref name="numParams"/> is 12 for double blocks, 6 for single blocks, 2 for the final layer.</summary>
     private Tensor[] ComputeAdaLnParams(IBackend backend, Tensor temb, int batch, int numParams)
     {
         int outDim = numParams * _hiddenSize;
@@ -340,18 +335,6 @@ public sealed unsafe class HiDreamBlock
         return results;
     }
 
-    /// <summary>GPU-resident AdaLN modulation: output = input * (1 + scale) + shift, scale/shift [B, hidden]
-    /// broadcast over the sequence.</summary>
-    private static Tensor GpuModulate(IBackend backend, Tensor input, Tensor shift, Tensor scale, int batch, int seqLen, int hiddenSize)
-    {
-        Tensor scalePlus1 = new Tensor(new TensorShape(batch, hiddenSize), DType.F32);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, hiddenSize), DType.F32);
-        backend.AffineBroadcastLastDim(output, input, scalePlus1, shift);
-        scalePlus1.Dispose();
-        return output;
-    }
-
     /// <summary>GPU-resident gated residual: output = input + gate * value, gate [B, hidden] broadcast over the sequence.</summary>
     private static Tensor GpuGatedResidual(IBackend backend, Tensor input, Tensor value, Tensor gate, int batch, int seqLen, int hiddenSize)
     {
@@ -360,10 +343,7 @@ public sealed unsafe class HiDreamBlock
         return output;
     }
 
-    /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text
-    /// each get their own Q/K/V (image via <c>to_q/k/v</c>, text via <c>to_q_t/k_t/v_t</c>); both are RMS-normed
-    /// per stream, RoPE is applied to the image-side Q/K (text positions are zero so RoPE is identity), then
-    /// SDPA is run over the concatenated [img_tokens, text_tokens] sequence and the result is split back.</summary>
+    /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text each get their own Q/K/V (image via <c>to_q/k/v</c>, text via <c>to_q_t/k_t/v_t</c>); both are RMS-normed per stream, RoPE is applied to the image-side Q/K (text positions are zero so RoPE is identity), then SDPA is run over the concatenated [img_tokens, text_tokens] sequence and the result is split back.</summary>
     private (Tensor img, Tensor txt) JointAttention(IBackend backend, Tensor img, Tensor txt,
         HiDreamRope rope, int totalRopeSeqLen, int batch, int imgSeqLen, int txtSeqLen)
     {
@@ -502,9 +482,7 @@ public sealed unsafe class HiDreamBlock
         return (imgOut, txtOut);
     }
 
-    /// <summary>Self-attention over the concatenated single-stream sequence. The image-side weights
-    /// (<c>to_q/k/v</c>) are reused for the entire sequence; only the image-token Q/K positions get RoPE
-    /// (text positions in the rope table are zeros and are passed through unchanged by the rotation).</summary>
+    /// <summary>Self-attention over the concatenated single-stream sequence. The image-side weights (<c>to_q/k/v</c>) are reused for the entire sequence; only the image-token Q/K positions get RoPE (text positions in the rope table are zeros and are passed through unchanged by the rotation).</summary>
     private Tensor SingleStreamSelfAttention(IBackend backend, Tensor hidden, HiDreamRope rope, int totalRopeSeqLen,
         int batch, int seqLen, int imgSeqLen, int txtSeqLen)
     {
@@ -592,8 +570,6 @@ public sealed unsafe class HiDreamBlock
     /// argmax expert with renormalized weight 1) plus the shared expert.</para></summary>
     private Tensor MoeForward(IBackend backend, Tensor input, int batch, int seqLen)
     {
-        TensorShape inShape = new TensorShape(batch, seqLen, _hiddenSize);
-
         // Shared (always-on) expert: SwiGLU. Inner dim is taken from the shared weight (3584 for HiDream V1),
         // which is NOT ff_dim/2 — so it must come from the weight, not a computed value.
         Tensor shared = SwiGluForward(backend, input, _sharedW1!, _sharedW3!, _sharedW2!, batch, seqLen);
@@ -613,7 +589,6 @@ public sealed unsafe class HiDreamBlock
 
         // The shared (always-on) expert output is the accumulator; each routed expert adds in place,
         // weighted by its (possibly zero) gate — all device-resident, no D2H.
-        _ = inShape;
         for (int e = 0; e < _numRoutedExperts; e++)
         {
             Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen);
@@ -624,8 +599,7 @@ public sealed unsafe class HiDreamBlock
         return shared;
     }
 
-    /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE
-    /// expert, and (under the fallback) the single routed expert.</summary>
+    /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE expert, and (under the fallback) the single routed expert.</summary>
     private Tensor SwiGluForward(IBackend backend, Tensor input, Tensor w1, Tensor w3, Tensor w2,
         int batch, int seqLen)
     {
@@ -658,8 +632,7 @@ public sealed unsafe class HiDreamBlock
         return output;
     }
 
-    /// <summary>Allocates an output tensor of shape <paramref name="outShape"/> and runs <c>backend.Linear</c>
-    /// from <paramref name="input"/> through <paramref name="weight"/> + optional <paramref name="bias"/>.</summary>
+    /// <summary>Allocates an output tensor of shape <paramref name="outShape"/> and runs <c>backend.Linear</c> from <paramref name="input"/> through <paramref name="weight"/> + optional <paramref name="bias"/>.</summary>
     private static Tensor LinearAlloc(IBackend backend, Tensor input, Tensor weight, Tensor? bias, TensorShape outShape)
     {
         Tensor output = new Tensor(outShape, DType.F32);
@@ -667,10 +640,7 @@ public sealed unsafe class HiDreamBlock
         return output;
     }
 
-    /// <summary>Applies the image-side rope to the first imgSeqLen positions of Q and K; the text segment
-    /// (positions imgSeqLen..total) is left untouched. The rope was precomputed in the caller for the full
-    /// image+text sequence with text positions = 0, so a single Forward call over <paramref name="imgSeqLen"/>
-    /// rotates exactly the image tokens.</summary>
+    /// <summary>Applies the image-side rope to the first imgSeqLen positions of Q and K; the text segment (positions imgSeqLen..total) is left untouched. The rope was precomputed in the caller for the full image+text sequence with text positions = 0, so a single Forward call over <paramref name="imgSeqLen"/> rotates exactly the image tokens.</summary>
     private static void ApplyRopeImageOnly(Tensor q, Tensor k, HiDreamRope rope, int batch, int imgSeqLen)
     {
         // The rope cache is sized by the latest Precompute call. Forward rotates the first
@@ -678,8 +648,7 @@ public sealed unsafe class HiDreamBlock
         rope.Forward(q, k, batch, q.ShapeValue(1), imgSeqLen);
     }
 
-    /// <summary>Applies rope across the full single-stream sequence. Text tokens have all-zero positions
-    /// in the rope table (set by HiDreamRope.BuildPositionIds), so their rotation is the identity.</summary>
+    /// <summary>Applies rope across the full single-stream sequence. Text tokens have all-zero positions in the rope table (set by HiDreamRope.BuildPositionIds), so their rotation is the identity.</summary>
     private static void ApplyRopeFullSeq(Tensor q, Tensor k, HiDreamRope rope, int batch, int seqLen)
     {
         rope.Forward(q, k, batch, q.ShapeValue(1), seqLen);

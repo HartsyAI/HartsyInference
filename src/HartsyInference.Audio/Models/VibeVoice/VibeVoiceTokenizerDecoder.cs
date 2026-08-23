@@ -4,11 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Decoder side of the VibeVoice acoustic VAE. Mirrors
-/// <see cref="VibeVoiceTokenizerEncoder"/> but with transposed convs for upsampling and
-/// channel widths running in reverse. Used by the acoustic VAE only — the semantic VAE
-/// has no decoder.
-///
+/// <summary>Decoder side of the VibeVoice acoustic VAE — mirrors <see cref="VibeVoiceTokenizerEncoder"/> but with transposed convs for upsampling and channel widths running in reverse; the semantic VAE has no decoder.</summary>
+/// <remarks>
 /// <para>Channel chain on the published checkpoints (decoder_n_filters=32, decoder_ratios
 /// in forward order [8,5,5,4,2,2], decoder_depths = reverse(encoder_depths) = [8,3,3,3,3,3,3]):
 /// <code>
@@ -21,7 +18,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 ///   stage 6: up   SConvTranspose1d(64   → 32,   k=4,  s=2)          + 3 × Block1D(dim=32)
 ///   head: SConv1d(32 → 1, k=7, s=1)
 /// </code>
-/// Total temporal upsample = <c>8*5*5*4*2*2 = 3200</c> — exact inverse of the encoder.</para></summary>
+/// Total temporal upsample = <c>8*5*5*4*2*2 = 3200</c> — exact inverse of the encoder.</para></remarks>
 internal sealed class VibeVoiceTokenizerDecoder
 {
     private readonly VibeVoiceTokenizerConfig _config;
@@ -113,8 +110,7 @@ internal sealed class VibeVoiceTokenizerDecoder
             _lastNormW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
     }
 
-    /// <summary>Forward — input <c>[batch, vae_dim, T_latent]</c>, output
-    /// <c>[batch, 1, T_latent * hop]</c>. Streaming when <paramref name="cache"/> is non-null.</summary>
+    /// <summary>Forward, input <c>[batch, vae_dim, T_latent]</c> to output <c>[batch, 1, T_latent * hop]</c>; streams when <paramref name="cache"/> is non-null.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tLatent,
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {

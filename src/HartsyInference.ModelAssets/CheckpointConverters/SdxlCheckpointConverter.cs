@@ -200,10 +200,7 @@ public sealed class SdxlCheckpointConverter
     }
 
 
-    /// <summary>The refiner checkpoint's auxiliary halves: the refiner carries ONE text encoder — CLIP-G at
-    /// <c>conditioner.embedders.0</c> (base SDXL keeps CLIP-G at index 1, CLIP-L at 0) — plus the standard SDXL
-    /// VAE. The UNet half loads separately via <c>SdxlRefinerLoader</c> (its block layout needs its own table).
-    /// Caller owns the loader.</summary>
+    /// <summary>The refiner checkpoint's auxiliary halves: the refiner carries ONE text encoder — CLIP-G at <c>conditioner.embedders.0</c> (base SDXL keeps CLIP-G at index 1, CLIP-L at 0) — plus the standard SDXL VAE. The UNet half loads separately via <c>SdxlRefinerLoader</c> (its block layout needs its own table). Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> ClipG, Dictionary<string, Tensor> Vae, SafeTensorsLoader Loader)
         LoadRefinerAuxiliary(string path)
     {

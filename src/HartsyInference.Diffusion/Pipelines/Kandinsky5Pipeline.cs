@@ -11,16 +11,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Kandinsky 5.0 text-to-image pipeline (kandinskylab/Kandinsky-5.0-T2I-Lite).
-///
-/// This pipeline only handles the diffusion side — the dual text encoder stack (Qwen2.5-VL +
-/// CLIP-L) is not yet implemented as a HartsyInference text encoder. Callers must supply the
-/// pre-computed Qwen sequence embeddings <c>[B, S, 3584]</c> and the CLIP pooled embeddings
-/// <c>[B, 768]</c>, plus their negative-prompt counterparts. This matches the diffusers
-/// <c>Kandinsky5T2IPipeline.__call__(prompt_embeds_qwen=, prompt_embeds_clip=, ...)</c> escape
-/// hatch — production users can pre-compute embeddings once with a sidecar Python helper, and
-/// once a Qwen2.5-VL text encoder lands in HartsyInference this pipeline can grow a tokenizer-fed
-/// overload without touching the denoising path.</summary>
+/// <summary>Kandinsky 5.0 text-to-image pipeline (kandinskylab/Kandinsky-5.0-T2I-Lite). This pipeline only handles the diffusion side — the dual text encoder stack (Qwen2.5-VL + CLIP-L) is not yet implemented as a HartsyInference text encoder. Callers must supply the pre-computed Qwen sequence embeddings <c>[B, S, 3584]</c> and the CLIP pooled embeddings <c>[B, 768]</c>, plus their negative-prompt counterparts. This matches the diffusers <c>Kandinsky5T2IPipeline.__call__(prompt_embeds_qwen=, prompt_embeds_clip=, ...)</c> escape hatch — production users can pre-compute embeddings once with a sidecar Python helper, and once a Qwen2.5-VL text encoder lands in HartsyInference this pipeline can grow a tokenizer-fed overload without touching the denoising path.</summary>
 public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 {
     private readonly Kandinsky5Transformer _transformer;
@@ -31,9 +22,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
     private readonly float _vaeScalingFactor;
     private readonly float _vaeShiftFactor;
 
-    /// <summary>Creates a new Kandinsky 5 pipeline. The VAE used for the Lite model is the Flux VAE
-    /// (16-channel latent, 8× downsample), with shift/scale identical to <c>VaeConfig.Flux</c>. Img2img is
-    /// unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
+    /// <summary>Creates a new Kandinsky 5 pipeline. The VAE used for the Lite model is the Flux VAE (16-channel latent, 8× downsample), with shift/scale identical to <c>VaeConfig.Flux</c>. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="transformer">Kandinsky 5 transformer (use <see cref="Kandinsky5Config.Lite"/>).</param>
     /// <param name="vaeDecoder">Flux VAE decoder (16 channels).</param>
@@ -48,10 +37,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
     {
     }
 
-    /// <summary>Creates a new Kandinsky 5 pipeline with both VAE halves loaded — required for img2img / inpaint
-    /// (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>). Configure the encoder
-    /// with <see cref="VaeConfig.Flux"/> so its output is already normalized into the transformer's latent space
-    /// (matching the <c>latent / scale + shift</c> un-normalization this pipeline applies before decode).</summary>
+    /// <summary>Creates a new Kandinsky 5 pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>). Configure the encoder with <see cref="VaeConfig.Flux"/> so its output is already normalized into the transformer's latent space (matching the <c>latent / scale + shift</c> un-normalization this pipeline applies before decode).</summary>
     public Kandinsky5Pipeline(IBackend backend, Kandinsky5Transformer transformer, VaeDecoder vaeDecoder,
         VaeEncoder? vaeEncoder, Kandinsky5Config config, float schedulerShift = 5.0f,
         float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
@@ -66,12 +52,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         _vaeShiftFactor = vaeShiftFactor;
     }
 
-    /// <summary>Generates an image from pre-computed text encoder outputs. Uses
-    /// <c>FlowMatchEulerDiscreteScheduler</c> (shift defaults to 5.0 per the Lite scheduler config).
-    /// An <see cref="ImageToImageRequest"/> selects img2img: the source is VAE-encoded (Flux VAE) and noised via
-    /// flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a <see cref="VaeEncoder"/> on
-    /// construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final
-    /// pixel recomposite). Strength=0 short-circuits to byte-identical pass-through.</summary>
+    /// <summary>Generates an image from pre-computed text encoder outputs. Uses <c>FlowMatchEulerDiscreteScheduler</c> (shift defaults to 5.0 per the Lite scheduler config). An <see cref="ImageToImageRequest"/> selects img2img: the source is VAE-encoded (Flux VAE) and noised via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final pixel recomposite). Strength=0 short-circuits to byte-identical pass-through.</summary>
     /// <param name="qwenEmbeds">Qwen2.5-VL sequence embeddings <c>[B, S_t, in_text_dim]</c>.</param>
     /// <param name="clipPooled">CLIP-L pooled embeddings <c>[B, in_text_dim2]</c>.</param>
     /// <param name="negQwenEmbeds">Negative-prompt Qwen embeddings (only required if cfg &gt; 1).</param>
@@ -279,9 +260,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source)
-    /// (Flux-VAE-configured encoder → already in the transformer's normalized latent space) combined with fresh
-    /// noise via flow-matching AddNoise at sigma[startStep].
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) (Flux-VAE-configured encoder → already in the transformer's normalized latent space) combined with fresh noise via flow-matching AddNoise at sigma[startStep].
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned
     /// alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain
     /// img2img.</para></summary>
@@ -332,8 +311,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         return (float)Math.Sqrt(var / n);
     }
 
-    /// <summary>Inverse of the VAE encoder's normalization: <c>x = x / scale + shift</c>. Flux/Kandinsky 5
-    /// store latents in the shifted-scaled space, so we reverse it before decoding.</summary>
+    /// <summary>Inverse of the VAE encoder's normalization: <c>x = x / scale + shift</c>. Flux/Kandinsky 5 store latents in the shifted-scaled space, so we reverse it before decoding.</summary>
     private static void ApplyVaeShiftScale(Tensor output, Tensor input, float scale, float shift)
     {
         float* i = (float*)input.DataPointer;

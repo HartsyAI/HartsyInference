@@ -13,7 +13,7 @@ public sealed unsafe class ResBlock2d
     {
         _conv1W = w[$"{p}.conv1.weight"]; w.TryGetValue($"{p}.conv1.bias", out _conv1B);
         _conv2W = w[$"{p}.conv2.weight"];
-        _normW = LoadF32(w, $"{p}.norm.weight"); w.TryGetValue($"{p}.norm.bias", out _normB);
+        _normW = TensorCasts.LoadF32(w, $"{p}.norm.weight"); w.TryGetValue($"{p}.norm.bias", out _normB);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -37,6 +37,4 @@ public sealed unsafe class ResBlock2d
         for (long i = 0; i < n; i++) hp[i] += xp[i];
         return h2;
     }
-
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string k) { Tensor t = w[k]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
 }

@@ -52,20 +52,13 @@ internal static class CsmTtsModel
         },
     };
 
-    /// <summary>Owns the loaded pipeline; both entry points share it. Disposal is owned by the
-    /// <see cref="StreamingTtsRunner"/>'s own <c>keep</c> array in <see cref="Descriptor"/>, not by this class.</summary>
+    /// <summary>Owns the loaded pipeline; both entry points share it. Disposal is owned by the <see cref="StreamingTtsRunner"/>'s own <c>keep</c> array in <see cref="Descriptor"/>, not by this class.</summary>
     private sealed class Session(CsmPipeline pipeline, Mimi mimi)
     {
         public float[] Synthesize(IBackend backend, TtsJob job)
             => pipeline.Synthesize(backend, AudioTextFrontend.CsmText(job.Text, job.SpeakerId ?? 0), seed: job.Seed);
 
-        /// <summary>Streaming counterpart: runs the AR loop on a background thread, batching every
-        /// <c>FramesPerChunk</c> genuine frames into a <see cref="Mimi.DecodeStreaming"/> call against one shared
-        /// <see cref="MimiDecoderStreamState"/> for the whole utterance — identical shape to
-        /// <c>KyutaiTtsModel.SynthesizeStream</c>, including the producer/consumer exception-propagation discipline
-        /// (no inline catch; the decoder's <c>Complete()</c> runs in a <c>finally</c> so a faulted/cancelled
-        /// producer always unblocks the consumer, and the outer <c>finally</c> always awaits the producer task so
-        /// its exception surfaces even if the caller stops enumerating early).</summary>
+        /// <summary>Streaming counterpart: runs the AR loop on a background thread, batching every <c>FramesPerChunk</c> genuine frames into a <see cref="Mimi.DecodeStreaming"/> call against one shared <see cref="MimiDecoderStreamState"/> for the whole utterance — identical shape to <c>KyutaiTtsModel.SynthesizeStream</c>, including the producer/consumer exception-propagation discipline (no inline catch; the decoder's <c>Complete()</c> runs in a <c>finally</c> so a faulted/cancelled producer always unblocks the consumer, and the outer <c>finally</c> always awaits the producer task so its exception surfaces even if the caller stops enumerating early).</summary>
         public async IAsyncEnumerable<HartsyInference.Audio.Streaming.AudioChunk> SynthesizeStream(
             IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
         {

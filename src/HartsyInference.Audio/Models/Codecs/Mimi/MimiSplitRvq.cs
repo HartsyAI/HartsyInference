@@ -4,13 +4,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
 
-/// <summary>Mimi's split EMA residual vector quantizer DECODE path (kyutai/mimi, HF transformers layout).
-/// The real codec splits the codebooks into a <b>semantic</b> RVQ (the first <c>num_semantic_quantizers</c>,
+/// <summary>Mimi's split EMA residual vector quantizer (kyutai/mimi, HF transformers layout), replacing the wrong factorized <see cref="Dac.DacResidualVectorQuantizer"/> the old Mimi scaffold reused.</summary>
+/// <remarks>The real codec splits the codebooks into a <b>semantic</b> RVQ (the first <c>num_semantic_quantizers</c>,
 /// = 1) and an <b>acoustic</b> RVQ (the rest). Each codebook is an EMA codebook stored as
 /// <c>embed_sum [vocab,dim]</c> + <c>cluster_usage [vocab]</c> with <c>embed = embed_sum / max(cluster_usage,
 /// 1e-5)</c>; decode = sum of per-codebook <c>embedding(code)</c> lookups, then a 1x1 <c>output_proj</c>
-/// (codebook_dim -> latent). Total = semantic + acoustic. Replaces the wrong factorized
-/// <see cref="Dac.DacResidualVectorQuantizer"/> the old Mimi scaffold reused.</summary>
+/// (codebook_dim -> latent). Total = semantic + acoustic.</remarks>
 internal sealed unsafe class MimiSplitRvq
 {
     private const float Eps = 1e-5f;
@@ -111,11 +110,10 @@ internal sealed unsafe class MimiSplitRvq
         return total;
     }
 
-    /// <summary>latent embeddings <c>[B, latentDim, T]</c> -> codes <c>[B, K, T]</c> (Int32), semantic
-    /// codebooks first then acoustic. Mirror of <see cref="Decode"/>: the semantic and acoustic RVQs each run
-    /// independently over the SAME latent (their own <c>input_proj</c>), and within each RVQ the codes are a
-    /// nearest-neighbour residual chain — pick the closest codebook vector, subtract it, repeat. Requires the
-    /// <c>input_proj</c> weights (present in the full codec checkpoint).</summary>
+    /// <summary>Latent embeddings <c>[B, latentDim, T]</c> to codes <c>[B, K, T]</c> (Int32), semantic codebooks first then acoustic; mirror of <see cref="Decode"/>. Requires the <c>input_proj</c> weights (present in the full codec checkpoint).</summary>
+    /// <remarks>The semantic and acoustic RVQs each run independently over the SAME latent (their own
+    /// <c>input_proj</c>), and within each RVQ the codes are a nearest-neighbour residual chain — pick the
+    /// closest codebook vector, subtract it, repeat.</remarks>
     public Tensor Encode(IBackend backend, Tensor latent, int batch, int t)
     {
         if (_semInW is null || _acoInW is null)
@@ -131,8 +129,7 @@ internal sealed unsafe class MimiSplitRvq
         return codes;
     }
 
-    /// <summary>Runs one residual VQ (codebooks <c>[first, last)</c>) over <paramref name="latent"/> projected by
-    /// <paramref name="inW"/>, writing indices into <paramref name="cp"/> at codebook rows <c>[first, last)</c>.</summary>
+    /// <summary>Runs one residual VQ (codebooks <c>[first, last)</c>) over <paramref name="latent"/> projected by <paramref name="inW"/>, writing indices into <paramref name="cp"/> at codebook rows <c>[first, last)</c>.</summary>
     private void EncodeRvq(IBackend backend, Tensor latent, int batch, int t, Tensor inW, Tensor? inB, int first, int last, int* cp)
     {
         // input_proj: 1x1 conv (latentDim -> codebook_dim) per frame.

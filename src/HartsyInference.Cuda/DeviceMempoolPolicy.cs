@@ -2,11 +2,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Set-once-per-device policy for the default mempool's release threshold, refcounted by live backends.
-/// The threshold is DEVICE state (one default pool per ordinal, whatever contexts or backends exist), so letting
-/// each backend write it directly meant backend B's construction momentarily flipped backend A's live pool to
-/// release-everything — re-introducing the alloc/free thrash the keep-threshold exists to stop. The first backend
-/// on a device decides; later backends refcount and must agree (a mismatch warns and keeps the first policy).</summary>
+/// <summary>Set-once-per-device policy for the default mempool's release threshold, refcounted by live backends. The threshold is DEVICE state (one default pool per ordinal, whatever contexts or backends exist), so letting each backend write it directly meant backend B's construction momentarily flipped backend A's live pool to release-everything — re-introducing the alloc/free thrash the keep-threshold exists to stop. The first backend on a device decides; later backends refcount and must agree (a mismatch warns and keeps the first policy).</summary>
 internal static class DeviceMempoolPolicy
 {
     private sealed class Entry
@@ -18,8 +14,7 @@ internal static class DeviceMempoolPolicy
     private static readonly Dictionary<int, Entry> _devices = new();
     private static readonly object _lock = new();
 
-    /// <summary>Applies (first caller) or joins (later callers) the device's threshold policy.
-    /// <paramref name="keep"/> true = hold freed blocks in the pool (fast reuse); false = release eagerly.</summary>
+    /// <summary>Applies (first caller) or joins (later callers) the device's threshold policy. <paramref name="keep"/> true = hold freed blocks in the pool (fast reuse); false = release eagerly.</summary>
     internal static void Acquire(int deviceOrdinal, bool keep)
     {
         lock (_lock)
@@ -39,9 +34,7 @@ internal static class DeviceMempoolPolicy
         }
     }
 
-    /// <summary>Drops one backend's hold; the device entry disappears at zero so the NEXT first backend re-decides.
-    /// The live threshold is deliberately left as-is — there is nobody left to care, and touching it could stall a
-    /// racing construction.</summary>
+    /// <summary>Drops one backend's hold; the device entry disappears at zero so the NEXT first backend re-decides. The live threshold is deliberately left as-is — there is nobody left to care, and touching it could stall a racing construction.</summary>
     internal static void Release(int deviceOrdinal)
     {
         lock (_lock)

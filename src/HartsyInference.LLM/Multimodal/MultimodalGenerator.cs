@@ -6,25 +6,8 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Multimodal;
 
-/// <summary>End-to-end vision-language generation for Gemma-3 VLMs: encodes an image to a small set of embeddings
-/// (<see cref="Gemma3VisionEncoder"/>), splices them into the text token-embedding sequence at the image
-/// placeholder, and runs the (already-verified) Gemma-3 text decoder via its embedding-in path
-/// (<see cref="GenericTransformer.ForwardEmbeds"/>). Greedy decode.
-///
-/// <para>Gemma-3's √hidden embedding normalizer is baked into the token-embedding lookup ITSELF
-/// (HF's <c>Gemma3TextScaledWordEmbedding.forward</c>: <c>super().forward(input_ids) * embed_scale</c>), not
-/// applied to the combined text+image sequence afterward — HF's <c>Gemma3Model.forward</c> calls
-/// <c>get_input_embeddings()(input_ids)</c> (scaled) THEN <c>inputs_embeds.masked_scatter(image_mask,
-/// image_features)</c>, which overwrites the image positions with the RAW (unscaled) vision-projector output.
-/// We apply the scale to text tokens via <see cref="GenericTransformer.EmbedLookup"/> and splice the image
-/// embeddings in raw, unscaled — matching that exactly. (An earlier version of this class scaled the spliced
-/// image embeddings too, based on a mistaken reading of the HF source as applying the normalizer to the
-/// combined sequence; for gemma3 specifically — hidden_size=2560, scale≈50.6× — that blew the vision signal's
-/// magnitude far outside what the decoder was trained on, well past the point of ordinary FP noise, while
-/// leaving text tokens correctly scaled: a plausible root cause for the "vision tower is numerically correct
-/// (cosine≈1.0 end to end) yet the model confidently describes an unrelated scene" hallucination — every other
-/// VLM family shares this exact splice code but has <c>EmbeddingScale == 1.0</c>, so gemma3 is the only family
-/// this bug could affect at all, consistent with it being the only family that failed.)</para></summary>
+/// <summary>End-to-end vision-language generation for Gemma-3 VLMs: encodes an image to a small set of embeddings, splices them into the text token-embedding sequence at the image placeholder, and runs the (already-verified) Gemma-3 text decoder via its embedding-in path (<see cref="GenericTransformer.ForwardEmbeds"/>), greedy-decoding.</summary>
+/// <remarks>Gemma-3's √hidden embedding normalizer is baked into the token-embedding lookup ITSELF (HF's <c>Gemma3TextScaledWordEmbedding.forward</c>: <c>super().forward(input_ids) * embed_scale</c>), not applied to the combined text+image sequence afterward — HF's <c>Gemma3Model.forward</c> calls <c>get_input_embeddings()(input_ids)</c> (scaled) THEN <c>inputs_embeds.masked_scatter(image_mask, image_features)</c>, which overwrites the image positions with the RAW (unscaled) vision-projector output. We apply the scale to text tokens via <see cref="GenericTransformer.EmbedLookup"/> and splice the image embeddings in raw, unscaled — matching that exactly. (An earlier version of this class scaled the spliced image embeddings too, based on a mistaken reading of the HF source; for gemma3 specifically — hidden_size=2560, scale≈50.6× — that blew the vision signal's magnitude far outside what the decoder was trained on while leaving text tokens correctly scaled: a plausible root cause for the "vision tower is numerically correct yet the model confidently describes an unrelated scene" hallucination — every other VLM family shares this splice code but has <c>EmbeddingScale == 1.0</c>, so gemma3 is the only family this bug could affect, consistent with it being the only family that failed.)</remarks>
 public sealed class MultimodalGenerator
 {
     private readonly GgufLanguageModel _text;
@@ -35,13 +18,7 @@ public sealed class MultimodalGenerator
     /// <summary>True when a genuine multi-stage layer-split placement is active.</summary>
     private bool Staged => _placement is not null && !_placement.IsSingle;
 
-    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling); null keeps
-    /// the single-backend path byte-identical. Splice-style VLMs need no cross-stage copy beyond what
-    /// <see cref="GenericTransformer.ForwardEmbedsStaged"/> already does for a plain embeds sequence — the image
-    /// tokens are spliced into the SAME sequence text tokens ride, so they cross stage boundaries via the
-    /// existing host-staged hidden handoff, not a dedicated path like mllama's cross-attention states. When
-    /// <paramref name="placement"/> is set, <paramref name="backend"/> must be the placement's LAST stage backend
-    /// (final norm/lm_head/logits live there) — mirrors <see cref="Generation.TextGenerationPipeline"/>'s contract.</summary>
+    /// <summary><paramref name="placement"/> shards the decoder layers across devices (VRAM pooling), or null keeps the single-backend path byte-identical; splice-style VLMs need no cross-stage copy beyond what <see cref="GenericTransformer.ForwardEmbedsStaged"/> already does, since image tokens ride the same sequence as text tokens (unlike mllama's dedicated cross-attention-states path). When set, <paramref name="backend"/> must be the placement's LAST stage backend.</summary>
     public MultimodalGenerator(GgufLanguageModel text, IVlmImageEncoder vision, IBackend backend, LlmPlacement? placement = null)
     {
         _text = text; _vision = vision; _placement = placement;
@@ -50,8 +27,7 @@ public sealed class MultimodalGenerator
             StagedWeightPreload.Preload(text.Transformer, _placement!);
     }
 
-    /// <summary>Builds the family-specific text segments that wrap the image embeddings: tokens before the image
-    /// and tokens after. The image embeddings are spliced in between.</summary>
+    /// <summary>Builds the family-specific text segments that wrap the image embeddings: tokens before and after the image, which is spliced in between.</summary>
     private (int[] pre, int[] post) BuildPrompt(string question)
     {
         if (_vision.Family == "idefics3")
@@ -100,10 +76,7 @@ public sealed class MultimodalGenerator
         return (g, gpost);
     }
 
-    /// <summary>Generates a reply to <paramref name="question"/> about the image given by normalized
-    /// <paramref name="pixelValues"/> <c>[1, 3, imageSize, imageSize]</c>. Builds the Gemma-3 multimodal prompt
-    /// (<c>&lt;start_of_turn&gt;user … &lt;start_of_image&gt; [image tokens] &lt;end_of_image&gt; question
-    /// &lt;end_of_turn&gt;&lt;start_of_turn&gt;model</c>), splices the image embeddings, and greedy-decodes.</summary>
+    /// <summary>Generates a reply to <paramref name="question"/> about the image given by normalized <paramref name="pixelValues"/> <c>[1, 3, imageSize, imageSize]</c>: builds the family-specific multimodal prompt, splices the image embeddings, and greedy-decodes.</summary>
     public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler.
@@ -181,26 +154,12 @@ public sealed class MultimodalGenerator
         return sb.ToString();
     }
 
-    /// <summary>The hidden-state forward for one step: staged across the placement (plain embeds handoff, no
-    /// cross-stage copy beyond the existing host-staged boundary) when sharded, else the plain single-backend
-    /// path.</summary>
+    /// <summary>The hidden-state forward for one step: staged across the placement (plain embeds handoff, no cross-stage copy beyond the existing host-staged boundary) when sharded, else the plain single-backend path.</summary>
     private Tensor Forward(GenericTransformer model, Tensor embeds, int t, int posStart, IKvCache cache) =>
         Staged
             ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache)
             : model.ForwardEmbeds(_backend, embeds, t, posStart, cache);
 
-    /// <summary>Projects the last position's hidden state to logits and selects the next token via the sampler
-    /// (greedy when the options request it; otherwise temperature/top-p/repetition-penalty over the history).</summary>
-    private unsafe int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
-    {
-        int h = model.Config.HiddenSize;
-        using Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* hp = (float*)hidden.DataPointer;   // D2H sync
-        Buffer.MemoryCopy(hp + (long)(t - 1) * h, (void*)last.DataPointer, (long)h * 4, (long)h * 4);
-        using Tensor logits = model.ProjectLogits(_backend, last, 1);
-        float* lp = (float*)logits.DataPointer;
-        int vocab = model.Config.VocabSize;
-        Span<float> span = new(lp, vocab);
-        return sampler.Next(span, history);
-    }
+    private int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
+        => VlmDecodeOps.SampleLast(_backend, model, hidden, t, sampler, history);
 }

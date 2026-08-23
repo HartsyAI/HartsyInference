@@ -3,20 +3,14 @@ using System.Text;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
-/// <summary>A minimal Jinja2 interpreter covering the subset HuggingFace chat templates use: <c>{{ expr }}</c>,
-/// <c>{% if/elif/else/endif %}</c>, <c>{% for x in seq %}/{% endfor %}</c>, <c>{% set %}</c>, whitespace control
-/// (<c>{%- -%}</c> / <c>{{- -}}</c>), member/index access, the <c>loop</c> object, <c>+</c>/<c>~</c> concat,
-/// comparisons + <c>and/or/not/in</c>, ternary <c>a if c else b</c>, common filters (<c>trim/default/length/
-/// lower/upper</c>) and string methods (<c>strip/startswith/endswith/replace/split</c>). Not a full Jinja — it
-/// targets Llama-3/Qwen/Mistral/Phi/Gemma/ChatML/DeepSeek chat templates; unsupported constructs throw.</summary>
+/// <summary>Minimal Jinja2 interpreter covering only the subset HuggingFace chat templates use (if/for/set, whitespace control, loop object, comparisons, ternary, common filters/string methods) targeting Llama-3/Qwen/Mistral/Phi/Gemma/ChatML/DeepSeek; unsupported constructs throw rather than silently misrendering.</summary>
 public sealed class JinjaEngine
 {
     private readonly List<Node> _program;
 
     public JinjaEngine(string template) => _program = Parser.Parse(Lexer.Lex(template));
 
-    /// <summary>Renders the template against <paramref name="context"/> (variable name → value; values are
-    /// string / bool / long / double / List&lt;object?&gt; / Dictionary&lt;string,object?&gt; / null).</summary>
+    /// <summary>Renders the template against <paramref name="context"/> (variable name → value; values are string/bool/long/double/List&lt;object?&gt;/Dictionary&lt;string,object?&gt;/null).</summary>
     public string Render(Dictionary<string, object?> context)
     {
         StringBuilder sb = new();
@@ -90,10 +84,7 @@ public sealed class JinjaEngine
             return segs;
         }
 
-        /// <summary>Finds the block-closing token (<c>}}</c>, <c>%}</c> or <c>#}</c>) starting at <paramref name="start"/>,
-        /// skipping over any single- or double-quoted string literals so a close token embedded inside a string
-        /// (e.g. Qwen's tool-call template, which contains <c>}}</c> inside a quoted example) is not mistaken for
-        /// the real block end. Honors backslash escapes inside strings. Returns the index of the token, or -1.</summary>
+        /// <summary>Finds the block-closing token, skipping over quoted string literals (honoring backslash escapes) so a close token embedded inside a string — e.g. Qwen's tool-call template contains <c>}}</c> inside a quoted example — isn't mistaken for the real block end.</summary>
         private static int FindClose(string t, int start, string closeTok)
         {
             char quote = '\0';
@@ -131,8 +122,7 @@ public sealed class JinjaEngine
         public override void Render(StringBuilder sb, Scope scope) => AssignSet(name, expr.Eval(scope), scope);
     }
 
-    /// <summary>Block-capture <c>{% set name %}...{% endset %}</c>: renders the body to a string and assigns it
-    /// (Gemma-4's chat template captures a message's rendered content this way before post-processing it).</summary>
+    /// <summary>Block-capture <c>{% set name %}...{% endset %}</c>: renders the body to a string and assigns it (Gemma-4's chat template captures a message's rendered content this way before post-processing it).</summary>
     internal sealed class SetBlockNode(string name, List<Node> body) : Node
     {
         public override void Render(StringBuilder sb, Scope scope)
@@ -143,8 +133,7 @@ public sealed class JinjaEngine
         }
     }
 
-    /// <summary>Shared <c>{% set %}</c> assignment target resolution: a plain variable, or <c>ns.attr</c>
-    /// (namespace attribute assignment — <c>ns</c> is a mutable dict already in scope).</summary>
+    /// <summary>Shared <c>{% set %}</c> assignment target resolution: a plain variable, or <c>ns.attr</c> (namespace attribute assignment — <c>ns</c> is a mutable dict already in scope).</summary>
     internal static void AssignSet(string name, object? value, Scope scope)
     {
         int dot = name.IndexOf('.');
@@ -168,11 +157,7 @@ public sealed class JinjaEngine
         }
     }
 
-    /// <summary>A <c>{% for x in seq %}</c> loop, optionally with Jinja's inline filter clause
-    /// (<c>{% for x in seq if cond %}</c> — only iterates items where <paramref name="filter"/> is truthy,
-    /// evaluated with <paramref name="var"/> already bound). <c>loop.index</c>/<c>loop.length</c>/etc. reflect
-    /// the FILTERED count, matching real Jinja (the filter narrows the sequence before iteration starts, it
-    /// isn't a per-item skip inside a still-full-length loop).</summary>
+    /// <summary>A <c>{% for x in seq %}</c> loop, optionally with Jinja's inline filter clause (<c>{% for x in seq if cond %}</c>); <c>loop.index</c>/<c>loop.length</c>/etc. reflect the FILTERED count, matching real Jinja — the filter narrows the sequence before iteration starts, it isn't a per-item skip inside a still-full-length loop.</summary>
     internal sealed class ForNode(string var, Expr seq, List<Node> body, Expr? filter = null) : Node
     {
         public override void Render(StringBuilder sb, Scope scope)

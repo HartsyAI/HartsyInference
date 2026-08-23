@@ -6,8 +6,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.WavTokenizer;
 
-/// <summary>WavTokenizer — single-codebook neural audio codec with iSTFT-based
-/// decoder. The encoder is SEANet-style (reuses <see cref="Dac.DacResidualUnit"/>
+/// <summary>WavTokenizer — single-codebook neural audio codec with iSTFT-based decoder.</summary>
+/// <remarks>
+/// The encoder is SEANet-style (reuses <see cref="Dac.DacResidualUnit"/>
 /// directly via DAC types); the quantizer is a degenerate <see cref="DacResidualVectorQuantizer"/>
 /// with <c>nCodebooks=1</c>; the decoder is a Vocos-style ConvNeXt + iSTFT head.
 ///
@@ -16,7 +17,7 @@ namespace HartsyInference.Audio.Models.Codecs.WavTokenizer;
 ///   <item><c>feature_extractor.encoder.*</c></item>
 ///   <item><c>feature_extractor.quantizer.quantizers.0.*</c></item>
 ///   <item><c>head.*</c></item>
-/// </list></summary>
+/// </list></remarks>
 public sealed unsafe class WavTokenizer
 {
     public WavTokenizerConfig Config { get; }
@@ -72,8 +73,7 @@ public sealed unsafe class WavTokenizer
     }
 }
 
-/// <summary>WavTokenizer SEANet-style encoder. Same structure as DAC encoder but
-/// projects to <see cref="WavTokenizerConfig.LatentDim"/> at the bottleneck.</summary>
+/// <summary>WavTokenizer SEANet-style encoder. Same structure as DAC encoder but projects to <see cref="WavTokenizerConfig.LatentDim"/> at the bottleneck.</summary>
 internal sealed unsafe class WavTokenizerEncoder
 {
     private readonly WavTokenizerConfig _cfg;
@@ -121,7 +121,7 @@ internal sealed unsafe class WavTokenizerEncoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _stemW = LoadFusedWeight(w, $"{_prefix}.block.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.block.0.bias"]);
 
         int dim = _cfg.EncoderDim;
@@ -134,13 +134,13 @@ internal sealed unsafe class WavTokenizerEncoder
             int snakeIdx = _cfg.ResidualDilations.Count;
             int convIdx = snakeIdx + 1;
             _downsampleSnakeAlpha[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{snakeIdx}.alpha"]).Reshape(new TensorShape(innerDim));
-            _downsampleW[i] = LoadFusedWeight(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
+            _downsampleW[i] = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{i + 1}.block.{convIdx}");
             _downsampleB[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{convIdx}.bias"]);
         }
 
         int finalDim = _cfg.EncoderDim * (1 << _nStages);
         _finalSnakeAlpha = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 1}.alpha"]).Reshape(new TensorShape(finalDim));
-        _finalProjW = LoadFusedWeight(w, $"{_prefix}.block.{_nStages + 2}");
+        _finalProjW = WeightNormFusion.LoadFused(w, $"{_prefix}.block.{_nStages + 2}");
         _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 2}.bias"]);
     }
 
@@ -208,18 +208,9 @@ internal sealed unsafe class WavTokenizerEncoder
         if (_finalProjW is not null) yield return _finalProjW;
         if (_finalProjB is not null) yield return _finalProjB;
     }
-
-    private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
-    {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
-    }
 }
 
-/// <summary>WavTokenizer iSTFT head. ConvNeXt-style block stack + linear projection
-/// to log-magnitude + phase + iSTFT overlap-add. Operates in frequency domain so
-/// reconstruction is fast even at high sample rates.</summary>
+/// <summary>WavTokenizer iSTFT head. ConvNeXt-style block stack + linear projection to log-magnitude + phase + iSTFT overlap-add. Operates in frequency domain so reconstruction is fast even at high sample rates.</summary>
 internal sealed unsafe class WavTokenizerHead
 {
     private readonly WavTokenizerConfig _cfg;
@@ -285,8 +276,7 @@ internal sealed unsafe class WavTokenizerHead
         _outProjB = WhisperOps.EnsureF32(w[$"{_prefix}.out.bias"]);
     }
 
-    /// <summary>Forward — <paramref name="latent"/> channels-first <c>[B, latent_dim, T_frames]</c>
-    /// → PCM <c>[B, 1, T_pcm]</c> via spectrogram prediction + iSTFT.</summary>
+    /// <summary>Forward — <paramref name="latent"/> channels-first <c>[B, latent_dim, T_frames]</c> → PCM <c>[B, 1, T_pcm]</c> via spectrogram prediction + iSTFT.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
     {
         // Project latent_dim → head_dim via 1×1 conv.
@@ -309,7 +299,6 @@ internal sealed unsafe class WavTokenizerHead
             backend.Transpose2D(cl, dw, _cfg.HeadDim, tDw);
             dw.Dispose();
 
-            // LayerNorm.
             Tensor normed = new(cl.Shape, DType.F32);
             backend.LayerNorm(normed, cl, _blockNormW[i]!, _blockNormB[i]!, 1e-6f);
             cl.Dispose();
@@ -319,7 +308,6 @@ internal sealed unsafe class WavTokenizerHead
             Tensor up = WhisperOps.ProjectLinear(backend, normed, _blockFc1W[i]!, _blockFc1B[i], batch, tDw, _cfg.HeadDim, ffnDim);
             normed.Dispose();
 
-            // GELU.
             Tensor act = new(up.Shape, DType.F32);
             backend.Gelu(act, up);
             up.Dispose();
@@ -406,10 +394,7 @@ internal sealed unsafe class WavTokenizerHead
         if (_outProjB is not null) yield return _outProjB;
     }
 
-    /// <summary>Splits the network output into (log-magnitude, phase), exponentiates the
-    /// magnitude, builds a complex spectrogram, runs iSTFT with overlap-add. Per
-    /// Vocos's convention: <c>mag = exp(network_out[:, :, 0:n_bins])</c> and
-    /// <c>phase = network_out[:, :, n_bins:2*n_bins]</c> (already in radians).</summary>
+    /// <summary>Splits the network output into (log-magnitude, phase), exponentiates the magnitude, builds a complex spectrogram, runs iSTFT with overlap-add. Per Vocos's convention: <c>mag = exp(network_out[:, :, 0:n_bins])</c> and <c>phase = network_out[:, :, n_bins:2*n_bins]</c> (already in radians).</summary>
     private Tensor ApplyIStft(Tensor magPhase, int batch, int tFrames)
     {
         int outLen = (tFrames - 1) * _cfg.HopLength;

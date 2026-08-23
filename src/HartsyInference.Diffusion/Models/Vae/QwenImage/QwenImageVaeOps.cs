@@ -84,7 +84,6 @@ public static unsafe class QwenImageVaeOps
         Tensor f32 = gamma.DType == DType.F32 ? gamma : gamma.CastTo(DType.F32);
         if (f32.Shape.Rank == 1 && (int)f32.Shape[0] == elements)
         {
-            if (ReferenceEquals(f32, gamma)) return f32;
             return f32;
         }
         TensorShape outShape = new TensorShape(elements);

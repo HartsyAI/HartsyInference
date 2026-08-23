@@ -28,23 +28,15 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly Qwen25VlMultimodalEncoder? _multimodalEncoder;
     private readonly QwenImageConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
-    /// FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a
-    /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
-    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
-    /// <summary>True when N-way DiT block-range sharding (Phase 8+ generalization) is configured for this pipeline.
-    /// Qwen-Image is the one pipeline that reads <see cref="DiffusionPipelineBase.DitShardStages"/> instead of the
-    /// base class's 2-way <c>DitShardBackend</c>/<c>DitShardSplitBlock</c> — see <c>QwenImageRecipe</c> for how the
-    /// stage list is built from <c>PlacementConfig.ShardDevices</c>.</summary>
+    /// <summary>True when N-way DiT block-range sharding (Phase 8+ generalization) is configured for this pipeline. Qwen-Image is the one pipeline that reads <see cref="DiffusionPipelineBase.DitShardStages"/> instead of the base class's 2-way <c>DitShardBackend</c>/<c>DitShardSplitBlock</c> — see <c>QwenImageRecipe</c> for how the stage list is built from <c>PlacementConfig.ShardDevices</c>.</summary>
     private bool IsDitSharded => DitShardStages is { Count: > 0 };
 
-    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): the TeaCache-style polynomial gate at
-    /// budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc
-    /// 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
+    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): the TeaCache-style polynomial gate at budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
     private static readonly StepCacheProfile CalibratedStepCache =
         new(Threshold: 0.20f, Cap: 3, Poly: [-0.0481274f, 2.57494f, -3.17407f, 4.38356f], LateWindow: 0f);
 
@@ -84,10 +76,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     {
     }
 
-    /// <summary>Creates a Qwen-Image-Edit pipeline: adds the Qwen2.5-VL vision-conditioning path. When
-    /// <paramref name="multimodalEncoder"/> is non-null and an <c>editRefImage</c> is passed, the prompt token
-    /// ids may contain <c>&lt;|image_pad|&gt;</c> placeholders and the TE phase runs the multimodal encode
-    /// (vision tower + sectioned M-RoPE) instead of the text-only encode.</summary>
+    /// <summary>Creates a Qwen-Image-Edit pipeline: adds the Qwen2.5-VL vision-conditioning path. When <paramref name="multimodalEncoder"/> is non-null and an <c>editRefImage</c> is passed, the prompt token ids may contain <c>&lt;|image_pad|&gt;</c> placeholders and the TE phase runs the multimodal encode (vision tower + sectioned M-RoPE) instead of the text-only encode.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, QwenImageVaeDecoder vaeDecoder, QwenImageVaeEncoder? vaeEncoder,
         Qwen25VlMultimodalEncoder? multimodalEncoder, QwenImageConfig config)
@@ -106,19 +95,9 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     /// <param name="negativeTokenIds">Negative-prompt token IDs (same length as <paramref name="promptTokenIds"/> recommended). Used only when <c>CfgScale &gt; 1</c>.</param>
     /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional per-step progress callback.</param>
-    /// <param name="promptDropIndex">Number of leading hidden-state positions to drop from the conditional
-    /// stream after encoding. Qwen-Image wraps the prompt in a system+user-header template and discards
-    /// those prefix tokens' hidden states (diffusers' <c>prompt_template_encode_start_idx</c>). 0 = keep all
-    /// (raw-prompt path).</param>
+    /// <param name="promptDropIndex">Number of leading hidden-state positions to drop from the conditional stream after encoding. Qwen-Image wraps the prompt in a system+user-header template and discards those prefix tokens' hidden states (diffusers' <c>prompt_template_encode_start_idx</c>). 0 = keep all (raw-prompt path).</param>
     /// <param name="negativeDropIndex">Same as <paramref name="promptDropIndex"/> for the negative stream.</param>
-    /// <param name="editRefImage">Qwen-Image-Edit reference image <c>[1, 3, refH, refW]</c>, F32 in [-1, 1], dims
-    /// divisible by 16 (VAE 8× + 2×2 packing; resize upstream — ComfyUI's <c>TextEncodeQwenImageEdit</c> rescales to
-    /// ~1 MP area). The reference is VAE-encoded once and its packed latent tokens are appended after the noise
-    /// tokens on EVERY transformer forward (both CFG passes, matching diffusers' QwenImageEditPipeline and the
-    /// standard ComfyUI edit workflow where positive AND negative conditioning carry the reference) with
-    /// frame-axis-1 RoPE — the "reference_latents" conditioning of ComfyUI's <c>comfy_extras/nodes_qwen.py</c>
-    /// (TextEncodeQwenImageEdit) + <c>comfy/ldm/qwen_image/model.py</c> (default "index" ref method), analogous to
-    /// Flux Kontext. Requires a <see cref="QwenImageVaeEncoder"/>. Caller retains ownership.
+    /// <param name="editRefImage">Qwen-Image-Edit reference image <c>[1, 3, refH, refW]</c>, F32 in [-1, 1], dims divisible by 16 (VAE 8× + 2×2 packing; resize upstream — ComfyUI's <c>TextEncodeQwenImageEdit</c> rescales to ~1 MP area). The reference is VAE-encoded once and its packed latent tokens are appended after the noise tokens on EVERY transformer forward (both CFG passes, matching diffusers' QwenImageEditPipeline and the standard ComfyUI edit workflow where positive AND negative conditioning carry the reference) with frame-axis-1 RoPE — the "reference_latents" conditioning of ComfyUI's <c>comfy_extras/nodes_qwen.py</c> (TextEncodeQwenImageEdit) + <c>comfy/ldm/qwen_image/model.py</c> (default "index" ref method), analogous to Flux Kontext. Requires a <see cref="QwenImageVaeEncoder"/>. Caller retains ownership.
     /// <para><b>Scope:</b> this implements the ref-LATENT half of Qwen-Image-Edit only. The other half — feeding the
     /// reference image to the Qwen2.5-VL text encoder as vision tokens inside the edit chat template
     /// (<c>&lt;|vision_start|&gt;&lt;|image_pad|&gt;&lt;|vision_end|&gt;</c>) — needs a Qwen2.5-VL VISION encoder,
@@ -633,7 +612,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
             long totalBlockBytes = 0;
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
-            long sharedBytes = SumBytes(_transformer.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_transformer.EnumerateSharedWeights());
             // Edit variants append packed reference tokens after the noise tokens, so the forward's real image-side
             // length is the latent's own — not imgSeqLen, which counts only the noise grid.
             int forwardImgSeqLen = (int)packedLatent.Shape[1] + (int)(packedEditRef?.Shape[1] ?? 0);
@@ -1022,12 +1001,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Routes the per-step forward to <see cref="QwenImageTransformer.ForwardSharded(IReadOnlyList{DitShardStage},Tensor,Tensor,float,int,int,ValueTuple{int,int}[],bool)"/>
-    /// when N-way DiT sharding is configured (which never takes a step cache — the pipeline already suppressed it)
-    /// and the plain <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical
-    /// either way.</summary>
-    /// <summary>Sums two stacked ControlNets' residual stacks into one (diffusers multi-ControlNet stacking).
-    /// Consumes both inputs' tensors.</summary>
+    /// <summary>Routes the per-step forward to <see cref="QwenImageTransformer.ForwardSharded(IReadOnlyList{DitShardStage},Tensor,Tensor,float,int,int,ValueTuple{int,int}[],bool)"/> when N-way DiT sharding is configured (which never takes a step cache — the pipeline already suppressed it) and the plain <see cref="QwenImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way.</summary>
+    /// <summary>Sums two stacked ControlNets' residual stacks into one (diffusers multi-ControlNet stacking). Consumes both inputs' tensors.</summary>
     private Adapters.QwenImageControlNetResiduals SumControlNetResiduals(
         Adapters.QwenImageControlNetResiduals acc, Adapters.QwenImageControlNetResiduals next)
     {
@@ -1058,11 +1033,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             : _transformer.Forward(Backend, input, hidden, normalizedT, hPacked, wPacked, refGrids, refTimestepZero, stepCache,
                 cp: null, controlNetResiduals: cnResiduals);
 
-    /// <summary>One context-parallel forward: fork rank 1 onto a worker (CfgBranchRunner's dedicated-thread
-    /// ambient-binding shape), run rank 0 on the calling thread, then gather both ranks' packed velocity rows in
-    /// global token order (host concat — the rank thunks host-materialize their outputs). Rank 1 gets its own host
-    /// clones of the mutable input (and, upstream, the conditioning) — two rank threads must never share a
-    /// non-weight tensor across backends.</summary>
+    /// <summary>One context-parallel forward: fork rank 1 onto a worker (CfgBranchRunner's dedicated-thread ambient-binding shape), run rank 0 on the calling thread, then gather both ranks' packed velocity rows in global token order (host concat — the rank thunks host-materialize their outputs). Rank 1 gets its own host clones of the mutable input (and, upstream, the conditioning) — two rank threads must never share a non-weight tensor across backends.</summary>
     private Tensor RunForwardContextParallel(Tensor input, Tensor hidden, Tensor hiddenRank1, float normalizedT,
         int hPacked, int wPacked, CpSequencePlan plan, CpKvExchange exchange)
     {
@@ -1081,9 +1052,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return full;
     }
 
-    /// <summary>One rank's forward: local packed velocity rows <c>[1, Sr, patch²·out]</c>, host-materialized on the
-    /// owning thread. ANY rank failure aborts the exchange FIRST — the peer may be blocked at a K/V barrier and
-    /// must throw, not deadlock.</summary>
+    /// <summary>One rank's forward: local packed velocity rows <c>[1, Sr, patch²·out]</c>, host-materialized on the owning thread. ANY rank failure aborts the exchange FIRST — the peer may be blocked at a K/V barrier and must throw, not deadlock.</summary>
     private Tensor CpRankForward(int rank, IBackend backend, Tensor input, Tensor hidden, float normalizedT,
         int hPacked, int wPacked, CpSequencePlan plan, CpKvExchange exchange)
     {
@@ -1102,8 +1071,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Host-side deep copy (forces the source's D2H sync first) — the per-rank clone primitive for
-    /// context parallelism.</summary>
+    /// <summary>Host-side deep copy (forces the source's D2H sync first) — the per-rank clone primitive for context parallelism.</summary>
     private static Tensor HostCloneTensor(Tensor src)
     {
         Tensor clone = new Tensor(src.Shape, src.DType);
@@ -1112,8 +1080,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return clone;
     }
 
-    /// <summary>Syncs every distinct DiT-shard-stage backend beyond the primary (already synced by the caller);
-    /// no-op when sharding is off.</summary>
+    /// <summary>Syncs every distinct DiT-shard-stage backend beyond the primary (already synced by the caller); no-op when sharding is off.</summary>
     private void SyncDitShardStages()
     {
         if (!IsDitSharded) return;
@@ -1134,9 +1101,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         FreeTransformerWeights();
     }
 
-    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric
-    /// preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on a shard stage's
-    /// block range (frees are per-backend) and leak it every non-resident generation.</summary>
+    /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on a shard stage's block range (frees are per-backend) and leak it every non-resident generation.</summary>
     private void FreeTransformerWeights()
     {
         if (IsDitSharded)
@@ -1231,9 +1196,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return (packedNoise, null);
     }
 
-    /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim
-    /// → <c>[1, Sa+Sb, D]</c>. Used by Qwen-Image-Edit to append the packed reference-latent tokens after the packed
-    /// noise tokens before the transformer (same as Flux Kontext). Both inputs must share batch and feature dim; F32 only.</summary>
+    /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim → <c>[1, Sa+Sb, D]</c>. Used by Qwen-Image-Edit to append the packed reference-latent tokens after the packed noise tokens before the transformer (same as Flux Kontext). Both inputs must share batch and feature dim; F32 only.</summary>
     private static Tensor ConcatPackedSeqDim(Tensor a, Tensor b)
     {
         if (a.Shape.Rank != 3 || b.Shape.Rank != 3 || a.Shape[0] != b.Shape[0] || a.Shape[2] != b.Shape[2])
@@ -1256,10 +1219,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Drops the first <paramref name="drop"/> sequence positions from a <c>[1, seq, hidden]</c>
-    /// F32 hidden-state tensor, returning <c>[1, seq-drop, hidden]</c>. Used to discard the system+user-header
-    /// template prefix from Qwen-Image text conditioning (the kept tail = prompt content + assistant suffix,
-    /// matching diffusers' <c>split_hidden_states[drop_idx:]</c>). No-op clone guard if drop is out of range.</summary>
+    /// <summary>Drops the first <paramref name="drop"/> sequence positions from a <c>[1, seq, hidden]</c> F32 hidden-state tensor, returning <c>[1, seq-drop, hidden]</c>. Used to discard the system+user-header template prefix from Qwen-Image text conditioning (the kept tail = prompt content + assistant suffix, matching diffusers' <c>split_hidden_states[drop_idx:]</c>). No-op clone guard if drop is out of range.</summary>
     private static Tensor DropPrefixHiddenStates(Tensor hidden, int drop)
     {
         long batch = hidden.Shape[0];
@@ -1324,17 +1284,6 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return packed;
     }
 
-    /// <summary>Inverse of <see cref="PackLatent"/>.</summary>
-    /// <summary>Sums a tensor set's true on-device footprint.</summary>
-    /// <remarks>Via <see cref="DType.ComputeByteCount"/> — block-quantized dtypes report <c>SizeInBytes == 0</c>, and
-    /// Qwen-Image's production checkpoint is a Q4_K GGUF, so the naive product would total to zero.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Per-forward activation/workspace estimate for one Qwen-Image pass over the joint [txt, img] sequence.</summary>
     /// <remarks>Same shape as <c>FluxPipeline.EstimateFluxActivationReserveBytes</c>. Dual-stream: image and text each
     /// carry their own QKV, modulation and FFN scratch, and joint attention concatenates them — so the per-block live
@@ -1355,6 +1304,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         return scratch + 1024L * 1024 * 1024;
     }
 
+    /// <summary>Inverse of <see cref="PackLatent"/>.</summary>
     private static Tensor UnpackLatent(Tensor packed, int h, int w, int channels, int patchSize)
     {
         int batch = (int)packed.Shape[0];

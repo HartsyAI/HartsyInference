@@ -3,15 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converter for Lumina-Image-2.0 (Alpha-VLLM) safetensors checkpoints. The diffusers and ComfyUI
-/// single-file distributions both use the same key naming as the upstream <c>Lumina2Transformer2DModel</c>:
-/// separate <c>attn.to_q/to_k/to_v.weight</c>, <c>attn.to_out.0.weight</c>, <c>attn.norm_q/k.weight</c>,
-/// <c>norm1.norm.weight</c> + <c>norm1.linear.{weight,bias}</c> (or just <c>norm1.weight</c> on context_refiner),
-/// <c>norm2.weight</c>, <c>ffn_norm{1,2}.weight</c>, <c>feed_forward.linear_{1,2,3}.weight</c>,
-/// <c>x_embedder.{weight,bias}</c>, <c>time_caption_embed.{caption_embedder.{0,1},timestep_embedder.linear_{1,2}}.*</c>,
-/// and <c>norm_out.linear_{1,2}.{weight,bias}</c>. This converter is mostly passthrough — its job is to fold
-/// per-tensor weight scales into <see cref="Tensor.Fp8ScaleFactor"/> (when shipped with ComfyUI <c>fp8_scaled</c>
-/// metadata) and partition transformer/VAE/text-encoder buckets.</summary>
+/// <summary>Converter for Lumina-Image-2.0 (Alpha-VLLM) safetensors checkpoints. The diffusers and ComfyUI single-file distributions both use the same key naming as the upstream <c>Lumina2Transformer2DModel</c>: separate <c>attn.to_q/to_k/to_v.weight</c>, <c>attn.to_out.0.weight</c>, <c>attn.norm_q/k.weight</c>, <c>norm1.norm.weight</c> + <c>norm1.linear.{weight,bias}</c> (or just <c>norm1.weight</c> on context_refiner), <c>norm2.weight</c>, <c>ffn_norm{1,2}.weight</c>, <c>feed_forward.linear_{1,2,3}.weight</c>, <c>x_embedder.{weight,bias}</c>, <c>time_caption_embed.{caption_embedder.{0,1},timestep_embedder.linear_{1,2}}.*</c>, and <c>norm_out.linear_{1,2}.{weight,bias}</c>. This converter is mostly passthrough — its job is to fold per-tensor weight scales into <see cref="Tensor.Fp8ScaleFactor"/> (when shipped with ComfyUI <c>fp8_scaled</c> metadata) and partition transformer/VAE/text-encoder buckets.</summary>
 public sealed class Lumina2CheckpointConverter
 {
     /// <summary>Result of partitioning a Lumina-Image-2.0 single-file safetensors checkpoint.</summary>
@@ -30,10 +22,7 @@ public sealed class Lumina2CheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions a Lumina-Image-2.0 checkpoint: a single file, or one shard of a diffusers
-    /// multi-shard release (detected via a sibling <c>*.safetensors.index.json</c> in the same directory — the
-    /// real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards; every other shard alongside
-    /// <paramref name="checkpointPath"/> is merged in too).</summary>
+    /// <summary>Loads and partitions a Lumina-Image-2.0 checkpoint: a single file, or one shard of a diffusers multi-shard release (detected via a sibling <c>*.safetensors.index.json</c> in the same directory — the real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards; every other shard alongside <paramref name="checkpointPath"/> is merged in too).</summary>
     public static (ConvertedWeights weights, IReadOnlyList<SafeTensorsLoader> loaders) LoadAndConvert(string checkpointPath)
     {
         string? dir = Path.GetDirectoryName(checkpointPath);

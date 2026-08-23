@@ -3,12 +3,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converter for Zeta-Chroma (<c>lodestones/Zeta-Chroma</c>) pixel-proto single-file safetensors.
-/// Zeta-Chroma is the Z-Image S3-DiT retrained for pixel space, so this is a thin wrapper over
-/// <see cref="ZImageCheckpointConverter"/>: the shared partitioner already strips wrappers (incl. the
-/// <c>_orig_mod.</c> torch.compile prefix), folds <c>fp8_scaled</c> companions, and buckets the Zeta-only
-/// <c>dec_net.*</c> decoder-head keys into the transformer dict. The Diffusion-side
-/// <c>ZetaChromaTransformer.LoadWeights</c> validates the decoder layout defensively.</summary>
+/// <summary>Converter for Zeta-Chroma (<c>lodestones/Zeta-Chroma</c>) pixel-proto single-file safetensors. Zeta-Chroma is the Z-Image S3-DiT retrained for pixel space, so this is a thin wrapper over <see cref="ZImageCheckpointConverter"/>: the shared partitioner already strips wrappers (incl. the <c>_orig_mod.</c> torch.compile prefix), folds <c>fp8_scaled</c> companions, and buckets the Zeta-only <c>dec_net.*</c> decoder-head keys into the transformer dict. The Diffusion-side <c>ZetaChromaTransformer.LoadWeights</c> validates the decoder layout defensively.</summary>
 public sealed class ZetaChromaCheckpointConverter
 {
     /// <summary>Partitions a flat dict of Zeta-Chroma safetensors keys (delegates to the Z-Image partitioner), then normalizes split diffusers-style attention (<c>to_q/to_k/to_v</c>, <c>to_out.0</c>, <c>norm_q/norm_k</c> — the layout newer Zeta releases ship) to the fused Z-Image naming (<c>qkv</c>, <c>out</c>, <c>q_norm/k_norm</c>).</summary>
@@ -62,8 +57,7 @@ public sealed class ZetaChromaCheckpointConverter
         return (converted, loader);
     }
 
-    /// <summary>True when a partitioned Z-Image-family transformer dict is a Zeta-Chroma pixel checkpoint
-    /// (the <c>dec_net.*</c> decoder head replaces <c>final_layer.*</c>).</summary>
+    /// <summary>True when a partitioned Z-Image-family transformer dict is a Zeta-Chroma pixel checkpoint (the <c>dec_net.*</c> decoder head replaces <c>final_layer.*</c>).</summary>
     public static bool IsZetaChroma(IReadOnlyDictionary<string, Tensor> transformerWeights)
     {
         foreach (string key in transformerWeights.Keys)

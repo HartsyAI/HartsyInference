@@ -20,22 +20,17 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Text-generation service: owns per-device model slots, GGUF/SSM loading, chat-template application,
-/// sampling, the multimodal VLM path, and token streaming — all against the native <see cref="TextRequest"/>
-/// contract. Lifted from SwarmUI's HartsyLocalLLMProvider with the host-app coupling stripped.</summary>
+/// <summary>Text-generation service: owns per-device model slots, GGUF/SSM loading, chat-template application, sampling, the multimodal VLM path, and token streaming — all against the native <see cref="TextRequest"/> contract. Lifted from SwarmUI's HartsyLocalLLMProvider with the host-app coupling stripped.</summary>
 public sealed class TextService : ITextService, IDisposable
 {
     /// <summary>OpenAI-CLIP normalization for the mllama image processor (splice encoders expose their own).</summary>
     private static readonly float[] MllamaMean = [0.48145466f, 0.4578275f, 0.40821073f];
     private static readonly float[] MllamaStd = [0.26862954f, 0.26130258f, 0.27577711f];
 
-    /// <summary>Minimum free-RAM-to-file-size ratio required before loading a GGUF — load dequantizes tensors the
-    /// GPU path can't consume onto host buffers atop the mmap, so peak host usage exceeds the file size (~1.5-2x
-    /// observed); 2.5x is a safety margin so a big model fails cleanly instead of OOM-killing the process.</summary>
+    /// <summary>Minimum free-RAM-to-file-size ratio required before loading a GGUF — load dequantizes tensors the GPU path can't consume onto host buffers atop the mmap, so peak host usage exceeds the file size (~1.5-2x observed); 2.5x is a safety margin so a big model fails cleanly instead of OOM-killing the process.</summary>
     private const double RamHeadroomMultiplier = 2.5;
 
-    /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long
-    /// enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
+    /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
     private const int UnloadWaitSeconds = 120;
 
     private readonly InferenceEngine _engine;
@@ -322,10 +317,7 @@ public sealed class TextService : ITextService, IDisposable
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
 
-    /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device
-    /// of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single
-    /// device. Gating only the logits stage left the other stage devices open to same-device siblings;
-    /// <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
+    /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single device. Gating only the logits stage left the other stage devices open to same-device siblings; <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
     private IEnumerable<int> GateOrdinalsFor(string deviceKey)
     {
         string[] shard = ResolveShardDevices(deviceKey);
@@ -342,9 +334,7 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>The CUDA ordinal <paramref name="deviceKey"/> gates on; -1 for CPU (ungated). For a composite
-    /// layer-split key the LAST stage's device is returned — single-selector callers get that selector's own
-    /// ordinal (multi-gate callers use <see cref="GateOrdinalsFor"/>).</summary>
+    /// <summary>The CUDA ordinal <paramref name="deviceKey"/> gates on; -1 for CPU (ungated). For a composite layer-split key the LAST stage's device is returned — single-selector callers get that selector's own ordinal (multi-gate callers use <see cref="GateOrdinalsFor"/>).</summary>
     private static int GateOrdinalFor(string deviceKey)
     {
         string last = deviceKey.Contains('+')
@@ -358,9 +348,7 @@ public sealed class TextService : ITextService, IDisposable
         return colon >= 0 && int.TryParse(last[(colon + 1)..], out int ordinal) ? ordinal : 0;
     }
 
-    /// <summary>The shard-device list in effect for <paramref name="deviceKey"/>: a request-level
-    /// <c>"cuda:0+cuda:1"</c> composite wins; else the engine placement's <c>ShardDevices</c> applies to the
-    /// primary slot; else empty (single-device).</summary>
+    /// <summary>The shard-device list in effect for <paramref name="deviceKey"/>: a request-level <c>"cuda:0+cuda:1"</c> composite wins; else the engine placement's <c>ShardDevices</c> applies to the primary slot; else empty (single-device).</summary>
     private string[] ResolveShardDevices(string deviceKey)
     {
         if (deviceKey.Contains('+'))
@@ -374,10 +362,7 @@ public sealed class TextService : ITextService, IDisposable
         return [];
     }
 
-    /// <summary>Rejects a shard list containing a non-CUDA device. <see cref="LoadSharded"/> always loads the
-    /// GGUF with <c>dequantizeToF32: false</c> (every CUDA backend handles quantized formats directly), so a
-    /// CPU stage would receive quantized tensors a CPU backend can't compute on (CPU requires F32). No-op for
-    /// fewer than 2 devices — single-device loads already pick <c>dequantizeToF32: isCpu</c> correctly.</summary>
+    /// <summary>Rejects a shard list containing a non-CUDA device. <see cref="LoadSharded"/> always loads the GGUF with <c>dequantizeToF32: false</c> (every CUDA backend handles quantized formats directly), so a CPU stage would receive quantized tensors a CPU backend can't compute on (CPU requires F32). No-op for fewer than 2 devices — single-device loads already pick <c>dequantizeToF32: isCpu</c> correctly.</summary>
     private static void ValidateShardDevices(string[] shardDevices)
     {
         if (shardDevices.Length < 2)
@@ -395,14 +380,7 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Layer-split load: plans layer ranges across <paramref name="shardDevices"/> (explicit engine
-    /// ratios win, else free-VRAM proportional), builds one backend per stage (slot-owned), and hands the
-    /// placement to the pipeline. VRAM pooling — a model larger than any single card runs across them. The
-    /// vision sidecar loads the same as the unsharded path (<see cref="LoadVisionInto"/>): both VLM generators
-    /// (<see cref="MllamaGenerator"/>'s per-stage cross-attention-state peer copy, <see cref="MultimodalGenerator"/>'s
-    /// plain staged embeds handoff) drive <see cref="GenericTransformer.ForwardEmbedsStaged"/> across the full
-    /// placement rather than the single last-stage backend, so the split is preserved for image questions too.
-    /// SSM never reaches here (layer-split isn't offered for recurrent architectures).</summary>
+    /// <summary>Layer-split load: plans layer ranges across <paramref name="shardDevices"/> (explicit engine ratios win, else free-VRAM proportional), builds one backend per stage (slot-owned), and hands the placement to the pipeline. VRAM pooling — a model larger than any single card runs across them. The vision sidecar loads the same as the unsharded path (<see cref="LoadVisionInto"/>): both VLM generators (<see cref="MllamaGenerator"/>'s per-stage cross-attention-state peer copy, <see cref="MultimodalGenerator"/>'s plain staged embeds handoff) drive <see cref="GenericTransformer.ForwardEmbedsStaged"/> across the full placement rather than the single last-stage backend, so the split is preserved for image questions too. SSM never reaches here (layer-split isn't offered for recurrent architectures).</summary>
     private void LoadSharded(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, string[] shardDevices)
     {
         // A previous load left this slot's backends alive (UnloadSlot keeps contexts for a same-config reload),
@@ -454,10 +432,7 @@ public sealed class TextService : ITextService, IDisposable
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
 
-    /// <summary>Tensor-parallel load (<c>TensorParallelDegree</c> ≥ 2): every rank device gets a weight SHARD
-    /// (column/row-split per layer, embed/head on rank 0) and the forward all-reduces at the two per-layer seams.
-    /// Latency-oriented sibling of <see cref="LoadSharded"/> (which pools VRAM by layer range) — the two are
-    /// mutually exclusive by validation. Vision sidecars are not supported under TP v1 (logged, not loaded).</summary>
+    /// <summary>Tensor-parallel load (<c>TensorParallelDegree</c> ≥ 2): every rank device gets a weight SHARD (column/row-split per layer, embed/head on rank 0) and the forward all-reduces at the two per-layer seams. Latency-oriented sibling of <see cref="LoadSharded"/> (which pools VRAM by layer range) — the two are mutually exclusive by validation. Vision sidecars are not supported under TP v1 (logged, not loaded).</summary>
     private void LoadTensorParallel(TextDeviceSlot slot, string path, TextRequest request, string[] rankDevices)
     {
         // Same stale-backend cleanup as LoadSharded: fresh rank backends are built below, so anything the
@@ -505,9 +480,7 @@ public sealed class TextService : ITextService, IDisposable
             + $"comm={comm.Transport} for '{Path.GetFileName(path)}' (column/row-split per layer, 2 all-reduces/layer).");
     }
 
-    /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision
-    /// encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder
-    /// (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
+    /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
     private static void LoadVisionInto(TextDeviceSlot slot, string textPath)
     {
         string? mmproj = FindMmproj(textPath);
@@ -551,9 +524,7 @@ public sealed class TextService : ITextService, IDisposable
         return freed;
     }
 
-    /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model
-    /// AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next
-    /// load, which is not enough when the host is reclaiming memory.</summary>
+    /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next load, which is not enough when the host is reclaiming memory.</summary>
     private static bool UnloadDeviceSlot(TextDeviceSlot slot)
     {
         if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
@@ -597,8 +568,7 @@ public sealed class TextService : ITextService, IDisposable
         _slots.Clear();
     }
 
-    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>.
-    /// Returns whether a model was actually resident.</summary>
+    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
     private static bool UnloadSlot(TextDeviceSlot slot)
     {
         slot.SpliceVision?.Dispose();
@@ -650,8 +620,7 @@ public sealed class TextService : ITextService, IDisposable
         return hadModel;
     }
 
-    /// <summary>Refuses to load when there isn't enough free host RAM to survive dequantization, so a big model
-    /// fails with a clear error instead of OOM-killing the process. No-op when <c>/proc/meminfo</c> is absent.</summary>
+    /// <summary>Refuses to load when there isn't enough free host RAM to survive dequantization, so a big model fails with a clear error instead of OOM-killing the process. No-op when <c>/proc/meminfo</c> is absent.</summary>
     private static void EnsureRamHeadroomFor(string path)
     {
         long availableKb = ReadAvailableMemoryKb();
@@ -700,18 +669,7 @@ public sealed class TextService : ITextService, IDisposable
         return probe.Metadata.GetString("general.architecture") ?? "";
     }
 
-    /// <summary>Finds a sidecar mmproj GGUF paired with a text model: prefers a candidate whose real
-    /// (symlink-resolved) source directory matches the text model's own — this is the authoritative signal and
-    /// survives a flat model directory where every file is a symlink back into its own real per-model subfolder.
-    /// Once that check has a real directory to compare against, its answer is final (match or no match) — it is
-    /// never overridden by the flat-folder guess below, because <see cref="ResolveRealDirectory"/> succeeds for
-    /// any existing file (symlink or not), so "no match" here already means "no companion mmproj exists", not
-    /// "inconclusive". Falling through anyway (the pre-2026-07-25-fix-round-two behavior) mislabeled every plain
-    /// text model in a symlinked model layout as vision-capable, since the flat-folder guess matches ANY mmproj
-    /// symlink sharing the directory, regardless of which family it actually belongs to — confirmed live testing
-    /// 2026-07-25 second pass (every model in <c>Models/llm/</c> reported <c>vision: true</c>). The flat-folder
-    /// fallback is now reached only when real-path resolution itself fails outright (I/O error, permission
-    /// denial) — a true "no signal at all" case, unlike a clean negative from the primary check.</summary>
+    /// <summary>Finds a sidecar mmproj GGUF paired with a text model: prefers a candidate whose real (symlink-resolved) source directory matches the text model's own — this is the authoritative signal and survives a flat model directory where every file is a symlink back into its own real per-model subfolder. Once that check has a real directory to compare against, its answer is final (match or no match) — it is never overridden by the flat-folder guess below, because <see cref="ResolveRealDirectory"/> succeeds for any existing file (symlink or not), so "no match" here already means "no companion mmproj exists", not "inconclusive". Falling through anyway (the pre-2026-07-25-fix-round-two behavior) mislabeled every plain text model in a symlinked model layout as vision-capable, since the flat-folder guess matches ANY mmproj symlink sharing the directory, regardless of which family it actually belongs to — confirmed live testing 2026-07-25 second pass (every model in <c>Models/llm/</c> reported <c>vision: true</c>). The flat-folder fallback is now reached only when real-path resolution itself fails outright (I/O error, permission denial) — a true "no signal at all" case, unlike a clean negative from the primary check.</summary>
     public static string? FindMmproj(string textPath)
     {
         string? dir = Path.GetDirectoryName(textPath);
@@ -750,8 +708,7 @@ public sealed class TextService : ITextService, IDisposable
         return bestNamed ?? best;
     }
 
-    /// <summary>True if the shorter of the two stems is a prefix of the longer, case-insensitively, at least 4
-    /// characters — a cheap same-family signal (e.g. "llava-v1.5-7b" / "llava-v1.5-7b-mmproj-model-f16").</summary>
+    /// <summary>True if the shorter of the two stems is a prefix of the longer, case-insensitively, at least 4 characters — a cheap same-family signal (e.g. "llava-v1.5-7b" / "llava-v1.5-7b-mmproj-model-f16").</summary>
     private static bool SharesNamePrefix(string a, string b)
     {
         string shorter = a.Length <= b.Length ? a : b;
@@ -759,9 +716,7 @@ public sealed class TextService : ITextService, IDisposable
         return shorter.Length >= 4 && longer.StartsWith(shorter, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Resolves <paramref name="path"/> through any symlink chain to its final target's containing
-    /// directory. Null on failure (not a symlink and doesn't exist, permission error, etc) — callers must treat
-    /// null as "no signal", not "no match".</summary>
+    /// <summary>Resolves <paramref name="path"/> through any symlink chain to its final target's containing directory. Null on failure (not a symlink and doesn't exist, permission error, etc) — callers must treat null as "no signal", not "no match".</summary>
     private static string? ResolveRealDirectory(string path)
     {
         try
@@ -777,9 +732,7 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>True if the mmproj is a LLaVA-NeXT/1.6 anyres checkpoint — distinguished from plain LLaVA-1.5
-    /// (same CLIP tower + <c>mm.0</c>/<c>mm.2</c> projector tensors) by the presence of the
-    /// <c>clip.vision.image_grid_pinpoints</c> metadata key, which only anyres checkpoints carry.</summary>
+    /// <summary>True if the mmproj is a LLaVA-NeXT/1.6 anyres checkpoint — distinguished from plain LLaVA-1.5 (same CLIP tower + <c>mm.0</c>/<c>mm.2</c> projector tensors) by the presence of the <c>clip.vision.image_grid_pinpoints</c> metadata key, which only anyres checkpoints carry.</summary>
     private static bool IsLlavaNext(string mmprojPath)
     {
         try
@@ -795,8 +748,7 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>True if the mmproj is a Qwen3-VL / Qwen3.5-VL merger — <c>clip.projector_type = qwen3vl_merger</c>.
-    /// Probed BEFORE <see cref="IsQwen25Vl"/> (whose "qwen" substring test would otherwise claim it).</summary>
+    /// <summary>True if the mmproj is a Qwen3-VL / Qwen3.5-VL merger — <c>clip.projector_type = qwen3vl_merger</c>. Probed BEFORE <see cref="IsQwen25Vl"/> (whose "qwen" substring test would otherwise claim it).</summary>
     private static bool IsQwen3Vl(string mmprojPath)
     {
         try
@@ -814,8 +766,7 @@ public sealed class TextService : ITextService, IDisposable
         return Path.GetFileName(mmprojPath).Replace(".", "").Replace("-", "").Contains("qwen3vl", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>True if the mmproj is a Qwen2/Qwen2.5-VL merger — via <c>clip.projector_type</c> metadata (robust
-    /// to file names), falling back to the filename.</summary>
+    /// <summary>True if the mmproj is a Qwen2/Qwen2.5-VL merger — via <c>clip.projector_type</c> metadata (robust to file names), falling back to the filename.</summary>
     private static bool IsQwen25Vl(string mmprojPath)
     {
         try
@@ -833,14 +784,11 @@ public sealed class TextService : ITextService, IDisposable
         return Path.GetFileName(mmprojPath).Replace(".", "").Replace("-", "").Contains("qwen2", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>True when the model has no usable chat template (ChatML fallback but the tokenizer never registered
-    /// the <c>&lt;|im_start|&gt;</c> special token — base/non-instruct checkpoints), so generation must feed the
-    /// latest user text straight to the tokenizer instead of applying a template that would throw.</summary>
+    /// <summary>True when the model has no usable chat template (ChatML fallback but the tokenizer never registered the <c>&lt;|im_start|&gt;</c> special token — base/non-instruct checkpoints), so generation must feed the latest user text straight to the tokenizer instead of applying a template that would throw.</summary>
     private static bool NeedsRawCompletion(IChatTemplate template, ILlmTokenizer tokenizer)
         => template is ChatMlTemplate && tokenizer.SpecialId("<|im_start|>") is null;
 
-    /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the
-    /// last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>.</summary>
+    /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>.</summary>
     private static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)
     {
         SamplingOptions sampling = BuildSampling(request);
@@ -868,8 +816,7 @@ public sealed class TextService : ITextService, IDisposable
         };
     }
 
-    /// <summary>Per-request sampler: temperature/top-p/seed from the request; top-k/min-p/repetition-penalty are the
-    /// request's backend-tuning knobs (null → filter off).</summary>
+    /// <summary>Per-request sampler: temperature/top-p/seed from the request; top-k/min-p/repetition-penalty are the request's backend-tuning knobs (null → filter off).</summary>
     private static SamplingOptions BuildSampling(TextRequest request) => SamplingOptions.Default with
     {
         Temperature = (float)Math.Max(0, request.Temperature),
@@ -881,8 +828,7 @@ public sealed class TextService : ITextService, IDisposable
         Greedy = request.Temperature <= 0 || request.Greedy,
     };
 
-    /// <summary>Vision-path sampler: keeps the user's temperature/top-p/seed but drops top-k and floors the
-    /// temperature to the VLM-tuned 0.4 (small quantized VLMs hallucinate under aggressive top-k).</summary>
+    /// <summary>Vision-path sampler: keeps the user's temperature/top-p/seed but drops top-k and floors the temperature to the VLM-tuned 0.4 (small quantized VLMs hallucinate under aggressive top-k).</summary>
     private static SamplingOptions BuildVisionSampling(TextRequest request) => SamplingOptions.Default with
     {
         Temperature = request.Temperature <= 0 ? 0f : (float)Math.Max(0.4, request.Temperature),
@@ -933,8 +879,7 @@ public sealed class TextService : ITextService, IDisposable
         return string.IsNullOrWhiteSpace(q) ? "Describe this image in detail." : q;
     }
 
-    /// <summary>Normalizes a requested device string to a slot key: blank → primary; bare "cuda" → cuda:0; else the
-    /// lowercased key as-is.</summary>
+    /// <summary>Normalizes a requested device string to a slot key: blank → primary; bare "cuda" → cuda:0; else the lowercased key as-is.</summary>
     private string NormalizeDeviceKey(string? device)
     {
         if (string.IsNullOrWhiteSpace(device))

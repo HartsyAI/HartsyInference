@@ -76,11 +76,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit): the family samples with a UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. This family samples with UniPC, so even an explicit 'euler' cannot be honoured here.
         // Refuse rather than accepting the request and sampling with something else.
-        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
-        {
-            throw new NotSupportedException(
-                $"Sampler/schedule '{request.Scheduler}' is not available on Wan-Animate. Leave the sampler unset.");
-        }
+        FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan-Animate");
 
         ThrowIfDisposed();
         int latentCh = _config.VaeLatentChannels;
@@ -219,10 +215,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             // device originals, so the numerics are unchanged; the device copies are freed here.
             conditioning = new WanAnimateConditioning
             {
-                Condition = HostCopy(conditionDev),
-                PoseLatent = HostCopy(poseLatentDev),
-                MotionCond = HostCopy(motionCondDev),
-                MotionUncond = motionUncondDev is null ? null : HostCopy(motionUncondDev),
+                Condition = WanAnimate2Conditioning.HostCopy(conditionDev),
+                PoseLatent = WanAnimate2Conditioning.HostCopy(poseLatentDev),
+                MotionCond = WanAnimate2Conditioning.HostCopy(motionCondDev),
+                MotionUncond = motionUncondDev is null ? null : WanAnimate2Conditioning.HostCopy(motionUncondDev),
                 RefMotionLatentLength = refMotionLatentLength,
             };
             conditionDev.Dispose();
@@ -265,7 +261,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             {
                 Stopwatch sw = Stopwatch.StartNew();
                 float tEmb = scheduler.Timesteps[k];
-                Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
+                Tensor modelInput = WanAnimate2Conditioning.ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
                 Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, null, promptEmbeds, tEmb, clipImageEmbeds, motion: motionCond);
                 if (useCfg)
                 {
@@ -298,7 +294,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         // cache — never disposed here.
 
         // Trim the reference latent frame (trim_latent), then decode the generated frames.
-        Tensor video = DropLeadingFrames(latents, latentCh, tTotal, trimLatent, hLat, wLat);
+        Tensor video = WanAnimate2Conditioning.DropLeadingFrames(latents, trimLatent);
         latents.Dispose();
         Tensor rgb;
         try { rgb = _vae.Decode(Backend, video); }
@@ -310,16 +306,6 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         Logs.Info($"Wan-Animate complete ({frames.Length} frames, seed={seed}"
             + $"{(trimImage > 0 ? $", {trimImage} re-rendered prefix frame(s) for the caller to trim" : "")})");
         return (frames, pixW, pixH, seed, conditioning, trimImage);
-    }
-
-    /// <summary>Fresh host-materialized copy of a (possibly device-resident) tensor, preserving shape and dtype —
-    /// the cross-generation cache form that survives per-step activation sweeps and re-faults to device on use.</summary>
-    private static Tensor HostCopy(Tensor x)
-    {
-        Tensor o = new Tensor(x.Shape, x.DType);
-        long bytes = x.DType.ComputeByteCount(x.ElementCount);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, bytes, bytes);
-        return o;
     }
 
     /// <summary>Builds the <c>[1, tp+z, tTotal, H, W]</c> concat conditioning in model space (post the WAN21
@@ -421,30 +407,5 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             Buffer.MemoryCopy(sp + ((long)c * srcT + startFrame) * frame, tp + ((long)c * pixT + startFrame) * frame,
                 copyT * frame * 4, copyT * frame * 4);
         }
-    }
-
-    /// <summary>Channel-concatenates two <c>[1, C, T, H, W]</c> tensors → <c>[1, Ca+Cb, T, H, W]</c>.</summary>
-    private static Tensor ConcatChannels(Tensor a, Tensor b)
-    {
-        int ca = (int)a.Shape[1], cb = (int)b.Shape[1];
-        int t = (int)a.Shape[2], h = (int)a.Shape[3], w = (int)a.Shape[4];
-        long perChannel = (long)t * h * w;
-        Tensor o = new Tensor(new TensorShape([1L, ca + cb, t, h, w]), DType.F32);
-        float* op = (float*)o.DataPointer;
-        Buffer.MemoryCopy((float*)a.DataPointer, op, (long)ca * perChannel * 4, (long)ca * perChannel * 4);
-        Buffer.MemoryCopy((float*)b.DataPointer, op + (long)ca * perChannel, (long)cb * perChannel * 4, (long)cb * perChannel * 4);
-        return o;
-    }
-
-    /// <summary>Drops the leading <paramref name="skip"/> latent frames → <c>[1, C, T−skip, H, W]</c>.</summary>
-    private static Tensor DropLeadingFrames(Tensor x, int c, int t, int skip, int h, int w)
-    {
-        Tensor o = new Tensor(new TensorShape([1L, c, t - skip, h, w]), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        long frame = (long)h * w;
-        for (int ci = 0; ci < c; ci++)
-            Buffer.MemoryCopy(xp + ((long)ci * t + skip) * frame, op + (long)ci * (t - skip) * frame,
-                (long)(t - skip) * frame * 4, (long)(t - skip) * frame * 4);
-        return o;
     }
 }

@@ -7,8 +7,7 @@ namespace HartsyInference.Diffusion.Utilities;
 public static class DtypeCastHelper
 {
     /// <summary>Returns a tensor of <paramref name="target"/> dtype. If <paramref name="input"/> already matches, returns it unchanged (caller still owns it). Otherwise allocates a new tensor, dispatches to the backend-appropriate cast op, and — when <paramref name="disposeSourceOnCast"/> is true (default) — disposes the source so the caller doesn't have to track whether a cast happened.
-    /// <para>Pattern: <c>x = DtypeCastHelper.EnsureDtype(backend, x, DType.F32);</c> after which <c>x</c> is always F32 and the old reference is gone if it differed.</para>
-    /// </summary>
+    /// <para>Pattern: <c>x = DtypeCastHelper.EnsureDtype(backend, x, DType.F32);</c> after which <c>x</c> is always F32 and the old reference is gone if it differed.</para></summary>
     public static Tensor EnsureDtype(IBackend backend, Tensor input, DType target, bool disposeSourceOnCast = true)
     {
         if (input.DType == target) return input;

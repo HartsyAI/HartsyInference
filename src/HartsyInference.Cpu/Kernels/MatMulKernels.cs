@@ -33,7 +33,6 @@ public static class MatMulKernels
         float* pB = (float*)b.DataPointer;
         float* pOut = (float*)output.DataPointer;
 
-        // Zero the output buffer
         NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
 
         // Tiled GEMM: iterate over tiles to improve cache locality
@@ -128,7 +127,6 @@ public static class MatMulKernels
         float* pW = (float*)w.DataPointer;
         float* pOut = (float*)output.DataPointer;
 
-        // Zero the output buffer
         NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
 
         // Tiled GEMM: C[M,N] = A[M,K] × B^T[K,N] where B is stored as [N, K]

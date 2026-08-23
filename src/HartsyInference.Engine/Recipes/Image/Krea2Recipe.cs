@@ -75,18 +75,18 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         try
         {
-            (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) = LoadComponent(
-                context.CheckpointPath, key => Krea2CheckpointConverter.RemapTransformerKey(StripTransformerPrefix(key)), applyFp8Dequant: true);
+            (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) = ComponentLoader.Load(
+                context.CheckpointPath, "Krea2Recipe", key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)), applyFp8Dequant: true);
             loaders.Add(ditLoader);
             if (ditWeights.Count == 0)
             {
                 throw new InvalidOperationException($"Krea 2 checkpoint '{fileName}' contains no transformer weights.");
             }
 
-            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = LoadComponent(encoderPath, RemapQwenKey, applyFp8Dequant: true);
+            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = ComponentLoader.Load(encoderPath, "Krea2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teLoader);
 
-            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoadComponent(vaePath, key => key, applyFp8Dequant: false);
+            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = ComponentLoader.Load(vaePath, "Krea2Recipe", keyTransform: null, applyFp8Dequant: false);
             loaders.Add(vaeLoader);
 
             // Krea 2's fp8-scaled transformer is ~13 GB; caching every fp8->F16/BF16 weight cast roughly doubles
@@ -110,14 +110,8 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], transformer.BlockCount, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount, transformer.EnumerateSharedWeights());
                 Logs.Info($"[Krea2Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
@@ -125,7 +119,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
 
-            Dictionary<string, Tensor> vaeF32 = CastToF32(vaeWeights);
+            Dictionary<string, Tensor> vaeF32 = VaePrecisionHelper.CastWeights(vaeWeights, [DType.F16, DType.BF16], DType.F32);
             QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
             vae.LoadWeights(vaeF32);
             // Encoder half from the same staged dict — null when the checkpoint ships decode-only, which the pipeline
@@ -161,91 +155,5 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         }
         string lower = name.ToLowerInvariant();
         return lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
-    }
-
-    /// <summary>Loads one safetensors component, applying <paramref name="keyTransform"/> (a null result drops the key), skipping the <c>scaled_fp8</c> marker tensors, and optionally folding fp8 weight-scale companions into dequantized weights.</summary>
-    private static (Dictionary<string, Tensor> weights, SafeTensorsLoader loader) LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-            foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
-            {
-                if (kv.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kv.Key == "scaled_fp8")
-                {
-                    continue;
-                }
-                string? mapped = keyTransform(kv.Key);
-                if (mapped is not null)
-                {
-                    merged[mapped] = kv.Value;
-                }
-            }
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Krea2Recipe] Failed to load component '{Path.GetFileName(filePath)}'.", ex);
-            loader.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Strips the Comfy/diffusers wrapper prefixes a Krea 2 diffusion-model file may carry.</summary>
-    private static string StripTransformerPrefix(string key)
-    {
-        if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["model.diffusion_model.".Length..];
-        }
-        if (key.StartsWith("diffusion_model.", StringComparison.Ordinal))
-        {
-            return key["diffusion_model.".Length..];
-        }
-        if (key.StartsWith("transformer.", StringComparison.Ordinal))
-        {
-            return key["transformer.".Length..];
-        }
-        return key;
-    }
-
-    /// <summary>Maps a Qwen3-VL checkpoint key to the <see cref="LlamaStyleEncoder"/> convention, dropping the vision tower and lm_head (null result = drop).</summary>
-    private static string? RemapQwenKey(string key)
-    {
-        if (key.Contains(".visual.", StringComparison.Ordinal) || key.StartsWith("visual.", StringComparison.Ordinal))
-        {
-            return null;
-        }
-        if (key.Contains("lm_head", StringComparison.Ordinal))
-        {
-            return null;
-        }
-        int lm = key.LastIndexOf("language_model.", StringComparison.Ordinal);
-        string suffix = lm >= 0 ? key[(lm + "language_model.".Length)..] : key;
-        if (suffix.StartsWith("model.", StringComparison.Ordinal))
-        {
-            suffix = suffix["model.".Length..];
-        }
-        if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
-        {
-            return "model." + suffix;
-        }
-        return null;
-    }
-
-    /// <summary>Upcasts 16-bit VAE weights to F32 (the Qwen-Image VAE runs on the F32 path); other dtypes pass through untouched.</summary>
-    private static Dictionary<string, Tensor> CastToF32(IReadOnlyDictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            DType dtype = kv.Value.DType;
-            result[kv.Key] = (dtype == DType.F16 || dtype == DType.BF16) ? kv.Value.CastTo(DType.F32) : kv.Value;
-        }
-        return result;
     }
 }

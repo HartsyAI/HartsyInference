@@ -41,7 +41,6 @@ public sealed unsafe class AdaLNModulation
         int batch = (int)timestepEmb.Shape[0];
         int outDim = _numParams * _hiddenSize;
 
-        // SiLU activation on input
         TensorShape inputShape = new TensorShape(batch, _hiddenSize);
         Tensor activated = new Tensor(inputShape, timestepEmb.DType);
         backend.Silu(activated, timestepEmb);
@@ -92,33 +91,6 @@ public sealed unsafe class AdaLNModulation
 
         projected.Dispose();
         return results;
-    }
-
-    /// <summary>Applies AdaLN modulation: output = input * (1 + scale) + shift.</summary>
-    public static Tensor ApplyModulation(Tensor input, Tensor shift, Tensor scale, int batch, int seqLen, int hiddenSize)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hiddenSize);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* shiftPtr = (float*)shift.DataPointer;
-        float* scalePtr = (float*)scale.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * hiddenSize;
-                int condOffset = b * hiddenSize;
-                for (int d = 0; d < hiddenSize; d++)
-                {
-                    outPtr[inOffset + d] = inPtr[inOffset + d] * (1.0f + scalePtr[condOffset + d]) + shiftPtr[condOffset + d];
-                }
-            }
-        }
-
-        return output;
     }
 
     /// <summary>Applies gated residual: output = input + gate * value. Gate is [B, hiddenSize], broadcast over sequence dim.</summary>

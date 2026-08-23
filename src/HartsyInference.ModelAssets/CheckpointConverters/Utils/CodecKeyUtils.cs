@@ -2,14 +2,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
-/// <summary>Shared key/tensor helpers for the audio-codec checkpoint converters (MusicGen, YuE). The engine codec
-/// classes (<c>EnCodec</c>, <c>XCodec</c>/DAC) fuse PyTorch weight-norm pairs themselves at <c>LoadWeights</c> time,
-/// so converters must keep raw <c>weight_g</c>/<c>weight_v</c> keys — these helpers only normalize the newer
-/// <c>parametrizations.weight.original0/original1</c> spelling back to the classic pair names.</summary>
+/// <summary>Shared key/tensor helpers for the audio-codec checkpoint converters (MusicGen, YuE). The engine codec classes (<c>EnCodec</c>, <c>XCodec</c>/DAC) fuse PyTorch weight-norm pairs themselves at <c>LoadWeights</c> time, so converters must keep raw <c>weight_g</c>/<c>weight_v</c> keys — these helpers only normalize the newer <c>parametrizations.weight.original0/original1</c> spelling back to the classic pair names.</summary>
 public static class CodecKeyUtils
 {
-    /// <summary>Renames torch ≥2.1 <c>*.parametrizations.weight.original0/original1</c> keys to the classic
-    /// <c>*.weight_g</c>/<c>*.weight_v</c> spelling the engine codec loaders expect. Other keys pass through.</summary>
+    /// <summary>Renames torch ≥2.1 <c>*.parametrizations.weight.original0/original1</c> keys to the classic <c>*.weight_g</c>/<c>*.weight_v</c> spelling the engine codec loaders expect. Other keys pass through.</summary>
     public static string NormalizeWeightNormKey(string key)
     {
         key = key.Replace(".parametrizations.weight.original0", ".weight_g", StringComparison.Ordinal);

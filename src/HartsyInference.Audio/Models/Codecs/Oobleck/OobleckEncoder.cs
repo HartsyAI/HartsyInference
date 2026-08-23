@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 
-/// <summary>Oobleck encoder (diffusers <c>OobleckEncoder</c>):
+/// <summary>Oobleck encoder (diffusers <c>OobleckEncoder</c>) — stem conv, N residual+downsample blocks, final conv to Gaussian parameters.</summary>
+/// <remarks>
 /// <code>
 ///   conv1: WNConv1d(audio_channels → hidden, k=7, padding=3)
 ///   for stride in downsampling_ratios:
@@ -14,7 +15,7 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// </code>
 /// The output's <c>hidden</c> channels are the Gaussian parameters — mean in the first half,
 /// softplus-scale in the second. <see cref="OobleckVae.EncodeMode"/> returns the mean
-/// (diffusers' <c>latent_dist.mode()</c> / "argmax" sampling).</summary>
+/// (diffusers' <c>latent_dist.mode()</c> / "argmax" sampling).</remarks>
 internal sealed class OobleckEncoder
 {
     private readonly OobleckConfig _cfg;
@@ -51,7 +52,7 @@ internal sealed class OobleckEncoder
         //   layers.{n+1}        = final Snake
         //   layers.{n+2}        = output WNConv1d (-> hidden = 2·latent, k=3)
         // Inside an EncoderBlock: .layers.{0,1,2} ResUnits, .layers.3 Snake, .layers.4 downsample conv.
-        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.0");
+        _stemW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.0");
         _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.0.bias"]);
 
         int n = _cfg.DownsamplingRatios.Length;
@@ -70,17 +71,16 @@ internal sealed class OobleckEncoder
                 _blockUnits[i][j].LoadWeights(w);
             }
             (_blockSnakeAlpha[i], _blockSnakeBeta[i]) = OobleckOps.LoadSnake(w, $"{blk}.layers.3", _dims[i]);
-            _blockDownW[i] = OobleckOps.LoadFusedWeight(w, $"{blk}.layers.4");
+            _blockDownW[i] = WeightNormFusion.LoadFused(w, $"{blk}.layers.4");
             _blockDownB[i] = WhisperOps.EnsureF32(w[$"{blk}.layers.4.bias"]);
         }
 
         (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.{n + 1}", _dims[^1]);
-        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.{n + 2}");
+        _outW = WeightNormFusion.LoadFused(w, $"{_prefix}.layers.{n + 2}");
         _outB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.{n + 2}.bias"]);
     }
 
-    /// <summary>Forward — PCM <c>[B, audio_channels, T]</c> (T a multiple of the hop) →
-    /// Gaussian parameters <c>[B, hidden, T / hop]</c> (mean ‖ scale).</summary>
+    /// <summary>Forward — PCM <c>[B, audio_channels, T]</c> (T a multiple of the hop) → Gaussian parameters <c>[B, hidden, T / hop]</c> (mean ‖ scale).</summary>
     public Tensor Forward(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
         if (_stemW is null) throw new InvalidOperationException("OobleckEncoder weights not loaded.");

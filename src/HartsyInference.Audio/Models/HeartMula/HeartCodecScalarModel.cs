@@ -5,18 +5,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>HeartCodec SQ-Codec waveform decoder (<c>sq_codec.ScalarModel.decode</c>). A causal conv stack that
-/// lifts the 128-D latent (out_channels/2 after the estimator-output reshape) to the 48 kHz mono waveform at
-/// 1920× the latent frame rate (∏ upsample factors [5,4,4,4,3] = 960, ×2 from the PostProcessor repeat):
-/// <list type="number">
-///   <item><b>round_func9</b> scalar quant: <c>round(9·x)/9</c>.</item>
-///   <item><b>decoder[0]</b> look-ahead Conv1d 128→2048, k=5, <b>non-causal</b> (symmetric pad 2).</item>
-///   <item><b>decoder[1..5]</b> ResDecoderBlock: causal ConvTranspose1d upsample + 5 dilated (1,3,5,7,9)
-///   causal ResidualUnits (PReLU(conv1 k7) → PReLU(conv2 k1) → +x).</item>
-///   <item><b>decoder[6]</b> PostProcessor: repeat each frame 2× then causal Conv1d k7 + PReLU.</item>
-///   <item><b>decoder[7]</b> final Conv1d 64→1, k=7, causal.</item>
-/// </list>
-/// All convs are weight-normed (<c>parametrizations.weight.original0/1</c>, fused at load).</summary>
+/// <summary>HeartCodec SQ-Codec waveform decoder (<c>sq_codec.ScalarModel.decode</c>) — a causal conv stack that lifts the 128-D latent to the 48 kHz mono waveform at 1920x the latent frame rate (∏ upsample factors [5,4,4,4,3] = 960, ×2 from the PostProcessor repeat).</summary>
+// round_func9 scalar quant: round(9·x)/9. decoder[0]: look-ahead Conv1d 128→2048, k=5, non-causal
+// (symmetric pad 2). decoder[1..5]: ResDecoderBlock — causal ConvTranspose1d upsample + 5 dilated
+// (1,3,5,7,9) causal ResidualUnits (PReLU(conv1 k7) → PReLU(conv2 k1) → +x). decoder[6]: PostProcessor —
+// repeat each frame 2x then causal Conv1d k7 + PReLU. decoder[7]: final Conv1d 64→1, k=7, causal.
+// All convs are weight-normed (parametrizations.weight.original0/1, fused at load).
 public sealed unsafe class HeartCodecScalarModel
 {
     private static readonly int[] UpFactors = [5, 4, 4, 4, 3];
@@ -65,9 +59,7 @@ public sealed unsafe class HeartCodecScalarModel
         _outB = WhisperOps.EnsureF32(w[$"{prefix}.decoder.7.bias"]);
     }
 
-    /// <summary>Decodes a latent <c>[B, 128, L]</c> into a waveform <c>[B, 1, L·1920]</c>. Long latents decode
-    /// in bounded overlapping chunks (see the chunk constants above); the kept interior samples are outside the
-    /// zero-pad's receptive field, so the result matches the monolithic decode.</summary>
+    /// <summary>Decodes a latent <c>[B, 128, L]</c> into a waveform <c>[B, 1, L·1920]</c>; long latents decode in bounded overlapping chunks (see the chunk constants above) and still match the monolithic decode exactly.</summary>
     public Tensor Decode(IBackend backend, Tensor latent)
     {
         int b = (int)latent.Shape[0];

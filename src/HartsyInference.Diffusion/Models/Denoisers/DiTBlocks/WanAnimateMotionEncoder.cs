@@ -61,7 +61,7 @@ public sealed unsafe class WanAnimateMotionEncoder
             throw new ArgumentException($"motion encoder has no fc layers under {p}.enc.fc.", nameof(w));
         _fc = fc.ToArray();
 
-        _directionWeight = LoadF32(w, $"{p}.dec.direction.weight");
+        _directionWeight = TensorCasts.LoadF32(w, $"{p}.dec.direction.weight");
         OutDim = (int)_directionWeight.Shape[0];
     }
 
@@ -168,8 +168,6 @@ public sealed unsafe class WanAnimateMotionEncoder
         return qt;
     }
 
-    private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-
     /// <summary>Fused leaky-ReLU with channel-wise bias: <c>leaky_relu(x + bias, 0.2) · √2</c> over <c>[B, C, …]</c>.</summary>
     private static void FusedLeakyReLU(Tensor x, Tensor bias, int channels)
     {
@@ -211,7 +209,7 @@ public sealed unsafe class WanAnimateMotionEncoder
             string? biasKey, int stride, int padKind, int blurPad0, int blurPad1)
         {
             EqualConv2d c = new();
-            Tensor raw = LoadF32(w, weightKey);
+            Tensor raw = TensorCasts.LoadF32(w, weightKey);
             c._outC = (int)raw.Shape[0]; c._inC = (int)raw.Shape[1]; c.Kernel = (int)raw.Shape[2];
             float scale = 1f / MathF.Sqrt(c._inC * c.Kernel * c.Kernel);
             c._scaledWeight = new Tensor(raw.Shape, DType.F32);
@@ -219,7 +217,7 @@ public sealed unsafe class WanAnimateMotionEncoder
             float* sp = (float*)c._scaledWeight.DataPointer, rp = (float*)raw.DataPointer;
             for (long i = 0; i < n; i++) sp[i] = rp[i] * scale;
             if (!ReferenceEquals(raw, w[weightKey])) raw.Dispose();
-            if (actBiasKey is not null) c._actBias = LoadF32(w, actBiasKey);
+            if (actBiasKey is not null) c._actBias = TensorCasts.LoadF32(w, actBiasKey);
             if (biasKey is not null && w.TryGetValue(biasKey, out Tensor? cb)) c._convBias = cb.DType == DType.F32 ? cb : cb.CastTo(DType.F32);
             c._stride = stride;
             c._pad = padKind == PadSame ? c.Kernel / 2 : padKind;
@@ -303,7 +301,7 @@ public sealed unsafe class WanAnimateMotionEncoder
         public static EqualLinear Load(IReadOnlyDictionary<string, Tensor> w, string p)
         {
             EqualLinear l = new();
-            Tensor raw = LoadF32(w, $"{p}.weight");
+            Tensor raw = TensorCasts.LoadF32(w, $"{p}.weight");
             l._outDim = (int)raw.Shape[0];
             float scale = 1f / MathF.Sqrt((int)raw.Shape[1]);
             l._scaledWeight = new Tensor(raw.Shape, DType.F32);

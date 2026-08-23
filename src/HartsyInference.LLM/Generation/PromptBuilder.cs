@@ -3,9 +3,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>Shared prompt-id construction for the token-in generation pipelines (transformer + SSM):
-/// raw token ids pass through, a chat message list goes through the model's chat template, and a bare
-/// prompt is wrapped into a one-turn user (+ optional system) message before templating.</summary>
+/// <summary>Shared prompt-id construction for the token-in generation pipelines (transformer + SSM): raw ids pass through, messages go through the chat template, and a bare prompt is wrapped into a one-turn user (+ optional system) message before templating.</summary>
 internal static class PromptBuilder
 {
     public static int[] BuildPromptIds(GenerationRequest request, ILlmTokenizer tokenizer, IChatTemplate template)

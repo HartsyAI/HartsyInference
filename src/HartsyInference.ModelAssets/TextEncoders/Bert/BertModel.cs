@@ -4,20 +4,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.TextEncoders.Bert;
 
-/// <summary>Standard HuggingFace BERT encoder (post-norm: <c>LayerNorm(x + sublayer(x))</c>), reusable for any
-/// BERT-conditioned model (GPT-SoVITS / MeloTTS text prosody, Grounding DINO open-vocab text tower). Embeddings are
-/// <c>word + learned-position + token-type</c> then LayerNorm; each layer is multi-head self-attention then a GELU
-/// FFN, both post-normed.
+/// <summary>Standard HuggingFace BERT encoder (post-norm: <c>LayerNorm(x + sublayer(x))</c>), reusable for any BERT-conditioned model (GPT-SoVITS / MeloTTS text prosody, Grounding DINO open-vocab text tower). Embeddings are <c>word + learned-position + token-type</c> then LayerNorm; each layer is multi-head self-attention then a GELU FFN, both post-normed.
 ///
-/// <para>Two entry points: <see cref="Forward(IBackend, ReadOnlySpan{int}, int)"/> is the unpadded single-segment
-/// path (token-type 0, positions 0..T-1, no mask) used by the audio prosody towers; the overload taking explicit
-/// position ids and an additive attention mask is used by Grounding DINO, whose caption is split into per-phrase
-/// sub-sentences via a block-diagonal self-attention mask and reset position ids.</para>
+/// <para>Two entry points: <see cref="Forward(IBackend, ReadOnlySpan{int}, int)"/> is the unpadded single-segment path (token-type 0, positions 0..T-1, no mask) used by the audio prosody towers; the overload taking explicit position ids and an additive attention mask is used by Grounding DINO, whose caption is split into per-phrase sub-sentences via a block-diagonal self-attention mask and reset position ids.</para>
 ///
-/// <para>Self-contained — routes all math through <see cref="IBackend"/> so it lives in the shared ModelHandler
-/// package (both Audio and Vision reference it) without dragging the audio stack across a package boundary. Weights
-/// load from the HF state-dict names (<c>{prefix}.embeddings.*</c> / <c>{prefix}.encoder.layer.N.*</c>, prefix
-/// default <c>bert</c>).</para></summary>
+/// <para>Self-contained — routes all math through <see cref="IBackend"/> so it lives in the shared ModelHandler package (both Audio and Vision reference it) without dragging the audio stack across a package boundary. Weights load from the HF state-dict names (<c>{prefix}.embeddings.*</c> / <c>{prefix}.encoder.layer.N.*</c>, prefix default <c>bert</c>).</para></summary>
 public sealed unsafe class BertModel : IDisposable
 {
     private readonly BertConfig _cfg;
@@ -45,16 +36,11 @@ public sealed unsafe class BertModel : IDisposable
         for (int i = 0; i < _cfg.NumLayers; i++) _layers[i].LoadWeights(w, $"{p}encoder.layer.{i}");
     }
 
-    /// <summary>Encodes token ids → hidden states <c>[1, T, hidden]</c> after <paramref name="numLayers"/>
-    /// transformer layers (defaults to all). GPT-SoVITS passes <c>NumLayers - 2</c> for the <c>hidden_states[-3]</c>
-    /// tap. Token-type is 0 for every position; positions are 0..T-1; unmasked.</summary>
+    /// <summary>Encodes token ids → hidden states <c>[1, T, hidden]</c> after <paramref name="numLayers"/> transformer layers (defaults to all). GPT-SoVITS passes <c>NumLayers - 2</c> for the <c>hidden_states[-3]</c> tap. Token-type is 0 for every position; positions are 0..T-1; unmasked.</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int numLayers = -1)
         => Forward(backend, tokenIds, default, default, null, numLayers);
 
-    /// <summary>Full BERT forward with explicit position ids and an optional additive self-attention mask. When
-    /// <paramref name="positionIds"/> is empty, positions default to <c>0..T-1</c>; when <paramref name="tokenTypeIds"/>
-    /// is empty, all segments are 0. <paramref name="additiveAttnMask"/> (if non-null) must be <c>[1, numHeads, T, T]</c>
-    /// with 0 on attended pairs and a large negative on masked pairs; it is added to the pre-softmax scores.</summary>
+    /// <summary>Full BERT forward with explicit position ids and an optional additive self-attention mask. When <paramref name="positionIds"/> is empty, positions default to <c>0..T-1</c>; when <paramref name="tokenTypeIds"/> is empty, all segments are 0. <paramref name="additiveAttnMask"/> (if non-null) must be <c>[1, numHeads, T, T]</c> with 0 on attended pairs and a large negative on masked pairs; it is added to the pre-softmax scores.</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positionIds,
         ReadOnlySpan<int> tokenTypeIds, Tensor? additiveAttnMask, int numLayers = -1)
     {
@@ -176,9 +162,7 @@ internal sealed unsafe class BertLayer
     }
 }
 
-/// <summary>Small self-contained tensor helpers for the BERT tower (mirrors the shape of the Whisper/CLIP encoder
-/// helpers): F32 casting, linear projection through <see cref="IBackend.Linear"/>, multi-head reshape, and an exact
-/// erf-GELU. Kept here so the shared package has no dependency on the audio package's WhisperOps.</summary>
+/// <summary>Small self-contained tensor helpers for the BERT tower (mirrors the shape of the Whisper/CLIP encoder helpers): F32 casting, linear projection through <see cref="IBackend.Linear"/>, multi-head reshape, and an exact erf-GELU. Kept here so the shared package has no dependency on the audio package's WhisperOps.</summary>
 internal static unsafe class BertOps
 {
     public static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;

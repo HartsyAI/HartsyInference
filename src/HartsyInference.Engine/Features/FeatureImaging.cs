@@ -4,10 +4,7 @@ using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Host-image-library-free raster helpers the feature resolvers share: bicubic resize of an
-/// <see cref="ImageData"/>, grayscale extraction for masks, separable dilation/blur, and the RGB→tensor packings the
-/// diffusion pipelines expect. Replaces the SwarmUI extension's ImageSharp calls with the engine's own
-/// <see cref="Resample"/> kernel (Keys bicubic, <c>a = -0.5</c>, antialiased — the PIL/torch convention).</summary>
+/// <summary>Host-image-library-free raster helpers the feature resolvers share: bicubic resize of an <see cref="ImageData"/>, grayscale extraction for masks, separable dilation/blur, and the RGB→tensor packings the diffusion pipelines expect. Replaces the SwarmUI extension's ImageSharp calls with the engine's own <see cref="Resample"/> kernel (Keys bicubic, <c>a = -0.5</c>, antialiased — the PIL/torch convention).</summary>
 public static class FeatureImaging
 {
     /// <summary>Bicubic-resizes an image to interleaved HWC RGB24 at the target size; a same-size image is copied verbatim.</summary>
@@ -39,8 +36,7 @@ public static class FeatureImaging
         return dst;
     }
 
-    /// <summary>Bicubic-resizes an image and collapses it to a single-channel L8 buffer via ITU-R BT.709 luminance — the
-    /// right semantic when a mask arrives as a colored paint layer.</summary>
+    /// <summary>Bicubic-resizes an image and collapses it to a single-channel L8 buffer via ITU-R BT.709 luminance — the right semantic when a mask arrives as a colored paint layer.</summary>
     public static byte[] ResizeGrayscale(ImageData image, int width, int height)
     {
         byte[] rgb = ResizeRgb24(image, width, height);
@@ -53,9 +49,7 @@ public static class FeatureImaging
         return gray;
     }
 
-    /// <summary>Tightest box containing every mask pixel at or above <paramref name="threshold"/>, expanded by
-    /// <paramref name="grow"/> pixels and clamped to the image. Returns null when the mask is entirely below the
-    /// threshold — there is nothing to inpaint, and the caller must fall back to the full canvas.</summary>
+    /// <summary>Tightest box containing every mask pixel at or above <paramref name="threshold"/>, expanded by <paramref name="grow"/> pixels and clamped to the image. Returns null when the mask is entirely below the threshold — there is nothing to inpaint, and the caller must fall back to the full canvas.</summary>
     public static (int X, int Y, int Width, int Height)? MaskBounds(byte[] mask, int width, int height, int grow, byte threshold)
     {
         ArgumentNullException.ThrowIfNull(mask);
@@ -112,9 +106,7 @@ public static class FeatureImaging
         return dst;
     }
 
-    /// <summary>Alpha-composites <paramref name="patch"/> over <paramref name="canvas"/> at <paramref name="x"/>,
-    /// <paramref name="y"/>, weighted per pixel by <paramref name="mask"/> (255 = take the patch, 0 = keep the canvas).
-    /// Returns a new image; neither input is mutated.</summary>
+    /// <summary>Alpha-composites <paramref name="patch"/> over <paramref name="canvas"/> at <paramref name="x"/>, <paramref name="y"/>, weighted per pixel by <paramref name="mask"/> (255 = take the patch, 0 = keep the canvas). Returns a new image; neither input is mutated.</summary>
     public static ImageData CompositeRgb24(ImageData canvas, ImageData patch, byte[] mask, int x, int y)
     {
         ArgumentNullException.ThrowIfNull(canvas);
@@ -150,8 +142,7 @@ public static class FeatureImaging
         return new ImageData { Rgb = dst, Width = canvas.Width, Height = canvas.Height };
     }
 
-    /// <summary>Zeroes every mask pixel below <paramref name="threshold"/>, so a blurred edge does not bleed the patch
-    /// into pixels the user never selected.</summary>
+    /// <summary>Zeroes every mask pixel below <paramref name="threshold"/>, so a blurred edge does not bleed the patch into pixels the user never selected.</summary>
     public static void ThresholdInPlace(byte[] mask, byte threshold)
     {
         ArgumentNullException.ThrowIfNull(mask);
@@ -176,8 +167,7 @@ public static class FeatureImaging
         }
     }
 
-    /// <summary>Separable max-filter dilation over a Chebyshev window of <paramref name="radius"/>: two 1-D passes,
-    /// O(W·H·R) instead of O(W·H·R²). Approximates a square morphological dilation — close enough for mask edges.</summary>
+    /// <summary>Separable max-filter dilation over a Chebyshev window of <paramref name="radius"/>: two 1-D passes, O(W·H·R) instead of O(W·H·R²). Approximates a square morphological dilation — close enough for mask edges.</summary>
     public static void DilateInPlace(byte[] mask, int width, int height, int radius)
     {
         ArgumentNullException.ThrowIfNull(mask);

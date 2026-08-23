@@ -33,7 +33,7 @@ public interface IBackend : IDisposable
     /// <summary>Same as <see cref="SeamlessTilingX"/> for the height axis.</summary>
     bool SeamlessTilingY { get => false; set { } }
 
-    /// <summary>Capabilities of this backend.</summary>
+    /// <summary>Which operations and dtypes this backend supports, so callers can route work to it or fall back.</summary>
     BackendCapabilities Capabilities { get; }
 
     // ── Linear Algebra ──────────────────────────────────────────────────
@@ -83,13 +83,13 @@ public interface IBackend : IDisposable
 
     // ── Normalization ───────────────────────────────────────────────────
 
-    /// <summary>Group normalization.</summary>
+    /// <summary>Splits channels into <paramref name="groups"/> groups, normalizes each over channel+spatial, then applies the per-channel affine weight/bias.</summary>
     void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps);
 
-    /// <summary>Layer normalization.</summary>
+    /// <summary>Normalizes over the last dim (zero mean, unit variance) then applies the affine weight/bias.</summary>
     void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps);
 
-    /// <summary>RMS normalization.</summary>
+    /// <summary>RMS-normalizes over the last dim (no mean subtraction) then scales by weight: <c>out = x / sqrt(mean(x²)+eps) · weight</c>.</summary>
     void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps);
 
     /// <summary>AdaIN 1D: per-(batch,channel) normalize <c>[B,C,T]</c> over T, scale by <c>(1+gamma)</c>, shift by beta.</summary>
@@ -675,10 +675,7 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>
-    /// Elementwise affine mix: <c>output = xScale·x + yScale·y</c>. Inputs may alias each other, but neither
-    /// input storage may overlap <paramref name="output"/>. All tensors are F32, nonempty, and identically shaped.
-    /// </summary>
+    /// <summary>Elementwise affine mix: <c>output = xScale·x + yScale·y</c>. Inputs may alias each other, but neither input storage may overlap <paramref name="output"/>. All tensors are F32, nonempty, and identically shaped.</summary>
     unsafe void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
     {
         long count = MixContract.ValidateAffineMix(output, x, y, xScale, yScale);
@@ -692,12 +689,7 @@ public interface IBackend : IDisposable
         GC.KeepAlive(y);
     }
 
-    /// <summary>
-    /// In-place masked affine replacement:
-    /// <c>target = mask·target + (1−mask)·(sourceScale·source + noiseScale·noise)</c>. When
-    /// <paramref name="noiseScale"/> is zero, <paramref name="noise"/> must be null and the noise term is omitted.
-    /// Mask values are consumed exactly as supplied (never clamped). Source, noise, and mask remain unchanged.
-    /// </summary>
+    /// <summary>In-place masked affine replacement: <c>target = mask·target + (1−mask)·(sourceScale·source + noiseScale·noise)</c>. When <paramref name="noiseScale"/> is zero, <paramref name="noise"/> must be null and the noise term is omitted. Mask values are consumed exactly as supplied (never clamped). Source, noise, and mask remain unchanged.</summary>
     unsafe void MaskedAffineMixInPlace(
         Tensor target,
         Tensor source,
@@ -754,14 +746,7 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>
-    /// Global-renormalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving
-    /// <paramref name="cond"/> and <paramref name="uncond"/> unchanged:
-    /// <c>guided = uncond + guidance·(cond−uncond)</c>,
-    /// <c>scale = clamp(‖cond‖₂/(‖guided‖₂+1e-8), renormMin, 1)</c>,
-    /// <c>z += delta·scale·guided</c>. The two prediction inputs may alias each other; neither may alias
-    /// the mutated <paramref name="z"/>.
-    /// </summary>
+    /// <summary>Global-renormalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving <paramref name="cond"/> and <paramref name="uncond"/> unchanged: <c>guided = uncond + guidance·(cond−uncond)</c>, <c>scale = clamp(‖cond‖₂/(‖guided‖₂+1e-8), renormMin, 1)</c>, <c>z += delta·scale·guided</c>. The two prediction inputs may alias each other; neither may alias the mutated <paramref name="z"/>.</summary>
     unsafe void CfgRenormEulerStep(
         Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float renormMin)
     {
@@ -808,14 +793,7 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>
-    /// Last-dimension-normalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving
-    /// <paramref name="cond"/> and <paramref name="uncond"/> unchanged. For every row formed by flattening
-    /// all dimensions except the last:
-    /// <c>guided = uncond + guidance·(cond−uncond)</c>,
-    /// <c>guided *= ‖cond‖₂/(‖guided‖₂+eps)</c>, and <c>z += delta·guided</c>.
-    /// The two prediction inputs may alias each other; neither may alias the mutated <paramref name="z"/>.
-    /// </summary>
+    /// <summary>Last-dimension-normalized CFG plus Euler update, in-place on <paramref name="z"/> while leaving <paramref name="cond"/> and <paramref name="uncond"/> unchanged. For every row formed by flattening all dimensions except the last: <c>guided = uncond + guidance·(cond−uncond)</c>, <c>guided *= ‖cond‖₂/(‖guided‖₂+eps)</c>, and <c>z += delta·guided</c>. The two prediction inputs may alias each other; neither may alias the mutated <paramref name="z"/>.</summary>
     unsafe void CfgNormalizedEulerStep(
         Tensor z, Tensor cond, Tensor uncond, float guidance, float delta, float eps = 1e-12f)
     {
@@ -1683,10 +1661,7 @@ public interface IBackend : IDisposable
         }
     }
 
-    /// <summary>
-    /// DiT token-grid patchify: <c>[B,C,H,W]</c> → <c>[B,(H/p)·(W/p),p²·C]</c>.
-    /// This byte-preserving shuffle supports F32, F16, and BF16.
-    /// </summary>
+    /// <summary>DiT token-grid patchify: <c>[B,C,H,W]</c> → <c>[B,(H/p)·(W/p),p²·C]</c>. This byte-preserving shuffle supports F32, F16, and BF16.</summary>
     /// <param name="innerChannelFastest">Token order: true=(ph,pw,c) (Z-Image/Lumina2), false=channel-outer (Krea2/diffusers).</param>
     unsafe void PatchifyTokens(Tensor output, Tensor input, int patch, bool innerChannelFastest)
     {
@@ -2382,10 +2357,7 @@ public interface IBackend : IDisposable
     /// docs/Research/MEMORY_SCHEDULING_SERVING.md §9. Returns 0 on host backends.</summary>
     long OffloadActivations(long targetBytes) => 0;
 
-    /// <summary>
-    /// Relative-L1 distance <c>Σ|a−b| / Σ|b|</c>; zero when both tensors are zero, positive infinity
-    /// when only the reference is zero, and NaN when an operand or an accumulated sum is non-finite.
-    /// </summary>
+    /// <summary>Relative-L1 distance <c>Σ|a−b| / Σ|b|</c>; zero when both tensors are zero, positive infinity when only the reference is zero, and NaN when an operand or an accumulated sum is non-finite.</summary>
     unsafe float RelativeL1Distance(Tensor a, Tensor b)
     {
         if (!a.Shape.Equals(b.Shape))
@@ -2649,12 +2621,7 @@ public interface IBackend : IDisposable
     /// <summary>Concatenate tensors along the specified dimension.</summary>
     void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim);
 
-    /// <summary>
-    /// Splits a nonempty contiguous F32, F16, or BF16 tensor into nonempty chunks along
-    /// <paramref name="dim"/>. Outputs must have the same dtype and rank as the input, match every
-    /// non-split dimension, exactly partition the split dimension, and share no storage with the input
-    /// or one another. Payload bits are copied unchanged.
-    /// </summary>
+    /// <summary>Splits a nonempty contiguous F32, F16, or BF16 tensor into nonempty chunks along <paramref name="dim"/>. Outputs must have the same dtype and rank as the input, match every non-split dimension, exactly partition the split dimension, and share no storage with the input or one another. Payload bits are copied unchanged.</summary>
     void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim);
 
     // ── Convolution ─────────────────────────────────────────────────────

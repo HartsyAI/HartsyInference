@@ -14,16 +14,13 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Ideogram 4 (<c>ideogram-oss/ideogram4</c>, 9.3B, non-commercial license) text-to-image pipeline. Orchestrates Qwen3-VL-8B (13-layer tap) → two single-stream DiTs (conditional + unconditional, asymmetric CFG) → Flux.2 VAE. Ported from upstream <c>pipeline_ideogram4.py</c>.
-///
-/// Pipeline-level specifics:
+/// <summary>Ideogram 4 (<c>ideogram-oss/ideogram4</c>, 9.3B, non-commercial license) text-to-image pipeline. Orchestrates Qwen3-VL-8B (13-layer tap) → two single-stream DiTs (conditional + unconditional, asymmetric CFG) → Flux.2 VAE. Ported from upstream <c>pipeline_ideogram4.py</c>. Pipeline-level specifics:
 /// <list type="bullet">
 ///   <item><b>Unified sequence</b> per prompt: <c>[text tokens][image tokens]</c>. Text features (Qwen 13-layer concat) sit at text positions; noise sits at image positions; an <c>image_indicator</c> embedding + 3D MRoPE keep them apart.</item>
 ///   <item><b>Asymmetric CFG</b>: the positive pass runs the conditional transformer over the full sequence and keeps only the image-token velocity; the negative pass runs the <i>unconditional</i> transformer over an image-only sequence with zeroed text features. Combined as <c>v = gw·pos + (1−gw)·neg</c> with a per-step guidance schedule (gw≈7 main, gw≈3 polish).</item>
 ///   <item><b>Logit-normal schedule</b> (<see cref="LogitNormalSchedule"/>), resolution-adjusted mean, plain Euler <c>z += v·(s−t)</c>.</item>
 ///   <item><b>Fixed-constant latent norm</b> (<see cref="Ideogram4LatentNorm"/>) applied to the packed token latent before the 2×2 unpatchify — NOT the Flux.2 VAE BatchNorm.</item>
 /// </list>
-///
 /// <para><b>VRAM:</b> both 9.3B transformers must be resident during the loop (each step runs both), so this needs roughly 2× the DiT footprint plus the VAE. The Qwen encoder is freed before the loop. Realistically a multi-GPU / high-VRAM host; documented in the Phase 4 checklist.</para></summary>
 public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
 {
@@ -38,18 +35,12 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private const int OutputImageIndicator = 2;
     private const int ImagePositionOffset = 65536;
 
-    /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop
-    /// FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a
-    /// prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both.
-    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
         EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
-    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): raw budget 0.3 confined to the LATE
-    /// half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is
-    /// schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship
-    /// (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>
+    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): raw budget 0.3 confined to the LATE half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>
     private static readonly StepCacheProfile CalibratedStepCache =
         new(Threshold: 0.3f, Cap: 3, Poly: null, LateWindow: 0.5f);
 
@@ -93,14 +84,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Encodes arbitrary chat-templated text through this pipeline's own Qwen3-VL encoder — the identical
-    /// multi-layer, interleaved tap-layer configuration (<see cref="Ideogram4Config.QwenActivationLayersHf"/>) the
-    /// base prompt uses in <see cref="GenerateFromTokens"/>, so the feature dimension and layout match exactly. For
-    /// regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s
-    /// <c>encodeRegion</c> delegate) — runs outside this method's own preload/free bracket around
-    /// <see cref="_textEncoder"/>, so the caller pays a cold-weight touch if the encoder isn't already resident;
-    /// correctness-only for this first pass, not a residency optimization. Returns a
-    /// <c>[1, L, LlmFeaturesDim]</c> tensor; disposal is the caller's responsibility.</summary>
+    /// <summary>Encodes arbitrary chat-templated text through this pipeline's own Qwen3-VL encoder — the identical multi-layer, interleaved tap-layer configuration (<see cref="Ideogram4Config.QwenActivationLayersHf"/>) the base prompt uses in <see cref="GenerateFromTokens"/>, so the feature dimension and layout match exactly. For regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s <c>encodeRegion</c> delegate) — runs outside this method's own preload/free bracket around <see cref="_textEncoder"/>, so the caller pays a cold-weight touch if the encoder isn't already resident; correctness-only for this first pass, not a residency optimization. Returns a <c>[1, L, LlmFeaturesDim]</c> tensor; disposal is the caller's responsibility.</summary>
     public Tensor EncodeRegionText(int[] tokenIds) =>
         _textEncoder.EncodeMultiLayer(Backend, [tokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
 
@@ -320,7 +304,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         {
             long condBytes = SumBlockBytes(_conditional);
             long uncondBytes = SumBlockBytes(_unconditional);
-            long sharedBytes = SumBytes(_conditional.EnumerateSharedWeights()) + SumBytes(_unconditional.EnumerateSharedWeights());
+            long sharedBytes = WeightBytes.Sum(_conditional.EnumerateSharedWeights()) + WeightBytes.Sum(_unconditional.EnumerateSharedWeights());
             // The shared sets stay resident on both paths, so they are part of what the block budget must fit beside.
             long reserve = EstimateActivationReserveBytes(seqLen, _config.EmbDim, _config.IntermediateSize) + sharedBytes;
 
@@ -550,11 +534,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Builds the initial image-token latent <c>[1, nImg, 128]</c>. T2I: pure seeded noise (Ideogram's
-    /// integrator starts at t≈0). Img2img: the source goes VAE-encode (<c>[1, 32, H/8, W/8]</c>, Flux2 scaling is
-    /// identity) → 2×2 token patchify (inverse of <see cref="Unpatchify"/>) → inverse fixed-constant latent norm
-    /// (<c>(x − Shift)/Scale</c>, inverse of <see cref="ApplyLatentNorm"/>) → <c>Img2ImgSetup.MixAtSigma</c> with
-    /// fresh noise at <c>sigma = 1 − t(startIdx+1)</c> (Ideogram's <c>x_t = t·x0 + (1−t)·ε</c>).
+    /// <summary>Builds the initial image-token latent <c>[1, nImg, 128]</c>. T2I: pure seeded noise (Ideogram's integrator starts at t≈0). Img2img: the source goes VAE-encode (<c>[1, 32, H/8, W/8]</c>, Flux2 scaling is identity) → 2×2 token patchify (inverse of <see cref="Unpatchify"/>) → inverse fixed-constant latent norm (<c>(x − Shift)/Scale</c>, inverse of <see cref="ApplyLatentNorm"/>) → <c>Img2ImgSetup.MixAtSigma</c> with fresh noise at <c>sigma = 1 − t(startIdx+1)</c> (Ideogram's <c>x_t = t·x0 + (1−t)·ε</c>).
     /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean normalized source tokens
     /// are returned alongside for the per-step blend. Caller disposes both. Source is null for t2i and plain
     /// img2img.</para></summary>
@@ -606,8 +586,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Inverse of <see cref="Unpatchify"/>: VAE latent <c>[1, aeC, gridH·patch, gridW·patch]</c> → packed
-    /// token latent <c>[1, gridH·gridW, patch²·aeC]</c> with feature <c>f = p1·(aeC·patch) + p2·aeC + ae</c>.</summary>
+    /// <summary>Inverse of <see cref="Unpatchify"/>: VAE latent <c>[1, aeC, gridH·patch, gridW·patch]</c> → packed token latent <c>[1, gridH·gridW, patch²·aeC]</c> with feature <c>f = p1·(aeC·patch) + p2·aeC + ae</c>.</summary>
     private static Tensor PatchifyToTokens(Tensor vaeLatent, int gridH, int gridW, int patch)
     {
         int aeC = (int)vaeLatent.Shape[1];
@@ -742,8 +721,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return ind;
     }
 
-    /// <summary>Builds (or returns the cached) MRoPE position tensors for the given layout. Reusing the same
-    /// tensor references across generations keeps both transformers' cos/sin caches warm.</summary>
+    /// <summary>Builds (or returns the cached) MRoPE position tensors for the given layout. Reusing the same tensor references across generations keeps both transformers' cos/sin caches warm.</summary>
     private (Tensor PosIds, Tensor PosIdsImageOnly) GetOrBuildPositionIds(int numText, int gridH, int gridW)
     {
         if (_cachedPosIds is not null && _cachedPosIdsImageOnly is not null
@@ -759,8 +737,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return (_cachedPosIds, _cachedPosIdsImageOnly);
     }
 
-    /// <summary>Diagnostic: logs the prompt token ids (count + a head/tail window) so they can be compared
-    /// 1:1 against a reference transformers Qwen3-VL tokenization of the same prompt + chat template.</summary>
+    /// <summary>Diagnostic: logs the prompt token ids (count + a head/tail window) so they can be compared 1:1 against a reference transformers Qwen3-VL tokenization of the same prompt + chat template.</summary>
     private static void LogTokenIds(int[] ids)
     {
         int head = Math.Min(24, ids.Length);
@@ -769,11 +746,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Logs.Info($"[Ideogram4] promptTokens count={ids.Length} ids=[{headStr}{tailStr}]");
     }
 
-    /// <summary>Diagnostic: logs summary stats of the Qwen3-VL encoder output. The text features are already
-    /// host-synced (BuildLlmFull reads them on CPU), so this is nearly free. Run two DIFFERENT prompts and compare:
-    /// identical stats ⇒ the encoder is producing prompt-independent features (weight-load / tokenization bug);
-    /// differing stats but an image that still ignores the prompt ⇒ the bug is downstream in the DiT conditioning
-    /// or MRoPE. NaN/inf &gt; 0 ⇒ the encoder forward is numerically broken.</summary>
+    /// <summary>Diagnostic: logs summary stats of the Qwen3-VL encoder output. The text features are already host-synced (BuildLlmFull reads them on CPU), so this is nearly free. Run two DIFFERENT prompts and compare: identical stats ⇒ the encoder is producing prompt-independent features (weight-load / tokenization bug); differing stats but an image that still ignores the prompt ⇒ the bug is downstream in the DiT conditioning or MRoPE. NaN/inf &gt; 0 ⇒ the encoder forward is numerically broken.</summary>
     private static void LogEncoderStats(Tensor textFeatures)
     {
         float* tf = (float*)textFeatures.DataPointer;
@@ -824,17 +797,6 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Unpatchifies the packed token latent <c>[1, nImg, patch²·aeC]</c> → <c>[1, aeC, gridH·patch, gridW·patch]</c> (upstream <c>view(B,gh,gw,p,p,ae).permute(0,5,1,3,2,4)</c>). For packed feature <c>f</c>: <c>ae = f % aeC, p2 = (f/aeC) % patch, p1 = f / (aeC·patch)</c>.</summary>
-    /// <summary>Sums a tensor set's true on-device footprint.</summary>
-    /// <remarks>Via <see cref="DType.ComputeByteCount"/>, not <c>ElementCount * SizeInBytes</c> — block-quantized
-    /// dtypes report <c>SizeInBytes == 0</c> and would total to zero, silently disabling the streamed path.</remarks>
-    private static long SumBytes(IEnumerable<Tensor> tensors)
-    {
-        long total = 0;
-        foreach (Tensor t in tensors) total += t.DType.ComputeByteCount(t.ElementCount);
-        return total;
-    }
-
     /// <summary>Total streamable (per-block) bytes for one transformer.</summary>
     private static long SumBlockBytes(Ideogram4Transformer transformer)
     {
@@ -881,6 +843,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return scratch + 1024L * 1024 * 1024;
     }
 
+    /// <summary>Unpatchifies the packed token latent <c>[1, nImg, patch²·aeC]</c> → <c>[1, aeC, gridH·patch, gridW·patch]</c> (upstream <c>view(B,gh,gw,p,p,ae).permute(0,5,1,3,2,4)</c>). For packed feature <c>f</c>: <c>ae = f % aeC, p2 = (f/aeC) % patch, p1 = f / (aeC·patch)</c>.</summary>
     private static Tensor Unpatchify(Tensor z, int gridH, int gridW, int patch)
     {
         int packedC = (int)z.Shape[2];

@@ -5,18 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>HunyuanVideo MM-DiT — the base offline-video transformer and the backbone the Hunyuan-GameCraft
-/// world model finetunes. Reuses <see cref="HunyuanImageBlock"/> (dual-stream) and
-/// <see cref="HunyuanImageSingleBlock"/> (single-stream) with a <b>3-axis (T,H,W) RoPE</b> via the generalized
-/// <see cref="HunyuanImageRope"/>. Predicts rectified-flow velocity over the 16-channel latent from a
-/// patchified input (16-ch plain, or GameCraft's 33-ch noisy+history+mask), Llava text tokens refined by the
-/// <see cref="HunyuanVideoTokenRefiner"/>, a pooled CLIP vector, a timestep, and — for plain HunyuanVideo
-/// (<c>guidance_embeds=True</c>) — an embedded guidance scalar. Optional <c>cameraTokens</c> are token-added to
-/// the image stream (GameCraft CameraNet).
-/// <para>Faithful to diffusers <c>transformer_hunyuan_video.py</c>: <c>temb = timestep_emb + guidance_emb +
-/// pooled_vec_emb</c>, the 2-layer token refiner replaces the plain <c>txt_in</c> projection, and the final
-/// AdaLN-continuous chunks <c>[shift, scale]</c> (Tencent order). The 60 double+single blocks are streamable via
-/// <see cref="GetBlock"/>/<see cref="BeforeBlockForward"/> for the 24 GB-class bf16 checkpoint.</para></summary>
+/// <summary>HunyuanVideo MM-DiT — the base offline-video transformer and the backbone the Hunyuan-GameCraft world model finetunes. Reuses <see cref="HunyuanImageBlock"/> (dual-stream) and <see cref="HunyuanImageSingleBlock"/> (single-stream) with a <b>3-axis (T,H,W) RoPE</b> via the generalized <see cref="HunyuanImageRope"/>. Predicts rectified-flow velocity over the 16-channel latent from a patchified input (16-ch plain, or GameCraft's 33-ch noisy+history+mask), Llava text tokens refined by the <see cref="HunyuanVideoTokenRefiner"/>, a pooled CLIP vector, a timestep, and — for plain HunyuanVideo (<c>guidance_embeds=True</c>) — an embedded guidance scalar. Optional <c>cameraTokens</c> are token-added to the image stream (GameCraft CameraNet). <para>Faithful to diffusers <c>transformer_hunyuan_video.py</c>: <c>temb = timestep_emb + guidance_emb + pooled_vec_emb</c>, the 2-layer token refiner replaces the plain <c>txt_in</c> projection, and the final AdaLN-continuous chunks <c>[shift, scale]</c> (Tencent order). The 60 double+single blocks are streamable via <see cref="GetBlock"/>/<see cref="BeforeBlockForward"/> for the 24 GB-class bf16 checkpoint.</para></summary>
 public sealed unsafe class HunyuanVideoDit : IDisposable
 {
     private readonly HunyuanVideoConfig _cfg;
@@ -49,16 +38,10 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     private bool _graphDead;
     private const int GraphCaptureCall = 3;
 
-    /// <summary>True while the step graph is engaged for this session (opt-in flag on, the graph path has run at
-    /// least once, not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds:
-    /// the captured graph balances its own allocations, and freeing activations would release the fixed buffers the
-    /// capture bakes. Re-check AFTER each <see cref="Forward"/> so a mid-gen self-disable re-enables the sweep.</summary>
+    /// <summary>True while the step graph is engaged for this session (opt-in flag on, the graph path has run at least once, not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds: the captured graph balances its own allocations, and freeing activations would release the fixed buffers the capture bakes. Re-check AFTER each <see cref="Forward"/> so a mid-gen self-disable re-enables the sweep.</summary>
     public bool StepGraphActive => DitStepGraph.Enabled && !_graphDead && _graphSig != long.MinValue;
 
-    /// <summary>Invalidates the captured step graph — MUST be called whenever the DiT weights are freed (the
-    /// pipeline's post-gen <c>FreeWeights</c>): the captured graph bakes the weight device pointers, so a free +
-    /// next-gen re-upload would leave it replaying against freed memory (CUDA 700). The next generation re-warms
-    /// and re-captures.</summary>
+    /// <summary>Invalidates the captured step graph — MUST be called whenever the DiT weights are freed (the pipeline's post-gen <c>FreeWeights</c>): the captured graph bakes the weight device pointers, so a free + next-gen re-upload would leave it replaying against freed memory (CUDA 700). The next generation re-warms and re-captures.</summary>
     public void InvalidateStepGraph(IBackend backend)
     {
         backend.StepGraphReset();
@@ -69,15 +52,8 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
 
     public HunyuanVideoConfig Config => _cfg;
 
-    /// <summary>Optional hook invoked immediately before each transformer block's forward pass (global index over
-    /// double-then-single blocks). Pipelines plug a <c>BlockStreamingController</c> here to drive prefetch/eviction
-    /// so the 24 GB bf16 DiT fits in 24 GB. Null = all resident.</summary>
+    /// <summary>Optional hook invoked immediately before each transformer block's forward pass (global index over double-then-single blocks). Pipelines plug a <c>BlockStreamingController</c> here to drive prefetch/eviction so the 24 GB bf16 DiT fits in 24 GB. Null = all resident.</summary>
     public Action<int>? BeforeBlockForward { get; set; }
-
-    /// <summary>Debug/parity hook: <c>idx=-1</c> is the post-embed state (image after <c>img_in</c>, text after the
-    /// token refiner); <c>idx=0..BlockCount-1</c> is the image+text state after each block. Read from a CPU run (or
-    /// after a sync) when dumping. Null in production.</summary>
-    public Action<int, Tensor, Tensor>? OnBlockOutput { get; set; }
 
     public HunyuanVideoDit(HunyuanVideoConfig cfg)
     {
@@ -95,25 +71,24 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _imgInW = F32(w[$"{p}img_in.weight"]); _imgInB = F32(w[$"{p}img_in.bias"]);
-        _timeW0 = F32(w[$"{p}time_in.0.weight"]); _timeB0 = F32(w[$"{p}time_in.0.bias"]);
-        _timeW1 = F32(w[$"{p}time_in.2.weight"]); _timeB1 = F32(w[$"{p}time_in.2.bias"]);
-        _vecW0 = F32(w[$"{p}vector_in.0.weight"]); _vecB0 = F32(w[$"{p}vector_in.0.bias"]);
-        _vecW1 = F32(w[$"{p}vector_in.2.weight"]); _vecB1 = F32(w[$"{p}vector_in.2.bias"]);
+        _imgInW = TensorCasts.EnsureF32(w[$"{p}img_in.weight"]); _imgInB = TensorCasts.EnsureF32(w[$"{p}img_in.bias"]);
+        _timeW0 = TensorCasts.EnsureF32(w[$"{p}time_in.0.weight"]); _timeB0 = TensorCasts.EnsureF32(w[$"{p}time_in.0.bias"]);
+        _timeW1 = TensorCasts.EnsureF32(w[$"{p}time_in.2.weight"]); _timeB1 = TensorCasts.EnsureF32(w[$"{p}time_in.2.bias"]);
+        _vecW0 = TensorCasts.EnsureF32(w[$"{p}vector_in.0.weight"]); _vecB0 = TensorCasts.EnsureF32(w[$"{p}vector_in.0.bias"]);
+        _vecW1 = TensorCasts.EnsureF32(w[$"{p}vector_in.2.weight"]); _vecB1 = TensorCasts.EnsureF32(w[$"{p}vector_in.2.bias"]);
         if (_cfg.GuidanceEmbed)
         {
-            _guidW0 = F32(w[$"{p}guidance_in.0.weight"]); _guidB0 = F32(w[$"{p}guidance_in.0.bias"]);
-            _guidW1 = F32(w[$"{p}guidance_in.2.weight"]); _guidB1 = F32(w[$"{p}guidance_in.2.bias"]);
+            _guidW0 = TensorCasts.EnsureF32(w[$"{p}guidance_in.0.weight"]); _guidB0 = TensorCasts.EnsureF32(w[$"{p}guidance_in.0.bias"]);
+            _guidW1 = TensorCasts.EnsureF32(w[$"{p}guidance_in.2.weight"]); _guidB1 = TensorCasts.EnsureF32(w[$"{p}guidance_in.2.bias"]);
         }
         _refiner.LoadWeights(w, $"{p}txt_in");
         for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(w, $"{p}double_blocks.{i}");
         for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(w, $"{p}single_blocks.{i}");
-        _finalModW = F32(w[$"{p}final_layer.mod.weight"]); _finalModB = F32(w[$"{p}final_layer.mod.bias"]);
-        _outW = F32(w[$"{p}final_layer.proj.weight"]); _outB = F32(w[$"{p}final_layer.proj.bias"]);
+        _finalModW = TensorCasts.EnsureF32(w[$"{p}final_layer.mod.weight"]); _finalModB = TensorCasts.EnsureF32(w[$"{p}final_layer.mod.bias"]);
+        _outW = TensorCasts.EnsureF32(w[$"{p}final_layer.proj.weight"]); _outB = TensorCasts.EnsureF32(w[$"{p}final_layer.proj.bias"]);
     }
 
-    /// <summary>Always-resident weights: patchify/text-refiner/time/vector/guidance embedders + final layer. Touched
-    /// every step regardless of the executing block, so the streaming controller doesn't manage them.</summary>
+    /// <summary>Always-resident weights: patchify/text-refiner/time/vector/guidance embedders + final layer. Touched every step regardless of the executing block, so the streaming controller doesn't manage them.</summary>
     public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         Tensor?[] head = [_imgInW, _imgInB, _timeW0, _timeB0, _timeW1, _timeB1,
@@ -135,12 +110,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     /// <summary>Streamable block at global index <paramref name="idx"/> (double blocks first, then single).</summary>
     public IStreamingBlock GetBlock(int idx) => idx < _double.Length ? _double[idx] : _single[idx - _double.Length];
 
-    /// <summary>Predicts velocity <c>[B, OutChannels, T, H, W]</c> for the latent <c>[B, InChannels, T, H, W]</c>,
-    /// conditioned on the raw Llava text hidden states <c>[B, L, TextEmbedDim]</c> (refined internally), a pooled
-    /// CLIP vector <c>[B, PooledEmbedDim]</c>, <paramref name="timestep"/> (≈0..1000), and — for plain HunyuanVideo —
-    /// <paramref name="guidance"/> (the embedded-guidance scalar, typically <c>EmbeddedGuidanceScale·1000</c>).
-    /// <paramref name="cameraTokens"/> (<c>[B, S_img, HiddenSize]</c>), when supplied, is added to the image tokens
-    /// after patchify (GameCraft CameraNet fusion).</summary>
+    /// <summary>Predicts velocity <c>[B, OutChannels, T, H, W]</c> for the latent <c>[B, InChannels, T, H, W]</c>, conditioned on the raw Llava text hidden states <c>[B, L, TextEmbedDim]</c> (refined internally), a pooled CLIP vector <c>[B, PooledEmbedDim]</c>, <paramref name="timestep"/> (≈0..1000), and — for plain HunyuanVideo — <paramref name="guidance"/> (the embedded-guidance scalar, typically <c>EmbeddedGuidanceScale·1000</c>). <paramref name="cameraTokens"/> (<c>[B, S_img, HiddenSize]</c>), when supplied, is added to the image tokens after patchify (GameCraft CameraNet fusion).</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor txt, Tensor pooled, float timestep,
         float guidance = 0f, Tensor? cameraTokens = null)
     {
@@ -153,12 +123,12 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         int patchVec = _cfg.InChannels * pT * pH * pW;
 
         // Step-graph fast path (opt-in): capture img_in → blocks → final → proj_out once and replay it. Only the
-        // single-forward b==1 path with no camera tokens qualifies (the block RoPE host fallback is batch>1-only,
-        // and the diagnostic block hooks would inject host reads into the capture). Requires the DiT to be RESIDENT
-        // (BeforeBlockForward null): a captured graph bakes weight device pointers, so block streaming — which
-        // re-points weights per block and runs a host prefetch hook — is incompatible. Self-disables to eager.
+        // single-forward b==1 path with no camera tokens qualifies (the block RoPE host fallback is batch>1-only).
+        // Requires the DiT to be RESIDENT (BeforeBlockForward null): a captured graph bakes weight device pointers,
+        // so block streaming — which re-points weights per block and runs a host prefetch hook — is incompatible.
+        // Self-disables to eager.
         if (DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && b == 1 && cameraTokens is null
-            && OnBlockOutput is null && BeforeBlockForward is null)
+            && BeforeBlockForward is null)
         {
             return ForwardGraph(backend, latent, txt, pooled, timestep, guidance,
                 hidden, pT, pH, pW, T, H, W, tOut, hOut, wOut, sImg, patchVec);
@@ -177,22 +147,18 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         // 3. temb = time(timestep) + guidance(guidance) + vector(pooled).
         Tensor temb = BuildTemb(backend, b, hidden, timestep, guidance, pooled);
 
-        OnBlockOutput?.Invoke(-1, img, txtTok);
-
         // 4. Blocks (3D rope, packed (tOut,hOut,wOut)).
         for (int i = 0; i < _double.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
             (Tensor ni, Tensor nt) = _double[i].Forward(backend, img, txtTok, temb, _rope, hOut, wOut, tOut);
             img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
-            OnBlockOutput?.Invoke(i, img, txtTok);
         }
         for (int i = 0; i < _single.Length; i++)
         {
             BeforeBlockForward?.Invoke(_double.Length + i);
             (Tensor ni, Tensor nt) = _single[i].Forward(backend, img, txtTok, temb, _rope, hOut, wOut, tOut);
             img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
-            OnBlockOutput?.Invoke(_double.Length + i, img, txtTok);
         }
         txtTok.Dispose();
 
@@ -235,12 +201,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         return velocity;
     }
 
-    /// <summary>Step-graph forward for the single-forward b==1 path. Refreshes the fixed input buffers OUTSIDE the
-    /// capture (host Patchify / token refiner / BuildTemb → CopyInto), then captures (call <see cref="GraphCaptureCall"/>)
-    /// or replays (later calls) the img_in → blocks → final → proj_out body, and unpatchifies the fixed proj_out buffer
-    /// into a fresh caller-owned velocity. Warm calls 1..2 run the body eagerly through the fixed buffers so nothing
-    /// inside the capture does a first-touch allocation (RoPE tables, weight promotions). Self-disables to the eager
-    /// body on any capture failure so the generation stays correct.</summary>
+    /// <summary>Step-graph forward for the single-forward b==1 path. Refreshes the fixed input buffers OUTSIDE the capture (host Patchify / token refiner / BuildTemb → CopyInto), then captures (call <see cref="GraphCaptureCall"/>) or replays (later calls) the img_in → blocks → final → proj_out body, and unpatchifies the fixed proj_out buffer into a fresh caller-owned velocity. Warm calls 1..2 run the body eagerly through the fixed buffers so nothing inside the capture does a first-touch allocation (RoPE tables, weight promotions). Self-disables to the eager body on any capture failure so the generation stays correct.</summary>
     private Tensor ForwardGraph(IBackend backend, Tensor latent, Tensor txt, Tensor pooled, float timestep,
         float guidance, int hidden, int pT, int pH, int pW, int T, int H, int W, int tOut, int hOut, int wOut,
         int sImg, int patchVec)
@@ -324,10 +285,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
     }
 
-    /// <summary>The captured (or capture-warming) body: img_in on the fixed patchified latent → double+single blocks
-    /// (a disposable working copy of the fixed text so the block loop can free it) → device final AdaLN → proj_out,
-    /// landing in the fixed <see cref="_graphProjected"/> buffer. All device ops — no host reads (b==1 RoPE is the
-    /// GPU path, the diagnostic block hooks are gated off on this path).</summary>
+    /// <summary>The captured (or capture-warming) body: img_in on the fixed patchified latent → double+single blocks (a disposable working copy of the fixed text so the block loop can free it) → device final AdaLN → proj_out, landing in the fixed <see cref="_graphProjected"/> buffer. All device ops — no host reads (b==1 RoPE is the GPU path, the diagnostic block hooks are gated off on this path).</summary>
     private void RunGraphBody(IBackend backend, int hidden, int hOut, int wOut, int tOut, int sImg, int outVec)
     {
         Tensor img = new(new TensorShape(1, sImg, hidden), DType.F32);
@@ -364,10 +322,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         backend.CopyInto(_graphProjected!, projected); projected.Dispose();
     }
 
-    /// <summary>Device-copies the fixed proj_out buffer into a fresh disposable tensor and unpatchifies THAT into a
-    /// fresh, caller-owned velocity <c>[1, OutChannels, T, H, W]</c>. Reading <see cref="_graphProjected"/>'s
-    /// DataPointer directly would D2H-AND-FREE the graph-owned buffer the captured graph writes (the Krea2
-    /// <c>SnapshotGraphLatent</c> rule) — freeing it corrupts every subsequent replay's output.</summary>
+    /// <summary>Device-copies the fixed proj_out buffer into a fresh disposable tensor and unpatchifies THAT into a fresh, caller-owned velocity <c>[1, OutChannels, T, H, W]</c>. Reading <see cref="_graphProjected"/>'s DataPointer directly would D2H-AND-FREE the graph-owned buffer the captured graph writes (the Krea2 <c>SnapshotGraphLatent</c> rule) — freeing it corrupts every subsequent replay's output.</summary>
     private Tensor UnpatchifyToVelocity(IBackend backend, int T, int H, int W, int pT, int pH, int pW,
         int tOut, int hOut, int wOut)
     {
@@ -449,8 +404,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
             }
     }
 
-    /// <summary>In-place AdaLN-continuous: <c>x = x*(1+scale)+shift</c> from packed mod <c>[B, 2*hidden]</c>,
-    /// chunked <c>[shift, scale]</c> (Tencent <c>final_layer.adaLN_modulation</c> order).</summary>
+    /// <summary>In-place AdaLN-continuous: <c>x = x*(1+scale)+shift</c> from packed mod <c>[B, 2*hidden]</c>, chunked <c>[shift, scale]</c> (Tencent <c>final_layer.adaLN_modulation</c> order).</summary>
     private static void Modulate(Tensor x, Tensor mod, int b, int s, int hidden)
     {
         float* xp = (float*)x.DataPointer; float* mp = (float*)mod.DataPointer;
@@ -465,8 +419,6 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
             }
         }
     }
-
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     public void Dispose() { }
 }

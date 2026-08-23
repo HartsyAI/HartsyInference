@@ -2,8 +2,8 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
-/// <summary>Top-level configuration for the CosyVoice 2 (`FunAudioLLM/CosyVoice2-0.5B`) text-to-speech
-/// pipeline. CosyVoice 2 is a four-stage system: Qwen2.5-0.5B text→speech-token LM → FSQ speech tokens →
+/// <summary>Top-level configuration for the CosyVoice 2 (`FunAudioLLM/CosyVoice2-0.5B`) text-to-speech pipeline.</summary>
+/// <remarks>CosyVoice 2 is a four-stage system: Qwen2.5-0.5B text→speech-token LM → FSQ speech tokens →
 /// chunk-aware conditional flow matching (speech-token→mel) → HiFTNet vocoder (mel→24 kHz waveform),
 /// with a CAM++ 192-dim speaker embedding injected only at the flow-matching stage. See
 /// <c>docs/Research/COSYVOICE_ARCHITECTURE.md</c>.
@@ -12,20 +12,16 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// "single extended-vocab softmax"):</b> the Qwen2.5 backbone keeps its stock text embedding; speech
 /// tokens use a <i>separate</i> <c>speech_embedding</c> on the input side and a separate
 /// <c>llm_decoder</c> Linear on the output side (the Qwen <c>lm_head</c> is unused for speech). Two
-/// extra control embeddings (<c>llm_embedding</c>: sos/eos + task) bracket the text/speech boundary.</para></summary>
+/// extra control embeddings (<c>llm_embedding</c>: sos/eos + task) bracket the text/speech boundary.</para></remarks>
 public sealed record CosyVoiceConfig
 {
-    /// <summary>Qwen2.5-0.5B backbone config (24 layers / 896 hidden / 14:2 GQA / RoPE θ=1e6). The
-    /// backbone keeps the stock Qwen text vocab; speech tokens are handled by the separate
-    /// <c>speech_embedding</c> / <c>llm_decoder</c> heads (see <see cref="SpeechTokenSize"/>).</summary>
+    /// <summary>Qwen2.5-0.5B backbone config (24 layers / 896 hidden / 14:2 GQA / RoPE θ=1e6). The backbone keeps the stock Qwen text vocab; speech tokens are handled by the separate <c>speech_embedding</c> / <c>llm_decoder</c> heads (see <see cref="SpeechTokenSize"/>).</summary>
     public required Qwen2Config Llm { get; init; }
 
     /// <summary>Number of FSQ speech-token codes — <c>3^8 = 6561</c> for CosyVoice 2.</summary>
     public int SpeechTokenSize { get; init; } = 6_561;
 
-    /// <summary>Extra speech-token vocab slots appended after the 6561 codes (sos/eos/task markers on
-    /// the speech side). The <c>llm_decoder</c> output dim and <c>speech_embedding</c> rows are
-    /// <c>SpeechTokenSize + SpeechTokenExtra</c>. The end-of-speech token ID is <see cref="SpeechTokenSize"/>.</summary>
+    /// <summary>Extra speech-token vocab slots appended after the 6561 codes (sos/eos/task markers on the speech side). The <c>llm_decoder</c> output dim and <c>speech_embedding</c> rows are <c>SpeechTokenSize + SpeechTokenExtra</c>. The end-of-speech token ID is <see cref="SpeechTokenSize"/>.</summary>
     public int SpeechTokenExtra { get; init; } = 3;
 
     /// <summary>Speech-token frame rate (Hz). 25 Hz for CV2 — 25 tokens ≈ 1 second of audio.</summary>
@@ -43,9 +39,7 @@ public sealed record CosyVoiceConfig
     /// <summary>Default LM sampling knobs (autoregressive speech-token generation).</summary>
     public CosyVoiceSamplingConfig Sampling { get; init; } = new();
 
-    /// <summary>Streaming text:speech interleave ratio (5 text tokens → 15 speech tokens) and the
-    /// per-chunk speech-token count that drives first-packet latency. <c>0</c> chunk size selects
-    /// non-streaming (emit the turn-of-speech marker only after all text).</summary>
+    /// <summary>Streaming text:speech interleave ratio (5 text tokens → 15 speech tokens) and the per-chunk speech-token count that drives first-packet latency. <c>0</c> chunk size selects non-streaming (emit the turn-of-speech marker only after all text).</summary>
     public int StreamingTextChunk { get; init; } = 5;
     public int StreamingSpeechChunk { get; init; } = 15;
 
@@ -63,9 +57,7 @@ public sealed record CosyVoiceConfig
     };
 }
 
-/// <summary>Conditional flow-matching (OT-CFM) config for the speech-token → mel stage. Vanilla
-/// first-order Euler (no sway-sampling / omega-shift); CFG weight 0.7; 10 NFE. The estimator is a
-/// small Matcha-TTS-style UNet1D wrapped in a chunk-aware causal transformer encoder.</summary>
+/// <summary>Conditional flow-matching (OT-CFM) config for the speech-token → mel stage. Vanilla first-order Euler (no sway-sampling / omega-shift); CFG weight 0.7; 10 NFE. The estimator is a small Matcha-TTS-style UNet1D wrapped in a chunk-aware causal transformer encoder.</summary>
 public sealed record CosyVoiceFlowConfig
 {
     /// <summary>Output mel bins. 80.</summary>
@@ -74,8 +66,7 @@ public sealed record CosyVoiceFlowConfig
     /// <summary>Mel frame rate (Hz). 50 — the flow upsamples the 25 Hz token stream ~2× in time.</summary>
     public int MelFrameRateHz { get; init; } = 50;
 
-    /// <summary>Speech-token embedding dim fed to the flow encoder (output_size of the upstream LM /
-    /// the flow's input projection). 512 in CV2's flow.pt.</summary>
+    /// <summary>Speech-token embedding dim fed to the flow encoder (output_size of the upstream LM / the flow's input projection). 512 in CV2's flow.pt.</summary>
     public int InputSize { get; init; } = 512;
 
     /// <summary>UpsampleConformerEncoder model width (output_size). 512 in CV2's flow.pt.</summary>
@@ -115,9 +106,7 @@ public sealed record CosyVoiceFlowConfig
     public float CfgRate { get; init; } = 0.7f;
 }
 
-/// <summary>HiFTNet vocoder config (mel → 24 kHz waveform). Harmonic-plus-noise source filter + iSTFT
-/// output stage — structurally the same family as the Kokoro iSTFTNet decoder, with an added internal
-/// F0 predictor feeding the sinusoidal source.</summary>
+/// <summary>HiFTNet vocoder config (mel → 24 kHz waveform). Harmonic-plus-noise source filter + iSTFT output stage — structurally the same family as the Kokoro iSTFTNet decoder, with an added internal F0 predictor feeding the sinusoidal source.</summary>
 public sealed record CosyVoiceHiftConfig
 {
     public int MelBins { get; init; } = 80;
@@ -144,8 +133,7 @@ public sealed record CosyVoiceSamplingConfig
     public float TopP { get; init; } = 0.8f;
     public float RepetitionPenalty { get; init; } = 1.1f;
 
-    /// <summary>Repetition-Aware Sampling: detect a degenerate speech-token loop and re-roll with a
-    /// flatter distribution. Window + max-repeat thresholds mirror <c>cosyvoice/llm/llm.py</c>.</summary>
+    /// <summary>Repetition-Aware Sampling: detect a degenerate speech-token loop and re-roll with a flatter distribution. Window + max-repeat thresholds mirror <c>cosyvoice/llm/llm.py</c>.</summary>
     public bool UseRas { get; init; } = true;
     public int RasWindow { get; init; } = 10;
     public int RasMaxRepeat { get; init; } = 4;

@@ -17,8 +17,7 @@ public sealed unsafe class HunyuanImageRope
     private readonly Dictionary<IBackend, (int[] Dims, Tensor Cos, Tensor Sin)> _tables = new();
 
     /// <summary>Creates a HunyuanImageRope.</summary>
-    /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>);
-    /// 3 axes <c>(temporal, height, width)</c> for video (e.g. <c>[16, 56, 56]</c> for HunyuanVideo). Each must be even.</param>
+    /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>); 3 axes <c>(temporal, height, width)</c> for video (e.g. <c>[16, 56, 56]</c> for HunyuanVideo). Each must be even.</param>
     /// <param name="theta">RoPE base frequency. Default 256.</param>
     public HunyuanImageRope(int[]? axesDim = null, float theta = 256.0f)
     {

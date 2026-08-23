@@ -80,11 +80,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit): the family samples with a UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. This family samples with UniPC, so even an explicit 'euler' cannot be honoured here.
         // Refuse rather than accepting the request and sampling with something else.
-        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
-        {
-            throw new NotSupportedException(
-                $"Sampler/schedule '{request.Scheduler}' is not available on Wan S2V. Leave the sampler unset.");
-        }
+        FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan S2V");
 
         ThrowIfDisposed();
         int width = request.Width ?? 832, height = request.Height ?? 480;

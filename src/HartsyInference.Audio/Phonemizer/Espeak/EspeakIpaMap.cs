@@ -3,9 +3,7 @@ using HartsyInference.Core.Exceptions;
 
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
-/// <summary>Maps espeak phoneme mnemonics to IPA, loaded from an embedded table generated offline by aligning
-/// espeak-ng's ascii and IPA phoneme output. The TTS models consume IPA, while the ported translation pipeline emits
-/// phoneme codes whose mnemonics come from the phoneme table; this bridges the two.</summary>
+/// <summary>Maps espeak phoneme mnemonics to IPA, loaded from an embedded table generated offline by aligning espeak-ng's ascii and IPA phoneme output; bridges the ported pipeline's mnemonic codes to the IPA the TTS models consume.</summary>
 internal sealed class EspeakIpaMap
 {
     private const string ResourcePrefix = "HartsyInference.Audio.Phonemizer.Resources.ipa_phoneme_map";
@@ -14,8 +12,7 @@ internal sealed class EspeakIpaMap
 
     private EspeakIpaMap(Dictionary<string, string> map) => _map = map;
 
-    /// <summary>Loads the embedded mnemonic-to-IPA table for a phoneme table (e.g. <c>en</c>, <c>en-us</c>). The mapping
-    /// differs per table (British <c>əʊ</c> vs American <c>oʊ</c>); falls back to the generic table.</summary>
+    /// <summary>Loads the embedded mnemonic-to-IPA table for a phoneme table (e.g. <c>en</c>, <c>en-us</c>); the mapping differs per table (British <c>əʊ</c> vs American <c>oʊ</c>) and falls back to the generic table.</summary>
     public static EspeakIpaMap Load(string table = "en")
     {
         Assembly asm = typeof(EspeakIpaMap).Assembly;
@@ -35,8 +32,7 @@ internal sealed class EspeakIpaMap
         return new EspeakIpaMap(map);
     }
 
-    /// <summary>Converts a sequence of phoneme codes to an IPA string, mapping each code through its phoneme-table
-    /// mnemonic. Codes without an IPA mapping fall back to their printable mnemonic so nothing is silently dropped.</summary>
+    /// <summary>Converts a sequence of phoneme codes to an IPA string via each code's phoneme-table mnemonic; codes without an IPA mapping fall back to their printable mnemonic so nothing is silently dropped.</summary>
     public string ToIpa(IReadOnlyList<byte> codes, EspeakPhonemeTable phonemeTable)
     {
         System.Text.StringBuilder sb = new(codes.Count * 2);

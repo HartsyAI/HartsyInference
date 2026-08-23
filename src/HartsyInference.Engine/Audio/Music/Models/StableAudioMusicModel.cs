@@ -12,18 +12,13 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Stable Audio Open Small (<c>stabilityai/stable-audio-open-small</c>, via the ungated
-/// <c>FastVideo/stable-audio-open-small-Diffusers</c> repack) — T5-base prompt encode → rectified-flow DiT
-/// ping-pong denoise (8 steps, no CFG, ARC-distilled) → Oobleck VAE decode → 44.1 kHz stereo, up to ~11.89 s.
-/// DiT/VAE/timing-conditioner components are individually real-weight parity-verified (cosine 1.0 each); the
-/// composed pipeline is structurally wired but not yet validated end-to-end against a Python reference.</summary>
+/// <summary>Stable Audio Open Small (<c>stabilityai/stable-audio-open-small</c>, via the ungated <c>FastVideo/stable-audio-open-small-Diffusers</c> repack) — T5-base prompt encode → rectified-flow DiT ping-pong denoise (8 steps, no CFG, ARC-distilled) → Oobleck VAE decode → 44.1 kHz stereo, up to ~11.89 s. DiT/VAE/timing-conditioner components are individually real-weight parity-verified (cosine 1.0 each); the composed pipeline is structurally wired but not yet validated end-to-end against a Python reference.</summary>
 internal static class StableAudioMusicModel
 {
     private const string Repo = "FastVideo/stable-audio-open-small-Diffusers";
     private const string T5Repo = "google-t5/t5-base";
     private const int T5MaxTokens = 64;
 
-    /// <summary>The Stable Audio Open Small descriptor.</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = true,

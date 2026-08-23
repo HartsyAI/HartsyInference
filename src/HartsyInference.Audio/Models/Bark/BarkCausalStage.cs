@@ -285,6 +285,7 @@ public sealed unsafe class BarkCausalStage : IDisposable
 
     /// <summary>Parity-debug only: teacher-forced logits for the given token ids. Returns <c>[1, T, outVocab]</c>
     /// (causal full-sequence forward + lm_head over every position). Not used in production.</summary>
+    /// <remarks>Kept unwired as the C# half of <c>tests/python-reference/bark_reference/dump_bark_reference.py</c>, which names this method as its counterpart.</remarks>
     public Tensor ForwardLogits(IBackend backend, IReadOnlyList<int> tokenIds)
     {
         if (_inputEmbed is null) throw new InvalidOperationException("BarkCausalStage weights not loaded.");
