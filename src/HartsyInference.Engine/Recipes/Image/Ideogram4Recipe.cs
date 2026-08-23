@@ -94,16 +94,16 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             // nvfp4ToFp8: the DiTs are ~93% nvfp4. Dequantizing to F16 would need 35.9 GB for the pair; folding the
             // block scale into an fp8 value (global scale on Fp8ScaleFactor) keeps them at 9.3 GB each.
             Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(context.CheckpointPath)}.");
-            Dictionary<string, Tensor> condWeights = LoadComponent(context.CheckpointPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
+            Dictionary<string, Tensor> condWeights = ComponentLoader.Load(context.CheckpointPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
             Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(uncondPath)}.");
-            Dictionary<string, Tensor> uncondWeights = LoadComponent(uncondPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, nvfp4ToFp8: true, loaders);
+            Dictionary<string, Tensor> uncondWeights = ComponentLoader.Load(uncondPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
             Logs.Info($"[Ideogram4Recipe] Loading Qwen3-VL-8B text encoder: {Path.GetFileName(encoderPath)}.");
-            Dictionary<string, Tensor> encoderWeights = LoadComponent(encoderPath, CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true, nvfp4ToFp8: false, loaders);
+            Dictionary<string, Tensor> encoderWeights = ComponentLoader.Load(encoderPath, "Ideogram4Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true, loaders);
 
             Logs.Info($"[Ideogram4Recipe] Loading Flux.2 VAE: {Path.GetFileName(vaePath)}.");
-            Dictionary<string, Tensor> vaeWeights = LoadComponent(vaePath, key => key, applyFp8Dequant: false, nvfp4ToFp8: false, loaders);
+            Dictionary<string, Tensor> vaeWeights = ComponentLoader.Load(vaePath, "Ideogram4Recipe", keyTransform: null, applyFp8Dequant: false, loaders);
 
             Ideogram4Config config = Ideogram4Config.V4;
             Logs.Info($"[Ideogram4Recipe] Building models (dim={config.LlmFeaturesDim} LLM features, {config.MaxTextTokens} max text tokens).");
@@ -150,27 +150,5 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Loads one component from a single safetensors file: drops fp8 <c>scaled_fp8</c> markers, applies <paramref name="keyTransform"/> (null return drops the key), then optionally folds fp8 <c>*.scale_weight</c> companions. The registered loader owns the tensor memory and must outlive the weights.</summary>
-    private static Dictionary<string, Tensor> LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant, bool nvfp4ToFp8, List<SafeTensorsLoader> loaders)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        loaders.Add(loader);
-        Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-        foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
-        {
-            if (kv.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kv.Key == "scaled_fp8")
-            {
-                continue;
-            }
-            string? mapped = keyTransform(kv.Key);
-            if (mapped is not null)
-            {
-                merged[mapped] = kv.Value;
-            }
-        }
-        return applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged, nvfp4ToFp8) : merged;
     }
 }

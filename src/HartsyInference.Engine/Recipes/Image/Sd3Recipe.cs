@@ -70,7 +70,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             if (t5Weights.Count == 0)
             {
                 string path = ResolveComponent(SideModels.T5XxlEnconly, "T5-XXL");
-                t5Weights = RequireWeights(StripT5Prefix(OpenSide(loaders, path).GetAllTensors()), "T5-XXL", path);
+                t5Weights = RequireWeights(LoaderPrefixUtils.StripT5XxlPrefix(OpenSide(loaders, path).GetAllTensors()), "T5-XXL", path);
                 Logs.Info($"[Sd3Recipe] T5-XXL resolved as a separate file: {path}.");
             }
             if (vaeWeights.Count == 0)
@@ -124,14 +124,8 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], transformer.BlockCount, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount, transformer.EnumerateSharedWeights());
                 Logs.Info($"[Sd3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
@@ -204,21 +198,5 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             return (int)t2.Shape[0];
         }
         return 1536;
-    }
-
-    /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file and drops the <c>position_ids</c> buffer the encoder doesn't consume.</summary>
-    private static Dictionary<string, Tensor> StripT5Prefix(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        const string ComfyPrefix = "text_encoders.t5xxl.transformer.";
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string key = kv.Key.StartsWith(ComfyPrefix, StringComparison.Ordinal) ? kv.Key[ComfyPrefix.Length..] : kv.Key;
-            if (!key.EndsWith("position_ids", StringComparison.Ordinal))
-            {
-                result[key] = kv.Value;
-            }
-        }
-        return result;
     }
 }

@@ -2,10 +2,7 @@ using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
-using HartsyInference.ModelAssets.PyTorch;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Audio.Wake.Speakers;
 
@@ -15,9 +12,8 @@ namespace HartsyInference.Engine.Audio.Wake.Speakers;
 /// <para>The whole-buffer extractor is the right one here: speaker identification runs on a captured utterance after
 /// a detection has already fired, never on the live 80 ms stream, so there is nothing incremental to preserve.</para>
 ///
-/// <para>The weight lookup and the fbank/CMN recipe mirror <c>Engine/Audio/Stt/SpeakerDiarizer</c>, which had them
-/// first but keeps them private behind a diarization-shaped API. When the two can be edited together, fold the
-/// diarizer's <c>Load</c>/<c>Embed</c> onto this type rather than growing a third copy.</para>
+/// <para>The weight lookup and the fbank/CMN recipe live in <see cref="CamPlusLoader"/>, shared with
+/// <c>Engine/Audio/Stt/SpeakerDiarizer</c>; this type contributes the whole-buffer framing and the clip guards.</para>
 ///
 /// <para>Not thread-safe internally by the encoder's design, so every call is serialized on a private lock; embedding
 /// one utterance is burst work at human cadence, so the contention does not matter.</para></summary>
@@ -82,55 +78,12 @@ public sealed class CamPlusEmbedder : IDisposable
     /// <summary>Loads CAM++ from an explicit checkpoint path.</summary>
     public static CamPlusEmbedder LoadFrom(string path)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        IDisposable[] loaders;
-        IReadOnlyDictionary<string, Tensor> weights;
-        try
-        {
-            if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-            {
-                SafeTensorsLoader safetensors = new SafeTensorsLoader();
-                safetensors.Load(path);
-                weights = safetensors.GetAllTensors();
-                loaders = [safetensors];
-            }
-            else
-            {
-                PytorchPickleLoader pickle = new PytorchPickleLoader();
-                pickle.Load(path);
-                weights = pickle.GetAllTensors();
-                loaders = [pickle];
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Wake][Speaker] Failed to read the CAM++ checkpoint '{path}'", ex);
-            throw;
-        }
-
-        // Standalone campplus checkpoints are unprefixed; the CosyVoice/Chatterbox bundle nests it under speaker_encoder.
-        string prefix = weights.ContainsKey("xvector.dense.linear.weight") ? string.Empty : "speaker_encoder";
-        CamPlusSpeakerEncoder encoder = new CamPlusSpeakerEncoder(EmbeddingDimension);
-        try
-        {
-            encoder.LoadWeights(weights, prefix);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Wake][Speaker] '{path}' does not carry CAM++ weights under prefix '{prefix}'", ex);
-            encoder.Dispose();
-            foreach (IDisposable loader in loaders)
-            {
-                loader.Dispose();
-            }
-            throw;
-        }
-        Logs.Info($"[Wake][Speaker] Loaded the CAM++ speaker encoder from '{path}'.");
+        (CamPlusSpeakerEncoder encoder, IDisposable[] loaders) = CamPlusLoader.Load(path, "[Wake][Speaker]", EmbeddingDimension);
         return new CamPlusEmbedder(encoder, loaders);
     }
 
     /// <summary>L2-normalized 192-d embedding of <paramref name="mono16k"/>, which must be mono 16 kHz. Amplitude scale does not matter — cepstral mean normalization removes constant gain — so the wake path's int16-scaled audio and a decoder's ±1 audio both work, as long as one clip is not a mix of the two.</summary>
-    public unsafe float[] Embed(IBackend backend, ReadOnlySpan<float> mono16k)
+    public float[] Embed(IBackend backend, ReadOnlySpan<float> mono16k)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (mono16k.Length < MinimumSamples)
@@ -143,53 +96,20 @@ public sealed class CamPlusEmbedder : IDisposable
         {
             float[,] fbank = _fbank.Compute(mono16k);
             int frames = fbank.GetLength(0);
-            int bins = fbank.GetLength(1);
             if (frames < MinimumFrames)
             {
                 throw new ArgumentException(
                     $"CAM++ needs at least {MinimumFrames} fbank frames, got {frames} from {mono16k.Length} samples.", nameof(mono16k));
             }
 
-            Tensor features = new Tensor(new TensorShape(1, frames, bins), DType.F32);
             try
             {
-                float* destination = (float*)features.DataPointer;
-                for (int bin = 0; bin < bins; bin++)
-                {
-                    // Cepstral mean normalization, per bin over time — what CosyVoice feeds CAM++.
-                    double mean = 0d;
-                    for (int frame = 0; frame < frames; frame++)
-                    {
-                        mean += fbank[frame, bin];
-                    }
-                    mean /= frames;
-                    for (int frame = 0; frame < frames; frame++)
-                    {
-                        destination[(long)frame * bins + bin] = (float)(fbank[frame, bin] - mean);
-                    }
-                }
-                Tensor embedding = _encoder.Forward(backend, features);
-                try
-                {
-                    int dimension = (int)embedding.Shape[embedding.Shape.Rank - 1];
-                    float[] vector = new float[dimension];
-                    new ReadOnlySpan<float>((float*)embedding.DataPointer, dimension).CopyTo(vector);
-                    SpeakerEmbeddingMath.NormalizeInPlace(vector);
-                    return vector;
-                }
-                finally
-                {
-                    embedding.Dispose();
-                }
+                return CamPlusLoader.Embed(backend, _encoder, fbank);
             }
             catch (Exception ex)
             {
                 Logs.Error($"[Wake][Speaker] CAM++ failed on a {mono16k.Length / (double)SampleRate:0.00}s clip", ex);
                 throw;
-            }
-            finally
-            {
-                features.Dispose();
             }
         }
     }

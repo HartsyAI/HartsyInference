@@ -62,13 +62,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
             WanAnimateTransformer transformer = new WanAnimateTransformer(config);
             transformer.LoadWeights(conv.Transformer);
 
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-            Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder();
-            vaeDecoder.LoadWeights(vaeWeights);
-            Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder();
-            vaeEncoder.LoadWeights(vaeWeights);
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);
 
             ClipVisionEncoder? clipVision = null;
             if (hasClipEmbedder)
@@ -81,13 +75,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
                 clipVision.LoadWeights(clipLoader.GetAllTensors());
             }
 
-            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-            umt5Loader.Load(umt5Path);
-            loaders.Add(umt5Loader);
-            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-            umt5.LoadWeights(umt5Weights);
-            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: WanVideoRecipe.TokenLength);
+            (T5TextEncoder umt5, T5Tokenizer tokenizer) = VideoRecipeUtils.LoadUmt5(umt5Path, loaders);
 
             WanAnimatePipeline pipeline = new WanAnimatePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanAnimateRecipe] Wan-Animate ready (driving-video).");

@@ -1,9 +1,19 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using HartsyInference.Audio.Io;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
+using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Vision.Clip;
+using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -235,15 +245,109 @@ internal static class VideoRecipeUtils
     internal static Tensor RgbToReferenceTensor(byte[] rgb24, int width, int height) => TileRgbToClip(rgb24, width, height, 1);
 
     /// <summary>Strips a Comfy wrapper prefix (e.g. <c>text_encoders.t5xxl.transformer.</c>) from a standalone text-encoder safetensors file, passing unprefixed keys through.</summary>
-    internal static Dictionary<string, Tensor> StripPrefix(IReadOnlyDictionary<string, Tensor> raw, string prefix)
+    internal static Dictionary<string, Tensor> StripPrefix(IReadOnlyDictionary<string, Tensor> raw, string prefix) =>
+        Features.LoaderPrefixUtils.StripPrefixes(raw, [prefix]);
+
+    /// <summary>CLIP-ViT-H image conditioning for the Wan family: preprocess to 224², encode hidden states, drop the batch axis, and materialize to host. Weights are preloaded and freed around the single encode, so the encoder costs VRAM only for its duration.</summary>
+    internal static Tensor EncodeClipVision(IBackend backend, ClipVisionEncoder clipVision, byte[] rgb24, int width, int height)
     {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(clipVision);
+        backend.PreloadWeights(clipVision.EnumerateWeights());
+        ClipImagePreprocessor preprocessor = new ClipImagePreprocessor(imageSize: 224);
+        Tensor pixels = preprocessor.Preprocess(rgb24, width, height);
+        Tensor batched = clipVision.EncodeHiddenStates(backend, pixels);
+        pixels.Dispose();
+        backend.Sync();
+        backend.FreeWeights(clipVision.EnumerateWeights());
+        Tensor dropped = DropBatch(batched);
+        batched.Dispose();
+        Tensor host = HostCopy(dropped);
+        dropped.Dispose();
+        return host;
+    }
+
+    /// <summary>Batched umT5 encode for the Wan family: every context in one encode, sliced back apart, pad rows zeroed, then the encoder's weights freed. The slice/zero passes are host loops, so the returned embeddings are host-materialized — that IS the cross-device boundary when <paramref name="backend"/> is a separate text-encoder backend, and must not be optimized away.</summary>
+    internal static Tensor[] EncodeWanPromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, params int[][] tokenSets)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(umt5);
+        ArgumentNullException.ThrowIfNull(tokenSets);
+        int[][] masks = new int[tokenSets.Length][];
+        for (int i = 0; i < tokenSets.Length; i++)
         {
-            string key = kv.Key.StartsWith(prefix, StringComparison.Ordinal) ? kv.Key[prefix.Length..] : kv.Key;
-            result[key] = kv.Value;
+            masks[i] = T5Tokenizer.CreateAttentionMask(tokenSets[i]);
         }
-        return result;
+        Tensor[] embeds = new Tensor[tokenSets.Length];
+        Tensor batch = umt5.Encode(backend, tokenSets, masks);
+        try
+        {
+            for (int i = 0; i < tokenSets.Length; i++)
+            {
+                embeds[i] = CfgHelper.SliceBatchElement(batch, i, WanVideoRecipe.TokenLength, textDim);
+            }
+        }
+        finally
+        {
+            batch.Dispose();
+        }
+        for (int i = 0; i < tokenSets.Length; i++)
+        {
+            ZeroPaddedRows(embeds[i], tokenSets[i], textDim);
+        }
+        backend.Sync();
+        backend.FreeWeights(umt5.EnumerateWeights());
+        return embeds;
+    }
+
+    /// <summary>Two-context form of <see cref="EncodeWanPromptBatch"/> — the plain positive/negative CFG pair.</summary>
+    internal static (Tensor Prompt, Tensor Negative) EncodeWanPrompts(IBackend backend, T5TextEncoder umt5, int textDim, int[] promptTokens, int[] negTokens)
+    {
+        Tensor[] embeds = EncodeWanPromptBatch(backend, umt5, textDim, promptTokens, negTokens);
+        return (embeds[0], embeds[1]);
+    }
+
+    /// <summary>Three-context form of <see cref="EncodeWanPromptBatch"/> — Wan-Animate-2 also carries the driving stream's own prompt.</summary>
+    internal static (Tensor Prompt, Tensor Negative, Tensor Driving) EncodeWanPrompts(
+        IBackend backend, T5TextEncoder umt5, int textDim, int[] promptTokens, int[] negTokens, int[] drivingTokens)
+    {
+        Tensor[] embeds = EncodeWanPromptBatch(backend, umt5, textDim, promptTokens, negTokens, drivingTokens);
+        return (embeds[0], embeds[1], embeds[2]);
+    }
+
+    /// <summary>Loads the Wan family's umT5-XXL text encoder with its fp8 scale companions folded in, plus the matching 512-token tokenizer; the loader is registered in <paramref name="loaders"/> because it owns the weights' mmap.</summary>
+    internal static (T5TextEncoder Encoder, T5Tokenizer Tokenizer) LoadUmt5(string umt5Path, List<SafeTensorsLoader> loaders)
+    {
+        ArgumentNullException.ThrowIfNull(loaders);
+        SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
+        umt5Loader.Load(umt5Path);
+        loaders.Add(umt5Loader);
+        Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+        T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
+        umt5.LoadWeights(umt5Weights);
+        return (umt5, T5Tokenizer.CreateUmt5(maxLength: WanVideoRecipe.TokenLength));
+    }
+
+    /// <summary>Loads the Wan VAE at F32 (the precision this family's decode is validated at) and builds the matching decoder/encoder pair — the z=16 Wan2.1 modules when <paramref name="isWan21"/>, else the z=48 Wan2.2 ones. Both halves share one weight dict, so the encoder costs no extra load.</summary>
+    internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<SafeTensorsLoader> loaders)
+    {
+        ArgumentNullException.ThrowIfNull(loaders);
+        (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
+        loaders.AddRange(vaeLoaders);
+        Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
+        if (isWan21)
+        {
+            Wan21VaeDecoder wan21Decoder = new Wan21VaeDecoder();
+            wan21Decoder.LoadWeights(vaeWeights);
+            Wan21VaeEncoder wan21Encoder = new Wan21VaeEncoder();
+            wan21Encoder.LoadWeights(vaeWeights);
+            return (wan21Decoder, wan21Encoder);
+        }
+        Wan22VaeDecoder wan22Decoder = new Wan22VaeDecoder();
+        wan22Decoder.LoadWeights(vaeWeights);
+        Wan22VaeEncoder wan22Encoder = new Wan22VaeEncoder();
+        wan22Encoder.LoadWeights(vaeWeights);
+        return (wan22Decoder, wan22Encoder);
     }
 
     /// <summary>Zeroes embedding rows past the real tokens (content + EOS; pad id 0). The Wan family cross-attends every context row with no text mask, and umT5 emits garbage at pad positions that otherwise drowns the prompt — the reference pipeline zero-pads instead. (LTX-Video does NOT use this: its reference truncates to the real tokens instead, via <c>CfgHelper.SliceBatchElementPrefix</c> — see <see cref="LtxVideoRecipePipeline"/>.)</summary>

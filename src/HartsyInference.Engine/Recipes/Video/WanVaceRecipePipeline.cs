@@ -70,15 +70,8 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         TextToImageRequest inner = new TextToImageRequest
         {

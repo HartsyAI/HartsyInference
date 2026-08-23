@@ -12,25 +12,9 @@ public static class LoaderClipUtils
     {
         ArgumentNullException.ThrowIfNull(raw);
         ArgumentException.ThrowIfNullOrEmpty(slot);
-        string comfyPrefix = $"text_encoders.{slot}.transformer.";
-        string ldmPrefix = $"conditioner.embedders.{embedderIndex}.transformer.";
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string key = kv.Key;
-            if (key.StartsWith(comfyPrefix, StringComparison.Ordinal))
-            {
-                key = key[comfyPrefix.Length..];
-            }
-            else if (key.StartsWith(ldmPrefix, StringComparison.Ordinal))
-            {
-                key = key[ldmPrefix.Length..];
-            }
-            if (!key.EndsWith("position_ids", StringComparison.Ordinal))
-            {
-                result[key] = kv.Value;
-            }
-        }
-        return result;
+        return LoaderPrefixUtils.StripPrefixes(
+            raw,
+            [$"text_encoders.{slot}.transformer.", $"conditioner.embedders.{embedderIndex}.transformer."],
+            LoaderPrefixUtils.PositionIdsBuffer);
     }
 }

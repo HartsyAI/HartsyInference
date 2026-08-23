@@ -124,14 +124,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             IBackend? ditShardBackend = null;
             if (context.DitShardBackend is not null && !ditIsHugeBf16Build)
             {
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], config.NumLayers, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
+                    context.Backend, context.DitShardBackend, config.NumLayers, transformer.EnumerateSharedWeights());
                 ditShardBackend = context.DitShardBackend;
                 Logs.Info($"[MiniMaxH3Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{config.NumLayers}) on the shard backend.");

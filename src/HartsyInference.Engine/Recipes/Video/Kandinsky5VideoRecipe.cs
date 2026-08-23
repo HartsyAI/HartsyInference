@@ -50,11 +50,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
 
             // BF16 -> F16 (native F16 GEMM), matching the T2I recipe and Kandinsky5VideoGenerationTests.
             Kandinsky5Config config = DetectConfig(converted.Transformer);
-            Dictionary<string, Tensor> transformerWeights = new Dictionary<string, Tensor>(converted.Transformer.Count);
-            foreach (KeyValuePair<string, Tensor> kv in converted.Transformer)
-            {
-                transformerWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
-            }
+            Dictionary<string, Tensor> transformerWeights = VaePrecisionHelper.CastWeights(converted.Transformer, [DType.BF16], DType.F16);
             Kandinsky5Transformer transformer = new Kandinsky5Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
@@ -65,11 +61,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             Logs.Info($"[Kandinsky5VideoRecipe] Loading HunyuanVideo VAE (diffusers naming): {vaeDir}.");
             (Dictionary<string, Tensor> vaeWeightsRaw, List<SafeTensorsLoader> vaeLoaders) = Kandinsky5CheckpointConverter.LoadHunyuanVideoVae(vaeDir);
             loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = new Dictionary<string, Tensor>(vaeWeightsRaw.Count);
-            foreach (KeyValuePair<string, Tensor> kv in vaeWeightsRaw)
-            {
-                vaeWeights[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
-            }
+            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastWeights(vaeWeightsRaw, [DType.BF16], DType.F16);
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(vaeWeights);
 
@@ -85,7 +77,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
-            clipL.LoadWeights(Kandinsky5TextEncoding.ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
+            clipL.LoadWeights(LoaderClipUtils.StripClipPrefix(clipLoader.GetAllTensors(), "clip_l", 0), prefix: "text_model");
 
             // Encoder half from the same vae/ shard — this is what turns on the I2V path (EncodeFirstFrame).
             HunyuanVideoVaeEncoder? vaeEncoder = null;

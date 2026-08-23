@@ -21,6 +21,19 @@ public static class VaePrecisionHelper
     public static Dictionary<string, Tensor> CastVaeWeights(IReadOnlyDictionary<string, Tensor> weights, DType targetDtype)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        return CastCore(weights, castableSources: null, targetDtype);
+    }
+
+    /// <summary>Allow-list cast: converts only tensors whose dtype appears in <paramref name="castableSources"/> and passes every other dtype through borrowed — the form recipes need so FP8/GGML-quantized transformer weights are never upcast by a VAE/DiT precision pass. Ownership and partial-failure cleanup match <see cref="CastVaeWeights"/>.</summary>
+    public static Dictionary<string, Tensor> CastWeights(IReadOnlyDictionary<string, Tensor> weights, IReadOnlyList<DType> castableSources, DType targetDtype)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(castableSources);
+        return CastCore(weights, castableSources, targetDtype);
+    }
+
+    private static Dictionary<string, Tensor> CastCore(IReadOnlyDictionary<string, Tensor> weights, IReadOnlyList<DType>? castableSources, DType targetDtype)
+    {
         Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
         HashSet<Tensor> borrowed = new(ReferenceEqualityComparer.Instance);
         foreach (KeyValuePair<string, Tensor> kvp in weights)
@@ -29,7 +42,7 @@ public static class VaePrecisionHelper
         try
         {
             foreach (KeyValuePair<string, Tensor> kvp in weights)
-                result[kvp.Key] = kvp.Value.DType == targetDtype ? kvp.Value : kvp.Value.CastTo(targetDtype);
+                result[kvp.Key] = ShouldCast(kvp.Value.DType, castableSources, targetDtype) ? kvp.Value.CastTo(targetDtype) : kvp.Value;
             return result;
         }
         catch
@@ -42,5 +55,25 @@ public static class VaePrecisionHelper
             }
             throw;
         }
+    }
+
+    private static bool ShouldCast(DType dtype, IReadOnlyList<DType>? castableSources, DType targetDtype)
+    {
+        if (dtype == targetDtype)
+        {
+            return false;
+        }
+        if (castableSources is null)
+        {
+            return true;
+        }
+        for (int i = 0; i < castableSources.Count; i++)
+        {
+            if (castableSources[i] == dtype)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }

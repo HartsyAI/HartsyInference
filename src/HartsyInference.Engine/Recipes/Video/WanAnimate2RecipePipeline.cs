@@ -111,18 +111,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         int[] promptTokens = _tokenizer.Encode(request.Prompt);
         int[] negTokens = _tokenizer.Encode(negative);
         int[] drivingTokens = _tokenizer.Encode(drivingPrompt);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens, drivingTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens),
-             T5Tokenizer.CreateAttentionMask(drivingTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor drivingEmbeds = CfgHelper.SliceBatchElement(batch, 2, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(drivingEmbeds, drivingTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds, Tensor drivingEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens, drivingTokens);
 
         Tensor? referenceRgb = null, referenceClip = null;
         try
@@ -134,7 +124,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
 
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(
                 VideoRecipeUtils.LetterboxRgb24(reference, width, height), width, height);
-            referenceClip = EncodeClipVision(reference.Rgb, reference.Width, reference.Height);
+            referenceClip = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, reference.Rgb, reference.Width, reference.Height);
 
             // One seed for the whole request: the chunks are separate denoises, so leaving it null would re-roll per
             // chunk and make a run unreproducible. Upstream draws fresh noise per chunk; offsetting by the chunk
@@ -175,7 +165,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 {
                     // Recomputed per chunk: the driving stream's image context is THIS chunk's frame 0, not the
                     // reference image's, and the frame changes as start advances.
-                    drivingClipEmbeds = EncodeClipVision(slice[0], width, height);
+                    drivingClipEmbeds = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, slice[0], width, height);
                     if (carriedFrame is not null)
                     {
                         carriedTensor = VideoRecipeUtils.RgbToReferenceTensor(carriedFrame, width, height);
@@ -463,23 +453,6 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
             }
         }
         return (bestW, bestH);
-    }
-
-    /// <summary>CLIP-ViT-H penultimate hidden state of one RGB24 frame, host-materialized — 257 image tokens that get prepended to that stream's umT5 context.</summary>
-    private Tensor EncodeClipVision(byte[] rgb24, int width, int height)
-    {
-        _backend.PreloadWeights(_clipVision.EnumerateWeights());
-        ClipImagePreprocessor preprocessor = new ClipImagePreprocessor(imageSize: 224);
-        Tensor pixels = preprocessor.Preprocess(rgb24, width, height);
-        Tensor batched = _clipVision.EncodeHiddenStates(_backend, pixels);
-        pixels.Dispose();
-        _backend.Sync();
-        _backend.FreeWeights(_clipVision.EnumerateWeights());
-        Tensor dropped = VideoRecipeUtils.DropBatch(batched);
-        batched.Dispose();
-        Tensor host = VideoRecipeUtils.HostCopy(dropped);
-        dropped.Dispose();
-        return host;
     }
 
     /// <summary>Pulls the character identity image out of the request's arch-specific bag, or null when absent.</summary>

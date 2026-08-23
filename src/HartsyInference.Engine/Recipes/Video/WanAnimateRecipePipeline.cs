@@ -123,15 +123,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_backend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _backend.Sync();
-        _backend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _backend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         Tensor? clipEmbeds = null;
         Tensor? referenceRgb = null;
@@ -140,17 +133,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         {
             if (_clipVision is not null)
             {
-                _backend.PreloadWeights(_clipVision.EnumerateWeights());
-                ClipImagePreprocessor preprocessor = new ClipImagePreprocessor(imageSize: 224);
-                Tensor pixels = preprocessor.Preprocess(reference.Rgb, reference.Width, reference.Height);
-                Tensor batched = _clipVision.EncodeHiddenStates(_backend, pixels);
-                pixels.Dispose();
-                _backend.Sync();
-                _backend.FreeWeights(_clipVision.EnumerateWeights());
-                Tensor dropped = VideoRecipeUtils.DropBatch(batched);
-                batched.Dispose();
-                clipEmbeds = VideoRecipeUtils.HostCopy(dropped);
-                dropped.Dispose();
+                clipEmbeds = VideoRecipeUtils.EncodeClipVision(_backend, _clipVision, reference.Rgb, reference.Width, reference.Height);
             }
 
             referenceRgb = VideoRecipeUtils.RgbToReferenceTensor(VideoRecipeUtils.LetterboxRgb24(reference, width, height), width, height);

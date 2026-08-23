@@ -84,18 +84,11 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        // umT5 runs on the (possibly separate) text backend; the host-side slice/zero passes below ARE the
+        // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
         // cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
         // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
-        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _textBackend.Sync();
-        _textBackend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {
@@ -222,15 +215,8 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         int[] promptTokens = _tokenizer.Encode(prompt);
         int[] negTokens = _tokenizer.Encode(negative);
-        Tensor batch = _umt5.Encode(_textBackend, [promptTokens, negTokens],
-            [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-        Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, WanVideoRecipe.TokenLength, _config.TextDim);
-        Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, WanVideoRecipe.TokenLength, _config.TextDim);
-        batch.Dispose();
-        VideoRecipeUtils.ZeroPaddedRows(promptEmbeds, promptTokens, _config.TextDim);
-        VideoRecipeUtils.ZeroPaddedRows(negEmbeds, negTokens, _config.TextDim);
-        _textBackend.Sync();
-        _textBackend.FreeWeights(_umt5.EnumerateWeights());
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {

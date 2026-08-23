@@ -65,13 +65,13 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         try
         {
             (Dictionary<string, Tensor> transformerW, SafeTensorsLoader transformerL) =
-                LoadComponent(context.CheckpointPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
+                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
             loaders.Add(transformerL);
 
             // TODO(E-IMG-4): the reference-image edit path also loads the Qwen3-VL vision tower (visual.* keys) and
             // wires a Qwen3VlMultimodalEncoder. Text-to-image only here, so the language tower alone is loaded.
             (Dictionary<string, Tensor> teW, SafeTensorsLoader teL) =
-                LoadComponent(tePath, CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
+                ComponentLoader.Load(tePath, "BooguImageRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teL);
 
             // The auto-downloaded flux_ae.safetensors ships BFL-native LDM keys; ConvertVaeKey remaps LDM → diffusers
@@ -109,36 +109,6 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
-            throw;
-        }
-    }
-
-    /// <summary>Loads one safetensors component, routing every key through <paramref name="keyTransform"/> (null drops the key) and optionally folding fp8 scale companions.</summary>
-    private static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-            {
-                if (kvp.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kvp.Key == "scaled_fp8")
-                {
-                    continue;
-                }
-                string? mapped = keyTransform(kvp.Key);
-                if (mapped is not null)
-                {
-                    merged[mapped] = kvp.Value;
-                }
-            }
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[BooguImageRecipe] Failed to load component '{filePath}'.", ex);
-            loader.Dispose();
             throw;
         }
     }

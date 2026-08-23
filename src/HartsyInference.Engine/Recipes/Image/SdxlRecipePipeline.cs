@@ -27,7 +27,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
     private readonly MergedLoraStack? _loraStack;
-    private readonly Dictionary<string, IpAdapterCacheEntry> _ipAdapterCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly IpAdapterCache _ipAdapterCache = new IpAdapterCache();
     private readonly Dictionary<string, SdxlRefinerEntry> _refinerCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>SDXL's dual-CLIP conditioning is penultimate-layer by spec, so weighted encoding uses the same depth.</summary>
@@ -89,8 +89,8 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
                 // which WeightedConditioning doesn't do — an embed-bearing prompt wins outright for now.
                 ? () => EmbeddingResolver.BuildDualClipSchedule(_textBackend, _clipL, _clipG, _tokenizer, embedPlan, strippedPrompt, strippedNegative, SdxlLayersFromEnd, negEmbedPlan)
                 : () => WeightedConditioning.BuildDualClip(_textBackend, _clipL, _clipG, _tokenizer, strippedPrompt, negative, SdxlLayersFromEnd),
-            LookupIpAdapter,
-            CacheIpAdapter,
+            _ipAdapterCache.Lookup,
+            _ipAdapterCache.Cache,
             cancel);
 
         // Two hand-off methods, resolved once: "StepSwap" stays a single GenerateFromTokens call (base+refiner
@@ -261,21 +261,10 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         return image;
     }
 
-    /// <summary>Cached IP-Adapter entry for <paramref name="path"/>, or null when not loaded yet.</summary>
-    private IpAdapterCacheEntry? LookupIpAdapter(string path) =>
-        _ipAdapterCache.TryGetValue(path, out IpAdapterCacheEntry? entry) ? entry : null;
-
-    /// <summary>Stores a freshly loaded IP-Adapter entry for reuse across generations on this model.</summary>
-    private void CacheIpAdapter(IpAdapterCacheEntry entry) => _ipAdapterCache[entry.FilePath] = entry;
-
     /// <inheritdoc/>
     public void Dispose()
     {
-        foreach (IpAdapterCacheEntry entry in _ipAdapterCache.Values)
-        {
-            entry.Dispose();
-        }
-        _ipAdapterCache.Clear();
+        _ipAdapterCache.Dispose();
         foreach (SdxlRefinerEntry entry in _refinerCache.Values)
         {
             entry.Dispose();

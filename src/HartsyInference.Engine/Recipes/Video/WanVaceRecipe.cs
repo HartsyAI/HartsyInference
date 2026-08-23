@@ -49,6 +49,7 @@ public sealed class WanVaceRecipe : IVideoRecipe
 
         (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ditLoader };
+        MergedLoraStack? loraStack = null;
         try
         {
             if (conv.Transformer.Count == 0)
@@ -66,25 +67,13 @@ public sealed class WanVaceRecipe : IVideoRecipe
             WanVaceTransformer transformer = new WanVaceTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
+            loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
             transformer.LoadWeights(conv.Transformer);
 
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-            Wan21VaeDecoder vaeDecoder = new Wan21VaeDecoder();
-            vaeDecoder.LoadWeights(vaeWeights);
-            Wan21VaeEncoder vaeEncoder = new Wan21VaeEncoder();
-            vaeEncoder.LoadWeights(vaeWeights);
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);
 
-            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-            umt5Loader.Load(umt5Path);
-            loaders.Add(umt5Loader);
-            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-            umt5.LoadWeights(umt5Weights);
-            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: WanVideoRecipe.TokenLength);
+            (T5TextEncoder umt5, T5Tokenizer tokenizer) = VideoRecipeUtils.LoadUmt5(umt5Path, loaders);
 
             WanVacePipeline pipeline = new WanVacePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[WanVaceRecipe] Wan VACE ready (control-video).");
@@ -97,6 +86,7 @@ public sealed class WanVaceRecipe : IVideoRecipe
             {
                 loader.Dispose();
             }
+            loraStack?.Dispose();
             throw;
         }
     }

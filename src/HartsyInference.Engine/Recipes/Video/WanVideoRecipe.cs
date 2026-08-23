@@ -221,29 +221,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             }
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            loaders.AddRange(vaeLoaders);
-            Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
-            IWanVaeDecoder vaeDecoder;
-            IWanVaeEncoder vaeEncoder;
-            if (isWan21)
-            {
-                Wan21VaeDecoder decoder = new Wan21VaeDecoder();
-                decoder.LoadWeights(vaeWeights);
-                vaeDecoder = decoder;
-                Wan21VaeEncoder encoder = new Wan21VaeEncoder();
-                encoder.LoadWeights(vaeWeights);
-                vaeEncoder = encoder;
-            }
-            else
-            {
-                Wan22VaeDecoder decoder = new Wan22VaeDecoder();
-                decoder.LoadWeights(vaeWeights);
-                vaeDecoder = decoder;
-                Wan22VaeEncoder encoder = new Wan22VaeEncoder();
-                encoder.LoadWeights(vaeWeights);
-                vaeEncoder = encoder;
-            }
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21, loaders);
 
             ClipVisionEncoder? clipVision = null;
             if (isClipI2V)
@@ -257,13 +235,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 Logs.Info("[WanVideoRecipe] CLIP-ViT-H image encoder resolved as side model (Wan2.1 I2V).");
             }
 
-            SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
-            umt5Loader.Load(umt5Path);
-            loaders.Add(umt5Loader);
-            Dictionary<string, Tensor> umt5Weights = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
-            T5TextEncoder umt5 = new T5TextEncoder(T5TextEncoderConfig.Umt5Xxl);
-            umt5.LoadWeights(umt5Weights);
-            T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: TokenLength);
+            (T5TextEncoder umt5, T5Tokenizer tokenizer) = VideoRecipeUtils.LoadUmt5(umt5Path, loaders);
 
             WanVideoPipeline pipeline = new WanVideoPipeline(context.Backend, transformer, vaeDecoder, config, vaeEncoder, transformer2)
             {

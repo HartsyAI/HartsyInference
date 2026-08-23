@@ -79,7 +79,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanVideoVae3D, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
-            vae.LoadWeights(CastBf16ToF16(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath))));
+            vae.LoadWeights(VaePrecisionHelper.CastWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)), [DType.BF16], DType.F16));
 
             // bf16-resident, block-streamed DiT — caching F16 casts would roughly double VRAM and OOM a 24 GB card.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "HunyuanVideoRecipe");
@@ -126,17 +126,5 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         loader.Load(path);
         loaders.Add(loader);
         return CheckpointConvertUtils.ApplyFp8ScaledDequant(loader.GetAllTensors());
-    }
-
-    private static Dictionary<string, Tensor> CastBf16ToF16(Dictionary<string, Tensor> weights)
-    {
-        foreach (string key in weights.Keys.ToList())
-        {
-            if (weights[key].DType == DType.BF16)
-            {
-                weights[key] = weights[key].CastTo(DType.F16);
-            }
-        }
-        return weights;
     }
 }

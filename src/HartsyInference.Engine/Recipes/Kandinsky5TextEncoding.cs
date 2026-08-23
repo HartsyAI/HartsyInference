@@ -51,29 +51,6 @@ internal static unsafe class Kandinsky5TextEncoding
         return pooled;
     }
 
-    /// <summary>Strips a standalone CLIP-L safetensors file down to the <c>text_model.*</c> keys the encoder expects (Comfy or LDM wrapping), dropping the <c>position_ids</c> buffer.</summary>
-    internal static Dictionary<string, Tensor> ConvertClipLFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string key = kv.Key;
-            if (key.StartsWith("text_encoders.clip_l.transformer.", StringComparison.Ordinal))
-            {
-                key = key["text_encoders.clip_l.transformer.".Length..];
-            }
-            else if (key.StartsWith("conditioner.embedders.0.transformer.", StringComparison.Ordinal))
-            {
-                key = key["conditioner.embedders.0.transformer.".Length..];
-            }
-            if (!key.EndsWith("position_ids", StringComparison.Ordinal))
-            {
-                result[key] = kv.Value;
-            }
-        }
-        return result;
-    }
-
     /// <summary>Copies a <c>[batch, seq, hidden]</c> F32 tensor from <paramref name="start"/> to the end of the sequence axis, dropping the leading template tokens.</summary>
     private static Tensor SliceSequenceFrom(Tensor source, int start)
     {

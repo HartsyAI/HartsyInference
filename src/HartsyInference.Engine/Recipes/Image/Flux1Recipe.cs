@@ -72,7 +72,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
                 SafeTensorsLoader clipLLoader = new SafeTensorsLoader();
                 clipLLoader.Load(clipLPath);
                 loaders.Add(clipLLoader);
-                clipLWeights = ConvertClipLFromStandalone(clipLLoader.GetAllTensors());
+                clipLWeights = LoaderClipUtils.StripClipPrefix(clipLLoader.GetAllTensors(), "clip_l", 0);
                 Logs.Info("[Flux1Recipe] CLIP-L resolved as side model.");
             }
             if (t5Weights.Count == 0)
@@ -81,7 +81,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
                 SafeTensorsLoader t5Loader = new SafeTensorsLoader();
                 t5Loader.Load(t5Path);
                 loaders.Add(t5Loader);
-                t5Weights = StripT5Prefix(t5Loader.GetAllTensors());
+                t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
                 Logs.Info("[Flux1Recipe] T5-XXL resolved as side model.");
             }
             if (vaeWeights.Count == 0)
@@ -124,22 +124,9 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long[] perBlockBytes = new long[transformer.BlockCount];
-                for (int i = 0; i < perBlockBytes.Length; i++)
-                {
-                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
-                    {
-                        perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
-                    }
-                }
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount,
+                    transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
                 Logs.Info($"[Flux1Recipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
                     + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend (v1 plain path; "
                     + "ControlNet/Kontext/inpaint/regional generations fall back to unsharded).");
@@ -184,49 +171,6 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Strips a standalone CLIP-L safetensors file down to the <c>text_model.*</c> keys the encoder expects (Comfy <c>text_encoders.clip_l.transformer.</c> or LDM <c>conditioner.embedders.0.transformer.</c> wrapping), dropping the <c>position_ids</c> buffer.</summary>
-    private static Dictionary<string, Tensor> ConvertClipLFromStandalone(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            if (kv.Key.StartsWith("text_encoders.clip_l.transformer.", StringComparison.Ordinal))
-            {
-                string rest = kv.Key["text_encoders.clip_l.transformer.".Length..];
-                if (!rest.EndsWith("position_ids", StringComparison.Ordinal))
-                {
-                    result[rest] = kv.Value;
-                }
-            }
-            else if (kv.Key.StartsWith("conditioner.embedders.0.transformer.", StringComparison.Ordinal))
-            {
-                string rest = kv.Key["conditioner.embedders.0.transformer.".Length..];
-                if (!rest.EndsWith("position_ids", StringComparison.Ordinal))
-                {
-                    result[rest] = kv.Value;
-                }
-            }
-            else
-            {
-                result[kv.Key] = kv.Value;
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Strips Comfy's <c>text_encoders.t5xxl.transformer.</c> prefix from a standalone T5-XXL safetensors file.</summary>
-    private static Dictionary<string, Tensor> StripT5Prefix(IReadOnlyDictionary<string, Tensor> raw)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(raw.Count);
-        const string ComfyPrefix = "text_encoders.t5xxl.transformer.";
-        foreach (KeyValuePair<string, Tensor> kv in raw)
-        {
-            string key = kv.Key.StartsWith(ComfyPrefix, StringComparison.Ordinal) ? kv.Key[ComfyPrefix.Length..] : kv.Key;
-            result[key] = kv.Value;
-        }
-        return result;
     }
 
     /// <summary>True if any tensor is still raw FP8 (E4M3/E5M2) — i.e. not pre-dequantized by the converter's scaled-fp8 handling.</summary>

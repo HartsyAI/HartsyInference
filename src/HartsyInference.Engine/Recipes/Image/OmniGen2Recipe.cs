@@ -57,7 +57,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
-            transformer.LoadWeights(CastWeightsToBf16(converted.Transformer));
+            transformer.LoadWeights(VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.F32], DType.BF16));
 
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             SafeTensorsLoader teLoader = new SafeTensorsLoader();
@@ -92,17 +92,5 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Casts F16/F32 weights to BF16 (others pass through) — same footprint as F16 with F32's exponent range, so CFG-amplified activations cannot overflow.</summary>
-    private static Dictionary<string, Tensor> CastWeightsToBf16(IReadOnlyDictionary<string, Tensor> weights)
-    {
-        Dictionary<string, Tensor> result = new Dictionary<string, Tensor>(weights.Count);
-        foreach (KeyValuePair<string, Tensor> kv in weights)
-        {
-            DType dtype = kv.Value.DType;
-            result[kv.Key] = (dtype == DType.F16 || dtype == DType.F32) ? kv.Value.CastTo(DType.BF16) : kv.Value;
-        }
-        return result;
     }
 }

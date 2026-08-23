@@ -25,7 +25,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
     private readonly IBackend _backend;
     private readonly ClipTextEncoder _textEncoder;
     private readonly MergedLoraStack? _loraStack;
-    private readonly Dictionary<string, IpAdapterCacheEntry> _ipAdapterCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly IpAdapterCache _ipAdapterCache = new IpAdapterCache();
 
     /// <summary>Wraps the constructed SD1.5 pipeline plus its tokenizer, text encoder, and merged LoRA stack, taking ownership of every disposable.</summary>
     public Sd15RecipePipeline(
@@ -61,8 +61,8 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
             UNetConfig.Sd15,
             IpAdapterBaseModel.Sd15,
             () => WeightedConditioning.BuildSingleClip(_backend, _textEncoder, _tokenizer, request.Prompt, negative, layersFromEnd),
-            LookupIpAdapter,
-            CacheIpAdapter,
+            _ipAdapterCache.Lookup,
+            _ipAdapterCache.Cache,
             cancel);
 
         TextToImageRequest inner = BuildInner(request, negative, plan);
@@ -112,21 +112,10 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
         return RecipeImg2ImgBinder.Apply(inner, plan.Img2Img);
     }
 
-    /// <summary>Cached IP-Adapter entry for <paramref name="path"/>, or null when not loaded yet.</summary>
-    private IpAdapterCacheEntry? LookupIpAdapter(string path) =>
-        _ipAdapterCache.TryGetValue(path, out IpAdapterCacheEntry? entry) ? entry : null;
-
-    /// <summary>Stores a freshly loaded IP-Adapter entry for reuse across generations on this model.</summary>
-    private void CacheIpAdapter(IpAdapterCacheEntry entry) => _ipAdapterCache[entry.FilePath] = entry;
-
     /// <inheritdoc/>
     public void Dispose()
     {
-        foreach (IpAdapterCacheEntry entry in _ipAdapterCache.Values)
-        {
-            entry.Dispose();
-        }
-        _ipAdapterCache.Clear();
+        _ipAdapterCache.Dispose();
         _pipeline.Dispose();
         _tokenizer.Dispose();
         // The LoRA stack owns the merged tensors the components reference, so it outlives them by exactly this much.

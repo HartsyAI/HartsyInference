@@ -56,7 +56,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             }
             else
             {
-                (ditWeights, SafeTensorsLoader ditLoader) = LoadComponent(context.CheckpointPath, CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
+                (ditWeights, SafeTensorsLoader ditLoader) = ComponentLoader.Load(context.CheckpointPath, "MageFlowRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
                 loaders.Add(ditLoader);
             }
             if (ditWeights.Count == 0)
@@ -73,7 +73,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = LoadComponent(encoderPath, CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
+            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = ComponentLoader.Load(encoderPath, "MageFlowRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teLoader);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
             textEncoder.LoadWeights(teWeights);
@@ -81,7 +81,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             // ── MageVAE: split the file into decoder (`pipeline.*`) and encoder (`student.dconv_encoder.*`). Encoder is
             // only needed for edit; a decode-only VAE file simply has no encoder keys. ──
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            (Dictionary<string, Tensor> allVae, SafeTensorsLoader vaeLoader) = LoadComponent(vaePath, key => key, applyFp8Dequant: false);
+            (Dictionary<string, Tensor> allVae, SafeTensorsLoader vaeLoader) = ComponentLoader.Load(vaePath, "MageFlowRecipe", keyTransform: null, applyFp8Dequant: false);
             loaders.Add(vaeLoader);
             (Dictionary<string, Tensor> decW, Dictionary<string, Tensor> encW) = SplitMageVae(allVae);
             MageVaeDecoder vae = new MageVaeDecoder();
@@ -99,23 +99,6 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             Logs.Error("[MageFlowRecipe] Construction failed.", ex);
             foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
             ggufHandle?.Dispose();
-            throw;
-        }
-    }
-
-    private static (Dictionary<string, Tensor>, SafeTensorsLoader) LoadComponent(string filePath, Func<string, string?> keyTransform, bool applyFp8Dequant)
-    {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(filePath);
-        try
-        {
-            Dictionary<string, Tensor> merged = Remap(loader.GetAllTensors(), keyTransform);
-            return (applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged, loader);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[MageFlowRecipe] Failed to load component '{Path.GetFileName(filePath)}'.", ex);
-            loader.Dispose();
             throw;
         }
     }

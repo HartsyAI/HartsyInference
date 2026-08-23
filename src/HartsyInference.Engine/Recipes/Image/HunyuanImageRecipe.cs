@@ -91,22 +91,9 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             int ditShardSplitBlock = 0;
             if (context.DitShardBackend is not null)
             {
-                long[] perBlockBytes = new long[transformer.BlockCount];
-                for (int i = 0; i < perBlockBytes.Length; i++)
-                {
-                    foreach (Tensor t in transformer.EnumerateBlockRangeWeights(i, i + 1))
-                    {
-                        perBlockBytes[i] += t.DType.ComputeByteCount(t.ElementCount);
-                    }
-                }
-                long sharedWeightBytes = 0;
-                foreach (Tensor t in transformer.EnumerateSharedWeights())
-                {
-                    sharedWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-                }
-                (long freeA, _) = context.Backend.GetVramInfo();
-                (long freeB, _) = context.DitShardBackend.GetVramInfo();
-                ditShardSplitBlock = PlacementPlanner.DitSplitPlan([freeA, freeB], perBlockBytes, sharedWeightBytes)[0];
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount,
+                    transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
                 Logs.Info($"[HunyuanImageRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the "
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }

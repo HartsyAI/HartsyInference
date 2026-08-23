@@ -87,7 +87,7 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
-            clipL.LoadWeights(Kandinsky5TextEncoding.ConvertClipLFromStandalone(clipLoader.GetAllTensors()), prefix: "text_model");
+            clipL.LoadWeights(LoaderClipUtils.StripClipPrefix(clipLoader.GetAllTensors(), "clip_l", 0), prefix: "text_model");
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);

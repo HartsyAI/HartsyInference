@@ -25,9 +25,6 @@ internal static class TtsCatalog
     /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
     private const string CmudictUrl = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
 
-    /// <summary>The registered catalog ids, for error messages.</summary>
-    internal static IReadOnlyCollection<string> RegisteredIds => Registry.Keys;
-
     /// <summary>Resolves a catalog id to its descriptor, or throws naming what is available.</summary>
     internal static TtsModelDescriptor Resolve(string id)
     {
