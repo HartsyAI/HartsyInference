@@ -127,14 +127,6 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
             Buffer.MemoryCopy(emb + (long)ids[s] * d, dp + (long)s * d, (long)d * 4, (long)d * 4);
     }
 
-    /// <summary>Shape-relabels an nn.Linear weight from GGUF's [in, out] to [out, in] (no data move).</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     /// <summary>Maps one qwen35moe layer's raw GGUF MoE tensors to the HF-style names <see cref="MoeFeedForward.LoadWeights"/> expects, splitting the stacked experts into per-expert quant views (reuses the same [E·out, in] flatten + byte-range slice as the transformer path).</summary>
     private static Dictionary<string, Tensor> BuildMoeLayerWeights(IReadOnlyDictionary<string, Tensor> w, int li, int e, int inter, int hidden)
     {

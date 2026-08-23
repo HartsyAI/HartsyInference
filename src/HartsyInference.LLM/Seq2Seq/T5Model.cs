@@ -31,13 +31,6 @@ public sealed unsafe class T5Model : IDisposable
         Intermediate = inter; VocabSize = vocab; NumBuckets = buckets; DecoderStartToken = decStart; Eps = eps <= 0f ? 1e-6f : eps;
     }
 
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     public static T5Model Load(string ggufPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(ggufPath, DType.F32);
@@ -50,7 +43,7 @@ public sealed unsafe class T5Model : IDisposable
                     || key.Contains("cross_attn_q") || key.Contains("cross_attn_k") || key.Contains("cross_attn_v") || key.Contains("cross_attn_o")
                     || key.Contains("ffn_up") || key.Contains("ffn_down") || key.Contains("ffn_gate")
                     || key == "output.weight" || key == "token_embd.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int dModel = (int)m.GetUInt32("t5.embedding_length");

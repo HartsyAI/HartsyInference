@@ -57,13 +57,6 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         MoeEveryN = moeEveryN; NumExperts = numExperts; ExpertsUsed = expertsUsed;
     }
 
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     /// <summary>Copies <paramref name="rows"/> row-major <c>[·, inDim]</c> rows from <paramref name="src"/>/<paramref name="srcR0"/> to <paramref name="dst"/>/<paramref name="dstR0"/>; used to de-interleave neo-bert's per-head fused QKV into contiguous q/k/v.</summary>
     private static void CopyRows(Tensor src, int srcR0, Tensor dst, int dstR0, int rows, int inDim)
     {
@@ -101,7 +94,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
                 if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_qkv")
                     || key.Contains("attn_output") || key.Contains("ffn_up") || key.Contains("ffn_down") || key.Contains("ffn_gate")
                     || key == "cls.weight" || key == "cls.output.weight")   // reranker classification head
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int hidden = (int)m.GetUInt32($"{arch}.embedding_length");

@@ -45,14 +45,6 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         int g = image / patch; TokensPerImage = (g * g) / (merge * merge);
     }
 
-    /// <summary>Shape-relabels a GGUF nn.Linear weight [in,out] → [out,in] via a copy.</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     /// <summary>Copies rows [<paramref name="row0"/>, row0+rows) of a 2D [R,C] tensor into a fresh [rows,C].</summary>
     private static Tensor SliceRows(Tensor t, int row0, int rows)
     {
@@ -96,7 +88,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
             {
                 string p = $"v.blk.{i}";
                 if (!w.ContainsKey($"{p}.attn_qkv.weight")) continue;
-                Tensor qkvW = Relabel(w[$"{p}.attn_qkv.weight"]);   // [3H, H]
+                Tensor qkvW = TensorCasts.RelabelRank2Copy(w[$"{p}.attn_qkv.weight"]);   // [3H, H]
                 w[$"{p}.attn_q.weight"] = SliceRows(qkvW, 0, hidden);
                 w[$"{p}.attn_k.weight"] = SliceRows(qkvW, hidden, hidden);
                 w[$"{p}.attn_v.weight"] = SliceRows(qkvW, 2 * hidden, hidden);
@@ -115,7 +107,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
                 if (!key.EndsWith(".weight", StringComparison.Ordinal) || w[key].Shape.Rank != 2) continue;
                 if (key.Contains("attn_out") || key.Contains("ffn_up") || key.Contains("ffn_down")
                     || key == "mm.0.weight" || key == "mm.2.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
 
             // Patch embed: two temporal conv frames [hidden,3,patch,patch] → summed [hidden, 3*patch*patch]
@@ -148,30 +140,10 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
     {
         int hidden = Hidden, patch = PatchSize, m = Merge, heads = NumHeads, hd = HeadDim;
         int H = (int)pixelValues.Shape[2], Wd = (int)pixelValues.Shape[3];
-        int gh = H / patch, gw = Wd / patch, np = gh * gw, pin = 3 * patch * patch;
+        int gh = H / patch, gw = Wd / patch, np = gh * gw;
         TokensPerImage = np / (m * m);
 
-        // 1. Patchify into merge-block order (bh,bw,mh,mw): groups of m*m consecutive patches form a 2×2 block, so
-        //    the merger later reads consecutive-4, and merged tokens come out row-major over the (gh/m, gw/m) grid.
-        Tensor patches = new(new TensorShape(np, pin), DType.F32);
-        backend.Sync();
-        float* px = (float*)pixelValues.DataPointer;
-        float* pp = (float*)patches.DataPointer;
-        int idx = 0;
-        for (int bh = 0; bh < gh / m; bh++)
-            for (int bw = 0; bw < gw / m; bw++)
-                for (int mh = 0; mh < m; mh++)
-                    for (int mw = 0; mw < m; mw++)
-                    {
-                        int ph = (bh * m + mh) * patch, pw = (bw * m + mw) * patch;
-                        float* dst = pp + (long)idx * pin;
-                        int o = 0;
-                        for (int c = 0; c < 3; c++)
-                            for (int yy = 0; yy < patch; yy++)
-                                for (int xx = 0; xx < patch; xx++)
-                                    dst[o++] = px[((long)c * H + (ph + yy)) * Wd + (pw + xx)];
-                        idx++;
-                    }
+        Tensor patches = QwenVlOps.Patchify(backend, pixelValues, gh, gw, m, patch);
 
         // 2. Patch embed (+ bias) → [np, hidden].
         Tensor embed = new(new TensorShape(np, hidden), DType.F32);
@@ -186,7 +158,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         }
 
         // 4. 2D-RoPE cos/sin tables [np, headDim] in the same merge-block order.
-        (float[] cos, float[] sin) = BuildRope(gh, gw);
+        (float[] cos, float[] sin) = QwenVlOps.BuildRope(gh, gw, hd, m);
         using Tensor cosT = new(new TensorShape(1, np, hd), DType.F32);
         using Tensor sinT = new(new TensorShape(1, np, hd), DType.F32);
         new ReadOnlySpan<float>(cos).CopyTo(new Span<float>((float*)cosT.DataPointer, np * hd));
@@ -311,39 +283,6 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
                             dstr[c] += w00 * r00[c] + w01 * r01[c] + w10 * r10[c] + w11 * r11[c];
                         idx++;
                     }
-    }
-
-    /// <summary>2D rotary cos/sin tables [np, headDim] in merge-block order (h-freqs on the first quarter, w-freqs on the second, mirrored on the upper half — the standard Qwen-VL vision 2D-RoPE with rotate_half layout).</summary>
-    private (float[] cos, float[] sin) BuildRope(int gh, int gw)
-    {
-        int hd = HeadDim, m = Merge, np = gh * gw, ropeDim = hd / 2;
-        int freqN = ropeDim / 2;
-        float[] inv = new float[freqN];
-        for (int i = 0; i < freqN; i++) inv[i] = 1f / MathF.Pow(10000f, (2f * i) / ropeDim);
-        int[] hpos = new int[np], wpos = new int[np];
-        int idx = 0;
-        for (int bh = 0; bh < gh / m; bh++)
-            for (int bw = 0; bw < gw / m; bw++)
-                for (int mh = 0; mh < m; mh++)
-                    for (int mw = 0; mw < m; mw++)
-                    { hpos[idx] = bh * m + mh; wpos[idx] = bw * m + mw; idx++; }
-        float[] cos = new float[np * hd], sin = new float[np * hd];
-        for (int pos = 0; pos < np; pos++)
-            for (int j = 0; j < freqN; j++)
-            {
-                float fh = hpos[pos] * inv[j], fw = wpos[pos] * inv[j];
-                SetCosSin(cos, sin, pos, hd, j, fh);
-                SetCosSin(cos, sin, pos, hd, freqN + j, fw);
-                SetCosSin(cos, sin, pos, hd, ropeDim + j, fh);
-                SetCosSin(cos, sin, pos, hd, ropeDim + freqN + j, fw);
-            }
-        return (cos, sin);
-    }
-
-    private static void SetCosSin(float[] cos, float[] sin, int pos, int hd, int e, float ang)
-    {
-        cos[pos * hd + e] = MathF.Cos(ang);
-        sin[pos * hd + e] = MathF.Sin(ang);
     }
 
     public void Dispose()

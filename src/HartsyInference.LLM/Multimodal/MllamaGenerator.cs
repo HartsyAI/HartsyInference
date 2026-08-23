@@ -123,15 +123,6 @@ public sealed class MllamaGenerator
             : model.ForwardEmbeds(_backend, embeds, t, posStart, cache,
                 applyFinalNorm: true, startLayer: 0, endLayer: null, crossStates: crossStates, crossLen: visLen);
 
-    private unsafe int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
-    {
-        int h = model.Config.HiddenSize;
-        using Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* hp = (float*)hidden.DataPointer;
-        Buffer.MemoryCopy(hp + (long)(t - 1) * h, (void*)last.DataPointer, (long)h * 4, (long)h * 4);
-        using Tensor logits = model.ProjectLogits(_backend, last, 1);
-        float* lp = (float*)logits.DataPointer;
-        Span<float> span = new(lp, model.Config.VocabSize);
-        return sampler.Next(span, history);
-    }
+    private int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
+        => VlmDecodeOps.SampleLast(_backend, model, hidden, t, sampler, history);
 }

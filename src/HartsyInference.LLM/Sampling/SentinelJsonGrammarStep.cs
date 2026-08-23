@@ -67,5 +67,5 @@ public sealed class SentinelJsonGrammarStep : ISamplerStep
         }
     }
 
-    private string TokenText(int id) => (uint)id < (uint)_vocabText.Length ? _vocabText[id] : string.Empty;
+    private string TokenText(int id) => JsonVocabText.TokenText(_vocabText, id);
 }

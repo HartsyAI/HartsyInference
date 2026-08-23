@@ -222,6 +222,14 @@ public sealed record TransformerConfig
     /// <summary>The (possibly partial) rotary dimension layer <paramref name="i"/> actually uses — parallels <see cref="HeadDimFor"/> for <see cref="RotaryDim"/>/<see cref="RotaryDimSwa"/>.</summary>
     public int RotaryDimFor(int i) => HeadDimSwa > 0 && !IsGlobalLayer(i) ? RotaryDimSwa : RotaryDim;
 
+    /// <summary><see cref="HeadDimFor"/> materialized per layer, for the KV caches that size each layer independently; a uniform array of <see cref="HeadDim"/> on every architecture but Gemma-4.</summary>
+    public int[] HeadDimsPerLayer()
+    {
+        int[] a = new int[NumLayers];
+        for (int i = 0; i < NumLayers; i++) a[i] = HeadDimFor(i);
+        return a;
+    }
+
     /// <summary>Sliding-window layer pattern: layer <c>i</c> is a global (full-attention) layer when this is 0 (all global) or <c>(i+1) % pattern == 0</c>; otherwise it is a local (sliding-window) layer. Gemma-2 alternates (pattern 2); Gemma-3 is 5 local : 1 global (pattern 6).</summary>
     public int SlidingWindowPattern { get; init; }
 

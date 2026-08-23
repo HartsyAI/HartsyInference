@@ -91,14 +91,6 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return outp;
     }
 
-    /// <summary>Relabels a 2D weight from engine shape <c>[a, b]</c> (= ggml ne) to <c>[b, a]</c> without moving data — the raw GGUF bytes are already row-major <c>[b, a]</c> = <c>[out, in]</c>, so this just fixes the shape for <see cref="IBackend.Linear"/>; copies into an owned tensor to avoid aliasing the loader's memory.</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     /// <summary>Loads the mmproj GGUF (vision tower + projector) and reads its config.</summary>
     public static SiglipVlmEncoder Load(string mmprojPath)
     {
@@ -132,7 +124,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
                     || key == "resampler.kv.weight" || key == "resampler.proj.weight"      // MiniCPM-V resampler Linears
                     || key == "resampler.attn.q.weight" || key == "resampler.attn.k.weight"
                     || key == "resampler.attn.v.weight" || key == "resampler.attn.out.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int hidden = (int)m.GetUInt32("clip.vision.embedding_length");

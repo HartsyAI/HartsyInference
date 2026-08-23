@@ -47,13 +47,6 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
         foreach (float[] s in _ssmState) Array.Clear(s);
     }
 
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
-        return outp;
-    }
-
     public static MambaModel Load(string ggufPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(ggufPath, DType.F32);
@@ -65,7 +58,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
             {
                 if (!key.EndsWith(".weight", StringComparison.Ordinal) || w[key].Shape.Rank != 2) continue;
                 if (key == "token_embd.weight" || key.Contains("ssm_in") || key.Contains("ssm_x") || key.Contains("ssm_dt") || key.Contains("ssm_out"))
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int dModel = (int)m.GetUInt32("mamba.embedding_length");

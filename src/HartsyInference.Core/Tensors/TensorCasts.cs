@@ -16,4 +16,12 @@ public static class TensorCasts
     /// <summary>Truncating F32→BF16 bit pattern, matching <see cref="Tensor.CastTo"/> bit for bit (not round-to-nearest-even).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static ushort F32ToBf16Bits(float value) => (ushort)(BitConverter.SingleToUInt32Bits(value) >> 16);
+
+    /// <summary>Returns a NEW owned F32 <c>[in, out]</c>→<c>[out, in]</c> relabel of an F32 rank-2 GGUF weight — the bytes are already row-major <c>[out, in]</c>, so only the shape changes, but the data is copied so the result never aliases the loader's mmap; contrast <c>GgufModelLoader.RelabelRank2ToPyTorchOrder</c>, which is a dtype-preserving metadata-only reshape returning borrowed views.</summary>
+    public static unsafe Tensor RelabelRank2Copy(Tensor t)
+    {
+        Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
+        Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
+        return outp;
+    }
 }

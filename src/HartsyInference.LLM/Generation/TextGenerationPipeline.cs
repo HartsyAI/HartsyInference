@@ -133,8 +133,7 @@ public sealed class TextGenerationPipeline
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
         // Gemma-4: local/SWA layers use a narrower head dim than global layers (HeadDimFor); every other
         // architecture's HeadDimFor is just the uniform HeadDim, so this is a no-op for them.
-        int[] headDimPerLayer = new int[cfg.NumLayers];
-        for (int i = 0; i < cfg.NumLayers; i++) headDimPerLayer[i] = cfg.HeadDimFor(i);
+        int[] headDimPerLayer = cfg.HeadDimsPerLayer();
         using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, headDimPerLayer, maxSeq,
             KvCaches.F16Enabled ? DType.F16 : DType.F32);
 
@@ -286,7 +285,7 @@ public sealed class TextGenerationPipeline
         // cached on the model/backend for its whole lifetime once it happens, so this is a one-time,
         // first-request-only cost — forcing it here, via a real single-token forward + logits projection
         // against a throwaway cache, moves it safely outside the capture region.
-        using (FixedKvCache warmup = new(cfg.NumLayers, 1, cfg.NumKvHeads, GraphDecodeWarmupHeadDims(cfg), maxSequenceLength: 2))
+        using (FixedKvCache warmup = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), maxSequenceLength: 2))
         {
             using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
             _model!.ProjectLogits(_backend, warmupHidden, 1).Dispose();
@@ -455,13 +454,6 @@ public sealed class TextGenerationPipeline
     }
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
-
-    private static int[] GraphDecodeWarmupHeadDims(TransformerConfig cfg)
-    {
-        int[] a = new int[cfg.NumLayers];
-        for (int i = 0; i < cfg.NumLayers; i++) a[i] = cfg.HeadDimFor(i);
-        return a;
-    }
 
     private static unsafe Span<float> RowAt(Tensor logits, int row, int vocab)
     {

@@ -280,7 +280,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // FlashAttentionDev refuses F16-storage KV (v1 scope — see CudaBackend), silently falling back to
         // eager per-token. Honoring the switch here would sabotage the very feature this branch selects for.
         IKvCache cache = graphEligible
-            ? new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, HeadDimPerLayer(cfg), promptIds.Length + req.MaxTokens + 1)
+            ? new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), promptIds.Length + req.MaxTokens + 1)
             : new PagedKvCache(_pool);
         try
         {
@@ -325,13 +325,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    private static int[] HeadDimPerLayer(TransformerConfig cfg)
-    {
-        int[] a = new int[cfg.NumLayers];
-        for (int i = 0; i < cfg.NumLayers; i++) a[i] = cfg.HeadDimFor(i);
-        return a;
-    }
-
     /// <summary>Captures one CUDA graph for greedy decode against <paramref name="cache"/>, mirroring <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> capture step but returning a <see cref="GraphDecodeSession"/> that outlives one method call; disposes whatever was already allocated before rethrowing on failure.</summary>
     private GraphDecodeSession CaptureGraphSession(FixedKvCache cache, int promptLen, int firstToken, float repetitionPenalty)
     {
@@ -361,7 +354,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // call from Forward and needs its own single-token-shaped warm-up (prefill's own ProjectLogits call
         // uses promptLen>1 positions — a GEMM shape — so it doesn't warm the GEMV path either).
         TransformerConfig warmupCfg = _model.Config;
-        using (FixedKvCache warmup = new(warmupCfg.NumLayers, 1, warmupCfg.NumKvHeads, HeadDimPerLayer(warmupCfg), maxSequenceLength: 2))
+        using (FixedKvCache warmup = new(warmupCfg.NumLayers, 1, warmupCfg.NumKvHeads, warmupCfg.HeadDimsPerLayer(), maxSequenceLength: 2))
         {
             using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
             _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
@@ -446,19 +439,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Pending.Completion.TrySetResult(result);
     }
 
-    private int[] BuildPromptIds(GenerationRequest request)
-    {
-        if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
-        if (request.Messages is not null) return _template.Encode(_tokenizer, request.Messages, addGenerationPrompt: true, request.EnableThinking);
-        if (request.Prompt is not null)
-        {
-            List<ChatMessage> messages = new(2);
-            if (!string.IsNullOrEmpty(request.SystemPrompt)) messages.Add(ChatMessage.System(request.SystemPrompt));
-            messages.Add(ChatMessage.User(request.Prompt));
-            return _template.Encode(_tokenizer, messages, addGenerationPrompt: true, request.EnableThinking);
-        }
-        throw new ArgumentException("Request must set RawTokenIds, Messages, or Prompt.", nameof(request));
-    }
+    private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
 
     private static unsafe Span<float> LastRow(Tensor logits, int t, int vocab)
     {

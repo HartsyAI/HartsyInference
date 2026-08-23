@@ -43,14 +43,6 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
         IntermediateLayers = interIdx;
     }
 
-    /// <summary>Relabels a 2D GGUF weight from engine shape <c>[in, out]</c> to <c>[out, in]</c> for <see cref="IBackend.Linear"/> (data is already row-major <c>[out, in]</c> — shape relabel only).</summary>
-    private static Tensor Relabel(Tensor t)
-    {
-        Tensor o = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)o.DataPointer, o.ElementCount * 4, t.ElementCount * 4);
-        return o;
-    }
-
     public static MllamaVisionEncoder Load(string mmprojPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(mmprojPath, DType.F32);
@@ -63,7 +55,7 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
                 if (key.Contains("position_embd") || key.Contains("patch_embd")) continue;
                 if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_out")
                     || key.Contains("ffn_up") || key.Contains("ffn_down") || key == "mm.0.weight")
-                    w[key] = Relabel(w[key]);
+                    w[key] = TensorCasts.RelabelRank2Copy(w[key]);
             }
             GgufMetadata m = handle.Metadata;
             int hidden = (int)m.GetUInt32("mllama.vision.embedding_length");

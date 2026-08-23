@@ -11,6 +11,9 @@ internal static class JsonVocabText
     public static string[] GetOrBuild(ILlmTokenizer tokenizer, int vocabSize) =>
         Cache.GetValue(tokenizer, t => Build(t, vocabSize));
 
+    /// <summary>Bounds-safe lookup: ids past the end of <paramref name="table"/> (a logits span wider than the decoded vocab) read as empty text, which the grammar states treat as a no-op rather than a parse failure.</summary>
+    public static string TokenText(string[] table, int id) => (uint)id < (uint)table.Length ? table[id] : string.Empty;
+
     private static string[] Build(ILlmTokenizer tokenizer, int vocabSize)
     {
         string[] table = new string[vocabSize];

@@ -160,17 +160,6 @@ public sealed class MultimodalGenerator
             ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache)
             : model.ForwardEmbeds(_backend, embeds, t, posStart, cache);
 
-    /// <summary>Projects the last position's hidden state to logits and selects the next token via the sampler (greedy when the options request it; otherwise temperature/top-p/repetition-penalty over the history).</summary>
-    private unsafe int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
-    {
-        int h = model.Config.HiddenSize;
-        using Tensor last = new(new TensorShape(1, 1, h), DType.F32);
-        float* hp = (float*)hidden.DataPointer;   // D2H sync
-        Buffer.MemoryCopy(hp + (long)(t - 1) * h, (void*)last.DataPointer, (long)h * 4, (long)h * 4);
-        using Tensor logits = model.ProjectLogits(_backend, last, 1);
-        float* lp = (float*)logits.DataPointer;
-        int vocab = model.Config.VocabSize;
-        Span<float> span = new(lp, vocab);
-        return sampler.Next(span, history);
-    }
+    private int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)
+        => VlmDecodeOps.SampleLast(_backend, model, hidden, t, sampler, history);
 }
