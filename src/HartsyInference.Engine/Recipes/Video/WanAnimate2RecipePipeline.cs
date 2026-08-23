@@ -276,11 +276,18 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    /// <summary>One trim + one free-VRAM query serving two decisions: refuses a geometry that cannot fit even with the BF16 cache and a fully-streamed DiT (naming the largest chunk length that would), then resolves the driving-cache dtype for the whole generation via <see cref="WanAnimate2DrivingCachePolicy"/>. Runs before any encode, so an infeasible request costs nothing. Backends reporting no VRAM (CPU) skip the refusal and resolve to F32.</summary>
+    /// <summary>One trim + one free-VRAM query serving two decisions: resolves the driving-cache dtype for the whole
+    /// generation via <see cref="WanAnimate2DrivingCachePolicy"/>, then refuses a geometry that cannot fit the
+    /// SELECTED cache plus a fully-streamed DiT (naming the largest chunk length that would). Runs before any
+    /// encode, so an infeasible request costs nothing. Backends reporting no VRAM (CPU) skip the refusal and
+    /// resolve to F32.</summary>
     /// <remarks>The feasibility floor deliberately excludes the per-token activation reserve: that reserve is a
     /// planning allowance the streaming scope clamps against, and it over-predicts the measured peak — charging it
-    /// here would refuse geometries that demonstrably run (480x800/61f). The BF16 cache is the immovable resident
-    /// object; activations are elastic under per-step frees.</remarks>
+    /// here would refuse geometries that demonstrably run (480x800/61f). The cache is the immovable resident
+    /// object; activations are elastic under per-step frees. Dtype must resolve BEFORE this floor is sized: a
+    /// forced/low-VRAM F32 pin (<see cref="WanAnimate2DrivingCachePolicy.EnvironmentVariable"/>=off, or the global
+    /// low-VRAM policy forcing it off) needs the larger F32 cache checked here — checking the smaller BF16 size
+    /// regardless of the pin let an F32-pinned geometry pass preflight and OOM mid-generation instead.</remarks>
     private bool PlanDrivingCache(int width, int height, int chunkLen)
     {
         (int T, int H, int W) genGrid = GenerationGrid(width, height, chunkLen);
@@ -291,22 +298,27 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         // Pooled frees under-report until trimmed — the VramPlanner.TrimBeforeQuery rationale.
         _backend.TrimMemoryPool();
         (long freeBytes, _) = _backend.GetVramInfo();
-        long floorBytes = bf16Cache + WanAnimate2Pipeline.FixedHeadroomBytes + weightFloor;
+        bool bf16DrivingCache = WanAnimate2DrivingCachePolicy.Resolve(_backend, f32Cache, bf16Cache,
+            WanAnimate2Pipeline.ActivationReserveBytes(tokenLoad), weightFloor, measuredFreeBytes: freeBytes);
+        long selectedCache = bf16DrivingCache ? bf16Cache : f32Cache;
+        long floorBytes = selectedCache + WanAnimate2Pipeline.FixedHeadroomBytes + weightFloor;
         if (freeBytes > 0 && floorBytes > freeBytes)
         {
-            int feasible = LargestFeasibleChunkFrames(width, height, chunkLen, freeBytes - weightFloor);
+            int feasible = LargestFeasibleChunkFrames(width, height, chunkLen, freeBytes - weightFloor, bf16DrivingCache);
             string advice = feasible > 0
                 ? $" At {width}x{height} the longest chunk that fits is {feasible} frames — lower --frames (or "
                     + "animatetotalframes chunking will still need --frames at or below that)."
                 : $" Not even the shortest chunk fits at {width}x{height} — lower the resolution.";
+            string cacheLabel = bf16DrivingCache ? "BF16" : "F32";
+            string pinNote = bf16DrivingCache ? "" : $" Unsetting {WanAnimate2DrivingCachePolicy.EnvironmentVariable} "
+                + "(or setting it to 'on') allows the smaller BF16 cache instead.";
             throw new OutOfVramException(
-                $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the BF16 driving cache "
-                + $"({ByteFormat.Mb(bf16Cache)}) plus workspace ({ByteFormat.Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
+                $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the {cacheLabel} driving cache "
+                + $"({ByteFormat.Mb(selectedCache)}) plus workspace ({ByteFormat.Mb(WanAnimate2Pipeline.FixedHeadroomBytes)}) and a fully-"
                 + $"streamed DiT ({ByteFormat.Mb(weightFloor)}) needs {ByteFormat.Mb(floorBytes)}, but only {ByteFormat.Mb(freeBytes)} is free."
-                + advice);
+                + advice + pinNote);
         }
-        return WanAnimate2DrivingCachePolicy.Resolve(_backend, f32Cache, bf16Cache,
-            WanAnimate2Pipeline.ActivationReserveBytes(tokenLoad), weightFloor, measuredFreeBytes: freeBytes);
+        return bf16DrivingCache;
     }
 
     /// <summary>The generation stream's token grid for a chunk — the same divisions <c>GenerateChunk</c> performs, so the up-front decision and the chunk placement cannot drift apart.</summary>
@@ -318,13 +330,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         return (tTotal / pt, height / sp / ph, width / sp / pw);
     }
 
-    /// <summary>The longest chunk whose BF16 cache + workspace fits <paramref name="budgetBytes"/>, walking the causal-VAE frame grid down from the request; 0 = the resolution is the problem, not the length.</summary>
-    private int LargestFeasibleChunkFrames(int width, int height, int chunkLen, long budgetBytes)
+    /// <summary>The longest chunk whose selected-dtype cache + workspace fits <paramref name="budgetBytes"/>, walking the causal-VAE frame grid down from the request; 0 = the resolution is the problem, not the length.</summary>
+    private int LargestFeasibleChunkFrames(int width, int height, int chunkLen, long budgetBytes, bool bf16Cache)
     {
         for (int candidate = chunkLen - _config.VaeTemporalCompression; candidate >= 5;
             candidate -= _config.VaeTemporalCompression)
         {
-            long bytes = _transformer.DrivingCacheBytes(GenerationGrid(width, height, candidate), bf16Cache: true);
+            long bytes = _transformer.DrivingCacheBytes(GenerationGrid(width, height, candidate), bf16Cache);
             if (bytes + WanAnimate2Pipeline.FixedHeadroomBytes <= budgetBytes)
             {
                 return candidate;

@@ -1765,9 +1765,12 @@ public sealed class VulkanBackend : IBackend
 
         // A mask whose query axis is 1 stores one [Skv] row broadcast over every query (a bias that depends only
         // on the key — Wan-Animate-2's log_scale band). Every shader below indexes it as [Sq, Skv], so expand it
-        // here; handing them the short buffer would read past the allocation and go unnoticed.
+        // here; handing them the short buffer would read past the allocation and go unnoticed. Gated on F32/rank
+        // first: ExpandKeyOnlyMask reads the mask as float* unconditionally, so an F16 mask (which every shader
+        // below rejects anyway) must fail that check BEFORE this native read, not after.
         long sqRows = query.Shape[2], skvRows = key.Shape[2];
-        using Tensor? expandedMask = mask is not null && MaskQueryRows(mask) == 1 && sqRows > 1
+        using Tensor? expandedMask = mask is not null && mask.DType == DType.F32
+            && mask.Shape.Rank is 2 or 3 or 4 && MaskQueryRows(mask) == 1 && sqRows > 1
             ? ExpandKeyOnlyMask(mask, sqRows, skvRows) : null;
         mask = expandedMask ?? mask;
 

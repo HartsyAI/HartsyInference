@@ -57,7 +57,13 @@ public static class SamplingParamResolver
     {
         bool hasSampler = !string.IsNullOrWhiteSpace(sampler);
         bool hasSchedule = !string.IsNullOrWhiteSpace(schedule);
-        if (!hasSampler && !hasSchedule)
+        // "normal"/"default" are the identity schedule and are NOT a recognized suffix (SplitCompound skips
+        // "normal" deliberately, and "default" isn't a suffix at all), so appending either produces a name
+        // nothing can split. Normalized once, up front, so both branches below see the same answer instead of
+        // only the has-both-sampler-and-schedule branch knowing about it.
+        string? scheduleKey = hasSchedule ? schedule!.Trim().ToLowerInvariant() : null;
+        bool scheduleIsIdentity = scheduleKey is "normal" or "default";
+        if (!hasSampler && (!hasSchedule || scheduleIsIdentity))
         {
             return null;
         }
@@ -66,7 +72,7 @@ public static class SamplingParamResolver
         if (!hasSampler)
         {
             // Schedule-only: name Euler explicitly so the value round-trips through SplitCompound as a compound.
-            requested = $"euler_{schedule!.Trim()}";
+            requested = $"euler_{scheduleKey}";
         }
         else if (!hasSchedule || SamplerRegistry.SplitCompound(sampler).Schedule is not null)
         {
@@ -74,10 +80,7 @@ public static class SamplingParamResolver
         }
         else
         {
-            string scheduleKey = schedule!.Trim().ToLowerInvariant();
-            // "normal" is the identity schedule and is NOT a recognized suffix (SplitCompound skips it deliberately),
-            // so appending it would produce a name nothing can split.
-            requested = scheduleKey is "normal" or "default" ? sampler! : $"{sampler!.Trim()}_{scheduleKey}";
+            requested = scheduleIsIdentity ? sampler! : $"{sampler!.Trim()}_{scheduleKey}";
         }
 
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(requested);

@@ -167,6 +167,50 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         Assert.True(diff < 1e-5f, $"materialized key-only bias diverged from the duplicate by {diff:E3}.");
     }
 
+    /// <summary>The tiled path's per-head/per-batch fix: a bias that carries one row PER HEAD (not one row shared by
+    /// everything) must have each head look up its own row, not always block 0's. Regression target for the bug
+    /// where <c>AccumulateKeyBias</c> was called once across all heads with a single un-offset bias pointer — every
+    /// head silently got head 0's row. Ground truth is the full non-broadcast duplicate ([1,heads,Sq,Skv], each
+    /// head's own row repeated over every query) run through the ordinary materialized path, which indexes the
+    /// mask per query row and was never at risk of this bug.</summary>
+    [Fact]
+    public void TiledPath_PerHeadBias_SelectsTheOwningHeadsRow()
+    {
+        if (Skip()) return;
+
+        const int heads = 4, hw = 32, frames = 4, d = 64;
+        const int sq = hw, skv = hw * frames;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor q = Rnd(1, heads, sq, d);
+        using Tensor k = Rnd(1, heads, skv, d);
+        using Tensor v = Rnd(1, heads, skv, d);
+
+        // One [Skv] row per head, each at a different log_scale — a wrong-head lookup is not accidentally masked
+        // by every head sharing the same bias.
+        using Tensor rowsPerHead = new(new TensorShape(1, heads, 1, skv), DType.F32);
+        using Tensor duplicatePerHead = new(new TensorShape(1, heads, sq, skv), DType.F32);
+        float* pRows = (float*)rowsPerHead.DataPointer;
+        float* pDup = (float*)duplicatePerHead.DataPointer;
+        for (int h = 0; h < heads; h++)
+        {
+            using Tensor row = WanAnimate2Transformer.BuildLogScaleBias(hw, skv, -0.5f * (h + 1));
+            float* pRow = (float*)row.DataPointer;
+            Buffer.MemoryCopy(pRow, pRows + (long)h * skv, skv * 4, skv * 4);
+            for (int qi = 0; qi < sq; qi++)
+                Buffer.MemoryCopy(pRow, pDup + ((long)h * sq + qi) * skv, skv * 4, skv * 4);
+        }
+
+        (string, string?)[] tiled = [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", "1")];
+        (string, string?)[] materialized =
+            [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", null), ("HARTSY_SDPA_NO_F16", "1")];
+        using Tensor viaTiled = Run(q, k, v, rowsPerHead, scale, tiled);
+        using Tensor viaMaterialized = Run(q, k, v, duplicatePerHead, scale, materialized);
+
+        float diff = MaxDiff(viaTiled, viaMaterialized);
+        _output.WriteLine($"tiled per-head vs materialized duplicate: max|Δ| = {diff:E3}");
+        Assert.True(diff < 1e-4f, $"tiled per-head bias diverged from the materialized ground truth by {diff:E3}.");
+    }
+
     /// <summary>A VRAM shortfall inside the fused path must never disable it permanently. The fallback it demotes
     /// to allocates the whole <c>[heads, Sq, Skv]</c> score matrix — strictly MORE memory than the allocation that
     /// just failed — so treating an OOM as structural guarantees the next call fails harder.</summary>

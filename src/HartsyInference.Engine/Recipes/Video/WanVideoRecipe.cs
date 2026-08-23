@@ -112,6 +112,33 @@ public sealed class WanVideoRecipe : IVideoRecipe
             return Defaults;
         }
     }
+    /// <summary>The sampler/schedule selection a CONCRETE checkpoint accepts. Same reason as <see cref="SupportsFor"/>
+    /// and <see cref="DefaultsFor"/>: Animate and Animate-2 share <c>wan-21-14b</c> with the solver-owned plain
+    /// backbone, so a host querying capabilities under the compat class id alone would report no selectable
+    /// sampler for a checkpoint that, once constructed, accepts UniPC/DPM++2M. Vace and S2V do not narrow their own
+    /// sampling support (both stay solver-owned like the family), so only Animate and Animate2 are special-cased.</summary>
+    public SamplingCapabilities.SamplingSupport SamplingSupportFor(string? checkpointPath)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            return SamplingCapabilities.ForVideo(_familyId);
+        }
+        try
+        {
+            return DetectVariant(checkpointPath) switch
+            {
+                WanVariant.Animate => SamplingCapabilities.ForVideo("wan-animate"),
+                WanVariant.Animate2 => SamplingCapabilities.ForVideo("wan-animate-2"),
+                _ => SamplingCapabilities.ForVideo(_familyId),
+            };
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware sampling support; using family defaults. {ex.Message}");
+            return SamplingCapabilities.ForVideo(_familyId);
+        }
+    }
+
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 

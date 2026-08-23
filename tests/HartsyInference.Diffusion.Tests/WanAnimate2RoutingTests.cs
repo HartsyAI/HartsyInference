@@ -75,6 +75,51 @@ public sealed class WanAnimate2RoutingTests
         }
     }
 
+    /// <summary>The capability table alone cannot catch this: <c>SamplingCapabilities.ForVideo("wan-animate-2")</c>
+    /// is correct in isolation, but a host queries capabilities the same way it queries defaults — by the compat
+    /// class id a checkpoint actually loads under. Without checkpoint-aware sampling-capability resolution, that
+    /// query would silently report Animate-2 as solver-owned with no selectable sampler.</summary>
+    [Fact]
+    public void SamplingSupportFor_Animate2Checkpoint_ReportsAnimate2Samplers_NotSolverOwned()
+    {
+        string path = WriteHeaderOnlySafeTensors(Animate2ConfigJson);
+        try
+        {
+            WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
+            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(path);
+
+            Assert.Equal(SamplingCapabilities.ForVideo("wan-animate-2").Samplers, resolved.Samplers);
+            // The trap, stated positively: this must NOT be the family's own (solver-owned, no sampler) answer.
+            Assert.NotEmpty(resolved.Samplers);
+            Assert.Empty(family.SamplingSupportFor(null).Samplers);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>Same trap as the Animate-2 case above, for the V1 pathway — detected by key sniff rather than
+    /// metadata, but sharing the same compat class and the same risk of a checkpoint-blind capability query.</summary>
+    [Fact]
+    public void SamplingSupportFor_AnimateV1Checkpoint_ReportsAnimateSamplers_NotSolverOwned()
+    {
+        string path = WriteHeaderOnlySafeTensorsWithKey("pose_patch_embedding.weight");
+        try
+        {
+            WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
+            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(path);
+
+            Assert.Equal(SamplingCapabilities.ForVideo("wan-animate").Samplers, resolved.Samplers);
+            Assert.NotEmpty(resolved.Samplers);
+            Assert.Empty(family.SamplingSupportFor(null).Samplers);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void DetectVariant_PlainI2vHeaderWithNoMetadata_IsNotMistakenForAnimate2()
     {
@@ -121,6 +166,27 @@ public sealed class WanAnimate2RoutingTests
         header.Append("\"blocks.0.self_attn.q.weight\":{\"dtype\":\"F32\",\"shape\":[5120,5120],\"data_offsets\":[0,0]}}");
         byte[] json = Encoding.UTF8.GetBytes(header.ToString());
         string path = Path.Combine(Path.GetTempPath(), $"hartsy-animate2-{Guid.NewGuid():N}.safetensors");
+        using (FileStream fs = File.Create(path))
+        {
+            Span<byte> len = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64LittleEndian(len, json.Length);
+            fs.Write(len);
+            fs.Write(json);
+        }
+        return path;
+    }
+
+    /// <summary>Writes a header-only safetensors file carrying one variant-signature key (e.g. Animate V1's
+    /// <c>pose_patch_embedding</c>) alongside the same I2V-14B keys <see cref="WriteHeaderOnlySafeTensors"/> uses,
+    /// for variants <see cref="WanVideoRecipe.DetectVariant"/> classifies by key sniff rather than metadata.</summary>
+    private static string WriteHeaderOnlySafeTensorsWithKey(string variantKeyName)
+    {
+        StringBuilder header = new StringBuilder("{");
+        header.Append($"\"{variantKeyName}\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,0]}},");
+        header.Append("\"patch_embedding.weight\":{\"dtype\":\"F32\",\"shape\":[5120,36,1,2,2],\"data_offsets\":[0,0]},");
+        header.Append("\"blocks.0.self_attn.q.weight\":{\"dtype\":\"F32\",\"shape\":[5120,5120],\"data_offsets\":[0,0]}}");
+        byte[] json = Encoding.UTF8.GetBytes(header.ToString());
+        string path = Path.Combine(Path.GetTempPath(), $"hartsy-animate-variant-{Guid.NewGuid():N}.safetensors");
         using (FileStream fs = File.Create(path))
         {
             Span<byte> len = stackalloc byte[8];

@@ -7687,13 +7687,21 @@ public sealed class CudaBackend : IBackend
         long totalHeads = b * h;
 
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0, pBias = 0, pOnes = 0;
+        long biasBlocks = 0;
         bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            if (keyBias is not null) pBias = GpuTransferHelper.CopyToDevice(keyBias);
+            if (keyBias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(keyBias);
+                // The mask may carry one row per batch/head ([H,1,Skv] or [B,H,1,Skv]), not just a single row
+                // broadcast over everything — bh below indexes into it modulo this so each head/batch gets its
+                // own row instead of every row silently reusing block 0's.
+                biasBlocks = Math.Max(1, keyBias.ElementCount / skv);
+            }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
@@ -7710,8 +7718,8 @@ public sealed class CudaBackend : IBackend
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
             if (pBias != 0)
             {
-                pOnes = CudaMemory.Allocate((nuint)(totalHeads * Br * sizeof(float)));
-                CudaMemory.Fill32(pOnes, 0x3F80_0000u, (nuint)(totalHeads * Br));   // 1.0f
+                pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));
+                CudaMemory.Fill32(pOnes, 0x3F80_0000u, (nuint)Br);   // 1.0f
             }
 
             long strideQ = sq * d, strideK = skv * d, strideV = skv * d, strideOut = sq * d;
@@ -7740,10 +7748,18 @@ public sealed class CudaBackend : IBackend
                         CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
 
-                // A key-only additive bias is the same [Skv] row for every query and head, so it lands on the
-                // whole packed tile in ONE rank-1 accumulate — no [Sq,Skv] duplicate of it is ever built.
+                // A key-only additive bias needs no [Sq,Skv] duplicate — one rank-1 accumulate covers a whole
+                // head's curBr rows. Looped per head/batch (not one accumulate across totalHeads*curBr) so a
+                // mask with more than one stored row applies the block that head/batch actually owns.
                 if (pBias != 0)
-                    AccumulateKeyBias(scoresBuf, pBias, pOnes, totalHeads * curBr, skv, skv, beta: 1f);
+                {
+                    for (long bh = 0; bh < totalHeads; bh++)
+                    {
+                        ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
+                        ulong biasPtr = pBias + (ulong)((bh % biasBlocks) * skv * sizeof(float));
+                        AccumulateKeyBias(sPtr, biasPtr, pOnes, curBr, skv, skv, beta: 1f);
+                    }
+                }
 
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
                 _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);

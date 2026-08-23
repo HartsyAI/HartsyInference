@@ -1283,6 +1283,32 @@ public sealed class VulkanBackendSmokeTests
         Assert.True(worst < 1e-5f, $"key-only mask diverged from the duplicate by {worst:E3}.");
     }
 
+    /// <summary>An F16 key-only mask must be rejected by the existing F32-only dtype guard, not expanded first.
+    /// Regression target: <c>ExpandKeyOnlyMask</c> read the mask natively as <c>float*</c> unconditionally, before
+    /// any dtype check ran — an F16 <c>[1,Skv]</c> mask (half the bytes of the same-shaped F32 one) was copied as
+    /// four bytes per element from a two-byte allocation (an out-of-bounds native read), and the RESULT of that
+    /// copy is a freshly-allocated F32 tensor, so the dtype guard downstream never even saw the original F16 mask
+    /// to reject it — the call silently proceeded on garbage mask data instead of throwing.</summary>
+    [Fact]
+    public void Backend_SDPA_KeyOnlyMask_F16_IsRejectedByDtypeGuard_NotExpandedFirst()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
+        using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor k = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor v = new(new TensorShape(B, H, Skv, D), DType.F32);
+        using Tensor o = new(new TensorShape(B, H, Sq, D), DType.F32);
+        using Tensor rowF16 = new(new TensorShape(1, Skv), DType.F16);
+
+        float scale = 1.0f / MathF.Sqrt(D);
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(
+            () => backend.ScaledDotProductAttention(o, q, k, v, rowF16, scale));
+        Assert.Contains("F32", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Backend_SDPA_MultiHead_Matches_Cpu_Reference()
     {

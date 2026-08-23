@@ -343,6 +343,21 @@ public sealed class InferenceEngine : IInferenceEngine
         };
     }
 
+    /// <summary>The sampler/schedule selection the video recipe for <paramref name="spec"/> accepts. Resolved through
+    /// the same registry lookup the construction path uses. Wan is checkpoint-aware for the same reason
+    /// <see cref="SupportedVideoFeatures"/> is: Animate and Animate-2 share the family's compat classes and are only
+    /// detected by header sniff, so a query keyed on the compat class id alone would under-report.</summary>
+    internal static SamplingCapabilities.SamplingSupport SamplingSupportForVideo(ModelSpec spec)
+    {
+        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
+        return recipe switch
+        {
+            null => SamplingCapabilities.Unknown,
+            Recipes.Video.WanVideoRecipe wan => wan.SamplingSupportFor(spec.LocalPath),
+            _ => SamplingCapabilities.ForVideo(ResolveVideoFamilyId(spec)),
+        };
+    }
+
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
     internal static string FamilyIdFor(ModelSpec spec) => ResolveFamilyId(spec);
 
