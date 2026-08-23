@@ -115,8 +115,9 @@ public sealed class VaeTileSeamAuditTests
             double interiorMean = interiorSum / Math.Max(1, interiorCount) / 3.0;
             _output.WriteLine($"Boundary-band mean abs diff: {boundaryMean:F3} (n={boundaryCount}). Interior mean abs diff: {interiorMean:F3} (n={interiorCount}).");
 
-            File.WriteAllBytes(Path.Combine(RepoRoot.Path, "vae_tileseam_untiled_reference.rgb"), refRgb);
-            File.WriteAllBytes(Path.Combine(RepoRoot.Path, "vae_tileseam_tiled.rgb"), tiledRgb);
+            Directory.CreateDirectory(TestPaths.OutputDir);
+            File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "vae_tileseam_untiled_reference.rgb"), refRgb);
+            File.WriteAllBytes(Path.Combine(TestPaths.OutputDir, "vae_tileseam_tiled.rgb"), tiledRgb);
             _output.WriteLine($"Wrote both {width}x{height} RGB24 outputs for visual inspection.");
 
             refDecode.Dispose();

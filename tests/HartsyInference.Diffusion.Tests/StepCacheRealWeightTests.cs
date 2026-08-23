@@ -103,14 +103,15 @@ public sealed class StepCacheRealWeightTests
         RecipeContext context = new RecipeContext { CheckpointPath = c.CheckpointPath, Backend = backend };
         using IRecipePipeline pipeline = c.RecipeFactory().Construct(context);
 
+        Directory.CreateDirectory(TestPaths.OutputDir);
         byte[] uncached = Generate(pipeline, request, threshold: null, lateWindow: null, out string uncachedLog);
         _output.WriteLine($"[{c.Name}] Generated cache-off ({uncached.Length} bytes). Log: '{uncachedLog}'");
-        string offPath = Path.Combine(RepoRoot.Path, $"{c.Name.ToLowerInvariant()}_stepcache_off.rgb");
+        string offPath = Path.Combine(TestPaths.OutputDir, $"{c.Name.ToLowerInvariant()}_stepcache_off.rgb");
         File.WriteAllBytes(offPath, uncached);
 
         byte[] cached = Generate(pipeline, request, threshold: c.Threshold, lateWindow: c.LateWindow, out string cachedLog);
         _output.WriteLine($"[{c.Name}] Generated cache-on ({cached.Length} bytes). Log: '{cachedLog}'");
-        string onPath = Path.Combine(RepoRoot.Path, $"{c.Name.ToLowerInvariant()}_stepcache_on.rgb");
+        string onPath = Path.Combine(TestPaths.OutputDir, $"{c.Name.ToLowerInvariant()}_stepcache_on.rgb");
         File.WriteAllBytes(onPath, cached);
         _output.WriteLine($"[{c.Name}] Wrote {offPath} and {onPath} for visual inspection.");
 

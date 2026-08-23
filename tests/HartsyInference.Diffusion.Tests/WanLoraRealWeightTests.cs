@@ -92,8 +92,9 @@ public sealed class WanLoraRealWeightTests
         double meanAbsDiff = diffSum / (double)off0.Rgb.Length;
         _output.WriteLine($"Mean absolute per-byte difference (frame 0): {meanAbsDiff:F2} (0 would mean byte-identical, i.e. the LoRA had no effect).");
 
-        string offPath = Path.Combine(RepoRoot.Path, "wan_lora_off_frame0.rgb");
-        string onPath = Path.Combine(RepoRoot.Path, "wan_lora_on_frame0.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string offPath = Path.Combine(TestPaths.OutputDir, "wan_lora_off_frame0.rgb");
+        string onPath = Path.Combine(TestPaths.OutputDir, "wan_lora_on_frame0.rgb");
         File.WriteAllBytes(offPath, off0.Rgb);
         File.WriteAllBytes(onPath, on0.Rgb);
         _output.WriteLine($"Wrote {offPath} and {onPath} ({off0.Width}x{off0.Height}) for visual inspection.");

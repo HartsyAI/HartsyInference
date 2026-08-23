@@ -92,7 +92,8 @@ public sealed class RegionalPromptingRealWeightTests
             Seed = c.Seed,
         });
 
-        string outPath = Path.Combine(RepoRoot.Path, $"{c.Name.ToLowerInvariant()}_regional_output.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string outPath = Path.Combine(TestPaths.OutputDir, $"{c.Name.ToLowerInvariant()}_regional_output.rgb");
         File.WriteAllBytes(outPath, rgb);
         _output.WriteLine($"[{c.Name}] Wrote {outPath} ({rgb.Length} bytes, {width}x{height}) for visual inspection.");
 

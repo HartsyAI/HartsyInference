@@ -83,8 +83,9 @@ public sealed class LtxVideoI2VRealWeightTests
         double frameDiff = MeanAbsDiff(first.Rgb, last.Rgb);
         _output.WriteLine($"Mean absolute per-byte difference (frame 0 vs last frame): {frameDiff:F2}.");
 
-        string firstPath = Path.Combine(RepoRoot.Path, "ltx_i2v_first.rgb");
-        string lastPath = Path.Combine(RepoRoot.Path, "ltx_i2v_last.rgb");
+        Directory.CreateDirectory(TestPaths.OutputDir);
+        string firstPath = Path.Combine(TestPaths.OutputDir, "ltx_i2v_first.rgb");
+        string lastPath = Path.Combine(TestPaths.OutputDir, "ltx_i2v_last.rgb");
         File.WriteAllBytes(firstPath, first.Rgb);
         File.WriteAllBytes(lastPath, last.Rgb);
         _output.WriteLine($"Wrote {firstPath} and {lastPath} ({first.Width}x{first.Height}) for visual inspection.");
@@ -92,7 +93,7 @@ public sealed class LtxVideoI2VRealWeightTests
         for (int idx = 0; idx < result.Frames.Count; idx += Math.Max(1, result.Frames.Count / 6))
         {
             VideoFrame f = result.Frames[idx];
-            string p = Path.Combine(RepoRoot.Path, $"ltx_i2v_frame{idx:D2}.rgb");
+            string p = Path.Combine(TestPaths.OutputDir, $"ltx_i2v_frame{idx:D2}.rgb");
             File.WriteAllBytes(p, f.Rgb);
             (double r, double g, double b) = ChannelMeans(f.Rgb);
             _output.WriteLine($"Frame {idx}: R={r:F1} G={g:F1} B={b:F1} -> {p}");
