@@ -55,9 +55,6 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
     /// <summary>Optional hook invoked immediately before each transformer block's forward pass (global index over double-then-single blocks). Pipelines plug a <c>BlockStreamingController</c> here to drive prefetch/eviction so the 24 GB bf16 DiT fits in 24 GB. Null = all resident.</summary>
     public Action<int>? BeforeBlockForward { get; set; }
 
-    /// <summary>Debug/parity hook: <c>idx=-1</c> is the post-embed state (image after <c>img_in</c>, text after the token refiner); <c>idx=0..BlockCount-1</c> is the image+text state after each block. Read from a CPU run (or after a sync) when dumping. Null in production.</summary>
-    public Action<int, Tensor, Tensor>? OnBlockOutput { get; set; }
-
     public HunyuanVideoDit(HunyuanVideoConfig cfg)
     {
         _cfg = cfg;
@@ -126,12 +123,12 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         int patchVec = _cfg.InChannels * pT * pH * pW;
 
         // Step-graph fast path (opt-in): capture img_in → blocks → final → proj_out once and replay it. Only the
-        // single-forward b==1 path with no camera tokens qualifies (the block RoPE host fallback is batch>1-only,
-        // and the diagnostic block hooks would inject host reads into the capture). Requires the DiT to be RESIDENT
-        // (BeforeBlockForward null): a captured graph bakes weight device pointers, so block streaming — which
-        // re-points weights per block and runs a host prefetch hook — is incompatible. Self-disables to eager.
+        // single-forward b==1 path with no camera tokens qualifies (the block RoPE host fallback is batch>1-only).
+        // Requires the DiT to be RESIDENT (BeforeBlockForward null): a captured graph bakes weight device pointers,
+        // so block streaming — which re-points weights per block and runs a host prefetch hook — is incompatible.
+        // Self-disables to eager.
         if (DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead && b == 1 && cameraTokens is null
-            && OnBlockOutput is null && BeforeBlockForward is null)
+            && BeforeBlockForward is null)
         {
             return ForwardGraph(backend, latent, txt, pooled, timestep, guidance,
                 hidden, pT, pH, pW, T, H, W, tOut, hOut, wOut, sImg, patchVec);
@@ -150,22 +147,18 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         // 3. temb = time(timestep) + guidance(guidance) + vector(pooled).
         Tensor temb = BuildTemb(backend, b, hidden, timestep, guidance, pooled);
 
-        OnBlockOutput?.Invoke(-1, img, txtTok);
-
         // 4. Blocks (3D rope, packed (tOut,hOut,wOut)).
         for (int i = 0; i < _double.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
             (Tensor ni, Tensor nt) = _double[i].Forward(backend, img, txtTok, temb, _rope, hOut, wOut, tOut);
             img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
-            OnBlockOutput?.Invoke(i, img, txtTok);
         }
         for (int i = 0; i < _single.Length; i++)
         {
             BeforeBlockForward?.Invoke(_double.Length + i);
             (Tensor ni, Tensor nt) = _single[i].Forward(backend, img, txtTok, temb, _rope, hOut, wOut, tOut);
             img.Dispose(); txtTok.Dispose(); img = ni; txtTok = nt;
-            OnBlockOutput?.Invoke(_double.Length + i, img, txtTok);
         }
         txtTok.Dispose();
 

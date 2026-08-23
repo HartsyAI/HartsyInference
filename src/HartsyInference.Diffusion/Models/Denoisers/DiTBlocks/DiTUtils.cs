@@ -123,55 +123,6 @@ public static unsafe class DiTUtils
         }
     }
 
-    /// <summary>Linear projection for 1D vectors: output = input @ weight^T + bias. Input: [B, inDim], Output: [B, outDim].</summary>
-    public static void LinearProject1D(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int inOffset = b * inDim;
-            int outOffset = b * outDim;
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                for (int i = 0; i < inDim; i++)
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                outPtr[outOffset + o] = sum;
-            }
-        }
-    }
-
-    /// <summary>Batched linear projection: output = input @ weight^T + bias. Input: [B, S, inDim], Output: [B, S, outDim].</summary>
-    public static void LinearProjectBatched(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-    }
-
     /// <summary>Concatenates two [B, S1, D] and [B, S2, D] tensors along the sequence dimension → [B, S1+S2, D].</summary>
     public static Tensor ConcatAlongSeqDim(Tensor a, Tensor b)
     {
@@ -380,38 +331,6 @@ public static unsafe class DiTUtils
         return output;
     }
 
-    /// <summary>Concatenates two [B, S, D1] and [B, S, D2] tensors along the last dimension → [B, S, D1+D2].</summary>
-    public static Tensor ConcatAlongLastDim(Tensor a, Tensor b)
-    {
-        int batch = (int)a.Shape[0];
-        int seqLen = (int)a.Shape[1];
-        int dimA = (int)a.Shape[2];
-        int dimB = (int)b.Shape[2];
-        int dimOut = dimA + dimB;
-
-        TensorShape outShape = new TensorShape(batch, seqLen, dimOut);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int bIdx = 0; bIdx < batch; bIdx++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int aOffset = (bIdx * seqLen + s) * dimA;
-                int bOffset = (bIdx * seqLen + s) * dimB;
-                int outOffset = (bIdx * seqLen + s) * dimOut;
-
-                Buffer.MemoryCopy(aPtr + aOffset, outPtr + outOffset, dimA * sizeof(float), dimA * sizeof(float));
-                Buffer.MemoryCopy(bPtr + bOffset, outPtr + outOffset + dimA, dimB * sizeof(float), dimB * sizeof(float));
-            }
-        }
-
-        return output;
-    }
-
     /// <summary>Concatenates two pooled tensors [B, D1] and [B, D2] along the last dimension → [B, D1+D2].</summary>
     public static Tensor ConcatPooled(Tensor a, Tensor b)
     {
@@ -554,7 +473,7 @@ public static unsafe class DiTUtils
     /// <summary>LayerNorm (no affine, eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, entirely on
     /// the backend so the activation stays device-resident. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>,
     /// so <paramref name="scale"/> is pre-incremented by 1 (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor —
-    /// bit-identical to the old host <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors QwenImageBlock.NormModulate.</summary>
+    /// bit-identical to the old host <c>AdaLNModulation.ApplyModulation</c>. Mirrors QwenImageBlock.NormModulate.</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps = 1e-6f)
     {
         // Intermediate follows the activation dtype (F16 activation stays F16 end-to-end; F32 callers unchanged).
@@ -568,7 +487,7 @@ public static unsafe class DiTUtils
     /// <summary>AdaLN modulation <c>out = x*(1+scale)+shift</c> on an ALREADY-normalized input, entirely on the
     /// backend. Split out of <see cref="NormModulate"/> for blocks that share one LayerNorm across two modulation
     /// paths (SD3.5 dual-attention) or use an affine <c>backend.LayerNorm</c> before modulating. Bit-identical to
-    /// the old host <see cref="AdaLNModulation.ApplyModulation"/>. Pass <paramref name="shift"/> null for scale-only
+    /// the old host <c>AdaLNModulation.ApplyModulation</c>. Pass <paramref name="shift"/> null for scale-only
     /// modulation <c>out = x*(1+scale)</c> (Z-Image / Ideogram-4 adaLN blocks that omit the shift term).</summary>
     public static Tensor Modulate(IBackend backend, Tensor x, Tensor? shift, Tensor scale, TensorShape shape)
     {

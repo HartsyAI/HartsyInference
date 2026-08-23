@@ -92,7 +92,4 @@ public sealed record ErnieImageConfig
         RopeTheta = 256,
         RopeAxesDim = (32, 48, 48),
     };
-
-    /// <summary>`baidu/ERNIE-Image-Turbo` preset — same backbone, distilled for 8-step inference.</summary>
-    public static ErnieImageConfig V1Turbo => V1;
 }

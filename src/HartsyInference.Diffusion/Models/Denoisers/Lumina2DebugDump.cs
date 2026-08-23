@@ -9,8 +9,6 @@ internal static unsafe class Lumina2DebugDump
     private static bool _initialized;
     private static readonly object _lock = new();
 
-    public static bool Enabled => _dumpDir is not null;
-
     private static string? ResolveDir()
     {
         string? dir = Environment.GetEnvironmentVariable("LUMINA2_DEBUG_DIR");

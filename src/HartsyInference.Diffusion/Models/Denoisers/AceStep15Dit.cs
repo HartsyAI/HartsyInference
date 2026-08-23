@@ -329,7 +329,5 @@ public sealed unsafe class AceStep15Dit : IDisposable
             packed.Dispose();
             return mod;
         }
-
-        private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

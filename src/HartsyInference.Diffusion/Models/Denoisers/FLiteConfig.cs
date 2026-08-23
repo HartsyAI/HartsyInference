@@ -94,7 +94,4 @@ public sealed record FLiteConfig
         NumRegisterTokens = 16,
         RopeMaxGrid = 512,
     };
-
-    /// <summary>F-Lite-Texture preset (texture-specialized variant). Same backbone as <see cref="V1"/>; the difference is in fine-tune weights, not architecture.</summary>
-    public static FLiteConfig Texture => V1;
 }

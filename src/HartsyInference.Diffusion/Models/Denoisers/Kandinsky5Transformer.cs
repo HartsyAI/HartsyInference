@@ -736,24 +736,4 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         }
         GC.SuppressFinalize(this);
     }
-
-    /// <summary>Converts a channel-last (BHWC) tensor to BCHW. No call sites in this codebase today — kept
-    /// for advanced callers that already have channel-last latents.</summary>
-    public static Tensor ToBchw(Tensor bhwc)
-    {
-        int b = (int)bhwc.Shape[0];
-        int h = (int)bhwc.Shape[1];
-        int w = (int)bhwc.Shape[2];
-        int c = (int)bhwc.Shape[3];
-
-        Tensor result = new Tensor(new TensorShape(b, c, h, w), DType.F32);
-        float* src = (float*)bhwc.DataPointer;
-        float* dst = (float*)result.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-                for (int hi = 0; hi < h; hi++)
-                    for (int wi = 0; wi < w; wi++)
-                        dst[((bi * c + ci) * h + hi) * w + wi] = src[((bi * h + hi) * w + wi) * c + ci];
-        return result;
-    }
 }

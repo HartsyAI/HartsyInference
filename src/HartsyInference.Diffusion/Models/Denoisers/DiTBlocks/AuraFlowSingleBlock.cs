@@ -9,8 +9,6 @@ public sealed unsafe class AuraFlowSingleBlock
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
-    private readonly int _innerDim;
-    private readonly int _mlpDim;
 
     private readonly AdaLNModulation _modulation;
 
@@ -33,8 +31,6 @@ public sealed unsafe class AuraFlowSingleBlock
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
         _headDim = headDim;
-        _innerDim = numHeads * headDim;
-        _mlpDim = mlpDim;
 
         _modulation = new AdaLNModulation(hiddenSize, 6);
 

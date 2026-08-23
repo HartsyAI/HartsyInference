@@ -264,14 +264,6 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             return o;
         }
 
-        private void AddInPlace(Tensor acc, Tensor add)
-        {
-            float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-            long n = acc.Shape.ElementCount;
-            for (long e = 0; e < n; e++) ap[e] += dp[e];
-        }
-
         public void Dispose() => _ones.Dispose();
     }
-
 }

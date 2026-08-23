@@ -7,10 +7,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 /// <summary>Spatial transformer block for UNet cross-attention. Wraps N BasicTransformerBlocks (each: SelfAttn→CrossAttn→FFN). SD1.5 uses 1 block, SDXL uses [1,2,10] per level.</summary>
 public sealed class CrossAttentionBlock
 {
-    private readonly int _channels;
-    private readonly int _numHeads;
-    private readonly int _headDim;
-    private readonly int _crossAttentionDim;
     private readonly int _numTransformerBlocks;
 
     /// <summary>How many cross-attention layers this block contains. Equal to the BasicTransformerBlock count — each transformer block has one cross-attention sub-layer that an IP-Adapter injects K_ip/V_ip into.</summary>
@@ -38,10 +34,6 @@ public sealed class CrossAttentionBlock
     /// <param name="normEps">GroupNorm epsilon.</param>
     public CrossAttentionBlock(int channels, int numHeads, int crossAttentionDim, int numTransformerBlocks = 1, int normGroups = 32, float normEps = 1e-5f)
     {
-        _channels = channels;
-        _numHeads = numHeads;
-        _headDim = channels / numHeads;
-        _crossAttentionDim = crossAttentionDim;
         _numTransformerBlocks = numTransformerBlocks;
 
         _selfAttns = new TransformerSubBlock[numTransformerBlocks];

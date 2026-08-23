@@ -299,6 +299,12 @@ public sealed unsafe class AceStepDit : IDisposable
         return null;
     }
 
+    private static Tensor? PickOptF32(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
+    {
+        Tensor? t = PickOpt(w, keys);
+        return t is null || t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+    }
+
     private static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
     {
         Tensor t = Pick(w, keys);
@@ -678,32 +684,6 @@ public sealed unsafe class AceStepDit : IDisposable
             float* tp = (float*)target.DataPointer;
             float* vp = (float*)value.DataPointer;
             for (long i = 0; i < n; i++) tp[i] += vp[i];
-        }
-
-        private static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
-        {
-            foreach (string key in keys)
-                if (w.TryGetValue(key, out Tensor? t)) return t;
-            throw new KeyNotFoundException($"none of [{string.Join(", ", keys)}] found in checkpoint.");
-        }
-
-        private static Tensor? PickOpt(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
-        {
-            foreach (string key in keys)
-                if (w.TryGetValue(key, out Tensor? t)) return t;
-            return null;
-        }
-
-        private static Tensor? PickOptF32(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
-        {
-            Tensor? t = PickOpt(w, keys);
-            return t is null || t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-        }
-
-        private static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, params string[] keys)
-        {
-            Tensor t = Pick(w, keys);
-            return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
         }
     }
 }

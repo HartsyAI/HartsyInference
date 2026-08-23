@@ -27,9 +27,9 @@ public sealed unsafe class StableAudioNumberEmbedder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _fourierWeights = PickF32(w, $"{prefix}.embedder.embedding.0.weights");
-        _linearWeight = Pick(w, $"{prefix}.embedder.embedding.1.weight");
-        _linearBias = PickOpt(w, $"{prefix}.embedder.embedding.1.bias");
+        _fourierWeights = StableAudioDit.PickF32(w, $"{prefix}.embedder.embedding.0.weights");
+        _linearWeight = StableAudioDit.Pick(w, $"{prefix}.embedder.embedding.1.weight");
+        _linearBias = StableAudioDit.PickOpt(w, $"{prefix}.embedder.embedding.1.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -60,17 +60,5 @@ public sealed unsafe class StableAudioNumberEmbedder
         backend.Linear(embed, fourier, _linearWeight!, _linearBias);
         fourier.Dispose();
         return embed;
-    }
-
-    private static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : throw new KeyNotFoundException($"'{key}' not found in checkpoint.");
-
-    private static Tensor? PickOpt(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? t) ? t : null;
-
-    private static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, string key)
-    {
-        Tensor t = Pick(w, key);
-        return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 }

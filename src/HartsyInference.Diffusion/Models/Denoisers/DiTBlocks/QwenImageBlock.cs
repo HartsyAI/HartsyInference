@@ -394,7 +394,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
     /// <summary>LayerNorm (no affine, eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on the
     /// GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented by 1
     /// (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor — bit-identical to the old CPU
-    /// <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors ChromaDoubleStreamBlock.NormModulate.</summary>
+    /// <c>AdaLNModulation.ApplyModulation</c>. Mirrors ChromaDoubleStreamBlock.NormModulate.</summary>
     private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps)
     {
         Tensor normed = new Tensor(shape, x.DType);

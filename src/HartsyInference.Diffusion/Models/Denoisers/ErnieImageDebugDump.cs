@@ -9,8 +9,6 @@ internal static unsafe class ErnieImageDebugDump
     private static bool _initialized;
     private static readonly object _lock = new();
 
-    public static bool Enabled => _dumpDir is not null;
-
     private static string? ResolveDir()
     {
         string? dir = Environment.GetEnvironmentVariable("ERNIE_IMAGE_DEBUG_DIR");

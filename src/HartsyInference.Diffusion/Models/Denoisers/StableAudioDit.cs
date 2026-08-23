@@ -174,13 +174,16 @@ public sealed unsafe class StableAudioDit : IDisposable
         return temb;
     }
 
-    private static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, string key) =>
+    /// <summary>Checkpoint-key lookups shared by the StableAudio family (<see cref="StableAudioNumberEmbedder"/> reuses them).</summary>
+    internal static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, string key) =>
         w.TryGetValue(key, out Tensor? t) ? t : throw new KeyNotFoundException($"'{key}' not found in checkpoint.");
 
-    private static Tensor? PickOpt(IReadOnlyDictionary<string, Tensor> w, string key) =>
+    /// <summary>Like <see cref="Pick"/> but returns null when the key is absent.</summary>
+    internal static Tensor? PickOpt(IReadOnlyDictionary<string, Tensor> w, string key) =>
         w.TryGetValue(key, out Tensor? t) ? t : null;
 
-    private static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, string key)
+    /// <summary>Like <see cref="Pick"/> but host-casts the result to F32 when needed.</summary>
+    internal static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, string key)
     {
         Tensor t = Pick(w, key);
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
@@ -392,18 +395,6 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.Linear(outT, val, _ff2W!, _ff2B);
             val.Dispose();
             return outT;
-        }
-
-        private static Tensor Pick(IReadOnlyDictionary<string, Tensor> w, string key) =>
-            w.TryGetValue(key, out Tensor? t) ? t : throw new KeyNotFoundException($"'{key}' not found in checkpoint.");
-
-        private static Tensor? PickOpt(IReadOnlyDictionary<string, Tensor> w, string key) =>
-            w.TryGetValue(key, out Tensor? t) ? t : null;
-
-        private static Tensor PickF32(IReadOnlyDictionary<string, Tensor> w, string key)
-        {
-            Tensor t = Pick(w, key);
-            return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
         }
     }
 }

@@ -9,9 +9,6 @@ public sealed unsafe class AuraFlowJointBlock
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
-    private readonly int _innerDim;
-    private readonly int _mlpDim;
-    private readonly float _qkNormEps;
 
     private readonly AdaLNModulation _imgModulation;
     private readonly AdaLNModulation _txtModulation;
@@ -46,9 +43,6 @@ public sealed unsafe class AuraFlowJointBlock
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
         _headDim = headDim;
-        _innerDim = numHeads * headDim;
-        _mlpDim = mlpDim;
-        _qkNormEps = qkNormEps;
 
         _imgModulation = new AdaLNModulation(hiddenSize, 6);
         _txtModulation = new AdaLNModulation(hiddenSize, 6);

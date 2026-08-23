@@ -44,9 +44,6 @@ public sealed unsafe class Kandinsky5Rope
     /// <summary>Total head dimension covered by this rope.</summary>
     public int HeadDim => _headDim;
 
-    /// <summary>Cached sequence length from the last <see cref="Precompute1D"/> / <see cref="Precompute3D"/> call.</summary>
-    public int CachedSeqLen => _cachedSeqLen;
-
     /// <summary>Precomputes the 1D RoPE tables for a sequence of integer positions. Mirrors <c>args = pos[:, None] * freqs[None, :]</c> with <c>freqs = get_freqs(head_dim/2, theta)</c>.</summary>
     /// <param name="positions">Per-token positions, shape <c>[seqLen]</c> as int32 (we read as int32 ptr).</param>
     public void Precompute1D(ReadOnlySpan<int> positions)

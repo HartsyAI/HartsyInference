@@ -12,8 +12,6 @@ internal static unsafe class AnimaDebugDump
     private static bool _initialized;
     private static readonly object _lock = new();
 
-    public static bool Enabled => _dumpDir is not null;
-
     private static string? ResolveDir()
     {
         string? dir = Environment.GetEnvironmentVariable("ANIMA_DEBUG_DIR");

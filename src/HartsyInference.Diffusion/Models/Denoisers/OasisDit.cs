@@ -94,7 +94,6 @@ public sealed unsafe class OasisDit : IDisposable
         if (t > _config.MaxFrames) throw new ArgumentException($"window {t} exceeds max_frames {_config.MaxFrames}.", nameof(latents));
 
         bool prof = taps is null && Environment.GetEnvironmentVariable("HARTSY_OASIS_PHASE") == "1";
-        long tsEntry = System.Diagnostics.Stopwatch.GetTimestamp();
 
         Tensor cond = BuildCondition(backend, noiseIndices, actions, t, dim);
         Tensor x = Patchify(backend, latents, t, gh, gw);
@@ -205,8 +204,6 @@ public sealed unsafe class OasisDit : IDisposable
         _mask = BuildCausalMask(t);
         _geomSig = sig;
     }
-
-    private static double ElapsedMs(long ts) => (System.Diagnostics.Stopwatch.GetTimestamp() - ts) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>Returns a fresh copy of the captured-graph velocity buffer so the caller may dispose it freely
     /// (the fixed <see cref="_velFixed"/> persists across forwards for the graph). One small device copy.</summary>

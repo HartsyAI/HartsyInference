@@ -6,7 +6,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 /// <summary>UNet down block: sequence of (ResNet + optional CrossAttention) layers followed by an optional downsample Conv2d(stride=2).</summary>
 public sealed class DownBlock
 {
-    private readonly int _inChannels;
     private readonly int _outChannels;
     private readonly int _numLayers;
     private readonly bool _hasAttention;
@@ -36,7 +35,6 @@ public sealed class DownBlock
 
     public DownBlock(int inChannels, int outChannels, int timeDim, int numLayers, bool hasAttention, bool hasDownsample, int numHeads = 8, int crossAttentionDim = 768, int numTransformerBlocks = 1)
     {
-        _inChannels = inChannels;
         _outChannels = outChannels;
         _numLayers = numLayers;
         _hasAttention = hasAttention;

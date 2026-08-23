@@ -581,8 +581,6 @@ public sealed unsafe class HiDreamBlock
     /// argmax expert with renormalized weight 1) plus the shared expert.</para></summary>
     private Tensor MoeForward(IBackend backend, Tensor input, int batch, int seqLen)
     {
-        TensorShape inShape = new TensorShape(batch, seqLen, _hiddenSize);
-
         // Shared (always-on) expert: SwiGLU. Inner dim is taken from the shared weight (3584 for HiDream V1),
         // which is NOT ff_dim/2 — so it must come from the weight, not a computed value.
         Tensor shared = SwiGluForward(backend, input, _sharedW1!, _sharedW3!, _sharedW2!, batch, seqLen);
@@ -602,7 +600,6 @@ public sealed unsafe class HiDreamBlock
 
         // The shared (always-on) expert output is the accumulator; each routed expert adds in place,
         // weighted by its (possibly zero) gate — all device-resident, no D2H.
-        _ = inShape;
         for (int e = 0; e < _numRoutedExperts; e++)
         {
             Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen);
