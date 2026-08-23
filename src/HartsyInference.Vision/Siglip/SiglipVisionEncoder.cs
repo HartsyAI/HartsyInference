@@ -207,9 +207,12 @@ public sealed unsafe class SiglipVisionEncoder
         // Reshape to multi-head [B, H, S, D] and run SDPA.
         int numHeads = _preset.NumHeads;
         int headDim = hidden / numHeads;
-        Tensor qMh = ReshapeToHeads(q, batch, 1, numHeads, headDim);
-        Tensor kMh = ReshapeToHeads(k, batch, _numPatches, numHeads, headDim);
-        Tensor vMh = ReshapeToHeads(v, batch, _numPatches, numHeads, headDim);
+        Tensor qMh = new Tensor(new TensorShape(batch, numHeads, 1, headDim), DType.F32);
+        Tensor kMh = new Tensor(new TensorShape(batch, numHeads, _numPatches, headDim), DType.F32);
+        Tensor vMh = new Tensor(new TensorShape(batch, numHeads, _numPatches, headDim), DType.F32);
+        backend.Permute0213(qMh, q, 1, numHeads, headDim);
+        backend.Permute0213(kMh, k, _numPatches, numHeads, headDim);
+        backend.Permute0213(vMh, v, _numPatches, numHeads, headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor attnOut = new Tensor(new TensorShape(batch, numHeads, 1, headDim), DType.F32);
@@ -218,7 +221,8 @@ public sealed unsafe class SiglipVisionEncoder
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // Merge heads → [B, 1, hidden].
-        Tensor merged = ReshapeFromHeads(attnOut, batch, 1, numHeads, headDim);
+        Tensor merged = new Tensor(new TensorShape(batch, 1, hidden), DType.F32);
+        backend.Permute0213(merged, attnOut, numHeads, 1, headDim);
         attnOut.Dispose();
 
         // out_proj.
@@ -256,40 +260,6 @@ public sealed unsafe class SiglipVisionEncoder
         int batch, int seq, int inDim, int outDim)
     {
         backend.Linear(output, input, weight, bias);
-    }
-
-    private Tensor ReshapeToHeads(Tensor input, int batch, int seq, int numHeads, int headDim)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, numHeads, seq, headDim), DType.F32);
-        float* sp = (float*)input.DataPointer;
-        float* dp = (float*)output.DataPointer;
-        int hidden = numHeads * headDim;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seq; s++)
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int sOff = (b * seq + s) * hidden + h * headDim;
-                    int dOff = ((b * numHeads + h) * seq + s) * headDim;
-                    new ReadOnlySpan<float>(sp + sOff, headDim).CopyTo(new Span<float>(dp + dOff, headDim));
-                }
-        return output;
-    }
-
-    private Tensor ReshapeFromHeads(Tensor input, int batch, int seq, int numHeads, int headDim)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seq, numHeads * headDim), DType.F32);
-        float* sp = (float*)input.DataPointer;
-        float* dp = (float*)output.DataPointer;
-        int hidden = numHeads * headDim;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seq; s++)
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int sOff = ((b * numHeads + h) * seq + s) * headDim;
-                    int dOff = (b * seq + s) * hidden + h * headDim;
-                    new ReadOnlySpan<float>(sp + sOff, headDim).CopyTo(new Span<float>(dp + dOff, headDim));
-                }
-        return output;
     }
 
     /// <summary>Head MLP: <c>output = pooled + Fc2(GELU(Fc1(LN(pooled))))</c>. Standard residual transformer FFN.</summary>
@@ -417,54 +387,26 @@ internal sealed unsafe class SiglipTransformerLayer
         backend.Linear(v, input, _vW!, _vB!);
 
         // Reshape to multi-head [B, H, S, D].
-        Tensor qMh = ReshapeToMh(q, batch, seq);
-        Tensor kMh = ReshapeToMh(k, batch, seq);
-        Tensor vMh = ReshapeToMh(v, batch, seq);
+        Tensor qMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
+        Tensor kMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
+        Tensor vMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
+        backend.Permute0213(qMh, q, seq, _numHeads, _headDim);
+        backend.Permute0213(kMh, k, seq, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seq, _numHeads, _headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor attnOut = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, 1f / MathF.Sqrt(_headDim));
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor merged = ReshapeFromMh(attnOut, batch, seq);
+        Tensor merged = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
+        backend.Permute0213(merged, attnOut, _numHeads, seq, _headDim);
         attnOut.Dispose();
 
         Tensor projected = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
         backend.Linear(projected, merged, _oW!, _oB!);
         merged.Dispose();
         return projected;
-    }
-
-    private Tensor ReshapeToMh(Tensor input, int batch, int seq)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        float* sp = (float*)input.DataPointer;
-        float* dp = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seq; s++)
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    int sOff = (b * seq + s) * _hidden + h * _headDim;
-                    int dOff = ((b * _numHeads + h) * seq + s) * _headDim;
-                    new ReadOnlySpan<float>(sp + sOff, _headDim).CopyTo(new Span<float>(dp + dOff, _headDim));
-                }
-        return output;
-    }
-
-    private Tensor ReshapeFromMh(Tensor input, int batch, int seq)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        float* sp = (float*)input.DataPointer;
-        float* dp = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seq; s++)
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    int sOff = ((b * _numHeads + h) * seq + s) * _headDim;
-                    int dOff = (b * seq + s) * _hidden + h * _headDim;
-                    new ReadOnlySpan<float>(sp + sOff, _headDim).CopyTo(new Span<float>(dp + dOff, _headDim));
-                }
-        return output;
     }
 
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)

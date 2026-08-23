@@ -37,23 +37,9 @@ public sealed unsafe class GroundingDinoMultiheadAttention : IDisposable
         Tensor k = Lin(backend, keys, _kW!, _kB, skv, h);
         Tensor v = Lin(backend, values, _vW!, _vB, skv, h);
 
-        Tensor qH = new(new TensorShape(1, nh, sq, hd), DType.F32);
-        Tensor kH = new(new TensorShape(1, nh, skv, hd), DType.F32);
-        Tensor vH = new(new TensorShape(1, nh, skv, hd), DType.F32);
-        // [1, S, nh*hd] -> [1, nh, S, hd] on the GPU (was a per-token host loop).
-        backend.Permute0213(qH, q, sq, nh, hd);
-        backend.Permute0213(kH, k, skv, nh, hd);
-        backend.Permute0213(vH, v, skv, nh, hd);
+        Tensor ctx = RtDetrAttention.MultiHead(backend, q, k, v, nh, hd, additiveMask);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor attn = new(new TensorShape(1, nh, sq, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, additiveMask, 1f / MathF.Sqrt(hd));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
-
-        // Merge heads: [1, nh, sq, hd] -> [1, sq, nh*hd] on the GPU (was a per-token host loop).
-        Tensor ctx = new(new TensorShape(1, sq, h), DType.F32);
-        backend.Permute0213(ctx, attn, nh, sq, hd);
-        attn.Dispose();
         Tensor o = Lin(backend, ctx, _oW!, _oB, sq, h);
         ctx.Dispose();
         return o;

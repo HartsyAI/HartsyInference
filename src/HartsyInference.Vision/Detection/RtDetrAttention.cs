@@ -12,8 +12,9 @@ public static class RtDetrAttention
 {
     /// <summary>Runs attention. <paramref name="q"/> is <c>[1, Sq, W]</c>, <paramref name="k"/>/<paramref name="v"/>
     /// are <c>[1, Skv, W]</c> with <c>W = heads·headDim</c>. Returns <c>[1, Sq, W]</c> (pre output-projection).
-    /// Owns the returned tensor.</summary>
-    public static Tensor MultiHead(IBackend backend, Tensor q, Tensor k, Tensor v, int heads, int headDim)
+    /// Owns the returned tensor; the caller keeps ownership of q/k/v, which stay alive until this returns.</summary>
+    /// <param name="additiveMask">Optional <c>[1, heads, Sq, Skv]</c> added to the pre-softmax scores; null for the unmasked RT-DETR paths.</param>
+    public static Tensor MultiHead(IBackend backend, Tensor q, Tensor k, Tensor v, int heads, int headDim, Tensor? additiveMask = null)
     {
         int sq = (int)q.Shape[1];
         int skv = (int)k.Shape[1];
@@ -28,7 +29,7 @@ public static class RtDetrAttention
         backend.Permute0213(vh, v, skv, heads, headDim);
 
         Tensor attn = new Tensor(new TensorShape(1, heads, sq, headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask: null, scale: scale);
+        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask: additiveMask, scale: scale);
         qh.Dispose(); kh.Dispose(); vh.Dispose();
 
         // Merge heads: [1, heads, Sq, headDim] -> [1, Sq, heads*headDim].

@@ -230,23 +230,4 @@ internal sealed unsafe class DinoViTLayer
         return proj;
     }
 
-    private Tensor ToHeads(Tensor input, int batch, int seq)
-    {
-        Tensor o = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        float* sp = (float*)input.DataPointer; float* dp = (float*)o.DataPointer;
-        for (int b = 0; b < batch; b++) for (int s = 0; s < seq; s++) for (int h = 0; h < _numHeads; h++)
-            new ReadOnlySpan<float>(sp + (b * seq + s) * _hidden + h * _headDim, _headDim)
-                .CopyTo(new Span<float>(dp + ((b * _numHeads + h) * seq + s) * _headDim, _headDim));
-        return o;
-    }
-
-    private Tensor FromHeads(Tensor input, int batch, int seq)
-    {
-        Tensor o = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        float* sp = (float*)input.DataPointer; float* dp = (float*)o.DataPointer;
-        for (int b = 0; b < batch; b++) for (int s = 0; s < seq; s++) for (int h = 0; h < _numHeads; h++)
-            new ReadOnlySpan<float>(sp + ((b * _numHeads + h) * seq + s) * _headDim, _headDim)
-                .CopyTo(new Span<float>(dp + (b * seq + s) * _hidden + h * _headDim, _headDim));
-        return o;
-    }
 }
