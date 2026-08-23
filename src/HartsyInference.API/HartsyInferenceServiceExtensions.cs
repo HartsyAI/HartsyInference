@@ -65,8 +65,6 @@ public static class HartsyInferenceServiceExtensions
             });
         }
 
-        // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
-        // ApiMetrics adds on top of ASP.NET Core's own request instrumentation (see WithMetrics below).
         if (options.WyomingEnabled)
         {
             services.AddSingleton(sp =>
@@ -83,6 +81,8 @@ public static class HartsyInferenceServiceExtensions
             });
         }
 
+        // Production-hardening surface: caller identity, per-caller usage, and the domain-specific metrics
+        // ApiMetrics adds on top of ASP.NET Core's own request instrumentation (see WithMetrics below).
         services.AddSingleton(new ApiKeyStore(options));
         services.AddSingleton<UsageTracker>();
         services.AddSingleton<ApiMetrics>();

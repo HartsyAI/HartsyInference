@@ -111,22 +111,8 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
             }
 
             AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s):[/]");
-            foreach (ModelAsset a in missing)
-                AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)} [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]");
-
-            await AnsiConsole.Progress()
-                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
-                .StartAsync(async ctx =>
-                {
-                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
-                    foreach (ModelAsset a in missing)
-                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
-                    await ModelDownloader.DownloadAsync(missing, (a, fraction) =>
-                    {
-                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
-                            task.Value = fraction;
-                    }, ct).ConfigureAwait(false);
-                }).ConfigureAwait(false);
+            ModelAcquisition.ListMissingAssets(missing, showTargetDir: true);
+            await ModelAcquisition.DownloadWithProgressAsync(missing, ct).ConfigureAwait(false);
 
             AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/]");
             string? primary = ModelDownloader.PrimaryLocalPath(cat);

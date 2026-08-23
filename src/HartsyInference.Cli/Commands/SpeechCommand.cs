@@ -93,12 +93,9 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
             parameters.Put("reference", settings.Reference);
         if (settings.RefText is { Length: > 0 })
             parameters.Put("ref-text", settings.RefText);
-        if (settings.Exaggeration is { } exaggeration)
-            parameters.Put("exaggeration", exaggeration.ToString(CultureInfo.InvariantCulture));
-        if (settings.NfeStep is { } nfeStep)
-            parameters.Put("nfe-step", nfeStep.ToString(CultureInfo.InvariantCulture));
-        if (settings.CfgScale is { } cfgScale)
-            parameters.Put("cfg-scale", cfgScale.ToString(CultureInfo.InvariantCulture));
+        parameters.PutIfSet("exaggeration", settings.Exaggeration);
+        parameters.PutIfSet("nfe-step", settings.NfeStep);
+        parameters.PutIfSet("cfg-scale", settings.CfgScale);
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Speech);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath, "en_US-lessac-medium");

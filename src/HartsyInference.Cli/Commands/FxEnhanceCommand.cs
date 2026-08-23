@@ -61,10 +61,8 @@ public sealed class FxEnhanceCommand : Command<FxEnhanceCommand.Settings>
 
         ParamState parameters = new ParamState(Modality.Fx) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "enhance");
-        if (settings.Lambda is { } lambda)
-            parameters.Put("lambda", lambda.ToString(CultureInfo.InvariantCulture));
-        if (settings.Tau is { } tau)
-            parameters.Put("tau", tau.ToString(CultureInfo.InvariantCulture));
+        parameters.PutIfSet("lambda", settings.Lambda);
+        parameters.PutIfSet("tau", settings.Tau);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, null, Modality.Fx);

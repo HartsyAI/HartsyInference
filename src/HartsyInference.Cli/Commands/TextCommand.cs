@@ -161,12 +161,9 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("system", system);
         if (settings.Image.Length > 0)
             parameters.Put("image", string.Join('\n', settings.Image));
-        if (settings.TopK is { } topK)
-            parameters.Put("top-k", topK.ToString(CultureInfo.InvariantCulture));
-        if (settings.MinP is { } minP)
-            parameters.Put("min-p", minP.ToString(CultureInfo.InvariantCulture));
-        if (settings.RepetitionPenalty is { } repetitionPenalty)
-            parameters.Put("repetition-penalty", repetitionPenalty.ToString(CultureInfo.InvariantCulture));
+        parameters.PutIfSet("top-k", settings.TopK);
+        parameters.PutIfSet("min-p", settings.MinP);
+        parameters.PutIfSet("repetition-penalty", settings.RepetitionPenalty);
         if (settings.Thinking is { } thinking)
             parameters.Put("thinking", thinking ? "true" : "false");
         else if (settings.NoThinking)

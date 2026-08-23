@@ -53,27 +53,14 @@ public static class ModelAcquisition
         }
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
-        foreach (ModelAsset a in missing)
-            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)} [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]");
+        ListMissingAssets(missing, showTargetDir: true);
 
         if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
             return spec;
 
         try
         {
-            AnsiConsole.Progress()
-                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
-                .Start(ctx =>
-                {
-                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
-                    foreach (ModelAsset a in missing)
-                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
-                    ModelDownloader.DownloadAsync(missing, (a, fraction) =>
-                    {
-                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
-                            task.Value = fraction;
-                    }, CancellationToken.None).GetAwaiter().GetResult();
-                });
+            DownloadWithProgressAsync(missing, CancellationToken.None).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -104,8 +91,7 @@ public static class ModelAcquisition
             return true;
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
-        foreach (ModelAsset a in missing)
-            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}");
+        ListMissingAssets(missing, showTargetDir: false);
 
         if (confirm && !InteractivePrompt.Confirm("Download these now?", defaultYes: false))
             return false;
@@ -139,6 +125,36 @@ public static class ModelAcquisition
 
         AnsiConsole.MarkupLine("[green]✓ model files ready.[/]");
         return true;
+    }
+
+    /// <summary>Lists one line per missing asset under the caller's own header.</summary>
+    /// <param name="showTargetDir">False for audio-cache assets, whose <c>TargetSubdir</c> is display-only and would name a folder they never land in.</param>
+    internal static void ListMissingAssets(IReadOnlyList<ModelAsset> missing, bool showTargetDir)
+    {
+        foreach (ModelAsset a in missing)
+        {
+            string target = showTargetDir ? $" [#9aa4af]→ Models/{Markup.Escape(a.TargetSubdir)}/[/]" : "";
+            AnsiConsole.MarkupLine($"  [#9aa4af]{a.Role}:[/] {Markup.Escape(a.Repo)}/{Markup.Escape(a.RepoPath)}{target}");
+        }
+    }
+
+    /// <summary>Downloads <paramref name="missing"/> through <see cref="ModelDownloader"/> under a per-file progress bar.</summary>
+    /// <remarks>Throws on failure — the confirm prompt, the header, and the error presentation differ per caller and stay there.</remarks>
+    internal static async Task DownloadWithProgressAsync(IReadOnlyList<ModelAsset> missing, CancellationToken ct)
+    {
+        await AnsiConsole.Progress()
+            .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
+            .StartAsync(async ctx =>
+            {
+                Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
+                foreach (ModelAsset a in missing)
+                    tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
+                await ModelDownloader.DownloadAsync(missing, (a, fraction) =>
+                {
+                    if (tasks.TryGetValue(a.FileName, out ProgressTask? task))
+                        task.Value = fraction;
+                }, ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
     }
 
     /// <summary>The real on-disk path for an audio asset: <see cref="AudioModelCache"/>'s directory, not <see cref="ModelDownloader"/>'s.</summary>

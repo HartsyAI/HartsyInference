@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
-using HartsyInference.Vision.Codec;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -34,7 +33,7 @@ public sealed class PreviewCommand : Command<PreviewCommand.Settings>
             return 1;
         }
 
-        (byte[] rgb, int width, int height) = Decode(settings.Image);
+        (byte[] rgb, int width, int height) = ImageIo.DecodeFile(settings.Image);
         if (!TerminalImage.IsSupported)
         {
             AnsiConsole.MarkupLine("[yellow]Inline preview unavailable[/] [#9aa4af](stdout is redirected, NO_COLOR, or HARTSY_NO_IMAGE=1).[/]");
@@ -46,12 +45,5 @@ public sealed class PreviewCommand : Command<PreviewCommand.Settings>
         TerminalImage.Render(rgb, width, height, maxCellWidth: Math.Max(8, settings.Width));
         AnsiConsole.MarkupLine($"[#9aa4af]{width.ToString(CultureInfo.InvariantCulture)}x{height.ToString(CultureInfo.InvariantCulture)} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
         return 0;
-    }
-
-    private static (byte[] rgb, int width, int height) Decode(string path)
-    {
-        if (path.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
-            return BmpEncoder.Decode(File.ReadAllBytes(path));
-        return PngDecoder.DecodeFromFile(path);
     }
 }

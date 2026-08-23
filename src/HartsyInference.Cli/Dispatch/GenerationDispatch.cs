@@ -612,16 +612,6 @@ public static class GenerationDispatch
         return artifact;
     }
 
-    private static async IAsyncEnumerable<HartsyInference.Video.VideoFrame> ToEncoderFrames(
-        IReadOnlyList<VideoFrame> frames)
-    {
-        for (int i = 0; i < frames.Count; i++)
-        {
-            yield return new HartsyInference.Video.VideoFrame(i, frames[i].Width, frames[i].Height, frames[i].Rgb);
-        }
-        await Task.CompletedTask.ConfigureAwait(false);
-    }
-
     /// <summary>Writes a frame sequence to disk and describes it, previewing the first frame inline.</summary>
     private static GeneratedArtifact FrameArtifact(IReadOnlyList<VideoFrame> frames, string? outputDir, string slug, string label,
         AudioBuffer? audio = null, int fps = 24)
@@ -887,9 +877,7 @@ public static class GenerationDispatch
         {
             throw new FileNotFoundException($"Input image not found: {path}");
         }
-        (byte[] rgb, int width, int height) = path.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase)
-            ? BmpEncoder.Decode(File.ReadAllBytes(path))
-            : PngDecoder.DecodeFromFile(path);
+        (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
 }
