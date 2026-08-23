@@ -224,13 +224,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // order-1 UniP step is the DDIM-shaped x0 form xT = (σT/σS0)·x − αT·hφ1·x0. Refuse a named sampler rather
         // than accepting it and silently sampling with UniPC. (IsNonDefault lets a bare "euler" through by design;
         // on Wan that still runs UniPC, since Euler was never this family's default.)
-        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
-        {
-            throw new NotSupportedException(
-                $"Sampler/schedule '{request.Scheduler}' is not available on Wan-Video — the family samples with a "
-                + "UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. "
-                + "This family samples with UniPC (a multistep solver with a corrector), so even an explicit 'euler' cannot be honoured here. Leave the sampler unset.");
-        }
+        FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan-Video");
 
         string mode = firstFrameLatent is not null && lastFrameLatent is not null ? "FLF2V"
             : firstFrameLatent is not null ? "I2V"
@@ -384,7 +378,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // scheduler/CFG path continues unchanged.
         Tensor CpForkedForward(Tensor input, Tensor embeds, float[]? fts, float tE)
         {
-            Tensor rank1Input = CloneLatents(input);   // never share the mutable input tensor across rank threads
+            Tensor rank1Input = input.To(input.Device);   // never share the mutable input tensor across rank threads
             Tensor local0, local1;
             try
             {
@@ -444,7 +438,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 }
                 else if (cfgParallel)
                 {
-                    Tensor uncondLatents = CloneLatents(latents);
+                    Tensor uncondLatents = latents.To(latents.Device);
                     try
                     {
                         (vCond, vUncond) = CfgBranchRunner.Run(
@@ -465,7 +459,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 // elsewhere (timestep t). frameTsLocal is a non-null local so the loop body below narrows
                 // cleanly — the null-forgiving `frameTs!` inside a `for` body doesn't otherwise persist the
                 // non-null flow state to the Forward() calls after it.
-                Tensor modelInput = CloneLatents(latents);
+                Tensor modelInput = latents.To(latents.Device);
                 if (firstFrameLatent is not null) WriteFirstFrame(modelInput, firstFrameLatent);
                 if (lastFrameLatent is not null) WriteLastFrame(modelInput, lastFrameLatent);
                 float[] frameTsLocal = frameTs!;
@@ -479,7 +473,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 }
                 else if (cfgParallel)
                 {
-                    Tensor uncondModelInput = CloneLatents(modelInput);
+                    Tensor uncondModelInput = modelInput.To(modelInput.Device);
                     try
                     {
                         (vCond, vUncond) = CfgBranchRunner.Run(
@@ -579,13 +573,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
         // Same UniPC blocker as RunDenoise (see the comment there). Refused here BEFORE the conditioning VAE encode
         // below, so a request that cannot run does not burn a whole-clip encode first.
-        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
-        {
-            throw new NotSupportedException(
-                $"Sampler/schedule '{request.Scheduler}' is not available on Wan-Video — the family samples with a "
-                + "UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. "
-                + "This family samples with UniPC (a multistep solver with a corrector), so even an explicit 'euler' cannot be honoured here. Leave the sampler unset.");
-        }
+        FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan-Video");
 
         Logs.Info($"Wan-Video I2V ({(imageEmbeds is null ? "concat" : "CLIP")}): {numFrames}f {width}x{height}, " +
             $"{steps} steps, cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
@@ -647,7 +635,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             float tEmb = scheduler.Timesteps[k];
             WanVideoTransformer expert = Expert(tEmb);
             if (_transformer2 is not null) SwapToExpert(expert);
-            Tensor modelInput = ConcatChannels(latents, condition);   // [1, 2z+tp, tLat, hLat, wLat]
+            Tensor modelInput = WanAnimate2Conditioning.ConcatChannels(latents, condition);   // [1, 2z+tp, tLat, hLat, wLat]
             Tensor vCond, vUncond;
             WanVideoDebugDump.SetTag("cond");
             if (imageEmbeds is not null)
@@ -741,13 +729,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // sites below rely on the latents being host-current when the loop ends). It is also a documented stand-in
         // — the VALIDATION-PENDING note above says this loop becomes UniPC once the partial-trajectory start is
         // designed, which would immediately un-convert it. Refuse instead of silently dropping the selection.
-        if (FlowMatchSampling.IsAnySelection(request.Scheduler))
-        {
-            throw new NotSupportedException(
-                $"Sampler/schedule '{request.Scheduler}' is not available on Wan-Video — the family samples with a "
-                + "UniPC multistep predictor/corrector, not an Euler step, so it has no sampler seam to drive. "
-                + "This family samples with UniPC (a multistep solver with a corrector), so even an explicit 'euler' cannot be honoured here. Leave the sampler unset.");
-        }
+        FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan-Video");
 
         EnsureVaeEncodeHeadroom(pixT, pixW, pixH);
         VaeBackend.PreloadWeights(_encoder.EnumerateWeights());
@@ -853,27 +835,6 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // Cond-latent channels: the FULL causal-VAE latent of the padded clip, all tLat frames.
         float* fp = (float*)condLatent.DataPointer;   // [1, latentCh, tLat, hLat, wLat]
         Buffer.MemoryCopy(fp, op + (long)maskCh * perChannel, (long)latentCh * perChannel * 4, (long)latentCh * perChannel * 4);
-        return o;
-    }
-
-    /// <summary>Channel-concatenates two <c>[1, C, T, H, W]</c> tensors → <c>[1, Ca+Cb, T, H, W]</c>.</summary>
-    private static Tensor ConcatChannels(Tensor a, Tensor b)
-    {
-        int ca = (int)a.Shape[1], cb = (int)b.Shape[1];
-        int t = (int)a.Shape[2], h = (int)a.Shape[3], w = (int)a.Shape[4];
-        long perChannel = (long)t * h * w;
-        Tensor o = new Tensor(new TensorShape([1L, ca + cb, t, h, w]), DType.F32);
-        float* op = (float*)o.DataPointer;
-        Buffer.MemoryCopy((float*)a.DataPointer, op, (long)ca * perChannel * 4, (long)ca * perChannel * 4);
-        Buffer.MemoryCopy((float*)b.DataPointer, op + (long)ca * perChannel, (long)cb * perChannel * 4, (long)cb * perChannel * 4);
-        return o;
-    }
-
-    private static Tensor CloneLatents(Tensor latents)
-    {
-        Tensor o = new Tensor(latents.Shape, DType.F32);
-        long bytes = latents.Shape.ElementCount * 4;
-        Buffer.MemoryCopy((float*)latents.DataPointer, (float*)o.DataPointer, bytes, bytes);
         return o;
     }
 

@@ -17,17 +17,15 @@ namespace HartsyInference.Video.Tokenizers;
 ///
 /// <para><b>What is integration-pending</b>: the learned convolutional autoencoder's exact stage schedule
 /// (channels, resnet/attention blocks) is not recoverable without NVIDIA's <c>encoder.jit</c> weight dump
-/// (research-doc Open Q §10). <see cref="Encode"/> / <see cref="Decode"/> run the generic sequential conv stack
-/// loaded via <see cref="LoadWeights"/>; until real weights + the resolved schedule are supplied they throw a
-/// clear <see cref="NotSupportedException"/>. The AR pipeline's parity gate (encode 9 frames → token IDs match
-/// <c>encoder.jit</c>) validates this end-to-end at integration.</para></summary>
+/// (research-doc Open Q §10). <see cref="Encode"/> runs the <see cref="CosmosDvEncoder"/> stack once
+/// <see cref="LoadWeights"/> supplies real weights, and throws a clear <see cref="NotSupportedException"/> until
+/// then; <see cref="Decode"/> has no stack at all and always throws. The AR pipeline's parity gate (encode 9
+/// frames → token IDs match <c>encoder.jit</c>) validates the encode path end-to-end at integration.</para></summary>
 public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposable
 {
     private readonly CosmosDvTokenizerConfig _cfg;
     private readonly int[] _levels;
     private readonly int _vocabSize;
-    private CausalConv3d[]? _encoderConvs;
-    private CausalConv3d[]? _decoderConvs;
     private CosmosDvEncoder? _encoder;
     private int _disposed;
 
@@ -159,38 +157,16 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
     }
 
     /// <inheritdoc/>
+    /// <remarks>Unimplemented, and refused rather than approximated: the decoder's conv stage schedule is not
+    /// recoverable without NVIDIA's <c>decoder.jit</c> weight dump (research-doc Open Q §10), so there is no stack to
+    /// run. <see cref="CodesToContinuous"/> and <see cref="HaarWavelet3D.Inverse"/> — the two deterministic halves of
+    /// this path — are implemented and tested; only the learned middle is missing.</remarks>
     public Tensor Decode(IBackend backend, Tensor codes, int latentT, int latentH, int latentW)
     {
         ThrowIfDisposed();
-        if (_decoderConvs is null)
-            throw new NotSupportedException("CosmosDvTokenizer.Decode requires the converted decoder.jit weights and the " +
-                "resolved conv stage schedule (research-doc Open Q §10). Load them via LoadWeights first.");
-        Tensor continuous = CodesToContinuous(codes, latentT, latentH, latentW);
-        Tensor features = RunConvStack(backend, _decoderConvs, continuous);
-        continuous.Dispose();
-        Tensor rgb = HaarWavelet3D.Inverse(features, _cfg.HaarLevels);
-        features.Dispose();
-        return rgb;
-    }
-
-    private static Tensor RunConvStack(IBackend backend, CausalConv3d[] stack, Tensor input)
-    {
-        Tensor current = input;
-        bool ownsCurrent = false;
-        foreach (CausalConv3d conv in stack)
-        {
-            Tensor next = conv.Forward(backend, current);
-            if (ownsCurrent) current.Dispose();
-            current = next;
-            ownsCurrent = true;
-        }
-        if (!ownsCurrent)   // empty stack: return an owned copy so the caller can dispose uniformly
-        {
-            Tensor copy = new Tensor(input.Shape, DType.F32);
-            backend.CopyTo(copy, input);
-            return copy;
-        }
-        return current;
+        throw new NotSupportedException("CosmosDvTokenizer.Decode is not implemented: the DV decoder's conv stage " +
+            "schedule requires the converted decoder.jit weights (research-doc Open Q §10), which are not wired. " +
+            "Encode / EncodeContinuous / the FSQ token-space helpers are available.");
     }
 
     /// <summary>Wires the DV encoder from the loaded <c>network.*</c> tokenizer weights (F32; produced by
@@ -205,16 +181,9 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
         _encoder = new CosmosDvEncoder(weightsF32);
     }
 
-    /// <summary>All conv weights for GPU preload (empty until <see cref="LoadWeights"/> runs).</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
-    {
-        if (_encoderConvs is not null)
-            foreach (CausalConv3d conv in _encoderConvs)
-                foreach (Tensor t in conv.EnumerateWeights()) yield return t;
-        if (_decoderConvs is not null)
-            foreach (CausalConv3d conv in _decoderConvs)
-                foreach (Tensor t in conv.EnumerateWeights()) yield return t;
-    }
+    /// <summary>Conv weights for GPU preload — always empty; <see cref="CosmosDvEncoder"/> owns the loaded weights and
+    /// faults them to device itself, and there is no decoder stack to preload.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() => [];
 
     private void ThrowIfDisposed()
     {
@@ -226,7 +195,5 @@ public sealed unsafe class CosmosDvTokenizer : IDiscreteVideoTokenizer, IDisposa
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _encoder?.Dispose();
         _encoder = null;
-        _encoderConvs = null;
-        _decoderConvs = null;
     }
 }

@@ -253,7 +253,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             videoLatent.Dispose();
             // Host-materialized: the driving latent has to survive the per-step activation sweeps between the
             // prepass and the loop, and it is a few MB.
-            drivingLatent = HostCopy(drivingLatentDev);
+            drivingLatent = WanAnimate2Conditioning.HostCopy(drivingLatentDev);
             drivingLatentDev.Dispose();
             Backend.TrimMemoryPool();
 
@@ -393,15 +393,5 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             Buffer.MemoryCopy(src + (long)c * frame, dst + (long)c * pixT * frame, frame * sizeof(float), frame * sizeof(float));
         }
         return grey;
-    }
-
-    /// <summary>Fresh host-materialized copy of a (possibly device-resident) tensor — the form that survives the
-    /// per-step activation sweeps and re-faults to device on use.</summary>
-    private static Tensor HostCopy(Tensor x)
-    {
-        Tensor o = new Tensor(x.Shape, x.DType);
-        long bytes = x.DType.ComputeByteCount(x.ElementCount);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, bytes, bytes);
-        return o;
     }
 }

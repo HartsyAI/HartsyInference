@@ -100,7 +100,7 @@ internal abstract unsafe class CosmosDvModule : IDisposable
         Tensor h2 = GroupNorm(c1, baseName + ".norm2", silu: true); c1.Dispose();
         Tensor c2 = FactConv(backend, h2, baseName + ".conv2"); h2.Dispose();
         Tensor shortcut = W.ContainsKey(baseName + ".nin_shortcut.conv3d.weight")
-            ? OneXOne(backend, x, baseName + ".nin_shortcut.conv3d") : Clone(x);
+            ? OneXOne(backend, x, baseName + ".nin_shortcut.conv3d") : x.To(x.Device);
         AddInPlace(shortcut, c2); c2.Dispose();
         return shortcut;
     }
@@ -201,14 +201,6 @@ internal abstract unsafe class CosmosDvModule : IDisposable
     }
 
     // ── small tensor utilities ─────────────────────────────────────────────
-    protected static Tensor Clone(Tensor x)
-    {
-        Tensor c = new(x.Shape, DType.F32);
-        long n = x.Shape.ElementCount;
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)c.DataPointer, n * 4, n * 4);
-        return c;
-    }
-
     protected static void AddInPlace(Tensor acc, Tensor add)
     {
         long n = acc.Shape.ElementCount;
