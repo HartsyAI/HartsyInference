@@ -898,3 +898,33 @@ From `RELEASE_NUGET` — mostly unstarted; persist through the 1.0 release.
 - [ ] Branding/metadata pass across all packages; license/readme per package.
 - [ ] Quality gates (build/test/pack) in CI; symbol packages.
 - [ ] Publish alpha → beta → stable progression; verify package-boundary dependency graph.
+
+## 12. Cleanup follow-ups (from the `engine-cleanup` pass, 2026-08-23)
+
+Deferred deliberately during the dead-code/duplication sweep — each needs a judgement or a
+design call rather than a mechanical edit. Full verdict-by-verdict record:
+`docs/Checklists/DEAD_CODE_RESOLUTIONS.md`.
+
+- [ ] `TensorPool` — adopt it on a real hot path or retire it. It has no production call site;
+      AGENTS.md no longer cites it as established practice, so the contradiction is closed either way.
+- [ ] 77 remaining analyzer hits (`docs/Checklists/analyzer-sweep-2026-08-23.txt`) — mostly config
+      mirrors and per-block dimension fields whose value is documentary. Per-symbol judgement, not a
+      bulk delete. Reproduce by bumping IDE0051/IDE0052/CA1823 in `.editorconfig` and building with
+      `-p:TreatWarningsAsErrors=false`.
+- [ ] `LtGemmExecutor` subsuming the Int8/Fp8 executors — blocked on Fp4's block-scale pointer
+      attributes, which `LtGemm` does not expose.
+- [ ] Vulkan spec-constant / push-constant builders (tiled matmul, Conv2D, WithOffsets) — the three
+      arrays differ in their bias/activation/residual tail slots; a shared builder needs ~5 params for
+      ~13 lines.
+- [ ] `QwenImageVaeOps.FlattenGamma` ownership asymmetry — returns a borrowed dict tensor on the
+      rank-1 no-cast path and an owned copy otherwise, so whether a caller may dispose it depends on
+      dtype at runtime. The dead no-op branch is gone; the asymmetry is not.
+- [ ] `VocosConfig.AdaNormNumEmbeddings` / `Padding` — settable but never read now that the
+      `Encodec24k` preset is gone. Deleting them turns the same silent trap into a compile error.
+- [ ] `WeightNormFusion.LoadFused` — the outer `EnsureF32` leaks its cast for F16 checkpoints
+      (`Fuse` re-casts internally and disposes only its own). Dropping the outer call is
+      output-identical.
+- [ ] Cli: a shared `Settings` base for the `-b`/`-o`/`-q` options repeated across 13 command
+      classes, and the `ReplSession.Generate` / `CommandRunner.Run` partial overlap.
+- [ ] `VideoRequest.VideoModel` / `VideoFormat` — no in-repo reader; public request-DTO surface the
+      SwarmUI extension may bind. Decide with the extension in hand.
