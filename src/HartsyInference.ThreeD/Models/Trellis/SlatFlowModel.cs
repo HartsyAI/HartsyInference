@@ -98,10 +98,10 @@ public sealed unsafe class SlatFlowModel
         return o;
     }
 
-    /// <summary>AbsolutePositionEmbedder (channels 1024, 3D): per voxel, per axis, sin/cos frequency bands zero-padded to 1024 dims.</summary>
-    private static Tensor AbsolutePositionEmbed(int[] coords, int n, int channels)
+    /// <summary>AbsolutePositionEmbedder (3D): per voxel, per axis, sin/cos frequency bands over <c>channels/3/2</c> freqs, zero-padded out to <paramref name="channels"/> (1024 for this flow model, 768 for <see cref="SlatGaussianDecoder"/>).</summary>
+    internal static Tensor AbsolutePositionEmbed(int[] coords, int n, int channels)
     {
-        int freqDim = channels / 3 / 2;   // 170
+        int freqDim = channels / 3 / 2;
         Tensor o = new(new TensorShape(1, n, channels), DType.F32);
         float* p = (float*)o.DataPointer; new Span<float>(p, n * channels).Clear();
         float[] freqs = new float[freqDim];

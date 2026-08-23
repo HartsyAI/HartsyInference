@@ -233,5 +233,5 @@ public sealed unsafe class Hunyuan3DDit
         }
     }
 
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+    internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);
 }

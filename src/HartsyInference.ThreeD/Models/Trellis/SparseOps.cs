@@ -7,11 +7,12 @@ namespace HartsyInference.ThreeD.Models.Trellis;
 public static unsafe class SparseOps
 {
     /// <summary>Reorders an spconv conv weight <c>[Cout, kD, kH, kW, Cin]</c> → <c>[Cout, Cin, kD, kH, kW]</c> (the <see cref="IBackend.Conv3d"/> layout), one-time at load.</summary>
+    /// <remarks>No production call sites: retained as the weight prep for the dense <see cref="SubmanifoldConv3d"/> path, which <c>TrellisSparseOpsParityTests</c> checks against the numpy reference alongside the sparse path.</remarks>
     public static Tensor PermuteConvWeight(Tensor w)
     {
         int cout = (int)w.Shape[0], k = (int)w.Shape[1], cin = (int)w.Shape[4];
         Tensor o = new(new TensorShape(new long[] { cout, cin, k, k, k }), DType.F32);
-        Tensor wf = w.DType != DType.F32 ? w.CastTo(DType.F32) : w;
+        Tensor wf = TensorCasts.EnsureF32(w);
         float* s = (float*)wf.DataPointer, d = (float*)o.DataPointer;
         for (int co = 0; co < cout; co++)
             for (int kd = 0; kd < k; kd++)
@@ -24,6 +25,7 @@ public static unsafe class SparseOps
     }
 
     /// <summary>Submanifold 3D conv (stride 1, k3, pad 1) whose output voxel set equals the input's; <paramref name="weightP"/> is the permuted weight from <see cref="PermuteConvWeight"/>.</summary>
+    /// <remarks>Superseded in production by <see cref="SubmanifoldConv3dSparse"/> (rulebook GEMM, no dense grid): retained as the scatter→dense-<see cref="IBackend.Conv3d"/>→gather formulation that <c>TrellisSparseOpsParityTests</c> validates against the same numpy reference the sparse path is checked against — so a regression in either implementation is attributable.</remarks>
     public static SparseTensor SubmanifoldConv3d(IBackend backend, SparseTensor x, Tensor weightP, Tensor? bias)
     {
         int r = x.Resolution, n = x.Count, cin = x.Channels, cout = (int)weightP.Shape[0];
@@ -50,7 +52,7 @@ public static unsafe class SparseOps
     public static Tensor[] ConvWeightSlices(Tensor w, bool f16 = false)
     {
         int cout = (int)w.Shape[0], k = (int)w.Shape[1], cin = (int)w.Shape[4];
-        Tensor wf = w.DType != DType.F32 ? w.CastTo(DType.F32) : w;
+        Tensor wf = TensorCasts.EnsureF32(w);
         float* s = (float*)wf.DataPointer;
         Tensor[] slices = new Tensor[k * k * k];
         for (int kd = 0; kd < k; kd++)

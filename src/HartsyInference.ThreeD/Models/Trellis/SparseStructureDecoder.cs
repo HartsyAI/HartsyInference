@@ -59,7 +59,7 @@ public sealed class SparseStructureDecoder
         return o;
     }
 
-    internal static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => w[k].DType != DType.F32 ? w[k].CastTo(DType.F32) : w[k];
+    internal static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => TensorCasts.LoadF32(w, k);
 }
 
 /// <summary>3D residual block: ChannelLayerNorm → SiLU → Conv3d(k3) ×2, identity skip (all TRELLIS SS-VAE res-blocks

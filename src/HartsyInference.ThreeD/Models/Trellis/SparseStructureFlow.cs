@@ -6,7 +6,7 @@ namespace HartsyInference.ThreeD.Models.Trellis;
 /// <summary>TRELLIS stage-1 sparse-structure flow DiT (<c>ss_flow_img_dit_L_16l8</c>): predicts the rectified-flow velocity for a dense <c>[1,8,16³]</c> latent, image-conditioned via cross-attention to DINOv2 tokens.</summary>
 public sealed unsafe class SparseStructureFlow
 {
-    private const int Tokens = 4096, Width = 1024, Heads = 16, HeadDim = 64, InCh = 8;
+    private const int Tokens = 4096, Width = 1024, HeadDim = 64, InCh = 8;
     private const float NormEps = 1e-6f, OutNormEps = 1e-5f;
 
     private Tensor? _inW, _inB, _outW, _outB, _posEmb;
@@ -77,5 +77,5 @@ public sealed unsafe class SparseStructureFlow
         return vec;
     }
 
-    internal static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => w[k].DType != DType.F32 ? w[k].CastTo(DType.F32) : w[k];
+    internal static Tensor F(IReadOnlyDictionary<string, Tensor> w, string k) => TensorCasts.LoadF32(w, k);
 }

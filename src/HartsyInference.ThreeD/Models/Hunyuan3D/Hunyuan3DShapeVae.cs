@@ -99,7 +99,7 @@ public sealed unsafe class Hunyuan3DShapeVae
             Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
             new ReadOnlySpan<float>(coordBuf, 0, count * 3).CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
             Tensor occ = DecodePoints(backend, kv, coordsT, count);
-            Tensor occF = occ.DType == DType.F32 ? occ : occ.CastTo(DType.F32);
+            Tensor occF = TensorCasts.EnsureF32(occ);
             new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(values.AsSpan((int)done, count));
             if (!ReferenceEquals(occF, occ)) occF.Dispose();
             occ.Dispose();
@@ -115,5 +115,5 @@ public sealed unsafe class Hunyuan3DShapeVae
         };
     }
 
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+    internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);
 }
