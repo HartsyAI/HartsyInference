@@ -17,8 +17,6 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed HunyuanImage 2.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HunyuanImagePipeline"/> owns the Qwen2.5-VL-7B forward (including its own TE⇄DiT residency swap and embedding cache), so this only produces the padded chat-template token ids + attention masks and calls <see cref="HunyuanImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HunyuanImageLoader.Generate</c>.</summary>
 public sealed class HunyuanImageRecipePipeline : IRecipePipeline
 {
-    /// <summary>HunyuanImage's guidance default when the caller does not supply one (SwarmUI loader fallback).</summary>
-    private const float DefaultCfg = 3.5f;
 
     private readonly HunyuanImagePipeline _pipeline;
     private readonly Qwen2Tokenizer _tokenizer;

@@ -26,8 +26,6 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
     /// <summary>diffusers truncates the templated sequence at 512 tokens.</summary>
     private const int MaxTokens = 512;
 
-    /// <summary>Qwen-Image's guidance default when the caller does not supply one (SwarmUI loader fallback).</summary>
-    private const float DefaultCfg = 2.5f;
 
     private readonly QwenImagePipeline _pipeline;
     private readonly Qwen3Tokenizer _tokenizer;

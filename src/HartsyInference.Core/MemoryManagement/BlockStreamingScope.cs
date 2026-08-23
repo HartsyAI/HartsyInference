@@ -15,7 +15,6 @@ namespace HartsyInference.Core.MemoryManagement;
 /// two disagree. <see cref="BlockStreamingPolicy.AllOrNothing"/> is the branch that does defer to it.</para></remarks>
 public sealed class BlockStreamingScope : IDisposable
 {
-    private readonly IBackend _backend;
     private readonly IStreamableDenoiser _denoiser;
     private readonly string _modelName;
     private readonly bool _perStepTrim;
@@ -25,7 +24,6 @@ public sealed class BlockStreamingScope : IDisposable
     private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
         BlockStreamingController? streamer)
     {
-        _backend = options.Backend;
         _denoiser = options.Denoiser;
         _modelName = options.ModelName;
         _perStepTrim = options.PerStepTrim;
