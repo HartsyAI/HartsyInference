@@ -34,9 +34,8 @@ public sealed class GgufTokenizer : ILlmTokenizer
     public IReadOnlyList<int> StopIds { get; }
 
     /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id); <paramref name="merges"/> are "left right" byte-level pairs in rank order; <paramref name="tokenType"/> (optional) marks control/user-defined tokens; <paramref name="extraStopIds"/> adds end-of-turn ids. <paramref name="preTokenizerRegex"/> overrides the default GPT-2 split regex (Llama-3 differs in digit grouping and contraction casing); <paramref name="ignoreMerges"/> mirrors HF's <c>ignore_merges</c> — a pre-token that is itself a vocab entry is emitted directly instead of being re-derived by BPE.</summary>
-    public GgufTokenizer(string[] tokens, string[]? merges, int[]? tokenType,
-        int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null,
-        string? preTokenizerRegex = null, bool ignoreMerges = false)
+    public GgufTokenizer(string[] tokens, string[]? merges, int[]? tokenType, int? bosId, int? eosId,
+        IReadOnlyList<int>? extraStopIds = null, string? preTokenizerRegex = null, bool ignoreMerges = false)
     {
         _preTokenRegex = preTokenizerRegex is null ? DefaultPreTokenRegex
             : new Regex(preTokenizerRegex, RegexOptions.Compiled);

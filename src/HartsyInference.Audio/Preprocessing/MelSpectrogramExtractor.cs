@@ -26,11 +26,10 @@ public sealed class MelSpectrogramExtractor
     /// <param name="AdditiveLogFloor">Zonos's speaker front-end applies log(mel + floor) (additive) rather than
     /// log(max(mel, floor)) (clamp). The two agree for mel ≫ floor but diverge near-silent bins; Zonos needs the
     /// additive form.</param>
-    public readonly record struct Config(int SampleRate, int NFft, int WinLength, int HopLength, int NMels,
-        double Fmin, double Fmax, Normalization Norm, bool DropLastStftFrame, LogBase LogBase, float? LogFloor,
-        float DynamicRangeDb, float NormOffset, float NormScale, bool PowerSpectrum,
-        MelScale Scale = MelScale.Slaney, bool SlaneyNorm = true, bool Center = false,
-        bool CenterWindowInFft = false, bool AdditiveLogFloor = false);
+    public readonly record struct Config(int SampleRate, int NFft, int WinLength, int HopLength, int NMels, double Fmin,
+        double Fmax, Normalization Norm, bool DropLastStftFrame, LogBase LogBase, float? LogFloor, float DynamicRangeDb,
+        float NormOffset, float NormScale, bool PowerSpectrum, MelScale Scale = MelScale.Slaney, bool SlaneyNorm = true,
+        bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false);
 
     /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
     /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper

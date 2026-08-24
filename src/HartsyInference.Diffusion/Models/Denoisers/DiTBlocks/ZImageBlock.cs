@@ -226,8 +226,7 @@ public sealed unsafe class ZImageBlock
         // narrowing even though this tensor stream is F32. Turbo retains the validated fused F16 path.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale,
-            allowF16: _allowF16Attention);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: _allowF16Attention);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

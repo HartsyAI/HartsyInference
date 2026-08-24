@@ -223,9 +223,8 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         Tensor x = combined;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, x,
-                mod[0], mod[1], mod[2], mod[3], mod[4], mod[5],
-                ropeCos, ropeSin, attentionMask);
+            Tensor next = _blocks[i].Forward(backend, x, mod[0], mod[1], mod[2], mod[3], mod[4], mod[5], ropeCos,
+                ropeSin, attentionMask);
             x.Dispose();
             x = next;
             ErnieImageDebugDump.Dump($"layers.{i}", x);

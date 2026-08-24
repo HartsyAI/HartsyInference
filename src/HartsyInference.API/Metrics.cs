@@ -38,7 +38,6 @@ public sealed class ApiMetrics
     }
 
     public void RecordRequest(string modality, string outcome) =>
-        _requestsTotal.Add(1,
-            new KeyValuePair<string, object?>("modality", modality),
-            new KeyValuePair<string, object?>("outcome", outcome));
+        _requestsTotal.Add(1, new KeyValuePair<string, object?>("modality", modality), new KeyValuePair<string,
+            object?>("outcome", outcome));
 }

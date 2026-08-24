@@ -74,11 +74,8 @@ public static class SeedVr2VaeOps
         Tensor weight = weights[$"{baseKey}.weight"];
         weights.TryGetValue($"{baseKey}.bias", out Tensor? bias);
         int kt = (int)weight.Shape[2], kh = (int)weight.Shape[3], kw = (int)weight.Shape[4];
-        return new CausalConv3d(weight, bias,
-            strideT, strideH, strideW,
-            padT: (kt - 1) / 2,
-            padH: padSpatial ? (kh - 1) / 2 : 0,
-            padW: padSpatial ? (kw - 1) / 2 : 0,
-            replicateFirstPad: true, causal: true, computeDtype: computeDtype);
+        return new CausalConv3d(weight, bias, strideT, strideH, strideW, padT: (kt - 1) / 2,
+            padH: padSpatial ? (kh - 1) / 2 : 0, padW: padSpatial ? (kw - 1) / 2 : 0, replicateFirstPad: true,
+            causal: true, computeDtype: computeDtype);
     }
 }

@@ -65,8 +65,7 @@ internal sealed class OobleckResidualUnit(string prefix, int dim, int dilation)
         mid.Dispose();
 
         Tensor proj = new(new TensorShape(batch, _dim, t), DType.F32);
-        backend.Conv1d(proj, a2, _conv2W!, _conv2B,
-            stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        backend.Conv1d(proj, a2, _conv2W!, _conv2B, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
         a2.Dispose();
 
         Tensor result = new(proj.Shape, DType.F32);

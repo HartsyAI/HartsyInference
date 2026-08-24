@@ -86,8 +86,7 @@ public sealed unsafe class Unpatchify
         try
         {
             // SD3 proj_out tokens are [patchH, patchW, channel] within each token.
-            backend.UnpatchifyTokens(output, input, _outChannels, gridH, gridW, _patchSize,
-                innerChannelFastest: true);
+            backend.UnpatchifyTokens(output, input, _outChannels, gridH, gridW, _patchSize, innerChannelFastest: true);
             return output;
         }
         catch

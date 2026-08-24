@@ -52,9 +52,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Creates a Lens pipeline with an attached <see cref="LensGptOssEncoder"/>. Required for the tokenizer-fed <see cref="GenerateFromTokens"/> overload.</summary>
-    public LensPipeline(IBackend backend, LensTransformer transformer,
-        LensGptOssEncoder? textEncoder, VaeDecoder vaeDecoder,
-        Tensor bnMean, Tensor bnVar, LensConfig config, float bnEps = 1e-5f)
+    public LensPipeline(IBackend backend, LensTransformer transformer, LensGptOssEncoder? textEncoder,
+        VaeDecoder vaeDecoder, Tensor bnMean, Tensor bnVar, LensConfig config, float bnEps = 1e-5f)
         : base(backend)
     {
         _transformer = transformer;

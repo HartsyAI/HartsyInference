@@ -29,9 +29,8 @@ public static class RegionalConditioningLayout
         return (extended, extLen, ranges, masks);
     }
 
-    private static unsafe void CopyStream(Tensor baseCond, Tensor extended, int baseLen, int dim,
-        RegionalPlan plan, int gridH, int gridW, int numImg,
-        List<(int Start, int End)> ranges, List<float[]> masks)
+    private static unsafe void CopyStream(Tensor baseCond, Tensor extended, int baseLen, int dim, RegionalPlan plan,
+        int gridH, int gridW, int numImg, List<(int Start, int End)> ranges, List<float[]> masks)
     {
         float* dst = (float*)extended.DataPointer;
         float* src = (float*)baseCond.DataPointer;

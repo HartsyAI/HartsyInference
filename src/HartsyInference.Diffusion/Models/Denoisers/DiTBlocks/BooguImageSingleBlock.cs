@@ -134,8 +134,7 @@ public sealed unsafe class BooguImageSingleBlock
     /// The rotation runs pre-permute via <c>IBackend.WanRopeInterleaved</c> — bit-equivalent to the old host
     /// <see cref="OmniGen2Rope.Apply"/> minus its per-block D2H drain + re-upload of Q and K. B=1 only (the
     /// transformer's contract). Caller owns <paramref name="hidden"/>; a new output tensor is returned.</summary>
-    public Tensor Forward(IBackend backend, Tensor hidden,
-        Tensor ropeCos, Tensor ropeSin, Tensor? temb)
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor ropeCos, Tensor ropeSin, Tensor? temb)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];

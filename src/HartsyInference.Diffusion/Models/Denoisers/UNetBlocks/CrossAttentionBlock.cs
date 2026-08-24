@@ -91,11 +91,8 @@ public sealed class CrossAttentionBlock
     }
 
     /// <summary>Forward with optional IP-Adapter image-attention injection. The shared image-prompt tokens (<paramref name="ipaImageTokens"/>) are injected into each cross-attention sub-layer with its own per-layer <c>to_k_ip</c> / <c>to_v_ip</c> projection, indexed from the flat checkpoint list starting at <paramref name="ipaStartIndex"/>. The block consumes <see cref="NumTransformerBlocks"/> entries from the K/V lists. Per-layer IPA strength comes from <paramref name="ipaScalePerLayer"/> at index <c>ipaStartIndex + i</c> for sub-block <c>i</c>; a scale of 0 short-circuits the image attention entirely (used for step-fraction gating and weight-type schedules that zero out specific blocks).</summary>
-    public Tensor Forward(IBackend backend, Tensor input, Tensor context,
-        Tensor? ipaImageTokens,
-        IReadOnlyList<Tensor>? ipaToKIpAll,
-        IReadOnlyList<Tensor>? ipaToVIpAll,
-        int ipaStartIndex,
+    public Tensor Forward(IBackend backend, Tensor input, Tensor context, Tensor? ipaImageTokens,
+        IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, int ipaStartIndex,
         IReadOnlyList<float>? ipaScalePerLayer)
     {
         int batch = (int)input.Shape[0];

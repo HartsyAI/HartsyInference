@@ -177,9 +177,8 @@ public sealed unsafe class CsmModel : IDisposable
     /// <paramref name="cfgScale"/> ≠ 1, classifier-free guidance is applied to every codebook's logits
     /// (<c>logit = uncond + g·(cond − uncond)</c>) via a parallel backbone+depth pass over the unconditional
     /// context (HeartMuLa's <c>cfg_scale</c>). CSM callers omit both and get the plain single-pass behavior.</para></summary>
-    public int[] GenerateFrame(IBackend backend, Tensor contextEmbeds, ref uint rng,
-        float? temperature = null, int? topK = null, float? topP = null,
-        float cfgScale = 1f, Tensor? uncondContext = null)
+    public int[] GenerateFrame(IBackend backend, Tensor contextEmbeds, ref uint rng, float? temperature = null,
+        int? topK = null, float? topP = null, float cfgScale = 1f, Tensor? uncondContext = null)
     {
         bool useCfg = cfgScale != 1f && uncondContext is not null;
         int bt = (int)contextEmbeds.Shape[1];

@@ -46,9 +46,8 @@ internal sealed class CudnnSdpa : IDisposable
     public static bool ShapeSupported(long d) => d == 256 || (d >= 64 && d <= 128 && d % 8 == 0);
 
     /// <summary> Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D] (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically). <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as [biasB,1,biasSq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine. <paramref name="biasSq"/> of 1 broadcasts one [Skv] row over every query, which is what a bias that depends only on the key needs (Wan-Animate-2's log_scale band) — a full [Sq,Skv] buffer for it is pure duplication. </summary>
-    public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
-                               long b, long h, long sq, long sk, long d, float scale,
-                               ulong biasF32 = 0, long biasB = 1, long biasSq = 0)
+    public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16, long b, long h, long sq, long sk, long d,
+                               float scale, ulong biasF32 = 0, long biasB = 1, long biasSq = 0)
         => Execute(qF16, kF16, vF16, oF16, b, h, sq, sk, d, scale, SdpaLayout.HeadMajor, biasF32, biasB, biasSq);
 
     /// <summary>Same as the head-major overload but lets the caller pick the Q/K/V/O buffer layout.</summary>

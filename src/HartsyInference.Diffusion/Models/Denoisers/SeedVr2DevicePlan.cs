@@ -129,8 +129,7 @@ public sealed class SeedVr2DevicePlan : IDisposable
             for (int w = slice.W0; w < slice.W1; w++)
             {
                 int token = (t * gridH + h) * gridW + w;
-                SeedVr2Rope.FillRowV1(cos, sin, token * headDim,
-                    t - slice.T0, fT, h - slice.H0, fH, w - slice.W0, fW);
+                SeedVr2Rope.FillRowV1(cos, sin, token * headDim, t - slice.T0, fT, h - slice.H0, fH, w - slice.W0, fW);
             }
         }
     }

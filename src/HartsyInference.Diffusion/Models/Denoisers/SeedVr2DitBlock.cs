@@ -231,9 +231,8 @@ public sealed class SeedVr2DitBlock
             _mlpVidGateW, _mlpVidInW, _mlpVidInB, _mlpVidOutW, _mlpVidOutB);
         if (!lastVidOnly)
         {
-            txt = MlpBranch(backend, txt, ones, txtBranch: true,
-                _mlpTxtGateW ?? _mlpVidGateW, _mlpTxtInW ?? _mlpVidInW, _mlpTxtInB ?? _mlpVidInB,
-                _mlpTxtOutW ?? _mlpVidOutW, _mlpTxtOutB ?? _mlpVidOutB);
+            txt = MlpBranch(backend, txt, ones, txtBranch: true, _mlpTxtGateW ?? _mlpVidGateW, _mlpTxtInW ?? _mlpVidInW,
+                _mlpTxtInB ?? _mlpVidInB, _mlpTxtOutW ?? _mlpVidOutW, _mlpTxtOutB ?? _mlpVidOutB);
         }
         else
         {

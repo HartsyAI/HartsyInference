@@ -83,8 +83,7 @@ public sealed class Proto
         // ConvTranspose2d with k=2, s=2, p=0 doubles spatial dims (no overlap, no padding).
         TensorShape upShape = new TensorShape(batch, _internalChannels, h * 2, w * 2);
         Tensor upsampled = new Tensor(upShape, DType.F32);
-        backend.ConvTranspose2d(upsampled, a, _upsampleWeight, _upsampleBias,
-            strideH: 2, strideW: 2, padH: 0, padW: 0);
+        backend.ConvTranspose2d(upsampled, a, _upsampleWeight, _upsampleBias, strideH: 2, strideW: 2, padH: 0, padW: 0);
         a.Dispose();
 
         // No activation between upsample and cv2: Ultralytics' Proto.forward is

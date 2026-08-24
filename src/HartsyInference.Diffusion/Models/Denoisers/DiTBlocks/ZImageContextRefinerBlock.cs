@@ -137,8 +137,7 @@ public sealed unsafe class ZImageContextRefinerBlock
         // site; Turbo retains its validated fused path.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale,
-            allowF16: _allowF16Attention);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: _allowF16Attention);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

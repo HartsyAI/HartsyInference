@@ -103,10 +103,8 @@ public sealed unsafe class ErnieImageBlock
     /// <param name="ropeCos">RoPE cos table <c>[B, S, head_dim]</c> (pre-sliced once at the transformer level from <see cref="ErnieImageRope.BuildFreqs"/>'s packed output — was re-sliced per block).</param>
     /// <param name="ropeSin">RoPE sin table <c>[B, S, head_dim]</c>.</param>
     /// <param name="attentionMask">Optional attention mask <c>[B, 1, 1, S]</c> — bool-style, where 0=mask out.</param>
-    public Tensor Forward(IBackend backend, Tensor x,
-        Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa,
-        Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp,
-        Tensor ropeCos, Tensor ropeSin, Tensor? attentionMask)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor shiftMlp,
+        Tensor scaleMlp, Tensor gateMlp, Tensor ropeCos, Tensor ropeSin, Tensor? attentionMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];

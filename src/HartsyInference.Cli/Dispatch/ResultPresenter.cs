@@ -42,9 +42,8 @@ public static class ResultPresenter
                 AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(artifact.Text)}[/]");
         }
 
-        string footer = string.Join(" · ", artifact.Meta
-            .Where(kv => !kv.Key.Equals("model", StringComparison.OrdinalIgnoreCase))
-            .Select(kv => $"{kv.Key} {kv.Value}"));
+        string footer = string.Join(" · ",
+            artifact.Meta .Where(kv => !kv.Key.Equals("model", StringComparison.OrdinalIgnoreCase)) .Select(kv => $"{kv.Key} {kv.Value}"));
         if (footer.Length > 0)
             AnsiConsole.MarkupLine($"[#9aa4af]{Markup.Escape(footer)}[/]");
     }

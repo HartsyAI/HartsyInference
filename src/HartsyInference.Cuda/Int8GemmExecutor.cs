@@ -82,14 +82,8 @@ public sealed unsafe class Int8GemmExecutor : IDisposable
                     "plain-layout int8 TN unsupported here; the COL32 interleaved path would be the fallback.");
 
             int a = 1, beta = 0;
-            int mRc = CublasLtApi.cublasLtMatmul(_ltHandle, matmulDesc,
-                &a,
-                weight, layoutA,
-                input, layoutB,
-                &beta,
-                outPtr, layoutD,
-                outPtr, layoutD,
-                (nint)heuristic, (nint)_workspace, _workspaceBytes, stream);
+            int mRc = CublasLtApi.cublasLtMatmul(_ltHandle, matmulDesc, &a, weight, layoutA, input, layoutB, &beta,
+                outPtr, layoutD, outPtr, layoutD, (nint)heuristic, (nint)_workspace, _workspaceBytes, stream);
             if (mRc != 0)
                 throw new InvalidOperationException($"cublasLtMatmul int8 rc={mRc} for {m}x{n}x{k}.");
         }

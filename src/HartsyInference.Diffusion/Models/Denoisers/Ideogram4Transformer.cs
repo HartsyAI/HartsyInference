@@ -146,8 +146,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
     /// 1..N−1 are reconstructed from the previous step's residual. Null = byte-identical uncached forward.</param>
     /// <returns><c>[B, numImg, inChannels]</c> image-token velocity (F32); text rows are dropped before the final layer.</returns>
     public Tensor Forward(IBackend backend, Tensor? llmTextFeatures, Tensor imageTokens, float timestep,
-        Tensor positionIds, int[] indicator, Tensor? attentionMask,
-        Utilities.DeviceFeatureCache? stepCache = null)
+        Tensor positionIds, int[] indicator, Tensor? attentionMask, Utilities.DeviceFeatureCache? stepCache = null)
     {
         int batch = (int)imageTokens.Shape[0];
         int numImg = (int)imageTokens.Shape[1];

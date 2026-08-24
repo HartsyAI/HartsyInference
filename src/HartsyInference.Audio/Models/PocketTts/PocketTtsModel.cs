@@ -53,8 +53,7 @@ public sealed unsafe class PocketTtsModel : IDisposable
     /// config sub-trees; reconcile the exact key strings against the real <c>b6369a24</c> safetensors at first
     /// load. The transformer body is loaded <b>headless</b> (no token <c>lm_head</c> — Pocket-TTS regresses
     /// latents, it does not emit token logits).</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w,
-        string lmPrefix = "flow_lm.transformer",
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string lmPrefix = "flow_lm.transformer",
         string flowHeadPrefix = "flow_lm.flow_head")
     {
         ThrowIfDisposed();

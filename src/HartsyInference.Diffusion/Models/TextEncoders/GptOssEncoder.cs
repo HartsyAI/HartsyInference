@@ -353,8 +353,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
             foreach (Tensor w in _moe.EnumerateWeights()) yield return w;
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, Tensor mask,
-            float[] ropeCos, float[] ropeSin, int seqLen)
+        public Tensor Forward(IBackend backend, Tensor hidden, Tensor mask, float[] ropeCos, float[] ropeSin, int seqLen)
         {
             int batch = (int)hidden.Shape[0];
             int H = _config.HiddenSize;

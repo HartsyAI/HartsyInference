@@ -114,9 +114,7 @@ internal sealed unsafe class SeaNetBlock
         mid.Dispose();
 
         Tensor proj = new(new TensorShape(batch, _dim, t1), DType.F32);
-        backend.Conv1d(proj, a2, _conv2W!, _conv2B,
-            stride: 1, padLeft: 0, padRight: 0,
-            dilation: 1, groups: 1);
+        backend.Conv1d(proj, a2, _conv2W!, _conv2B, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
         a2.Dispose();
 
         // Skip path: identity (true_skip) or a learned 1×1 conv shortcut (use_conv_shortcut). The shortcut maps

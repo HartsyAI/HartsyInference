@@ -534,10 +534,8 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
     /// <summary>The captured (or capture-warming) step-pair body: approximator from the fixed timestep buffer,
     /// then both passes, landing the velocities in the fixed pre-capture buffers via <c>CopyInto</c>.</summary>
-    private void RunPairIntoFixed(IBackend backend, Tensor packedLatent,
-        Tensor condContext, Tensor? uncondContext,
-        int condTxtLen, int uncondTxtLen, int hPacked, int wPacked,
-        Tensor? condMask, Tensor? uncondMask)
+    private void RunPairIntoFixed(IBackend backend, Tensor packedLatent, Tensor condContext, Tensor? uncondContext,
+        int condTxtLen, int uncondTxtLen, int hPacked, int wPacked, Tensor? condMask, Tensor? uncondMask)
     {
         Tensor modTable = _approximator.Forward(backend, _modInputFixed!);
         Tensor condV = ForwardOnePass(backend, packedLatent, condContext, modTable,

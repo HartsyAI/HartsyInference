@@ -31,9 +31,8 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
     private readonly HashSet<int> _specialIds;
     private readonly int _unkId;
 
-    private Gemma4Tokenizer(string[] tokens, Dictionary<string, int> tokenToId,
-        Dictionary<(string, string), int> mergeRanks, Dictionary<byte, int> byteToId,
-        Dictionary<string, int> specialByLiteral, int unkId)
+    private Gemma4Tokenizer(string[] tokens, Dictionary<string, int> tokenToId, Dictionary<(string, string),
+        int> mergeRanks, Dictionary<byte, int> byteToId, Dictionary<string, int> specialByLiteral, int unkId)
     {
         _tokens = tokens;
         _tokenToId = tokenToId;

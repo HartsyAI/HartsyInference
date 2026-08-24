@@ -18,8 +18,7 @@ public static class AudioClipCodec
         }
         WavFile.DecodedAudio decoded = Decode(clip);
         float[] mono = decoded.ToMono();
-        return decoded.SampleRate == targetSampleRate ? mono
-            : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(mono);
+        return decoded.SampleRate == targetSampleRate ? mono : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(mono);
     }
 
     /// <summary>Decodes a clip to a stereo pair at <paramref name="targetSampleRate"/> (mono sources duplicate the single channel), for the models that need true stereo input such as Demucs.</summary>
@@ -38,8 +37,7 @@ public static class AudioClipCodec
         }
         // Separate resampler instances: the polyphase filter carries per-stream state.
         float[] outLeft = Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(left);
-        float[] outRight = ReferenceEquals(left, right) ? outLeft
-            : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(right);
+        float[] outRight = ReferenceEquals(left, right) ? outLeft : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(right);
         return (outLeft, outRight);
     }
 
@@ -60,7 +58,7 @@ public static class AudioClipCodec
         ArgumentNullException.ThrowIfNull(left);
         if (right is null)
         {
-            using MemoryStream mono = new MemoryStream();
+            using MemoryStream mono = new();
             WavFile.WriteMono16(mono, left, sampleRate);
             return mono.ToArray();
         }
@@ -101,8 +99,7 @@ public static class AudioClipCodec
             return EncodeWav([], null, Math.Max(1, audio.SampleRate));
         }
         (float[] left, float[] right) = audio.ToStereo();
-        return audio.ChannelCount == 1 ? EncodeWav(left, null, audio.SampleRate)
-            : EncodeWav(left, right, audio.SampleRate);
+        return audio.ChannelCount == 1 ? EncodeWav(left, null, audio.SampleRate) : EncodeWav(left, right, audio.SampleRate);
     }
 
     /// <summary>The clip's duration in seconds at <paramref name="sampleRate"/>.</summary>
@@ -118,12 +115,9 @@ public static class AudioClipCodec
         catch (Exception ex)
         {
             Logs.Error($"[Audio] Failed to decode an input clip (format hint '{clip.Format ?? "none"}').", ex);
-            throw new HartsyInferenceException(
-                $"The Engine decodes RIFF/WAVE PCM audio only (format hint '{clip.Format ?? "none"}'). "
-                + "Convert the clip to WAV before submitting it — the Engine takes no ffmpeg dependency.", ex);
+            throw new HartsyInferenceException($"The Engine decodes RIFF/WAVE PCM audio only (format hint '{clip.Format ?? "none"}'). Convert the clip to WAV before submitting it — the Engine takes no ffmpeg dependency.", ex);
         }
     }
 
-    private static short ToPcm16(float value) =>
-        (short)Math.Clamp((int)MathF.Round(value * 32767f), short.MinValue, short.MaxValue);
+    private static short ToPcm16(float value) => (short)Math.Clamp((int)MathF.Round(value * 32767f), short.MinValue, short.MaxValue);
 }

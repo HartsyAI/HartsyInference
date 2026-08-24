@@ -153,9 +153,8 @@ public sealed unsafe class Flux2DoubleBlock
     // in), RoPE rotates the pre-permute joint on-device via FluxRope.ApplyGpu (bit-identical rotation), then one
     // Permute0213 per joint tensor. The post-attention split is a permute-back + SliceRows (B=1); B>1 keeps the
     // host fallbacks for RoPE and the split, exactly like the Flux.1 blocks.
-    public (Tensor image, Tensor text) Forward(IBackend backend,
-        Tensor image, Tensor text,
-        Tensor[] imgMod, Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null)
+    public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor[] imgMod,
+        Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];

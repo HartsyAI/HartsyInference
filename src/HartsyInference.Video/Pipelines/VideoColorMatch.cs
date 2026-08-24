@@ -30,10 +30,8 @@ public static class VideoColorMatch
             sqL += l * l; sqA += a * a; sqB += b * b;
         }
         double meanL = sumL / count, meanA = sumA / count, meanB = sumB / count;
-        return new LabStats(meanL, meanA, meanB,
-            Math.Sqrt(Math.Max(0, sqL / count - meanL * meanL)),
-            Math.Sqrt(Math.Max(0, sqA / count - meanA * meanA)),
-            Math.Sqrt(Math.Max(0, sqB / count - meanB * meanB)));
+        return new LabStats(meanL, meanA, meanB, Math.Sqrt(Math.Max(0, sqL / count - meanL * meanL)),
+            Math.Sqrt(Math.Max(0, sqA / count - meanA * meanA)), Math.Sqrt(Math.Max(0, sqB / count - meanB * meanB)));
     }
 
     /// <summary>Matches the frame's per-channel Lab mean/std to <paramref name="reference"/> in place, lerped by

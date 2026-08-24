@@ -119,8 +119,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         ArgumentNullException.ThrowIfNull(captionEmbeddings);
         ArgumentNullException.ThrowIfNull(request);
         if (!float.IsFinite(cfgScale))
-            throw new ArgumentOutOfRangeException(nameof(cfgScale), cfgScale,
-                "Z-Image CFG scale must be finite.");
+            throw new ArgumentOutOfRangeException(nameof(cfgScale), cfgScale, "Z-Image CFG scale must be finite.");
         if (request is ImageToImageRequest && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
         if (cfgScale > 1.0f && negativeCaptionEmbeddings is null)

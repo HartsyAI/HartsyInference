@@ -82,9 +82,8 @@ public sealed unsafe class LtxVideo2Rope
             baseWidth, scaleFactors, causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
 
     /// <summary>Audio RoPE (self and cross are identical): 1 axis, coordinates in seconds.</summary>
-    public static LtxVideo2Rope ForAudio(int dim, double theta, int baseFrames, int audioScaleFactor,
-        int causalOffset, int samplingRate, int hopLength, RopeType ropeType, int numHeads, int headDim,
-        int patchSizeT = 1) =>
+    public static LtxVideo2Rope ForAudio(int dim, double theta, int baseFrames, int audioScaleFactor, int causalOffset,
+        int samplingRate, int hopLength, RopeType ropeType, int numHeads, int headDim, int patchSizeT = 1) =>
         new(Modality.Audio, ropeType, temporalOnly: false, dim, numHeads, headDim, theta, baseFrames, baseHeight: 0,
             baseWidth: 0, [audioScaleFactor], causalOffset, samplingRate, hopLength, patchSize: 1, patchSizeT);
 

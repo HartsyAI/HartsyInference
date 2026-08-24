@@ -250,8 +250,7 @@ public sealed class VibeVoiceStreamingPipeline : IDisposable
         // Generous cap: text windows + a frame per window's speech budget, rounded up for the voice-priming
         // prefill and the CFG negative stream's own smaller cache.
         int textWindows = (ttsTextIds.Length + TtsTextWindowSize - 1) / Math.Max(1, TtsTextWindowSize);
-        int cacheCap = Math.Min(_cfg.Decoder.MaxPositionEmbeddings,
-            ttsTextIds.Length + maxNewFrames + textWindows + 32);
+        int cacheCap = Math.Min(_cfg.Decoder.MaxPositionEmbeddings, ttsTextIds.Length + maxNewFrames + textWindows + 32);
         using IKvCache textCache = _textLm.CreateDecodeCache(Math.Max(64, textWindows * TtsTextWindowSize + 8));
         using IKvCache negTextCache = _textLm.CreateDecodeCache(8);
         using IKvCache ttsCache = _ttsLm.CreateDecodeCache(cacheCap);

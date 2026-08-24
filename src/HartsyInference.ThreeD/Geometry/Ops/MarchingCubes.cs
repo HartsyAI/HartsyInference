@@ -85,9 +85,8 @@ public static class MarchingCubes
     }
 
     /// <summary>Canonical key for the grid edge between two cube corners, independent of which cell references it, so neighbouring cells share the vertex.</summary>
-    private static long EdgeKey(int x, int y, int z,
-        ReadOnlySpan<int> cox, ReadOnlySpan<int> coy, ReadOnlySpan<int> coz,
-        int a, int b, int nx, int ny)
+    private static long EdgeKey(int x, int y, int z, ReadOnlySpan<int> cox, ReadOnlySpan<int> coy,
+        ReadOnlySpan<int> coz, int a, int b, int nx, int ny)
     {
         int ax = x + cox[a], ay = y + coy[a], az = z + coz[a];
         int bx = x + cox[b], by = y + coy[b], bz = z + coz[b];

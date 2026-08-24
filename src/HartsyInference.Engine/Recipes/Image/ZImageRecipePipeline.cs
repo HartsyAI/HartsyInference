@@ -50,11 +50,10 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
 
     /// <summary>Wraps the constructed Z-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
-        ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder,
-        Tensor[] transformerWeightTensors, Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights,
-        IBackend backend, IBackend textBackend,
-        ImageDefaults variantDefaults,
-        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
+        ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder, Tensor[] transformerWeightTensors,
+        Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights, IBackend backend, IBackend textBackend,
+        ImageDefaults variantDefaults, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader,
+        SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _pipeline = pipeline;

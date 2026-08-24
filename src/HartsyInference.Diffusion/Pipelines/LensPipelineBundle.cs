@@ -30,9 +30,8 @@ public sealed class LensPipelineBundle : IDisposable
 
     private readonly IDisposable[] _ownedLoaders;
 
-    internal LensPipelineBundle(LensPipeline pipeline, LensTransformer transformer,
-        LensGptOssEncoder? textEncoder, VaeDecoder vaeDecoder, Tensor bnMean, Tensor bnVar,
-        IDisposable[] ownedLoaders)
+    internal LensPipelineBundle(LensPipeline pipeline, LensTransformer transformer, LensGptOssEncoder? textEncoder,
+        VaeDecoder vaeDecoder, Tensor bnMean, Tensor bnVar, IDisposable[] ownedLoaders)
     {
         Pipeline = pipeline;
         Transformer = transformer;

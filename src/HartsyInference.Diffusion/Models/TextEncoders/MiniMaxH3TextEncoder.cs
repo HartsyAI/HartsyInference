@@ -160,8 +160,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
     /// <summary>Tokenizes <paramref name="prompt"/> with H3's presentation rules and encodes it.</summary>
     public Result Encode(IBackend backend, Qwen2Tokenizer tokenizer, string prompt,
-        IReadOnlyList<MiniMaxH3TextEncoding.Condition>? conditions = null,
-        IReadOnlyList<Tensor>? referenceImages = null)
+        IReadOnlyList<MiniMaxH3TextEncoding.Condition>? conditions = null, IReadOnlyList<Tensor>? referenceImages = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         return Encode(backend, MiniMaxH3TextEncoding.Build(tokenizer, prompt, conditions), referenceImages);

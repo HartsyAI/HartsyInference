@@ -41,8 +41,7 @@ internal static unsafe class SnakeResidualBlock
         mid.Dispose();
 
         Tensor proj = new(new TensorShape(batch, dim, tConv1), DType.F32);
-        backend.Conv1d(proj, a2, conv2W, conv2B,
-            stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        backend.Conv1d(proj, a2, conv2W, conv2B, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
         a2.Dispose();
 
         int tProj = (int)proj.Shape[2];

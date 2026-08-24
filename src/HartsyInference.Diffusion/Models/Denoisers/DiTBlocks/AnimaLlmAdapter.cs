@@ -369,10 +369,8 @@ public sealed unsafe class AnimaLlmAdapterBlock
     /// <summary>Multi-head attention with QK-RMSNorm and RoPE on Q+K (separate position tables per stream).
     /// Q comes from <paramref name="qSource"/> <c>[B, qLen, hidden]</c>, K/V from <paramref name="kvSource"/>
     /// <c>[B, kvLen, hidden]</c>.</summary>
-    private Tensor Attention(IBackend backend, Tensor qSource, Tensor kvSource,
-        Tensor qWeight, Tensor kWeight, Tensor vWeight, Tensor oWeight,
-        QkNorm qNorm, QkNorm kNorm,
-        Tensor cosQ, Tensor sinQ, Tensor cosK, Tensor sinK,
+    private Tensor Attention(IBackend backend, Tensor qSource, Tensor kvSource, Tensor qWeight, Tensor kWeight,
+        Tensor vWeight, Tensor oWeight, QkNorm qNorm, QkNorm kNorm, Tensor cosQ, Tensor sinQ, Tensor cosK, Tensor sinK,
         int batch, int qLen, int kvLen)
     {
         TensorShape qFlatShape = new TensorShape(batch, qLen, _hidden);

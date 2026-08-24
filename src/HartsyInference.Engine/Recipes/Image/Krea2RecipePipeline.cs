@@ -18,10 +18,9 @@ using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Krea 2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Krea2Pipeline"/> owns the Qwen3-VL-4B forward (it taps 12 decoder layers itself), so this only builds the templated token ids — byte-identical to Qwen-Image's template — plus the prefix-drop indices and calls <see cref="Krea2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Krea2Loader.Generate</c>. Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
-public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer,
-    LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae,
-    QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders,
-    MergedLoraStack? loraStack = null) : IRecipePipeline
+public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
+    Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo,
+    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Krea 2's prompt template is byte-identical to Qwen-Image's — same system prompt, same prefix-drop design.</summary>
     private const string Krea2SystemPrompt =

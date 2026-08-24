@@ -103,8 +103,7 @@ internal sealed unsafe class SnacEncoder
         int stemPad = _cfg.StemKernelSize / 2;
         int tStem = tPcm;
         Tensor x = new(new TensorShape(batch, _cfg.EncoderDim, tStem), DType.F32);
-        backend.Conv1d(x, pcm, _stemW!, _stemB,
-            stride: 1, padLeft: stemPad, padRight: stemPad, dilation: 1, groups: 1);
+        backend.Conv1d(x, pcm, _stemW!, _stemB, stride: 1, padLeft: stemPad, padRight: stemPad, dilation: 1, groups: 1);
 
         int t = tStem;
         int dim = _cfg.EncoderDim;

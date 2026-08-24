@@ -94,9 +94,8 @@ public sealed unsafe class QwenImageRope
     /// <paramref name="refFrameIndex"/> (ComfyUI <c>qwen_image/model.py</c> ref_latents "index" method: first ref = 1)
     /// and spatial positions centered on the REF grid — the reference image may have a different resolution than the
     /// output.</para></summary>
-    public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads,
-        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart,
-        ReadOnlySpan<(int H, int W)> refGrids = default)
+    public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads, int imgPackedH, int imgPackedW, int txtSeqLen,
+        int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default)
     {
         int imgSeqLen = imgPackedH * imgPackedW;
         int refSeqLen = 0;

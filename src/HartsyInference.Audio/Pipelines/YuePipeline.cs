@@ -90,9 +90,8 @@ public sealed unsafe class YuePipeline : IDisposable
     /// [end_of_segment][start_of_segment]). Each segment is capped at <paramref name="maxFramesPerSegment"/> and
     /// stops at its own &lt;EOA&gt;; the song is their concatenation. Then Stage-2 + vocoders as usual.</summary>
     public float[] Synthesize(IBackend backend, int[] headIds, IReadOnlyList<int[]> segmentPrompts,
-        int maxFramesPerSegment = 1500, int seed = 0,
-        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
-        float? guidanceScale = null)
+        int maxFramesPerSegment = 1500, int seed = 0, float? temperature = null, int? topK = null, float? topP = null,
+        float? repetitionPenalty = null, float? guidanceScale = null)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();

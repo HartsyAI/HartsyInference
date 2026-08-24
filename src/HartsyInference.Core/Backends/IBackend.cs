@@ -1946,9 +1946,8 @@ public interface IBackend : IDisposable
 
     /// <summary>Qwen3.5 SSM decode step (seq=1), part 2: delta-rule recurrence + gated RMSNorm.</summary>
     /// <remarks><paramref name="state"/> is the device-persistent [hv, sv, sk] recurrent state. CUDA-only.</remarks>
-    void SsmDeltaStep(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z,
-        Tensor alphaRaw, Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW,
-        int hv, int sv, int sk, int repeat, float eps)
+    void SsmDeltaStep(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z, Tensor alphaRaw,
+        Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW, int hv, int sv, int sk, int repeat, float eps)
         => throw new NotSupportedException("SsmDeltaStep requires a CUDA backend.");
 
     /// <summary>Fused residual-add + RMSNorm: <c>residOut = a + b; normOut = rmsnorm(residOut) · weight</c>, one pass instead of two.</summary>

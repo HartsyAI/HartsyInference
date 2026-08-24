@@ -126,10 +126,9 @@ internal static class HeartMulaMusicModel
                 }
             }
             float[] samples = pipeline.Generate(backend, lyrics, maxFrames, seed: request.Seed,
-                temperature: request.Temperature.HasValue ? (float)request.Temperature.Value : null,
-                topK: request.TopK,
-                cfgScale: request.CfgScale.HasValue ? (float)request.CfgScale.Value : null,
-                cancel: ct, onFrame: OnFrame, tagsTokens: tags);
+                temperature: request.Temperature.HasValue ? (float)request.Temperature.Value : null, topK: request.TopK,
+                cfgScale: request.CfgScale.HasValue ? (float)request.CfgScale.Value : null, cancel: ct,
+                onFrame: OnFrame, tagsTokens: tags);
             return MusicAudio.Mono(samples);
         }
 

@@ -39,10 +39,9 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Generates an image from already-tokenized (chat-templated) prompts. <paramref name="condDrop"/>/ <paramref name="uncondDrop"/> is the number of leading (system-prefix) tokens to discard from the encoder hidden states before they enter the DiT text stream (mirrors Krea2/Qwen-Image). Pass <paramref name="uncondTokens"/>=null (or cfgScale ≤ 1) for the guidance-free / Turbo path. Returns the decoded image as <c>[1, 3, H, W]</c> F32 in <c>[-1, 1]</c>.</summary>
-    public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop,
-        int width, int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null,
-        string? seamlessTiling = null, long variationSeed = -1, double variationSeedStrength = 0,
-        string? samplerSelection = null)
+    public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop, int width,
+        int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null, string? seamlessTiling = null,
+        long variationSeed = -1, double variationSeedStrength = 0, string? samplerSelection = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed

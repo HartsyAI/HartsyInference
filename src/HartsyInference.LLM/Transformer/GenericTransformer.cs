@@ -345,9 +345,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Embedding-in path: runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack) and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/> is true.</summary>
     /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.</remarks>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
-        bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null,
-        Tensor? crossStates = null, int crossLen = 0, ReadOnlySpan<int> tokenIds = default,
-        bool advanceCache = true)
+        bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
+        int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;

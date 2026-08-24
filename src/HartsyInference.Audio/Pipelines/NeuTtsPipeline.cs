@@ -77,8 +77,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         for (int i = 0; i < refCodes.Length; i++)
             prompt[promptPrefix.Length + 1 + i] = _cfg.SpeechTokenBase + refCodes[i];
 
-        int cacheCap = Math.Min(Math.Min(_cfg.Llm.MaxPositionEmbeddings, _cfg.MaxContext),
-            prompt.Length + maxTokens + 8);
+        int cacheCap = Math.Min(Math.Min(_cfg.Llm.MaxPositionEmbeddings, _cfg.MaxContext), prompt.Length + maxTokens + 8);
         using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
 
         uint rng = DeterministicRng.Seed(seed);

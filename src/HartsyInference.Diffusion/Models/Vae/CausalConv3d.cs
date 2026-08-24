@@ -35,9 +35,8 @@ public sealed unsafe class CausalConv3d
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
     /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path.</summary>
-    public CausalConv3d(Tensor weight5d, Tensor? bias,
-        int strideT = 1, int strideH = 1, int strideW = 1,
-        int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
+    public CausalConv3d(Tensor weight5d, Tensor? bias, int strideT = 1, int strideH = 1, int strideW = 1, int padT = 0,
+        int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
         bool spatialReplicatePad = false, bool spatialReflectPad = false, DType? computeDtype = null)
     {
         _computeDtype = computeDtype ?? DType.F32;

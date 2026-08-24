@@ -38,10 +38,9 @@ public sealed unsafe class YueStage1Lm : IDisposable
     /// <paramref name="uncondTokenIds"/> is supplied (a negative/unconditional prompt) and
     /// <paramref name="guidanceScale"/> ≠ 1: at each step <c>logits = uncond + g·(cond − uncond)</c> via a parallel
     /// KV cache primed on the negative prompt and fed the same generated tokens.</remarks>
-    public (List<int> Vocal, List<int> Accomp) GenerateCb0(IBackend backend,
-        ReadOnlySpan<int> promptTokenIds, int maxFrames = 3000, int seed = 0,
-        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
-        float? guidanceScale = null, ReadOnlySpan<int> uncondTokenIds = default)
+    public (List<int> Vocal, List<int> Accomp) GenerateCb0(IBackend backend, ReadOnlySpan<int> promptTokenIds,
+        int maxFrames = 3000, int seed = 0, float? temperature = null, int? topK = null, float? topP = null,
+        float? repetitionPenalty = null, float? guidanceScale = null, ReadOnlySpan<int> uncondTokenIds = default)
     {
         (List<int> v, List<int> a, _) = GenerateSegment(backend, promptTokenIds, maxFrames, seed,
             temperature, topK, topP, repetitionPenalty, guidanceScale, uncondTokenIds);

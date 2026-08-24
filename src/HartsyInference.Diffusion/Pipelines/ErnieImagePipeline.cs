@@ -63,9 +63,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// <param name="schedulerShift">Flow-match scheduler shift. Default <b>4.0</b> per ERNIE-Image's <c>scheduler_config.json</c> (<c>shift=4.0</c>, static); ERNIE-Image-Turbo may differ.</param>
     /// <param name="vaeEncoder">Optional Flux2-style VAE encoder (configure with <c>VaeConfig.Flux2</c>) — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</param>
     public ErnieImagePipeline(IBackend backend, IErnieTextEncoder textEncoder, ErnieImageTransformer transformer,
-        VaeDecoder vaeDecoder, ErnieImageConfig config,
-        Tensor? vaeBnMean = null, Tensor? vaeBnVar = null, float vaeBnEps = 1e-5f,
-        float schedulerShift = 4.0f, VaeEncoder? vaeEncoder = null)
+        VaeDecoder vaeDecoder, ErnieImageConfig config, Tensor? vaeBnMean = null, Tensor? vaeBnVar = null,
+        float vaeBnEps = 1e-5f, float schedulerShift = 4.0f, VaeEncoder? vaeEncoder = null)
         : base(backend)
     {
         _vaeEncoder = vaeEncoder;

@@ -62,9 +62,8 @@ public sealed unsafe class LtxVideo2Attention
     /// <summary>Attention over query rows <paramref name="qInput"/> <c>[Sq, qInDim]</c> attending to
     /// <paramref name="kvInput"/> <c>[Sk, kvInDim]</c>. Pass <paramref name="qRope"/>/<paramref name="kRope"/> null
     /// to skip RoPE (text cross-attn). Returns <c>[Sq, outDim]</c>; caller owns it.</summary>
-    public Tensor Forward(IBackend backend, Tensor qInput, Tensor kvInput,
-        LtxVideo2Rope? qRope, Tensor? qCos, Tensor? qSin,
-        LtxVideo2Rope? kRope, Tensor? kCos, Tensor? kSin, Tensor? mask)
+    public Tensor Forward(IBackend backend, Tensor qInput, Tensor kvInput, LtxVideo2Rope? qRope, Tensor? qCos,
+        Tensor? qSin, LtxVideo2Rope? kRope, Tensor? kCos, Tensor? kSin, Tensor? mask)
     {
         int sq = (int)qInput.Shape[0];
         int sk = (int)kvInput.Shape[0];

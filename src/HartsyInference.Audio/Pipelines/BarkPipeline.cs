@@ -35,8 +35,7 @@ public sealed unsafe class BarkPipeline : IDisposable
     /// <summary>Synthesizes 24 kHz audio. <paramref name="textTokenIds"/> are BERT WordPiece ids already
     /// shifted by <see cref="BarkConfig.TextEncodingOffset"/> (caller's tokenizer); the semantic-infer
     /// prefix is appended here.</summary>
-    public float[] Synthesize(IBackend backend, int[] textTokenIds, int seed = 0,
-        int maxSemantic = 768)
+    public float[] Synthesize(IBackend backend, int[] textTokenIds, int seed = 0, int maxSemantic = 768)
         => Synthesize(backend, textTokenIds, seed, maxSemantic, null, null);
 
     /// <summary>As above, overriding Bark's two sampling temperatures. Upstream <c>generate_audio</c>

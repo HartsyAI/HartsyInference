@@ -58,16 +58,10 @@ public sealed class ChatterboxPipeline : IDisposable
     ///         prompt tokens + prompt mel from the first 10 s). Requires the CAM++, S3-tokenizer, and (unless
     ///         <paramref name="refSpeakerEmbed"/> is supplied) voice-encoder modules to be attached.</item>
     /// </list></summary>
-    public float[] Synthesize(IBackend backend,
-        ReadOnlySpan<int> textTokens,
-        Tensor? refSpeakerEmbed,
-        float exaggeration = 0.5f,
-        int seed = 0,
-        Tensor? flowSpeakerEmbed = null,
-        ReadOnlySpan<float> referenceAudio = default,
-        int referenceSampleRate = 0,
-        Action<GenerationProgress>? progress = null,
-        ReadOnlySpan<int> t3PromptSpeechTokens = default,
+    public float[] Synthesize(IBackend backend, ReadOnlySpan<int> textTokens, Tensor? refSpeakerEmbed,
+        float exaggeration = 0.5f, int seed = 0, Tensor? flowSpeakerEmbed = null,
+        ReadOnlySpan<float> referenceAudio = default, int referenceSampleRate = 0,
+        Action<GenerationProgress>? progress = null, ReadOnlySpan<int> t3PromptSpeechTokens = default,
         float cfgWeight = 0f)
     {
         ThrowIfDisposed();

@@ -74,8 +74,7 @@ public sealed class BlockStreamingScope : IDisposable
         IStreamingBlock[] streamed = new IStreamingBlock[blockCount - prefix];
         Array.Copy(blocks, prefix, streamed, 0, streamed.Length);
         BlockStreamingController streamer = new BlockStreamingController(cache, streamed,
-            prefetchAhead: options.PrefetchAhead, retainBehind: 0,
-            backend: options.PerStepTrim ? backend : null);
+            prefetchAhead: options.PrefetchAhead, retainBehind: 0, backend: options.PerStepTrim ? backend : null);
         denoiser.BeforeBlockForward = i => { if (i >= prefix) streamer.BeforeBlockForward(i - prefix); };
         streamer.Prime();
         Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {ByteFormat.Mb(blockBytes)}, " +

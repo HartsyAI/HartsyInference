@@ -600,8 +600,7 @@ public sealed unsafe class HiDreamBlock
     }
 
     /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE expert, and (under the fallback) the single routed expert.</summary>
-    private Tensor SwiGluForward(IBackend backend, Tensor input, Tensor w1, Tensor w3, Tensor w2,
-        int batch, int seqLen)
+    private Tensor SwiGluForward(IBackend backend, Tensor input, Tensor w1, Tensor w3, Tensor w2, int batch, int seqLen)
     {
         // The SwiGLU inner dim MUST come from the weight (w1.Shape[0] = the GEMM's N), not a computed ffDim.
         // HiDream's checkpoint uses the Llama SwiGLU width round_up(8/3·dim, 256) = 6912 (routed experts / text

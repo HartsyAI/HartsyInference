@@ -281,9 +281,8 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         // A step-cache HIT set startBlock = Depth, so this range is empty and its streaming hook never fires. The
         // controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next miss
         // resumes from there — residency is per-block state, not a position in a sequence.
-        ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, tembZero,
-            hPacked, wPacked, txtPositionStart, refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor, cp,
-            controlNetResiduals?.BlockResiduals);
+        ForwardBlocksRange(backend, ref currentImg, ref currentTxt, temb, tembZero, hPacked, wPacked, txtPositionStart,
+            refGrids, mainSeqLen, startBlock, _config.Depth, cacheAnchor, cp, controlNetResiduals?.BlockResiduals);
 
         if (cacheAnchor is not null)
         {

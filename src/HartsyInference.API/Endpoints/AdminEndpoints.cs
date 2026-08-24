@@ -147,8 +147,7 @@ public static class AdminEndpoints
             return Results.Ok(new { backend = engine.BackendSelector, resolved = engine.BackendDescription });
         });
 
-        app.MapGet("/admin/usage", (UsageTracker usageTracker) =>
-            Results.Ok(usageTracker.Snapshot()));
+        app.MapGet("/admin/usage", (UsageTracker usageTracker) => Results.Ok(usageTracker.Snapshot()));
 
         app.MapGet("/admin/queue", (
             InferenceQueue fastQueue, [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue longRunningQueue, HartsyInferenceServerOptions options) =>

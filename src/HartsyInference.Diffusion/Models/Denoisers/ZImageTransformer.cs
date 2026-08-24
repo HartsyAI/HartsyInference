@@ -270,8 +270,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     {
         int capRealLen = (int)captionEmbeddings.Shape[1];
         int capPaddedLen = PadUpTo(capRealLen, _config.SeqMultiOf);
-        return EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen,
-            _packedActivationDtype);
+        return EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen, _packedActivationDtype);
     }
 
     /// <summary>Denoise-step core in packed token space (the Krea2 <c>ForwardPatched</c> pattern): consumes the

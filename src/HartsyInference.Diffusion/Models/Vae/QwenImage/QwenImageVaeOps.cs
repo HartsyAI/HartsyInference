@@ -40,8 +40,7 @@ public static unsafe class QwenImageVaeOps
         int kW = (int)conv3dWeight.Shape[4];
         if (temporalSlot < 0) temporalSlot += kT;
         if (temporalSlot < 0 || temporalSlot >= kT)
-            throw new ArgumentOutOfRangeException(nameof(temporalSlot),
-                $"Slot {temporalSlot} out of range [0, {kT}).");
+            throw new ArgumentOutOfRangeException(nameof(temporalSlot), $"Slot {temporalSlot} out of range [0, {kT}).");
 
         // Cast to F32 first (the existing backend Conv2D path expects F32 weights for these small VAE
         // ops; HartsyInference's mixed-precision conv is reserved for the bigger diffusion convs).

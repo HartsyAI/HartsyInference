@@ -34,9 +34,8 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
     public string Family => "qwen3vl";
 
     private Qwen3VlEncoder(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
-        Tensor patchWSum, Tensor? patchBias, Tensor? posEmbd, int posGrid,
-        int hidden, int layers, int heads, int inter, int patch, int merge, int image, int projDim,
-        float[] mean, float[] std, float eps)
+        Tensor patchWSum, Tensor? patchBias, Tensor? posEmbd, int posGrid, int hidden, int layers, int heads, int inter,
+        int patch, int merge, int image, int projDim, float[] mean, float[] std, float eps)
     {
         _handle = handle; _w = w; _patchWSum = patchWSum; _patchBias = patchBias; _posEmbd = posEmbd; _posGrid = posGrid;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;

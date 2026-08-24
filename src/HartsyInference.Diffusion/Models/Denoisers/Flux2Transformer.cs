@@ -493,8 +493,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
     /// <summary>The captured (or capture-warming) step body: temb from the fixed device sin buffer(s), full
     /// forward, velocity lands in the fixed buffer via <c>CopyInto</c>.</summary>
-    private void RunStepIntoFixed(IBackend backend, Tensor packedLatent, Tensor textEmbeddings,
-        int hPacked, int wPacked)
+    private void RunStepIntoFixed(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, int hPacked, int wPacked)
     {
         Tensor temb = ComputeTembFromSin(backend, _sinFixed!, _guidanceSinFixed, 1);
         Tensor v = ForwardWithTemb(backend, packedLatent, textEmbeddings, temb, hPacked, wPacked);

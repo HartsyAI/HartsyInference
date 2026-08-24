@@ -79,9 +79,8 @@ public sealed class KokoroPipeline : IDisposable
     public KokoroConfig Config => _cfg;
     public string ModelName => "hexgrad/Kokoro-82M";
 
-    private KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert,
-        KokoroTextEncoder textEnc, KokoroProsodyPredictor pred, KokoroIStftNetDecoder dec,
-        IDisposable? loader, string repoDir)
+    private KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert, KokoroTextEncoder textEnc,
+        KokoroProsodyPredictor pred, KokoroIStftNetDecoder dec, IDisposable? loader, string repoDir)
     {
         _cfg = cfg;
         _tokenizer = tok;

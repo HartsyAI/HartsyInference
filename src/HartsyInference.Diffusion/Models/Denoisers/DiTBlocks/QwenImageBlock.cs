@@ -203,9 +203,8 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
     /// post-RoPE joint K/V is traded through <see cref="CpKvExchange"/> (txt prefix replicated, img rows exchanged)
     /// so the local queries attend over the FULL sequence. Null = the byte-identical single-backend path.</param>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
-        QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart,
-        (int H, int W)[]? refGrids = null, Tensor? tembZero = null, int timestepZeroIndex = 0,
-        CpForwardContext? cp = null)
+        QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart, (int H, int W)[]? refGrids = null,
+        Tensor? tembZero = null, int timestepZeroIndex = 0, CpForwardContext? cp = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];

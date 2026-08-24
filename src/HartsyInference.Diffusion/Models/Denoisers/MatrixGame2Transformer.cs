@@ -39,11 +39,10 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         {
             _blocks[i] = new WanVideoBlock(wan, crossAttnNorm: true) { FfnDtype = DiTBlocks.DitDtype.Act };
             if (actionSet is null || actionSet.Contains(i))
-                _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim,
-                    keyboardDimIn: config.KeyboardDim, hiddenSize: config.ActionHiddenSize,
-                    streamHiddenDim: config.ActionStreamDim, headsNum: config.ActionHeads,
-                    vaeTimeCompressionRatio: config.VaeTemporalCompression, windowsSize: config.ActionWindowSize,
-                    ropeTheta: config.ActionRopeTheta, eps: config.Eps,
+                _actionModules[i] = new MatrixGame3ActionModule(config.InnerDim, keyboardDimIn: config.KeyboardDim,
+                    hiddenSize: config.ActionHiddenSize, streamHiddenDim: config.ActionStreamDim,
+                    headsNum: config.ActionHeads, vaeTimeCompressionRatio: config.VaeTemporalCompression,
+                    windowsSize: config.ActionWindowSize, ropeTheta: config.ActionRopeTheta, eps: config.Eps,
                     enableMouse: config.EnableMouse);
         }
         _rope = new WanRope(config.HeadDim, config.RopeTheta, config.RopeMaxSeqLen);

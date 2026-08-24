@@ -166,8 +166,7 @@ public sealed unsafe class MiniMaxH3AudioVaeEncoder : IDisposable
                 cur = Activate(backend, x, stage.Alpha);
                 x.Dispose();
                 x = cur;
-                cur = Conv(backend, x, stage.DownW, stage.DownB, stage.Stride,
-                    (stage.Stride + 1) / 2, dilation: 1);
+                cur = Conv(backend, x, stage.DownW, stage.DownB, stage.Stride, (stage.Stride + 1) / 2, dilation: 1);
                 x.Dispose();
                 x = cur;
             }

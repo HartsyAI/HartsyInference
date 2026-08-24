@@ -32,10 +32,8 @@ public sealed class PhonemeIdMap
             if (kv.Key.Length == 0) continue;
             byCp[char.ConvertToUtf32(kv.Key, 0)] = kv.Value;
         }
-        return new PhonemeIdMap(byCp,
-            phonemeIdMap.TryGetValue(Bos, out int[]? b) ? b : [1],
-            phonemeIdMap.TryGetValue(Eos, out int[]? e) ? e : [2],
-            phonemeIdMap.TryGetValue(Pad, out int[]? p) ? p : [0]);
+        return new PhonemeIdMap(byCp, phonemeIdMap.TryGetValue(Bos, out int[]? b) ? b : [1],
+            phonemeIdMap.TryGetValue(Eos, out int[]? e) ? e : [2], phonemeIdMap.TryGetValue(Pad, out int[]? p) ? p : [0]);
     }
 
     /// <summary>Parses the full Piper voice config JSON (<c>*.onnx.json</c>) and extracts its <c>phoneme_id_map</c>.</summary>

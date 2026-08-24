@@ -203,8 +203,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     // Keyframes are presented to the vision tower exactly as reference images are — the reference
                     // labels them <Picture 1>/<Picture 2> ahead of the prompt — so the two conditioning paths agree.
                     encoded = _textEncoder.Encode(_textEncoderBackend, _tokenizer, request.Prompt,
-                        conditions.Count == 0 ? null : conditions,
-                        visionInputs.Count == 0 ? null : visionInputs);
+                        conditions.Count == 0 ? null : conditions, visionInputs.Count == 0 ? null : visionInputs);
                     // Load-bearing when the encoder sits on another device: the DiT's first read of these hidden
                     // states faults them back from here, and a fault does not await this device's stream.
                     _textEncoderBackend.Sync();

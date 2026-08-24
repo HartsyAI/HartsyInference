@@ -29,8 +29,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
     private Tensor? _videoProjW, _videoProjB, _audioProjW, _audioProjB;
     private readonly Connector _video, _audio;
 
-    public LtxVideo2TextConnectors(LtxVideo2Config c, int numBlocks = 8, int numRegisters = 128,
-        int baseSeqLen = 4096)
+    public LtxVideo2TextConnectors(LtxVideo2Config c, int numBlocks = 8, int numRegisters = 128, int baseSeqLen = 4096)
     {
         _videoDim = c.InnerDim;
         _audioDim = c.AudioInnerDim;

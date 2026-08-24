@@ -714,9 +714,8 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
     private static CausalConv3d Conv(IReadOnlyDictionary<string, Tensor> weights, string prefix,
         int padT, int padH, int padW, int strideT = 1, int strideH = 1, int strideW = 1) =>
         new CausalConv3d(Require(weights, $"{prefix}.weight"),
-            weights.TryGetValue($"{prefix}.bias", out Tensor? bias) ? bias : null,
-            strideT, strideH, strideW, padT, padH, padW,
-            replicateFirstPad: false, causal: true, spatialReflectPad: padH > 0 || padW > 0);
+            weights.TryGetValue($"{prefix}.bias", out Tensor? bias) ? bias : null, strideT, strideH, strideW, padT,
+            padH, padW, replicateFirstPad: false, causal: true, spatialReflectPad: padH > 0 || padW > 0);
 
     private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key) =>
         weights.TryGetValue(key, out Tensor? t) ? t

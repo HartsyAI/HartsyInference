@@ -27,11 +27,8 @@ internal static class MiniMaxMusic3WeightPolicy
         // Only the decoder layers are quantized. The embedding table and the output head are read row-wise on the
         // host (the head is sliced to 16385 rows at load), so quantizing them would buy nothing and would break the
         // row reader; they stay mmapped from the source checkpoint.
-        return QuantizeToCache(weights,
-            key => key.StartsWith("model.layers.", StringComparison.Ordinal),
-            PolicyFor(backbone.Value),
-            CachePath(repo, quant!, "lm"),
-            "language model", backbone.Value, out cache);
+        return QuantizeToCache(weights, key => key.StartsWith("model.layers.", StringComparison.Ordinal),
+            PolicyFor(backbone.Value), CachePath(repo, quant!, "lm"), "language model", backbone.Value, out cache);
     }
 
     /// <summary>Applies the depth decoder's quantization, returning the weights to load and (when quantizing) the

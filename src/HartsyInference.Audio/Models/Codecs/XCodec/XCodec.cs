@@ -209,8 +209,7 @@ public sealed unsafe class XCodec
             semanticBytes, semanticBytes);
 
         Tensor prior = new(new TensorShape(1, Config.LatentDim, t), DType.F32);
-        backend.Conv1d(prior, fused, _fcPriorW!, _fcPriorB,
-            stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        backend.Conv1d(prior, fused, _fcPriorW!, _fcPriorB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
         fused.Dispose();
         return new XCodecEncodeStages(acoustic, semantic, prior, t, fallback);
     }

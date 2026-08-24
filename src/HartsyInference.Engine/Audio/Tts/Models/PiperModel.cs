@@ -21,8 +21,7 @@ internal static class PiperModel
             PiperPipeline pipeline = await PiperPipeline.LoadAsync(voice, ct: cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][Piper] Loaded rhasspy/piper-voices {voice} (VITS 22.05 kHz).");
             return new TtsRunner(pipeline.SampleRate,
-                (backend, job) => pipeline.SynthesizeText(backend, job.Text, seed: job.Seed),
-                pipeline);
+                (backend, job) => pipeline.SynthesizeText(backend, job.Text, seed: job.Seed), pipeline);
         },
     };
 }

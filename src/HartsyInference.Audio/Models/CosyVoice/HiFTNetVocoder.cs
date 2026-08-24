@@ -312,9 +312,8 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
             float[] tailF0 = f0Window[(settledMelFrames - f0WindowStart)..(tMel - f0WindowStart)];
             double[] tailPhase = (double[])state.HarmonicPhase.Clone();
             uint tailRng = state.NoiseRngState;
-            float[] tailAudio = NsfVocoderDsp.GenerateHarmonicSourceChunk(tailF0, tailPhase, ref tailRng,
-                scale, _cfg.SampleRate, Harmonics, _mSourceW!, _mSourceB!, SineAmp, NoiseStd, VoicedThreshold,
-                addNoise);
+            float[] tailAudio = NsfVocoderDsp.GenerateHarmonicSourceChunk(tailF0, tailPhase, ref tailRng, scale,
+                _cfg.SampleRate, Harmonics, _mSourceW!, _mSourceB!, SineAmp, NoiseStd, VoicedThreshold, addNoise);
             harmonicAudioForThisCall = new float[state.HarmonicAudioSoFar.Count + tailAudio.Length];
             state.HarmonicAudioSoFar.CopyTo(harmonicAudioForThisCall);
             Array.Copy(tailAudio, 0, harmonicAudioForThisCall, state.HarmonicAudioSoFar.Count, tailAudio.Length);

@@ -33,9 +33,8 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
 
     /// <summary><paramref name="encoder"/> is optional and only needed for RGB-input I2V
     /// (<see cref="EncodeFirstFrame"/>); it loads from the same <c>vae/</c> shard as the decoder.</summary>
-    public Kandinsky5VideoPipeline(IBackend backend, Kandinsky5Transformer transformer,
-        HunyuanVideoVaeDecoder vae, Kandinsky5Config config,
-        HunyuanVideoVaeEncoder? encoder = null, float schedulerShift = 5.0f)
+    public Kandinsky5VideoPipeline(IBackend backend, Kandinsky5Transformer transformer, HunyuanVideoVaeDecoder vae,
+        Kandinsky5Config config, HunyuanVideoVaeEncoder? encoder = null, float schedulerShift = 5.0f)
         : base(backend)
     {
         if (!config.VisualCond)

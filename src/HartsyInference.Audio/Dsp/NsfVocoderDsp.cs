@@ -18,9 +18,8 @@ public static unsafe class NsfVocoderDsp
     /// (deterministic phase, voiced/unvoiced + fixed-seed Gaussian noise shaping), then merges via
     /// <c>tanh(Linear)</c> using <paramref name="mergeW"/> (<c>[1, harmonics]</c>) + <paramref name="mergeB"/>.
     /// <paramref name="f0"/> is <c>[1, 1, T0]</c> in Hz; returns a float[<c>T0 · scale</c>] waveform.</summary>
-    public static float[] GenerateHarmonicSource(Tensor f0, int scale, int sampleRate, int harmonics,
-        Tensor mergeW, Tensor mergeB, float sineAmp = 0.1f, float noiseStd = 0.003f,
-        float voicedThreshold = 10f, int noiseSeed = 0)
+    public static float[] GenerateHarmonicSource(Tensor f0, int scale, int sampleRate, int harmonics, Tensor mergeW,
+        Tensor mergeB, float sineAmp = 0.1f, float noiseStd = 0.003f, float voicedThreshold = 10f, int noiseSeed = 0)
     {
         int t0 = (int)f0.Shape[2];
         float* fp = (float*)f0.DataPointer;

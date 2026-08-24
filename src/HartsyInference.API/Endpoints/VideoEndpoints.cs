@@ -64,9 +64,8 @@ public static class VideoEndpoints
             byte[][] rgb = new byte[result.Frames.Count][];
             for (int i = 0; i < result.Frames.Count; i++)
                 rgb[i] = result.Frames[i].Rgb;
-            return VideoOutputWriter.Write(rgb, first.Width, first.Height,
-                OutputWriter.ResolveDir(req.OutputDir), req.Request.Prompt,
-                result.Audio, result.Fps ?? 24).Directory;
+            return VideoOutputWriter.Write(rgb, first.Width, first.Height, OutputWriter.ResolveDir(req.OutputDir),
+                req.Request.Prompt, result.Audio, result.Fps ?? 24).Directory;
         }
         catch (Exception ex)
         {
