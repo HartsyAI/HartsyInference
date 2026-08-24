@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native text-to-speech request. Carries the text plus an optional voice reference (for zero-shot cloning) and the per-model knobs pipelines honor when they support them.</summary>
@@ -59,4 +61,7 @@ public sealed record SpeechRequest
 
     /// <summary>Sampling seed for reproducibility; 0 leaves it unset.</summary>
     public int Seed { get; init; }
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

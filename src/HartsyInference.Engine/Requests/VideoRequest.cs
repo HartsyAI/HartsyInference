@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native, transport-agnostic text/image-to-video request. Carries the common generation props plus the video-specific model selections, framing, trimming, and audio-track inputs the backend reads.</summary>
@@ -126,4 +128,7 @@ public sealed record VideoRequest
 
     /// <summary>Arch-specific or host-registered params not named by the flat contract.</summary>
     public IReadOnlyDictionary<string, object> Extra { get; init; } = new Dictionary<string, object>();
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

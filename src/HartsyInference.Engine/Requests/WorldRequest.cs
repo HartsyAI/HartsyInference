@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native interactive-world request: opens a stateful session seeded by a prompt and/or an initial frame.</summary>
@@ -14,4 +16,7 @@ public sealed record WorldRequest
 
     /// <summary>RNG seed; negative means a random seed.</summary>
     public long Seed { get; init; } = -1;
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

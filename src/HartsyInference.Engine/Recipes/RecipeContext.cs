@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Recipes;
@@ -125,4 +126,11 @@ public sealed record RecipeContext
 
     /// <summary>Fraction (0..1) of steps run by the swap model; null uses the family's official boundary.</summary>
     public double? VideoSwapPercent { get; init; }
+
+    /// <summary>The VRAM policy this construction runs under — the backend's, already refined by the request's
+    /// overrides. Recipes read this instead of resolving the environment themselves.</summary>
+    /// <remarks>Construction-scoped by nature: a recipe's decisions (sharding eligibility, quantized compute) are
+    /// baked into the pipeline it returns and cached with it. The runtime levers are re-resolved per generation
+    /// inside the pipeline, so a cached pipeline is not stale for those.</remarks>
+    public VramPolicy? VramPolicy { get; init; }
 }

@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native, transport-agnostic text-to-image request. Flat common props cover the everyday knobs; the nullable composition objects add LoRA/ControlNet/IP-Adapter/Refiner/img2img/inpaint/regional/variation-seed; and <see cref="Extra"/> carries arch-specific or host-registered params the flat contract does not name. Transports (HTTP, CLI, the SwarmUI backend) map their own inputs onto this — it is the single contract image generation accepts.</summary>
@@ -83,4 +85,7 @@ public sealed record ImageRequest
 
     /// <summary>Arch-specific or host-registered params not named by the flat contract (keys are host-defined).</summary>
     public IReadOnlyDictionary<string, object> Extra { get; init; } = new Dictionary<string, object>();
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

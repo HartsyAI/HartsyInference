@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native speech-to-text request: the audio to transcribe plus decode options. The timestamp/diarization toggles request the richer <see cref="TranscriptResult"/> outputs when the model supports them.</summary>
@@ -17,4 +19,7 @@ public sealed record AudioRequest
 
     /// <summary>Request speaker diarization (who-spoke-when) in the result.</summary>
     public bool Diarization { get; init; }
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

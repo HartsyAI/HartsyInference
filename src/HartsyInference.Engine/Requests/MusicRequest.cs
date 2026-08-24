@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native text-to-music request. Flat fields cover the common and ACE-Step/HeartMuLa knobs; the LM-planner block drives ACE-Step's 5 Hz planner; and the continuation/repaint/cover inputs select the editing mode over a supplied source clip (null on all three = plain text-to-music).</summary>
@@ -128,4 +130,7 @@ public sealed record MusicRequest
 
     /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every generated segment.</summary>
     public double ReferenceEndSeconds { get; init; } = 30;
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

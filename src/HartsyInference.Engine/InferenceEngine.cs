@@ -208,6 +208,7 @@ public sealed class InferenceEngine : IInferenceEngine
             CpBackends = EnsureCpBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
+            VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         }));
         _recipePipelines[key] = pipeline;
         return pipeline;
@@ -412,6 +413,7 @@ public sealed class InferenceEngine : IInferenceEngine
                 Loras = request?.Loras,
                 VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
                 VideoSwapPercent = request?.VideoSwapPercent,
+                VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
             }));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
@@ -443,13 +445,25 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_backend is null)
         {
             _backend = BackendFactory.Create(_backendSelector);
-            // Weak-keyed override: it dies with the backend, so rebuilds re-apply here and disposal needs no cleanup.
-            if (_options?.LowVram is LowVramMode lowVram)
-            {
-                LowVramPolicy.SetOverride(_backend, lowVram);
-            }
+            ApplyVramPolicy(_backend);
         }
         return _backend;
+    }
+
+    /// <summary>Pins this engine's configured VRAM policy onto a freshly-constructed backend.</summary>
+    /// <remarks>Weak-keyed: it dies with the backend, so rebuilds re-apply here and disposal needs no cleanup.
+    /// <see cref="EngineOptions.VramPolicy"/> wins over the legacy <see cref="EngineOptions.LowVram"/>; with neither
+    /// set the backend inherits the environment, which is what leaves default hosts on today's behavior.</remarks>
+    private void ApplyVramPolicy(IBackend backend)
+    {
+        if (_options?.VramPolicy is VramPolicy policy)
+        {
+            VramPolicyRegistry.Set(backend, policy);
+        }
+        else if (_options?.LowVram is LowVramMode lowVram)
+        {
+            LowVramPolicy.SetOverride(backend, lowVram);
+        }
     }
 
     /// <summary>The backend for a placement device selector: the primary when the selector resolves to the
@@ -471,10 +485,7 @@ public sealed class InferenceEngine : IInferenceEngine
             return existing;
         }
         IBackend created = BackendFactory.Create(canonical);
-        if (_options?.LowVram is LowVramMode lowVram)
-        {
-            LowVramPolicy.SetOverride(created, lowVram);
-        }
+        ApplyVramPolicy(created);
         _placementBackends[canonical] = created;
         return created;
     }

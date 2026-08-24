@@ -13,7 +13,13 @@ public sealed class EngineOptions
     /// <summary>Low-VRAM policy for this engine's backend; null = follow the <c>HARTSY_LOWVRAM</c> environment
     /// variable. Hosts with a per-backend setting (the SwarmUI extension) pass it here — the env var is process-wide
     /// last-writer-wins, which breaks one-backend-per-GPU setups with differing card sizes.</summary>
+    /// <remarks>Superseded by <see cref="VramPolicy"/>, which carries every lever rather than the streaming one alone.
+    /// Kept because it is the shape existing hosts already pass; when both are set, <see cref="VramPolicy"/> wins.</remarks>
     public LowVramMode? LowVram { get; set; }
+
+    /// <summary>Full VRAM policy for this engine's backends. Null falls back to <see cref="LowVram"/>, then to the
+    /// environment. Set this rather than <see cref="LowVram"/> to control levers beyond weight streaming.</summary>
+    public VramPolicy? VramPolicy { get; set; }
 
     /// <summary>Multi-device placement for this engine (component devices, shard devices); null = single-device.
     /// Can also be changed later via <c>InferenceEngine.SetPlacement</c>.</summary>

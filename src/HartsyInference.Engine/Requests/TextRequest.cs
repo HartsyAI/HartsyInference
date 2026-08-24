@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native chat/completion request. Carries the conversation, sampling knobs, tool definitions, and the decode hints the local backend honors. Per-request knobs (temperature/topP/seed/maxTokens) live here; nullable knobs fall back to the model/engine default when unset.</summary>
@@ -56,4 +58,7 @@ public sealed record TextRequest
 
     /// <summary>Free the model's device memory after this request completes; null uses the engine default.</summary>
     public bool? AlwaysFreeMemory { get; init; }
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }

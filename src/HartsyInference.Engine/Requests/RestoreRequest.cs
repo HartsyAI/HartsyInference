@@ -1,3 +1,5 @@
+using HartsyInference.Core.MemoryManagement;
+
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Video/image restoration request (SeedVR2). Exactly one of <see cref="Video"/>, <see cref="Frames"/>, or <see cref="Image"/> must be set. The target is an AREA (<see cref="TargetWidth"/>×<see cref="TargetHeight"/>) with aspect preserved — SeedVR2 has no scale factor; the bicubic area-resize is part of the model contract and the DiT restores detail at the target resolution.</summary>
@@ -32,4 +34,7 @@ public sealed record RestoreRequest
 
     /// <summary>RNG seed; null uses the reference default (666).</summary>
     public int? Seed { get; init; }
+
+    /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
+    public VramOverrides? Vram { get; init; }
 }
