@@ -4,10 +4,12 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Feed-forward network supporting SwiGLU (w2(silu(w1(x)) * w3(x))) and GELU-approximate (linear(gelu(linear(x)))) modes. Mode is set at weight loading time to support both Stability AI and HuggingFace diffusers weight formats.</summary>
-public sealed class SwiGluFfn
+/// <param name="hiddenSize">Model hidden dimension.</param>
+/// <param name="ffDim">Feed-forward inner dimension (typically 4 * hiddenSize).</param>
+public sealed class SwiGluFfn(int hiddenSize, int ffDim)
 {
-    private readonly int _hiddenSize;
-    private readonly int _ffDim;
+    private readonly int _hiddenSize = hiddenSize;
+    private readonly int _ffDim = ffDim;
     private bool _useGeluMode;
 
     // SwiGLU mode: w1 = gate (SiLU), w3 = linear, w2 = output
@@ -15,15 +17,6 @@ public sealed class SwiGluFfn
     private Tensor? _w1Weight, _w1Bias;
     private Tensor? _w2Weight, _w2Bias;
     private Tensor? _w3Weight, _w3Bias;
-
-    /// <summary>Creates a feed-forward block with the given dimensions.</summary>
-    /// <param name="hiddenSize">Model hidden dimension.</param>
-    /// <param name="ffDim">Feed-forward inner dimension (typically 4 * hiddenSize).</param>
-    public SwiGluFfn(int hiddenSize, int ffDim)
-    {
-        _hiddenSize = hiddenSize;
-        _ffDim = ffDim;
-    }
 
     /// <summary>Loads weights for SwiGLU mode (3 projections): w1 = gate, w3 = linear, w2 = output. Biases may be null when the model has bias-less linears (Flux.2).</summary>
     public void LoadSwiGluWeights(Tensor w1Weight, Tensor? w1Bias, Tensor w3Weight, Tensor? w3Bias, Tensor w2Weight, Tensor? w2Bias)

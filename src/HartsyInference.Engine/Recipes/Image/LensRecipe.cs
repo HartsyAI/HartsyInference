@@ -47,8 +47,7 @@ public sealed class LensRecipe : IArchitectureRecipe
         (string vocabPath, string mergesPath) = EnsureGptOssVocabMerges();
 
         LensConfig config = Path.GetFileName(context.CheckpointPath).Contains("turbo", StringComparison.OrdinalIgnoreCase)
-            ? LensConfig.Turbo
-            : LensConfig.Default;
+            ? LensConfig.Turbo : LensConfig.Default;
         Logs.Info($"[LensRecipe] Loading Lens ({(config.DefaultCfgScale > 1 ? "standard" : "turbo")}): {Path.GetFileName(context.CheckpointPath)}.");
 
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging after
@@ -100,8 +99,7 @@ public sealed class LensRecipe : IArchitectureRecipe
             List<string> merges = new List<string>();
             foreach (JsonElement merge in model.GetProperty("merges").EnumerateArray())
             {
-                merges.Add(merge.ValueKind == JsonValueKind.Array
-                    ? $"{merge[0].GetString()} {merge[1].GetString()}"
+                merges.Add(merge.ValueKind == JsonValueKind.Array ? $"{merge[0].GetString()} {merge[1].GetString()}"
                     : merge.GetString() ?? "");
             }
             File.WriteAllLines(mergesPath, merges);

@@ -101,8 +101,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         // for every chunk (per-chunk resolution could mix dtypes as free VRAM shifts between chunks).
         bool bf16DrivingCache = PlanDrivingCache(width, height, chunkLen);
 
-        string negative = string.IsNullOrWhiteSpace(request.NegativePrompt)
-            ? WanVideoRecipe.DefaultNegativePrompt
+        string negative = string.IsNullOrWhiteSpace(request.NegativePrompt) ? WanVideoRecipe.DefaultNegativePrompt
             : request.NegativePrompt;
         string drivingPrompt = ResolveDrivingPrompt(request);
 
@@ -141,8 +140,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
             // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
             float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
             VideoColorMatch.LabStats refColorStats = colorStrength > 0f
-                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
-                : default;
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height) : default;
 
             List<byte[]> assembled = new List<byte[]>();
             byte[]? carriedFrame = null;

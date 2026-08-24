@@ -84,9 +84,7 @@ internal sealed class SeaNetEncoder
         // cfg.LstmLayers == 0 disables the LSTM (used by Mimi, which substitutes a
         // transformer-of-codecs after the encoder).
         int finalDim = cfg.NFilters * (1 << _stages);
-        _lstm = cfg.LstmLayers > 0
-            ? new UnidirectionalLstm(finalDim, finalDim, cfg.LstmLayers)
-            : null;
+        _lstm = cfg.LstmLayers > 0 ? new UnidirectionalLstm(finalDim, finalDim, cfg.LstmLayers) : null;
         // ELU + final projection follow.
     }
 

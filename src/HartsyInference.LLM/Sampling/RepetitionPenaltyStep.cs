@@ -3,16 +3,10 @@ using System.Collections.Generic;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Penalizes the logits of already-generated tokens following the Hugging Face convention (divide positive logits, multiply negative ones).</summary>
-public sealed class RepetitionPenaltyStep : ISamplerStep
+/// <summary>Penalizes the logits of already-generated tokens following the Hugging Face convention (divide positive logits, multiply negative ones). A <paramref name="penalty"/> of 1.0 leaves logits unchanged at apply time.</summary>
+public sealed class RepetitionPenaltyStep(float penalty) : ISamplerStep
 {
-    private readonly float _penalty;
-
-    /// <summary>Creates a repetition-penalty step; a penalty of 1.0 leaves logits unchanged at apply time.</summary>
-    public RepetitionPenaltyStep(float penalty)
-    {
-        _penalty = penalty;
-    }
+    private readonly float _penalty = penalty;
 
     /// <inheritdoc/>
     public void Apply(Span<float> logits, IReadOnlyList<int> history)

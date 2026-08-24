@@ -45,8 +45,7 @@ public static unsafe class Int8ConvRotCodec
     public static void ApplyRotationInPlace(Span<float> values, int groupSize)
     {
         ValidateGroupSize(groupSize);
-        if (values.Length % groupSize != 0)
-            throw new ArgumentException($"Length {values.Length} is not a multiple of ConvRot group size {groupSize}.", nameof(values));
+        if (values.Length % groupSize != 0) throw new ArgumentException($"Length {values.Length} is not a multiple of ConvRot group size {groupSize}.", nameof(values));
         fixed (float* p = values)
         {
             ApplyRotation(p, values.Length, groupSize);
@@ -60,25 +59,19 @@ public static unsafe class Int8ConvRotCodec
     {
         ArgumentNullException.ThrowIfNull(weight);
         ArgumentNullException.ThrowIfNull(rowScale);
-        if (weight.DType != DType.I8 || weight.Shape.Rank != 2)
-            throw new ArgumentException($"ConvRot weight must be I8 rank-2; got {weight.DType} {weight.Shape}.", nameof(weight));
-        if (rowScale.DType != DType.F32)
-            throw new ArgumentException($"ConvRot weight scale must be F32; got {rowScale.DType}.", nameof(rowScale));
+        if (weight.DType != DType.I8 || weight.Shape.Rank != 2) throw new ArgumentException($"ConvRot weight must be I8 rank-2; got {weight.DType} {weight.Shape}.", nameof(weight));
+        if (rowScale.DType != DType.F32) throw new ArgumentException($"ConvRot weight scale must be F32; got {rowScale.DType}.", nameof(rowScale));
 
         long outFeatures = weight.Shape[0];
         long inFeatures = weight.Shape[1];
         if (rowScale.ElementCount != outFeatures && rowScale.ElementCount != 1)
         {
-            throw new ArgumentException(
-                $"ConvRot weight scale must hold {outFeatures} row scales or a single per-tensor scale; got {rowScale.ElementCount}.",
-                nameof(rowScale));
+            throw new ArgumentException($"ConvRot weight scale must hold {outFeatures} row scales or a single per-tensor scale; got {rowScale.ElementCount}.", nameof(rowScale));
         }
         if (convRotGroupSize > 0)
         {
             ValidateGroupSize(convRotGroupSize);
-            if (inFeatures % convRotGroupSize != 0)
-                throw new ArgumentException(
-                    $"ConvRot group size {convRotGroupSize} does not divide in_features {inFeatures}.", nameof(convRotGroupSize));
+            if (inFeatures % convRotGroupSize != 0) throw new ArgumentException($"ConvRot group size {convRotGroupSize} does not divide in_features {inFeatures}.", nameof(convRotGroupSize));
         }
 
         Tensor result = new Tensor(new TensorShape(outFeatures, inFeatures), DType.BF16);
@@ -109,7 +102,6 @@ public static unsafe class Int8ConvRotCodec
             }
             return scratch;
         }, static _ => { });
-
         return result;
     }
 
@@ -144,8 +136,7 @@ public static unsafe class Int8ConvRotCodec
 
     private static void ValidateGroupSize(int size)
     {
-        if (!IsValidGroupSize(size))
-            throw new ArgumentOutOfRangeException(nameof(size), size, "ConvRot group size must be a power of four (4, 16, 64, 256, …).");
+        if (!IsValidGroupSize(size)) throw new ArgumentOutOfRangeException(nameof(size), size, "ConvRot group size must be a power of four (4, 16, 64, 256, …).");
     }
 
 }

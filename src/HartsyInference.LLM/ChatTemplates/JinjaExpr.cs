@@ -354,8 +354,7 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
 
     private static List<object?> SplitString(string s, object? sep)
     {
-        string[] parts = sep is null
-            ? s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+        string[] parts = sep is null ? s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
             : s.Split(Values.ToStr(sep));
         List<object?> list = new(parts.Length);
         foreach (string p in parts) list.Add(p);

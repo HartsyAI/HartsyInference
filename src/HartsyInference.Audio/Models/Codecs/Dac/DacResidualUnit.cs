@@ -31,12 +31,12 @@ namespace HartsyInference.Audio.Models.Codecs.Dac;
 ///   <item><c>{prefix}.block.3.weight_g</c> / <c>.weight_v</c> / <c>.bias</c> — second WNConv1d (kernel=1)</item>
 /// </list></para>
 /// </remarks>
-internal sealed unsafe class DacResidualUnit
+internal sealed unsafe class DacResidualUnit(string prefix, int dim, int kernel, int dilation)
 {
-    private readonly string _prefix;
-    private readonly int _dim;
-    private readonly int _kernel;
-    private readonly int _dilation;
+    private readonly string _prefix = prefix;
+    private readonly int _dim = dim;
+    private readonly int _kernel = kernel;
+    private readonly int _dilation = dilation;
 
     private Tensor? _snake1Alpha;
     private Tensor? _snake2Alpha;
@@ -44,14 +44,6 @@ internal sealed unsafe class DacResidualUnit
     private Tensor? _conv1B;
     private Tensor? _conv2W;
     private Tensor? _conv2B;
-
-    public DacResidualUnit(string prefix, int dim, int kernel, int dilation)
-    {
-        _prefix = prefix;
-        _dim = dim;
-        _kernel = kernel;
-        _dilation = dilation;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

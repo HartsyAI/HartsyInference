@@ -213,8 +213,7 @@ public sealed class ModelManager : IDisposable
     {
         if (!_llmSessions.TryGetValue(modelId, out LlmSession? session))
             throw new InvalidOperationException($"Model '{modelId}' is not a loaded chat model. POST /v1/models/load first.");
-        return session.Scheduler is not null
-            ? session.Scheduler.SubmitAsync(request, onToken, ct)
+        return session.Scheduler is not null ? session.Scheduler.SubmitAsync(request, onToken, ct)
             : _queue.EnqueueAsync(() => Task.FromResult(session.SsmPipeline!.Generate(request, onToken, ct)), ct);
     }
 

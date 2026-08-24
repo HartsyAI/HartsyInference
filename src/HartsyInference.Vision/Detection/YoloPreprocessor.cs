@@ -159,16 +159,8 @@ public sealed unsafe class YoloPreprocessor
     /// <summary>Letterbox transform record — captures every parameter needed to (a) describe the
     /// preprocessing for debugging and (b) un-do the mapping after NMS so detection boxes can be
     /// reported in original-image coordinates.</summary>
-    public readonly record struct Transform(
-        int SourceWidth,
-        int SourceHeight,
-        int ResizedWidth,
-        int ResizedHeight,
-        float Scale,
-        int PadLeft,
-        int PadTop,
-        int PaddedWidth,
-        int PaddedHeight)
+    public readonly record struct Transform(int SourceWidth, int SourceHeight, int ResizedWidth, int ResizedHeight,
+        float Scale, int PadLeft, int PadTop, int PaddedWidth, int PaddedHeight)
     {
         /// <summary>Maps a box from letterboxed-canvas xyxy coordinates back to source-image xyxy
         /// coordinates. Used after NMS to report detections in the caller's coordinate frame.</summary>

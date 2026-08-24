@@ -282,8 +282,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // generic raw 0.10): raw 0.15 in the LATE half — 1.13× at SSIM 0.9740 (U-shaped drift, ONE safe
         // late reuse at 8 distilled steps; results doc 2026-07-22_accel_stepcache_krea2turbo_4090.md).
         StepCacheProfile? profile = _config.IsDistilled
-            ? new StepCacheProfile(Threshold: 0.15f, Cap: 3, Poly: null, LateWindow: 0.5f)
-            : null;
+            ? new StepCacheProfile(Threshold: 0.15f, Cap: 3, Poly: null, LateWindow: 0.5f) : null;
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
             StepCacheEnv.Resolve(profile);
         DeviceFeatureCache? condCache = null;
@@ -340,8 +339,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // arithmetic between them. Narrowing for that generation is the established precedent here; silently capturing
         // the wrong sequence is not.
         bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null && !hasRegions
-            && !nonDefaultSampler
-            && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
+            && !nonDefaultSampler && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
         {
@@ -401,8 +399,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                             // second-order sampler evaluates at) takes the raw sigma, which is exactly right: there is
                             // no precomputed timestep for it.
                             float t = stepIndex < steps && sigma == scheduler.SigmaAt(stepIndex)
-                                ? timestepTable[stepIndex] / 1000.0f
-                                : sigma;
+                                ? timestepTable[stepIndex] / 1000.0f : sigma;
                             Tensor? bias = null;
                             if (hasRegions)
                             {
@@ -509,8 +506,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         if (condCache is not null)
         {
             string uncondStats = uncondCache is not null
-                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses"
-                : "";
+                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses" : "";
             Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses{uncondStats}");
             condCache.Dispose();
             uncondCache?.Dispose();

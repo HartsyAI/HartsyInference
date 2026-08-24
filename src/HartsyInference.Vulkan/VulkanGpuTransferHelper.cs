@@ -160,8 +160,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     public VulkanBuffer AllocateDevice(ulong byteSize)
     {
         VkMemoryPropertyFlags preferred = _caps.HasReBar
-            ? VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent
-            : VkMemoryPropertyFlags.None;
+            ? VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent : VkMemoryPropertyFlags.None;
         return VulkanBufferFactory.Create(
             _device, _allocator, in _memProps,
             byteSize,

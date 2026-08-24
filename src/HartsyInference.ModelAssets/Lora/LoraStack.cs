@@ -139,10 +139,8 @@ public sealed class LoraStack : IDisposable
             Tensor fusedBase = weights[fusedKey];
             long sliceRows = fusedBase.Shape[0] / slices[0].SliceCount;
             bool anyBad = slices.Exists(sl =>
-                fusedBase.Shape.Rank != 2
-                || fusedBase.Shape[0] % sl.SliceCount != 0
-                || sl.Layer.LoraUp.Shape[0] != sliceRows
-                || sl.Layer.LoraDown.Shape[1] != fusedBase.Shape[1]);
+                fusedBase.Shape.Rank != 2 || fusedBase.Shape[0] % sl.SliceCount != 0
+                || sl.Layer.LoraUp.Shape[0] != sliceRows || sl.Layer.LoraDown.Shape[1] != fusedBase.Shape[1]);
             if (anyBad)
             {
                 Logs.Warning($"LoRA fused-slice merge into '{fusedKey}' skipped: delta shapes do not tile the fused weight {fusedBase.Shape}.");
@@ -261,8 +259,7 @@ public sealed class LoraStack : IDisposable
             // DType.I8 has IsQuantized false, so without this the merge dies in CastTo's raw "I8 → F32" throw.
             throw new NotSupportedException(
                 $"LoRA weights can't be merged into int8 weight '{canonicalKey}': it carries "
-                + (baseW.QuantInfo is null
-                    ? "no quantization descriptor, so its dequant scale is unknowable."
+                + (baseW.QuantInfo is null ? "no quantization descriptor, so its dequant scale is unknowable."
                     : $"unsupported quantization format '{baseW.QuantInfo.Format}'.")
                 + " Use a BF16/fp8_scaled build of this model with LoRAs, or remove the LoRA.");
         }
@@ -360,9 +357,7 @@ public sealed class LoraStack : IDisposable
 
     /// <summary>Whether this layer's <c>up @ down</c> product is the shape of the weight it would be added to.</summary>
     private static bool DeltaShapeMatches(LoraLayer layer, Tensor baseW) =>
-        baseW.Shape.Rank == 2
-        && layer.LoraUp.Shape[0] == baseW.Shape[0]
-        && layer.LoraDown.Shape[1] == baseW.Shape[1];
+        baseW.Shape.Rank == 2 && layer.LoraUp.Shape[0] == baseW.Shape[0] && layer.LoraDown.Shape[1] == baseW.Shape[1];
 
     private static void AccumulateDelta(IBackend backend, Tensor accumF32, LoraLayer layer, float strength)
     {

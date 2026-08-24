@@ -163,8 +163,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 // alone this round gets it retired (disposed, one-way — see ActiveSeq.GraphSession's doc)
                 // before the eager round runs, so it never sits around going stale.
                 Action work = feeders.Count == 1 && feeders[0].GraphSession is { } gs
-                    ? () => ReplayGraphRound(feeders[0], gs)
-                    : () =>
+                    ? () => ReplayGraphRound(feeders[0], gs) : () =>
                     {
                         foreach (ActiveSeq seq in feeders)
                         {
@@ -269,8 +268,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // FixedKvCache instead of drawing from the shared pool — see DynamicBatchScheduler's class doc and
         // ActiveSeq's GraphSession field doc for why this is safe and why it's a one-way admission decision
         // (never converted later).
-        bool graphEligible = solo && !_graphCaptureUnavailable
-            && req.Sampling.Greedy && !req.Sampling.HasJsonConstraint
+        bool graphEligible = solo && !_graphCaptureUnavailable && req.Sampling.Greedy && !req.Sampling.HasJsonConstraint
             && (req.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1"))
             && (TestForceSupportsGraphDecode ?? _model.SupportsGraphDecode(_backend));
 

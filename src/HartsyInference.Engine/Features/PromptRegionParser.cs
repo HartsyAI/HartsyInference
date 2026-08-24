@@ -268,10 +268,8 @@ public sealed class PromptRegionParser
 
     private static bool TryParseRect(Part p, string[] coords)
     {
-        if (coords.Length < 4 || coords.Length > 6
-            || !float.TryParse(coords[0], out float x)
-            || !float.TryParse(coords[1], out float y)
-            || !float.TryParse(coords[2], out float width)
+        if (coords.Length < 4 || coords.Length > 6 || !float.TryParse(coords[0], out float x)
+            || !float.TryParse(coords[1], out float y) || !float.TryParse(coords[2], out float width)
             || !float.TryParse(coords[3], out float height))
         {
             return false;

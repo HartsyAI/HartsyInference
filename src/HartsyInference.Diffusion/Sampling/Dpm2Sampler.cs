@@ -50,8 +50,7 @@ public sealed class Dpm2Sampler : ISampler
         ArgumentNullException.ThrowIfNull(predictor);
         float sigma = _sigmas[stepIndex];
         float sigmaNext = _sigmas[stepIndex + 1];
-        (float sigmaDown, float sigmaUp) = _eta > 0f
-            ? SamplerMath.AncestralStep(sigma, sigmaNext, _eta)
+        (float sigmaDown, float sigmaUp) = _eta > 0f ? SamplerMath.AncestralStep(sigma, sigmaNext, _eta)
             : (sigmaNext, 0f);
 
         using Tensor denoised = SamplerMath.PredictDenoised(backend, predictor, z, sigma, stepIndex);

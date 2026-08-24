@@ -15,8 +15,10 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed OmniGen 2 pipeline driven against the native <see cref="ImageRequest"/>. The Qwen2.5-VL-3B forward lives outside <see cref="OmniGen2Pipeline"/>, so this owns the encoder: it live-encodes the ComfyUI chat template (full sequence, no prefix drop, final hidden state after the last RMSNorm), frees the encoder's device weights, then runs <see cref="OmniGen2Pipeline.GenerateFromEmbeddings"/>. Two single-slot embedding caches (positive + negative) let seed-only reruns skip the encoder entirely, as the SwarmUI backend's <c>OmniGen2CacheEntry.GetOrEncode</c> did.</summary>
-public sealed class OmniGen2RecipePipeline : IRecipePipeline
+/// <summary>A constructed OmniGen 2 pipeline driven against the native <see cref="ImageRequest"/>. The Qwen2.5-VL-3B forward lives outside <see cref="OmniGen2Pipeline"/>, so this owns the encoder: it live-encodes the ComfyUI chat template (full sequence, no prefix drop, final hidden state after the last RMSNorm), frees the encoder's device weights, then runs <see cref="OmniGen2Pipeline.GenerateFromEmbeddings"/>. Two single-slot embedding caches (positive + negative) let seed-only reruns skip the encoder entirely, as the SwarmUI backend's <c>OmniGen2CacheEntry.GetOrEncode</c> did. Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
+public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer,
+    LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>ComfyUI's OmniGen2 system prompt, verbatim (<c>comfy/text_encoders/omnigen2.py</c> llama_template).</summary>
     private const string SystemPrompt =
@@ -25,31 +27,19 @@ public sealed class OmniGen2RecipePipeline : IRecipePipeline
     /// <summary>ComfyUI truncates the templated sequence at 512 tokens.</summary>
     private const int MaxTokens = 512;
 
-    private readonly OmniGen2Pipeline _pipeline;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _textEncoder;
-    private readonly OmniGen2Transformer _transformer;
-    private readonly IBackend _backend;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly OmniGen2Pipeline _pipeline = pipeline;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _textEncoder = textEncoder;
+    private readonly OmniGen2Transformer _transformer = transformer;
+    private readonly IBackend _backend = backend;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
 
     private string? _cachedPrompt;
     private Tensor? _cachedEmbeds;
     private string? _cachedNegPrompt;
     private Tensor? _cachedNegEmbeds;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _transformer = transformer;
-        _backend = backend;
-        _loaders = loaders;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

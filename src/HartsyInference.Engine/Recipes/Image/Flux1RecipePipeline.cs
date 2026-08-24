@@ -14,28 +14,18 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path.</summary>
-public sealed class Flux1RecipePipeline : IRecipePipeline
+/// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
+/// <param name="isDev">Selects the step fallback and whether the embedded distilled guidance is applied.</param>
+public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
+    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
 {
-    private readonly FluxPipeline _pipeline;
-    private readonly ClipTokenizer _clipTokenizer;
-    private readonly T5Tokenizer _t5Tokenizer;
-    private readonly bool _isDev;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-    private readonly IBackend _backend;
-
-    /// <summary>Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable. <paramref name="isDev"/> selects the step fallback and whether the embedded distilled guidance is applied.</summary>
-    public Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack, IBackend backend)
-    {
-        _pipeline = pipeline;
-        _clipTokenizer = clipTokenizer;
-        _t5Tokenizer = t5Tokenizer;
-        _isDev = isDev;
-        _loaders = loaders;
-        _loraStack = loraStack;
-        _backend = backend;
-    }
+    private readonly FluxPipeline _pipeline = pipeline;
+    private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
+    private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
+    private readonly bool _isDev = isDev;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
+    private readonly IBackend _backend = backend;
 
     /// <summary>A Schnell checkpoint (no guidance embedding) is a 4-step distilled model, so it resolves against <see cref="Flux1Recipe.SchnellDefaults"/> rather than Dev's 28 steps.</summary>
     public ImageDefaults? VariantDefaults => _isDev ? Flux1Recipe.FamilyDefaults : Flux1Recipe.SchnellDefaults;
@@ -78,8 +68,7 @@ public sealed class Flux1RecipePipeline : IRecipePipeline
         // package can't reference) and handed back the finished map under this key. Absent on a genuine Tools
         // checkpoint surfaces as GenerateFromTokens' own "requires a control image" error, not a silent fallback.
         ImageData? toolsControlImageData = RequestExtras.Image(request.Extra, RequestExtras.FluxToolsControlImage);
-        Tensor? controlImage = toolsControlImageData is null
-            ? null
+        Tensor? controlImage = toolsControlImageData is null ? null
             : FeatureImaging.RgbToTensorMinusOneOne(FeatureImaging.ResizeRgb24(toolsControlImageData, reqWidth, reqHeight), reqWidth, reqHeight);
 
         FluxControlNetResolver.ResolvedSpec? controlNets = null;

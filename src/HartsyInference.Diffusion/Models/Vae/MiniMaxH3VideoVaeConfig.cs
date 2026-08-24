@@ -170,8 +170,7 @@ public sealed record MiniMaxH3VideoVaeConfig
     public static bool MatchesEncoder(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        return weights.ContainsKey("encoder.conv_in.weight")
-            && weights.ContainsKey("encoder.conv_out.weight")
+        return weights.ContainsKey("encoder.conv_in.weight") && weights.ContainsKey("encoder.conv_out.weight")
             && weights.ContainsKey("quant_conv.weight");
     }
 
@@ -179,8 +178,7 @@ public sealed record MiniMaxH3VideoVaeConfig
     public static bool Matches(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        return weights.ContainsKey("decoder.x_embedder.weight")
-            && weights.ContainsKey("decoder.proj_out.weight")
+        return weights.ContainsKey("decoder.x_embedder.weight") && weights.ContainsKey("decoder.proj_out.weight")
             && weights.ContainsKey("decoder.transformer_blocks.0.attn.to_qkv.weight");
     }
 
@@ -204,8 +202,7 @@ public sealed record MiniMaxH3VideoVaeConfig
         int zChannels = (int)xEmbed.Shape[1];
         int ffnMult = (int)(Require(weights, "decoder.transformer_blocks.0.ff.w1.weight").Shape[0] / (2L * dim));
         int registerTokens = weights.TryGetValue("decoder.register_tokens", out Tensor? reg) ? (int)reg.Shape[1] : 0;
-        int latentChannels = weights.TryGetValue("post_quant_conv.weight", out Tensor? pq)
-            ? (int)pq.Shape[1]
+        int latentChannels = weights.TryGetValue("post_quant_conv.weight", out Tensor? pq) ? (int)pq.Shape[1]
             : baseConfig.LatentChannels;
 
         if (dim % baseConfig.DimHead != 0)
@@ -362,8 +359,7 @@ public sealed record MiniMaxH3VideoVaeConfig
     }
 
     private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        weights.TryGetValue(key, out Tensor? t)
-            ? t
+        weights.TryGetValue(key, out Tensor? t) ? t
             : throw new ArgumentException($"MiniMax-H3 video VAE checkpoint is missing '{key}'.");
 
     private static readonly float[] DefaultLatentsMean =

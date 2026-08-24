@@ -44,8 +44,7 @@ public sealed class ChromaCheckpointConverter
             if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8")
                 continue;
             string k = kvp.Key.StartsWith("model.diffusion_model.", StringComparison.Ordinal)
-                ? kvp.Key["model.diffusion_model.".Length..]
-                : kvp.Key;
+                ? kvp.Key["model.diffusion_model.".Length..] : kvp.Key;
             if (k.StartsWith("_orig_mod.", StringComparison.Ordinal))
                 k = k["_orig_mod.".Length..];
             bfl[k] = kvp.Value;

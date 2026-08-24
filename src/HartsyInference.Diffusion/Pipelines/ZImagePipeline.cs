@@ -195,8 +195,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             (Tensor initialLatent, Tensor? initialSourceLatent) = BuildInitialLatent(
                 request, scheduler, latentShape, seed, plan.StartStep, keepSourceLatent: isMaskedInpaint);
             Tensor latent = tensors.Own(initialLatent, "latent");
-            Tensor? sourceLatent = initialSourceLatent is null
-                ? null
+            Tensor? sourceLatent = initialSourceLatent is null ? null
                 : tensors.Own(initialSourceLatent, "source latent");
             Tensor? latentMask = null;
             if (isMaskedInpaint)
@@ -334,8 +333,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                             // On-schedule sigmas reuse the loop's own expression — the F32 round trip through x1000
                             // is not exact, so raw sigma would shift every existing generation by an ulp.
                             float stepSigma = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                                ? timestepTable[stepIndex] / 1000.0f
-                                : s;
+                                ? timestepTable[stepIndex] / 1000.0f : s;
                             float inverted = 1.0f - stepSigma;
                             // Narrowed for a non-default sampler: the step cache's drift calibration assumes one
                             // forward per step, which a second-order method breaks.

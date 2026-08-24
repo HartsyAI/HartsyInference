@@ -4,27 +4,20 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 
 /// <summary>SDXL ADM micro-conditioning embedding. Embeds size/crop/target scalars via sinusoidal encoding, concatenates with pooled text embedding, and projects to the timestep embedding dimension.</summary>
-public sealed unsafe class AdditionEmbedding
+/// <param name="admInChannels">Total input dimension (2816 for SDXL base: 1280 pooled + 6*256 scalars).</param>
+/// <param name="timeDim">Output dimension matching timestep embedding (1280 for SDXL base).</param>
+/// <param name="additionTimeEmbedDim">Sinusoidal embedding dimension per scalar (256 for SDXL).</param>
+public sealed unsafe class AdditionEmbedding(int admInChannels, int timeDim, int additionTimeEmbedDim)
 {
-    private readonly int _admInChannels;
-    private readonly int _timeDim;
-    private readonly int _additionTimeEmbedDim;
+    private readonly int _admInChannels = admInChannels;
+    private readonly int _timeDim = timeDim;
+    private readonly int _additionTimeEmbedDim = additionTimeEmbedDim;
 
     // Linear projection: admInChannels → timeDim → timeDim
     private Tensor? _linear1Weight;
     private Tensor? _linear1Bias;
     private Tensor? _linear2Weight;
     private Tensor? _linear2Bias;
-
-    /// <param name="admInChannels">Total input dimension (2816 for SDXL base: 1280 pooled + 6*256 scalars).</param>
-    /// <param name="timeDim">Output dimension matching timestep embedding (1280 for SDXL base).</param>
-    /// <param name="additionTimeEmbedDim">Sinusoidal embedding dimension per scalar (256 for SDXL).</param>
-    public AdditionEmbedding(int admInChannels, int timeDim, int additionTimeEmbedDim)
-    {
-        _admInChannels = admInChannels;
-        _timeDim = timeDim;
-        _additionTimeEmbedDim = additionTimeEmbedDim;
-    }
 
     /// <summary>Loads weights from named tensors using the given prefix (e.g., "add_embedding").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

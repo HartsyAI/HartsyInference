@@ -75,9 +75,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         // takes priority. If the caller left it at the default but supplied a non-default generic cfgScale,
         // honour the generic value so the legacy request.CfgScale path keeps working.
         float effectiveTextGuidance =
-            Math.Abs(textGuidanceScale - 4.0f) < 1e-6f
-                ? cfgScale
-                : textGuidanceScale;
+            Math.Abs(textGuidanceScale - 4.0f) < 1e-6f ? cfgScale : textGuidanceScale;
 
         // cfg_range gates which steps apply CFG. Default = full schedule (0..1).
         (float rangeStart, float rangeEnd) = cfgRange ?? (0f, 1f);
@@ -146,8 +144,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
                     // shift every existing OmniGen 2 generation by an ulp of conditioning. Only a genuine sub-step
                     // (what a second-order sampler evaluates at) takes the raw value — there is no table entry for it.
                     float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex] / 1000.0f
-                        : s;
+                        ? timestepTable[stepIndex] / 1000.0f : s;
                     // cfg_range gating: CFG only when start <= i/steps <= end, otherwise the bare conditional (upstream).
                     float schedFraction = steps > 1 ? (float)stepIndex / steps : 0f;
                     bool inCfgRange = schedFraction >= rangeStart && schedFraction <= rangeEnd;

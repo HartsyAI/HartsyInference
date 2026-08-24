@@ -130,8 +130,7 @@ public static class AttentionKernels
                                 {
                                     Vector256<float> vV = Avx.LoadVector256(vRow + d);
                                     Vector256<float> vO = Avx.LoadVector256(oRow + d);
-                                    Vector256<float> result = Fma.IsSupported
-                                        ? Fma.MultiplyAdd(vAttn, vV, vO)
+                                    Vector256<float> result = Fma.IsSupported ? Fma.MultiplyAdd(vAttn, vV, vO)
                                         : Avx.Add(vO, Avx.Multiply(vAttn, vV));
                                     Avx.Store(oRow + d, result);
                                 }
@@ -180,9 +179,7 @@ public static class AttentionKernels
             {
                 Vector256<float> va = Avx.LoadVector256(a + i);
                 Vector256<float> vb = Avx.LoadVector256(b + i);
-                vSum = Fma.IsSupported
-                    ? Fma.MultiplyAdd(va, vb, vSum)
-                    : Avx.Add(vSum, Avx.Multiply(va, vb));
+                vSum = Fma.IsSupported ? Fma.MultiplyAdd(va, vb, vSum) : Avx.Add(vSum, Avx.Multiply(va, vb));
             }
 
             result += SimdDispatch.HorizontalSum(vSum);

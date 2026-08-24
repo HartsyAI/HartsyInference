@@ -3,16 +3,10 @@ using System.Collections.Generic;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Scales every logit by the inverse temperature to sharpen or flatten the distribution.</summary>
-public sealed class TemperatureStep : ISamplerStep
+/// <summary>Scales every logit by the inverse temperature to sharpen or flatten the distribution. Values of <paramref name="temperature"/> at or below 1.0 leave logits unchanged at apply time.</summary>
+public sealed class TemperatureStep(float temperature) : ISamplerStep
 {
-    private readonly float _temperature;
-
-    /// <summary>Creates a temperature step; values of 1.0 or below leave logits unchanged at apply time.</summary>
-    public TemperatureStep(float temperature)
-    {
-        _temperature = temperature;
-    }
+    private readonly float _temperature = temperature;
 
     /// <inheritdoc/>
     public void Apply(Span<float> logits, IReadOnlyList<int> history)

@@ -34,9 +34,7 @@ public sealed class SpeechService : ISpeechService
         // A descriptor whose weights ARE the voice (Piper ships one .onnx per voice) needs the voice in the
         // variant, or every voice would share the first-loaded pipeline.
         string variant = descriptor.VoiceSelectsWeights && !string.IsNullOrWhiteSpace(request.Voice)
-            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase)
-            ? request.Voice
-            : selector.Variant;
+            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase) ? request.Voice : selector.Variant;
         string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
@@ -91,9 +89,7 @@ public sealed class SpeechService : ISpeechService
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
         string variant = descriptor.VoiceSelectsWeights && !string.IsNullOrWhiteSpace(request.Voice)
-            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase)
-            ? request.Voice
-            : selector.Variant;
+            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase) ? request.Voice : selector.Variant;
         string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
@@ -177,8 +173,7 @@ public sealed class SpeechService : ISpeechService
         ReferenceWavPath = referenceWavPath,
         // "default" is a placeholder some callers send, not a real voice name.
         Voice = string.IsNullOrEmpty(request.Voice) || request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase)
-            ? null
-            : request.Voice,
+            ? null : request.Voice,
         Speed = request.Speed,
         Exaggeration = request.Exaggeration,
         NfeStep = request.NfeStep,

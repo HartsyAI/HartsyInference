@@ -11,22 +11,14 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed F-Lite pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FLitePipeline"/> owns the T5-XXL encoder; this tokenizes the prompt (no attention mask beyond an all-ones window — the fal-ai reference attends the full 512-token pad sea) and passes a null negative when unset (the reference uses a zero context, not an encoded empty string). Runs <see cref="FLitePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FLiteLoader.Generate</c> drive path (text-to-image only).</summary>
-public sealed class FLiteRecipePipeline : IRecipePipeline
+/// <summary>A constructed F-Lite pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FLitePipeline"/> owns the T5-XXL encoder; this tokenizes the prompt (no attention mask beyond an all-ones window — the fal-ai reference attends the full 512-token pad sea) and passes a null negative when unset (the reference uses a zero context, not an encoded empty string). Runs <see cref="FLitePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FLiteLoader.Generate</c> drive path (text-to-image only). Wraps the constructed F-Lite pipeline plus its tokenizer, taking ownership of every disposable.</summary>
+public sealed class FLiteRecipePipeline(FLitePipeline pipeline, T5Tokenizer tokenizer, FLiteCheckpointConverter.LoaderHandle handle,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly FLitePipeline _pipeline;
-    private readonly T5Tokenizer _tokenizer;
-    private readonly FLiteCheckpointConverter.LoaderHandle _handle;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed F-Lite pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public FLiteRecipePipeline(FLitePipeline pipeline, T5Tokenizer tokenizer, FLiteCheckpointConverter.LoaderHandle handle, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _handle = handle;
-    }
+    private readonly FLitePipeline _pipeline = pipeline;
+    private readonly T5Tokenizer _tokenizer = tokenizer;
+    private readonly FLiteCheckpointConverter.LoaderHandle _handle = handle;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

@@ -4,25 +4,18 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 
 /// <summary>Sinusoidal timestep embedding followed by a two-layer MLP. Converts scalar timestep to a dense vector for conditioning UNet residual blocks.</summary>
-public sealed unsafe class TimestepEmbedding
+/// <param name="embeddingDim">Dimension of the sinusoidal embedding (typically model_channels, e.g., 320).</param>
+/// <param name="timeDim">Output dimension of the MLP (typically 4 * model_channels, e.g., 1280).</param>
+public sealed unsafe class TimestepEmbedding(int embeddingDim, int timeDim)
 {
-    private readonly int _embeddingDim;
-    private readonly int _timeDim;
+    private readonly int _embeddingDim = embeddingDim;
+    private readonly int _timeDim = timeDim;
 
     // MLP: Linear(embeddingDim, timeDim) → SiLU → Linear(timeDim, timeDim)
     private Tensor? _linear1Weight;
     private Tensor? _linear1Bias;
     private Tensor? _linear2Weight;
     private Tensor? _linear2Bias;
-
-    /// <summary>Creates a timestep embedding module.</summary>
-    /// <param name="embeddingDim">Dimension of the sinusoidal embedding (typically model_channels, e.g., 320).</param>
-    /// <param name="timeDim">Output dimension of the MLP (typically 4 * model_channels, e.g., 1280).</param>
-    public TimestepEmbedding(int embeddingDim, int timeDim)
-    {
-        _embeddingDim = embeddingDim;
-        _timeDim = timeDim;
-    }
 
     /// <summary>Loads weights from named tensors using the given prefix (e.g., "time_embedding").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

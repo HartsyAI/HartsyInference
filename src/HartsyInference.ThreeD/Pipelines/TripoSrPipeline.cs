@@ -40,8 +40,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         DinoViTConfig dp = dinoCfg ?? DinoViTConfig.DinoVitB16_512;
 
         string[] files = Directory.Exists(modelPath)
-            ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories)
-            : [modelPath];
+            ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories) : [modelPath];
         if (files.Length == 0) throw new FileNotFoundException($"No .safetensors found under '{modelPath}'.");
 
         List<IDisposable> loaders = [];

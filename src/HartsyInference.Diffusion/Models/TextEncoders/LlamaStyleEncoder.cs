@@ -41,8 +41,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             GlobalSin = globalSin;
             LocalCos = localCos;
             LocalSin = localSin;
-            _owned = localCos is null
-                ? [causalMask, globalCos, globalSin]
+            _owned = localCos is null ? [causalMask, globalCos, globalSin]
                 : [causalMask, globalCos, globalSin, localCos, localSin!];
         }
 
@@ -452,8 +451,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
     private void ValidateAttentionGeometry()
     {
-        if (_config.NumKvHeads <= 0 || _config.NumQueryHeads <= 0
-            || _config.NumQueryHeads % _config.NumKvHeads != 0)
+        if (_config.NumKvHeads <= 0 || _config.NumQueryHeads <= 0 || _config.NumQueryHeads % _config.NumKvHeads != 0)
         {
             throw new InvalidOperationException(
                 $"Invalid grouped-query geometry Hq={_config.NumQueryHeads}, Hkv={_config.NumKvHeads}; Hq must be divisible by positive Hkv.");
@@ -510,8 +508,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
     private (Tensor Cos, Tensor Sin) RopeForLayer(int layerIndex, ForwardConstants constants)
     {
-        if (constants.LocalCos is not null
-            && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
+        if (constants.LocalCos is not null && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
             && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal)
             && !string.Equals(types[layerIndex], "full_attention", StringComparison.Ordinal))
         {

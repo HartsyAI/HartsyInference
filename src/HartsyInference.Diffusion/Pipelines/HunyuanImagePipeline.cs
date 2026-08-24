@@ -274,8 +274,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         {
             // Combine in latent space, then patchify once — the same order the text-to-image path uses, so the
             // token layout the loop integrates in is identical either way.
-            Tensor sourceLatent = HyVaeEncoder is not null
-                ? HyVaeEncoder.Encode(VaeBackend, img2img.SourceImage)
+            Tensor sourceLatent = HyVaeEncoder is not null ? HyVaeEncoder.Encode(VaeBackend, img2img.SourceImage)
                 : VaeEncoder!.Encode(Backend, img2img.SourceImage);
             initialLatent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(initialLatent, sourceLatent, noise, startStep);
@@ -399,8 +398,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
                     // recomputing it would shift every existing Hunyuan generation by an ulp of conditioning. Only a
                     // genuine off-schedule sub-step (what a second-order sampler evaluates at) scales the raw sigma,
                     // which is right: there is no precomputed timestep for it.
-                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex]
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                         : s * 1000.0f;
                     Tensor cond = RunForward(x, condText, stepT, distilledGuidance, hPacked, wPacked);
                     if (!useCfg || _config.GuidanceEmbed)
@@ -490,8 +488,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 
         Logs.Info("Decoding latents to image (32-channel VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor decoded = _hyVaeDecoder is not null
-            ? _hyVaeDecoder.Decode(VaeBackend, latent)
+        Tensor decoded = _hyVaeDecoder is not null ? _hyVaeDecoder.Decode(VaeBackend, latent)
             : _vaeDecoder.Decode(VaeBackend, latent);
         latent.Dispose();
         vaeSw.Stop();

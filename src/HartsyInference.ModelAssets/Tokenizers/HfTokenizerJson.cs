@@ -14,8 +14,7 @@ public static class HfTokenizerJson
 
         if (!root.TryGetProperty("model", out JsonElement model))
             throw new InvalidOperationException("tokenizer.json has no 'model' object.");
-        if (model.TryGetProperty("type", out JsonElement modelType)
-            && modelType.ValueKind == JsonValueKind.String
+        if (model.TryGetProperty("type", out JsonElement modelType) && modelType.ValueKind == JsonValueKind.String
             && !string.Equals(modelType.GetString(), "BPE", StringComparison.Ordinal))
         {
             throw new NotSupportedException(

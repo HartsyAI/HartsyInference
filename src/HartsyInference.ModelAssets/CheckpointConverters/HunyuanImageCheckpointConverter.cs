@@ -125,8 +125,7 @@ public sealed class HunyuanImageCheckpointConverter
                 // row-major [out][in] either way, so only the shape metadata changes.
                 if (key.EndsWith(".weight", StringComparison.Ordinal) && t.Shape.Rank == 4)
                 {
-                    TensorShape flat = t.Shape[0] == 1
-                        ? new TensorShape(t.Shape[3], t.Shape[2])
+                    TensorShape flat = t.Shape[0] == 1 ? new TensorShape(t.Shape[3], t.Shape[2])
                         : new TensorShape(t.Shape[0], t.Shape[1]);
                     Tensor copy = new Tensor(flat, t.DType);
                     copy.Fp8ScaleFactor = t.Fp8ScaleFactor;

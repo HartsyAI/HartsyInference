@@ -110,8 +110,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
                 // is not an exact F32 round trip, so deriving it from sigma would shift every existing generation by
                 // an ulp. Only a genuine sub-step takes the derived value, which has no table entry.
                 float t = stepIndex < steps && s == 1.0f - scheduler.TimestepAt(stepIndex)
-                    ? scheduler.TimestepAt(stepIndex)
-                    : 1.0f - s;
+                    ? scheduler.TimestepAt(stepIndex) : 1.0f - s;
                 Tensor cond = _transformer.ForwardPacked(Backend, x, t, instructionEmbeddings, hPacked, wPacked);
                 if (textGuidanceScale <= 1.0f)
                 {

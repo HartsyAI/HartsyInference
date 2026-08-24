@@ -104,8 +104,7 @@ public sealed class C3k2
         for (int i = 0; i < _numInnerUnits; i++)
         {
             Tensor prev = accumulated[1 + i];
-            accumulated[2 + i] = _useC3k
-                ? _c3kBlocks![i].Forward(backend, prev)
+            accumulated[2 + i] = _useC3k ? _c3kBlocks![i].Forward(backend, prev)
                 : _bottlenecks![i].Forward(backend, prev);
         }
 

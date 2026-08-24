@@ -138,8 +138,7 @@ internal sealed class CudnnConv : IDisposable
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_POST_PADDINGS, CUDNN_TYPE_INT64, 2, postPads);
             Check(cudnnBackendFinalize(conv), "conv desc finalize");
 
-            int opDescType = backwardData
-                ? CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_DATA_DESCRIPTOR
+            int opDescType = backwardData ? CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_DATA_DESCRIPTOR
                 : CUDNN_BACKEND_OPERATION_CONVOLUTION_FORWARD_DESCRIPTOR;
             Check(cudnnBackendCreateDescriptor(opDescType, out nint op), "conv op create");
             owned.Add(op);

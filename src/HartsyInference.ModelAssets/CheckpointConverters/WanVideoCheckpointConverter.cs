@@ -84,8 +84,7 @@ public sealed class WanVideoCheckpointConverter
             using JsonDocument doc = JsonDocument.Parse(config);
             return doc.RootElement.TryGetProperty("transformer", out JsonElement transformer)
                 && transformer.TryGetProperty("model_type", out JsonElement modelType)
-                && modelType.ValueKind == JsonValueKind.String
-                && modelType.GetString() == "animate2";
+                && modelType.ValueKind == JsonValueKind.String && modelType.GetString() == "animate2";
         }
         catch (JsonException) { return false; }
     }

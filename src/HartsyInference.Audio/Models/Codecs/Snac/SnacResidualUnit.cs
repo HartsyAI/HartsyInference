@@ -6,13 +6,13 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
 /// <summary>SNAC residual unit. Structurally identical to <see cref="DacResidualUnit"/>: <c>Snake → Conv1d(k=7, dilation) → Snake → Conv1d(k=1) → residual add</c>. Kept as a SNAC-namespaced class so the codecs stay independently maintainable; the math is identical and weights load with the same key conventions.</summary>
-internal sealed unsafe class SnacResidualUnit
+internal sealed unsafe class SnacResidualUnit(string prefix, int dim, int kernel, int dilation, int groups = 1)
 {
-    private readonly string _prefix;
-    private readonly int _dim;
-    private readonly int _kernel;
-    private readonly int _dilation;
-    private readonly int _groups;
+    private readonly string _prefix = prefix;
+    private readonly int _dim = dim;
+    private readonly int _kernel = kernel;
+    private readonly int _dilation = dilation;
+    private readonly int _groups = groups;
 
     private Tensor? _snake1Alpha;
     private Tensor? _snake2Alpha;
@@ -20,15 +20,6 @@ internal sealed unsafe class SnacResidualUnit
     private Tensor? _conv1B;
     private Tensor? _conv2W;
     private Tensor? _conv2B;
-
-    public SnacResidualUnit(string prefix, int dim, int kernel, int dilation, int groups = 1)
-    {
-        _prefix = prefix;
-        _dim = dim;
-        _kernel = kernel;
-        _dilation = dilation;
-        _groups = groups;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

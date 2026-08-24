@@ -190,16 +190,10 @@ public static class LtxAudioPixelNorm
 /// <summary>LTX-2 audio VAE resnet block (<c>LTX2AudioResnetBlock</c>, pixel-norm variant):
 /// pixelNorm → SiLU → conv1 → pixelNorm → SiLU → conv2 → + shortcut. The shortcut is a 1×1 causal conv
 /// (<c>nin_shortcut</c>) when in≠out, else identity.</summary>
-public sealed class LtxAudioResnetBlock
+public sealed class LtxAudioResnetBlock(int inChannels, int outChannels)
 {
-    private readonly int _inC, _outC;
+    private readonly int _inC = inChannels, _outC = outChannels;
     private LtxAudioCausalConv2d? _conv1, _conv2, _ninShortcut;
-
-    public LtxAudioResnetBlock(int inChannels, int outChannels)
-    {
-        _inC = inChannels;
-        _outC = outChannels;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {

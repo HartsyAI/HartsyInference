@@ -108,8 +108,7 @@ internal static class SttCatalog
             (IReadOnlyDictionary<string, Tensor> dict, IDisposable[] loaders) = await AudioCheckpoints.LoadAsync(repo, "stt", cancel).ConfigureAwait(false);
             bool small = repo.Contains("1b", StringComparison.OrdinalIgnoreCase);
             // The SentencePiece text model is not shipped in the -trfs repos — fetch it from the original repo.
-            (string spmRepo, string spmFile) = small
-                ? ("kyutai/stt-1b-en_fr", "tokenizer_en_fr_audio_8000.model")
+            (string spmRepo, string spmFile) = small ? ("kyutai/stt-1b-en_fr", "tokenizer_en_fr_audio_8000.model")
                 : ("kyutai/stt-2.6b-en", "tokenizer_en_audio_4000.model");
             string spm = await AudioModelCache.GetAsync(spmRepo, spmFile, category: "stt", ct: cancel).ConfigureAwait(false);
             KyutaiSttConfig config = small ? KyutaiSttConfig.Stt1B : KyutaiSttConfig.Stt2_6B;
@@ -246,8 +245,7 @@ internal static class SttCatalog
         {
             return id;
         }
-        return id.Contains("tiny", StringComparison.OrdinalIgnoreCase)
-            ? "UsefulSensors/moonshine-tiny"
+        return id.Contains("tiny", StringComparison.OrdinalIgnoreCase) ? "UsefulSensors/moonshine-tiny"
             : "UsefulSensors/moonshine-base";
     }
 

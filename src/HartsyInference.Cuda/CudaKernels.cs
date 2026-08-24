@@ -2239,8 +2239,7 @@ public sealed class CudaKernels : IDisposable
     /// <remarks><paramref name="group"/> must be a power of FOUR: the Hadamard is kron(h4, ..., h4), so the
     /// rotation is exactly log4(group) radix-4 stages and a group like 128 has no valid decomposition.</remarks>
     public bool HasFusedConvRotQuant(int cols, int group) =>
-        _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols
-        && group >= 4 && cols % group == 0
+        _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols && group >= 4 && cols % group == 0
         && (group & (group - 1)) == 0 && (group & 0x55555554) != 0;
 
     /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside (48 KB is the per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost occupancy). The static reduction scratch is counted against the same budget.</summary>
@@ -2258,10 +2257,8 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>Whether <see cref="LaunchConvRotQuantRowwiseWide"/> serves this row — the f16-staged variant for rows too wide for <see cref="HasFusedConvRotQuant"/>. F16 source only: the f32 activation path is not on any wide-row model here, and adding it would be an untested second kernel.</summary>
     public bool HasWideConvRotQuant(int cols, int group, bool srcF16) =>
-        _convRotModule is not null && srcF16 && cols > FusedConvRotMaxCols
-        && group >= 4 && cols % group == 0
-        && (group & (group - 1)) == 0 && (group & 0x55555554) != 0
-        && WideConvRotPlan(cols, group).SharedBytes != 0;
+        _convRotModule is not null && srcF16 && cols > FusedConvRotMaxCols && group >= 4 && cols % group == 0
+        && (group & (group - 1)) == 0 && (group & 0x55555554) != 0 && WideConvRotPlan(cols, group).SharedBytes != 0;
 
     /// <summary>Wide-row twin of <see cref="LaunchConvRotQuantRowwise"/>, bit-identical to it and to the rotate-then-quant pair. Gate with <see cref="HasWideConvRotQuant"/>.</summary>
     public unsafe void LaunchConvRotQuantRowwiseWide(ulong q, ulong rowScale, ulong x, int rows, int cols,
@@ -3844,8 +3841,7 @@ public sealed class CudaKernels : IDisposable
         uint grid = (uint)((long)tokens * heads);
         uint block = QkvNormBlockSize(headDim);
         uint sharedMem = 2u * block * sizeof(float);
-        nint fn = full
-            ? (f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32)
+        nint fn = full ? (f16 ? _ditQkvSplitNormHeadMajorF16 : _ditQkvSplitNormHeadMajorF32)
             : (f16 ? _ditQkvSplitNormHeadMajorSubsetF16 : _ditQkvSplitNormHeadMajorSubsetF32);
         CudaDriverApi.cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }

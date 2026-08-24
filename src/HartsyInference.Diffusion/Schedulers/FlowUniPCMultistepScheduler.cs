@@ -104,9 +104,7 @@ public sealed unsafe class FlowUniPCMultistepScheduler
         _modelOutputs.Add(converted);
         while (_modelOutputs.Count > _solverOrder) _modelOutputs.RemoveAt(0);
 
-        int thisOrder = _lowerOrderFinal
-            ? Math.Min(_solverOrder, _timesteps.Length - _stepIndex)
-            : _solverOrder;
+        int thisOrder = _lowerOrderFinal ? Math.Min(_solverOrder, _timesteps.Length - _stepIndex) : _solverOrder;
         _thisOrder = Math.Min(thisOrder, _lowerOrderNums + 1);
 
         _lastSample = new float[n];

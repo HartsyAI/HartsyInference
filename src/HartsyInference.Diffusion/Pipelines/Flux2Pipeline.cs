@@ -274,8 +274,7 @@ _transformer.InvalidateStepGraph(Backend);
         float[] timestepTable = scheduler.Timesteps.ToArray();
 
         bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null && !hasRegions
-            && !nonDefaultSampler
-            && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
+            && !nonDefaultSampler && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
         if (graphRoute)
         {
             Tensor fixedLatent = _transformer.PrepareGraphLatent(Backend, packedLatent);
@@ -316,8 +315,7 @@ _transformer.InvalidateStepGraph(Backend);
                         // through x1000 is not exact, so substituting raw sigma would shift every existing generation
                         // by an ulp of conditioning. Only a genuine sub-step takes the raw value.
                         float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex] / 1000.0f
-                            : s;
+                            ? timestepTable[stepIndex] / 1000.0f : s;
                         // Narrowed for a non-default sampler: the step cache's drift calibration assumes one
                         // forward per step, and a second-order method breaks that assumption (see ChromaPipeline).
                         bool eligible = !nonDefaultSampler

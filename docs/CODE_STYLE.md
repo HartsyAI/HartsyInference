@@ -217,6 +217,39 @@ Classes should be `sealed` unless they are explicitly designed for inheritance. 
 public sealed class NativeBuffer : IDisposable { }
 ```
 
+### Primary constructors -- prefer them
+
+When a class or struct's constructor does nothing but assign its parameters to fields/properties, use
+a primary constructor instead of a body-only constructor. Give primary-constructor parameters
+`camelCase` names and forward them straight into `PascalCase` properties with `= paramName`.
+
+```csharp
+// WRONG -- body-only constructor that just assigns
+public readonly struct StreamingUploadToken : IEquatable<StreamingUploadToken>
+{
+    public nint Handle { get; }
+    public object BackendTag { get; }
+
+    public StreamingUploadToken(nint handle, object backendTag)
+    {
+        Handle = handle;
+        BackendTag = backendTag;
+    }
+}
+
+// RIGHT -- primary constructor
+public readonly struct StreamingUploadToken(nint handle, object backendTag) : IEquatable<StreamingUploadToken>
+{
+    public nint Handle { get; } = handle;
+    public object BackendTag { get; } = backendTag;
+}
+```
+
+Keep the body-only constructor when there's a real reason not to use a primary one: constructor
+validation/`ArgumentNullException.ThrowIfNull` (see Constructor validation below), multiple
+overloaded constructors, non-trivial setup logic beyond simple assignment, or a base-call that varies
+by overload.
+
 ### `readonly` aggressively
 
 - Mark fields `readonly` whenever possible
@@ -254,6 +287,32 @@ public record TextToImageOptions
 - Use `required` keyword for mandatory fields in class records
 - Use `init` setters for all record properties
 - Never use `record struct` (mutable) -- always `readonly record struct`
+
+### Positional record parameters -- one line, or two if it doesn't fit
+
+Never spread a positional record's parameters one per line. Keep them on the declaration line; only
+wrap to a second line (still many-per-line, not one-per-line) when the line exceeds the length limits
+below.
+
+```csharp
+// WRONG -- one parameter per line
+internal readonly record struct MaskedMixGeometry(
+    MaskBroadcastLayout Layout,
+    long ElementCount,
+    long Batch,
+    long Channels,
+    long Spatial,
+    long Tokens,
+    long FeatureDimension,
+    long PatchArea);
+
+// RIGHT -- fits on one line
+public readonly record struct TensorRef(nint DataPointer, TensorShape Shape, DType DType, DeviceKind Device);
+
+// RIGHT -- too long for one line, wraps to two (not one-per-line)
+internal readonly record struct MaskedMixGeometry(MaskBroadcastLayout Layout, long ElementCount, long Batch,
+    long Channels, long Spatial, long Tokens, long FeatureDimension, long PatchArea);
+```
 
 ### File ordering
 
@@ -456,6 +515,25 @@ public long ElementCount => Shape.ElementCount;
 - Soft limit: 120 characters
 - Hard limit: 150 characters
 - Break long method signatures after each parameter
+
+### Multi-condition boolean expressions -- pack, don't split one-per-line
+
+When a chain of `&&`/`||` conditions doesn't fit on one line, pack as many conditions per line as fit
+under the length limits above, wrapping to additional lines only as needed. Don't give each condition
+its own line.
+
+```csharp
+// WRONG -- one condition per line
+public bool IsSingle =>
+    ShardDevices.Count == 0
+    && ShardRatios is null
+    && TextEncoderDevice is null
+    && VaeDevice is null;
+
+// RIGHT -- packed to as few lines as fit
+public bool IsSingle => ShardDevices.Count == 0 && ShardRatios is null && TextEncoderDevice is null
+    && VaeDevice is null;
+```
 
 ### Blank lines
 

@@ -236,9 +236,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         // 2511 timestep-zero ref method: a second temb at t=0 drives the ref-row modulation in every block
         // (identical to upstream's batch-2 `cat([timestep, timestep*0])` — separate embedding call, same math).
-        Tensor? tembZero = refSeqLen > 0 && refTimestepZero
-            ? ComputeTimestepEmbedding(backend, 0.0f, batch)
-            : null;
+        Tensor? tembZero = refSeqLen > 0 && refTimestepZero ? ComputeTimestepEmbedding(backend, 0.0f, batch) : null;
 
         int txtPositionStart = QwenImageRope.ComputeTextPositionStart(hPacked, wPacked);
 
@@ -372,8 +370,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         (Tensor currentImg, Tensor currentTxt) = ForwardEmbedIn(firstBackend, packedLatent, encoderHidden, batch, imgSeqLen, txtSeqLen);
         Tensor temb = ComputeTimestepEmbedding(firstBackend, timestep, batch);
-        Tensor? tembZero = refSeqLen > 0 && refTimestepZero
-            ? ComputeTimestepEmbedding(firstBackend, 0.0f, batch)
+        Tensor? tembZero = refSeqLen > 0 && refTimestepZero ? ComputeTimestepEmbedding(firstBackend, 0.0f, batch)
             : null;
         int txtPositionStart = QwenImageRope.ComputeTextPositionStart(hPacked, wPacked);
 
@@ -462,8 +459,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         (int H, int W)[] refGrids, int mainSeqLen, int startBlock, int endBlock, Tensor? cacheAnchor = null,
         CpForwardContext? cp = null, Tensor[]? cnResiduals = null)
     {
-        int cnInterval = cnResiduals is { Length: > 0 }
-            ? (int)Math.Ceiling((double)_config.Depth / cnResiduals.Length)
+        int cnInterval = cnResiduals is { Length: > 0 } ? (int)Math.Ceiling((double)_config.Depth / cnResiduals.Length)
             : 0;
         for (int i = startBlock; i < endBlock; i++)
         {

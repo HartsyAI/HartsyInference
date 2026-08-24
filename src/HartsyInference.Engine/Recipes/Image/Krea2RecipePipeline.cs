@@ -17,8 +17,11 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Krea 2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Krea2Pipeline"/> owns the Qwen3-VL-4B forward (it taps 12 decoder layers itself), so this only builds the templated token ids — byte-identical to Qwen-Image's template — plus the prefix-drop indices and calls <see cref="Krea2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Krea2Loader.Generate</c>.</summary>
-public sealed class Krea2RecipePipeline : IRecipePipeline
+/// <summary>A constructed Krea 2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Krea2Pipeline"/> owns the Qwen3-VL-4B forward (it taps 12 decoder layers itself), so this only builds the templated token ids — byte-identical to Qwen-Image's template — plus the prefix-drop indices and calls <see cref="Krea2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Krea2Loader.Generate</c>. Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
+public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer,
+    LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae,
+    QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Krea 2's prompt template is byte-identical to Qwen-Image's — same system prompt, same prefix-drop design.</summary>
     private const string Krea2SystemPrompt =
@@ -28,29 +31,15 @@ public sealed class Krea2RecipePipeline : IRecipePipeline
     /// <summary>The templated sequence is truncated at 512 tokens.</summary>
     private const int MaxTokens = 512;
 
-    private readonly Krea2Pipeline _pipeline;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _textEncoder;
-    private readonly Krea2Transformer _transformer;
-    private readonly QwenImageVaeDecoder _vae;
-    private readonly QwenImageVaeEncoder? _vaeEncoder;
-    private readonly bool _isTurbo;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
-    public Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _transformer = transformer;
-        _vae = vae;
-        _vaeEncoder = vaeEncoder;
-        _isTurbo = isTurbo;
-        _loaders = loaders;
-    }
+    private readonly Krea2Pipeline _pipeline = pipeline;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _textEncoder = textEncoder;
+    private readonly Krea2Transformer _transformer = transformer;
+    private readonly QwenImageVaeDecoder _vae = vae;
+    private readonly QwenImageVaeEncoder? _vaeEncoder = vaeEncoder;
+    private readonly bool _isTurbo = isTurbo;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <summary>A Turbo/TDM checkpoint samples in 8 guidance-free steps, so it resolves against <see cref="Krea2Recipe.TurboDefaults"/> rather than Base's 28 steps at CFG 4.5.</summary>
     public ImageDefaults? VariantDefaults => _isTurbo ? Krea2Recipe.TurboDefaults : Krea2Recipe.FamilyDefaults;

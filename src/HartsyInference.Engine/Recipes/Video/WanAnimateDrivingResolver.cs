@@ -75,8 +75,7 @@ internal static class WanAnimateDrivingResolver
                         FfmpegProcessDecoder.Result decodedMask = DecodeClip(request.DrivingMaskVideo, width, height, frameOffset + frameCount, cancel);
                         // A single-frame mask bypasses the offset entirely (it repeats over every chunk); a multi-frame
                         // one is seeked, and a seek past its end drops the mask for this chunk.
-                        List<byte[]> maskFrames = decodedMask.Frames.Count == 1
-                            ? decodedMask.Frames
+                        List<byte[]> maskFrames = decodedMask.Frames.Count == 1 ? decodedMask.Frames
                             : DropLeadingFrames(decodedMask.Frames, frameOffset);
                         if (maskFrames.Count == 0)
                         {

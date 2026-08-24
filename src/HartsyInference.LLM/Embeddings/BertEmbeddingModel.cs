@@ -104,8 +104,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
             int maxPos = (int)m.GetUInt32($"{arch}.context_length", 512u);
             // neo-bert: pre-norm RMSNorm encoder (RoPE, fused QKV, SwiGLU, final-norm only) — uses rms_epsilon.
             bool isNeoBert = arch == "neo-bert";
-            float eps = isNeoBert
-                ? m.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f)
+            float eps = isNeoBert ? m.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f)
                 : m.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-12f);
             int pooling = (int)m.GetUInt32($"{arch}.pooling_type", 2u);
             float ropeBase = m.GetFloat32($"{arch}.rope.freq_base", 0f);

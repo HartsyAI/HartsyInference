@@ -11,11 +11,7 @@ namespace HartsyInference.Audio.Streaming;
 /// <para>The <see cref="Samples"/> array is owned by the producer; callers must consume
 /// or copy it before the next chunk arrives. Producers re-using a backing buffer should
 /// allocate a fresh array per chunk.</para></summary>
-public readonly record struct AudioChunk(
-    float[] Samples,
-    int SampleRate,
-    int Channels,
-    long StartSampleOffset)
+public readonly record struct AudioChunk(float[] Samples, int SampleRate, int Channels, long StartSampleOffset)
 {
     /// <summary>Number of frames in the chunk (= samples per channel).</summary>
     public int FrameCount => Samples.Length / Channels;

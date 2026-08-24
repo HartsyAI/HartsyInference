@@ -118,7 +118,6 @@ public sealed record MiniMaxH3Config
     }
 
     private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        weights.TryGetValue(key, out Tensor? t)
-            ? t
+        weights.TryGetValue(key, out Tensor? t) ? t
             : throw new ArgumentException($"MiniMax-H3 checkpoint is missing '{key}'.");
 }

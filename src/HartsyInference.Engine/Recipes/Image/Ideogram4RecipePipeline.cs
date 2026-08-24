@@ -17,28 +17,18 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Ideogram 4 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Ideogram4Pipeline"/> owns the Qwen3-VL forward, so this only chat-templates and trims the prompt tokens, snaps the resolution to Ideogram's 16-pixel grid, and maps <see cref="ImageRequest.Steps"/> onto the nearest official sampler preset (the preset carries the per-step asymmetric-CFG guidance schedule, so CfgScale and the negative prompt are ignored by design). Mirrors the SwarmUI backend's <c>Ideogram4Loader.Generate</c> drive path.</summary>
-public sealed class Ideogram4RecipePipeline : IRecipePipeline
+/// <summary>A constructed Ideogram 4 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Ideogram4Pipeline"/> owns the Qwen3-VL forward, so this only chat-templates and trims the prompt tokens, snaps the resolution to Ideogram's 16-pixel grid, and maps <see cref="ImageRequest.Steps"/> onto the nearest official sampler preset (the preset carries the per-step asymmetric-CFG guidance schedule, so CfgScale and the negative prompt are ignored by design). Mirrors the SwarmUI backend's <c>Ideogram4Loader.Generate</c> drive path. Wraps the constructed Ideogram 4 pipeline plus its tokenizer and both transformers, taking ownership of every disposable.</summary>
+public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
+    Ideogram4Transformer conditional, Ideogram4Transformer unconditional, List<SafeTensorsLoader> loaders,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly Ideogram4Pipeline _pipeline;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _textEncoder;
-    private readonly Ideogram4Transformer _conditional;
-    private readonly Ideogram4Transformer _unconditional;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Ideogram 4 pipeline plus its tokenizer and both transformers, taking ownership of every disposable.</summary>
-    public Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, Ideogram4Transformer conditional, Ideogram4Transformer unconditional, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _conditional = conditional;
-        _unconditional = unconditional;
-        _loaders = loaders;
-        _loraStack = loraStack;
-    }
+    private readonly Ideogram4Pipeline _pipeline = pipeline;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _textEncoder = textEncoder;
+    private readonly Ideogram4Transformer _conditional = conditional;
+    private readonly Ideogram4Transformer _unconditional = unconditional;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -85,8 +75,7 @@ public sealed class Ideogram4RecipePipeline : IRecipePipeline
         // Regional/object prompt parts, chat-templated + encoded via the SAME Qwen3-VL multi-layer tap
         // configuration as the base prompt above (Ideogram4Pipeline.EncodeRegionText).
         using Tensor? baseCondPlaceholder = RegionalPromptResolver.HasRegionParts(prompt) ? new Tensor(new TensorShape(1), DType.F32) : null;
-        RegionalPlan? regionalPlan = baseCondPlaceholder is null
-            ? null
+        RegionalPlan? regionalPlan = baseCondPlaceholder is null ? null
             : RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, snappedW, snappedH, preset.NumSteps, encodeRegion: text =>
             {
                 int[] regionPadded = _tokenizer.EncodeChat(text, includeThinkBlock: false);

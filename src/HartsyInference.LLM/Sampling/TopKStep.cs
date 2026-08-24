@@ -3,16 +3,10 @@ using System.Collections.Generic;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Keeps the k highest logits and masks the remainder to negative infinity.</summary>
-public sealed class TopKStep : ISamplerStep
+/// <summary>Keeps the k highest logits and masks the remainder to negative infinity. Values of <paramref name="k"/> at or below 0 disable the filter at apply time.</summary>
+public sealed class TopKStep(int k) : ISamplerStep
 {
-    private readonly int _k;
-
-    /// <summary>Creates a top-k step; values of 0 or below disable the filter at apply time.</summary>
-    public TopKStep(int k)
-    {
-        _k = k;
-    }
+    private readonly int _k = k;
 
     /// <inheritdoc/>
     public void Apply(Span<float> logits, IReadOnlyList<int> history)

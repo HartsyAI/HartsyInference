@@ -66,8 +66,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
             qkNormEps: config.QkNormEps);
 
         _contextEmbedder2 = config.TextEmbedDim2 is int dim2
-            ? new HunyuanImageByT5Projection(dim2, intermediateDim: 2048, outFeatures: config.HiddenSize)
-            : null;
+            ? new HunyuanImageByT5Projection(dim2, intermediateDim: 2048, outFeatures: config.HiddenSize) : null;
     }
 
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
@@ -846,23 +845,16 @@ public sealed unsafe class HunyuanImageTokenRefiner
 }
 
 /// <summary>Hunyuan Image ByT5 secondary text projection (<c>HunyuanImageByT5TextProjection</c>). LayerNorm → Linear(in, intermediate) → GELU → Linear(intermediate, intermediate) → GELU → Linear(intermediate, out). Used to project ByT5 glyph encoder hidden states into the transformer hidden dim before they are concatenated with the MLLM tokens.</summary>
-public sealed class HunyuanImageByT5Projection
+public sealed class HunyuanImageByT5Projection(int inFeatures, int intermediateDim, int outFeatures)
 {
-    private readonly int _inFeatures;
-    private readonly int _intermediateDim;
-    private readonly int _outFeatures;
+    private readonly int _inFeatures = inFeatures;
+    private readonly int _intermediateDim = intermediateDim;
+    private readonly int _outFeatures = outFeatures;
 
     private Tensor? _normWeight, _normBias;
     private Tensor? _linear1Weight, _linear1Bias;
     private Tensor? _linear2Weight, _linear2Bias;
     private Tensor? _linear3Weight, _linear3Bias;
-
-    public HunyuanImageByT5Projection(int inFeatures, int intermediateDim, int outFeatures)
-    {
-        _inFeatures = inFeatures;
-        _intermediateDim = intermediateDim;
-        _outFeatures = outFeatures;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {

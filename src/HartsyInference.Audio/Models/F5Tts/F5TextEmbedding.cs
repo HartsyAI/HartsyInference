@@ -132,22 +132,16 @@ internal sealed unsafe class F5TextEmbedding
 }
 
 /// <summary>F5-TTS ConvNeXt-V2 block: same shape as the original ConvNeXt block but with GRN in place of layer scale and no skip mod; all operations are channels-last <c>[B, T, dim]</c> except the depthwise conv, which transposes to channels-first.</summary>
-internal sealed unsafe class F5ConvNeXtV2Block
+internal sealed unsafe class F5ConvNeXtV2Block(int dim, int intermediate)
 {
-    private readonly int _dim;
-    private readonly int _intermediate;
+    private readonly int _dim = dim;
+    private readonly int _intermediate = intermediate;
 
     private Tensor? _dwConvW, _dwConvB;
     private Tensor? _normW, _normB;
     private Tensor? _pwConv1W, _pwConv1B;
     private Tensor? _pwConv2W, _pwConv2B;
     private Tensor? _grnGamma, _grnBeta;
-
-    public F5ConvNeXtV2Block(int dim, int intermediate)
-    {
-        _dim = dim;
-        _intermediate = intermediate;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {

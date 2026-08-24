@@ -636,8 +636,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         // ── 3. Image patchify + embed + pad + noise_refiner stack ──
         // Packed input skips patchify (the pipeline keeps the latent in token space across the whole loop and
         // owns the tensor); pixel input patchifies here as before.
-        Tensor packedLatent = packedInput
-            ? latent
+        Tensor packedLatent = packedInput ? latent
             : Patchify(latent, batch, (int)latent.Shape[1], (int)latent.Shape[2], (int)latent.Shape[3], patch);
         TensorShape imgEmbShape = new TensorShape(batch, imgRealLen, hidden);
         Tensor imgEmbedded = new Tensor(imgEmbShape, DType.F32);

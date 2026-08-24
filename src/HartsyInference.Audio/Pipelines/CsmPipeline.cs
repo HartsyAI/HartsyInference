@@ -12,19 +12,12 @@ namespace HartsyInference.Audio.Pipelines;
 /// 8-codebook Mimi frames one 80 ms frame at a time (backbone → codebook 0, decoder → codebooks 1..7);
 /// the built Mimi codec decodes them to 24 kHz audio. Token-IDs-in: the caller Llama-3-tokenizes the
 /// text (and may prepend a `Segment(speaker, text, audio)` conversation history as context).</summary>
-public sealed unsafe class CsmPipeline : IDisposable
+public sealed unsafe class CsmPipeline(CsmConfig cfg, CsmModel model, Mimi mimi) : IDisposable
 {
-    private readonly CsmConfig _cfg;
-    private readonly CsmModel _model;
-    private readonly Mimi _mimi;
+    private readonly CsmConfig _cfg = cfg;
+    private readonly CsmModel _model = model;
+    private readonly Mimi _mimi = mimi;
     private int _disposed;
-
-    public CsmPipeline(CsmConfig cfg, CsmModel model, Mimi mimi)
-    {
-        _cfg = cfg;
-        _model = model;
-        _mimi = mimi;
-    }
 
     /// <summary>Synthesizes 24 kHz audio for the Llama-tokenized <paramref name="textTokenIds"/>. When
     /// <paramref name="onFrame"/> is supplied, it is invoked with each genuine (non-EOS-sentinel) frame right

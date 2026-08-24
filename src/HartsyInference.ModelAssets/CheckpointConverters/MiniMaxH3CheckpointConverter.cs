@@ -49,8 +49,7 @@ public sealed class MiniMaxH3CheckpointConverter
 
     /// <summary>True when a bare (unprefixed) key belongs to the Qwen3-VL tower rather than the DiT.</summary>
     private static bool IsBareTextEncoderKey(string key) =>
-        key.StartsWith("visual.", StringComparison.Ordinal)
-        || key.StartsWith("model.layers.", StringComparison.Ordinal)
+        key.StartsWith("visual.", StringComparison.Ordinal) || key.StartsWith("model.layers.", StringComparison.Ordinal)
         || key.StartsWith("model.embed_tokens", StringComparison.Ordinal)
         || key.StartsWith("model.norm.", StringComparison.Ordinal)
         || key.StartsWith("lm_head.", StringComparison.Ordinal);

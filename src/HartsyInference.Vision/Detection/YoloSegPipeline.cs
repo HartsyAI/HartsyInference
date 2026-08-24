@@ -53,9 +53,7 @@ public sealed class YoloSegPipeline : IVisionPipeline
 
     /// <summary>Returns the label string for a class id (uses supplied label table or COCO).</summary>
     public string GetLabel(int classId) =>
-        _labels is not null && classId >= 0 && classId < _labels.Count
-            ? _labels[classId]
-            : CocoLabels.Get(classId);
+        _labels is not null && classId >= 0 && classId < _labels.Count ? _labels[classId] : CocoLabels.Get(classId);
 
     /// <summary>Runs detection + segmentation on a single image. <paramref name="rgbPixels"/> is
     /// HWC-packed RGB u8.</summary>

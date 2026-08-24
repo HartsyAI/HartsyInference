@@ -171,9 +171,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
         System.Diagnostics.Stopwatch phaseSw = System.Diagnostics.Stopwatch.StartNew();
         // ── 1. Concat padding-mask channel → [B, 17, H, W] ──
-        Tensor latentExpanded = _config.ConcatPaddingMask
-            ? AppendPaddingMaskChannel(backend, latent)
-            : latent;
+        Tensor latentExpanded = _config.ConcatPaddingMask ? AppendPaddingMaskChannel(backend, latent) : latent;
         AnimaDebugDump.Dump("latent_with_mask", latentExpanded);
 
         int totalChannels = (int)latentExpanded.Shape[1];
@@ -207,8 +205,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
         AnimaDebugDump.Dump("embedded_timestep", embeddedTimestep);
 
         // ── 5. Build cross-attn mask if provided ──
-        Tensor? crossMask = textAttentionMask is not null
-            ? BuildAttentionMask(batch, textSeq, textAttentionMask)
+        Tensor? crossMask = textAttentionMask is not null ? BuildAttentionMask(batch, textSeq, textAttentionMask)
             : null;
 
         // ── 6. Layer loop ──

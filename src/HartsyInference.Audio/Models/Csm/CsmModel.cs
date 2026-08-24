@@ -295,8 +295,7 @@ public sealed unsafe class CsmModel : IDisposable
         // roofline (nsys 2026-07-25: ~11.4 ms per stream-frame on the 4090), so this halves the dominant
         // per-frame cost in CFG runs. The batched step itself is graph-captured when eligible (see below);
         // otherwise it runs eager. Kill-switch HARTSY_CSM_CFG_BATCH=0 restores two-stream.
-        if (useCfg && !uncondStandalone && (int)condNewEmbeds.Shape[1] == 1
-            && (int)uncondNewEmbeds!.Shape[1] == 1
+        if (useCfg && !uncondStandalone && (int)condNewEmbeds.Shape[1] == 1 && (int)uncondNewEmbeds!.Shape[1] == 1
             && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_BATCH", defaultOn: true))
         {
             FixedKvCache ucB = session.Uncond ?? throw new InvalidOperationException("CFG StepFrame needs a CFG session (useCfg:true).");
@@ -307,8 +306,7 @@ public sealed unsafe class CsmModel : IDisposable
             // check is a safety net that falls back to the eager batched path, never wrong math). Kill-switch
             // HARTSY_CSM_CFG_GRAPH=0 restores the eager batched step below.
             if (graphEnabled && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_GRAPH", defaultOn: true)
-                && _backbone.SupportsDualGraphDecode(backend)
-                && session.Backbone.CurrentLength == ucB.CurrentLength)
+                && _backbone.SupportsDualGraphDecode(backend) && session.Backbone.CurrentLength == ucB.CurrentLength)
             {
                 (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, condNewEmbeds, uncondNewEmbeds!, bh);
                 return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);

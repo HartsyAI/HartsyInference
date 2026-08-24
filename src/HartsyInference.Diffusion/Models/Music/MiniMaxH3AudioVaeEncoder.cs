@@ -119,8 +119,7 @@ public sealed unsafe class MiniMaxH3AudioVaeEncoder : IDisposable
     {
         ArgumentNullException.ThrowIfNull(weights);
         return (weights.ContainsKey("encoder.block.0.weight_v") || weights.ContainsKey("encoder.block.0.weight"))
-            && weights.ContainsKey("pre_block.attn.qkv.weight")
-            && weights.ContainsKey("mean_proj.weight");
+            && weights.ContainsKey("pre_block.attn.qkv.weight") && weights.ContainsKey("mean_proj.weight");
     }
 
     /// <summary>Encodes a waveform <c>[1, S, L]</c> in [-1, 1] at the VAE's sample rate to normalized latents

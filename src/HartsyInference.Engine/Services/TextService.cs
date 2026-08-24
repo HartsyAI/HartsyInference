@@ -204,8 +204,7 @@ public sealed class TextService : ITextService, IDisposable
             };
         }
 
-        GenerationResult result = slot.SsmPipeline is not null
-            ? slot.SsmPipeline.Generate(genRequest, onToken, cancel)
+        GenerationResult result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, cancel)
             : slot.Pipeline!.Generate(genRequest, onToken, cancel);
 
         StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;

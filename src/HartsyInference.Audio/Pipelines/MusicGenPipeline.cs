@@ -14,19 +14,12 @@ namespace HartsyInference.Audio.Pipelines;
 /// classifier-free guidance, reverts the <see cref="MusicGenDelay">delay pattern</see>, and decodes via the
 /// built <see cref="EnCodec"/>. Reuses <see cref="NucleusSampler"/> (top-k/top-p draw) and the EnCodec
 /// decoder. The special token is masked out of every active codebook's sampling so only real codes are drawn.</summary>
-public sealed unsafe class MusicGenPipeline : IDisposable
+public sealed unsafe class MusicGenPipeline(MusicGenConfig cfg, MusicGenDecoder decoder, EnCodec codec) : IDisposable
 {
-    private readonly MusicGenConfig _cfg;
-    private readonly MusicGenDecoder _decoder;
-    private readonly EnCodec _codec;
+    private readonly MusicGenConfig _cfg = cfg;
+    private readonly MusicGenDecoder _decoder = decoder;
+    private readonly EnCodec _codec = codec;
     private int _disposed;
-
-    public MusicGenPipeline(MusicGenConfig cfg, MusicGenDecoder decoder, EnCodec codec)
-    {
-        _cfg = cfg;
-        _decoder = decoder;
-        _codec = codec;
-    }
 
     /// <summary>Generates audio from precomputed T5 states <c>[1, T_text, textDim]</c>. <paramref name="seconds"/>
     /// sets the real frame count (<c>frameRate × seconds</c>). Returns mono PCM at the codec sample rate.

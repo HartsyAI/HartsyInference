@@ -11,24 +11,15 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed SD3 pipeline driven against the native <see cref="ImageRequest"/>. Both CLIPs share one BPE tokenizer (encoded once, reused for L and G); when a T5 encoder is present the prompt is additionally tokenized with the T5 SentencePiece plus its attention mask. Runs <see cref="Sd3Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Sd3Loader.Generate</c> drive path (text-to-image only).</summary>
-public sealed class Sd3RecipePipeline : IRecipePipeline
+/// <summary>A constructed SD3 pipeline driven against the native <see cref="ImageRequest"/>. Both CLIPs share one BPE tokenizer (encoded once, reused for L and G); when a T5 encoder is present the prompt is additionally tokenized with the T5 SentencePiece plus its attention mask. Runs <see cref="Sd3Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Sd3Loader.Generate</c> drive path (text-to-image only). Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the checkpoint plus one loader per component resolved as a separate file, and must outlive the weights it mmaps.</summary>
+public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer,
+    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly Sd3Pipeline _pipeline;
-    private readonly ClipTokenizer _clipTokenizer;
-    private readonly T5Tokenizer? _t5Tokenizer;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the checkpoint plus one loader per component resolved as a separate file, and must outlive the weights it mmaps.</summary>
-    public Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _pipeline = pipeline;
-        _clipTokenizer = clipTokenizer;
-        _t5Tokenizer = t5Tokenizer;
-        _loaders = loaders;
-        _loraStack = loraStack;
-    }
+    private readonly Sd3Pipeline _pipeline = pipeline;
+    private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
+    private readonly T5Tokenizer? _t5Tokenizer = t5Tokenizer;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

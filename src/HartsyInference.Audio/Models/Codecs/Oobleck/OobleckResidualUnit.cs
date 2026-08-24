@@ -22,25 +22,18 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// unit is itself a <c>Sequential</c> of [Snake, WNConv1d k=7, Snake, WNConv1d k=1]):
 /// <c>{prefix}.layers.0.{alpha,beta}</c>, <c>{prefix}.layers.1.{weight_g,weight_v,bias}</c>,
 /// <c>{prefix}.layers.2.{alpha,beta}</c>, <c>{prefix}.layers.3.{weight_g,weight_v,bias}</c>.</para></remarks>
-internal sealed class OobleckResidualUnit
+internal sealed class OobleckResidualUnit(string prefix, int dim, int dilation)
 {
     private const int Kernel = 7;
 
-    private readonly string _prefix;
-    private readonly int _dim;
-    private readonly int _dilation;
+    private readonly string _prefix = prefix;
+    private readonly int _dim = dim;
+    private readonly int _dilation = dilation;
 
     private Tensor? _snake1Alpha, _snake1Beta;
     private Tensor? _snake2Alpha, _snake2Beta;
     private Tensor? _conv1W, _conv1B;
     private Tensor? _conv2W, _conv2B;
-
-    public OobleckResidualUnit(string prefix, int dim, int dilation)
-    {
-        _prefix = prefix;
-        _dim = dim;
-        _dilation = dilation;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

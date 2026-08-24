@@ -15,8 +15,11 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Qwen-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="QwenImagePipeline"/> owns the text-encoder forward, so this only builds the templated Qwen token ids plus the prefix-drop indices and calls <see cref="QwenImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>QwenImageLoader.Generate</c> text-to-image drive path.</summary>
-public sealed class QwenImageRecipePipeline : IRecipePipeline
+/// <summary>A constructed Qwen-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="QwenImagePipeline"/> owns the text-encoder forward, so this only builds the templated Qwen token ids plus the prefix-drop indices and calls <see cref="QwenImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>QwenImageLoader.Generate</c> text-to-image drive path. Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
+public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer,
+    LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae,
+    QwenImageVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers <c>QwenImagePipeline.prompt_template_encode</c>); its hidden states are dropped by the prefix-drop index.</summary>
     private const string QwenImageSystemPrompt =
@@ -27,30 +30,16 @@ public sealed class QwenImageRecipePipeline : IRecipePipeline
     private const int MaxTokens = 512;
 
 
-    private readonly QwenImagePipeline _pipeline;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _textEncoder;
-    private readonly QwenImageTransformer _transformer;
-    private readonly QwenImageVaeDecoder _vae;
-    private readonly QwenImageVaeEncoder? _vaeEncoder;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly IDisposable? _ggufHandle;
+    private readonly QwenImagePipeline _pipeline = pipeline;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _textEncoder = textEncoder;
+    private readonly QwenImageTransformer _transformer = transformer;
+    private readonly QwenImageVaeDecoder _vae = vae;
+    private readonly QwenImageVaeEncoder? _vaeEncoder = vaeEncoder;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IDisposable? _ggufHandle = ggufHandle;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
-    public QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _transformer = transformer;
-        _vae = vae;
-        _vaeEncoder = vaeEncoder;
-        _loaders = loaders;
-        _ggufHandle = ggufHandle;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

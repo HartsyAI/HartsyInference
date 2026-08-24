@@ -82,8 +82,7 @@ public sealed record SeedVr2Config
         Tensor embOut = Require(weights, "emb_in.proj_out.weight");
         Tensor normQ = Require(weights, "blocks.0.attn.norm_q.vid.weight");
         bool swiglu = weights.ContainsKey("blocks.0.mlp.vid.proj_in_gate.weight");
-        Tensor mlpIn = swiglu
-            ? Require(weights, "blocks.0.mlp.vid.proj_in_gate.weight")
+        Tensor mlpIn = swiglu ? Require(weights, "blocks.0.mlp.vid.proj_in_gate.weight")
             : Require(weights, "blocks.0.mlp.vid.proj_in.weight");
 
         int vidDim = (int)txtIn.Shape[0];
@@ -154,7 +153,6 @@ public sealed record SeedVr2Config
     }
 
     private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key)
-        => weights.TryGetValue(key, out Tensor? t)
-            ? t
+        => weights.TryGetValue(key, out Tensor? t) ? t
             : throw new HartsyInferenceException($"SeedVR2 checkpoint missing required tensor '{key}'.");
 }

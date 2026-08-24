@@ -4,13 +4,7 @@ namespace HartsyInference.Vision.Detection;
 /// values are in pixel coordinates of the source image (post-<see cref="YoloPreprocessor.Transform.Invert"/>
 /// unprojection). Class ID is the index into the model's label vocabulary — typically COCO 80,
 /// resolvable through <see cref="CocoLabels.Get"/>.</summary>
-public readonly record struct YoloDetection(
-    float X1,
-    float Y1,
-    float X2,
-    float Y2,
-    float Confidence,
-    int ClassId)
+public readonly record struct YoloDetection(float X1, float Y1, float X2, float Y2, float Confidence, int ClassId)
 {
     /// <summary>Box width in source pixels.</summary>
     public float Width => X2 - X1;

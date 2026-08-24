@@ -139,8 +139,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
         // ── 1. Slice modulation rows into tiny [B, hidden] tensors: shift, scale, gate. Device slices
         // (B=1): the old host path read the device-produced temb's DataPointer — a full pipeline drain
         // per block (the temb stream-stall). ──
-        Tensor[] mod = batch == 1
-            ? ChromaDoubleStreamBlock.SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 3)
+        Tensor[] mod = batch == 1 ? ChromaDoubleStreamBlock.SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 3)
             : ChromaDoubleStreamBlock.SliceModRows(temb, batch, rowStart: 0, rowCount: 3);
 
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);

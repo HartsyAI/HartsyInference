@@ -57,8 +57,7 @@ public sealed class BlockStreamingScope : IDisposable
 
         // Both planners preload the shared weights themselves — the resident-prefix one has to do it before it
         // frees and re-sizes a pinned prefix, the all-or-nothing one after the planner's availability query.
-        int prefix = options.Policy == BlockStreamingPolicy.AllOrNothing
-            ? PlanAllOrNothing(options, planner, blocks)
+        int prefix = options.Policy == BlockStreamingPolicy.AllOrNothing ? PlanAllOrNothing(options, planner, blocks)
             : PlanResidentPrefix(options, planner, blocks, blockBytes);
 
         if (prefix > 0)

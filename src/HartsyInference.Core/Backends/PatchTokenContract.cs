@@ -3,16 +3,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Core.Backends;
 
 /// <summary>Validated geometry shared by the host and accelerator patch-token shuffles.</summary>
-internal readonly record struct PatchTokenGeometry(
-    int Batch,
-    int Channels,
-    int Height,
-    int Width,
-    int HPacked,
-    int WPacked,
-    long SequenceLength,
-    long PatchVolume,
-    long ElementCount);
+internal readonly record struct PatchTokenGeometry(int Batch, int Channels, int Height, int Width, int HPacked,
+    int WPacked, long SequenceLength, long PatchVolume, long ElementCount);
 
 /// <summary>Centralizes the exact tensor contract for <see cref="IBackend.PatchifyTokens"/> and <see cref="IBackend.UnpatchifyTokens"/> so CPU fallbacks and accelerator dispatch cannot silently disagree.</summary>
 internal static class PatchTokenContract
@@ -137,11 +129,9 @@ internal static class PatchTokenContract
             throw new ArgumentOutOfRangeException(nameof(input),
                 $"{(patchify ? "PatchifyTokens" : "UnpatchifyTokens")} byte span exceeds signed 64-bit addressable storage.");
 
-        TensorShape expectedInput = patchify
-            ? new TensorShape(batch, channels, height, width)
+        TensorShape expectedInput = patchify ? new TensorShape(batch, channels, height, width)
             : new TensorShape(batch, sequenceLength, patchVolume);
-        TensorShape expectedOutput = patchify
-            ? new TensorShape(batch, sequenceLength, patchVolume)
+        TensorShape expectedOutput = patchify ? new TensorShape(batch, sequenceLength, patchVolume)
             : new TensorShape(batch, channels, height, width);
 
         if (input.Shape != expectedInput)
@@ -207,8 +197,7 @@ internal static unsafe class PatchTokenHostShuffle
                                 int y = hp * patch + ph;
                                 int x = wp * patch + pw;
                                 long seq = (long)hp * geometry.WPacked + wp;
-                                long inner = innerChannelFastest
-                                    ? (((long)ph * patch + pw) * geometry.Channels + c)
+                                long inner = innerChannelFastest ? (((long)ph * patch + pw) * geometry.Channels + c)
                                     : (((long)c * patch + ph) * patch + pw);
                                 long srcIndex = ((long)b * geometry.Channels + c) * hw
                                     + (long)y * geometry.Width + x;
@@ -235,8 +224,7 @@ internal static unsafe class PatchTokenHostShuffle
                         int hp = y / patch, ph = y % patch;
                         int wp = x / patch, pw = x % patch;
                         long seq = (long)hp * geometry.WPacked + wp;
-                        long inner = innerChannelFastest
-                            ? (((long)ph * patch + pw) * geometry.Channels + c)
+                        long inner = innerChannelFastest ? (((long)ph * patch + pw) * geometry.Channels + c)
                             : (((long)c * patch + ph) * patch + pw);
                         long dstIndex = ((long)b * geometry.Channels + c) * hw
                             + (long)y * geometry.Width + x;

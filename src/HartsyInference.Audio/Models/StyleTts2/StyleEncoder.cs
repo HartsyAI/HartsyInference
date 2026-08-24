@@ -237,9 +237,7 @@ internal sealed unsafe class ResBlk2D
         c1d.Dispose();
 
         // Shortcut: conv1x1? → avgpool2×.
-        Tensor sc = _learnedSc
-            ? StyleEncoder.Conv2dSame(backend, x, _conv1x1W!, bias: null, _outCh, 1, 0)
-            : Clone(x);
+        Tensor sc = _learnedSc ? StyleEncoder.Conv2dSame(backend, x, _conv1x1W!, bias: null, _outCh, 1, 0) : Clone(x);
         Tensor scd = StyleEncoder.AvgPool2x(sc);
         sc.Dispose();
 

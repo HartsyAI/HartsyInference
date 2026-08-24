@@ -91,8 +91,7 @@ public sealed class LtxVideo2CheckpointConverter
         || key.StartsWith("model.norm.", StringComparison.Ordinal)
         || key.StartsWith("multi_modal_projector.", StringComparison.Ordinal)
         || key.StartsWith("audio_projector.", StringComparison.Ordinal)
-        || key.StartsWith("vision_model.", StringComparison.Ordinal)
-        || key == "tokenizer_json";
+        || key.StartsWith("vision_model.", StringComparison.Ordinal) || key == "tokenizer_json";
 
     /// <summary>Key whose presence identifies an LTX-2.5 diffusion video VAE — the noised-pixel input projection, which the convolutional decoder has no counterpart for. Same signature ComfyUI selects on.</summary>
     public const string DiffusionDecoderSignatureKey = "decoder.conv_in_x_t.weight";
@@ -177,10 +176,9 @@ public sealed class LtxVideo2CheckpointConverter
         bool diffusersAlready = key.Contains("resnets", StringComparison.Ordinal)
             || key.Contains("upsamplers", StringComparison.Ordinal)
             || key.Contains("mid_block", StringComparison.Ordinal);
-        bool original = !diffusersAlready
-            && (key.Contains("up_blocks.", StringComparison.Ordinal)
-                || key.Contains("res_blocks", StringComparison.Ordinal)
-                || key.StartsWith("per_channel_statistics", StringComparison.Ordinal));
+        bool original = !diffusersAlready && (key.Contains("up_blocks.", StringComparison.Ordinal)
+            || key.Contains("res_blocks", StringComparison.Ordinal)
+            || key.StartsWith("per_channel_statistics", StringComparison.Ordinal));
         if (original)
         {
             // Drop the stats we don't consume (channel index, mean-of-stds, …) — keep only the two renamed below.

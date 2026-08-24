@@ -183,8 +183,7 @@ public static class IpAdapterResolver
         }
         else
         {
-            Tensor encoderOut = entry.IpAdapter.Config.IsFaceId
-                ? EmbedFaces(backend, entry, promptImages, log)
+            Tensor encoderOut = entry.IpAdapter.Config.IsFaceId ? EmbedFaces(backend, entry, promptImages, log)
                 : AverageVisionOutputs(backend, entry, promptImages, log);
             try
             {
@@ -473,8 +472,7 @@ public static class IpAdapterResolver
         Tensor accumulator;
         try
         {
-            accumulator = entry.IpAdapter.Config.IsPlus
-                ? clipVision.EncodeHiddenStates(backend, firstPixels)
+            accumulator = entry.IpAdapter.Config.IsPlus ? clipVision.EncodeHiddenStates(backend, firstPixels)
                 : clipVision.EncodeImageEmbeds(backend, firstPixels);
         }
         finally
@@ -488,8 +486,7 @@ public static class IpAdapterResolver
             Tensor next;
             try
             {
-                next = entry.IpAdapter.Config.IsPlus
-                    ? clipVision.EncodeHiddenStates(backend, pixels)
+                next = entry.IpAdapter.Config.IsPlus ? clipVision.EncodeHiddenStates(backend, pixels)
                     : clipVision.EncodeImageEmbeds(backend, pixels);
             }
             finally
@@ -724,8 +721,7 @@ public static class IpAdapterResolver
             Dictionary<string, Tensor> cvWeights = clipVisionLoader.GetAllTensors();
             // Some image-encoder files ship under a "vision_model." prefix, others ship rooted — probe for the patch
             // embedding under either naming.
-            string cvPrefix = cvWeights.ContainsKey("vision_model.embeddings.patch_embedding.weight")
-                ? "vision_model"
+            string cvPrefix = cvWeights.ContainsKey("vision_model.embeddings.patch_embedding.weight") ? "vision_model"
                 : (cvWeights.ContainsKey("embeddings.patch_embedding.weight") ? "" : "vision_model");
             ClipVisionEncoder clipVision = new ClipVisionEncoder(ClipVisionEncoderConfig.ViTH14);
             clipVision.LoadWeights(cvWeights, prefix: cvPrefix);

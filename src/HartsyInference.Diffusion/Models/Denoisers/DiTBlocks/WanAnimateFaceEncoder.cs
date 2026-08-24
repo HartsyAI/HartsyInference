@@ -11,18 +11,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// no-affine LayerNorm + SiLU; <c>out_proj</c> maps 1024 → out_dim and the learnable <c>padding_tokens</c> row is
 /// appended along the head axis. CausalConv1d = replicate-pad <c>kernel−1</c> on the left, then a plain Conv1d.
 /// All dims derive from the loaded weights (real: in 512, hidden 1024, heads 4).</summary>
-public sealed unsafe class WanAnimateFaceEncoder
+public sealed unsafe class WanAnimateFaceEncoder(float eps = 1e-6f)
 {
-    private readonly float _eps;
+    private readonly float _eps = eps;
     private int _inDim, _outDim, _hiddenDim, _numHeads, _kernel;
 
     private Tensor? _conv1W, _conv1B, _conv2W, _conv2B, _conv3W, _conv3B;
     private Tensor? _outW, _outB, _paddingTokens;   // padding_tokens [1,1,1,out_dim]
-
-    public WanAnimateFaceEncoder(float eps = 1e-6f)
-    {
-        _eps = eps;
-    }
 
     /// <summary>Number of parallel head streams (+1 padding token in the output). Valid after <see cref="LoadWeights"/>.</summary>
     public int NumHeads => _numHeads;

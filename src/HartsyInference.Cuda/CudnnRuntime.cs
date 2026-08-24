@@ -95,8 +95,7 @@ public static class CudnnRuntime
 
         Version = (long)CudnnApi.cudnnGetVersion();
         Available = true;
-        string attentionStatus = SupportsSdpa
-            ? "convolution + fused-attention fast paths ENABLED"
+        string attentionStatus = SupportsSdpa ? "convolution + fused-attention fast paths ENABLED"
             : "convolution ENABLED; fused attention requires cuDNN 9.21 or newer";
         Reason = $"cuDNN {Version / 10000}.{Version / 100 % 100}.{Version % 100} (built for CUDA {cudnnCudaMajor}) " +
                  $"from {(LibDir ?? "the OS library path")} — {attentionStatus}.";

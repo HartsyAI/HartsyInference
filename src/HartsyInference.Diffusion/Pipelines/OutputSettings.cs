@@ -19,9 +19,7 @@ public sealed record OutputSettings
         Directory.CreateDirectory(dateDir);
 
         // Count existing files to get sequence number
-        int existingCount = Directory.Exists(dateDir)
-            ? Directory.GetFiles(dateDir, $"*.{Format}").Length
-            : 0;
+        int existingCount = Directory.Exists(dateDir) ? Directory.GetFiles(dateDir, $"*.{Format}").Length : 0;
         int seqNum = existingCount + 1;
 
         string slug = !string.IsNullOrWhiteSpace(promptSlug)

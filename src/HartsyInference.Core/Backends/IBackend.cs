@@ -36,7 +36,7 @@ public interface IBackend : IDisposable
     /// <summary>Which operations and dtypes this backend supports, so callers can route work to it or fall back.</summary>
     BackendCapabilities Capabilities { get; }
 
-    // ── Linear Algebra ──────────────────────────────────────────────────
+    #region Linear Algebra
 
     /// <summary>Matrix multiply: output = a @ b</summary>
     void MatMul(Tensor output, Tensor a, Tensor b);
@@ -76,12 +76,16 @@ public interface IBackend : IDisposable
         Linear(output, input, rows, biasRows);
     }
 
-    // ── Convolution ─────────────────────────────────────────────────────
+    #endregion
+
+    #region Convolution
 
     /// <summary>2D convolution: output = conv2d(input, weight, bias, stride, padding)</summary>
     void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW);
 
-    // ── Normalization ───────────────────────────────────────────────────
+    #endregion
+
+    #region Normalization
 
     /// <summary>Splits channels into <paramref name="groups"/> groups, normalizes each over channel+spatial, then applies the per-channel affine weight/bias.</summary>
     void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps);
@@ -97,7 +101,9 @@ public interface IBackend : IDisposable
     /// <param name="beta"><c>[B, C]</c> (or <c>[C]</c>, broadcast across batch), typically a Linear projection of a style/speaker embedding.</param>
     void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps);
 
-    // ── DiT transformer glue ────────────────────────────────────────────
+    #endregion
+
+    #region DiT transformer glue
     // These keep the per-block modulation math GPU-resident in diffusion transformers
     // (Ideogram 4, etc.). Default implementations are scalar-F32 CPU loops that also serve
     // as the numerical reference; CudaBackend overrides them with PTX kernels.
@@ -348,8 +354,11 @@ public interface IBackend : IDisposable
         }
     }
 
-    // ── Oasis spatio-temporal attention layout (default host impls = numeric reference;
-    //    CudaBackend overrides with PTX kernels to keep the attention island GPU-resident) ──
+    #endregion
+
+    #region Oasis spatio-temporal attention layout
+    // Default host impls = numeric reference; CudaBackend overrides with PTX kernels to keep
+    // the attention island GPU-resident.
 
     /// <summary>Frame-major qkv <c>[token,3·dim]</c> → <c>[b,heads,seq,headDim]</c>; spatial: b=frame; temporal: b=spatial,seq=frames.</summary>
     unsafe void OasisSplitHeads(Tensor output, Tensor qkv, int frames, int sp, int heads, int headDim, int part, bool temporal)
@@ -723,8 +732,7 @@ public interface IBackend : IDisposable
             {
                 long feature = i % geometry.FeatureDimension;
                 long token = i / geometry.FeatureDimension;
-                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter
-                    ? feature % geometry.PatchArea
+                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter ? feature % geometry.PatchArea
                     : feature / channels;
                 MixAt(i, token * geometry.PatchArea + patchIndex);
             }
@@ -1123,8 +1131,7 @@ public interface IBackend : IDisposable
     /// <c>DataPointer</c>, which pulls a device-resident tensor back to the host and drops the device copy, so the
     /// following op re-uploads it — measured at 11.5 s of a 74.9 s LTX-2.5 decode.</remarks>
     static bool Na3dOutputShapeMatches(TensorShape output, TensorShape q)
-        => output.Equals(q)
-            || (output.Rank == 2 && output[0] == q[0] * q[1] * q[2] * q[3] && output[1] == q[4] * q[5]);
+        => output.Equals(q) || (output.Rank == 2 && output[0] == q[0] * q[1] * q[2] * q[3] && output[1] == q[4] * q[5]);
 
     /// <summary>The managed <see cref="Na3d"/> body, callable directly so a device backend can fall back to it and a
     /// test can diff against it without going through interface dispatch.</summary>
@@ -1497,7 +1504,9 @@ public interface IBackend : IDisposable
         }
     }
 
-    // ── Step-graph capture (CUDA-graph replay of a fixed per-step op sequence) ─────────────────────────────
+    #endregion
+
+    #region Step-graph capture (CUDA-graph replay of a fixed per-step op sequence)
     // A pipeline whose denoise step issues an IDENTICAL op sequence every step can capture it once and replay
     // with a single graph launch, collapsing thousands of per-op host calls. Contract: between Begin and
     // EndAndLaunch only async device work is issued (no DataPointer reads, no sync allocs); per-step-varying
@@ -1531,7 +1540,9 @@ public interface IBackend : IDisposable
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)dst.DataPointer, bytes, bytes);
     }
 
-    // ── Device-side decode position (autoregressive step-graph replay) ──────────────────────────────────────
+    #endregion
+
+    #region Device-side decode position (autoregressive step-graph replay)
     // A captured decode graph must NOT re-bake the per-step KV position into its kernel params, or every replay
     // would append/attend at the capture-time position. Instead the self-attention KV-append and flash kernels
     // read the position from a small device buffer {kvLen, qOffset}, refreshed (outside capture) each step. This
@@ -1566,7 +1577,9 @@ public interface IBackend : IDisposable
         new Span<float>((void*)src.DataPointer, dst.Length).CopyTo(dst);
     }
 
-    // ── LLM decode-graph: RoPE / embed / argmax reading & writing device state ──────────────────────────────
+    #endregion
+
+    #region LLM decode-graph: RoPE / embed / argmax reading & writing device state
     // The remaining per-token host work a captured graph can't tolerate: RoPE's cos/sin table build
     // (Math.Cos/Sin + H2D every step) and the embedding lookup (host gather from the token id). Both convert
     // to a one-time device-resident precompute (RoPE table) / preload (embed table) plus a fixed-grid kernel
@@ -1600,7 +1613,9 @@ public interface IBackend : IDisposable
     /// <summary>Argmax over the last dim, writing into a persistent buffer (e.g. <see cref="AllocDeviceTokenId"/>) to chain decode.</summary>
     void ArgMaxInto(ulong outputTokenId, Tensor input) { }
 
-    // ── Graph-capture decode: repetition penalty ────────────────────────────────────────────────────────────
+    #endregion
+
+    #region Graph-capture decode: repetition penalty
     // Greedy graph decode previously skipped the sampler chain entirely (raw argmax on unpenalized logits),
     // silently ignoring a nonzero repetition penalty — repetition penalty is the ONLY sampler stage that can
     // change greedy's picked token (temperature is monotonic, top-k/top-p/min-p never remove the argmax
@@ -1628,7 +1643,9 @@ public interface IBackend : IDisposable
     /// <summary>Applies HF-convention repetition penalty (divide positive/multiply negative logits) to every history token.</summary>
     void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty) { }
 
-    // ── Graph capture/replay (backend-agnostic handle) ──────────────────────────────────────────────────────
+    #endregion
+
+    #region Graph capture/replay (backend-agnostic handle)
     // Callers outside HartsyInference.Cuda (e.g. TextGenerationPipeline, which must stay backend-agnostic —
     // CPU builds link against IBackend only) capture/replay through this opaque-handle indirection instead of
     // referencing CudaGraph directly. Default: unsupported: CaptureGraph returns null, meaning "not captured,
@@ -2220,7 +2237,9 @@ public interface IBackend : IDisposable
         => throw new NotSupportedException(
             "QuantizedMatMul is implemented on the CUDA backend only; dequantize the weight to F16/F32 for CPU/Vulkan.");
 
-    // ── Attention ───────────────────────────────────────────────────────
+    #endregion
+
+    #region Attention
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
     /// <param name="allowF16">When true, a backend MAY run the attention in F16 for speed (halves score-matrix
@@ -2491,7 +2510,9 @@ public interface IBackend : IDisposable
         }
     }
 
-    // ── Activations ─────────────────────────────────────────────────────
+    #endregion
+
+    #region Activations
 
     /// <summary>GELU activation using the standard tanh approximation; use <see cref="GeluErf"/> for the exact erf form.</summary>
     void Gelu(Tensor output, Tensor input);
@@ -2564,7 +2585,9 @@ public interface IBackend : IDisposable
         }
     }
 
-    // ── Element-wise ────────────────────────────────────────────────────
+    #endregion
+
+    #region Element-wise
 
     /// <summary>Element-wise addition: output = a + b</summary>
     void Add(Tensor output, Tensor a, Tensor b);
@@ -2578,7 +2601,9 @@ public interface IBackend : IDisposable
     /// <summary>Element-wise clamp: output = clamp(input, min, max)</summary>
     void Clamp(Tensor output, Tensor input, float min, float max);
 
-    // ── Transpose / Permute ─────────────────────────────────────────────
+    #endregion
+
+    #region Transpose / Permute
 
     /// <summary>Batched 2D transpose: [B, D1, D2] → [B, D2, D1].</summary>
     void Transpose2D(Tensor output, Tensor input, int d1, int d2);
@@ -2616,7 +2641,9 @@ public interface IBackend : IDisposable
     /// <summary>Broadcast add: hidden [B, C, ...spatial] += bias [B, C] in-place.</summary>
     void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial);
 
-    // ── Shape Operations ────────────────────────────────────────────────
+    #endregion
+
+    #region Shape Operations
 
     /// <summary>Concatenate tensors along the specified dimension.</summary>
     void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim);
@@ -2624,7 +2651,9 @@ public interface IBackend : IDisposable
     /// <summary>Splits a nonempty contiguous F32, F16, or BF16 tensor into nonempty chunks along <paramref name="dim"/>. Outputs must have the same dtype and rank as the input, match every non-split dimension, exactly partition the split dimension, and share no storage with the input or one another. Payload bits are copied unchanged.</summary>
     void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim);
 
-    // ── Convolution ─────────────────────────────────────────────────────
+    #endregion
+
+    #region Convolution
 
     /// <summary>1D convolution with asymmetric padding, channels-first; separate padLeft/padRight cover causal and symmetric padding.</summary>
     /// <param name="weight">PyTorch convention <c>[C_out, C_in / groups, K]</c>.</param>
@@ -2639,7 +2668,9 @@ public interface IBackend : IDisposable
     void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups);
 
-    // ── Sampling ────────────────────────────────────────────────────────
+    #endregion
+
+    #region Sampling
 
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
     void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW);
@@ -2666,16 +2697,14 @@ public interface IBackend : IDisposable
 
         for (int oy = 0; oy < outH; oy++)
         {
-            float sy = alignCorners
-                ? (outH == 1 ? 0f : oy * (float)(inH - 1) / (outH - 1))
+            float sy = alignCorners ? (outH == 1 ? 0f : oy * (float)(inH - 1) / (outH - 1))
                 : (oy + 0.5f) * inH / outH - 0.5f;
             int y0 = (int)MathF.Floor(sy);
             float fy = sy - y0;
             int y0c = Math.Clamp(y0, 0, inH - 1), y1c = Math.Clamp(y0 + 1, 0, inH - 1);
             for (int ox = 0; ox < outW; ox++)
             {
-                float sx = alignCorners
-                    ? (outW == 1 ? 0f : ox * (float)(inW - 1) / (outW - 1))
+                float sx = alignCorners ? (outW == 1 ? 0f : ox * (float)(inW - 1) / (outW - 1))
                     : (ox + 0.5f) * inW / outW - 0.5f;
                 int x0 = (int)MathF.Floor(sx);
                 float fx = sx - x0;
@@ -3139,7 +3168,9 @@ public interface IBackend : IDisposable
         }
     }
 
-    // ── Data Movement ───────────────────────────────────────────────────
+    #endregion
+
+    #region Data Movement
 
     /// <summary>Copy tensor data to a different device.</summary>
     void CopyTo(Tensor destination, Tensor source);
@@ -3162,7 +3193,9 @@ public interface IBackend : IDisposable
     /// <summary>Fill a tensor with a constant value.</summary>
     void Fill(Tensor tensor, float value);
 
-    // ── Audio (optional — backends may throw NotSupportedException) ──
+    #endregion
+
+    #region Audio (optional — backends may throw NotSupportedException)
 
     /// <summary>Radix-2 FFT for audio processing.</summary>
     void Fft(Tensor output, Tensor input);
@@ -3173,7 +3206,9 @@ public interface IBackend : IDisposable
     /// <summary>Apply mel filterbank to FFT magnitude spectrogram.</summary>
     void MelFilterbank(Tensor output, Tensor input, Tensor filters);
 
-    // ── Fused Operations ────────────────────────────────────────────────
+    #endregion
+
+    #region Fused Operations
 
     /// <summary>Fused GroupNorm + SiLU: normalize, apply affine, then SiLU in one pass, eliminating an intermediate allocation.</summary>
     void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
@@ -3182,7 +3217,9 @@ public interface IBackend : IDisposable
         Silu(output, output);
     }
 
-    // ── Dtype Casting ────────────────────────────────────────────────────
+    #endregion
+
+    #region Dtype Casting
 
     /// <summary>Cast tensor from FP32 to FP16. Default: CPU scalar loop.</summary>
     unsafe void CastToF16(Tensor output, Tensor input)
@@ -3239,7 +3276,9 @@ public interface IBackend : IDisposable
         f8.Dispose();
     }
 
-    // ── Synchronization ──────────────────────────────────────────────────
+    #endregion
+
+    #region Synchronization
 
     /// <summary>Waits for all pending GPU work (no-op on CPU) — call at phase boundaries so deferred frees land before large allocations.</summary>
     void Sync() { }
@@ -3293,4 +3332,6 @@ public interface IBackend : IDisposable
 
     /// <summary>Writes the per-op profile accumulated so far, tagging the output with <paramref name="label"/>. No-op when profiling is off.</summary>
     void DumpOpProfile(string label) { }
+
+    #endregion
 }

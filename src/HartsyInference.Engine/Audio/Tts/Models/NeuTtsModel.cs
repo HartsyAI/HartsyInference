@@ -46,8 +46,7 @@ internal static class NeuTtsModel
             string Phones(string text) =>
                 string.Join(' ', phonemizer.PhonemizeToIpa(text, EspeakLanguage).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-            IDisposable?[] keep = encoder is null
-                ? [pipeline, tokenizer, .. backboneLoaders, .. codecLoaders]
+            IDisposable?[] keep = encoder is null ? [pipeline, tokenizer, .. backboneLoaders, .. codecLoaders]
                 : [pipeline, encoder, tokenizer, .. backboneLoaders, .. codecLoaders];
             return new TtsRunner(pipeline.SampleRate, (backend, job) =>
             {

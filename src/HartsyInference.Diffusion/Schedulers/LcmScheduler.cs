@@ -122,8 +122,7 @@ public sealed unsafe class LcmScheduler : IScheduler
             {
                 float predX0 = (samplePtr[i] - sqrtBetaProdT * modelPtr[i]) / sqrtAlphaProdT;
                 float denoised = cOut * predX0 + cSkip * samplePtr[i];
-                outPtr[i] = noisePtr is null
-                    ? denoised
+                outPtr[i] = noisePtr is null ? denoised
                     : sqrtAlphaProdTPrev * denoised + sqrtBetaProdTPrev * noisePtr[i];
             }
         }

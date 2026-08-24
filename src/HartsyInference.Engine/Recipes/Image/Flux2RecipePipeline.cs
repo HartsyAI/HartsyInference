@@ -15,33 +15,21 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Flux.2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Flux2Pipeline"/> owns the text encoder, so this only produces the token ids — the embedded Qwen3 chat template for Klein, or the spliced Mistral tekken conditioning ids for Dev — and calls <see cref="Flux2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Flux2Loader.Generate</c> text-to-image drive path.</summary>
-public sealed class Flux2RecipePipeline : IRecipePipeline
+/// <summary>A constructed Flux.2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Flux2Pipeline"/> owns the text encoder, so this only produces the token ids — the embedded Qwen3 chat template for Klein, or the spliced Mistral tekken conditioning ids for Dev — and calls <see cref="Flux2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Flux2Loader.Generate</c> text-to-image drive path. Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
+public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer,
+    string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly Flux2Pipeline _pipeline;
-    private readonly Flux2Config _config;
-    private readonly Qwen3Tokenizer? _qwenTokenizer;
-    private readonly ErnieTokenizer? _mistralTokenizer;
-    private readonly string _mistralSystemPrompt;
-    private readonly LlamaStyleEncoder _encoder;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly IDisposable? _ggufHandle;
+    private readonly Flux2Pipeline _pipeline = pipeline;
+    private readonly Flux2Config _config = config;
+    private readonly Qwen3Tokenizer? _qwenTokenizer = qwenTokenizer;
+    private readonly ErnieTokenizer? _mistralTokenizer = mistralTokenizer;
+    private readonly string _mistralSystemPrompt = mistralSystemPrompt;
+    private readonly LlamaStyleEncoder _encoder = encoder;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IDisposable? _ggufHandle = ggufHandle;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="ggufHandle"/> is non-null when the transformer loaded from a GGUF file (keeps the mmap alive for any pass-through F16 tensor still referencing it).</summary>
-    public Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer, string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle = null, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _config = config;
-        _qwenTokenizer = qwenTokenizer;
-        _mistralTokenizer = mistralTokenizer;
-        _mistralSystemPrompt = mistralSystemPrompt;
-        _encoder = encoder;
-        _loaders = loaders;
-        _ggufHandle = ggufHandle;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <summary>A Klein checkpoint (no guidance embedding) is CFG-distilled and few-step, so it resolves against <see cref="Flux2Recipe.KleinDefaults"/> rather than Dev's 50 steps.</summary>
     public ImageDefaults? VariantDefaults => _config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults : Flux2Recipe.KleinDefaults;
@@ -61,8 +49,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
 
         // TODO(E-IMG-4/5): img2img, NegativePrompt/CfgScale mapping, and user component overrides are deferred.
         int[] tokenIds = _config.TextEncoderType == Flux2TextEncoderType.Mistral
-            ? BuildMistralDevTokenIds(_mistralTokenizer!, prompt)
-            : _qwenTokenizer!.EncodeChat(prompt);
+            ? BuildMistralDevTokenIds(_mistralTokenizer!, prompt) : _qwenTokenizer!.EncodeChat(prompt);
 
         // Resolved at the 16-rounded size Flux2Pipeline validates against.
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
@@ -129,8 +116,7 @@ public sealed class Flux2RecipePipeline : IRecipePipeline
         return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
         {
             int[] regionTokenIds = _config.TextEncoderType == Flux2TextEncoderType.Mistral
-                ? BuildMistralDevTokenIds(_mistralTokenizer!, text)
-                : _qwenTokenizer!.EncodeChat(text);
+                ? BuildMistralDevTokenIds(_mistralTokenizer!, text) : _qwenTokenizer!.EncodeChat(text);
             return _pipeline.EncodeRegionText(regionTokenIds);
         });
     }

@@ -131,8 +131,7 @@ public sealed class WhisperStreamingPipeline : IDisposable
     }
 
     private static IReadOnlyList<string> SplitWords(string text)
-        => string.IsNullOrWhiteSpace(text)
-            ? Array.Empty<string>()
+        => string.IsNullOrWhiteSpace(text) ? Array.Empty<string>()
             : text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).ToList();
 
     private static string JoinWords(IReadOnlyList<string> words) => string.Join(' ', words);

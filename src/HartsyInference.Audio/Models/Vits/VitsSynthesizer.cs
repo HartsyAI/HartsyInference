@@ -46,8 +46,7 @@ public sealed unsafe class VitsSynthesizer : IDisposable
         float ls = lengthScale ?? _cfg.LengthScale, ns = noiseScale ?? _cfg.NoiseScale;
 
         (Tensor hidden, Tensor mP, Tensor logsP) = _enc.Forward(backend, tokens);
-        float[] logw = _sdp is not null
-            ? _sdp.Forward(backend, hidden, tx, _cfg.NoiseScaleW, seed)
+        float[] logw = _sdp is not null ? _sdp.Forward(backend, hidden, tx, _cfg.NoiseScaleW, seed)
             : _dp.Forward(backend, hidden, tx);
         hidden.Dispose();
 

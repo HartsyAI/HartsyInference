@@ -27,7 +27,7 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 /// there. <c>N_i = ceil(speaker_i_audio_samples / 3200)</c> is the count of
 /// <c>&lt;|vision_pad|&gt;</c> sentinels needed to represent the speaker's voice prompt at
 /// the acoustic VAE's 7.5 Hz frame rate.</para></remarks>
-public sealed class VibeVoiceProcessor
+public sealed class VibeVoiceProcessor(VibeVoiceTokenizer tokenizer)
 {
     private const string SystemPrompt = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.";
     private const string VoiceHeader = " Voice input:";
@@ -36,12 +36,7 @@ public sealed class VibeVoiceProcessor
     private const float TargetDbFs = -25.0f;
     private const float TargetRmsEps = 1e-6f;
 
-    private readonly VibeVoiceTokenizer _tokenizer;
-
-    public VibeVoiceProcessor(VibeVoiceTokenizer tokenizer)
-    {
-        _tokenizer = tokenizer;
-    }
+    private readonly VibeVoiceTokenizer _tokenizer = tokenizer;
 
     /// <summary>Parses a script and assembles all the inputs the pipeline needs to start generation.</summary>
     /// <param name="lines">Each entry is one speaker turn — either a "Speaker N: text" formatted line, or a plain string assumed to be the next speaker in rotation (Speaker 0 on the first line, Speaker 1 on the second, etc).</param>

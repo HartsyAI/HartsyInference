@@ -12,18 +12,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// itself prepended to 128 sin ‖ 128 cos features) → <c>Linear(257 → CondTokenDim)</c>. Checkpoint keys:
 /// <c>conditioners.{name}.embedder.embedding.0.weights</c> [128], <c>conditioners.{name}.embedder.embedding.1.
 /// {weight,bias}</c> [768,257]/[768].</summary>
-public sealed unsafe class StableAudioNumberEmbedder
+/// <param name="minVal">Clamp/normalize range minimum (0 on both released variants).</param>
+/// <param name="maxVal">Clamp/normalize range maximum — <see cref="StableAudioDitConfig.TimingMaxSeconds"/>.</param>
+public sealed unsafe class StableAudioNumberEmbedder(float minVal, float maxVal)
 {
-    private readonly float _minVal, _maxVal;
+    private readonly float _minVal = minVal, _maxVal = maxVal;
     private Tensor? _fourierWeights, _linearWeight, _linearBias;
-
-    /// <param name="minVal">Clamp/normalize range minimum (0 on both released variants).</param>
-    /// <param name="maxVal">Clamp/normalize range maximum — <see cref="StableAudioDitConfig.TimingMaxSeconds"/>.</param>
-    public StableAudioNumberEmbedder(float minVal, float maxVal)
-    {
-        _minVal = minVal;
-        _maxVal = maxVal;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {

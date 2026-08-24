@@ -7,18 +7,12 @@ namespace HartsyInference.Vision.Detection.GroundingDino;
 /// <c>GroundingDinoMultiheadAttention</c>), used by the text-enhancer self-attention and the decoder self- and
 /// text-cross-attention. Scale is <c>1/sqrt(head_dim)</c>; an optional additive mask <c>[1, heads, Sq, Skv]</c> is
 /// added to the pre-softmax scores.</summary>
-public sealed unsafe class GroundingDinoMultiheadAttention : IDisposable
+public sealed unsafe class GroundingDinoMultiheadAttention(int hidden, int heads) : IDisposable
 {
-    private readonly int _hidden;
-    private readonly int _heads;
+    private readonly int _hidden = hidden;
+    private readonly int _heads = heads;
     private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
     private int _disposed;
-
-    public GroundingDinoMultiheadAttention(int hidden, int heads)
-    {
-        _hidden = hidden;
-        _heads = heads;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string outName = "out_proj")
     {

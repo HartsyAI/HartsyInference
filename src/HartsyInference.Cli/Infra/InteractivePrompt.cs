@@ -10,8 +10,7 @@ public static class InteractivePrompt
     // Fall back to a plain numbered/line-read flow whenever the console can't drive Spectre's interactive prompts —
     // redirected streams, or a terminal Spectre judges non-interactive / non-ANSI (CI, dumb terminals, some PTYs).
     private static bool Plain =>
-        Console.IsInputRedirected || Console.IsOutputRedirected
-        || !AnsiConsole.Profile.Capabilities.Ansi
+        Console.IsInputRedirected || Console.IsOutputRedirected || !AnsiConsole.Profile.Capabilities.Ansi
         || !AnsiConsole.Profile.Capabilities.Interactive;
 
     /// <summary>Shows <paramref name="choices"/> and returns the selected index, or -1 if the user cancels.</summary>
@@ -55,8 +54,7 @@ public static class InteractivePrompt
             return string.IsNullOrEmpty(result) ? def : result;
         }
 
-        AnsiConsole.Markup(def is null
-            ? $"[{CliTheme.Accent}]{Markup.Escape(label)}[/][{CliTheme.Muted}]: [/]"
+        AnsiConsole.Markup(def is null ? $"[{CliTheme.Accent}]{Markup.Escape(label)}[/][{CliTheme.Muted}]: [/]"
             : $"[{CliTheme.Accent}]{Markup.Escape(label)}[/] [{CliTheme.Muted}][[{Markup.Escape(def)}]]: [/]");
         string? line = Console.ReadLine();
         return string.IsNullOrWhiteSpace(line) ? def : line.Trim();

@@ -252,8 +252,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // ── 3. Initial latent (t2i: noise * initSigma; img2img: VAE-encoded source + AddNoise at sigma[startStep]) ──
         (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, startStep, keepSourceLatent: isMaskedInpaint);
         Tensor? latentMask = isMaskedInpaint
-            ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW)
-            : null;
+            ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW) : null;
 
         // ── 4. Denoising loop ──
         // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
@@ -327,8 +326,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
                     // DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
                     // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
                     // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
-                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex]
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                         : s * 1000.0f;
                     // The step cache is a first-block-cache calibrated on the drift between CONSECUTIVE steps. A
                     // second-order sampler evaluates twice inside one step at different sigmas, which feeds it a drift
@@ -398,8 +396,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         if (stepCacheCond is not null)
         {
             string uncondStats = stepCacheUncond is not null
-                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
-                : "";
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses" : "";
             Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
         }
         stepCacheCond?.Dispose();

@@ -69,8 +69,7 @@ public static class MatMulKernels
                                 {
                                     Vector256<float> vB = Avx.LoadVector256(rowB + j);
                                     Vector256<float> vOut = Avx.LoadVector256(rowOut + j);
-                                    Vector256<float> result = Fma.IsSupported
-                                        ? Fma.MultiplyAdd(vA, vB, vOut)
+                                    Vector256<float> result = Fma.IsSupported ? Fma.MultiplyAdd(vA, vB, vOut)
                                         : Avx.Add(vOut, Avx.Multiply(vA, vB));
                                     Avx.Store(rowOut + j, result);
                                 }
@@ -162,8 +161,7 @@ public static class MatMulKernels
                                 {
                                     Vector256<float> vA = Avx.LoadVector256(rowA + k);
                                     Vector256<float> vW = Avx.LoadVector256(rowW + k);
-                                    vSum = Fma.IsSupported
-                                        ? Fma.MultiplyAdd(vA, vW, vSum)
+                                    vSum = Fma.IsSupported ? Fma.MultiplyAdd(vA, vW, vSum)
                                         : Avx.Add(vSum, Avx.Multiply(vA, vW));
                                 }
                                 // Horizontal sum

@@ -262,8 +262,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         foreach (int u in _cfg.UpsampleRates) upProd *= u;
         int scale = upProd * _cfg.IstftHopSize;
         int marginMelFrames = Math.Max(1, StreamMarginSamples / scale);
-        int settledMelFrames = isFinal
-            ? tMel
+        int settledMelFrames = isFinal ? tMel
             : Math.Min(tMel, Math.Max(state.HarmonicSettledMelFrames, tMel - marginMelFrames));
 
         // F0 for the harmonic source MUST come from a genuinely position-local computation — see

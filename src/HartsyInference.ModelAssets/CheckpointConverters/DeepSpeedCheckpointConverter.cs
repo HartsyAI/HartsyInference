@@ -19,8 +19,7 @@ public static class DeepSpeedCheckpointConverter
         foreach (KeyValuePair<string, Tensor> kv in raw)
         {
             string key = anyPrefixed && kv.Key.StartsWith(ModulePrefix, StringComparison.Ordinal)
-                ? kv.Key[ModulePrefix.Length..]
-                : kv.Key;
+                ? kv.Key[ModulePrefix.Length..] : kv.Key;
             outMap[key] = kv.Value;
         }
         return outMap;

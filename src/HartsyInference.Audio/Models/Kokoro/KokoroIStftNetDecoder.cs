@@ -161,8 +161,7 @@ public sealed unsafe class KokoroIStftNetDecoder
         f0Down.Dispose();
 
         // generator consumes the ORIGINAL 2T F0 curve (not the downsampled one).
-        float[] audio = _useHifiGan
-            ? _hifiGan!.Forward(backend, x, styleDecoder, f0)
+        float[] audio = _useHifiGan ? _hifiGan!.Forward(backend, x, styleDecoder, f0)
             : RunGenerator(backend, x, styleDecoder, f0);
         x.Dispose();
         return audio;

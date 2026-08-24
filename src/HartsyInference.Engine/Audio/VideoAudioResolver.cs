@@ -14,8 +14,7 @@ public static class VideoAudioResolver
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(request);
-        AudioBuffer? chosen = result.Audio is not null && !result.Audio.IsEmpty
-            ? result.Audio
+        AudioBuffer? chosen = result.Audio is not null && !result.Audio.IsEmpty ? result.Audio
             : DecodePassThrough(request);
         if (chosen is null || chosen.IsEmpty)
         {

@@ -36,12 +36,7 @@ public sealed unsafe class AnimaRope
     private readonly Dictionary<IBackend, GpuTableEntry> _gpuTables =
         new(ReferenceEqualityComparer.Instance);
 
-    private sealed record GpuTableEntry(
-        int TFrames,
-        int HPatched,
-        int WPatched,
-        Tensor Cos,
-        Tensor Sin);
+    private sealed record GpuTableEntry(int TFrames, int HPatched, int WPatched, Tensor Cos, Tensor Sin);
 
     /// <summary>Creates a 3-axis Cosmos RoPE for the given <paramref name="hiddenSize"/> per head and base period.
     /// <paramref name="ropeScale"/> applies the upstream NTK scale: <c>theta_axis = theta * scale^(dim_axis/(dim_axis-2))</c>
@@ -53,8 +48,7 @@ public sealed unsafe class AnimaRope
                 nameof(hiddenSize), hiddenSize, "AnimaRope head dimension must be positive and even.");
         if (!float.IsFinite(theta) || theta <= 0f)
             throw new ArgumentOutOfRangeException(nameof(theta), theta, "AnimaRope theta must be finite and positive.");
-        if (!float.IsFinite(ropeScale.T) || ropeScale.T <= 0f
-            || !float.IsFinite(ropeScale.H) || ropeScale.H <= 0f
+        if (!float.IsFinite(ropeScale.T) || ropeScale.T <= 0f || !float.IsFinite(ropeScale.H) || ropeScale.H <= 0f
             || !float.IsFinite(ropeScale.W) || ropeScale.W <= 0f)
             throw new ArgumentOutOfRangeException(
                 nameof(ropeScale), ropeScale, "AnimaRope per-axis scales must be finite and positive.");

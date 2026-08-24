@@ -52,9 +52,7 @@ public sealed class DdimScheduler : IScheduler
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {
         int timestep = (int)_timesteps[stepIndex];
-        int prevTimestep = stepIndex + 1 < _numInferenceSteps
-            ? (int)_timesteps[stepIndex + 1]
-            : -1;
+        int prevTimestep = stepIndex + 1 < _numInferenceSteps ? (int)_timesteps[stepIndex + 1] : -1;
 
         float alphaProdT = _alphasCumprod[timestep];
         float alphaProdTPrev = prevTimestep >= 0 ? _alphasCumprod[prevTimestep] : _finalAlphaCumprod;

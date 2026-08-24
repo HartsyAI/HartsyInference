@@ -53,8 +53,7 @@ public static unsafe class LlavaNextImagePreprocessor
     public static (int h, int w) GetPatchOutputSize((int h, int w) original, (int h, int w) target)
     {
         double scaleW = (double)target.w / original.w, scaleH = (double)target.h / original.h;
-        return scaleW < scaleH
-            ? (Math.Min((int)Math.Ceiling(original.h * scaleW), target.h), target.w)
+        return scaleW < scaleH ? (Math.Min((int)Math.Ceiling(original.h * scaleW), target.h), target.w)
             : (target.h, Math.Min((int)Math.Ceiling(original.w * scaleH), target.w));
     }
 

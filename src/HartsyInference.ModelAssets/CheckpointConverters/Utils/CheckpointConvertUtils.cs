@@ -102,8 +102,7 @@ public static unsafe class CheckpointConvertUtils
             suffix = suffix["model.".Length..];
 
         if (suffix.StartsWith("layers.", StringComparison.Ordinal)
-            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal)
-            || suffix == "norm.weight")
+            || suffix.StartsWith("embed_tokens.", StringComparison.Ordinal) || suffix == "norm.weight")
         {
             return "model." + suffix;
         }
@@ -703,8 +702,7 @@ public static unsafe class CheckpointConvertUtils
                     }
 
                     float globalScale = ((float*)scale2T.DataPointer)[0];
-                    result[key] = nvfp4ToFp8
-                        ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
+                    result[key] = nvfp4ToFp8 ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
                         : DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
                     continue;
                 }

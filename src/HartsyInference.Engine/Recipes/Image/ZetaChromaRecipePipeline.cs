@@ -15,34 +15,23 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Zeta-Chroma pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZetaChromaPipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZetaChromaPipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZetaChromaLoader.Generate</c> drive path, with the Z-Image preload→encode→free staging around the ~8 GB encoder.</summary>
-public sealed unsafe class ZetaChromaRecipePipeline : IRecipePipeline
+/// <summary>A constructed Zeta-Chroma pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZetaChromaPipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZetaChromaPipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZetaChromaLoader.Generate</c> drive path, with the Z-Image preload→encode→free staging around the ~8 GB encoder. Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
+public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config,
+    LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader,
+    SafeTensorsLoader qwenLoader, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Qwen3 right-pads EncodeChat output with BosTokenId (151643); the real length ends at the first such pad.</summary>
     private const int Qwen3PadTokenId = 151643;
 
-    private readonly ZetaChromaPipeline _pipeline;
-    private readonly ZetaChromaConfig _config;
-    private readonly LlamaStyleEncoder _qwen;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly IBackend _backend;
-    private readonly SafeTensorsLoader _checkpointLoader;
-    private readonly SafeTensorsLoader _qwenLoader;
+    private readonly ZetaChromaPipeline _pipeline = pipeline;
+    private readonly ZetaChromaConfig _config = config;
+    private readonly LlamaStyleEncoder _qwen = qwen;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly IBackend _backend = backend;
+    private readonly SafeTensorsLoader _checkpointLoader = checkpointLoader;
+    private readonly SafeTensorsLoader _qwenLoader = qwenLoader;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _config = config;
-        _qwen = qwen;
-        _tokenizer = tokenizer;
-        _backend = backend;
-        _checkpointLoader = checkpointLoader;
-        _qwenLoader = qwenLoader;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

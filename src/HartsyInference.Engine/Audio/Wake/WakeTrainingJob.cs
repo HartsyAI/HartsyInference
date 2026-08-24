@@ -294,8 +294,7 @@ public sealed class WakeTrainingJob
         {
             float recall = positives.Count == 0 ? 0f : positives.Count(f => trainer.Predict(f) >= threshold) / (float)positives.Count;
             float falseAccepts = negatives.Count == 0 ? 0f : negatives.Count(f => trainer.Predict(f) >= threshold) / (float)negatives.Count;
-            bool better = falseAccepts <= 0.01f
-                ? bestFalse > 0.01f || recall > bestRecall
+            bool better = falseAccepts <= 0.01f ? bestFalse > 0.01f || recall > bestRecall
                 : bestFalse > 0.01f && falseAccepts < bestFalse;
             if (better) (bestThreshold, bestRecall, bestFalse) = (threshold, recall, falseAccepts);
         }

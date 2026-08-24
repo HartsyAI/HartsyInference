@@ -381,8 +381,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                         // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for
                         // the other would shift every existing Chroma generation by an ulp of conditioning.
                         float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex] / 1000.0f
-                            : s;
+                            ? timestepTable[stepIndex] / 1000.0f : s;
                         // The step cache is a first-block-cache calibrated on the drift between CONSECUTIVE
                         // steps. A second-order sampler evaluates twice inside one step at different sigmas, which
                         // feeds it a drift signature it was never calibrated for — the failure mode ROADMAP §6
@@ -471,8 +470,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             // Drain-free previews: every 4th step, but NOT the final step — the finished image follows
             // immediately, and the final-step latent preview would add a redundant full drain + D2H +
             // convert right before the end-of-loop snapshot does the same work.
-            bool emitPreview = onProgress is not null
-                && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
+            bool emitPreview = onProgress is not null && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
             if (emitPreview)
             {
                 // Graph mode: never read the fixed latent's DataPointer (D2H would evict the buffer the
@@ -503,8 +501,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         if (stepCacheCond is not null)
         {
             string uncondStats = stepCacheUncond is not null
-                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
-                : "";
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses" : "";
             Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
         }
         stepCacheCond?.Dispose();

@@ -41,8 +41,7 @@ public sealed class WanVaceRecipe : IVideoRecipe
     {
         // TODO(E-IMG-4/5): LoRA and VideoRequest.Components overrides for the umT5 / VAE picks are deferred.
         WanVideoConfig config = string.Equals(_familyId, WanVideoRecipe.Wan21_1_3BCompatClassId, StringComparison.OrdinalIgnoreCase)
-            ? WanVideoConfig.Vace_1_3B
-            : WanVideoConfig.Vace_14B;
+            ? WanVideoConfig.Vace_1_3B : WanVideoConfig.Vace_14B;
 
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();

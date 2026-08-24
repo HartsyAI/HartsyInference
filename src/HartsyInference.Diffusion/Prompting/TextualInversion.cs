@@ -57,9 +57,8 @@ public static class TextualInversion
         foreach (KeyValuePair<string, Tensor> kv in tensors)
         {
             Tensor t = kv.Value;
-            bool match = chosen is null
-                && ((t.Shape.Rank == 2 && (int)t.Shape[1] == hiddenSize)
-                    || (t.Shape.Rank == 1 && (int)t.Shape[0] == hiddenSize));
+            bool match = chosen is null && ((t.Shape.Rank == 2 && (int)t.Shape[1] == hiddenSize)
+                || (t.Shape.Rank == 1 && (int)t.Shape[0] == hiddenSize));
             if (match)
             {
                 chosen = t;

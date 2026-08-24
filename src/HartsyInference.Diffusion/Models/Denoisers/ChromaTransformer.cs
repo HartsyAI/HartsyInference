@@ -311,11 +311,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         // see the per-backend cache comment on _sdpaMaskCaches).
         FluxRope rope = GetRope(txtSeqLen, hPacked, wPacked);
         Tensor? maskA = attentionMask is not null
-            ? GetOrBuildSdpaMask(backendA, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen)
-            : null;
+            ? GetOrBuildSdpaMask(backendA, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen) : null;
         Tensor? maskB = attentionMask is not null
-            ? GetOrBuildSdpaMask(backendB, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen)
-            : null;
+            ? GetOrBuildSdpaMask(backendB, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen) : null;
 
         int doubleSplit = Math.Min(splitBlock, numDoubles);
         int singleSplit = Math.Max(0, splitBlock - numDoubles);
@@ -602,8 +600,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
             ? SliceModSlabDevice(backend, modTable, _config.ModIndexLength - 2, rowCount: 2, hidden)
             : SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
 
-        Tensor normedOut = batch == 1
-            ? ApplyContinuousNormDevice(backend, imgOut, finalScaleShift, imgSeqLen, hidden)
+        Tensor normedOut = batch == 1 ? ApplyContinuousNormDevice(backend, imgOut, finalScaleShift, imgSeqLen, hidden)
             : ApplyContinuousNorm(imgOut, finalScaleShift, batch, imgSeqLen, hidden);
         finalScaleShift.Dispose();
         imgOut.Dispose();
@@ -687,8 +684,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         //    CFG — the profiled top H2D_MISS_BIG source). Two slots because the CFG loop alternates the
         //    cond/uncond mask tensors every step. The cache owns the tensors; the forward must not dispose. ──
         Tensor? sdpaMask = attentionMask is not null
-            ? GetOrBuildSdpaMask(backend, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen)
-            : null;
+            ? GetOrBuildSdpaMask(backend, attentionMask, batch, txtSeqLen, imgSeqLen, totalSeqLen) : null;
 
         // ── Double-stream blocks ──
         // Across-step First-Block cache (docs/Research/STEP_ACCELERATION.md §2; same pattern as
@@ -803,8 +799,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         {
             int imgRow = imgOffset + 6 * i;
             int txtRow = txtOffset + 6 * i;
-            Tensor doubleTemb = batch == 1
-                ? BuildDoubleBlockTembDevice(backend, modTable, imgRow, txtRow, hidden)
+            Tensor doubleTemb = batch == 1 ? BuildDoubleBlockTembDevice(backend, modTable, imgRow, txtRow, hidden)
                 : BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
             ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
 
@@ -835,8 +830,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         for (int i = startBlock; i < endBlock; i++)
         {
             int singleRow = 3 * i;
-            Tensor singleTemb = batch == 1
-                ? SliceModSlabDevice(backend, modTable, singleRow, rowCount: 3, hidden)
+            Tensor singleTemb = batch == 1 ? SliceModSlabDevice(backend, modTable, singleRow, rowCount: 3, hidden)
                 : SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
             ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
 

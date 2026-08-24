@@ -106,8 +106,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         // fused-GEMV head; a tied F32 embed is the head directly; untied models ship their own lm_head.
         if (_cfg.TieWordEmbeddings)
         {
-            _head = embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16
-                ? embedRaw
+            _head = embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16 ? embedRaw
                 : _embed;
         }
         else
@@ -497,9 +496,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         long rowsPer = rows / degree;
         long elementsPerRow = w.ElementCount / rows;
         long rowBytes = w.DType.ComputeByteCount(elementsPerRow);
-        TensorShape shape = w.Shape.Rank == 1
-            ? new TensorShape(rowsPer)
-            : new TensorShape(rowsPer, w.Shape[1]);
+        TensorShape shape = w.Shape.Rank == 1 ? new TensorShape(rowsPer) : new TensorShape(rowsPer, w.Shape[1]);
         Tensor slice = new(shape, w.DType);
         long bytes = rowsPer * rowBytes;
         Buffer.MemoryCopy((byte*)w.DataPointer + rank * bytes, (void*)slice.DataPointer, bytes, bytes);

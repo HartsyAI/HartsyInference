@@ -604,8 +604,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // step-graph slot, so a persistent cross-generation graph requires skipping the sweep on the plain
         // t2i cache-warm path (the Chroma pattern — per-op disposal + the warm mem-pool keep VRAM flat).
         bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
-            && !hasFluxCn && !hasRegions && !StatsEnabled
-            && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
+            && !hasFluxCn && !hasRegions && !StatsEnabled && (reduxExtendedT5 is null || reduxApplyStartFraction <= 0f);
 
         // Across-step First-Block cache (same knobs as Sd3/Chroma/HiDream). Only wired onto the drainFree,
         // non-sharded path — ForwardSharded has no cache-consuming entry point, and the host-step branch
@@ -734,8 +733,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // mathematically but the F32 round trip through x1000 is not exact, so passing raw sigma would shift
             // every existing Flux generation by an ulp of conditioning. A genuine sub-step takes the raw value.
             float stepSigma = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                ? timestepTable[stepIndex] / 1000.0f
-                : s;
+                ? timestepTable[stepIndex] / 1000.0f : s;
             // Narrowed for a non-default sampler: the step cache is calibrated on drift between CONSECUTIVE
             // steps, and a second-order method evaluates twice inside one step.
             bool eligible = !nonDefaultSampler
@@ -990,8 +988,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         if (stepCacheCond is not null)
         {
             string uncondStats = stepCacheUncond is not null
-                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
-                : "";
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses" : "";
             Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
         }
         stepCacheCond?.Dispose();

@@ -158,8 +158,7 @@ public sealed class VulkanDevice : IDisposable
         bool isAsyncCompute = false;
         for (uint i = 0; i < qfs.Length; i++)
         {
-            if ((qfs[i].queueFlags & VkQueueFlags.Compute) != 0
-                && (qfs[i].queueFlags & VkQueueFlags.Graphics) == 0)
+            if ((qfs[i].queueFlags & VkQueueFlags.Compute) != 0 && (qfs[i].queueFlags & VkQueueFlags.Graphics) == 0)
             { queueFamily = i; isAsyncCompute = true; break; }
         }
         if (queueFamily == uint.MaxValue)

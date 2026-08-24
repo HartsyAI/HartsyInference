@@ -3,11 +3,11 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Computes T5's learned relative position bias for self-attention. Uses bucketed log-linear distance mapping with a learned [numBuckets, numHeads] lookup table. Computed once (layer 0) and broadcast to all encoder layers.</summary>
-public sealed unsafe class T5RelativePositionBias
+public sealed unsafe class T5RelativePositionBias(int numBuckets, int maxDistance, int numHeads)
 {
-    private readonly int _numBuckets;
-    private readonly int _maxDistance;
-    private readonly int _numHeads;
+    private readonly int _numBuckets = numBuckets;
+    private readonly int _maxDistance = maxDistance;
+    private readonly int _numHeads = numHeads;
 
     /// <summary>Learned bias table [numBuckets, numHeads] loaded from weights.</summary>
     private Tensor? _biasTable;
@@ -15,13 +15,6 @@ public sealed unsafe class T5RelativePositionBias
     /// <summary>Cached bias tensor [1, numHeads, seqLen, seqLen] for the last computed sequence length.</summary>
     private Tensor? _cachedBias;
     private int _cachedSeqLen;
-
-    public T5RelativePositionBias(int numBuckets, int maxDistance, int numHeads)
-    {
-        _numBuckets = numBuckets;
-        _maxDistance = maxDistance;
-        _numHeads = numHeads;
-    }
 
     /// <summary>Loads the relative_attention_bias.weight tensor [numBuckets, numHeads]. Auto-casts to F32 if needed (ComputeBias uses float* directly).</summary>
     public void LoadWeights(Tensor biasTable)

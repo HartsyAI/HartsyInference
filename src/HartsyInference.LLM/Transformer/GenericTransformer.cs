@@ -73,8 +73,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         long elementsPerRow = parts[0].ElementCount / parts[0].Shape[0];
         long totalRows = 0;
         foreach (Tensor p in parts) totalRows += p.Shape[0];
-        TensorShape outShape = parts[0].Shape.Rank == 1
-            ? new TensorShape(totalRows)
+        TensorShape outShape = parts[0].Shape.Rank == 1 ? new TensorShape(totalRows)
             : new TensorShape(totalRows, parts[0].Shape[1]);
         Tensor result = new(outShape, dt);
         long rowBytes = dt.ComputeByteCount(elementsPerRow);
@@ -429,8 +428,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 {
                     // mllama: cross-attend the vision features. With no image present the layer is skipped (HF masks
                     // it out), so the hidden state passes through unchanged.
-                    next = crossStates is not null
-                        ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen)
+                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen)
                         : CopyHidden(backend, hidden);
                 }
                 else
@@ -545,10 +543,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     private bool SupportsGraphDecodeCore(IBackend backend) =>
-        backend.GraphDecodeSupported
-        && _cfg.Mla is null
-        && _cfg.Moe is null
-        && _cfg.CrossAttnLayers.Count == 0
+        backend.GraphDecodeSupported && _cfg.Mla is null && _cfg.Moe is null && _cfg.CrossAttnLayers.Count == 0
         // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
@@ -706,12 +701,8 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>True when this architecture can run the two-stream shared-position graph decode step (<see cref="ForwardGraphDecodeStepDualEmbeds"/>): everything <see cref="SupportsGraphDecode"/> requires, minus the features <see cref="Layer.ForwardGraphStepDual"/> doesn't implement (per-layer SWA head dims, dual local/global RoPE tables, KV-sharing, per-layer embeddings, V-norm, LayerNorm/full-dim QK-norm). CSM/HeartMuLa's Llama backbone satisfies all of these.</summary>
     public bool SupportsDualGraphDecode(IBackend backend) =>
-        SupportsGraphDecodeCore(backend)
-        && _cfg.KvSharedFromLayer == 0
-        && _cfg.PerLayerEmbeddingDim == 0
-        && _cfg.HeadDimSwa == 0
-        && _cfg.RopeLocalTheta <= 0
-        && !_cfg.VNorm
+        SupportsGraphDecodeCore(backend) && _cfg.KvSharedFromLayer == 0 && _cfg.PerLayerEmbeddingDim == 0
+        && _cfg.HeadDimSwa == 0 && _cfg.RopeLocalTheta <= 0 && !_cfg.VNorm
         && !(_cfg.QkNorm && (_cfg.QkNormFullDim || _cfg.UseLayerNorm));
 
     /// <summary>Two-stream variant of <see cref="ForwardGraphDecodeStepEmbeds"/> for CSM/HeartMuLa's CFG decode: <paramref name="inEmbed"/> is <c>[1,2,H]</c> (row 0 = conditional, row 1 = unconditional), the rows are POSITION-ALIGNED so ONE shared <paramref name="devicePos"/> serves RoPE/KV scatters/attention for both, and each row writes into its OWN cache (<paramref name="cacheA"/>/<paramref name="cacheB"/>).</summary>
@@ -819,9 +810,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         // route EVERY token; nsys measured that at 55% of qwen2.5-0.5b's total decode GPU time (2026-07-22).
         bool fusedHead = t <= 8
             && (((headW.DType == DType.Q4_K || headW.DType == DType.Q5_K || headW.DType == DType.Q6_K)
-                    && _cfg.HiddenSize % 256 == 0)
-                || ((headW.DType == DType.Q8_0 || headW.DType == DType.Q4_0 || headW.DType == DType.Q5_0)
-                    && _cfg.HiddenSize % 32 == 0));
+            && _cfg.HiddenSize % 256 == 0)
+            || ((headW.DType == DType.Q8_0 || headW.DType == DType.Q4_0 || headW.DType == DType.Q5_0)
+            && _cfg.HiddenSize % 32 == 0));
         if (fusedHead)
         {
             Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
@@ -1222,8 +1213,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
                 // GluActivate pass over the concatenated projection output.
-                bool gluFusable = _gateUpW is not null
-                    && _gateW!.Shape[0] == _upW!.Shape[0]
+                bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]
                     && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared);
                 if (gluFusable)
                 {

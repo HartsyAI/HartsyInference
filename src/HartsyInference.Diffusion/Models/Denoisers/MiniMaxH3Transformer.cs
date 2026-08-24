@@ -338,8 +338,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
                 Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
-            Tensor attn = seq > chunkRows
-                ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
+            Tensor attn = seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
                 : Attention(backend, modulated, $"{p}.attn", cos, sin);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
@@ -350,8 +349,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex,
                 Optional($"{p}.mlp.fc1.weight"));
             normed2.Dispose();
-            Tensor mlp = seq > chunkRows
-                ? MlpChunked(backend, modulated2, $"{p}.mlp", chunkRows)
+            Tensor mlp = seq > chunkRows ? MlpChunked(backend, modulated2, $"{p}.mlp", chunkRows)
                 : Mlp(backend, modulated2, $"{p}.mlp");
             modulated2.Dispose();
             Tensor gatedMlp = Gate(backend, h, mlp, mod[5], modIndex);

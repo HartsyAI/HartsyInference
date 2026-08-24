@@ -4,10 +4,10 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Adapters;
 
 /// <summary>The image-prompt projection used by the standard (non-Plus) IP-Adapter: a single Linear from the CLIP visual_projection output (typically 1024 dims) to <c>num_tokens × cross_attention_dim</c>, reshaped into <c>[B, num_tokens, cross_attention_dim]</c> and finished with a LayerNorm over the per-token cross-attention dim. Math is CPU-side here on purpose — even at SDXL's largest case (1024 → 8192 linear, batch=1) it's a couple of MB of floats, dwarfed by the UNet's per-step cost. Avoiding a backend round-trip keeps the projection as a self-contained unit and lets us skip allocating intermediate device tensors that would flow into <c>cnn</c>'s weight cache. The Plus variant's resampler uses backend ops instead — its matmul shapes (273×1024 K/V over 8 layers) are ~6 GFLOPs and benefit from GPU. Weight key layout matches diffusers / tencent-ailab IP-Adapter: <c>image_proj.proj.weight</c>, <c>image_proj.proj.bias</c>, <c>image_proj.norm.weight</c>, <c>image_proj.norm.bias</c>.</summary>
-public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjection
+public sealed unsafe class IpAdapterStandardProjection(int crossAttnDim, int numTokens) : IIpAdapterImageProjection
 {
-    private readonly int _crossAttnDim;
-    private readonly int _numTokens;
+    private readonly int _crossAttnDim = crossAttnDim;
+    private readonly int _numTokens = numTokens;
 
     private Tensor? _projWeight; // [numTokens * crossAttnDim, projectionDim]
     private Tensor? _projBias;   // [numTokens * crossAttnDim]
@@ -15,12 +15,6 @@ public sealed unsafe class IpAdapterStandardProjection : IIpAdapterImageProjecti
     private Tensor? _normBias;   // [crossAttnDim]
 
     public int NumTokens => _numTokens;
-
-    public IpAdapterStandardProjection(int crossAttnDim, int numTokens)
-    {
-        _crossAttnDim = crossAttnDim;
-        _numTokens = numTokens;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {

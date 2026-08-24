@@ -74,8 +74,7 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
                     Conv1 = Conv(weights, $"{p}.conv1", padT: 1, padH: 1, padW: 1),
                     Conv2 = Conv(weights, $"{p}.conv2", padT: 1, padH: 1, padW: 1),
                     NinShortcut = weights.ContainsKey($"{p}.nin_shortcut.weight")
-                        ? Conv(weights, $"{p}.nin_shortcut", padT: 0, padH: 0, padW: 0)
-                        : null,
+                        ? Conv(weights, $"{p}.nin_shortcut", padT: 0, padH: 0, padW: 0) : null,
                 };
             }
             int spaceStride = _config.EncoderSpaceDown[i], timeStride = _config.EncoderTimeDown[i];
@@ -634,8 +633,7 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
     {
         int h = (int)tile.Shape[3], w = (int)tile.Shape[4];
         using Tensor view = new Tensor((void*)tile.DataPointer, new TensorShape(1, planes, h, w), DType.F32);
-        return vertical
-            ? VaeTiling.ExtractTile(view, 1, planes, h - overlap, 0, overlap, w)
+        return vertical ? VaeTiling.ExtractTile(view, 1, planes, h - overlap, 0, overlap, w)
             : VaeTiling.ExtractTile(view, 1, planes, 0, w - overlap, h, overlap);
     }
 
@@ -721,7 +719,6 @@ public sealed unsafe class MiniMaxH3VideoVaeEncoder
             replicateFirstPad: false, causal: true, spatialReflectPad: padH > 0 || padW > 0);
 
     private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        weights.TryGetValue(key, out Tensor? t)
-            ? t
+        weights.TryGetValue(key, out Tensor? t) ? t
             : throw new ArgumentException($"MiniMax-H3 video VAE encoder is missing '{key}'.");
 }

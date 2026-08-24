@@ -89,8 +89,7 @@ public sealed class Qwen3Tokenizer : IDisposable
             throw new FileNotFoundException("Qwen3 merges file was not found.", mergesFullPath);
         string? vocabDirectory = Path.GetDirectoryName(vocabFullPath);
         string? mergesDirectory = Path.GetDirectoryName(mergesFullPath);
-        if (vocabDirectory is not null
-            && string.Equals(vocabDirectory, mergesDirectory, StringComparison.Ordinal)
+        if (vocabDirectory is not null && string.Equals(vocabDirectory, mergesDirectory, StringComparison.Ordinal)
             && File.Exists(Path.Combine(vocabDirectory, "tokenizer.json")))
         {
             using Stream jsonStream = File.OpenRead(Path.Combine(vocabDirectory, "tokenizer.json"));
@@ -214,9 +213,7 @@ public sealed class Qwen3Tokenizer : IDisposable
 
     private IReadOnlyList<int> EncodeBpe(string text)
     {
-        string normalized = text.IsNormalized(NormalizationForm.FormC)
-            ? text
-            : text.Normalize(NormalizationForm.FormC);
+        string normalized = text.IsNormalized(NormalizationForm.FormC) ? text : text.Normalize(NormalizationForm.FormC);
 
         if (_exactTokenizer is not null)
             // GgufTokenizer's addSpecial flag means "recognize literals already present in the text"; it

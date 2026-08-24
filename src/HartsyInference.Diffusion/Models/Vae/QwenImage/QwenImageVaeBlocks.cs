@@ -52,16 +52,14 @@ public sealed class QwenImageResidualBlock
 
         Tensor c2 = weights[$"{prefix}.residual.2.weight"];
         _conv2Weight = QwenImageVaeOps.SliceConv3dToConv2d(c2, temporalSlot: -1);  // kT=3 → take last slot
-        _conv2Bias = weights[$"{prefix}.residual.2.bias"].DType == DType.F32
-            ? weights[$"{prefix}.residual.2.bias"]
+        _conv2Bias = weights[$"{prefix}.residual.2.bias"].DType == DType.F32 ? weights[$"{prefix}.residual.2.bias"]
             : weights[$"{prefix}.residual.2.bias"].CastTo(DType.F32);
 
         _gamma3 = QwenImageVaeOps.FlattenGamma(weights[$"{prefix}.residual.3.gamma"]);
 
         Tensor c6 = weights[$"{prefix}.residual.6.weight"];
         _conv6Weight = QwenImageVaeOps.SliceConv3dToConv2d(c6, temporalSlot: -1);
-        _conv6Bias = weights[$"{prefix}.residual.6.bias"].DType == DType.F32
-            ? weights[$"{prefix}.residual.6.bias"]
+        _conv6Bias = weights[$"{prefix}.residual.6.bias"].DType == DType.F32 ? weights[$"{prefix}.residual.6.bias"]
             : weights[$"{prefix}.residual.6.bias"].CastTo(DType.F32);
 
         if (_hasShortcut)
@@ -69,8 +67,7 @@ public sealed class QwenImageResidualBlock
             Tensor sc = weights[$"{prefix}.shortcut.weight"];
             // Shortcut is CausalConv3d(in, out, 1) — kT = kH = kW = 1.
             _shortcutWeight = QwenImageVaeOps.SliceConv3dToConv2d(sc, temporalSlot: 0);
-            _shortcutBias = weights[$"{prefix}.shortcut.bias"].DType == DType.F32
-                ? weights[$"{prefix}.shortcut.bias"]
+            _shortcutBias = weights[$"{prefix}.shortcut.bias"].DType == DType.F32 ? weights[$"{prefix}.shortcut.bias"]
                 : weights[$"{prefix}.shortcut.bias"].CastTo(DType.F32);
         }
     }

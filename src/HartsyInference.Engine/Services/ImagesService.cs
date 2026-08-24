@@ -35,8 +35,7 @@ public sealed class ImagesService : IImagesService
                 // re-serialized copy) — zero behavior change for every request without a <segment:>/<clear:> tag.
                 bool hasSegments = SegmentRefinement.HasSegmentParts(resolved.Prompt);
                 ImageRequest basePass = hasSegments
-                    ? resolved with { Prompt = SegmentRefinement.StripSegmentText(resolved.Prompt) }
-                    : resolved;
+                    ? resolved with { Prompt = SegmentRefinement.StripSegmentText(resolved.Prompt) } : resolved;
 
                 // basePass first: the crop is scaled to the resolution the model will actually run at, so it has to see
                 // the defaults-filled request rather than the caller's.

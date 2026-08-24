@@ -86,8 +86,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
         LlmPlacement? placement = Placement is { IsSingle: false } ? Placement : null;
         IBackend headBackend = placement?.LastBackend ?? backend;
         Tensor RunBody(ReadOnlySpan<int> tokens, int posStart, IKvCache kv) => placement is null
-            ? _lm.Forward(backend, tokens, 1, posStart, kv)
-            : _lm.ForwardStaged(placement, tokens, posStart, kv);
+            ? _lm.Forward(backend, tokens, 1, posStart, kv) : _lm.ForwardStaged(placement, tokens, posStart, kv);
 
         int[] prompt = contextTokens.ToArray();
         Tensor hidden = RunBody(prompt, 0, cache);

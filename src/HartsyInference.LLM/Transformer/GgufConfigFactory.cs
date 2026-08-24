@@ -253,8 +253,7 @@ public static class GgufConfigFactory
             // *Qwen2-MoE* do NOT (qwen2moe is build_moe_ffn(..., false) upstream). Honor an explicit GGUF flag
             // when present, else default per arch.
             bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
-                ? metadata.GetBool($"{arch}.expert_weights_norm")
-                : arch is not ("olmoe" or "qwen2moe");
+                ? metadata.GetBool($"{arch}.expert_weights_norm") : arch is not ("olmoe" or "qwen2moe");
             moe = new MoeConfig
             {
                 NumExperts = expertCount,
@@ -383,8 +382,7 @@ public static class GgufConfigFactory
         double factor = metadata.GetFloat32($"{arch}.rope.scaling.factor", 1f);
         double origCtx = metadata.GetUInt32($"{arch}.rope.scaling.original_context_length", 0u);
         double attn = metadata.ContainsKey($"{arch}.rope.scaling.attn_factor")
-            ? metadata.GetFloat32($"{arch}.rope.scaling.attn_factor")
-            : double.NaN;
+            ? metadata.GetFloat32($"{arch}.rope.scaling.attn_factor") : double.NaN;
         // YaRN NTK-by-parts boundaries + DeepSeek's mscale_all_dim — honor GGUF overrides (else the record
         // defaults 32 / 1 / 0). DeepSeek folds the mscale into the attention score scale (see the deepseek2
         // branch in FromGguf), so here we leave the cos/sin mscale neutral (attn_factor = 1) for it.

@@ -275,8 +275,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                         // shift every existing ERNIE-Image generation by an ulp of conditioning. Only a genuine
                         // off-schedule sub-step — what a second-order sampler evaluates at — takes the scaled value,
                         // which is right: there is no precomputed timestep for it.
-                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex]
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                             : s * 1000.0f;
                         if (!useCfg)
                         {

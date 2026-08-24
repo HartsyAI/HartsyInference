@@ -19,8 +19,7 @@ public sealed class SamMlpHead
         {
             _weights.Add(w.DType != DType.F32 ? w.CastTo(DType.F32) : w);
             _biases.Add(weights.TryGetValue($"{prefix}layers.{i}.bias", out Tensor? b)
-                ? (b.DType != DType.F32 ? b.CastTo(DType.F32) : b)
-                : null);
+                ? (b.DType != DType.F32 ? b.CastTo(DType.F32) : b) : null);
             i++;
         }
         if (_weights.Count == 0)

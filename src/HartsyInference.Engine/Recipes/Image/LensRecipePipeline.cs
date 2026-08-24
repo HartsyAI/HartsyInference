@@ -11,22 +11,14 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Lens pipeline driven against the native <see cref="ImageRequest"/>. Renders the prompt through Lens' Harmony chat template (<see cref="GptOssTokenizer.BuildChatInputs"/>) and calls <see cref="LensPipeline.GenerateFromTokens"/>, which owns the GPT-OSS-20B encoder forward. Mirrors the SwarmUI backend's <c>LensLoader.Generate</c> drive path.</summary>
-public sealed class LensRecipePipeline : IRecipePipeline
+/// <summary>A constructed Lens pipeline driven against the native <see cref="ImageRequest"/>. Renders the prompt through Lens' Harmony chat template (<see cref="GptOssTokenizer.BuildChatInputs"/>) and calls <see cref="LensPipeline.GenerateFromTokens"/>, which owns the GPT-OSS-20B encoder forward. Mirrors the SwarmUI backend's <c>LensLoader.Generate</c> drive path. Wraps the factory-built Lens bundle plus its tokenizer, taking ownership of both.</summary>
+public sealed class LensRecipePipeline(LensPipelineBundle bundle, LensConfig config, GptOssTokenizer tokenizer,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly LensPipelineBundle _bundle;
-    private readonly LensConfig _config;
-    private readonly GptOssTokenizer _tokenizer;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the factory-built Lens bundle plus its tokenizer, taking ownership of both.</summary>
-    public LensRecipePipeline(LensPipelineBundle bundle, LensConfig config, GptOssTokenizer tokenizer, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _bundle = bundle;
-        _config = config;
-        _tokenizer = tokenizer;
-    }
+    private readonly LensPipelineBundle _bundle = bundle;
+    private readonly LensConfig _config = config;
+    private readonly GptOssTokenizer _tokenizer = tokenizer;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <summary>The loaded <see cref="LensConfig"/> already carries the variant's official step count and CFG (Turbo 4/1.0, standard 20/5.0), so the defaults are read straight off it.</summary>
     public ImageDefaults? VariantDefaults => new ImageDefaults { Steps = _config.DefaultSteps, CfgScale = _config.DefaultCfgScale, Width = 1024, Height = 1024 };

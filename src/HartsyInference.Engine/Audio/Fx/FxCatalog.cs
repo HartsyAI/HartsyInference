@@ -106,7 +106,6 @@ internal static class FxCatalog
             return HtDemucsConfig.Htdemucs6s;
         }
         return value.Contains("_ft", StringComparison.Ordinal) || value.EndsWith("ft", StringComparison.Ordinal)
-            ? HtDemucsConfig.HtdemucsFt
-            : HtDemucsConfig.Htdemucs;
+            ? HtDemucsConfig.HtdemucsFt : HtDemucsConfig.Htdemucs;
     }
 }

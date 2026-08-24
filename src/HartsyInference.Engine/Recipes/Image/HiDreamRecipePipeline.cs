@@ -13,33 +13,21 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed HiDream-I1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HiDreamPipeline"/> owns all four encoder forwards, so this only tokenizes: one CLIP BPE pass reused for both CLIP-L and CLIP-G (the reference feeds identical ids to both), a T5 pass with its attention mask, and a Llama-3.1 pass — then calls <see cref="HiDreamPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HiDreamLoader.Generate</c> drive path.</summary>
-public sealed class HiDreamRecipePipeline : IRecipePipeline
+/// <summary>A constructed HiDream-I1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HiDreamPipeline"/> owns all four encoder forwards, so this only tokenizes: one CLIP BPE pass reused for both CLIP-L and CLIP-G (the reference feeds identical ids to both), a T5 pass with its attention mask, and a Llama-3.1 pass — then calls <see cref="HiDreamPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HiDreamLoader.Generate</c> drive path. Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
+public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer,
+    LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer,
+    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly HiDreamPipeline _pipeline;
-    private readonly ClipTokenizer _clipTokenizer;
-    private readonly T5Tokenizer _t5Tokenizer;
-    private readonly LlamaTokenizer _llamaTokenizer;
-    private readonly T5TextEncoder _t5;
-    private readonly LlamaStyleEncoder _llama;
-    private readonly HiDreamTransformer _transformer;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly HiDreamPipeline _pipeline = pipeline;
+    private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
+    private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
+    private readonly LlamaTokenizer _llamaTokenizer = llamaTokenizer;
+    private readonly T5TextEncoder _t5 = t5;
+    private readonly LlamaStyleEncoder _llama = llama;
+    private readonly HiDreamTransformer _transformer = transformer;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
-    public HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _clipTokenizer = clipTokenizer;
-        _t5Tokenizer = t5Tokenizer;
-        _llamaTokenizer = llamaTokenizer;
-        _t5 = t5;
-        _llama = llama;
-        _transformer = transformer;
-        _loaders = loaders;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

@@ -24,21 +24,15 @@ namespace HartsyInference.World.Pipelines;
 /// <para>This is the Phase 10 pedagogical reference model — full RGB-in/RGB-out in pure C# (the ViT-VAE encoder ships
 /// with the checkpoint). <b>Numerics validation-pending</b>; the 360×640 resolution is the only one the checkpoint
 /// supports. See <c>docs/Research/OASIS_ARCHITECTURE.md</c>.</para></summary>
-public sealed unsafe class OasisPipeline : DiffusionPipelineBase
+public sealed unsafe class OasisPipeline(IBackend backend, OasisDit dit, OasisVitVae vae)
+    : DiffusionPipelineBase(backend)
 {
     /// <summary>Latent scaling factor (20/255) from <c>generate.py</c>.</summary>
     public const float ScalingFactor = 0.07843137255f;
 
-    private readonly OasisDit _dit;
-    private readonly OasisVitVae _vae;
+    private readonly OasisDit _dit = dit;
+    private readonly OasisVitVae _vae = vae;
     private readonly DdimVPredScheduler _scheduler = new();
-
-    public OasisPipeline(IBackend backend, OasisDit dit, OasisVitVae vae)
-        : base(backend)
-    {
-        _dit = dit;
-        _vae = vae;
-    }
 
     /// <summary>Generates <paramref name="totalFrames"/> frames (including the prompt frame) from an RGB24 prompt
     /// image and a per-frame action plan (<c>[totalFrames − 1][25]</c> rows — the prompt frame gets the prepended

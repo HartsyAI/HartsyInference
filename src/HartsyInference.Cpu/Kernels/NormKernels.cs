@@ -261,9 +261,7 @@ public static class NormKernels
             {
                 Vector256<float> v = Avx.LoadVector256(ptr + i);
                 vSum = Avx.Add(vSum, v);
-                vSumSq = Fma.IsSupported
-                    ? Fma.MultiplyAdd(v, v, vSumSq)
-                    : Avx.Add(vSumSq, Avx.Multiply(v, v));
+                vSumSq = Fma.IsSupported ? Fma.MultiplyAdd(v, v, vSumSq) : Avx.Add(vSumSq, Avx.Multiply(v, v));
             }
 
             sum += SimdDispatch.HorizontalSum(vSum);

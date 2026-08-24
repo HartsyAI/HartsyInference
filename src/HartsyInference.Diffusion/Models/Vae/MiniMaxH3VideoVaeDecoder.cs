@@ -332,8 +332,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
                         newTails[j] = VaeTiling.ExtractTile(tile, 1, planes, tileH - yOverlap[i], 0, yOverlap[i], tileW);
                     }
                     Tensor? nextLeft = j < xs.Length - 1
-                        ? VaeTiling.ExtractTile(tile, 1, planes, 0, tileW - xOverlap[j], tileH, xOverlap[j])
-                        : null;
+                        ? VaeTiling.ExtractTile(tile, 1, planes, 0, tileW - xOverlap[j], tileH, xOverlap[j]) : null;
                     if (i > 0) VaeTiling.BlendVertical(rowTails[j]!, tile, yOverlap[i - 1]);
                     if (j > 0) VaeTiling.BlendHorizontal(leftTail!, tile, xOverlap[j - 1]);
                     leftTail?.Dispose();
@@ -527,8 +526,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     {
         int c = _config.OutChannels;
         long plane = (long)height * width;
-        TensorShape shape = asRank5
-            ? new TensorShape([1L, c, count, height, width])
+        TensorShape shape = asRank5 ? new TensorShape([1L, c, count, height, width])
             : new TensorShape(1, (long)c * count, height, width);
         Tensor outT = new Tensor(shape, DType.F32);
         float* src = (float*)tile.DataPointer;

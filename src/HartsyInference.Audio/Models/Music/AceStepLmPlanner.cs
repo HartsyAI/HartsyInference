@@ -148,8 +148,7 @@ public sealed unsafe class AceStepLmPlanner : IDisposable
             int hi = Math.Min(AudioCodeBase + NumAudioTokens, _cfg.VocabSize);
             for (int id = AudioCodeBase; id < hi; id++)
             {
-                blended[id] = useCfg
-                    ? uncondLogits![id] + opts.CfgScale * (condLogits![id] - uncondLogits[id])
+                blended[id] = useCfg ? uncondLogits![id] + opts.CfgScale * (condLogits![id] - uncondLogits[id])
                     : condLogits![id];
             }
             int next = sampler.Next(blended.AsSpan(), history);

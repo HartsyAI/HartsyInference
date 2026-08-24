@@ -72,8 +72,7 @@ public sealed class QwenImageVaeEncoder : IDisposable
         for (int i = 0; i < _stages.Length; i++)
         {
             EncodeStage s = _stages[i];
-            _downStages[i] = s.Kind == StageKind.Residual
-                ? new QwenImageResidualBlock(s.InCh, s.OutCh)
+            _downStages[i] = s.Kind == StageKind.Residual ? new QwenImageResidualBlock(s.InCh, s.OutCh)
                 : new QwenImageDownsample(s.InCh, s.OutCh);
         }
     }
@@ -232,18 +231,12 @@ public sealed class QwenImageVaeEncoder : IDisposable
 }
 
 /// <summary>Encoder strided downsample — the WAN <c>Resample</c> in <c>downsample2d</c> mode: a channel-changing <c>Conv2d(in, out, k=3, stride=2)</c> behind WAN's asymmetric <c>(0,1,0,1)</c> pad (via <see cref="VaeEncoder.PadRightBottom"/>), halving H/W. Mirrors <see cref="QwenImageResample"/> (upsample) with the same <c>resample.1.weight/bias</c> key convention (the <c>.0</c> slot is the parameter-less pad).</summary>
-public sealed class QwenImageDownsample
+public sealed class QwenImageDownsample(int inDim, int outDim)
 {
-    private readonly int _inDim;
-    private readonly int _outDim;
+    private readonly int _inDim = inDim;
+    private readonly int _outDim = outDim;
     private Tensor? _convWeight;   // [out, in, 3, 3]
     private Tensor? _convBias;
-
-    public QwenImageDownsample(int inDim, int outDim)
-    {
-        _inDim = inDim;
-        _outDim = outDim;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {

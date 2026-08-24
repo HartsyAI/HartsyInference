@@ -219,8 +219,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             Copy(sp + 2L * hidden * cols, v, (long)hidden * cols);
             return (q, k, v);
 
-            static Tensor Make(int rows, int cols) => cols == 1
-                ? new Tensor(new TensorShape(rows), DType.F32)
+            static Tensor Make(int rows, int cols) => cols == 1 ? new Tensor(new TensorShape(rows), DType.F32)
                 : new Tensor(new TensorShape(rows, cols), DType.F32);
             static void Copy(float* src, Tensor dst, long n)
             { float* dp = (float*)dst.DataPointer; Buffer.MemoryCopy(src, dp, n * 4, n * 4); }

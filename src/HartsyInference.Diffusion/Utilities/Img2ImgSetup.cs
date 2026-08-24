@@ -7,10 +7,7 @@ namespace HartsyInference.Diffusion.Utilities;
 public static class Img2ImgSetup
 {
     /// <summary>The validated img2img inputs and the derived denoise-loop start step. <see cref="PassThrough"/> is true when the caller should short-circuit (strength clamped to 0 → 0 denoise steps requested), in which case the source image should be returned to the user unchanged.</summary>
-    public readonly record struct Plan(
-        int StartStep,
-        Tensor? MaskPixel,
-        bool PassThrough);
+    public readonly record struct Plan(int StartStep, Tensor? MaskPixel, bool PassThrough);
 
     /// <summary>The no-op plan returned for plain text-to-image requests. Denoise loop starts at step 0; no mask; not a pass-through.</summary>
     public static Plan TextToImage => new Plan(StartStep: 0, MaskPixel: null, PassThrough: false);

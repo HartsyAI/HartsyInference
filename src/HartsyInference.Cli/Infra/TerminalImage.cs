@@ -16,8 +16,7 @@ public static class TerminalImage
     /// <remarks>Requires a real (non-redirected) stdout, truecolor not opted out via <c>NO_COLOR</c>, and not disabled via
     /// <c>HARTSY_NO_IMAGE=1</c>.</remarks>
     public static bool IsSupported =>
-        !Console.IsOutputRedirected
-        && Environment.GetEnvironmentVariable("NO_COLOR") is null
+        !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null
         && Environment.GetEnvironmentVariable("HARTSY_NO_IMAGE") != "1";
 
     /// <summary>Prints <paramref name="rgb"/> scaled to fit <paramref name="maxCellWidth"/> columns; no-op when unsupported.</summary>

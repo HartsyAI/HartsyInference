@@ -57,8 +57,7 @@ public sealed class TextGenerationPipeline
 
     /// <summary>The hidden-state forward for one step: staged across the placement when sharded, else the plain single-backend path.</summary>
     private Tensor ForwardTokens(ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache) =>
-        Staged
-            ? _model!.ForwardStaged(_placement!, tokenIds, posStart, cache)
+        Staged ? _model!.ForwardStaged(_placement!, tokenIds, posStart, cache)
             : _model!.Forward(_backend, tokenIds, posStart, cache);
 
     /// <summary>Headroom-guarded weight preload: uploads every transformer weight that fits while leaving 2 GB of VRAM free (large stragglers stay lazy); idempotent — already-cached tensors are skipped.</summary>
@@ -177,22 +176,16 @@ public sealed class TextGenerationPipeline
         // excluded it — now consistent.)
         // Staged v1 keeps decode eager: the step graph is a single-backend capture (one slot per backend,
         // baked device pointers), so per-stage graphs are a measured follow-up, not a default.
-        bool useGraphDecode = request.Sampling.Greedy
-            && !request.Sampling.HasJsonConstraint
-            && graphDecodeRequested
-            && !Staged
-            && _model!.SupportsGraphDecode(_backend);
+        bool useGraphDecode = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint && graphDecodeRequested
+            && !Staged && _model!.SupportsGraphDecode(_backend);
 
         // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
         // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
         // eligible — it's the more mature, unconditionally-faster path). See GenerateSpeculative's doc for why
         // this is restricted to greedy, non-JSON-mode requests.
         bool specDecodeRequested = request.SpeculativeDecode ?? (Environment.GetEnvironmentVariable("HARTSY_SPEC_DECODE") == "1");
-        bool useSpecDecode = !useGraphDecode
-            && request.Sampling.Greedy
-            && !request.Sampling.HasJsonConstraint
-            && !Staged
-            && specDecodeRequested;
+        bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
+            && !Staged && specDecodeRequested;
 
         if (useGraphDecode)
         {

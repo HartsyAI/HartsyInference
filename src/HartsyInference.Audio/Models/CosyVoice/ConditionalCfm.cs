@@ -20,16 +20,10 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 ///
 /// <para>Vanilla Euler — no sway-sampling / omega-shift (the mel operating dimension is small). NFE 10,
 /// CFG 0.7 by default. Deterministic for a fixed seed.</para></remarks>
-public sealed unsafe class ConditionalCfm
+public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
 {
-    private readonly ICfmEstimator _estimator;
-    private readonly int _melBins;
-
-    public ConditionalCfm(ICfmEstimator estimator, int melBins)
-    {
-        _estimator = estimator;
-        _melBins = melBins;
-    }
+    private readonly ICfmEstimator _estimator = estimator;
+    private readonly int _melBins = melBins;
 
     /// <summary>Solves the flow ODE to produce a mel <c>[1, melBins, T]</c>.</summary>
     /// <remarks><paramref name="mu"/> is the

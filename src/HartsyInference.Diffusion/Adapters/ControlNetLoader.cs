@@ -18,16 +18,13 @@ public static class ControlNetLoader
             loader.Load(filePath);
 
             bool isLdmLayout = ControlNetCheckpointConverter.IsLdmLayout(loader.Descriptors.Keys);
-            ControlNetBaseModel baseModel = isLdmLayout
-                ? DetectBaseModelLdm(loader.Descriptors)
+            ControlNetBaseModel baseModel = isLdmLayout ? DetectBaseModelLdm(loader.Descriptors)
                 : DetectBaseModel(loader.Descriptors);
             ControlNetMode mode = modeOverride ?? DetectMode(filePath);
             FluxControlNetConfig? fluxConfig = baseModel == ControlNetBaseModel.Flux
-                ? FluxControlNetConfig.FromDescriptors(loader.Descriptors)
-                : null;
+                ? FluxControlNetConfig.FromDescriptors(loader.Descriptors) : null;
             QwenImageControlNetConfig? qwenConfig = baseModel == ControlNetBaseModel.QwenImage
-                ? QwenImageControlNetConfig.FromDescriptors(loader.Descriptors)
-                : null;
+                ? QwenImageControlNetConfig.FromDescriptors(loader.Descriptors) : null;
             int unionControlTypes = DetectUnionControlTypes(loader.Descriptors, baseModel, isLdmLayout);
             ControlNetConfig config = baseModel switch
             {

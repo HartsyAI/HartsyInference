@@ -14,30 +14,19 @@ using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed HunyuanVideo pipeline driven against the native <see cref="VideoRequest"/>. <see cref="HunyuanVideoPipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: LLaVA-Llama-3-8B through the diffusers prompt template (layer −3, cropped to drop the template preamble) and CLIP-L's pooled EOS embedding. Mirrors <c>HunyuanVideoGenerationTests</c>' proven construction.</summary>
-public sealed class HunyuanVideoRecipePipeline : IVideoRecipePipeline
+/// <summary>A constructed HunyuanVideo pipeline driven against the native <see cref="VideoRequest"/>. <see cref="HunyuanVideoPipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: LLaVA-Llama-3-8B through the diffusers prompt template (layer −3, cropped to drop the template preamble) and CLIP-L's pooled EOS embedding. Mirrors <c>HunyuanVideoGenerationTests</c>' proven construction. Wraps the constructed HunyuanVideo pipeline plus its dual text stack, taking ownership of every disposable.</summary>
+public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPipeline pipeline,
+    LlamaStyleEncoder llava, ClipTextEncoder clipL, ClipTokenizer clipTokenizer, HunyuanVideoDit dit,
+    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IVideoRecipePipeline
 {
-    private readonly IBackend _backend;
-    private readonly HunyuanVideoPipeline _pipeline;
-    private readonly LlamaStyleEncoder _llava;
-    private readonly ClipTextEncoder _clipL;
-    private readonly ClipTokenizer _clipTokenizer;
-    private readonly HunyuanVideoDit _dit;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed HunyuanVideo pipeline plus its dual text stack, taking ownership of every disposable.</summary>
-    public HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPipeline pipeline, LlamaStyleEncoder llava, ClipTextEncoder clipL, ClipTokenizer clipTokenizer, HunyuanVideoDit dit, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _backend = backend;
-        _pipeline = pipeline;
-        _llava = llava;
-        _clipL = clipL;
-        _clipTokenizer = clipTokenizer;
-        _dit = dit;
-        _loaders = loaders;
-    }
+    private readonly IBackend _backend = backend;
+    private readonly HunyuanVideoPipeline _pipeline = pipeline;
+    private readonly LlamaStyleEncoder _llava = llava;
+    private readonly ClipTextEncoder _clipL = clipL;
+    private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
+    private readonly HunyuanVideoDit _dit = dit;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

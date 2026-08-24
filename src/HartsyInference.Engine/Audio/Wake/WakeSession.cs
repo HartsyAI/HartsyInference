@@ -24,7 +24,7 @@ public enum WakeSessionState
 /// handoff through <see cref="AudioRingBuffer"/>, which drops oldest on overflow. That is the correct failure
 /// mode for an always-on listener: if inference ever falls behind, losing the oldest audio degrades detection
 /// briefly, whereas blocking the socket would stall the device and cascade into its reconnect logic.</para></summary>
-public sealed class WakeSession : IDisposable
+public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline) : IDisposable
 {
     /// <summary>Audio buffered between the socket and the worker (2 s). Sized to absorb scheduling jitter and short inference stalls without becoming a latency reservoir.</summary>
     public const int RingCapacitySamples = 32_000;
@@ -40,10 +40,10 @@ public sealed class WakeSession : IDisposable
     private int _disposed;
 
     /// <summary>Stable identity from the client's <c>hello</c>; survives reconnects.</summary>
-    public string DeviceId { get; }
+    public string DeviceId { get; } = deviceId;
 
     /// <summary>The device's detection pipeline. Touched only by the wake worker thread.</summary>
-    public WakeDetectionPipeline Pipeline { get; }
+    public WakeDetectionPipeline Pipeline { get; } = pipeline;
 
     /// <summary>Frame codec for this connection, replaced when the device reconnects.</summary>
     public WakeFrameCodec? Codec { get; set; }
@@ -55,12 +55,6 @@ public sealed class WakeSession : IDisposable
 
     /// <summary>Samples dropped because the worker fell behind. Non-zero here means the machine is oversubscribed.</summary>
     public long SamplesDropped => _ring.SamplesDropped;
-
-    public WakeSession(string deviceId, WakeDetectionPipeline pipeline)
-    {
-        DeviceId = deviceId;
-        Pipeline = pipeline;
-    }
 
     /// <summary>Queues audio from the socket and mirrors it into the capture buffer. <paramref name="sequence"/> is the client's frame counter; a gap means audio was lost in flight, so the models are reset rather than fed a splice across the discontinuity.</summary>
     public void Enqueue(ReadOnlySpan<float> samples, long sequence)

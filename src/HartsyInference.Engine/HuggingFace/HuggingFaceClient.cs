@@ -346,10 +346,8 @@ public sealed class HuggingFaceClient : IDisposable
     {
         string id = element.GetProperty("id").GetString()!;
         string modelId = element.TryGetProperty("modelId", out JsonElement modelIdElement)
-            ? modelIdElement.GetString() ?? id
-            : id;
-        string? author = element.TryGetProperty("author", out JsonElement authorElement)
-            ? authorElement.GetString()
+            ? modelIdElement.GetString() ?? id : id;
+        string? author = element.TryGetProperty("author", out JsonElement authorElement) ? authorElement.GetString()
             : null;
 
         List<string> tags = new List<string>();
@@ -375,12 +373,10 @@ public sealed class HuggingFaceClient : IDisposable
             }
         }
 
-        string? pipelineTag = element.TryGetProperty("pipeline_tag", out JsonElement ptElement)
-            ? ptElement.GetString()
+        string? pipelineTag = element.TryGetProperty("pipeline_tag", out JsonElement ptElement) ? ptElement.GetString()
             : null;
 
-        string? libraryName = element.TryGetProperty("library_name", out JsonElement lnElement)
-            ? lnElement.GetString()
+        string? libraryName = element.TryGetProperty("library_name", out JsonElement lnElement) ? lnElement.GetString()
             : null;
 
         return new HuggingFaceModelInfo

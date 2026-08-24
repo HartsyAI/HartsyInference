@@ -356,8 +356,7 @@ public sealed class FishSpeechTokenizer
             for (int i = 0; i < parts.Count - 1; i++)
             {
                 // JSON merges: rank of the (left,right) pair. tiktoken: rank (id) of the merged token itself.
-                bool found = _tiktokenMode
-                    ? _tokenToId.TryGetValue(parts[i] + parts[i + 1], out int r)
+                bool found = _tiktokenMode ? _tokenToId.TryGetValue(parts[i] + parts[i + 1], out int r)
                     : _mergeRanks.TryGetValue((parts[i], parts[i + 1]), out r);
                 if (found && r < bestRank) { bestRank = r; bestIdx = i; }
             }

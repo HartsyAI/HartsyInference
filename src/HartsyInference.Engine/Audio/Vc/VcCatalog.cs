@@ -175,8 +175,7 @@ internal static class VcCatalog
             int contentFrames = (int)content2x.Shape[2];
             // Both estimators run at hop 160 (100 Hz on 16 kHz audio), matching content2x's grid.
             float[] f0 = string.Equals(f0Method, "yin", StringComparison.OrdinalIgnoreCase)
-                ? F0Estimator.EstimateYin(source16k, 16_000, hopSize: 160)
-                : rmvpe.ExtractF0(backend, source16k);
+                ? F0Estimator.EstimateYin(source16k, 16_000, hopSize: 160) : rmvpe.ExtractF0(backend, source16k);
             if (pitchSemitones != 0d)
             {
                 f0 = RvcPitch.Shift(f0, (float)pitchSemitones);

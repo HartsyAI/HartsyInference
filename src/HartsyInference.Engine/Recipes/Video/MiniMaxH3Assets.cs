@@ -64,8 +64,7 @@ public sealed record MiniMaxH3Assets
             bool underTransformer = dir is not null
                 && string.Equals(Path.GetFileName(dir), "transformer", StringComparison.OrdinalIgnoreCase);
             return underTransformer && parent is not null && Directory.Exists(Path.Combine(parent, "video_vae"))
-                ? parent
-                : null;
+                ? parent : null;
         }
         if (!Directory.Exists(path))
         {
@@ -208,8 +207,7 @@ public sealed record MiniMaxH3Assets
         {
             files = Directory.GetFiles(dir, "*.safetensors", SearchOption.AllDirectories);
         }
-        return files.Length > 0
-            ? files.OrderBy(f => f, StringComparer.Ordinal).First()
+        return files.Length > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
             : throw new FileNotFoundException($"No .safetensors in {dir}.");
     }
 }

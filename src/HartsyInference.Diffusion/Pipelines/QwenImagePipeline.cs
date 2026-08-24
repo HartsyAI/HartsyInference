@@ -235,8 +235,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             foreach (Tensor sigImg in sigSource)
                 editSig = editSig * 1000003L ^ ImageSignature.Compute(sigImg);
         }
-        bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex
-            && _cachedEditSig == editSig
+        bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex && _cachedEditSig == editSig
             && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
         bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondDrop == negativeDropIndex
             && _cachedEditSig == editSig
@@ -295,8 +294,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 }
             }
 
-            condHidden = visionEncode
-                ? _multimodalEncoder!.Encode(TextEncoderBackend, promptTokenIds, visionImages)
+            condHidden = visionEncode ? _multimodalEncoder!.Encode(TextEncoderBackend, promptTokenIds, visionImages)
                 : _textEncoder.Encode(TextEncoderBackend, [promptTokenIds]);
             if (promptDropIndex > 0)
             {
@@ -740,8 +738,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // CONSECUTIVE steps, and a second-order sampler evaluates twice inside one step at different sigmas —
             // a drift signature it was never calibrated for. ROADMAP §6 records that failure on HiDream as a flat,
             // textureless colour field rather than a mild degradation. Narrowed for that generation, same as graphs.
-            bool cacheEligible = !nonDefaultSampler
-                && (stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate));
+            bool cacheEligible = !nonDefaultSampler && (stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate));
             DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
             DeviceFeatureCache? stepUncondCache = cacheEligible ? uncondCache : null;
 
@@ -775,8 +772,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                         // On-schedule sigmas reuse the loop's own timestep expression; the F32 round trip through
                         // x1000 is not exact, so raw sigma would shift every existing generation by an ulp.
                         float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex] / 1000.0f
-                            : s;
+                            ? timestepTable[stepIndex] / 1000.0f : s;
                         Tensor input;
                         bool ownsInput = false;
                         if (packedEditRef is null)
@@ -903,8 +899,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (condCache is not null)
         {
             string uncondStats = uncondCache is not null
-                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses"
-                : string.Empty;
+                ? $"; uncond {uncondCache.Computes} computes / {uncondCache.Reuses} reuses" : string.Empty;
             Logs.Info($"Step cache: cond {condCache.Computes} computes / {condCache.Reuses} reuses{uncondStats}");
             condCache.Dispose();
             uncondCache?.Dispose();

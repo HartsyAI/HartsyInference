@@ -43,8 +43,7 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
             Insert(raw, id);
 
             bool isSpecial = tokenType is not null && id < tokenType.Length
-                ? tokenType[id] == TypeControl || tokenType[id] == TypeUserDefined
-                : false;
+                ? tokenType[id] == TypeControl || tokenType[id] == TypeUserDefined : false;
             if (isSpecial && tokens[id].Length > 0)
             {
                 _specialByLiteral[tokens[id]] = id;

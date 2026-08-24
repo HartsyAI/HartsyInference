@@ -9,8 +9,7 @@ internal static class MiniMaxH3VideoVaeWeights
 {
     /// <summary>Weight as stored, naming the key when it is absent.</summary>
     public static Tensor Raw(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        weights.TryGetValue(key, out Tensor? t)
-            ? t
+        weights.TryGetValue(key, out Tensor? t) ? t
             : throw new KeyNotFoundException($"MiniMax-H3 video VAE weight '{key}' is missing.");
 
     /// <summary>F32 view of a required weight.</summary>

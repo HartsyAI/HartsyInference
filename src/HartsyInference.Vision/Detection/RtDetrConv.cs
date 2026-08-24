@@ -18,27 +18,17 @@ public enum RtDetrActivation
 /// activation. RT-DETR checkpoints store BN as separate <c>running_mean/var/weight/bias</c> buffers;
 /// the checkpoint converter folds each BN into its preceding conv, leaving a plain
 /// <c>{prefix}.weight</c> / <c>{prefix}.bias</c> pair that this class loads.</summary>
-public sealed class RtDetrConv
+public sealed class RtDetrConv(int strideH, int strideW, int padH, int padW, RtDetrActivation activation)
 {
-    private readonly int _strideH, _strideW;
-    private readonly int _padH, _padW;
-    private readonly RtDetrActivation _activation;
+    private readonly int _strideH = strideH, _strideW = strideW;
+    private readonly int _padH = padH, _padW = padW;
+    private readonly RtDetrActivation _activation = activation;
 
     private Tensor? _weight;   // [C_out, C_in, kH, kW]
     private Tensor? _bias;     // [C_out]
 
     /// <summary>Output channel count (available after weights are loaded).</summary>
     public int OutChannels => (int)_weight!.Shape[0];
-
-    /// <summary>Creates a conv with the given stride, padding, and activation.</summary>
-    public RtDetrConv(int strideH, int strideW, int padH, int padW, RtDetrActivation activation)
-    {
-        _strideH = strideH;
-        _strideW = strideW;
-        _padH = padH;
-        _padW = padW;
-        _activation = activation;
-    }
 
     /// <summary>Loads the folded conv <c>{prefix}.weight</c> and <c>{prefix}.bias</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

@@ -309,8 +309,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
                         // take — so an on-schedule step reuses the scheduler's own table entry rather than recomputing
                         // it, and only a genuine sub-step (what a second-order sampler evaluates at) scales the raw
                         // sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
-                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex]
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                             : s * 1000.0f;
                         // Late-window gate: reuse eligible only in the schedule tail (mirrors ZImagePipeline).
                         // `!nonDefaultSampler`: the step cache is a first-block-cache calibrated on the drift between
@@ -402,8 +401,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         if (stepCacheCond is not null)
         {
             string uncondStats = stepCacheUncond is not null
-                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses"
-                : "";
+                ? $"; uncond {stepCacheUncond.Computes} computes / {stepCacheUncond.Reuses} reuses" : "";
             Logs.Info($"Step cache: cond {stepCacheCond.Computes} computes / {stepCacheCond.Reuses} reuses{uncondStats}");
         }
 

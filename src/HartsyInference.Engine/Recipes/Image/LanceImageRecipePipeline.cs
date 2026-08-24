@@ -12,29 +12,20 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Lance image pipeline driven against the native <see cref="ImageRequest"/>. Tokenizes the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls <see cref="LanceImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c> text-to-image drive path.</summary>
-public sealed class LanceImageRecipePipeline : IRecipePipeline
+/// <summary>A constructed Lance image pipeline driven against the native <see cref="ImageRequest"/>. Tokenizes the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls <see cref="LanceImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c> text-to-image drive path. Wraps the constructed Lance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
+public sealed class LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceConfig config,
+    LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<SafeTensorsLoader> loaders,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Total downscale between pixels and transformer tokens (VAE 16x, latent patch (1,1,1) per the real checkpoint).</summary>
     private const int SizeMultiple = 16;
 
-    private readonly LanceImagePipeline _pipeline;
-    private readonly LanceConfig _config;
-    private readonly LanceTransformer _transformer;
-    private readonly ILlmTokenizer _tokenizer;
-    private readonly IReadOnlyList<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Lance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceConfig config, LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _config = config;
-        _transformer = transformer;
-        _tokenizer = tokenizer;
-        _loaders = loaders;
-    }
+    private readonly LanceImagePipeline _pipeline = pipeline;
+    private readonly LanceConfig _config = config;
+    private readonly LanceTransformer _transformer = transformer;
+    private readonly ILlmTokenizer _tokenizer = tokenizer;
+    private readonly IReadOnlyList<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

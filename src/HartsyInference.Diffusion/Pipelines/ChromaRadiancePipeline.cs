@@ -321,8 +321,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                         // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for
                         // the other would shift every existing Radiance generation by an ulp of conditioning.
                         float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex] / 1000.0f
-                            : s;
+                            ? timestepTable[stepIndex] / 1000.0f : s;
                         // Model predicts x0; convert each pass to velocity BEFORE the CFG combine (ComfyUI order).
                         // The conversion is a function of the sample being evaluated, so it runs against `x` and this
                         // evaluation's own t — a sub-step's x0 residual belongs to ITS sample, not the step's.
@@ -403,8 +402,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             // Pixel-space preview: the in-flight sample is already an RGB image — no unpack needed. On the
             // drain-free path a preview read is a D2H sync of the device-resident sample, so previews emit
             // every 4th step (and not the final step — the finished image follows immediately).
-            bool emitPreview = onProgress is not null
-                && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
+            bool emitPreview = onProgress is not null && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
             if (emitPreview)
             {
                 onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)

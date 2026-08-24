@@ -519,8 +519,7 @@ internal static class AceStepMusicModel
             {
                 throw new NotSupportedException("The 5 Hz LM planner is ACE-Step 1.5 only — set ACE-Step LM Planner to none for v1 checkpoints.");
             }
-            string guidanceType = string.IsNullOrEmpty(request.GuidanceType)
-                ? (request.UseAdg ? "adg" : "apg")
+            string guidanceType = string.IsNullOrEmpty(request.GuidanceType) ? (request.UseAdg ? "adg" : "apg")
                 : request.GuidanceType.ToLowerInvariant();
             AceStepPipeline.GuidanceMode guidanceMode = guidanceType switch
             {
@@ -574,8 +573,7 @@ internal static class AceStepMusicModel
             }
             try
             {
-                int[] lyricIds = string.IsNullOrWhiteSpace(request.Prompt)
-                    ? []
+                int[] lyricIds = string.IsNullOrWhiteSpace(request.Prompt) ? []
                     : lyricTokenizer.TokenizeLyrics(request.Prompt,
                         string.IsNullOrWhiteSpace(request.VocalLanguage) ? null : request.VocalLanguage);
                 (float[] left, float[] right, int _, int _) = pipeline.Generate(

@@ -99,8 +99,7 @@ public sealed unsafe class Nvfp4Linear : IDisposable
             throw new InvalidOperationException($"Linear '{prefix}.weight' must be rank-2; got {weight.Shape}.");
 
         Tensor? preQuantScale = weights.TryGetValue($"{prefix}.pre_quant_scale", out Tensor? pqs)
-            ? TensorCasts.EnsureF32(pqs)
-            : null;
+            ? TensorCasts.EnsureF32(pqs) : null;
 
         if (weight.DType != DType.U8)
         {

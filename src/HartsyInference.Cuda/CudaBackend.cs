@@ -41,10 +41,8 @@ public sealed class CudaBackend : IBackend
     /// <c>HashSet</c>) because this backend is a process-wide DI singleton and nothing enforces
     /// <c>InferenceQueue.MaxConcurrency</c> stays at its default of 1 — a plain <c>HashSet</c> was never actually
     /// safe under a higher setting.</remarks>
-    private sealed record DimFailureState(
-        int ConsecutiveFailures,
-        long NextRetryAtTicks,   // Environment.TickCount64; 0 = eligible immediately
-        bool Permanent);
+    /// <param name="NextRetryAtTicks">Environment.TickCount64; 0 = eligible immediately.</param>
+    private sealed record DimFailureState(int ConsecutiveFailures, long NextRetryAtTicks, bool Permanent);
     private readonly ConcurrentDictionary<long, DimFailureState> _cudnnSdpaDimState = new();
 
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
@@ -213,8 +211,7 @@ public sealed class CudaBackend : IBackend
     {
         if (completedTarget < 0) throw new ArgumentOutOfRangeException(nameof(completedTarget));
         if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan) throw new ArgumentOutOfRangeException(nameof(timeout));
-        long deadline = timeout == Timeout.InfiniteTimeSpan
-            ? long.MaxValue
+        long deadline = timeout == Timeout.InfiniteTimeSpan ? long.MaxValue
             : Environment.TickCount64 + Math.Max(0L, (long)Math.Ceiling(timeout.TotalMilliseconds));
         lock (_abandonedCleanupProgress)
         {
@@ -601,8 +598,7 @@ public sealed class CudaBackend : IBackend
         // HARTSY_INT8_ROW_BUDGET_MB pins the budget. Deriving it from free VRAM makes the chunk count — and with it
         // the launch count and the GEMM's M — a function of whatever else is transiently allocated, so any A/B that
         // changes device-memory pressure silently changes this too and stops being a controlled comparison.
-        long budget = RowChunkBudgetOverrideBytes > 0
-            ? RowChunkBudgetOverrideBytes
+        long budget = RowChunkBudgetOverrideBytes > 0 ? RowChunkBudgetOverrideBytes
             : Math.Clamp(CudaMemory.GetMemInfo().FreeBytes / 8, FloorBytes, CeilingBytes);
         long perRowBytes = (long)n * sizeof(int) + k + (long)k * activationBytes;
         return (int)Math.Min(m, Math.Max(1, budget / Math.Max(1, perRowBytes)));
@@ -1196,8 +1192,7 @@ public sealed class CudaBackend : IBackend
     /// HARTSY_IM2COL_BAND_MB (also lets tests force banding on small shapes).</remarks>
     private static readonly long Im2ColBandCapBytes =
         long.TryParse(Environment.GetEnvironmentVariable("HARTSY_IM2COL_BAND_MB"), out long capMb) && capMb > 0
-            ? capMb << 20
-            : 1L << 30;
+            ? capMb << 20 : 1L << 30;
 
     #region Linear Algebra
 
@@ -1389,8 +1384,8 @@ public sealed class CudaBackend : IBackend
         && k <= 2L * n && n <= (WideMmaGate ? 4L : 2L) * k && _kernels!.HasInt8MmaGemm(rows, n, k);
 
     /// <summary>One resident-int8 projection for <see cref="RunResidentInt8"/>: device pointers already resolved, so the helper never touches the transfer caches (see the prologue ordering note in <c>LinearImpl</c>).</summary>
-    private readonly record struct Int8ResidentTarget(
-        ulong Weight, ulong Output, ulong BiasF32, ulong RowScaleDev, int N, bool OutF16, bool FuseGelu);
+    private readonly record struct Int8ResidentTarget(ulong Weight, ulong Output, ulong BiasF32, ulong RowScaleDev,
+        int N, bool OutF16, bool FuseGelu);
 
     /// <summary>The resident int8 chain — ConvRot, per-row quant, IMMA GEMM, dequant epilogue — over one activation and one or more weights. Every target shares the quantized activation, which is the point: the rotate+quant pass is ~40% of the LTX-2.5 step's quant traffic precisely because an attention re-derived it per projection. Bit-identical to running the targets one at a time (same pointer, same k, same kernel).</summary>
     /// <remarks>Chunked over rows because the int32 accumulator is 4 bytes per output element: at video token counts
@@ -1540,12 +1535,9 @@ public sealed class CudaBackend : IBackend
     public unsafe void LinearHeadGated(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         Tensor gateLogits, int heads, int headDim)
     {
-        bool fused = FuseHeadGateIntoQuant
-            && input.DType == DType.F16 && gateLogits.DType == DType.F16
-            && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
-            && qi.ConvRotGroupSize > 0
-            && CanRunResidentInt8(output, input, weight, qi, 0, -1)
-            && _kernels is not null
+        bool fused = FuseHeadGateIntoQuant && input.DType == DType.F16 && gateLogits.DType == DType.F16
+            && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi && qi.ConvRotGroupSize > 0
+            && CanRunResidentInt8(output, input, weight, qi, 0, -1) && _kernels is not null
             && _kernels.HasFusedGatedConvRotQuant((int)weight.Shape[1], qi.ConvRotGroupSize, srcF16: true, heads, headDim);
         if (!fused)
         {
@@ -1812,8 +1804,7 @@ public sealed class CudaBackend : IBackend
         // companions, so they happen before the transfer caches are touched. Eligibility was already settled by the
         // fallback gate above, so reaching here with an F4E2M1 weight means the kernel can serve it.
         Nvfp4WeightScales nvfp4Scales = weight.DType == DType.F4E2M1
-            && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null }
-                ? EnsureNvfp4Scales(weight)
+            && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null } ? EnsureNvfp4Scales(weight)
                 : default;
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
@@ -1855,7 +1846,7 @@ public sealed class CudaBackend : IBackend
                 // xq/xd; Q4_K's min term additionally needs the per-block int-sum xs.
                 bool dp4a = EnableDp4aGemv
                     && (((weight.DType == DType.Q4_K || weight.DType == DType.Q5_K || weight.DType == DType.Q6_K) && k % 256 == 0)
-                        || ((weight.DType == DType.Q8_0 || weight.DType == DType.Q4_0 || weight.DType == DType.Q5_0) && k % 32 == 0));
+                    || ((weight.DType == DType.Q8_0 || weight.DType == DType.Q4_0 || weight.DType == DType.Q5_0) && k % 32 == 0));
                 if (dp4a)
                 {
                     // Quantize-at-producer: the input's Q8_1 sidecar (emitted by RmsNormEmitQ8/
@@ -1979,8 +1970,7 @@ public sealed class CudaBackend : IBackend
                     // time-embed MLP + modulation projections) — passing it raw reinterprets two 16-bit
                     // halves as one float and the timestep conditioning explodes → black frames. Transient
                     // F32 cast; F32 biases (the common LLM case) pass straight through.
-                    ulong gemvBias = bias is null
-                        ? 0
+                    ulong gemvBias = bias is null ? 0
                         : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
                     if (weight.DType == DType.BF16)
                         _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, gemvBias, n, k, m, _stream.Handle);
@@ -2006,8 +1996,7 @@ public sealed class CudaBackend : IBackend
             // shapes fall through to the cast-to-F16 path below.
             if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
                 && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)
-                && (output.DType == DType.F16 || output.DType == DType.F32)
-                && k % 16 == 0
+                && (output.DType == DType.F16 || output.DType == DType.F32) && k % 16 == 0
                 && (n * output.DType.SizeInBytes) % 16 == 0)
             {
                 ulong inputFp8Ptr;
@@ -2062,8 +2051,7 @@ public sealed class CudaBackend : IBackend
                 // This path consumes the PACKED fp8 weight directly and returns before the shared cast-resolution
                 // offset below, so a row range has to be applied here too — fp8 is 1 byte per element, and the
                 // rows of a [outDim, inDim] weight are contiguous.
-                ulong fp8WeightPtr = rowRange
-                    ? pWeight + (ulong)((long)weightRowOffset * k * weight.DType.SizeInBytes)
+                ulong fp8WeightPtr = rowRange ? pWeight + (ulong)((long)weightRowOffset * k * weight.DType.SizeInBytes)
                     : pWeight;
                 Fp8Executor.Run(weight: fp8WeightPtr, input: inputFp8Ptr, outPtr: pOutput, m: m, n: n, k: k,
                     weightScale: alpha, stream: _stream.Handle,
@@ -2138,12 +2126,10 @@ public sealed class CudaBackend : IBackend
             // back out as x·Wᵀ — H is its own inverse. See RunResidentInt8 for the chain itself.
             if (int8Resident)
             {
-                Int8ResidentTarget target = new(pWeight, pOutput, bias is null
-                        ? 0
+                Int8ResidentTarget target = new(pWeight, pOutput, bias is null ? 0
                         : CastIfNeeded(pBias, bias!.DType, DType.F32, (int)bias.ElementCount, out pBiasCast),
                     int8RowScaleDev, n, output.DType == DType.F16, fuseGelu);
-                Int8PreGate gate = preGate is null
-                    ? default
+                Int8PreGate gate = preGate is null ? default
                     : new(GpuTransferHelper.CopyToDevice(preGate), preGateHeads, preGateHeadDim);
                 try
                 {
@@ -2205,8 +2191,7 @@ public sealed class CudaBackend : IBackend
                     // (a 4B model's BF16 casts are ~8 GB), and prefill still needs large transients (head
                     // cast, activations, cuBLAS workspace) AFTER the cache stops growing — a 2 GB floor
                     // OOMed Qwen3-4B. 4 GB caches the hottest few GB of casts and never starves transients.
-                    long headroom = weight.DType.IsQuantized
-                        ? Math.Max(4L << 30, totalBytes / 3)
+                    long headroom = weight.DType.IsQuantized ? Math.Max(4L << 30, totalBytes / 3)
                         : Math.Max(2L << 30, totalBytes / 8);
                     if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
                     {
@@ -2271,8 +2256,7 @@ public sealed class CudaBackend : IBackend
             // Tensor-core HGEMM path (opt-in, validation-pending): F16 operands+output,
             // aligned dims. Produces the GEMM only; bias is added by the block below.
             bool ltBiasFused = false;
-            if (EnableTensorCoreGemm
-                && gemmDtype == DType.F16 && output.DType == DType.F16
+            if (EnableTensorCoreGemm && gemmDtype == DType.F16 && output.DType == DType.F16
                 && TensorCoreGemm.IsSupported && Cuda.TensorCoreGemm.IsAligned(m, n, k))
             {
                 TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: m, n: n, k: k, alpha: alpha, stream: _stream.Handle);
@@ -2475,8 +2459,7 @@ public sealed class CudaBackend : IBackend
         // matrix is a kH·kW× input-sized HBM write+read per conv, the dominant conv cost on the SDXL
         // UNet (~50 convs/step) and VAE. Anything else (F32, fp8/quant weights, scale factors) keeps
         // the im2col path; any cuDNN failure self-disables the route for the session.
-        if (_convCudnn && !_cudnnConvDead
-            && input.DType == weight.DType && output.DType == input.DType
+        if (_convCudnn && !_cudnnConvDead && input.DType == weight.DType && output.DType == input.DType
             && (input.DType == DType.F16 || input.DType == DType.BF16)
             && input.Fp8ScaleFactor == 1.0f && weight.Fp8ScaleFactor == 1.0f
             && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
@@ -3660,8 +3643,7 @@ public sealed class CudaBackend : IBackend
         {
             pTarget = GpuTransferHelper.CopyToDevice(target);
             pSource = GpuTransferHelper.CopyToDevice(source);
-            pNoise = noise is null
-                ? 0
+            pNoise = noise is null ? 0
                 : ReferenceEquals(noise, source) ? pSource : GpuTransferHelper.CopyToDevice(noise);
             pMask = GpuTransferHelper.CopyToDevice(mask);
 
@@ -4070,8 +4052,7 @@ public sealed class CudaBackend : IBackend
         int kt = Math.Min(kernelT, dimT), kh = Math.Min(kernelH, dimH), kw = Math.Min(kernelW, dimW);
 
         EnsureKernels();
-        (int tileH, int tileW) = _kernels is not null && UseLtx25Na3dTiled
-            ? _kernels.Ltx25Na3dTile(dimH, dimW, headDim)
+        (int tileH, int tileW) = _kernels is not null && UseLtx25Na3dTiled ? _kernels.Ltx25Na3dTile(dimH, dimW, headDim)
             : (0, 0);
         if (_kernels is null || !_kernels.HasLtx25NaKernels
             || (tileH == 0 && CudaKernels.Ltx25Na3dSharedBytes(headDim, kt, kh, kw) > 48 * 1024))
@@ -5991,8 +5972,7 @@ public sealed class CudaBackend : IBackend
         if (headMajor)
         {
             if (q.Shape.Rank != 4 || q.Shape[0] > int.MaxValue || q.Shape[2] > int.MaxValue
-                || q.Shape[1] != headsLong || q.Shape[3] != headDimLong
-                || q.Shape[0] * q.Shape[2] != tokensLong)
+                || q.Shape[1] != headsLong || q.Shape[3] != headDimLong || q.Shape[0] * q.Shape[2] != tokensLong)
                 throw new HartsyInferenceException(
                     $"CUDA {operation} requires q/k/v [B,heads,seq,headDim] matching qkv; got {q.Shape}, " +
                     $"heads={headsLong}, headDim={headDimLong}, tokens={tokensLong}.");
@@ -6000,8 +5980,7 @@ public sealed class CudaBackend : IBackend
         else
         {
             bool flattenedHeads = q.Shape.Rank >= 1 && q.Shape[q.Shape.Rank - 1] == width;
-            bool explicitHeads = q.Shape.Rank >= 2
-                && q.Shape[q.Shape.Rank - 2] == headsLong
+            bool explicitHeads = q.Shape.Rank >= 2 && q.Shape[q.Shape.Rank - 2] == headsLong
                 && q.Shape[q.Shape.Rank - 1] == headDimLong;
             if (!flattenedHeads && !explicitHeads)
                 throw new HartsyInferenceException(
@@ -7297,8 +7276,7 @@ public sealed class CudaBackend : IBackend
             2 => (mask.Shape[0] == 1 || mask.Shape[0] == sq) && mask.Shape[1] == skv,
             3 => (mask.Shape[0] == 1 || mask.Shape[0] == h)
                 && (mask.Shape[1] == 1 || mask.Shape[1] == sq) && mask.Shape[2] == skv,
-            4 => (mask.Shape[0] == 1 || mask.Shape[0] == b)
-                && (mask.Shape[1] == 1 || mask.Shape[1] == h)
+            4 => (mask.Shape[0] == 1 || mask.Shape[0] == b) && (mask.Shape[1] == 1 || mask.Shape[1] == h)
                 && (mask.Shape[2] == 1 || mask.Shape[2] == sq) && mask.Shape[3] == skv,
             _ => false,
         };
@@ -7327,11 +7305,8 @@ public sealed class CudaBackend : IBackend
         if (mask.DType != DType.F32) return false;
         if (mask.Shape.Rank == 2)
             return (mask.Shape[0] == sq || mask.Shape[0] == 1) && mask.Shape[1] == skv;
-        return mask.Shape.Rank == 4
-            && (mask.Shape[0] == 1 || mask.Shape[0] == b)
-            && mask.Shape[1] == 1
-            && (mask.Shape[2] == sq || mask.Shape[2] == 1)
-            && mask.Shape[3] == skv;
+        return mask.Shape.Rank == 4 && (mask.Shape[0] == 1 || mask.Shape[0] == b) && mask.Shape[1] == 1
+            && (mask.Shape[2] == sq || mask.Shape[2] == 1) && mask.Shape[3] == skv;
     }
 
     /// <summary>cuDNN fused flash-attention fast path for the plain F32/no-mask/MHA case (F16 execute, F32 output).</summary>
@@ -7506,8 +7481,7 @@ public sealed class CudaBackend : IBackend
         if (!tf32Available || mask is not null || !float.IsFinite(scale)) return false;
         if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
             return false;
-        if (output.DType != DType.F32 || query.DType != DType.F32
-            || key.DType != DType.F32 || value.DType != DType.F32)
+        if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
             return false;
 
         long b = query.Shape[0];
@@ -7521,10 +7495,7 @@ public sealed class CudaBackend : IBackend
             return false;
         if ((d != 64 && d != 128) || sq % 32 != 0) return false;
 
-        return output.Shape == query.Shape
-            && key.Shape == value.Shape
-            && key.Shape[0] == b
-            && key.Shape[1] == h
+        return output.Shape == query.Shape && key.Shape == value.Shape && key.Shape[0] == b && key.Shape[1] == h
             && key.Shape[3] == d;
     }
 
@@ -8306,8 +8277,7 @@ public sealed class CudaBackend : IBackend
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
-            ulong inTyped = input.DType == output.DType
-                ? pIn
+            ulong inTyped = input.DType == output.DType ? pIn
                 : CastIfNeeded(pIn, input.DType, output.DType, (int)input.ElementCount, out inCast);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
@@ -10979,8 +10949,7 @@ public sealed class CudaBackend : IBackend
                     (failures ??= []).Add(new InvalidOperationException("CUDA cleanup failed to retire transfer state.", error));
                 }
             }
-            _cleanupFailure = failures is null
-                ? null
+            _cleanupFailure = failures is null ? null
                 : new AggregateException("One or more CUDA backend resources failed to release.", failures);
             Volatile.Write(ref _lifecycleState, LifecycleCleaned);
             _cleanupCompleted.Set();

@@ -198,8 +198,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         // On the primary card the DiT eviction above leaves enough room for the 8.0 GB Qwen checkpoint plus the
         // 335 MB decoder (verified on the 12 GB production floor), so retain that warm decoder. A shared secondary
         // TE/VAE card has no corresponding DiT eviction and must reclaim the prior VAE phase before Qwen preload.
-        if (!ReferenceEquals(_textBackend, _backend)
-            && ReferenceEquals(_textBackend, _pipeline.VaeBackend))
+        if (!ReferenceEquals(_textBackend, _backend) && ReferenceEquals(_textBackend, _pipeline.VaeBackend))
             _pipeline.EvictVaeDeviceState();
 
         Tensor? newPositive = null;

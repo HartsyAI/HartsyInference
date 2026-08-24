@@ -131,8 +131,7 @@ public sealed unsafe class FLiteTransformer : IDisposable
         Tensor xWithRegister = PrependRegisterTokens(patches, batch, hPacked * wPacked, registerCount, hidden);
         patches.Dispose();
 
-        (Tensor cosRope, Tensor sinRope) = _config.UseRope
-            ? _rope.BuildDeviceTables(hPacked, wPacked, registerCount)
+        (Tensor cosRope, Tensor sinRope) = _config.UseRope ? _rope.BuildDeviceTables(hPacked, wPacked, registerCount)
             : (null!, null!);
 
         Tensor temb = ComputeTimeEmbedding(backend, batch, timestepNormalized);

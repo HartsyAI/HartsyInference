@@ -18,7 +18,7 @@ namespace HartsyInference.Audio.Models.PocketTts;
 /// </list>
 /// All convs are causal (left-pad <c>k_eff-stride</c> zeros; transposed convs trim the trailing <c>k-stride</c>),
 /// reproducing the streaming modules run with a fresh state. Verified by <c>SnacParityTests</c>-style oracle.</summary>
-internal sealed unsafe class PocketTtsMimiDecoder
+internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
 {
     private const int LatentDim = 32;
     private const int Dim = 512;          // outer_dim / d_model
@@ -38,7 +38,7 @@ internal sealed unsafe class PocketTtsMimiDecoder
     private const int LastKernel = 3;
     private const int ResidualKernel = 3;
 
-    private readonly string _p;
+    private readonly string _p = prefix;
 
     // Front: output_proj + upsample.
     private Tensor? _outProjW;     // [512,32,1]
@@ -59,11 +59,6 @@ internal sealed unsafe class PocketTtsMimiDecoder
     private readonly Tensor?[] _seR1W = new Tensor?[3], _seR1B = new Tensor?[3];     // resblock.block.1 conv (k3)
     private readonly Tensor?[] _seR2W = new Tensor?[3], _seR2B = new Tensor?[3];     // resblock.block.3 conv (k1)
     private Tensor? _seOutW, _seOutB;      // model.11 conv 64->1 k3
-
-    public PocketTtsMimiDecoder(string prefix = "mimi")
-    {
-        _p = prefix;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

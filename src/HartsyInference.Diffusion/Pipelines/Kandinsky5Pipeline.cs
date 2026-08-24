@@ -143,8 +143,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
                     // flow-match DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
                     // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
                     // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
-                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex]
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                         : s * 1000.0f;
                     Tensor? uncond = null;
                     Tensor cond;
@@ -166,9 +165,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
                     // host reductions or materialize device tensors merely to format informational log lines.
                     if (Kandinsky5DebugDump.Enabled && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1))
                     {
-                        Tensor diagnosticPred = useCfg
-                            ? CfgHelper.ApplyCfg(uncond!, cond, cfgScale)
-                            : cond;
+                        Tensor diagnosticPred = useCfg ? CfgHelper.ApplyCfg(uncond!, cond, cfgScale) : cond;
                         try
                         {
                             Logs.Info($"[K5DIAG] step {stepIndex}: t={stepT:F2} sigma_idx noisePred.std={StdOf(diagnosticPred):F4} latent.std={StdOf(x):F4}");
@@ -184,9 +181,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
                         }
                     }
 
-                    return useCfg
-                        ? new DenoisePrediction(cond, uncond!, cfgScale)
-                        : new DenoisePrediction(cond, cond);
+                    return useCfg ? new DenoisePrediction(cond, uncond!, cfgScale) : new DenoisePrediction(cond, cond);
                 });
             if (i == startStep)
             {

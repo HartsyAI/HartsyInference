@@ -143,8 +143,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
                 for (int j = 0; j < k; j++)
                 {
                     int combined = s + j;
-                    acc += combined < k - 1
-                        ? convW[c * k + j] * history[combined * di + c]
+                    acc += combined < k - 1 ? convW[c * k + j] * history[combined * di + c]
                         : convW[c * k + j] * x[(combined - (k - 1)) * di + c];
                 }
                 xc[s * di + c] = acc / (1f + MathF.Exp(-acc));   // SiLU

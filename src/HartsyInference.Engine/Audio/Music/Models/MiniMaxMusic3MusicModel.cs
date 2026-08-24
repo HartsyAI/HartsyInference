@@ -149,17 +149,14 @@ internal static class MiniMaxMusic3MusicModel
             ct.ThrowIfCancellationRequested();
             // ACE-Step's mapping, which the CLI and the request DTO already speak: the style/description rides in
             // Genre and the lyrics in Prompt.
-            string caption = string.IsNullOrWhiteSpace(request.Genre)
-                ? "A warm instrumental track."
-                : request.Genre;
+            string caption = string.IsNullOrWhiteSpace(request.Genre) ? "A warm instrumental track." : request.Genre;
             string lyrics = string.IsNullOrWhiteSpace(request.Prompt) ? "[instrumental]" : request.Prompt;
             (int[] conditional, int[] unconditional) = MiniMaxMusic3Prompt.Tokenize(tokenizer, caption, lyrics);
 
             int frames = (int)Math.Clamp(
                 Math.Round(request.Duration * MiniMaxMusic3ArPipeline.FrameRate), 1, MiniMaxMusic3ArPipeline.MaxAudioFrames);
             int steps = request.InferSteps is > 0 ? request.InferSteps.Value : MiniMaxMusic3FlowPipeline.DefaultSteps;
-            float cfgScale = request.CfgScale is > 0
-                ? (float)request.CfgScale.Value
+            float cfgScale = request.CfgScale is > 0 ? (float)request.CfgScale.Value
                 : MiniMaxMusic3FlowPipeline.DefaultCfgScale;
 
             long autoregressiveStart = Environment.TickCount64;

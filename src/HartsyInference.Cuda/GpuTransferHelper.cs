@@ -218,8 +218,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Recomputes the context fallback and sole-state fast path from resolvable states.</summary>
     private static void RebuildRoutes(nint contextHandle, State excluded)
     {
-        if (contextHandle != 0
-            && _byContext.TryGetValue(contextHandle, out State? current)
+        if (contextHandle != 0 && _byContext.TryGetValue(contextHandle, out State? current)
             && (ReferenceEquals(current, excluded) || !IsResolvable(current)))
         {
             State? replacement = null;

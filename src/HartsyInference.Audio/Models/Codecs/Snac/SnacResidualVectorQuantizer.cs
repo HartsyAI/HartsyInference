@@ -84,9 +84,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 throw new InvalidOperationException($"Latent length {t} is not divisible by codebook {q} stride {stride}.");
 
             // Downsample the residual via average pooling.
-            Tensor downsampled = stride == 1
-                ? Clone(residual)
-                : AvgPool1d(residual, batch, LatentDim, t, stride);
+            Tensor downsampled = stride == 1 ? Clone(residual) : AvgPool1d(residual, batch, LatentDim, t, stride);
 
             // in_proj 1×1 conv: latent_dim → codebook_dim.
             Tensor projected = new(new TensorShape(batch, CodebookDim, tQuant), DType.F32);
@@ -110,8 +108,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
             quantizedSmall.Dispose();
 
-            Tensor reprojFull = stride == 1
-                ? reprojSmall
+            Tensor reprojFull = stride == 1 ? reprojSmall
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 
@@ -162,8 +159,7 @@ internal sealed unsafe class SnacResidualVectorQuantizer
                 stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
             quantizedSmall.Dispose();
 
-            Tensor reprojFull = stride == 1
-                ? reprojSmall
+            Tensor reprojFull = stride == 1 ? reprojSmall
                 : RepeatInterleave(reprojSmall, batch, LatentDim, tQuant, stride);
             if (stride > 1) reprojSmall.Dispose();
 

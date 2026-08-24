@@ -27,9 +27,7 @@ public sealed unsafe class FlowMatchDmdScheduler
         for (int i = 0; i < denoisingStepList.Length; i++)
         {
             float t = (float)denoisingStepList[i] / numTrainTimesteps;
-            _sigmas[i] = warpDenoisingStep
-                ? timestepShift * t / (1f + (timestepShift - 1f) * t)
-                : t;
+            _sigmas[i] = warpDenoisingStep ? timestepShift * t / (1f + (timestepShift - 1f) * t) : t;
         }
     }
 

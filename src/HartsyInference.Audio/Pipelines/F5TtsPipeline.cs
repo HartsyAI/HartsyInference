@@ -151,9 +151,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         System.Diagnostics.Stopwatch _secSw = System.Diagnostics.Stopwatch.StartNew();
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
         int sr = melCfg.SampleRate;
-        float[] mono24k = sampleRate == sr
-            ? refAudio.ToArray()
-            : Resampler.Create(sampleRate, sr).Resample(refAudio);
+        float[] mono24k = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
 
         // Upstream: if rms < target_rms (0.1), scale the reference up so quiet clips don't under-drive the DiT.
         const float targetRms = 0.1f;

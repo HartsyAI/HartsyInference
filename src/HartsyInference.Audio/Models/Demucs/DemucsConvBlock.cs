@@ -65,8 +65,7 @@ public sealed unsafe class DemucsConvBlock : IDisposable
         int outF = _is2d ? (f + 2 * pad - _kernel) / _stride + 1 : f;
         int outT = _is2d ? t : (tIn + 2 * pad - _kernel) / _stride + 1;
         // conv: freq branch strides freq only (kernel (k,1), stride (s,1), pad (pad,0)); time branch strides time.
-        Tensor conv = _is2d
-            ? Conv2(backend, xin, _convW!, _convB, _outCh, outF, outT, _stride, 1, pad, 0)
+        Tensor conv = _is2d ? Conv2(backend, xin, _convW!, _convB, _outCh, outF, outT, _stride, 1, pad, 0)
             : Conv1(backend, xin, _convW!, _convB, _outCh, outT, _stride, pad);
         if (ownXin) xin.Dispose();
         if (ConvProbe is not null) { Action<Tensor> p = ConvProbe; ConvProbe = null; p(conv); }   // one-shot: enc0 conv
@@ -74,8 +73,7 @@ public sealed unsafe class DemucsConvBlock : IDisposable
         DConvApply(backend, conv, _outCh, _is2d ? outF : 1, _is2d ? outT : outT);
         if (DConvProbe is not null) { Action<Tensor> p = DConvProbe; DConvProbe = null; p(conv); }   // one-shot: enc0 post-dconv
         int n = _is2d ? outF * outT : outT;
-        Tensor rew = _is2d
-            ? Conv2(backend, conv, _rewriteW!, _rewriteB, 2 * _outCh, outF, outT, 1, 1, 0, 0)
+        Tensor rew = _is2d ? Conv2(backend, conv, _rewriteW!, _rewriteB, 2 * _outCh, outF, outT, 1, 1, 0, 0)
             : Conv1(backend, conv, _rewriteW!, _rewriteB, 2 * _outCh, outT, 1, 0);
         conv.Dispose();
         Tensor outT2 = Glu(rew, _outCh, n); rew.Dispose();
@@ -88,8 +86,7 @@ public sealed unsafe class DemucsConvBlock : IDisposable
     {
         // rewrite is 3x3 (pad 1) in the decoder → GLU.
         int n = _is2d ? f * t : t;
-        Tensor rew = _is2d
-            ? Conv2(backend, x, _rewriteW!, _rewriteB, 2 * _inCh, f, t, 1, 1, 1, 1)
+        Tensor rew = _is2d ? Conv2(backend, x, _rewriteW!, _rewriteB, 2 * _inCh, f, t, 1, 1, 1, 1)
             : Conv1(backend, x, _rewriteW!, _rewriteB, 2 * _inCh, t, 1, 1);
         Tensor y = Glu(rew, _inCh, n); rew.Dispose();
         DConvApply(backend, y, _inCh, _is2d ? f : 1, _is2d ? t : t);

@@ -117,9 +117,7 @@ public static class AudioWeightsCatalog
             return [];
         }
         return _registry.Value.TryGetValue(familyId, out Dictionary<string, ModelAsset[]>? variants)
-            && variants.TryGetValue(variant.Trim(), out ModelAsset[]? assets)
-            ? assets
-            : [];
+            && variants.TryGetValue(variant.Trim(), out ModelAsset[]? assets) ? assets : [];
     }
 
     /// <summary>The PRIMARY checkpoint asset (the weights file) for a variant, or null when unregistered.</summary>

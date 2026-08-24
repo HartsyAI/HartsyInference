@@ -60,8 +60,7 @@ public sealed partial class AceStepLyricTokenizer
         List<string> merges = [];
         foreach (JsonElement m in model.GetProperty("merges").EnumerateArray())
         {
-            merges.Add(m.ValueKind == JsonValueKind.Array
-                ? $"{m[0].GetString()} {m[1].GetString()}"
+            merges.Add(m.ValueKind == JsonValueKind.Array ? $"{m[0].GetString()} {m[1].GetString()}"
                 : m.GetString() ?? "");
         }
         return new AceStepLyricTokenizer(vocab, merges);

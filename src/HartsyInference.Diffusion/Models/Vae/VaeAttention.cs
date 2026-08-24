@@ -3,12 +3,12 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
-/// <summary>Self-attention layer for the VAE mid-block. Single-head attention (heads=1, head_dim=channels) with GroupNorm and residual connection.</summary>
-public sealed class VaeAttention
+/// <summary>Self-attention layer for the VAE mid-block. Single-head attention (heads=1, head_dim=channels) with GroupNorm and residual connection. Creates a VAE attention layer with the specified channel count.</summary>
+public sealed class VaeAttention(int channels, int normGroups = 32, float normEps = 1e-6f)
 {
-    private readonly int _channels;
-    private readonly int _normGroups;
-    private readonly float _normEps;
+    private readonly int _channels = channels;
+    private readonly int _normGroups = normGroups;
+    private readonly float _normEps = normEps;
 
     // GroupNorm before attention projections
     private Tensor? _groupNormWeight;
@@ -25,14 +25,6 @@ public sealed class VaeAttention
     // Output projection
     private Tensor? _toOutWeight;
     private Tensor? _toOutBias;
-
-    /// <summary>Creates a VAE attention layer with the specified channel count.</summary>
-    public VaeAttention(int channels, int normGroups = 32, float normEps = 1e-6f)
-    {
-        _channels = channels;
-        _normGroups = normGroups;
-        _normEps = normEps;
-    }
 
     /// <summary>Loads weights from named tensors using the given prefix (e.g., "decoder.mid_block.attentions.0").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

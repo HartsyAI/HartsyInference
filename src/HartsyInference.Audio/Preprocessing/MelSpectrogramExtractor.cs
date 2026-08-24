@@ -20,32 +20,17 @@ public sealed class MelSpectrogramExtractor
     /// <paramref name="Scale"/> / <paramref name="SlaneyNorm"/> / <paramref name="Center"/> parameters default
     /// to the librosa Slaney convention used by most presets; F5-TTS/Vocos overrides them to HTK + no-norm +
     /// center padding (see <see cref="F5VocosConfig"/>).</summary>
-    public readonly record struct Config(
-        int SampleRate,
-        int NFft,
-        int WinLength,
-        int HopLength,
-        int NMels,
-        double Fmin,
-        double Fmax,
-        Normalization Norm,
-        bool DropLastStftFrame,
-        LogBase LogBase,
-        float? LogFloor,
-        float DynamicRangeDb,
-        float NormOffset,
-        float NormScale,
-        bool PowerSpectrum,
-        MelScale Scale = MelScale.Slaney,
-        bool SlaneyNorm = true,
-        bool Center = false,
-        // When WinLength &lt; NFft, torch.stft/torchaudio pad the analysis window to NFft *centered*
-        // ((NFft-WinLength)/2 zeros each side) rather than left-aligning it. Most presets here have
-        // WinLength == NFft so it is moot; StyleTTS2's reference mel (win 1200 &lt; n_fft 2048) needs it.
-        bool CenterWindowInFft = false,
-        // Zonos's speaker front-end applies log(mel + floor) (additive) rather than log(max(mel, floor))
-        // (clamp). The two agree for mel ≫ floor but diverge near-silent bins; Zonos needs the additive form.
-        bool AdditiveLogFloor = false);
+    /// <param name="CenterWindowInFft">When WinLength &lt; NFft, torch.stft/torchaudio pad the analysis window to
+    /// NFft *centered* ((NFft-WinLength)/2 zeros each side) rather than left-aligning it. Most presets here have
+    /// WinLength == NFft so it is moot; StyleTTS2's reference mel (win 1200 &lt; n_fft 2048) needs it.</param>
+    /// <param name="AdditiveLogFloor">Zonos's speaker front-end applies log(mel + floor) (additive) rather than
+    /// log(max(mel, floor)) (clamp). The two agree for mel ≫ floor but diverge near-silent bins; Zonos needs the
+    /// additive form.</param>
+    public readonly record struct Config(int SampleRate, int NFft, int WinLength, int HopLength, int NMels,
+        double Fmin, double Fmax, Normalization Norm, bool DropLastStftFrame, LogBase LogBase, float? LogFloor,
+        float DynamicRangeDb, float NormOffset, float NormScale, bool PowerSpectrum,
+        MelScale Scale = MelScale.Slaney, bool SlaneyNorm = true, bool Center = false,
+        bool CenterWindowInFft = false, bool AdditiveLogFloor = false);
 
     /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
     /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper
@@ -223,8 +208,7 @@ public sealed class MelSpectrogramExtractor
     {
         // torch.stft(center=True) reflect-pads by n_fft/2 each side and yields (len // hop) + 1 frames.
         // Without centering the caller is responsible for any pre-padding (e.g. Whisper zero-pads to 30s).
-        int frames = _cfg.Center
-            ? 1 + audioLength / _cfg.HopLength
+        int frames = _cfg.Center ? 1 + audioLength / _cfg.HopLength
             : 1 + (audioLength - _cfg.WinLength) / _cfg.HopLength;
         if (frames < 1) frames = 1;
         if (_cfg.DropLastStftFrame) frames--;

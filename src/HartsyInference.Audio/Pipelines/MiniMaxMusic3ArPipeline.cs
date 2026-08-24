@@ -238,8 +238,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         float threshold = KthLargest(conditional, TopK);
         for (int i = 0; i < count; i++)
         {
-            guided[i] = conditional[i] < threshold
-                ? float.NegativeInfinity
+            guided[i] = conditional[i] < threshold ? float.NegativeInfinity
                 : unconditional[i] + ((conditional[i] - unconditional[i]) * CfgScale);
         }
     }

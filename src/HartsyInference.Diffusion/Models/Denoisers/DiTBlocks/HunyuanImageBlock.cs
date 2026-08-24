@@ -221,8 +221,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         // (was a full D2H→host-trig→H2D excursion per block per step).
         if (batch == 1)
         {
-            Span<int> ropeDims = imgPackedT > 1
-                ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
+            Span<int> ropeDims = imgPackedT > 1 ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
                 : stackalloc int[2] { imgPackedH, imgPackedW };
             rope.ApplyGpu(backend, imgQn, imgKn, _numHeads, ropeDims);
         }

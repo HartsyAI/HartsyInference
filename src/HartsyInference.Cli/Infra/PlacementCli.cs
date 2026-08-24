@@ -103,8 +103,7 @@ public static class PlacementCli
             VaeDevice = vaeSelector,
             CfgParallelDevice = cfgSelector,
             ShardDevices = shardSelector is not null
-                ? new[] { BackendFactory.WithOrdinal(backendSelector, primary), shardSelector }
-                : Array.Empty<string>(),
+                ? new[] { BackendFactory.WithOrdinal(backendSelector, primary), shardSelector } : Array.Empty<string>(),
             EnableDitSharding = ditShardSelector is not null,
             ContextParallelDevices = cpDevices,
         };

@@ -39,8 +39,7 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
         int ffDim = config.HiddenSize * 4;
         _blocks = new JointBlock[config.Depth];
-        HashSet<int> dualLayers = config.DualAttentionLayers is null
-            ? new HashSet<int>()
+        HashSet<int> dualLayers = config.DualAttentionLayers is null ? new HashSet<int>()
             : new HashSet<int>(config.DualAttentionLayers);
 
         for (int i = 0; i < config.Depth; i++)

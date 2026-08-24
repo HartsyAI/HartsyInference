@@ -83,8 +83,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         Tensor n1 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.OasisAdaLn(n1, x, mod, _dim, sp, frames * sp, 6 * _dim, 0 * _dim, 1 * _dim, 1e-6f);
         if (Prof) { backend.Sync(); TModNorm += Now(); TAttnRest -= Now(); }
-        Tensor attn = spatial
-            ? SpatialAttention(backend, n1, frames, sp, spatialCos, spatialSin)
+        Tensor attn = spatial ? SpatialAttention(backend, n1, frames, sp, spatialCos, spatialSin)
             : TemporalAttention(backend, n1, frames, sp, temporalCos, temporalSin, causalMask);
         n1.Dispose();
         GatedResidual(backend, x, attn, mod, frames, gateSlot: 2);   // x += gate·attn (in place, device)
@@ -92,8 +91,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         if (Prof) { backend.Sync(); TAttnRest += Now(); TMlp -= Now(); }
 
         // MLP sub-half.
-        (Tensor fc1W, Tensor? fc1B, Tensor fc2W, Tensor? fc2B) = spatial
-            ? (_sFc1W!, _sFc1B, _sFc2W!, _sFc2B)
+        (Tensor fc1W, Tensor? fc1B, Tensor fc2W, Tensor? fc2B) = spatial ? (_sFc1W!, _sFc1B, _sFc2W!, _sFc2B)
             : (_tFc1W!, _tFc1B, _tFc2W!, _tFc2B);
         Tensor n2 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.OasisAdaLn(n2, x, mod, _dim, sp, frames * sp, 6 * _dim, 3 * _dim, 4 * _dim, 1e-6f);

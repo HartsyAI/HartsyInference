@@ -229,9 +229,7 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         Stopwatch vaeSw = Stopwatch.StartNew();
 
         bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
-        Tensor vaeInput = vaeF16
-            ? DtypeCastHelper.EnsureDtype(Backend, latent, DType.F16)
-            : latent;
+        Tensor vaeInput = vaeF16 ? DtypeCastHelper.EnsureDtype(Backend, latent, DType.F16) : latent;
 
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
         Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeInput);

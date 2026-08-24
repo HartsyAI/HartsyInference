@@ -67,8 +67,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// range only, since shared weights (patch/time-embed/final-layer projections) always live on the primary
     /// backend. Zero when <see cref="DiffusionPipelineBase.DitShardBackend"/> is not set.</summary>
     public long EstimateShardResidentWeightBytes() => DitShardBackend is not null
-        ? SumBytes(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers))
-        : 0;
+        ? SumBytes(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers)) : 0;
 
     private static long SumBytes(IEnumerable<Tensor> weights) =>
         weights.Sum(t => t.DType.ComputeByteCount(t.ElementCount));

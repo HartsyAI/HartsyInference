@@ -113,8 +113,7 @@ public static class WanLoraMapper
     {
         bool original = body.Contains("self_attn.", StringComparison.Ordinal)
             || body.Contains("cross_attn.", StringComparison.Ordinal)
-            || body.EndsWith(".ffn.0", StringComparison.Ordinal)
-            || body.EndsWith(".ffn.2", StringComparison.Ordinal)
+            || body.EndsWith(".ffn.0", StringComparison.Ordinal) || body.EndsWith(".ffn.2", StringComparison.Ordinal)
             || body.EndsWith(".norm3", StringComparison.Ordinal)
             || body.StartsWith("img_emb.", StringComparison.Ordinal)
             || body.StartsWith("time_embedding.", StringComparison.Ordinal)

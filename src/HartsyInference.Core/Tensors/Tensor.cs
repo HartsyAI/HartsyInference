@@ -311,9 +311,7 @@ public sealed unsafe class Tensor : IDisposable
         nuint otherStart = (nuint)otherPointer;
         nuint thisLength = checked((nuint)_byteSize);
         nuint otherLength = checked((nuint)other._byteSize);
-        return thisStart <= otherStart
-            ? otherStart - thisStart < thisLength
-            : thisStart - otherStart < otherLength;
+        return thisStart <= otherStart ? otherStart - thisStart < thisLength : thisStart - otherStart < otherLength;
     }
 
     /// <summary>Shape and strides of this tensor.</summary>

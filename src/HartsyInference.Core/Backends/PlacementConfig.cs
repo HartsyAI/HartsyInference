@@ -31,15 +31,8 @@ public sealed record PlacementConfig
     public int TensorParallelDegree { get; init; } = 1;
 
     /// <summary>True when every member is at its default — the engine must then behave byte-identically to a build without placement support.</summary>
-    public bool IsSingle =>
-        ShardDevices.Count == 0
-        && ShardRatios is null
-        && TextEncoderDevice is null
-        && VaeDevice is null
-        && CfgParallelDevice is null
-        && !EnableDitSharding
-        && ContextParallelDevices.Count == 0
-        && TensorParallelDegree == 1;
+    public bool IsSingle => ShardDevices.Count == 0 && ShardRatios is null && TextEncoderDevice is null && VaeDevice is null
+        && CfgParallelDevice is null && !EnableDitSharding && ContextParallelDevices.Count == 0 && TensorParallelDegree == 1;
 
     /// <summary>Stable, order-sensitive identity for pipeline cache keys. Empty for <see cref="IsSingle"/> so existing cache keys stay byte-identical when placement is unused.</summary>
     public string CacheKey()
@@ -48,10 +41,7 @@ public sealed record PlacementConfig
         {
             return "";
         }
-        string shard = ShardDevices.Count == 0
-            ? ""
-            : string.Join(",", ShardDevices) + (ShardRatios is null ? "" : "@" + string.Join(",", ShardRatios));
-        return $"|placement:shard={shard};te={TextEncoderDevice};vae={VaeDevice};cfg={CfgParallelDevice};" +
-            $"dit={(EnableDitSharding ? 1 : 0)};cp={string.Join(",", ContextParallelDevices)};tp={TensorParallelDegree}";
+        string shard = ShardDevices.Count == 0 ? "" : string.Join(",", ShardDevices) + (ShardRatios is null ? "" : "@" + string.Join(",", ShardRatios));
+        return $"|placement:shard={shard};te={TextEncoderDevice};vae={VaeDevice};cfg={CfgParallelDevice};" + $"dit={(EnableDitSharding ? 1 : 0)};cp={string.Join(",", ContextParallelDevices)};tp={TensorParallelDegree}";
     }
 }

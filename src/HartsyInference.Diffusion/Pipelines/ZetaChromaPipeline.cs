@@ -16,19 +16,14 @@ namespace HartsyInference.Diffusion.Pipelines;
 ///   <item><b>Timestep inversion</b> — the transformer is conditioned on <c>1 − sigma</c>, inheriting Z-Image's convention (item 7).</item>
 ///   <item><b>Flow-match Euler</b>, static shift 3.0 (item 9), default 50 steps, CFG 5.0.</item>
 ///   <item><b>Resolution must be divisible by the pixel patch size</b> (32 reported) — no pad/crop path until the training resolution behavior is known.</item>
-/// </list></summary>
-public sealed class ZetaChromaPipeline : DiffusionPipelineBase
+/// </list>
+///
+/// <para>Creates a Zeta-Chroma pipeline. The Qwen3 caption encoder is owned by the caller (as with Z-Image).</para></summary>
+public sealed class ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer transformer, ZetaChromaConfig config)
+    : DiffusionPipelineBase(backend)
 {
-    private readonly ZetaChromaTransformer _transformer;
-    private readonly ZetaChromaConfig _config;
-
-    /// <summary>Creates a Zeta-Chroma pipeline. The Qwen3 caption encoder is owned by the caller (as with Z-Image).</summary>
-    public ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer transformer, ZetaChromaConfig config)
-        : base(backend)
-    {
-        _transformer = transformer;
-        _config = config;
-    }
+    private readonly ZetaChromaTransformer _transformer = transformer;
+    private readonly ZetaChromaConfig _config = config;
 
     /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. API mirrors <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Img2img / inpaint is pixel-space (no VAE): pass an <see cref="ImageToImageRequest"/> and the source pixels are noised directly at <c>sigma[startStep]</c> (VALIDATION-PENDING alongside the rest of the sampling recipe — mid-pretraining checkpoint).</summary>
     /// <param name="captionEmbeddings">Qwen3-4B last-hidden-state for the prompt [B, capLen, 2560].</param>
@@ -151,8 +146,7 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
                 // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression: the two are equal
                 // mathematically, but the F32 round trip through x1000 is not exact, and substituting one for the
                 // other would shift every existing generation by an ulp of conditioning.
-                float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                    ? timestepTable[stepIndex] / 1000.0f
+                float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex] / 1000.0f
                     : s;
                 // Z-Image lineage: the transformer conditions on the INVERTED timestep (1 - sigma); the
                 // transformer multiplies by t_scale=1000 internally. Validation-gated (research doc item 7).

@@ -45,8 +45,7 @@ public static class ParallelPlanner
         // healthy setups, but the probe is authoritative).
         List<GpuTopologyInfo> ordered = [.. gpus.OrderByDescending(g => g.SmCount)];
         string[] devices = [.. ordered.Select(g => $"cuda:{g.Ordinal}")];
-        bool fitsPrimary = request.ModelBytes <= 0
-            || request.ModelBytes * FitOverhead < ordered[0].FreeMemoryBytes;
+        bool fitsPrimary = request.ModelBytes <= 0 || request.ModelBytes * FitOverhead < ordered[0].FreeMemoryBytes;
         bool fitsEverySecondary = request.ModelBytes > 0
             && ordered.Skip(1).All(g => request.ModelBytes * FitOverhead < g.FreeMemoryBytes);
         double smRatio = (double)ordered[^1].SmCount / Math.Max(1, ordered[0].SmCount);

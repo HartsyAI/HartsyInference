@@ -68,8 +68,7 @@ internal static class MiniMaxMusic3WeightPolicy
     private static string CachePath(string repo, string quant, string component) => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "hartsyinference", "minimax-music3",
-        component == "lm"
-            ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
+        component == "lm" ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
             : $"{repo.Replace('/', '_')}-{component}-{quant.ToLowerInvariant()}.gguf");
 
     /// <summary>Quantizes the <paramref name="quantizable"/> subset of <paramref name="weights"/> into a disk-cached GGUF (written once, on the first run) and returns it merged back over the untouched remainder.</summary>
@@ -136,8 +135,7 @@ internal static class MiniMaxMusic3WeightPolicy
         {
             // Norms and biases are tiny and precision-sensitive, and time_proj is read host-side by the Fourier
             // embedding rather than through a backend op — only the projections are worth narrowing.
-            bool narrow = entry.Value.DType == DType.F32
-                && entry.Value.Shape.Rank >= 2
+            bool narrow = entry.Value.DType == DType.F32 && entry.Value.Shape.Rank >= 2
                 && !entry.Key.StartsWith("time_proj", StringComparison.Ordinal);
             cast[entry.Key] = narrow ? tracker.Track(entry.Value.CastTo(DType.BF16)) : entry.Value;
         }

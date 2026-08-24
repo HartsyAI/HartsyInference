@@ -68,10 +68,10 @@ public sealed record BiCodecConfig
 }
 
 /// <summary>Projects w2v-BERT features to a 50 Hz semantic latent, then nearest-neighbor matches by cosine similarity against an L2-normalized 8192-entry codebook.</summary>
-internal sealed unsafe class BiCodecSemanticEncoder
+internal sealed unsafe class BiCodecSemanticEncoder(BiCodecConfig cfg, string prefix)
 {
-    private readonly BiCodecConfig _cfg;
-    private readonly string _prefix;
+    private readonly BiCodecConfig _cfg = cfg;
+    private readonly string _prefix = prefix;
 
     private Tensor? _projW;
     private Tensor? _projB;
@@ -79,12 +79,6 @@ internal sealed unsafe class BiCodecSemanticEncoder
     private Tensor? _vqInProjB;
     private Tensor? _codebook;
     private Tensor? _codebookNorm;
-
-    public BiCodecSemanticEncoder(BiCodecConfig cfg, string prefix)
-    {
-        _cfg = cfg;
-        _prefix = prefix;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

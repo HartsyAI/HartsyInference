@@ -23,9 +23,7 @@ public static class AiToolkitFluxMapper
                 continue;
             }
 
-            string root = isDown
-                ? key[..^DownSuffix.Length]
-                : key[..^UpSuffix.Length];
+            string root = isDown ? key[..^DownSuffix.Length] : key[..^UpSuffix.Length];
 
             string body;
             LoraTarget target;

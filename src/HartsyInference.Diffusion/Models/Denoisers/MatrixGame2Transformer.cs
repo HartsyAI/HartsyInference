@@ -140,8 +140,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++)
         {
             MatrixGame3ActionModule? action = _actionModules[i];
-            Action<Tensor>? hook = action is null || keyboard is null
-                ? null
+            Action<Tensor>? hook = action is null || keyboard is null ? null
                 : h => action.Forward(backend, h, (gt, gh, gw), frameIdx, 0, mouse ?? keyboard, keyboard);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook, mask);
             cur.Dispose();

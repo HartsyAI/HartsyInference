@@ -96,8 +96,7 @@ public sealed unsafe class SamPipeline : IVisionPipeline
             {
                 return new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder, pickleLoader);
             }
-            return loader is null
-                ? new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder)
+            return loader is null ? new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder)
                 : new SamPipeline(backend, config, encoder, promptEncoder, maskDecoder, loader);
         }
         catch (Exception ex)

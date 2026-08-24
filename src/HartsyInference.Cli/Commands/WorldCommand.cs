@@ -95,8 +95,7 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("actions", settings.Actions ?? "");
 
-        Dictionary<string, string> aux = isOasis
-            ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
+        Dictionary<string, string> aux = isOasis ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
             : new Dictionary<string, string>();
         ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
         ModelSpec spec = baseSpec with { Aux = aux };

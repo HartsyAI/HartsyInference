@@ -171,8 +171,7 @@ public sealed class YueTokenizer : IDisposable
         int[] window = new int[hi - lo];
         for (int i = lo; i < hi; i++)
         {
-            window[i - lo] = globalOffset + (dual
-                ? ((i & 1) == 0 ? vocalCb0[i >> 1] : instrumentalCb0[i >> 1])
+            window[i - lo] = globalOffset + (dual ? ((i & 1) == 0 ? vocalCb0[i >> 1] : instrumentalCb0[i >> 1])
                 : vocalCb0[i]);
         }
         return window;

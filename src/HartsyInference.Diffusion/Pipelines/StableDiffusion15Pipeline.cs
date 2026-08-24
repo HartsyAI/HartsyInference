@@ -127,18 +127,15 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         // 4. Sampler seam. The sampler-driven loop covers the plain t2i/img2img case on an epsilon Euler schedule;
         //    every conditional feature (masked inpaint, ControlNet, IP-Adapter, a per-step conditioning schedule) and
         //    the legacy non-Euler schedulers keep the reference host loop, which never consults a sampler.
-        bool samplerLoop = scheduler is EulerDiscreteScheduler euler && euler.FusedEulerCompatible
-            && !isMaskedInpaint
-            && (controlNets is null || controlNets.Count == 0)
-            && (ipAdapters is null || ipAdapters.Count == 0)
+        bool samplerLoop = scheduler is EulerDiscreteScheduler euler && euler.FusedEulerCompatible && !isMaskedInpaint
+            && (controlNets is null || controlNets.Count == 0) && (ipAdapters is null || ipAdapters.Count == 0)
             && conditioningSchedule is null;
 
         // Refuse the combination rather than dropping it: silently running plain Euler when the user asked for
         // euler_ancestral (or ignoring `karras`) is the exact INVISIBLE fallback this seam exists to remove — the
         // image is fine, just not the one that was requested. The sampler half has to be checked as well as the
         // schedule half, because a bare `euler_ancestral` carries no schedule suffix.
-        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName)
-            && samplerName.Length > 0
+        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName) && samplerName.Length > 0
             && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
         if (!samplerLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
         {
@@ -412,8 +409,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             }
 
             // Per-step conditioning selection for alternation [a|b] / scheduling [a:b:when].
-            Tensor stepEmbeddings = conditioningSchedule is null
-                ? textEmbeddings
+            Tensor stepEmbeddings = conditioningSchedule is null ? textEmbeddings
                 : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
 
             // ControlNet (single pass per step, cond branch only — residuals shared across

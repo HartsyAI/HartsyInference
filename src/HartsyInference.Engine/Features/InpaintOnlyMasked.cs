@@ -18,16 +18,8 @@ public static class InpaintOnlyMasked
     private const int SizeAlignment = 16;
 
     /// <summary>The resolved crop: where it came from, what to generate, and what to composite back into.</summary>
-    public sealed record Plan(
-        int X,
-        int Y,
-        int CropWidth,
-        int CropHeight,
-        int GenerateWidth,
-        int GenerateHeight,
-        ImageData OriginalInit,
-        ImageData CroppedInit,
-        byte[] CroppedMask);
+    public sealed record Plan(int X, int Y, int CropWidth, int CropHeight, int GenerateWidth, int GenerateHeight,
+        ImageData OriginalInit, ImageData CroppedInit, byte[] CroppedMask);
 
     /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.ShrinkGrow"/> at 0, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
     public static Plan? Prepare(ImageRequest request)

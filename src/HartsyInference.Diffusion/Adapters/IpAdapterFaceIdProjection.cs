@@ -4,10 +4,10 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Adapters;
 
 /// <summary>The image-prompt projection used by plain IP-Adapter FaceID (h94's <c>MLPProjModel</c>): a 2-layer MLP from the L2-normalized 512-d InsightFace ArcFace identity embedding to <c>num_tokens × cross_attention_dim</c> — <c>Linear(512 → 1024) → GELU → Linear(1024 → tokens·crossDim)</c>, reshaped to <c>[B, numTokens, crossAttnDim]</c> and finished with a LayerNorm over the per-token dim. Checkpoint keys (h94/IP-Adapter-FaceID <c>.bin</c>, flattened): <c>image_proj.proj.0.weight/bias</c>, <c>image_proj.proj.2.weight/bias</c>, <c>image_proj.norm.weight/bias</c>. The FaceID-Plus variants (<c>ProjPlusModel</c>, which additionally mix CLIP-Vision features through a perceiver resampler) are a different module and are NOT handled here. Math is CPU-side like <see cref="IpAdapterStandardProjection"/> — the largest case (1024 → 8192, batch 1) is a few MFLOPs, dwarfed by everything around it. GELU uses the exact erf form matching <c>torch.nn.GELU</c>'s default.</summary>
-public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
+public sealed unsafe class IpAdapterFaceIdProjection(int crossAttnDim, int numTokens) : IIpAdapterImageProjection
 {
-    private readonly int _crossAttnDim;
-    private readonly int _numTokens;
+    private readonly int _crossAttnDim = crossAttnDim;
+    private readonly int _numTokens = numTokens;
 
     private Tensor? _proj0Weight; // [hidden, idDim]
     private Tensor? _proj0Bias;   // [hidden]
@@ -17,12 +17,6 @@ public sealed unsafe class IpAdapterFaceIdProjection : IIpAdapterImageProjection
     private Tensor? _normBias;    // [crossAttnDim]
 
     public int NumTokens => _numTokens;
-
-    public IpAdapterFaceIdProjection(int crossAttnDim, int numTokens)
-    {
-        _crossAttnDim = crossAttnDim;
-        _numTokens = numTokens;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "image_proj")
     {

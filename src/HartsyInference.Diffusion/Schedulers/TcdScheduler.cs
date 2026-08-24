@@ -121,9 +121,7 @@ public sealed unsafe class TcdScheduler : IScheduler
                 float predX0 = (samplePtr[i] - sqrtBetaProdT * eps) / sqrtAlphaProdT;
                 float denoised = cOut * predX0 + cSkip * samplePtr[i];
                 float predNoisedS = sqrtAlphaProdS * denoised + sqrtBetaProdS * eps;
-                outPtr[i] = noisePtr is null
-                    ? predNoisedS
-                    : renoiseSignal * predNoisedS + renoiseNoise * noisePtr[i];
+                outPtr[i] = noisePtr is null ? predNoisedS : renoiseSignal * predNoisedS + renoiseNoise * noisePtr[i];
             }
         }
         finally

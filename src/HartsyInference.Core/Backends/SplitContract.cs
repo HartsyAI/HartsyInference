@@ -3,11 +3,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Core.Backends;
 
 /// <summary>Validated contiguous geometry for <see cref="IBackend.Split"/>.</summary>
-internal readonly record struct SplitGeometry(
-    long Outer,
-    long InputDimension,
-    long Inner,
-    int ElementSize);
+internal readonly record struct SplitGeometry(long Outer, long InputDimension, long Inner, int ElementSize);
 
 /// <summary>Centralizes the exact split contract so host and accelerator implementations cannot disagree about dtype width, output geometry, or storage aliasing.</summary>
 internal static class SplitContract

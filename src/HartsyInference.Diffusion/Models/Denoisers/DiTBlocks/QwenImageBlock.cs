@@ -350,8 +350,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         Tensor imgAttnProj = new Tensor(imgShape, act);
         backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
-        Tensor imgAfterAttn = imgModZero is null
-            ? GatedResidual(backend, image, imgAttnProj, imgMod[2], imgShape)
+        Tensor imgAfterAttn = imgModZero is null ? GatedResidual(backend, image, imgAttnProj, imgMod[2], imgShape)
             : GatedResidualSplit(backend, image, imgAttnProj, imgMod[2], imgModZero[2], imgShape, timestepZeroIndex);
         imgAttnProj.Dispose();
 
@@ -368,8 +367,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
             : NormModulateSplit(backend, imgAfterAttn, imgMod[3], imgMod[4], imgModZero[3], imgModZero[4], imgShape, timestepZeroIndex, _streamLnEps);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = imgModZero is null
-            ? GatedResidual(backend, imgAfterAttn, imgMlpOut, imgMod[5], imgShape)
+        Tensor imgFinal = imgModZero is null ? GatedResidual(backend, imgAfterAttn, imgMlpOut, imgMod[5], imgShape)
             : GatedResidualSplit(backend, imgAfterAttn, imgMlpOut, imgMod[5], imgModZero[5], imgShape, timestepZeroIndex);
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();

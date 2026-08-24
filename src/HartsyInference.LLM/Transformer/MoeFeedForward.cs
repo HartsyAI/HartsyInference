@@ -5,23 +5,16 @@ namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Mixture-of-Experts feed-forward block: a router picks the top-k experts per token, each selected expert (a SwiGLU FFN) runs only on the tokens routed to it (gather → expert GEMM → weighted scatter-add), plus an optional always-on shared expert applied to every token, replacing the dense SwiGLU on MoE layers. Covers Qwen2-MoE/Qwen3-MoE/Mixtral (softmax routing) and DeepSeek (sigmoid routing); experts run through the same quant-aware <see cref="GenericTransformer.Project"/> path as the dense FFN.</summary>
 /// <remarks><b>Routing residency:</b> the router logits are read to the host to pick top-k experts and build the per-expert token groups (one D2H per MoE layer); the expert GEMMs and the gather/scatter combine stay device-resident. A fully on-device top-k + dispatch is a follow-up; correctness is unaffected.</remarks>
-public sealed class MoeFeedForward
+public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 {
-    private readonly MoeConfig _moe;
-    private readonly int _hidden;
-    private readonly bool _lowVram;
+    private readonly MoeConfig _moe = moe;
+    private readonly int _hidden = hiddenSize;
+    private readonly bool _lowVram = lowVram;
 
     private Tensor _routerW = null!;                 // [E, hidden]
     private Tensor[] _gateW = null!, _upW = null!, _downW = null!;   // per expert
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
     private float[]? _correctionBias;                // DeepSeek-V3 e_score_correction_bias [E] (selection only)
-
-    public MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
-    {
-        _moe = moe;
-        _hidden = hiddenSize;
-        _lowVram = lowVram;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {

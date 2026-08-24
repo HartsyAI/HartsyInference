@@ -94,8 +94,7 @@ public sealed unsafe class LtxVideoBlock
             : ApplyShiftScale(backend, RmsNoAffine(backend, hidden, s), scaleMsa, shiftMsa, s);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, null, s, s);
         n1.Dispose();
-        Tensor afterAttn1 = perToken
-            ? GatedAddRowIndexed(backend, hidden, attn1, gateMsa, modIndex!, s)
+        Tensor afterAttn1 = perToken ? GatedAddRowIndexed(backend, hidden, attn1, gateMsa, modIndex!, s)
             : GatedAdd(backend, hidden, attn1, gateMsa, s);
         attn1.Dispose();
 
@@ -112,8 +111,7 @@ public sealed unsafe class LtxVideoBlock
             : ApplyShiftScale(backend, RmsNoAffine(backend, afterAttn2, s), scaleMlp, shiftMlp, s);
         Tensor ff = Ffn(backend, n2, s);
         n2.Dispose();
-        Tensor outT = perToken
-            ? GatedAddRowIndexed(backend, afterAttn2, ff, gateMlp, modIndex!, s)
+        Tensor outT = perToken ? GatedAddRowIndexed(backend, afterAttn2, ff, gateMlp, modIndex!, s)
             : GatedAdd(backend, afterAttn2, ff, gateMlp, s);
         afterAttn2.Dispose();
         ff.Dispose();

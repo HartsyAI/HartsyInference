@@ -6,25 +6,17 @@ namespace HartsyInference.Vision.FaceDetection;
 /// <para>Point semantics (left/right are image-side, matched to the ArcFace template rows): 0 left-eye,
 /// 1 right-eye, 2 nose, 3 mouth-left, 4 mouth-right. The names are the convention a standard face checkpoint
 /// uses; a checkpoint trained with a different keypoint order needs its points remapped before construction.</para></summary>
-public readonly struct Landmark5
+public readonly struct Landmark5(FaceLandmark leftEye, FaceLandmark rightEye, FaceLandmark nose,
+    FaceLandmark mouthLeft, FaceLandmark mouthRight)
 {
     /// <summary>Number of landmark points.</summary>
     public const int Count = 5;
 
-    public FaceLandmark LeftEye { get; }
-    public FaceLandmark RightEye { get; }
-    public FaceLandmark Nose { get; }
-    public FaceLandmark MouthLeft { get; }
-    public FaceLandmark MouthRight { get; }
-
-    public Landmark5(FaceLandmark leftEye, FaceLandmark rightEye, FaceLandmark nose, FaceLandmark mouthLeft, FaceLandmark mouthRight)
-    {
-        LeftEye = leftEye;
-        RightEye = rightEye;
-        Nose = nose;
-        MouthLeft = mouthLeft;
-        MouthRight = mouthRight;
-    }
+    public FaceLandmark LeftEye { get; } = leftEye;
+    public FaceLandmark RightEye { get; } = rightEye;
+    public FaceLandmark Nose { get; } = nose;
+    public FaceLandmark MouthLeft { get; } = mouthLeft;
+    public FaceLandmark MouthRight { get; } = mouthRight;
 
     /// <summary>Builds from a flat (x, y[, score]) sequence of exactly <see cref="Count"/> points. <paramref name="stride"/>
     /// is the values-per-point (2 for x/y, 3 for x/y/score) — the layout the detector's landmark branch produces.</summary>

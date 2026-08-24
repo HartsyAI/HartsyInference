@@ -360,8 +360,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             try
             {
                 CpForwardContext ctx = new() { Rank = rank, Plan = cpPlan!, Exchange = cpExchange! };
-                Tensor local = fts is null
-                    ? _transformer.Forward(rankBackend, input, embeds, tE, null, ctx)
+                Tensor local = fts is null ? _transformer.Forward(rankBackend, input, embeds, tE, null, ctx)
                     : _transformer.Forward(rankBackend, input, embeds, fts, null, ctx);
                 _ = local.DataPointer;
                 return local;

@@ -14,33 +14,21 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed HunyuanImage 2.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HunyuanImagePipeline"/> owns the Qwen2.5-VL-7B forward (including its own TE⇄DiT residency swap and embedding cache), so this only produces the padded chat-template token ids + attention masks and calls <see cref="HunyuanImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HunyuanImageLoader.Generate</c>.</summary>
-public sealed class HunyuanImageRecipePipeline : IRecipePipeline
+/// <summary>A constructed HunyuanImage 2.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HunyuanImagePipeline"/> owns the Qwen2.5-VL-7B forward (including its own TE⇄DiT residency swap and embedding cache), so this only produces the padded chat-template token ids + attention masks and calls <see cref="HunyuanImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HunyuanImageLoader.Generate</c>. Wraps the constructed HunyuanImage pipeline plus its components, taking ownership of every disposable.</summary>
+public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qwen2Tokenizer tokenizer, LlamaStyleEncoder llama,
+    HunyuanImageQwenTextEncoder qwenEncoder, HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vae,
+    List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
 
-    private readonly HunyuanImagePipeline _pipeline;
-    private readonly Qwen2Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _llama;
-    private readonly HunyuanImageQwenTextEncoder _qwenEncoder;
-    private readonly HunyuanImageTransformer _transformer;
-    private readonly HunyuanImageVaeDecoder _vae;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly IDisposable? _ggufHandle;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed HunyuanImage pipeline plus its components, taking ownership of every disposable.</summary>
-    public HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qwen2Tokenizer tokenizer, LlamaStyleEncoder llama, HunyuanImageQwenTextEncoder qwenEncoder, HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vae, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _llama = llama;
-        _qwenEncoder = qwenEncoder;
-        _transformer = transformer;
-        _vae = vae;
-        _loaders = loaders;
-        _ggufHandle = ggufHandle;
-    }
+    private readonly HunyuanImagePipeline _pipeline = pipeline;
+    private readonly Qwen2Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _llama = llama;
+    private readonly HunyuanImageQwenTextEncoder _qwenEncoder = qwenEncoder;
+    private readonly HunyuanImageTransformer _transformer = transformer;
+    private readonly HunyuanImageVaeDecoder _vae = vae;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IDisposable? _ggufHandle = ggufHandle;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

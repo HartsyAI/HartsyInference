@@ -18,8 +18,7 @@ public static class AudioClipCodec
         }
         WavFile.DecodedAudio decoded = Decode(clip);
         float[] mono = decoded.ToMono();
-        return decoded.SampleRate == targetSampleRate
-            ? mono
+        return decoded.SampleRate == targetSampleRate ? mono
             : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(mono);
     }
 
@@ -39,8 +38,7 @@ public static class AudioClipCodec
         }
         // Separate resampler instances: the polyphase filter carries per-stream state.
         float[] outLeft = Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(left);
-        float[] outRight = ReferenceEquals(left, right)
-            ? outLeft
+        float[] outRight = ReferenceEquals(left, right) ? outLeft
             : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(right);
         return (outLeft, outRight);
     }
@@ -103,8 +101,7 @@ public static class AudioClipCodec
             return EncodeWav([], null, Math.Max(1, audio.SampleRate));
         }
         (float[] left, float[] right) = audio.ToStereo();
-        return audio.ChannelCount == 1
-            ? EncodeWav(left, null, audio.SampleRate)
+        return audio.ChannelCount == 1 ? EncodeWav(left, null, audio.SampleRate)
             : EncodeWav(left, right, audio.SampleRate);
     }
 

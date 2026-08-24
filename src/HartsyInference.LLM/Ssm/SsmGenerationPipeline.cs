@@ -67,12 +67,9 @@ public sealed class SsmGenerationPipeline
         // the transformer pipeline's design. The pre-capture warmup step is a REAL eager device step
         // (capture only records; execution happens at LaunchGraph), so it both primes every buffer
         // into the device caches (no memcpy nodes) and produces the second token.
-        bool useGraph = request.Sampling.Greedy
-            && !request.Sampling.HasJsonConstraint
-            && request.Sampling.RepetitionPenalty == 1.0f
-            && _model is ISsmGraphDecodable { GraphDecodeReady: true }
-            && _backend.GraphDecodeSupported
-            && Environment.GetEnvironmentVariable("HARTSY_SSM_GRAPH") != "0";
+        bool useGraph = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
+            && request.Sampling.RepetitionPenalty == 1.0f && _model is ISsmGraphDecodable { GraphDecodeReady: true }
+            && _backend.GraphDecodeSupported && Environment.GetEnvironmentVariable("HARTSY_SSM_GRAPH") != "0";
         if (useGraph && !stops.Contains(next) && request.MaxTokens > 0)
         {
             ISsmGraphDecodable g = (ISsmGraphDecodable)_model;

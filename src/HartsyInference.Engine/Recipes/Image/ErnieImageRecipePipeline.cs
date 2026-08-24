@@ -13,28 +13,17 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed ERNIE-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ErnieImagePipeline"/> owns the Ministral-3-3B forward and self-manages its GPU preload/free per generation, so this only tokenizes (raw prompt, no chat template — BOS prepended, EOS appended, no padding; the pipeline assembles the sequence) and calls <see cref="ErnieImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ErnieImageLoader.Generate</c> drive path.</summary>
-public sealed class ErnieImageRecipePipeline : IRecipePipeline
+/// <summary>A constructed ERNIE-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ErnieImagePipeline"/> owns the Ministral-3-3B forward and self-manages its GPU preload/free per generation, so this only tokenizes (raw prompt, no chat template — BOS prepended, EOS appended, no padding; the pipeline assembles the sequence) and calls <see cref="ErnieImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ErnieImageLoader.Generate</c> drive path. Wraps the constructed ERNIE-Image pipeline plus its tokenizer and text stack, taking ownership of every disposable.</summary>
+public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieTokenizer tokenizer, ErnieImageLlamaTextEncoder textEncoder,
+    LlamaStyleEncoder llama, ErnieImageTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly ErnieImagePipeline _pipeline;
-    private readonly ErnieTokenizer _tokenizer;
-    private readonly ErnieImageLlamaTextEncoder _textEncoder;
-    private readonly LlamaStyleEncoder _llama;
-    private readonly ErnieImageTransformer _transformer;
-    private readonly List<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed ERNIE-Image pipeline plus its tokenizer and text stack, taking ownership of every disposable.</summary>
-    public ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieTokenizer tokenizer, ErnieImageLlamaTextEncoder textEncoder, LlamaStyleEncoder llama, ErnieImageTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _llama = llama;
-        _transformer = transformer;
-        _loaders = loaders;
-    }
+    private readonly ErnieImagePipeline _pipeline = pipeline;
+    private readonly ErnieTokenizer _tokenizer = tokenizer;
+    private readonly ErnieImageLlamaTextEncoder _textEncoder = textEncoder;
+    private readonly LlamaStyleEncoder _llama = llama;
+    private readonly ErnieImageTransformer _transformer = transformer;
+    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

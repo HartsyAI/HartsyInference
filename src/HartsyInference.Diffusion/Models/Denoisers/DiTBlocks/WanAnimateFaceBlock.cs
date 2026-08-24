@@ -12,19 +12,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// (<c>q_norm</c>/<c>k_norm</c>, eps 1e-6, V un-normed); output projection <c>linear2</c>. The caller adds the result
 /// residually. Also loads the legacy <c>to_q/to_k/to_v/to_out</c> + <c>norm_q/norm_k</c> layout used by the
 /// <see cref="WanS2VTransformer"/> audio injector. B=1.</summary>
-public sealed unsafe class WanAnimateFaceBlock
+public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, float eps = 1e-6f)
 {
-    private readonly int _dim, _heads, _headDim;
-    private readonly float _eps;
+    private readonly int _dim = dim, _heads = heads, _headDim = headDim;
+    private readonly float _eps = eps;
     private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _nq, _nk;
-
-    public WanAnimateFaceBlock(int dim, int heads, int headDim, float eps = 1e-6f)
-    {
-        _dim = dim;
-        _heads = heads;
-        _headDim = headDim;
-        _eps = eps;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {

@@ -3,21 +3,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
-/// <summary>Tiled VAE decoder that splits latents into overlapping tiles, decodes each independently, and blends with linear interpolation. Keeps VRAM usage constant regardless of output image size. Tile geometry and blending live in <see cref="VaeTiling"/>, shared with <see cref="VaeTiledEncoder"/>.</summary>
-public sealed class VaeTiledDecoder
+/// <summary>Tiled VAE decoder that splits latents into overlapping tiles, decodes each independently, and blends with linear interpolation. Keeps VRAM usage constant regardless of output image size. Tile geometry and blending live in <see cref="VaeTiling"/>, shared with <see cref="VaeTiledEncoder"/>. Creates a tiled decoder wrapping the given VaeDecoder.</summary>
+/// <param name="decoder">The underlying VAE decoder to use for individual tiles.</param>
+/// <param name="tileOverlapFactor">Fraction of tile that overlaps with neighbors. Default: 0.25.</param>
+public sealed class VaeTiledDecoder(VaeDecoder decoder, float tileOverlapFactor = 0.25f)
 {
-    private readonly VaeDecoder _decoder;
-    private readonly float _tileOverlapFactor;
+    private readonly VaeDecoder _decoder = decoder;
+    private readonly float _tileOverlapFactor = tileOverlapFactor;
     private const int SpatialCompressionFactor = 8;
-
-    /// <summary>Creates a tiled decoder wrapping the given VaeDecoder.</summary>
-    /// <param name="decoder">The underlying VAE decoder to use for individual tiles.</param>
-    /// <param name="tileOverlapFactor">Fraction of tile that overlaps with neighbors. Default: 0.25.</param>
-    public VaeTiledDecoder(VaeDecoder decoder, float tileOverlapFactor = 0.25f)
-    {
-        _decoder = decoder;
-        _tileOverlapFactor = tileOverlapFactor;
-    }
 
     /// <summary>Decodes a latent tensor using tiled decoding. Input: [B, C, H, W] (latent space). Output: [B, 3, H*8, W*8] (pixel space).</summary>
     public Tensor Decode(IBackend backend, Tensor latent)

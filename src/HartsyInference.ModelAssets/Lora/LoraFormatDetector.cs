@@ -55,8 +55,7 @@ public static class LoraFormatDetector
             // The `text_encoder.` arm is the mapper's other recognized wrapper (routed to LoraTarget.ClipL), and
             // belongs to the same format.
             if ((key.StartsWith("transformer.", StringComparison.Ordinal)
-                    || key.StartsWith("text_encoder.", StringComparison.Ordinal))
-                && HasLoraSuffix(key))
+                    || key.StartsWith("text_encoder.", StringComparison.Ordinal)) && HasLoraSuffix(key))
             {
                 hasDiffusersFlux = true;
             }

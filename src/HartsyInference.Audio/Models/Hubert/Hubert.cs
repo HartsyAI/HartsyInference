@@ -44,8 +44,7 @@ public sealed unsafe class Hubert : IDisposable
         // pos_conv is weight-normed in the real wav2vec2/HuBERT checkpoints (dim=2 → one magnitude per kernel
         // position). Compose weight_g[1,1,k]·weight_v[out,in,k]/‖weight_v[:,:,k]‖ when the raw conv.weight is absent.
         _posConvW = w.TryGetValue($"{prefix}encoder.pos_conv_embed.conv.weight", out Tensor? pcw)
-            ? WhisperOps.EnsureF32(pcw)
-            : ComposePosConvWeightNorm(
+            ? WhisperOps.EnsureF32(pcw) : ComposePosConvWeightNorm(
                 WhisperOps.EnsureF32(w[$"{prefix}encoder.pos_conv_embed.conv.weight_g"]),
                 WhisperOps.EnsureF32(w[$"{prefix}encoder.pos_conv_embed.conv.weight_v"]));
         _posConvB = w.TryGetValue($"{prefix}encoder.pos_conv_embed.conv.bias", out Tensor? pb) ? WhisperOps.EnsureF32(pb) : null;

@@ -3,16 +3,10 @@ using System.Collections.Generic;
 
 namespace HartsyInference.LLM.Sampling;
 
-/// <summary>Masks tokens whose softmax probability falls below a fraction of the most probable token's probability.</summary>
-public sealed class MinPStep : ISamplerStep
+/// <summary>Masks tokens whose softmax probability falls below a fraction of the most probable token's probability. Values of <paramref name="minP"/> at or below 0.0 disable the filter at apply time.</summary>
+public sealed class MinPStep(float minP) : ISamplerStep
 {
-    private readonly float _minP;
-
-    /// <summary>Creates a min-p step; values of 0.0 or below disable the filter at apply time.</summary>
-    public MinPStep(float minP)
-    {
-        _minP = minP;
-    }
+    private readonly float _minP = minP;
 
     /// <inheritdoc/>
     public void Apply(Span<float> logits, IReadOnlyList<int> history)

@@ -568,8 +568,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
 
         for (int i = 0; i < NumLayers; i++)
         {
-            Tensor next = _isLinear[i]
-                ? BlockLinearDeviceStep(backend, h, i)
+            Tensor next = _isLinear[i] ? BlockLinearDeviceStep(backend, h, i)
                 : BlockAttnGraphStep(backend, h, i, cosTable, sinTable, devicePos);
             h.Dispose(); h = next;
         }
@@ -796,8 +795,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
                 for (int j = 0; j < k; j++)
                 {
                     int combined = s + j;
-                    acc += combined < k - 1
-                        ? convW[c * k + j] * history[combined * convDim + c]
+                    acc += combined < k - 1 ? convW[c * k + j] * history[combined * convDim + c]
                         : convW[c * k + j] * qkvP[(long)(combined - (k - 1)) * convDim + c];
                 }
                 xc[s * convDim + c] = acc / (1f + MathF.Exp(-acc));   // SiLU

@@ -80,14 +80,13 @@ public static class IpAdapterLoader
         // alongside the K/V projections, and/or the FaceID MLP proj (image_proj.proj.0.weight).
         bool isFaceId = lowered.Contains("faceid") || lowered.Contains("face_id")
             || weights.Keys.Any(k => k.Contains("id_proj", StringComparison.Ordinal)
-                || k.Contains("_lora.down.weight", StringComparison.Ordinal));
+            || k.Contains("_lora.down.weight", StringComparison.Ordinal));
         // Plus signature = a resampler: proj_in / latents keys (standard Plus) or the FaceID-Plus perceiver.
         // Standard checkpoints ALSO carry image_proj.norm.* (the post-projection LayerNorm), so norm keys must
         // NOT imply Plus; for FaceID files "plus" in the filename is authoritative (ProjPlusModel).
         bool hasPerceiver = weights.Keys.Any(k => k.StartsWith("image_proj.perceiver_resampler.", StringComparison.Ordinal));
         bool isPlus = lowered.Contains("plus") || weights.ContainsKey("image_proj.proj_in.weight")
-            || weights.ContainsKey("image_proj.latents")
-            || hasPerceiver;
+            || weights.ContainsKey("image_proj.latents") || hasPerceiver;
         // FaceID-Plus v2 is structurally identical to v1 (same ProjPlusModel keys), differing only in
         // training (shortcut path enabled) — the filename is the only signal (h94 ships "plusv2").
         bool isFaceIdV2 = isFaceId && isPlus
@@ -170,9 +169,7 @@ public static class IpAdapterLoader
         return new IpAdapterConfig
         {
             BaseModel = baseModel,
-            ClipImageModel = isFaceId
-                ? isPlus ? "InsightFace ArcFace + ViT-H/14" : "InsightFace ArcFace"
-                : "ViT-H/14",
+            ClipImageModel = isFaceId ? isPlus ? "InsightFace ArcFace + ViT-H/14" : "InsightFace ArcFace" : "ViT-H/14",
             ImageEmbeddingDim = imageDim,
             NumImageTokens = numTokens,
             CrossAttentionDim = crossDim,

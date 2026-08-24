@@ -8,10 +8,10 @@ namespace HartsyInference.Diffusion.Models.Music;
 /// head (the padded-ones-row normalizer trick), RMSNorm'd output projection with residual, then the gated MBConv FFN
 /// (1×1 expand ×2 → SiLU → depthwise 3×3 → SiLU-gate chunk → 1×1 project, residual). Operates on NCHW. Used in the
 /// deepest DCAE stages; numerics validation-pending.</summary>
-public sealed unsafe class EfficientVitBlock
+public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
 {
-    private readonly int _dim;
-    private readonly int _headDim;
+    private readonly int _dim = dim;
+    private readonly int _headDim = headDim;
 
     private Tensor? _qW, _kW, _vW;                          // base qkv (linear, no bias)
     private Tensor? _msProjInW, _msProjInB;                  // multiscale 5×5 grouped conv over fused qkv
@@ -20,12 +20,6 @@ public sealed unsafe class EfficientVitBlock
     private Tensor? _attnNormW, _attnNormB;                  // norm_out (RMS, channel)
     private Tensor? _ffInvW, _ffInvB, _ffDepthW, _ffDepthB, _ffPointW;   // GLUMBConv
     private Tensor? _ffNormW, _ffNormB;
-
-    public EfficientVitBlock(int dim, int headDim = 32)
-    {
-        _dim = dim;
-        _headDim = headDim;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {

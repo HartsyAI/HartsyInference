@@ -4,17 +4,11 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Vae;
 
 /// <summary>Wan2.2 VAE channel-wise RMS norm (<c>RMS_norm</c> in <c>vae2_2.py</c>: <c>F.normalize(x, dim=channel)·√dim·gamma</c>, which equals RMS-over-channels × gamma). Normalizes the channel vector at each spatial-temporal position of a <c>[B, C, T, H, W]</c> tensor and scales by a per-channel learnable <c>gamma</c>. Reusable by any Wan-family video VAE.</summary>
-public sealed unsafe class WanRmsNorm
+public sealed unsafe class WanRmsNorm(int channels, float eps = 1e-12f)
 {
-    private readonly int _channels;
-    private readonly float _eps;
+    private readonly int _channels = channels;
+    private readonly float _eps = eps;
     private Tensor? _gamma;   // [C] (flattened from [C,1,1,1])
-
-    public WanRmsNorm(int channels, float eps = 1e-12f)
-    {
-        _channels = channels;
-        _eps = eps;
-    }
 
     /// <summary>Loads the per-channel scale (<c>gamma</c>), cast to F32. Accepts any shape whose element count is the channel count.</summary>
     public void LoadWeights(Tensor gamma)

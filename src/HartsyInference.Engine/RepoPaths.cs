@@ -27,13 +27,11 @@ public static class RepoPaths
 
     /// <summary>The models root: the <c>HARTSYINFERENCE_MODELS</c> override, else <c>&lt;repo&gt;/Models</c>.</summary>
     public static string ModelsRoot() =>
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS") is { Length: > 0 } m
-            ? Path.GetFullPath(m)
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS") is { Length: > 0 } m ? Path.GetFullPath(m)
             : Path.Combine(RepoRoot(), "Models");
 
     /// <summary>The output root: the <c>HARTSYINFERENCE_OUTPUT</c> override, else <c>&lt;repo&gt;/Output</c>.</summary>
     public static string OutputRoot() =>
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_OUTPUT") is { Length: > 0 } o
-            ? Path.GetFullPath(o)
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_OUTPUT") is { Length: > 0 } o ? Path.GetFullPath(o)
             : Path.Combine(RepoRoot(), "Output");
 }

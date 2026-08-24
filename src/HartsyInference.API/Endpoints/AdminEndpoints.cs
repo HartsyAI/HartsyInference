@@ -73,8 +73,7 @@ public static class AdminEndpoints
         app.MapDelete("/admin/cache/{id}", (string id, HartsyInferenceServerOptions options) =>
         {
             ModelCacheStore cache = OpenCache(options);
-            return cache.Remove(id)
-                ? Results.Ok(new { removed = id })
+            return cache.Remove(id) ? Results.Ok(new { removed = id })
                 : HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, $"'{id}' is not in the cache.", "invalid_request_error");
         });
 

@@ -43,9 +43,7 @@ internal sealed class VibeVoiceTokenizerDecoder
         _ratios = [.. config.DecoderRatios];
 
         int[] encDepths = ParseDepths(config.EncoderDepths);
-        _depths = config.DecoderDepths is null
-            ? ReverseArray(encDepths)
-            : ParseDepths(config.DecoderDepths);
+        _depths = config.DecoderDepths is null ? ReverseArray(encDepths) : ParseDepths(config.DecoderDepths);
 
         int nFilters = config.DecoderNFilters;
         int kernel = 7;
@@ -115,8 +113,7 @@ internal sealed class VibeVoiceTokenizerDecoder
         VibeVoiceTokenizerStreamingCache? cache = null, ReadOnlySpan<int> sampleIndices = default)
     {
         // Stem.
-        Tensor current = cache is null
-            ? _stem.Forward(backend, latent, batch, tLatent)
+        Tensor current = cache is null ? _stem.Forward(backend, latent, batch, tLatent)
             : _stem.ForwardStreaming(backend, latent, batch, tLatent, cache, sampleIndices);
         int t = (int)current.Shape[2];
 
@@ -132,8 +129,7 @@ internal sealed class VibeVoiceTokenizerDecoder
         // Stages 1..N-1: upsample → blocks.
         for (int i = 1; i < _depths.Length; i++)
         {
-            Tensor up = cache is null
-                ? _upsamples[i - 1].Forward(backend, current, batch, t)
+            Tensor up = cache is null ? _upsamples[i - 1].Forward(backend, current, batch, t)
                 : _upsamples[i - 1].ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
             current.Dispose();
             current = up;
@@ -156,8 +152,7 @@ internal sealed class VibeVoiceTokenizerDecoder
         }
 
         // Head projection.
-        Tensor head = cache is null
-            ? _head.Forward(backend, current, batch, t)
+        Tensor head = cache is null ? _head.Forward(backend, current, batch, t)
             : _head.ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
         current.Dispose();
         return head;

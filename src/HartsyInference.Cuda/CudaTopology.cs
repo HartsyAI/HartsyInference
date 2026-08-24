@@ -10,8 +10,8 @@ namespace HartsyInference.Cuda;
 /// <param name="CcMajor">Compute capability major.</param>
 /// <param name="CcMinor">Compute capability minor.</param>
 /// <param name="SmCount">Streaming-multiprocessor count — the per-device compute-throughput proxy.</param>
-public readonly record struct GpuTopologyInfo(
-    int Ordinal, string Name, long TotalMemoryBytes, long FreeMemoryBytes, int CcMajor, int CcMinor, int SmCount);
+public readonly record struct GpuTopologyInfo(int Ordinal, string Name, long TotalMemoryBytes, long FreeMemoryBytes,
+    int CcMajor, int CcMinor, int SmCount);
 
 /// <summary>One DIRECTED device pair's peer-access facts, as probed by <see cref="CudaTopology.ProbeLinks"/>.</summary>
 /// <param name="From">Accessing device ordinal.</param>
@@ -20,8 +20,7 @@ public readonly record struct GpuTopologyInfo(
 /// <param name="PerformanceRank">Driver's relative link ranking (lower is faster); -1 when no peer access.</param>
 /// <param name="NativeAtomics">True when native atomic operations work across the link.</param>
 /// <param name="LikelyNvLink">Heuristic: peer access + native atomics is the accepted driver-API signal for an NVLink-class link (NVML would be authoritative but is not a dependency).</param>
-public readonly record struct GpuLinkInfo(
-    int From, int To, bool PeerAccessSupported, int PerformanceRank, bool NativeAtomics, bool LikelyNvLink);
+public readonly record struct GpuLinkInfo(int From, int To, bool PeerAccessSupported, int PerformanceRank, bool NativeAtomics, bool LikelyNvLink);
 
 /// <summary>Device-topology probe for the placement planner: per-device VRAM/compute-capability/SM count plus the directed peer-link matrix. Read-only queries; the free-VRAM number binds each device's primary context briefly, and <see cref="ProbeLinks"/> never enables peer access.</summary>
 public static class CudaTopology

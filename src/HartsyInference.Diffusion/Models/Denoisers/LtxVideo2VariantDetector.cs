@@ -119,8 +119,7 @@ public static class LtxVideo2VariantDetector
             string kind = rope.GetString() ?? string.Empty;
             config = config with
             {
-                RopeType = kind.Equals("split", StringComparison.OrdinalIgnoreCase)
-                    ? LtxVideo2Rope.RopeType.Split
+                RopeType = kind.Equals("split", StringComparison.OrdinalIgnoreCase) ? LtxVideo2Rope.RopeType.Split
                     : LtxVideo2Rope.RopeType.Interleaved,
             };
         }

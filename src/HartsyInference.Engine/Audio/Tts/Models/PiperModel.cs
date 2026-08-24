@@ -17,8 +17,7 @@ internal static class PiperModel
         {
             // The variant IS the voice here (VoiceSelectsWeights) — each voice is its own .onnx download.
             string voice = string.IsNullOrWhiteSpace(variant) || variant.Equals("default", StringComparison.OrdinalIgnoreCase)
-                ? DefaultVoice
-                : variant;
+                ? DefaultVoice : variant;
             PiperPipeline pipeline = await PiperPipeline.LoadAsync(voice, ct: cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][Piper] Loaded rhasspy/piper-voices {voice} (VITS 22.05 kHz).");
             return new TtsRunner(pipeline.SampleRate,

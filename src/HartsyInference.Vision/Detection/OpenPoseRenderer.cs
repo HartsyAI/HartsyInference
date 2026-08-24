@@ -93,8 +93,7 @@ public static class OpenPoseRenderer
                 if (op == 1)   // neck = shoulder midpoint (COCO 5 = L-shoulder, 6 = R-shoulder)
                 {
                     Keypoint ls = person.Keypoints[5], rs = person.Keypoints[6];
-                    vis[1] = profile.AverageNeckConfidence
-                        ? (ls.Confidence + rs.Confidence) * 0.5f >= visThreshold
+                    vis[1] = profile.AverageNeckConfidence ? (ls.Confidence + rs.Confidence) * 0.5f >= visThreshold
                         : ls.Confidence >= visThreshold && rs.Confidence >= visThreshold;
                     px[1] = (ls.X + rs.X) * 0.5f * scaleX; py[1] = (ls.Y + rs.Y) * 0.5f * scaleY;
                     continue;

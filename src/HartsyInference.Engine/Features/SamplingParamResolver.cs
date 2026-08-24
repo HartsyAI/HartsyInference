@@ -100,8 +100,7 @@ public static class SamplingParamResolver
 
         // Pass the selection through as given. Pipelines carrying the sampler seam split it themselves via
         // SamplerRegistry.SplitCompound; the legacy SD-family path maps the sampler half onto a SchedulerFactory name.
-        return SamplerRegistry.IsKnown(samplerName) || scheduleName is not null
-            ? requested.Trim().ToLowerInvariant()
+        return SamplerRegistry.IsKnown(samplerName) || scheduleName is not null ? requested.Trim().ToLowerInvariant()
             : MapSamplerName(samplerName);
     }
 

@@ -13,21 +13,16 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para>This is the inverse of <see cref="VaeTiledDecoder"/>: the decoder tiles in latent space and
 /// blends in pixel space; the encoder tiles in <b>pixel</b> space and blends in the smaller
 /// <b>latent</b> space (8x cheaper memory for the blend). Tile geometry and blending live in the shared
-/// <see cref="VaeTiling"/> helper.</para></summary>
-public sealed class VaeTiledEncoder
+/// <see cref="VaeTiling"/> helper.</para>
+///
+/// <para>Creates a tiled encoder wrapping the given VaeEncoder.</para></summary>
+/// <param name="encoder">The underlying VAE encoder used for individual tiles.</param>
+/// <param name="tileOverlapFactor">Fraction of tile that overlaps with neighbors. Default: 0.25 (matches <see cref="VaeTiledDecoder"/>).</param>
+public sealed class VaeTiledEncoder(VaeEncoder encoder, float tileOverlapFactor = 0.25f)
 {
-    private readonly VaeEncoder _encoder;
-    private readonly float _tileOverlapFactor;
+    private readonly VaeEncoder _encoder = encoder;
+    private readonly float _tileOverlapFactor = tileOverlapFactor;
     private const int SpatialCompressionFactor = 8;
-
-    /// <summary>Creates a tiled encoder wrapping the given VaeEncoder.</summary>
-    /// <param name="encoder">The underlying VAE encoder used for individual tiles.</param>
-    /// <param name="tileOverlapFactor">Fraction of tile that overlaps with neighbors. Default: 0.25 (matches <see cref="VaeTiledDecoder"/>).</param>
-    public VaeTiledEncoder(VaeEncoder encoder, float tileOverlapFactor = 0.25f)
-    {
-        _encoder = encoder;
-        _tileOverlapFactor = tileOverlapFactor;
-    }
 
     /// <summary>Encodes an image using tiled encoding. Input: [B, 3, H, W] (pixel space, values in [-1, 1]).
     /// Output: [B, latentCh, H/8, W/8] (scaled latent space). Bit-identical to a single-shot

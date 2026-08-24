@@ -86,14 +86,12 @@ public sealed unsafe class LtxVideo2Attention
         // attention shares all four; cross-attention (text, a2v/v2a) still shares gate+q and k+v.
         if (ReferenceEquals(qInput, kvInput))
         {
-            backend.LinearMulti(qInput, gateLogits is null
-                ? [new(q, _qW!, _qB), new(k, _kW!, _kB), new(v, _vW!, _vB)]
+            backend.LinearMulti(qInput, gateLogits is null ? [new(q, _qW!, _qB), new(k, _kW!, _kB), new(v, _vW!, _vB)]
                 : [new(gateLogits, _gateW!, _gateB), new(q, _qW!, _qB), new(k, _kW!, _kB), new(v, _vW!, _vB)]);
         }
         else
         {
-            backend.LinearMulti(qInput, gateLogits is null
-                ? [new LinearOp(q, _qW!, _qB)]
+            backend.LinearMulti(qInput, gateLogits is null ? [new LinearOp(q, _qW!, _qB)]
                 : [new(gateLogits, _gateW!, _gateB), new(q, _qW!, _qB)]);
             backend.LinearMulti(kvInput, [new LinearOp(k, _kW!, _kB), new(v, _vW!, _vB)]);
         }

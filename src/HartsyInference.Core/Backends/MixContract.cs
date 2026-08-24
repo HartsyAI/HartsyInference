@@ -16,15 +16,8 @@ public enum MaskBroadcastLayout
 }
 
 /// <summary>Validated launch geometry for a mask-broadcast affine mix.</summary>
-internal readonly record struct MaskedMixGeometry(
-    MaskBroadcastLayout Layout,
-    long ElementCount,
-    long Batch,
-    long Channels,
-    long Spatial,
-    long Tokens,
-    long FeatureDimension,
-    long PatchArea);
+internal readonly record struct MaskedMixGeometry(MaskBroadcastLayout Layout, long ElementCount, long Batch,
+    long Channels, long Spatial, long Tokens, long FeatureDimension, long PatchArea);
 
 /// <summary>One source of truth for host and accelerator mix contracts.</summary>
 internal static class MixContract

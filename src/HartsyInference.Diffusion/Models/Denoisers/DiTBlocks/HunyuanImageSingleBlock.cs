@@ -156,8 +156,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         // host excursion in the block (full Q/K D2H per block per step) becomes one GPU-resident op.
         if (batch == 1)
         {
-            Span<int> ropeDims = imgPackedT > 1
-                ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
+            Span<int> ropeDims = imgPackedT > 1 ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
                 : stackalloc int[2] { imgPackedH, imgPackedW };
             rope.ApplyGpu(backend, qn, kn, _numHeads, ropeDims);
         }

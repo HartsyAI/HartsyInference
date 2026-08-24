@@ -24,11 +24,11 @@ namespace HartsyInference.Vulkan;
 /// capture uses is cached by <see cref="VulkanKernelRegistry"/> exactly like the normal-mode one, keyed by
 /// <c>KernelKey.ForCapture</c> — no extra bookkeeping needed here.</para>
 /// </remarks>
-public sealed unsafe class VulkanStepGraph : IDisposable
+public sealed unsafe class VulkanStepGraph(nint device, nint queue, uint queueFamilyIndex) : IDisposable
 {
-    private readonly nint _device;
-    private readonly nint _queue;
-    private readonly uint _queueFamily;
+    private readonly nint _device = device;
+    private readonly nint _queue = queue;
+    private readonly uint _queueFamily = queueFamilyIndex;
 
     private ulong _commandPool;
     private ulong _fence;
@@ -39,13 +39,6 @@ public sealed unsafe class VulkanStepGraph : IDisposable
 
     /// <summary>True once a capture has been ended and launched at least once — the graph can be replayed via <see cref="Launch"/>.</summary>
     public bool IsReady => _ready && !_recording;
-
-    public VulkanStepGraph(nint device, nint queue, uint queueFamilyIndex)
-    {
-        _device = device;
-        _queue = queue;
-        _queueFamily = queueFamilyIndex;
-    }
 
     private void EnsureResources()
     {

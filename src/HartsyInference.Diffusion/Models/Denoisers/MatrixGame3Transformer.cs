@@ -153,13 +153,11 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++)
         {
             MatrixGame3ActionModule? action = _actionModules[i];
-            Action<Tensor>? hook = action is null || mouse is null || keyboard is null
-                ? null
+            Action<Tensor>? hook = action is null || mouse is null || keyboard is null ? null
                 : h => action.Forward(backend, h, (gt, gh, gw), frameIdx, memoryFrames, mouse, keyboard);
             MatrixGame3CamInjector camInj = _camInjectors[i];
             Action<Tensor>? camHook = pluckerEmb is not null && camInj.Loaded
-                ? h => camInj.Apply(backend, h, pluckerEmb)
-                : null;
+                ? h => camInj.Apply(backend, h, pluckerEmb) : null;
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook, postSelfAttnHook: camHook);
             cur.Dispose();
             cur = next;

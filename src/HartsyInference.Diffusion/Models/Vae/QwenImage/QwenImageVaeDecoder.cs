@@ -94,8 +94,7 @@ public sealed class QwenImageVaeDecoder : IDisposable
         for (int i = 0; i < _stages.Length; i++)
         {
             UpsampleStage s = _stages[i];
-            _upStages[i] = s.Kind == StageKind.Residual
-                ? new QwenImageResidualBlock(s.InCh, s.OutCh)
+            _upStages[i] = s.Kind == StageKind.Residual ? new QwenImageResidualBlock(s.InCh, s.OutCh)
                 : new QwenImageResample(s.InCh);
         }
     }

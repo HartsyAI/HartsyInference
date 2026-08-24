@@ -44,8 +44,7 @@ public static class Sam2Converter
 
         foreach (KeyValuePair<string, Tensor> kvp in weights)
         {
-            string key = kvp.Key.StartsWith(ModelPrefix, StringComparison.Ordinal)
-                ? kvp.Key[ModelPrefix.Length..]
+            string key = kvp.Key.StartsWith(ModelPrefix, StringComparison.Ordinal) ? kvp.Key[ModelPrefix.Length..]
                 : kvp.Key;
 
             if (Strip(key, "image_encoder.", out string ie)) imageEncoder[ie] = kvp.Value;

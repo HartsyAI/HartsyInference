@@ -274,8 +274,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     /// <summary>The ten per-step timestep-derived tensors every forward variant consumes. One producer
     /// (<see cref="ComputeTimestepTables"/>) — the eager, CFG-pair, and graph paths used to each carry a copy of
     /// the 8-modulator block, and a fix to one copy could silently miss the others.</summary>
-    private readonly record struct TimestepTables(
-        Tensor TVideo, Tensor TAudio, Tensor? TPromptV, Tensor? TPromptA,
+    private readonly record struct TimestepTables(Tensor TVideo, Tensor TAudio, Tensor? TPromptV, Tensor? TPromptA,
         Tensor TCaVss, Tensor TCaAss, Tensor TCaVGate, Tensor TCaAGate, Tensor EmbV, Tensor EmbA);
 
     private TimestepTables ComputeTimestepTables(IBackend backend, float timestep)

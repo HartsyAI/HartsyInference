@@ -146,8 +146,7 @@ public sealed unsafe class LtxLatentUpsampler
         int Int(string key) => root.TryGetProperty(key, out JsonElement e) && e.ValueKind == JsonValueKind.Number
             ? e.GetInt32()
             : throw new HartsyInferenceException($"Latent upsampler config has no numeric '{key}': {configJson}");
-        bool Bool(string key) => root.TryGetProperty(key, out JsonElement e)
-            ? e.ValueKind == JsonValueKind.True
+        bool Bool(string key) => root.TryGetProperty(key, out JsonElement e) ? e.ValueKind == JsonValueKind.True
             : throw new HartsyInferenceException($"Latent upsampler config has no '{key}': {configJson}");
 
         if (Str("_class_name") is not ("LatentUpsampler" or "<absent>"))

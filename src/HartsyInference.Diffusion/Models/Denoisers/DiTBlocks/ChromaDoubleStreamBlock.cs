@@ -233,11 +233,9 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         // imgMod[0..6]: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp (image stream)
         // txtMod[0..6]: same for text stream. Device slices (B=1): the old host path read the
         // device-produced temb's DataPointer — a full pipeline drain per block (the temb stream-stall).
-        Tensor[] imgMod = batch == 1
-            ? SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 6)
+        Tensor[] imgMod = batch == 1 ? SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 6)
             : SliceModRows(temb, batch, rowStart: 0, rowCount: 6);
-        Tensor[] txtMod = batch == 1
-            ? SliceModRowsDevice(backend, temb, rowStart: 6, rowCount: 6)
+        Tensor[] txtMod = batch == 1 ? SliceModRowsDevice(backend, temb, rowStart: 6, rowCount: 6)
             : SliceModRows(temb, batch, rowStart: 6, rowCount: 6);
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);

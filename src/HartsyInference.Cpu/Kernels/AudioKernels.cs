@@ -87,12 +87,9 @@ public static class AudioKernels
 
         // Temporary buffer for windowed frame — heap allocate for large FFT sizes to avoid stack overflow
         const int MaxStackAllocFloats = 4096;
-        float* frameAlloc = fftSize > MaxStackAllocFloats
-            ? (float*)NativeMemory.Alloc((nuint)(fftSize * sizeof(float)))
+        float* frameAlloc = fftSize > MaxStackAllocFloats ? (float*)NativeMemory.Alloc((nuint)(fftSize * sizeof(float)))
             : null;
-        Span<float> frame = frameAlloc != null
-            ? new Span<float>(frameAlloc, fftSize)
-            : stackalloc float[fftSize];
+        Span<float> frame = frameAlloc != null ? new Span<float>(frameAlloc, fftSize) : stackalloc float[fftSize];
 
         try
         {
@@ -159,8 +156,7 @@ public static class AudioKernels
                     {
                         Vector256<float> vIn = Avx.LoadVector256(frameIn + i);
                         Vector256<float> vFilter = Avx.LoadVector256(filterRow + i);
-                        vSum = Fma.IsSupported
-                            ? Fma.MultiplyAdd(vIn, vFilter, vSum)
+                        vSum = Fma.IsSupported ? Fma.MultiplyAdd(vIn, vFilter, vSum)
                             : Avx.Add(vSum, Avx.Multiply(vIn, vFilter));
                     }
                     sum += SimdDispatch.HorizontalSum(vSum);

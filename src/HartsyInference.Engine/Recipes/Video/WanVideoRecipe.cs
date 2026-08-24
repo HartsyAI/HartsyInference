@@ -58,8 +58,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <see cref="SupportsFor"/>) and keeps claiming both; the generic "wan" catalog slug (weight-derived config,
     /// no compat class) does too, for the same reason.</remarks>
     public VideoFeatures Supports =>
-        (_familyId is Wan21_1_3BCompatClassId
-            ? VideoFeatures.InitImage
+        (_familyId is Wan21_1_3BCompatClassId ? VideoFeatures.InitImage
             : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
@@ -215,8 +214,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
             if (context.VideoSwapModelPath is not null)
             {
-                string swapPath = File.Exists(context.VideoSwapModelPath)
-                    ? context.VideoSwapModelPath
+                string swapPath = File.Exists(context.VideoSwapModelPath) ? context.VideoSwapModelPath
                     : ModelFileLocator.Require(context.VideoSwapModelPath, "Video swap model", "Stable-Diffusion", "diffusion_models", "unet");
                 WanVariant swapVariant = DetectVariant(swapPath);
                 if (swapVariant != WanVariant.Base)

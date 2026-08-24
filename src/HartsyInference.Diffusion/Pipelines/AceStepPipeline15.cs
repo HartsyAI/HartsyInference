@@ -108,8 +108,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         int actualSeed = opts.Seed ?? SeedGenerator.RandomSeed();
         int frames = _config.FrameCount(durationSeconds);
         // Turbo: 1..20 steps, shift snapped to trained {1,2,3}. Base/sft: arbitrary steps/shift.
-        int wantSteps = _config.IsTurbo
-            ? Math.Clamp(opts.InferSteps ?? _config.NumInferenceSteps, 1, 20)
+        int wantSteps = _config.IsTurbo ? Math.Clamp(opts.InferSteps ?? _config.NumInferenceSteps, 1, 20)
             : Math.Clamp(opts.InferSteps ?? 50, 1, 200);
         float[] timesteps = AceStep15Config.GetTimesteps(wantSteps, opts.Shift ?? _config.FlowShift, snapShift: _config.IsTurbo);
         int steps = timesteps.Length;
@@ -150,8 +149,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         }
         bool sde = string.Equals(opts.InferMethod, "sde", StringComparison.OrdinalIgnoreCase);
         // "apg" | "cfg" | "adg"; empty honors the deprecated UseAdg bool.
-        string guidanceType = string.IsNullOrEmpty(opts.GuidanceType)
-            ? (opts.UseAdg ? "adg" : "apg")
+        string guidanceType = string.IsNullOrEmpty(opts.GuidanceType) ? (opts.UseAdg ? "adg" : "apg")
             : opts.GuidanceType.ToLowerInvariant();
         if (guidanceType is not ("apg" or "cfg" or "adg"))
             throw new ArgumentException($"Unknown ACE-Step guidance type '{opts.GuidanceType}' — expected apg, cfg, or adg.");

@@ -4,22 +4,15 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>AdaLN-Zero modulation for SD3 JointBlocks. Takes timestep embedding, produces shift/scale/gate parameters via SiLU + Linear. SD3 uses 6 params per image sub-block (attn: shift, scale, gate; mlp: shift, scale, gate) and 3 per context sub-block (attn only: shift, scale, gate).</summary>
-public sealed unsafe class AdaLNModulation
+/// <param name="hiddenSize">Model hidden dimension.</param>
+/// <param name="numParams">Number of modulation parameters to produce (6 for image block, 3 for context block).</param>
+public sealed unsafe class AdaLNModulation(int hiddenSize, int numParams)
 {
-    private readonly int _hiddenSize;
-    private readonly int _numParams;
+    private readonly int _hiddenSize = hiddenSize;
+    private readonly int _numParams = numParams;
 
     private Tensor? _linearWeight;
     private Tensor? _linearBias;
-
-    /// <summary>Creates an AdaLN-Zero modulation layer.</summary>
-    /// <param name="hiddenSize">Model hidden dimension.</param>
-    /// <param name="numParams">Number of modulation parameters to produce (6 for image block, 3 for context block).</param>
-    public AdaLNModulation(int hiddenSize, int numParams)
-    {
-        _hiddenSize = hiddenSize;
-        _numParams = numParams;
-    }
 
     /// <summary>Loads the linear projection weights. Weight shape: [numParams * hiddenSize, hiddenSize], Bias shape: [numParams * hiddenSize] (may be null for Flux.2 where modulation projections have no bias).</summary>
     public void LoadWeights(Tensor weight, Tensor? bias)

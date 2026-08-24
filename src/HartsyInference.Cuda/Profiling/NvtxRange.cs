@@ -102,9 +102,7 @@ public readonly ref struct NvtxRange
 
         try
         {
-            int rc = _isWindows
-                ? NvtxApi.RangePushA_Windows(message)
-                : NvtxApi.RangePushA_Linux(message);
+            int rc = _isWindows ? NvtxApi.RangePushA_Windows(message) : NvtxApi.RangePushA_Linux(message);
             // NVTX returns the depth of the range stack on success, or a negative value on failure.
             // Either way, treat it as success for the wrapper.
             _ = rc;
@@ -152,9 +150,7 @@ public readonly ref struct NvtxRange
         if (!_active) return;
         try
         {
-            int rc = _isWindows
-                ? NvtxApi.RangePop_Windows()
-                : NvtxApi.RangePop_Linux();
+            int rc = _isWindows ? NvtxApi.RangePop_Windows() : NvtxApi.RangePop_Linux();
             _ = rc;
         }
         catch (Exception ex)

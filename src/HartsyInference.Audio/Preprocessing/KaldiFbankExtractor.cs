@@ -134,8 +134,7 @@ public sealed class KaldiFbankExtractor
             {
                 double mel = MelScale(k * fftBinWidth);
                 if (mel <= leftMel || mel >= rightMel) continue;
-                double weight = mel <= centerMel
-                    ? (mel - leftMel) / (centerMel - leftMel)
+                double weight = mel <= centerMel ? (mel - leftMel) / (centerMel - leftMel)
                     : (rightMel - mel) / (rightMel - centerMel);
                 banks[m, k] = (float)weight;
             }

@@ -42,8 +42,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Dinov2Preset dp = dinoPreset ?? Dinov2Preset.Giant;   // Hunyuan3D-2 conditions on DINOv2-giant (1536-dim)
 
         string[] files = Directory.Exists(modelPath)
-            ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories)
-            : [modelPath];
+            ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories) : [modelPath];
         if (files.Length == 0)
             throw new FileNotFoundException($"No .safetensors found under '{modelPath}'.");
 

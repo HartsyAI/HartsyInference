@@ -54,8 +54,7 @@ public sealed class TranscribeService : ITranscribeService
             ct.ThrowIfCancellationRequested();
 
             // A timestamped decode already produced the text; re-running the plain decode would double the cost.
-            string text = segments is { Count: > 0 }
-                ? string.Join(" ", segments.Select(segment => segment.Text))
+            string text = segments is { Count: > 0 } ? string.Join(" ", segments.Select(segment => segment.Text))
                 : runner.Transcribe(backend, audio, request);
             Logs.Verbose($"[Audio][STT] Transcribed {AudioClipCodec.Seconds(audio.Length, descriptor.InputSampleRate):0.0}s "
                 + $"via {repo} in {Environment.TickCount64 - started}ms.");
@@ -64,8 +63,7 @@ public sealed class TranscribeService : ITranscribeService
             if (request.Diarization)
             {
                 // CAM++ is a 16 kHz model, so the clip is re-decoded rather than resampled from the STT rate.
-                float[] mono16k = descriptor.InputSampleRate == SpeakerDiarizer.SampleRate
-                    ? audio
+                float[] mono16k = descriptor.InputSampleRate == SpeakerDiarizer.SampleRate ? audio
                     : AudioClipCodec.DecodeMono(request.Audio, SpeakerDiarizer.SampleRate);
                 speakers = SpeakerDiarizer.Shared().Diarize(backend, mono16k, segments, ct);
             }

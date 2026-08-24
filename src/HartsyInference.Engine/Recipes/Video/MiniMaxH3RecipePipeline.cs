@@ -178,8 +178,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     AudioLatentFrames = MiniMaxH3Geometry.AudioLatentFrames(frames),
                     Steps = request.Steps ?? 30,
                     Seed = (int)(RecipeRequestMapper.MapSeed(request.Seed) ?? 0),
-                    Keyframes = keyframes.Count == 0
-                        ? null
+                    Keyframes = keyframes.Count == 0 ? null
                         : keyframes.Select(k => new MiniMaxH3Keyframe { ResolvedFrameIndex = k.FrameIndex }).ToList(),
                     Refs = references.Count == 0 ? null : references.Select(r => r.Block).ToList(),
                     FrameCount = frames,

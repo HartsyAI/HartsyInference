@@ -11,27 +11,17 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Chroma pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ChromaPipeline"/> owns the T5-XXL encoder, so this only tokenizes the prompt/negative (plus the tokenizer attention masks Chroma's "first padding token unmasked" rule needs) and calls <see cref="ChromaPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ChromaLoader.Generate</c> drive path.</summary>
-public sealed class ChromaRecipePipeline : IRecipePipeline
+/// <summary>A constructed Chroma pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ChromaPipeline"/> owns the T5-XXL encoder, so this only tokenizes the prompt/negative (plus the tokenizer attention masks Chroma's "first padding token unmasked" rule needs) and calls <see cref="ChromaPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ChromaLoader.Generate</c> drive path. Wraps the constructed Chroma pipeline plus its tokenizer, taking ownership of every disposable.</summary>
+public sealed class ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader,
+    SafeTensorsLoader t5Loader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
-    private readonly ChromaPipeline _pipeline;
-    private readonly T5Tokenizer _tokenizer;
-    private readonly SafeTensorsLoader _checkpointLoader;
-    private readonly SafeTensorsLoader _t5Loader;
-    private readonly SafeTensorsLoader _vaeLoader;
+    private readonly ChromaPipeline _pipeline = pipeline;
+    private readonly T5Tokenizer _tokenizer = tokenizer;
+    private readonly SafeTensorsLoader _checkpointLoader = checkpointLoader;
+    private readonly SafeTensorsLoader _t5Loader = t5Loader;
+    private readonly SafeTensorsLoader _vaeLoader = vaeLoader;
 
-    private readonly MergedLoraStack? _loraStack;
-
-    /// <summary>Wraps the constructed Chroma pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-    public ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _checkpointLoader = checkpointLoader;
-        _t5Loader = t5Loader;
-        _vaeLoader = vaeLoader;
-    }
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

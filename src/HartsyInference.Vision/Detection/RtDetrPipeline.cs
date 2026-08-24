@@ -148,9 +148,7 @@ public sealed class RtDetrPipeline : IDetectionPipeline
 
     /// <summary>Resolves a class label — uses the supplied label table if any, else the COCO 80 fallback.</summary>
     public string GetLabel(int classId) =>
-        _labels is not null && classId >= 0 && classId < _labels.Count
-            ? _labels[classId]
-            : CocoLabels.Get(classId);
+        _labels is not null && classId >= 0 && classId < _labels.Count ? _labels[classId] : CocoLabels.Get(classId);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

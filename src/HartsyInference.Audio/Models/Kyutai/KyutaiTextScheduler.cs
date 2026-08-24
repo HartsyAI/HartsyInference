@@ -7,19 +7,14 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// padding, pops a word's SentencePiece tokens into the stream, and (for <c>second_stream_ahead</c>) multiplexes
 /// a lookahead second stream into the fed token as <c>(second+1)·card + main</c> (the demuxing embedding splits
 /// it again). Direct port of moshi <c>tts.py</c> StateMachine; pure logic, no tensors.</summary>
-public sealed class KyutaiTextScheduler
+public sealed class KyutaiTextScheduler(int secondStreamAhead = 2, int maxPadding = 6, int initialPadding = 2)
 {
     // TokenIds for tts-1.6b-en_fr.
     public const int Card = 8001, NewWord = 0, Pad = 3, Main = 1, Other = 2, Zero = -1;
 
-    private readonly int _secondStreamAhead, _maxPadding, _initialPadding;
-
-    public KyutaiTextScheduler(int secondStreamAhead = 2, int maxPadding = 6, int initialPadding = 2)
-    {
-        _secondStreamAhead = secondStreamAhead;
-        _maxPadding = maxPadding;
-        _initialPadding = initialPadding;
-    }
+    private readonly int _secondStreamAhead = secondStreamAhead;
+    private readonly int _maxPadding = maxPadding;
+    private readonly int _initialPadding = initialPadding;
 
     /// <summary>One word to synthesize: its SentencePiece <paramref name="Tokens"/> (empty = a pure pause), and
     /// <paramref name="Padding"/> forced-pad steps after it.</summary>

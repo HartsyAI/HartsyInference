@@ -37,8 +37,7 @@ public static class LoraResolver
         {
             // Skip non-global confinement: per-segment LoRA scopes aren't modeled, so honoring the global slot only is safe.
             if (!string.IsNullOrWhiteSpace(entry.SectionConfinement)
-                && int.TryParse(entry.SectionConfinement, out int confinementId)
-                && confinementId > 0)
+                && int.TryParse(entry.SectionConfinement, out int confinementId) && confinementId > 0)
             {
                 Logs.Debug($"[Features][LoRA] '{entry.Model}' has section confinement={confinementId}; skipping (not yet supported).");
                 continue;

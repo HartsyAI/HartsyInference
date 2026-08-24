@@ -16,20 +16,22 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Boogu-Image pipeline driven against the native <see cref="ImageRequest"/>. Builds the Qwen3-VL chat-templated instruction tokens, encodes them through the 8B language tower under the loader's TE ⇄ DiT staging (evict the resident DiT, encode, free the encoder weights), and calls <see cref="BooguImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>BooguImageLoader.Generate</c> text-to-image drive path.</summary>
-public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
+/// <summary>A constructed Boogu-Image pipeline driven against the native <see cref="ImageRequest"/>. Builds the Qwen3-VL chat-templated instruction tokens, encodes them through the 8B language tower under the loader's TE ⇄ DiT staging (evict the resident DiT, encode, free the encoder weights), and calls <see cref="BooguImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>BooguImageLoader.Generate</c> text-to-image drive path. Wraps the constructed Boogu-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
+public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
+    BooguImageTransformer transformer, IBackend backend, IReadOnlyList<SafeTensorsLoader> loaders,
+    MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>
     private const string SystemPromptT2I =
         "You are a helpful assistant that generates high-quality images based on user instructions. The instructions are as follows.";
 
-    private readonly BooguImagePipeline _pipeline;
-    private readonly Qwen3Tokenizer _tokenizer;
-    private readonly LlamaStyleEncoder _textEncoder;
-    private readonly BooguImageTransformer _transformer;
-    private readonly IBackend _backend;
-    private readonly IReadOnlyList<SafeTensorsLoader> _loaders;
-    private readonly MergedLoraStack? _loraStack;
+    private readonly BooguImagePipeline _pipeline = pipeline;
+    private readonly Qwen3Tokenizer _tokenizer = tokenizer;
+    private readonly LlamaStyleEncoder _textEncoder = textEncoder;
+    private readonly BooguImageTransformer _transformer = transformer;
+    private readonly IBackend _backend = backend;
+    private readonly IReadOnlyList<SafeTensorsLoader> _loaders = loaders;
+    private readonly MergedLoraStack? _loraStack = loraStack;
 
     // Prompt-embedding cache: repeat prompts skip the whole Qwen3-VL-8B encode (and the DiT eviction it forces —
     // the ~10 GB encoder and the ~10 GB fp8 DiT cannot coexist beside activations on 24 GB). Reusing the SAME
@@ -38,18 +40,6 @@ public sealed unsafe class BooguImageRecipePipeline : IRecipePipeline
     private Tensor? _cachedInstr;
     private string? _cachedNegKey;
     private Tensor? _cachedNeg;
-
-    /// <summary>Wraps the constructed Boogu-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
-    public BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder, BooguImageTransformer transformer, IBackend backend, IReadOnlyList<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
-    {
-        _loraStack = loraStack;
-        _pipeline = pipeline;
-        _tokenizer = tokenizer;
-        _textEncoder = textEncoder;
-        _transformer = transformer;
-        _backend = backend;
-        _loaders = loaders;
-    }
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

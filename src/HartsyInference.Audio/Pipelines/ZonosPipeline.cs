@@ -204,15 +204,13 @@ public sealed unsafe class ZonosPipeline : IDisposable
     /// the host streaming path (CPU/Vulkan). Both are numerically equivalent; the resident path avoids the
     /// per-layer host reshape/rope/repeat round-trips and the O(n²) K/V re-upload.</summary>
     private Tensor RunBackbone(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache) =>
-        backend.FlashDecodeSupported
-            ? _bb.ForwardResident(backend, embeds, t, posStart, cache)
+        backend.FlashDecodeSupported ? _bb.ForwardResident(backend, embeds, t, posStart, cache)
             : _bb.Forward(backend, embeds, t, posStart, (StreamingKvCache)cache);
 
     /// <summary>Allocates the KV cache backing that matches the backend: a fixed-capacity device cache
     /// (in-place GPU append) when flash-decode is supported, else the host streaming cache.</summary>
     private IKvCache NewCache(IBackend backend, int maxSeq) =>
-        backend.FlashDecodeSupported
-            ? new FixedKvCache(_cfg.NumLayers, 1, _cfg.NumKvHeads, _cfg.HeadDim, maxSeq)
+        backend.FlashDecodeSupported ? new FixedKvCache(_cfg.NumLayers, 1, _cfg.NumKvHeads, _cfg.HeadDim, maxSeq)
             : new StreamingKvCache(_cfg.NumLayers, 1, _cfg.NumKvHeads, maxSeq, _cfg.HeadDim);
 
     private float[][] StepCfg(IBackend backend, ReadOnlySpan<int> frame, int posC, int posU,

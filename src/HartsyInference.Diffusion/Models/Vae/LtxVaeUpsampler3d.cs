@@ -54,8 +54,7 @@ public sealed unsafe class LtxVaeUpsampler3d
         int xOut = outC / stProd;                          // final channels (= inC / upscale)
 
         Tensor conv = _conv!.Forward(backend, x);          // [B, outC, F, H, W]
-        Tensor main = b == 1
-            ? PixelShuffleDevice(backend, conv, xOut, f, h, w, st0, st1, st2)
+        Tensor main = b == 1 ? PixelShuffleDevice(backend, conv, xOut, f, h, w, st0, st1, st2)
             : PixelShuffle(conv, b, outC, xOut, f, h, w, st0, st1, st2);
         conv.Dispose();
 

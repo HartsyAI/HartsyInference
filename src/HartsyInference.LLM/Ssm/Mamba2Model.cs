@@ -160,8 +160,7 @@ public sealed unsafe class Mamba2Model : IDisposable, ISsmModel
                 {
                     // Combined [history (k-1 rows) ++ xbc (seq rows)] index for this tap.
                     int combined = s + j;
-                    acc += combined < k - 1
-                        ? convW[c * k + j] * history[combined * convDim + c]
+                    acc += combined < k - 1 ? convW[c * k + j] * history[combined * convDim + c]
                         : convW[c * k + j] * xbc[(combined - (k - 1)) * convDim + c];
                 }
                 xc[s * convDim + c] = acc / (1f + MathF.Exp(-acc));   // SiLU

@@ -7,22 +7,14 @@ namespace HartsyInference.Vision.Detection.GroundingDino;
 /// and decoder cross-attention. Each query predicts, per head/level/point, a 2-D sampling offset and an attention
 /// weight; values are bilinearly sampled (grid_sample, align_corners=false, zero padding) from the multi-scale
 /// feature maps at those locations and combined by the softmaxed weights.</summary>
-public sealed unsafe class MultiscaleDeformableAttention : IDisposable
+public sealed unsafe class MultiscaleDeformableAttention(int dModel, int nHeads, int nLevels, int nPoints) : IDisposable
 {
-    private readonly int _dModel;
-    private readonly int _nHeads;
-    private readonly int _nLevels;
-    private readonly int _nPoints;
+    private readonly int _dModel = dModel;
+    private readonly int _nHeads = nHeads;
+    private readonly int _nLevels = nLevels;
+    private readonly int _nPoints = nPoints;
     private Tensor? _sampOffW, _sampOffB, _attnW, _attnB, _valW, _valB, _outW, _outB;
     private int _disposed;
-
-    public MultiscaleDeformableAttention(int dModel, int nHeads, int nLevels, int nPoints)
-    {
-        _dModel = dModel;
-        _nHeads = nHeads;
-        _nLevels = nLevels;
-        _nPoints = nPoints;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {

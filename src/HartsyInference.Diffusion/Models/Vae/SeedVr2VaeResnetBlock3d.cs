@@ -33,8 +33,7 @@ public sealed class SeedVr2VaeResnetBlock3d
         _conv1 = SeedVr2VaeOps.Conv(weights, $"{prefix}.conv1", computeDtype: _actDtype);
         _conv2 = SeedVr2VaeOps.Conv(weights, $"{prefix}.conv2", computeDtype: _actDtype);
         _shortcut = weights.ContainsKey($"{prefix}.conv_shortcut.weight")
-            ? SeedVr2VaeOps.Conv(weights, $"{prefix}.conv_shortcut", computeDtype: _actDtype)
-            : null;
+            ? SeedVr2VaeOps.Conv(weights, $"{prefix}.conv_shortcut", computeDtype: _actDtype) : null;
     }
 
     /// <summary>Forward on <c>[B,C,T,H,W]</c> F32.</summary>

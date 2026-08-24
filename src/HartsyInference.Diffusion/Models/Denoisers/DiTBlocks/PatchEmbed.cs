@@ -116,9 +116,7 @@ public sealed class PatchEmbed : IDisposable
             ThrowIfDisposed();
             if (_projWeight is null || _projBias is null)
                 return Array.Empty<Tensor>();
-            return _posEmbed is null
-                ? new[] { _projWeight, _projBias }
-                : new[] { _projWeight, _projBias, _posEmbed };
+            return _posEmbed is null ? new[] { _projWeight, _projBias } : new[] { _projWeight, _projBias, _posEmbed };
         }
     }
 

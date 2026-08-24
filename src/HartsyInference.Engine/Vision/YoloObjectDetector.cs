@@ -51,8 +51,7 @@ public sealed class YoloObjectDetector : IDisposable
             bool isV11 = name.Contains("yolo11", StringComparison.OrdinalIgnoreCase) || name.Contains("yolov11", StringComparison.OrdinalIgnoreCase);
             YoloConfig config = InferConfig(name);
             Logs.Info($"[Vision] Loading YOLO ({config.Name}): {checkpointPath}");
-            YoloPipeline pipeline = isV11
-                ? YoloPipeline.LoadV11(backend, config, checkpointPath)
+            YoloPipeline pipeline = isV11 ? YoloPipeline.LoadV11(backend, config, checkpointPath)
                 : new YoloPipeline(backend, config, checkpointPath);
             _cache[checkpointPath] = pipeline;
             return pipeline;

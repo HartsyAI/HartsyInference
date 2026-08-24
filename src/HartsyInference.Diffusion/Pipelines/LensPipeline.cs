@@ -256,8 +256,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
                     // off-schedule sub-step (what a second-order sampler evaluates at) takes the raw sigma, which is
                     // right: there is no precomputed timestep for it.
                     float t = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex] / 1000.0f
-                        : s;
+                        ? timestepTable[stepIndex] / 1000.0f : s;
                     Tensor combined;
                     if (useCfg)
                     {

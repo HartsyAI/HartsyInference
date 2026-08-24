@@ -3,20 +3,13 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Per-head RMSNorm with learnable scale for query-key normalization. Prevents attention logit explosion by normalizing each head's Q/K vector independently before the dot product.</summary>
-public sealed unsafe class QkNorm
+/// <param name="headDim">Per-head dimension (64 for SD3).</param>
+/// <param name="eps">RMSNorm epsilon. Default: 1e-6.</param>
+public sealed unsafe class QkNorm(int headDim, float eps = 1e-6f)
 {
-    private readonly int _headDim;
-    private readonly float _eps;
+    private readonly int _headDim = headDim;
+    private readonly float _eps = eps;
     private Tensor? _weight;
-
-    /// <summary>Creates a QK-norm layer for the given head dimension.</summary>
-    /// <param name="headDim">Per-head dimension (64 for SD3).</param>
-    /// <param name="eps">RMSNorm epsilon. Default: 1e-6.</param>
-    public QkNorm(int headDim, float eps = 1e-6f)
-    {
-        _headDim = headDim;
-        _eps = eps;
-    }
 
     /// <summary>Loads the learnable scale weight. Shape: [headDim]. Auto-casts to F32 if needed (Forward uses float* directly).</summary>
     public void LoadWeights(Tensor weight)

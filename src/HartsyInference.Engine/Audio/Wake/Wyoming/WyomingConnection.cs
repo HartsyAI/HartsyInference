@@ -194,8 +194,7 @@ internal sealed class WyomingConnection : IDisposable
                 Language = _language ?? _options.DefaultLanguage,
             };
             Task<TranscriptResult> Run() => _engine.Transcribe.RunAsync(spec, request, cancel);
-            TranscriptResult result = _options.TranscribeGate is null
-                ? await Run().ConfigureAwait(false)
+            TranscriptResult result = _options.TranscribeGate is null ? await Run().ConfigureAwait(false)
                 : await _options.TranscribeGate(Run).ConfigureAwait(false);
             await _codec.WriteAsync("transcript", Transcript(result.Text, result.Language), cancel).ConfigureAwait(false);
         }
@@ -302,8 +301,7 @@ internal sealed class WyomingConnection : IDisposable
             ModelSpec spec = Registry.ModelResolver.Resolve(artifact.ResolvedModelId, null, Modality.Speech);
             SpeechRequest request = new() { Text = text, Voice = artifact.VoiceName ?? StringOf(voice, "speaker") };
             Task<AudioResult> Run() => _engine.Speech.SynthesizeAsync(spec, request, cancel);
-            AudioResult result = _options.SynthesizeGate is null
-                ? await Run().ConfigureAwait(false)
+            AudioResult result = _options.SynthesizeGate is null ? await Run().ConfigureAwait(false)
                 : await _options.SynthesizeGate(Run).ConfigureAwait(false);
             await SendAudioAsync(result, cancel).ConfigureAwait(false);
         }

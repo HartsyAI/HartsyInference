@@ -7,15 +7,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// optional pos-embed add → FP32 LayerNorm → gelu FFN (net.0.proj → net.2) → FP32 LayerNorm, mapping CLIP features
 /// <c>[seqImg, imageDim]</c> → <c>[seqImg, dim]</c>. Hoisted from <see cref="WanVideoTransformer"/> so the Animate DiT
 /// shares it (both carry the same <c>img_emb</c> module).</summary>
-public sealed unsafe class WanImageEmbedder
+public sealed unsafe class WanImageEmbedder(float eps = 1e-6f)
 {
-    private readonly float _eps;
+    private readonly float _eps = eps;
     private Tensor? _norm1W, _norm1B, _ff0W, _ff0B, _ff2W, _ff2B, _norm2W, _norm2B, _posEmbed;
-
-    public WanImageEmbedder(float eps = 1e-6f)
-    {
-        _eps = eps;
-    }
 
     /// <summary>True once the image-embedder weights were found and loaded.</summary>
     public bool IsLoaded => _ff0W is not null;

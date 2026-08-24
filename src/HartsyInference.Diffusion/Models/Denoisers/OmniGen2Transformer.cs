@@ -122,8 +122,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         // Forward with refLatents throws when absent.
         weights.TryGetValue("ref_image_patch_embedder.weight", out _refEmbedderWeight);
         weights.TryGetValue("ref_image_patch_embedder.bias", out _refEmbedderBias);
-        _hasRefStack = _refEmbedderWeight is not null
-            && weights.ContainsKey("ref_image_refiner.0.attn.to_q.weight");
+        _hasRefStack = _refEmbedderWeight is not null && weights.ContainsKey("ref_image_refiner.0.attn.to_q.weight");
         if (_hasRefStack)
         {
             for (int i = 0; i < _refImageRefiner.Length; i++)

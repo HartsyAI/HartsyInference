@@ -7,10 +7,5 @@ namespace HartsyInference.World.Sessions;
 /// <param name="DroppedFrames">Frames discarded because the consumer fell behind the bounded output queue.</param>
 /// <param name="ActionQueueDepth">Actions currently waiting for the compute thread.</param>
 /// <param name="FrameQueueDepth">Frames currently waiting for the consumer.</param>
-public readonly record struct InteractiveSessionStats(
-    double P50StepMs,
-    double P99StepMs,
-    long FramesEmitted,
-    long DroppedFrames,
-    int ActionQueueDepth,
-    int FrameQueueDepth);
+public readonly record struct InteractiveSessionStats(double P50StepMs, double P99StepMs, long FramesEmitted,
+    long DroppedFrames, int ActionQueueDepth, int FrameQueueDepth);

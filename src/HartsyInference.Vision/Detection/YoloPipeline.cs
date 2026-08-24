@@ -91,9 +91,7 @@ public sealed class YoloPipeline : IDetectionPipeline
     /// <summary>Returns the label string for a detection's class id — uses the supplied label
     /// table if any, falling back to <see cref="CocoLabels.Get"/>.</summary>
     public string GetLabel(int classId) =>
-        _labels is not null && classId >= 0 && classId < _labels.Count
-            ? _labels[classId]
-            : CocoLabels.Get(classId);
+        _labels is not null && classId >= 0 && classId < _labels.Count ? _labels[classId] : CocoLabels.Get(classId);
 
     /// <summary><see cref="IDetectionPipeline"/> implementation — decodes PNG bytes, runs YOLO,
     /// converts <see cref="YoloDetection"/> (xyxy pixel coords) into <see cref="DetectionResult"/>

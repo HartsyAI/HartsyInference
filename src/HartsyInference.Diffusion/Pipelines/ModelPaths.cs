@@ -49,8 +49,7 @@ public sealed record ModelPaths
             TokenizerDir = Path.Combine(sdDir, tokenizerDir),
             TextEncoderPath = Path.Combine(sdDir, "text_encoder", "model.fp16.safetensors"),
             UNetPath = Path.Combine(sdDir, "unet", "diffusion_pytorch_model.fp16.safetensors"),
-            VaePath = vaeName != null
-                ? Path.Combine(root, "VAE", vaeName)
+            VaePath = vaeName != null ? Path.Combine(root, "VAE", vaeName)
                 : Path.Combine(sdDir, "vae", "diffusion_pytorch_model.fp16.safetensors"),
         };
     }

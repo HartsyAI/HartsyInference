@@ -30,8 +30,7 @@ public sealed class HypothesisBuffer
     {
         // The hypothesis re-decodes the whole window, so its first _committed.Count words are the already-confirmed
         // ones; take the tail beyond them.
-        List<string> tail = hypothesis.Count > _committed.Count
-            ? hypothesis.Skip(_committed.Count).ToList()
+        List<string> tail = hypothesis.Count > _committed.Count ? hypothesis.Skip(_committed.Count).ToList()
             : new List<string>();
 
         int k = CommonPrefixLength(_pendingTail, tail);

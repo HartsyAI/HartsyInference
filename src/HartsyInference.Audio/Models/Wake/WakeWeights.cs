@@ -25,7 +25,6 @@ public static class WakeWeights
     /// <summary>Looks up <paramref name="name"/> and returns an owned copy, or throws naming the model that
     /// should have supplied it.</summary>
     public static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string name, string expectedSource) =>
-        weights.TryGetValue(name, out Tensor? t)
-            ? Own(t)
+        weights.TryGetValue(name, out Tensor? t) ? Own(t)
             : throw new HartsyInferenceException($"Missing weight '{name}'. Expected {expectedSource}.");
 }

@@ -25,23 +25,16 @@ namespace HartsyInference.Video.Pipelines;
 /// DiT on 24 GB). Latent grid: <c>T_lat=(F−1)/4+1</c>, <c>H/8</c>, <c>W/8</c>, 16 channels; the DiT patchifies
 /// <c>(1,2,2)</c> internally. Decode divides by the VAE scaling factor 0.476986 (no mean/std shift).
 /// <b>Status: built, first-run numeric validation pending.</b></para></summary>
-public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
+public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDit dit, HunyuanVideoVaeDecoder vae,
+    HunyuanVideoConfig config) : DiffusionPipelineBase(backend)
 {
     private const int VaeSpatial = 8;
     private const int VaeTemporal = 4;
     private const float VaeScalingFactor = 0.476986f;
 
-    private readonly HunyuanVideoDit _dit;
-    private readonly HunyuanVideoVaeDecoder _vae;
-    private readonly HunyuanVideoConfig _config;
-
-    public HunyuanVideoPipeline(IBackend backend, HunyuanVideoDit dit, HunyuanVideoVaeDecoder vae, HunyuanVideoConfig config)
-        : base(backend)
-    {
-        _dit = dit;
-        _vae = vae;
-        _config = config;
-    }
+    private readonly HunyuanVideoDit _dit = dit;
+    private readonly HunyuanVideoVaeDecoder _vae = vae;
+    private readonly HunyuanVideoConfig _config = config;
 
     /// <summary>Generates frames from pre-computed text conditioning. Returns one interleaved-RGB <c>byte[]</c> per
     /// frame plus the resolved dimensions and seed.</summary>

@@ -141,8 +141,7 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
     /// <summary>Talker-width → MTP-width projection; identity copy when the checkpoint has no projection
     /// (0.6B: both widths are 1024).</summary>
     private Tensor ProjectToMtp(IBackend backend, Tensor x, int talkerH, int mtpHidden)
-        => _smallToMtpW is null
-            ? x.To(x.Device)
+        => _smallToMtpW is null ? x.To(x.Device)
             : WhisperOps.ProjectLinear(backend, x, _smallToMtpW, _smallToMtpB, 1, 1, talkerH, mtpHidden);
 
     /// <summary>Projects the MTP hidden through <c>lm_head[g]</c> and samples a codebook token with the

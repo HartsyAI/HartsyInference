@@ -218,8 +218,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
                     // flow-match DiTs take — so an on-schedule step reuses the scheduler's own table entry rather than
                     // recomputing it, and only a genuine sub-step (what a second-order sampler evaluates at) scales
                     // the raw sigma up. There is no precomputed timestep for a sub-step, which is exactly right.
-                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                        ? timestepTable[stepIndex]
+                    float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                         : s * 1000.0f;
                     // The 33-channel model input is DERIVED from the latent, so it must be re-packed against the
                     // sampler's `x` — a second-order sampler evaluates at an intermediate latent that is not the

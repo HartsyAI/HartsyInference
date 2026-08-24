@@ -360,8 +360,7 @@ public static class CompatEndpoints
                     {
                         Name = t.Function.Name,
                         Description = t.Function.Description,
-                        JsonSchema = t.Function.Parameters.ValueKind == JsonValueKind.Undefined
-                            ? "{}"
+                        JsonSchema = t.Function.Parameters.ValueKind == JsonValueKind.Undefined ? "{}"
                             : t.Function.Parameters.GetRawText(),
                     })]
                 : null,

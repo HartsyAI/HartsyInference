@@ -103,8 +103,7 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
                 // On-schedule sigmas reuse the loop's own `timesteps[i]/1000` expression — the F32 round trip
                 // through x1000 is not exact, so raw sigma would shift every existing generation by an ulp.
                 float normalizedT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                    ? timestepTable[stepIndex] / 1000f
-                    : s;
+                    ? timestepTable[stepIndex] / 1000f : s;
                 // Ref tokens are appended for this forward only (the DiT slices them off the velocity), and must
                 // be rebuilt against whatever latent is being evaluated — a second-order sampler's sub-step latent
                 // is not the loop's tensor.

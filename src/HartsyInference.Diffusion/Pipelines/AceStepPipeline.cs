@@ -81,8 +81,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         int fLat = Math.Max(8, _config.LatentFrames(durationSeconds));
 
         // Custom (OSS) step schedule: effective steps = |oss|, each sampling a sigma from the full grid (1-indexed).
-        float[] sigmas = ossSteps is { Length: > 0 }
-            ? BuildOssSigmas(ossSteps, _config.FlowShift)
+        float[] sigmas = ossSteps is { Length: > 0 } ? BuildOssSigmas(ossSteps, _config.FlowShift)
             : BuildSigmas(inferSteps, _config.FlowShift);
         int loopSteps = sigmas.Length - 1;
 

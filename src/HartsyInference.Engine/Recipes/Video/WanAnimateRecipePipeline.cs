@@ -106,8 +106,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
 
         string prompt = request.Prompt;
         // Swarm sends an unset negative as "", not null, so upstream's falsy check is the one to mirror.
-        string negative = string.IsNullOrWhiteSpace(request.NegativePrompt)
-            ? WanVideoRecipe.DefaultNegativePrompt
+        string negative = string.IsNullOrWhiteSpace(request.NegativePrompt) ? WanVideoRecipe.DefaultNegativePrompt
             : request.NegativePrompt;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 77, step: _config.VaeTemporalCompression);
@@ -156,8 +155,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
             // canvas: black pad bars drag the mean dark, which is this correction's known failure mode.
             float colorStrength = (float)(request.AnimateColorCorrection ?? 1.0);
             VideoColorMatch.LabStats refColorStats = colorStrength > 0f
-                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height)
-                : default;
+                ? VideoColorMatch.ComputeStats(reference.Rgb, reference.Width, reference.Height) : default;
 
             List<byte[]> assembled = new List<byte[]>();
             int chunkLen = numFrames;
@@ -253,9 +251,7 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                 }
             }
             // Frame edits (trim/boomerang) run once over the assembled video, not per chunk.
-            byte[][] output = assembled.Count > totalFrames
-                ? [.. assembled.GetRange(0, totalFrames)]
-                : [.. assembled];
+            byte[][] output = assembled.Count > totalFrames ? [.. assembled.GetRange(0, totalFrames)] : [.. assembled];
             return VideoRecipeUtils.ToResult(output, outW, outH, request, fps: drivingFps);
         }
         catch (Exception ex)

@@ -223,8 +223,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // Text rows only ([1, effNumText, llmDim]) — the transformer synthesizes the zero image rows and caches
         // the projection keyed on this reference, so pass the cached tensor itself when there are no regions.
         Tensor llmTextRows = hasRegions
-            ? BuildLlmFull(textFeatures, numText, effNumText, _config.LlmFeaturesDim, regionalPlan)
-            : textFeatures;
+            ? BuildLlmFull(textFeatures, numText, effNumText, _config.LlmFeaturesDim, regionalPlan) : textFeatures;
         (Tensor posIds, Tensor posIdsImageOnly) = GetOrBuildPositionIds(effNumText, gridH, gridW);
         int[] indicator = BuildIndicator(effNumText, numImageTokens);         // [L]
         int[] indicatorImageOnly = new int[numImageTokens];
@@ -724,8 +723,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     /// <summary>Builds (or returns the cached) MRoPE position tensors for the given layout. Reusing the same tensor references across generations keeps both transformers' cos/sin caches warm.</summary>
     private (Tensor PosIds, Tensor PosIdsImageOnly) GetOrBuildPositionIds(int numText, int gridH, int gridW)
     {
-        if (_cachedPosIds is not null && _cachedPosIdsImageOnly is not null
-            && _cachedPosKey == (numText, gridH, gridW))
+        if (_cachedPosIds is not null && _cachedPosIdsImageOnly is not null && _cachedPosKey == (numText, gridH, gridW))
         {
             return (_cachedPosIds, _cachedPosIdsImageOnly);
         }

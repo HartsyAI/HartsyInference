@@ -9,7 +9,9 @@ namespace HartsyInference.Audio.Models.Zonos;
 /// letters), offset by the 4 special tokens (PAD 0, UNK 1, BOS 2, EOS 3), with unknown codepoints mapped to UNK,
 /// then wrapped <c>[BOS, …ids…, EOS]</c>. The table is character-level over the whole IPA string, so spaces and
 /// punctuation are tokenized too.</summary>
-public sealed class ZonosPhonemeTokenizer
+/// <param name="phonemizer">espeak-ng phonemizer (reused across calls).</param>
+/// <param name="language">espeak voice code, e.g. <c>"en-us"</c>.</param>
+public sealed class ZonosPhonemeTokenizer(EspeakPhonemizer phonemizer, string language)
 {
     public const int PadId = 0;
     public const int UnkId = 1;
@@ -35,16 +37,8 @@ public sealed class ZonosPhonemeTokenizer
 
     private static readonly Dictionary<int, int> SymbolToId = BuildTable();
 
-    private readonly EspeakPhonemizer _phonemizer;
-    private readonly string _language;
-
-    /// <param name="phonemizer">espeak-ng phonemizer (reused across calls).</param>
-    /// <param name="language">espeak voice code, e.g. <c>"en-us"</c>.</param>
-    public ZonosPhonemeTokenizer(EspeakPhonemizer phonemizer, string language)
-    {
-        _phonemizer = phonemizer;
-        _language = language;
-    }
+    private readonly EspeakPhonemizer _phonemizer = phonemizer;
+    private readonly string _language = language;
 
     /// <summary>Phonemizes <paramref name="text"/> and returns the wrapped phoneme ids <c>[BOS, …, EOS]</c>.</summary>
     public int[] Tokenize(string text)

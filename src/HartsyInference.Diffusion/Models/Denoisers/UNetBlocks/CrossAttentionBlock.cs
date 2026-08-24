@@ -446,9 +446,9 @@ internal sealed class TransformerSubBlock
 }
 
 /// <summary>Feed-forward network: LayerNorm → Linear → GEGLU → Linear → Residual.</summary>
-internal sealed class FeedForwardBlock
+internal sealed class FeedForwardBlock(int channels)
 {
-    private readonly int _channels;
+    private readonly int _channels = channels;
 
     private Tensor? _normWeight;
     private Tensor? _normBias;
@@ -460,11 +460,6 @@ internal sealed class FeedForwardBlock
     // Output linear: net.2
     private Tensor? _outLinearWeight;
     private Tensor? _outLinearBias;
-
-    public FeedForwardBlock(int channels)
-    {
-        _channels = channels;
-    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string ffPrefix, string normPrefix)
     {

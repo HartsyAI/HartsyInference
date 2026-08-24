@@ -147,8 +147,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         int clipSkip = request.ClipSkip ?? 2;
         bool teCacheEligible = !useStepSwap;
         bool teCacheHit = teCacheEligible && _cachedTextEmb is not null && _cachedPooled is not null
-            && _teKeyClipSkip == clipSkip
-            && _teKeyEosG == promptEosPositionG && _teKeyNegEosG == negativeEosPositionG
+            && _teKeyClipSkip == clipSkip && _teKeyEosG == promptEosPositionG && _teKeyNegEosG == negativeEosPositionG
             && TokensEqual(_teKeyL, promptTokenIdsL) && TokensEqual(_teKeyLNeg, negativePromptTokenIdsL)
             && TokensEqual(_teKeyG, promptTokenIdsG) && TokensEqual(_teKeyGNeg, negativePromptTokenIdsG);
 
@@ -294,14 +293,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // is a single in-place device kernel with no intermediate host-visible F32 cond/uncond tensor to
         // renormalize (cfgRescale) or tangentially filter (tcfg) against.
         bool fusedLoop = scheduler is EulerDiscreteScheduler fusedScheduler && fusedScheduler.FusedEulerCompatible
-            && !isMaskedInpaint
-            && !useStepSwap
-            && (controlNets is null || controlNets.Count == 0)
-            && (ipAdapters is null || ipAdapters.Count == 0)
-            && conditioningSchedule is null
-            && cfgRescale <= 0f
-            && !tcfg
-            && pooledOutput is not null;
+            && !isMaskedInpaint && !useStepSwap && (controlNets is null || controlNets.Count == 0)
+            && (ipAdapters is null || ipAdapters.Count == 0) && conditioningSchedule is null && cfgRescale <= 0f
+            && !tcfg && pooledOutput is not null;
 
         // CFG-branch parallelism (ROADMAP.md item 10, mirrors Flux/Wan): the fused loop's batch=2 single-GPU
         // forward splits into two batch=1 forwards — cond on Backend, uncond concurrently on CfgParallelBackend
@@ -344,8 +338,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // Non-obvious case worth spelling out: a bare `euler_ancestral` with, say, an inpaint mask has no schedule
         // suffix, so a schedule-only check passes it straight through to the reference loop and plain Euler. The
         // sampler half has to be checked too.
-        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName)
-            && samplerName.Length > 0
+        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName) && samplerName.Length > 0
             && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
         if (!fusedLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
         {
@@ -542,8 +535,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             UNet activeUnet = inRefinerPhase ? refiner!.RefinerUnet : _unet;
             // Per-step conditioning selection (alternation/scheduling) applies only to the base
             // phase; the refiner phase uses its own CLIP-G-only conditioning.
-            Tensor baseTextEmb = conditioningSchedule is null
-                ? textEmbeddings
+            Tensor baseTextEmb = conditioningSchedule is null ? textEmbeddings
                 : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
             Tensor activeTextEmb = inRefinerPhase ? clipGForRefiner! : baseTextEmb;
             float[] activeSizeCond = inRefinerPhase ? refinerSizeConditionPos! : sizeCondition;
@@ -573,8 +565,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // adapter is additionally gated by its [start, end] step-fraction window.
             Tensor[]? cnDownRes = null;
             Tensor? cnMidRes = null;
-            IReadOnlyList<ControlNetConditioning>? activeControlNets = inRefinerPhase
-                ? null
+            IReadOnlyList<ControlNetConditioning>? activeControlNets = inRefinerPhase ? null
                 : ControlNetConditioning.FilterActive(controlNets, i, totalSteps);
             if (activeControlNets is not null)
             {
@@ -1064,8 +1055,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // UNet output may be F16 — CFG arithmetic runs in F32 (returned to the scheduler).
         Tensor uncondF32 = DtypeCastHelper.EnsureF32(Backend, uncondNoise);
         Tensor condF32 = DtypeCastHelper.EnsureF32(Backend, condNoise);
-        Tensor output = tcfg
-            ? CfgHelper.ApplyTcfg(condF32, uncondF32, cfgScale)
+        Tensor output = tcfg ? CfgHelper.ApplyTcfg(condF32, uncondF32, cfgScale)
             : CfgHelper.ApplyCfg(uncondF32, condF32, cfgScale);
         if (cfgRescale > 0f)
         {

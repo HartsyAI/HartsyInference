@@ -202,8 +202,7 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
             for (int c = 0; c < 16; c++)
             {
                 long dst = ((long)c * included + i) * frame;
-                float* channelSrc = i < ctxCount
-                    ? (float*)generated[globalFrame].DataPointer + (long)c * frame
+                float* channelSrc = i < ctxCount ? (float*)generated[globalFrame].DataPointer + (long)c * frame
                     : (float*)current.DataPointer + ((long)c * blockSize + (i - ctxCount)) * frame;
                 Buffer.MemoryCopy(channelSrc, ip + dst, frame * 4, frame * 4);
             }

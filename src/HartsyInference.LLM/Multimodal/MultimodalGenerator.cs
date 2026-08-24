@@ -156,8 +156,7 @@ public sealed class MultimodalGenerator
 
     /// <summary>The hidden-state forward for one step: staged across the placement (plain embeds handoff, no cross-stage copy beyond the existing host-staged boundary) when sharded, else the plain single-backend path.</summary>
     private Tensor Forward(GenericTransformer model, Tensor embeds, int t, int posStart, IKvCache cache) =>
-        Staged
-            ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache)
+        Staged ? model.ForwardEmbedsStaged(_placement!, embeds, t, posStart, cache)
             : model.ForwardEmbeds(_backend, embeds, t, posStart, cache);
 
     private int SampleLast(GenericTransformer model, Tensor hidden, int t, SamplerChain sampler, List<int> history)

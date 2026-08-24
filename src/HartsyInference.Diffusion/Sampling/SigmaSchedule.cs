@@ -214,8 +214,7 @@ public static class SigmaSchedule
         if (x >= 1.0) return 1.0;
         double lnBeta = LogGamma(a) + LogGamma(b) - LogGamma(a + b);
         double front = Math.Exp((Math.Log(x) * a) + (Math.Log(1.0 - x) * b) - lnBeta);
-        return x < (a + 1.0) / (a + b + 2.0)
-            ? front * BetaContinuedFraction(x, a, b) / a
+        return x < (a + 1.0) / (a + b + 2.0) ? front * BetaContinuedFraction(x, a, b) / a
             : 1.0 - (Math.Exp((Math.Log(1.0 - x) * b) + (Math.Log(x) * a) - lnBeta) * BetaContinuedFraction(1.0 - x, b, a) / b);
     }
 

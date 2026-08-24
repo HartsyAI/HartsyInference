@@ -109,7 +109,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         bool teCacheHit = _cachedCond is not null
             && TokensEqual(_teKeyCond, promptTokenIdsT5) && TokensEqual(_teKeyCondMask, promptAttentionMaskT5)
             && (!useCfg || (_cachedUncond is not null
-                && TokensEqual(_teKeyUncond, negativePromptTokenIdsT5) && TokensEqual(_teKeyUncondMask, negativeAttentionMaskT5)));
+            && TokensEqual(_teKeyUncond, negativePromptTokenIdsT5) && TokensEqual(_teKeyUncondMask, negativeAttentionMaskT5)));
 
         Tensor condContext;
         Tensor? uncondContext;
@@ -239,8 +239,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
                         // shift every existing AuraFlow generation by an ulp of conditioning. Only a genuine
                         // off-schedule sub-step — what a second-order sampler evaluates at — takes the scaled value;
                         // there is no precomputed timestep for it.
-                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex)
-                            ? timestepTable[stepIndex]
+                        float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                             : s * 1000.0f;
                         Tensor cond = _transformer.ForwardTokens(Backend, x, stepT, condContext, gridH, gridW);
                         if (!useCfg)

@@ -1,7 +1,8 @@
 namespace HartsyInference.Audio.Phonemizer.Espeak;
 
 /// <summary>Places lexical stress on a word's phoneme sequence, ported from <c>GetVowelStress</c> + <c>SetWordStress</c> in espeak-ng dictionary.c: strips any existing stress markers, decides each vowel's stress level from the language stress rule and dictionary flag bits (which may pin the stressed syllable), and re-emits the sequence with stress-marker phonemes inserted. English relies mostly on the explicit dictionary stress position with a penultimate fallback.</summary>
-internal sealed class EspeakStress
+internal sealed class EspeakStress(EspeakPhonemeTable phonemeTable, int stressRule = 2, int stressFlags = 0,
+    int unstressedWd1 = 1, int unstressedWd2 = 3)
 {
     private const int MaxPhonemes = 200; // N_WORD_PHONEMES
     private const int MaxVowels = MaxPhonemes / 2;
@@ -29,25 +30,16 @@ internal sealed class EspeakStress
 
     private static readonly byte[] ConsonantTypes = [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0];
 
-    private readonly EspeakPhonemeTable _phon;
+    private readonly EspeakPhonemeTable _phon = phonemeTable;
 
     // Language options (English/base defaults).
-    private readonly int _stressRule;
-    private readonly int _stressFlags;
-    private readonly int _unstressedWd1;
-    private readonly int _unstressedWd2;
+    private readonly int _stressRule = stressRule;
+    private readonly int _stressFlags = stressFlags;
+    private readonly int _unstressedWd1 = unstressedWd1;
+    private readonly int _unstressedWd2 = unstressedWd2;
 
     /// <summary>The language stress flags, consulted by the phoneme-list reduction pass.</summary>
     public int StressFlags => _stressFlags;
-
-    public EspeakStress(EspeakPhonemeTable phonemeTable, int stressRule = 2, int stressFlags = 0, int unstressedWd1 = 1, int unstressedWd2 = 3)
-    {
-        _phon = phonemeTable;
-        _stressRule = stressRule;
-        _stressFlags = stressFlags;
-        _unstressedWd1 = unstressedWd1;
-        _unstressedWd2 = unstressedWd2;
-    }
 
     private bool Ph(int code, out EspeakPhoneme ph) => _phon.TryGet(code, out ph);
 

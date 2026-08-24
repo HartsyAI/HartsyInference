@@ -93,8 +93,7 @@ public sealed class GgufLanguageModel : IDisposable
     {
         IChatTemplate ChatMlOrRaw() =>
             tokenizer.SpecialId("<|im_start|>") is not null && tokenizer.SpecialId("<|im_end|>") is not null
-                ? new ChatMlTemplate()
-                : new RawCompletionTemplate();
+                ? new ChatMlTemplate() : new RawCompletionTemplate();
 
         string? chatTemplate = meta.GetString("tokenizer.chat_template");
         if (string.IsNullOrWhiteSpace(chatTemplate)) return ChatMlOrRaw();

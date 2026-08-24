@@ -1687,8 +1687,7 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 0, (uint)dim);
             BinaryWriteUInt(pc, 4, (uint)seqLen);
             BinaryWriteUInt(pc, 8, (uint)total);
-            Span<ulong> bufs = shift is null
-                ? stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, outBuf.Handle }
+            Span<ulong> bufs = shift is null ? stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, outBuf.Handle }
                 : stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, shiftBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
             CacheOutput(output, outBuf);
@@ -2217,8 +2216,7 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 0, (uint)batch);
             BinaryWriteUInt(pc, 4, (uint)channels);
             BinaryWriteUInt(pc, 8, (uint)timeDim);
-            Span<ulong> bufs = beta is null
-                ? stackalloc ulong[] { inBuf.Handle, alphaBuf.Handle, outBuf.Handle }
+            Span<ulong> bufs = beta is null ? stackalloc ulong[] { inBuf.Handle, alphaBuf.Handle, outBuf.Handle }
                 : stackalloc ulong[] { inBuf.Handle, alphaBuf.Handle, betaBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);
@@ -2962,8 +2960,7 @@ public sealed class VulkanBackend : IBackend
         {
             ulong capByteCount = (ulong)(dst.ElementCount * dst.DType.SizeInBytes);
             VulkanBuffer capDstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? capExisting) && capExisting is not null
-                ? capExisting
-                : _xfer.AllocateDevice(capByteCount);
+                ? capExisting : _xfer.AllocateDevice(capByteCount);
             VulkanBuffer capSrcBuf = GetBuffer(src);
             VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, capSrcBuf.Handle, capDstBuf.Handle, capByteCount,
                 postStage: VkPipelineStageFlags2.ComputeShader,
@@ -2977,8 +2974,7 @@ public sealed class VulkanBackend : IBackend
         using OpScope _op = EnterOp();
         ulong byteCount = (ulong)(dst.ElementCount * dst.DType.SizeInBytes);
         VulkanBuffer dstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? existingDst) && existingDst is not null
-            ? existingDst
-            : _xfer.AllocateDevice(byteCount);
+            ? existingDst : _xfer.AllocateDevice(byteCount);
         VulkanBuffer srcBuf = GetBuffer(src);
         _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
             postStage: VkPipelineStageFlags2.ComputeShader,

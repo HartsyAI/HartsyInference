@@ -38,8 +38,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
         int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null,
         string? preTokenizerRegex = null, bool ignoreMerges = false)
     {
-        _preTokenRegex = preTokenizerRegex is null
-            ? DefaultPreTokenRegex
+        _preTokenRegex = preTokenizerRegex is null ? DefaultPreTokenRegex
             : new Regex(preTokenizerRegex, RegexOptions.Compiled);
         _ignoreMerges = ignoreMerges;
         if (tokens is null || tokens.Length == 0) throw new ArgumentException("GGUF tokens array is empty.", nameof(tokens));
@@ -58,8 +57,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
         for (int i = 0; i < tokens.Length; i++)
         {
             bool isSpecial = tokenType is not null && i < tokenType.Length
-                ? tokenType[i] == TypeControl || tokenType[i] == TypeUserDefined
-                : LooksSpecial(tokens[i]);
+                ? tokenType[i] == TypeControl || tokenType[i] == TypeUserDefined : LooksSpecial(tokens[i]);
             // Conversion fixup: some GGUFs (leafspark mllama) mis-type template tokens as NORMAL, so
             // Decode's special-skip missed them and `<|eot_id|>`-family markers leaked into generated
             // text. Tokens shaped EXACTLY like `<|...|>` are template machinery in every supported vocab

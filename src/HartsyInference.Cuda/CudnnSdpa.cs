@@ -14,8 +14,8 @@ internal sealed class CudnnSdpa : IDisposable
     internal enum SdpaLayout { HeadMajor, TokenMajor }
 
     /// <summary>Exact identity of a cached execution plan and its immutable device scale scalar.</summary>
-    internal readonly record struct PlanKey(
-        long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias, long BiasB, long BiasSq, SdpaLayout Layout);
+    internal readonly record struct PlanKey(long B, long H, long Sq, long Sk, long D, int ScaleBits, bool HasBias,
+        long BiasB, long BiasSq, SdpaLayout Layout);
 
     private sealed class Plan
     {

@@ -116,8 +116,7 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         Tensor? maskPixel = plan.MaskPixel;
         bool isMaskedInpaint = maskPixel is not null && sourceTokensKeep is not null;
         // Token grid is row-major (t, h, w) with T=1, so the mask downsampled to gridHxgridW lines up 1:1.
-        Tensor? tokenMask = isMaskedInpaint
-            ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, gridH, gridW)
+        Tensor? tokenMask = isMaskedInpaint ? MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, gridH, gridW)
             : null;
 
         for (int k = startStep; k < steps; k++)

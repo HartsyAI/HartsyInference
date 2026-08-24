@@ -71,9 +71,7 @@ public static unsafe class Nvfp4ResidentCodec
             throw new ArgumentException($"NVFP4 in_features {inDim} must be a multiple of the {GroupSize}-element block.", nameof(packed));
         long paddedCols = blockScale.Shape[1];
         if (blockScale.Shape[0] < outDim || paddedCols < inDim / GroupSize)
-            throw new ArgumentException(
-                $"NVFP4 block scale {blockScale.Shape} is too small for a [{outDim}, {inDim}] weight.", nameof(blockScale));
-
+            throw new ArgumentException($"NVFP4 block scale {blockScale.Shape} is too small for a [{outDim}, {inDim}] weight.", nameof(blockScale));
         Tensor result = new Tensor(new TensorShape(outDim, inDim), DType.BF16);
         DequantToBf16Core((byte*)packed.DataPointer, (byte*)blockScale.DataPointer,
             blockScale.Fp8ScaleFactor, ((float*)globalScale.DataPointer)[0],

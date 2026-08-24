@@ -151,8 +151,7 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         }
         else
         {
-            textProjected = _textProjWeight is not null
-                ? ProjectText(backend, textEmbeds, batch, textMax, hidden)
+            textProjected = _textProjWeight is not null ? ProjectText(backend, textEmbeds, batch, textMax, hidden)
                 : EnsureF32(textEmbeds);
             if (cacheable && !ReferenceEquals(textProjected, textEmbeds))
             {

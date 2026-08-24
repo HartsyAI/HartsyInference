@@ -10,12 +10,17 @@ namespace HartsyInference.Vision.Upscale;
 /// pre/post-processing and overlapping-tile inference so arbitrary-size images upscale at bounded VRAM.
 /// Tiling reuses the same tested linear-ramp blender as the VAE (<see cref="VaeTiling"/>); here the
 /// spatial factor is the model's upscale ratio rather than the VAE's 8x.</summary>
-public sealed class UpscalePipeline : IUpscalePipeline
+/// <param name="backend">Compute backend.</param>
+/// <param name="net">Loaded RRDBNet generator.</param>
+/// <param name="inputTileSize">Tile size in input pixels (0 disables tiling — whole image at once). Default 128.</param>
+/// <param name="tileOverlapFactor">Fraction of a tile that overlaps its neighbours. Default 0.25.</param>
+public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTileSize = 128,
+    float tileOverlapFactor = 0.25f) : IUpscalePipeline
 {
-    private readonly IBackend _backend;
-    private readonly RrdbNet _net;
-    private readonly int _inputTileSize;
-    private readonly float _tileOverlapFactor;
+    private readonly IBackend _backend = backend;
+    private readonly RrdbNet _net = net;
+    private readonly int _inputTileSize = inputTileSize;
+    private readonly float _tileOverlapFactor = tileOverlapFactor;
 
     /// <inheritdoc/>
     public string ModelName => $"real-esrgan-x{_net.Config.Scale}";
@@ -23,26 +28,11 @@ public sealed class UpscalePipeline : IUpscalePipeline
     /// <inheritdoc/>
     public int ScaleFactor => _net.Config.Scale;
 
-    /// <summary>Creates an upscale pipeline.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="net">Loaded RRDBNet generator.</param>
-    /// <param name="inputTileSize">Tile size in input pixels (0 disables tiling — whole image at once). Default 128.</param>
-    /// <param name="tileOverlapFactor">Fraction of a tile that overlaps its neighbours. Default 0.25.</param>
-    public UpscalePipeline(IBackend backend, RrdbNet net, int inputTileSize = 128, float tileOverlapFactor = 0.25f)
-    {
-        _backend = backend;
-        _net = net;
-        _inputTileSize = inputTileSize;
-        _tileOverlapFactor = tileOverlapFactor;
-    }
-
     /// <inheritdoc/>
     public (byte[] rgbData, int width, int height) Upscale(ReadOnlySpan<byte> rgbData, int width, int height)
     {
         Tensor input = ImageTensor.RgbToTensor01(rgbData, width, height);
-        Tensor output = _inputTileSize <= 0
-            ? _net.Forward(_backend, input)
-            : TiledForward(input, width, height);
+        Tensor output = _inputTileSize <= 0 ? _net.Forward(_backend, input) : TiledForward(input, width, height);
         input.Dispose();
 
         byte[] bytes = Tensor01ToRgb(output);
@@ -89,9 +79,7 @@ public sealed class UpscalePipeline : IUpscalePipeline
                 int tileW = Math.Min(tile, width - j);
 
                 Tensor t = VaeTiling.ExtractTile(input, 1, 3, i, j, tileH, tileW);
-                Tensor padded = tileH < tile || tileW < tile
-                    ? VaeTiling.PadTile(_backend, t, 1, 3, tile, tile)
-                    : t;
+                Tensor padded = tileH < tile || tileW < tile ? VaeTiling.PadTile(_backend, t, 1, 3, tile, tile) : t;
                 if (!ReferenceEquals(padded, t)) t.Dispose();
 
                 Tensor up = _net.Forward(_backend, padded);

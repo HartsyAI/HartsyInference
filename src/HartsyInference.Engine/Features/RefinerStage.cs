@@ -146,8 +146,7 @@ public static class RefinerStage
                 Creativity = spec.Strength,
                 Mode = Img2ImgMode.Denoise,
             },
-            Components = string.IsNullOrWhiteSpace(spec.Vae)
-                ? request.Components
+            Components = string.IsNullOrWhiteSpace(spec.Vae) ? request.Components
                 : (request.Components ?? new ComponentOverrides()) with { Vae = spec.Vae },
         };
 

@@ -55,8 +55,7 @@ public static class MiniMaxH3Geometry
             throw new ArgumentOutOfRangeException(nameof(width), "MiniMax-H3 needs a positive canvas.");
         }
         double ratio = (double)width / height;
-        (double w, double h) = ratio >= 1.0
-            ? (BaseShortEdge * ratio, (double)BaseShortEdge)
+        (double w, double h) = ratio >= 1.0 ? (BaseShortEdge * ratio, (double)BaseShortEdge)
             : ((double)BaseShortEdge, BaseShortEdge / ratio);
         if (w * h > MaxPixels)
         {
@@ -78,9 +77,7 @@ public static class MiniMaxH3Geometry
         {
             throw new ArgumentOutOfRangeException(nameof(width), "MiniMax-H3 needs a positive canvas.");
         }
-        double s = (long)width * height > MaxPixels
-            ? Math.Sqrt((double)MaxPixels / ((double)width * height))
-            : 1.0;
+        double s = (long)width * height > MaxPixels ? Math.Sqrt((double)MaxPixels / ((double)width * height)) : 1.0;
         int w = Round(width * s), h = Round(height * s);
         if ((long)w * h <= MaxPixels)
         {

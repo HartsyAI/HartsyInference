@@ -33,14 +33,11 @@ public static class StepCacheEnv
         float threshold = isDefaultOn && profile is not null ? profile.Threshold : ReadThreshold();
         if (threshold <= 0f) return (0f, 0, null, 0f);
 
-        int cap = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP") is { Length: > 0 }
-            ? ReadCap()
+        int cap = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP") is { Length: > 0 } ? ReadCap()
             : profile?.Cap ?? ReadCap();
-        float[]? poly = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY") is { Length: > 0 }
-            ? ReadPoly()
+        float[]? poly = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY") is { Length: > 0 } ? ReadPoly()
             : profile?.Poly;
-        float late = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE") is { Length: > 0 }
-            ? ReadLateWindow()
+        float late = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE") is { Length: > 0 } ? ReadLateWindow()
             : profile?.LateWindow ?? 0f;
         return (threshold, cap, poly, late);
     }

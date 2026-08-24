@@ -31,10 +31,8 @@ public sealed record ComfyQuantDescriptor
             JsonElement root = doc.RootElement;
             // ValueKind is checked before GetString: on a non-string `format` that accessor throws
             // InvalidOperationException, which is not a JsonException and would escape as a load crash.
-            if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("format", out JsonElement formatElement)
-                || formatElement.ValueKind != JsonValueKind.String
-                || formatElement.GetString() is not string format)
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("format", out JsonElement formatElement)
+                || formatElement.ValueKind != JsonValueKind.String || formatElement.GetString() is not string format)
             {
                 return null;
             }

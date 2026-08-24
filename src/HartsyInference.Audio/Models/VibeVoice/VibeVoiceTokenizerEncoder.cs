@@ -114,8 +114,7 @@ internal sealed class VibeVoiceTokenizerEncoder
         for (int i = 0; i < _depths.Length; i++)
         {
             // Downsample / stem.
-            Tensor down = cache is null
-                ? _downsamples[i].Forward(backend, current, batch, t)
+            Tensor down = cache is null ? _downsamples[i].Forward(backend, current, batch, t)
                 : _downsamples[i].ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
             if (ownsCurrent) current.Dispose();
             current = down;
@@ -141,8 +140,7 @@ internal sealed class VibeVoiceTokenizerEncoder
         }
 
         // Head projection (1×1-ish — kernel=7, stride=1, so T preserved).
-        Tensor head = cache is null
-            ? _head.Forward(backend, current, batch, t)
+        Tensor head = cache is null ? _head.Forward(backend, current, batch, t)
             : _head.ForwardStreaming(backend, current, batch, t, cache, sampleIndices);
         current.Dispose();
         return head;

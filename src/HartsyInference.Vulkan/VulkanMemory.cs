@@ -42,13 +42,8 @@ public static class VulkanMemoryHelpers
 }
 
 /// <summary>One sub-allocated region inside a <see cref="VulkanMemoryBlock"/>. Returned by <see cref="VulkanMemoryAllocator.Allocate"/>; freed via <see cref="VulkanMemoryAllocator.Free"/>.</summary>
-public readonly record struct VulkanAllocation(
-    ulong DeviceMemory,
-    ulong Offset,
-    ulong Size,
-    nint MappedPointer,
-    uint MemoryTypeIndex,
-    int BlockId)
+public readonly record struct VulkanAllocation(ulong DeviceMemory, ulong Offset, ulong Size, nint MappedPointer,
+    uint MemoryTypeIndex, int BlockId)
 {
     /// <summary>Empty allocation sentinel; used for unsuccessful or never-bound allocations.</summary>
     public bool IsEmpty => DeviceMemory == 0 && Size == 0;
@@ -167,14 +162,14 @@ internal sealed class VulkanMemoryBlock : IDisposable
 /// which is the anti-pattern <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>'s suballocation guidance
 /// already warns about; this fixes the one path that still did it. Not thread-safe — the engine uses one
 /// allocator per <see cref="VulkanBackend"/>.</remarks>
-public sealed class VulkanMemoryAllocator : IDisposable
+public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemoryProperties memProps) : IDisposable
 {
     public const ulong SlabLarge = 64UL * 1024 * 1024;
     public const ulong SlabSmall = 8UL * 1024 * 1024;
     public const ulong DedicatedThreshold = 16UL * 1024 * 1024;
 
-    private readonly nint _device;
-    private readonly VkPhysicalDeviceMemoryProperties _memProps;
+    private readonly nint _device = device;
+    private readonly VkPhysicalDeviceMemoryProperties _memProps = memProps;
     private readonly List<VulkanMemoryBlock> _blocks = new();
     private int _nextBlockId;
     private bool _disposed;
@@ -203,12 +198,6 @@ public sealed class VulkanMemoryAllocator : IDisposable
 
     /// <summary>Optional callback producing a human-readable VRAM breakdown, logged right before a genuine (post-retry) OOM is thrown — the allocator's own byte/block counters don't cover weight/activation caches or step-graph-retained buffers (those live in VulkanGpuTransferHelper), so VulkanBackend wires this up to include the full picture. Diagnostic only; adds no cost on the success path.</summary>
     public Func<string>? OnOutOfMemoryDiagnostic { get; set; }
-
-    public VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemoryProperties memProps)
-    {
-        _device = device;
-        _memProps = memProps;
-    }
 
     public VulkanAllocation Allocate(
         ulong size, ulong alignment,

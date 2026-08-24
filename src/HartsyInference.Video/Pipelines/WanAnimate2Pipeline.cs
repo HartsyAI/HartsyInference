@@ -186,9 +186,8 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
             throw new ArgumentException($"driving H/W must be divisible by {sp}.", nameof(drivingRgbClip));
         if ((pixT - 1) % tp != 0)
             throw new ArgumentException($"driving frame count must satisfy (T-1) % {tp} == 0; got {pixT}.", nameof(drivingRgbClip));
-        if (carriedRgbFrame is not null
-            && (carriedRgbFrame.Shape.Rank != 5 || carriedRgbFrame.Shape[2] != 1
-                || carriedRgbFrame.Shape[3] != pixH || carriedRgbFrame.Shape[4] != pixW))
+        if (carriedRgbFrame is not null && (carriedRgbFrame.Shape.Rank != 5 || carriedRgbFrame.Shape[2] != 1
+            || carriedRgbFrame.Shape[3] != pixH || carriedRgbFrame.Shape[4] != pixW))
             throw new ArgumentException($"carriedRgbFrame must be [1,3,1,{pixH},{pixW}]; got {carriedRgbFrame.Shape}.", nameof(carriedRgbFrame));
 
         int hLat = pixH / sp, wLat = pixW / sp;

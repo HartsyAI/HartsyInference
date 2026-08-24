@@ -185,8 +185,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         Tensor causalMask = BuildCausalMask(seqLen);
         VisionResult[] visionOut = RunVisionTower(backend, presentation, referenceImages);
         // One buffer for every quantized linear in the tower, instead of a host allocation per projection per layer.
-        Tensor? dequantScratch = _dequantScratchElements > 0
-            ? Nvfp4Linear.CreateDequantScratch(_dequantScratchElements)
+        Tensor? dequantScratch = _dequantScratchElements > 0 ? Nvfp4Linear.CreateDequantScratch(_dequantScratchElements)
             : null;
         try
         {
@@ -302,8 +301,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         for (int i = 0; i < imageCount; i++)
         {
             Tensor input = referenceImages![i];
-            (Tensor pix, int gt, int gh, int gw) = input.Shape.Rank == 4
-                ? processor.Preprocess(FrameViews(input))
+            (Tensor pix, int gt, int gh, int gw) = input.Shape.Rank == 4 ? processor.Preprocess(FrameViews(input))
                 : processor.Preprocess(input);
             outputs[i] = new VisionResult(_vision.Forward(backend, pix, gt, gh, gw), gh, gw);
             pix.Dispose();

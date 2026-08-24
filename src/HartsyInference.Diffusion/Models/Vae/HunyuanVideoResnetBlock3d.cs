@@ -7,24 +7,16 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// GroupNorm → SiLU → CausalConv3d(k3) → GroupNorm → SiLU → CausalConv3d(k3), residual via 1×1×1
 /// causal conv shortcut when channels change. GroupNorm statistics span the full clip (C/g, T, H, W);
 /// all convs use HunyuanVideo replicate padding (temporal first-frame left pad + spatial edge pad).</summary>
-public sealed class HunyuanVideoResnetBlock3d
+public sealed class HunyuanVideoResnetBlock3d(int inChannels, int outChannels, int normGroups = 32, float normEps = 1e-6f)
 {
-    private readonly int _inChannels;
-    private readonly int _outChannels;
-    private readonly int _normGroups;
-    private readonly float _normEps;
+    private readonly int _inChannels = inChannels;
+    private readonly int _outChannels = outChannels;
+    private readonly int _normGroups = normGroups;
+    private readonly float _normEps = normEps;
 
     private Tensor? _norm1Weight, _norm1Bias;
     private Tensor? _norm2Weight, _norm2Bias;
     private CausalConv3d? _conv1, _conv2, _convShortcut;
-
-    public HunyuanVideoResnetBlock3d(int inChannels, int outChannels, int normGroups = 32, float normEps = 1e-6f)
-    {
-        _inChannels = inChannels;
-        _outChannels = outChannels;
-        _normGroups = normGroups;
-        _normEps = normEps;
-    }
 
     /// <summary>Loads <c>{prefix}.{norm1,conv1,norm2,conv2[,conv_shortcut]}</c> weights (conv key spelling fallback-gated, see <see cref="HunyuanVideoVaeKeys"/>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

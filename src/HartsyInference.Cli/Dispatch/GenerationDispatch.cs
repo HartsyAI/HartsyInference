@@ -68,8 +68,7 @@ public static class GenerationDispatch
             Img2Img = BuildImg2Img(parameters),
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
-                ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] }
-                : null,
+                ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] } : null,
             Extra = BuildImageExtra(parameters),
         };
 
@@ -395,8 +394,7 @@ public static class GenerationDispatch
         VideoRequest request = new VideoRequest
         {
             Prompt = prompt,
-            NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative
-                ? negative
+            NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative ? negative
                 : "blurry, low quality, distorted, watermark",
             Width = parameters.GetIntOrNull("width"),
             Height = parameters.GetIntOrNull("height"),
@@ -546,8 +544,7 @@ public static class GenerationDispatch
             return actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         }
         return string.Equals(catalogId, "diamond", StringComparison.OrdinalIgnoreCase)
-            ? ["fire", "right", "right", "right", "right", "left", "left", "left", "left"]
-            : ["forward"];
+            ? ["fire", "right", "right", "right", "right", "left", "left", "left", "left"] : ["forward"];
     }
 
     /// <summary>Video/image restoration through <see cref="IRestoreService"/>; video inputs are decoded ONCE here (ffmpeg subprocess) so the source fps is known for the MP4 remux.</summary>

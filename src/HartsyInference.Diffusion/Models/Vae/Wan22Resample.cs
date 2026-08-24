@@ -175,8 +175,7 @@ public sealed unsafe class Wan22Resample
         Tensor conv = new Tensor(new TensorShape(b * t, c, oh, ow), DType.F32);
         backend.Conv2D(conv, padded, _convW!, _convB, 2, 2, 0, 0);
         padded.Dispose();
-        Tensor outT = b == 1
-            ? Vae3dLayout.FromFrames(backend, conv, b, c, t, oh, ow)
+        Tensor outT = b == 1 ? Vae3dLayout.FromFrames(backend, conv, b, c, t, oh, ow)
             : Vae3dLayout.FromFrames(conv, b, c, t, oh, ow);
         conv.Dispose();
         return outT;

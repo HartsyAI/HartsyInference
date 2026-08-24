@@ -86,8 +86,7 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
         // --- mixer path (fully on-device) ---
         Tensor normed = VibeVoiceOps.RmsNormChannelsFirstGpu(backend, x, _normW!, batch, _dim, t, _normEps);
 
-        Tensor mixed = cache is null
-            ? _mixer.Forward(backend, normed, batch, t)
+        Tensor mixed = cache is null ? _mixer.Forward(backend, normed, batch, t)
             : _mixer.ForwardStreaming(backend, normed, batch, t, cache, sampleIndices);
         normed.Dispose();
 

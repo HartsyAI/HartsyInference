@@ -4,7 +4,9 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
 /// <summary>Converts BFL-format Flux.2 (Klein 4B / Klein 9B / Dev) checkpoints to the canonical layout loaded by <see cref="Flux2Transformer"/>. Mirrors <see cref="FluxCheckpointConverter"/> but accounts for Flux.2 changes: top-level shared modulation projections, fused-SwiGLU MLP splits, single-block linear1 packing Q+K+V+gate+up, swap_scale_shift on the final layer, and Klein's missing CLIP pooled MLP / guidance_in.</summary>
-public sealed class Flux2CheckpointConverter
+/// <param name="hiddenSize">Transformer hidden dim. 3072 for Klein 4B, 4096 for Klein 9B, 6144 for Dev.</param>
+/// <param name="mlpInner">Per-block MLP inner dimension (= hiddenSize × mlp_ratio). 9216 for Klein 4B (ratio 3.0), etc.</param>
+public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
 {
     /// <summary>Result of converting a single-file Flux.2 checkpoint.</summary>
     public sealed class ConvertedWeights
@@ -13,17 +15,8 @@ public sealed class Flux2CheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    private readonly int _hiddenSize;
-    private readonly int _mlpInner;
-
-    /// <summary>Creates a converter sized for a specific Flux.2 variant.</summary>
-    /// <param name="hiddenSize">Transformer hidden dim. 3072 for Klein 4B, 4096 for Klein 9B, 6144 for Dev.</param>
-    /// <param name="mlpInner">Per-block MLP inner dimension (= hiddenSize × mlp_ratio). 9216 for Klein 4B (ratio 3.0), etc.</param>
-    public Flux2CheckpointConverter(int hiddenSize, int mlpInner)
-    {
-        _hiddenSize = hiddenSize;
-        _mlpInner = mlpInner;
-    }
+    private readonly int _hiddenSize = hiddenSize;
+    private readonly int _mlpInner = mlpInner;
 
     /// <summary>Converts a transformer-only single-file Flux.2 checkpoint (BFL format) into the canonical key layout consumed by <see cref="Flux2Transformer"/>.</summary>
     public Dictionary<string, Tensor> ConvertTransformer(IReadOnlyDictionary<string, Tensor> allWeights)
@@ -262,9 +255,7 @@ public sealed class Flux2CheckpointConverter
         long totalElements = fused.ElementCount;
         long halfBytes = CheckpointConvertUtils.SliceByteCount(fused, totalElements / 2);
 
-        TensorShape halfShape = hasBias
-            ? new TensorShape(_mlpInner)
-            : new TensorShape(_mlpInner, fused.Shape[1]);
+        TensorShape halfShape = hasBias ? new TensorShape(_mlpInner) : new TensorShape(_mlpInner, fused.Shape[1]);
 
         Tensor gate = new Tensor(halfShape, fused.DType);
         Tensor up = new Tensor(halfShape, fused.DType);

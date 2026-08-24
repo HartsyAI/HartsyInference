@@ -52,11 +52,8 @@ public sealed unsafe class LtGemmExecutor : IDisposable
     private static long _liveContextLeaseCountForTests;
 
     /// <summary>The complete identity of a reusable plan under this executor's fixed TN, non-batched, host-scalar contract. Device addresses are represented only by the alignment class visible to the heuristic; the actual bias address is patched per submission.</summary>
-    internal readonly record struct PlanKey(
-        int M, int N, int K,
-        int AbType, int DType, int ComputeType, int ScaleType,
-        int Epilogue, bool HasBias,
-        uint AlignA, uint AlignB, uint AlignC, uint AlignD, ulong AlignBias,
+    internal readonly record struct PlanKey(int M, int N, int K, int AbType, int DType, int ComputeType, int ScaleType,
+        int Epilogue, bool HasBias, uint AlignA, uint AlignB, uint AlignC, uint AlignD, ulong AlignBias,
         ulong WorkspaceLimitBytes);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -111,17 +108,8 @@ public sealed unsafe class LtGemmExecutor : IDisposable
 
     private readonly record struct BuildResult(BuildDisposition Disposition, Plan? Plan);
 
-    internal readonly record struct CacheDiagnostics(
-        int Count,
-        long Hits,
-        long Misses,
-        long HeuristicQueries,
-        long NegativeHits,
-        long Fallbacks,
-        long PlanCreates,
-        long PlanDestroys,
-        long Evictions,
-        int LastComputeType);
+    internal readonly record struct CacheDiagnostics(int Count, long Hits, long Misses, long HeuristicQueries,
+        long NegativeHits, long Fallbacks, long PlanCreates, long PlanDestroys, long Evictions, int LastComputeType);
 
     /// <summary>Whether a cuBLASLt handle is available. The workspace may be zero bytes after a recoverable allocation failure; in that case the heuristic can still select a zero-workspace plan.</summary>
     public bool IsSupported { get; }
@@ -695,14 +683,12 @@ public sealed unsafe class LtGemmExecutor : IDisposable
     }
 
     private static bool EpilogueRequiresBias(int epilogue)
-        => epilogue == CublasLtApi.CUBLASLT_EPILOGUE_BIAS
-            || epilogue == CublasLtApi.CUBLASLT_EPILOGUE_RELU_BIAS
+        => epilogue == CublasLtApi.CUBLASLT_EPILOGUE_BIAS || epilogue == CublasLtApi.CUBLASLT_EPILOGUE_RELU_BIAS
             || epilogue == CublasLtApi.CUBLASLT_EPILOGUE_GELU_BIAS;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsUnsupported(int status)
-        => status == CublasLtApi.CUBLAS_STATUS_NOT_SUPPORTED
-            || status == CublasLtApi.CUBLAS_STATUS_ARCH_MISMATCH;
+        => status == CublasLtApi.CUBLAS_STATUS_NOT_SUPPORTED || status == CublasLtApi.CUBLAS_STATUS_ARCH_MISMATCH;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint PointerAlignment(ulong pointer)

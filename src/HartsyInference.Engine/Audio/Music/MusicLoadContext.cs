@@ -31,8 +31,7 @@ internal sealed record MusicLoadContext
         {
             return "";
         }
-        string loras = Loras is null or { Entries.Count: 0 }
-            ? ""
+        string loras = Loras is null or { Entries.Count: 0 } ? ""
             : "|lora=" + string.Join("+", Loras.Entries.Select(entry => $"{entry.Model}@{entry.Weight}"));
         string shard = IsSharded ? string.Join("+", ShardStages!.Select(s => s.Selector)) : "";
         return $"|lmq={LmQuant}|shard={shard}{loras}";

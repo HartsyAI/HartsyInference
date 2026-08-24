@@ -507,8 +507,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            (float dt, float zScale, float noiseScale) = ancestral
-                ? AncestralCoefficients(sigmas[k], sigmas[k + 1])
+            (float dt, float zScale, float noiseScale) = ancestral ? AncestralCoefficients(sigmas[k], sigmas[k + 1])
                 : (sigmas[k] - sigmas[k + 1], 1f, 0f);
             float tEmb = sigmas[k] * _config.TimestepScaleMultiplier;   // flow sigma (≈1..0) scaled to ≈0..1000
 
