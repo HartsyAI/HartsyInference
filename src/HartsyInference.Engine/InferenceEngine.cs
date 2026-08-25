@@ -257,6 +257,19 @@ public sealed class InferenceEngine : IInferenceEngine
         }
     }
 
+    /// <summary>Escalating a VRAM policy and retrying CANNOT live here, despite this being the engine's OOM boundary.</summary>
+    /// <remarks>Two independent reasons, both learned by producing corrupted output rather than by reading:
+    /// <list type="number">
+    /// <item>The cleanup above wipes device memory but leaves every cached pipeline alive still believing its
+    /// weights are resident (<c>_ditResident</c> and friends). A retry then skips the preload and computes against
+    /// freed memory — the generation SUCCEEDS and returns garbage, which is strictly worse than the OOM it
+    /// replaced. Only <see cref="FreeMemory"/> is safe to retry after, because it disposes the pipelines first.</item>
+    /// <item><paramref name="generate"/> is a closure over an ALREADY-RESOLVED pipeline. Disposing pipelines here
+    /// would leave that closure holding a disposed one, and re-resolving is impossible from inside it.</item>
+    /// </list>
+    /// So the retry belongs at a layer that can re-resolve the pipeline — the host, which already frees correctly
+    /// before its own retry.</remarks>
+
     /// <summary>Runs a recipe's <c>Construct</c> and, on <b>any</b> failure, releases every device buffer it allocated
     /// before rethrowing.</summary>
     /// <remarks>Recipes upload multi-GB weight sets across several components (text encoder, DiT, VAE) before returning

@@ -86,6 +86,50 @@ public static class VramPolicyResolver
     /// <summary>The tier a device with <paramref name="totalVramBytes"/> starts from under <see cref="VramTier.Auto"/>.</summary>
     public static VramPolicy ForDevice(long totalVramBytes) => Expand(GpuVramClass.Seed(totalVramBytes));
 
+    /// <summary>The next tier to try after <paramref name="tier"/> ran out of VRAM, or null when there is nothing more aggressive left.</summary>
+    /// <remarks>Ordered by how much they give up, not by the enum's numeric order — <see cref="VramTier.Performance"/>
+    /// is the least aggressive despite being 0, and <see cref="VramTier.Auto"/> re-enters the ladder at Balanced
+    /// because its whole point is that measurement already decided and the measurement was not enough.</remarks>
+    public static VramTier? Escalate(VramTier tier) => tier switch
+    {
+        VramTier.Performance => VramTier.Balanced,
+        VramTier.Auto => VramTier.Balanced,
+        VramTier.Balanced => VramTier.Aggressive,
+        VramTier.Aggressive => VramTier.Maximum,
+        _ => null,
+    };
+
+    /// <summary>Escalates <paramref name="policy"/> one rung, preserving any explicitly pinned levers.</summary>
+    /// <remarks>A caller who pinned a lever meant it, and an automatic retry is not the place to overrule them —
+    /// so the pins are re-applied on top of the harder tier rather than discarded. The one exception is a lever
+    /// pinned OFF that is exactly what the escalation needs: streaming pinned Off stays Off, because the operator
+    /// asking for a loud failure gets a loud failure instead of a silent slow one.</remarks>
+    public static VramPolicy? Escalate(VramPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (Escalate(policy.Tier) is not VramTier next)
+        {
+            return null;
+        }
+        VramPolicy preset = Expand(policy.Tier);
+        VramPolicy escalated = Expand(next);
+        return escalated with
+        {
+            KeepResident = Pinned(policy.KeepResident, preset.KeepResident) ?? escalated.KeepResident,
+            PhaseUnload = Pinned(policy.PhaseUnload, preset.PhaseUnload) ?? escalated.PhaseUnload,
+            WeightStreaming = Pinned(policy.WeightStreaming, preset.WeightStreaming) ?? escalated.WeightStreaming,
+            ActivationOffload = Pinned(policy.ActivationOffload, preset.ActivationOffload) ?? escalated.ActivationOffload,
+            FreeAfterGeneration = Pinned(policy.FreeAfterGeneration, preset.FreeAfterGeneration) ?? escalated.FreeAfterGeneration,
+            QuantizedCompute = Pinned(policy.QuantizedCompute, preset.QuantizedCompute) ?? escalated.QuantizedCompute,
+            MultiGpuSpill = Pinned(policy.MultiGpuSpill, preset.MultiGpuSpill) ?? escalated.MultiGpuSpill,
+            PrefetchAhead = policy.PrefetchAhead,
+            HeadroomBytes = policy.HeadroomBytes,
+        };
+    }
+
+    /// <summary>The lever value when the caller pinned it away from its tier's preset, else null.</summary>
+    private static LeverState? Pinned(LeverState actual, LeverState preset) => actual == preset ? null : actual;
+
     /// <summary>Bridges the legacy three-state mode onto a policy, so callers still on <see cref="LowVramMode"/> resolve identically.</summary>
     public static VramPolicy FromLegacyMode(LowVramMode mode) => mode switch
     {
