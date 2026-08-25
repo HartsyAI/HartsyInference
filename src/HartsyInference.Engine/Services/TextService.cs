@@ -895,21 +895,32 @@ public sealed class TextService : ITextService, IDisposable
         return resolved == "cpu" ? "cpu" : $"cuda:{BackendFactory.ParseOrdinal(_engine.BackendSelector)}";
     }
 
-    /// <summary>Creates the compute backend for a device key ("cpu" / "cuda:{ordinal}").</summary>
-    private static IBackend CreateBackendFor(string deviceKey)
+    /// <summary>Creates the compute backend for a device key ("cpu" / "cuda:{ordinal}"), carrying the engine's VRAM policy onto it.</summary>
+    /// <remarks>Instance rather than static so the policy lands here too: text slots build their own backends instead
+    /// of going through <c>EnsureBackend</c>, which used to leave them on the environment's policy while every
+    /// image/video backend honoured the host's configured one.</remarks>
+    private IBackend CreateBackendFor(string deviceKey)
     {
         string key = (deviceKey ?? "cuda").Trim().ToLowerInvariant();
+        IBackend backend;
         if (key == "cpu")
-            return BackendFactory.Create("cpu");
-        if (key.StartsWith("cuda"))
+        {
+            backend = BackendFactory.Create("cpu");
+        }
+        else if (key.StartsWith("cuda"))
         {
             int ordinal = 0;
             int colon = key.IndexOf(':');
             if (colon >= 0 && int.TryParse(key[(colon + 1)..], out int n))
                 ordinal = n;
-            return BackendFactory.CreateCuda(ordinal);
+            backend = BackendFactory.CreateCuda(ordinal);
         }
-        throw new HartsyInferenceException($"Local LLM device '{deviceKey}' is not supported — choose CUDA or CPU.");
+        else
+        {
+            throw new HartsyInferenceException($"Local LLM device '{deviceKey}' is not supported — choose CUDA or CPU.");
+        }
+        _engine.ApplyVramPolicy(backend);
+        return backend;
     }
 
     /// <summary>The outcome of one generation: full text, stop reason, and token counts.</summary>

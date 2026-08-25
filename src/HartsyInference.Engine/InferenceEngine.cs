@@ -453,8 +453,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>Pins this engine's configured VRAM policy onto a freshly-constructed backend.</summary>
     /// <remarks>Weak-keyed: it dies with the backend, so rebuilds re-apply here and disposal needs no cleanup.
     /// <see cref="EngineOptions.VramPolicy"/> wins over the legacy <see cref="EngineOptions.LowVram"/>; with neither
-    /// set the backend inherits the environment, which is what leaves default hosts on today's behavior.</remarks>
-    private void ApplyVramPolicy(IBackend backend)
+    /// set the backend inherits the environment, which is what leaves default hosts on today's behavior.
+    /// <para>Internal rather than private because <see cref="Services.TextService"/> builds its own backends per
+    /// device slot instead of going through <see cref="EnsureBackend()"/>, and those must carry the same policy.</para></remarks>
+    internal void ApplyVramPolicy(IBackend backend)
     {
         if (_options?.VramPolicy is VramPolicy policy)
         {
