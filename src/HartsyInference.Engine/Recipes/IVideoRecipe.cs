@@ -17,6 +17,10 @@ public interface IVideoRecipe
     /// wired rejects an init image by name instead of generating text-to-video and discarding it silently.</summary>
     VideoFeatures Supports => VideoFeatures.None;
 
+    /// <summary>Memory and multi-device behaviours this recipe actually wires; the default declares none, so a family
+    /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
+    MemoryCapabilities MemorySupports => MemoryCapabilities.None;
+
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null; the generic fallback keeps a recipe that has not declared its own numbers working.</summary>
     VideoDefaults Defaults => VideoDefaults.Standard;

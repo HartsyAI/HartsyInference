@@ -21,6 +21,10 @@ public interface IArchitectureRecipe
     /// been wired rejects every composition object with a precise error instead of silently ignoring it.</summary>
     ImageFeatures Supports => ImageFeatures.None;
 
+    /// <summary>Memory and multi-device behaviours this recipe actually wires; the default declares none, so a family
+    /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
+    MemoryCapabilities MemorySupports => MemoryCapabilities.None;
+
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null. The generic 20-step / CFG-7.5 fallback keeps a recipe that has not declared its own numbers working;
     /// variant-dependent families refine it further via <see cref="IRecipePipeline.VariantDefaults"/>.</summary>

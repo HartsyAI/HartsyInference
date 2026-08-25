@@ -68,6 +68,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.ComponentPlacement;
+
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components Gemma/VAE override are deferred.

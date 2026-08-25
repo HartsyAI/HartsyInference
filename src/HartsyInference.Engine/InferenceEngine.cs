@@ -196,7 +196,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
         IArchitectureRecipe recipe = ResolveRecipe(spec);
         IBackend backend = EnsureBackend();
-        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(new RecipeContext
+        RecipeContext context = new RecipeContext
         {
             CheckpointPath = spec.LocalPath,
             Backend = backend,
@@ -209,7 +209,11 @@ public sealed class InferenceEngine : IInferenceEngine
             Components = request?.Components,
             Loras = request?.Loras,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
-        }));
+        };
+        // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the
+        // operator's memory settings this family was never going to act on.
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
+        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
         _recipePipelines[key] = pipeline;
         return pipeline;
     }
@@ -398,23 +402,24 @@ public sealed class InferenceEngine : IInferenceEngine
                 $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
 
         IBackend backend = EnsureBackend();
-        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec,
-            () => recipe.Construct(new RecipeContext
-            {
-                CheckpointPath = spec.LocalPath,
-                Backend = backend,
-                TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
-                VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
-                CfgParallelBackend = EnsureCfgParallelBackend(),
-                DitShardBackend = EnsureDitShardBackend(),
-                DitShardBackends = EnsureDitShardBackends(),
-                CpBackends = EnsureCpBackends(),
-                Components = request?.Components,
-                Loras = request?.Loras,
-                VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
-                VideoSwapPercent = request?.VideoSwapPercent,
-                VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
-            }));
+        RecipeContext context = new RecipeContext
+        {
+            CheckpointPath = spec.LocalPath,
+            Backend = backend,
+            TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
+            VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
+            CfgParallelBackend = EnsureCfgParallelBackend(),
+            DitShardBackend = EnsureDitShardBackend(),
+            DitShardBackends = EnsureDitShardBackends(),
+            CpBackends = EnsureCpBackends(),
+            Components = request?.Components,
+            Loras = request?.Loras,
+            VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
+            VideoSwapPercent = request?.VideoSwapPercent,
+            VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
+        };
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
+        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
     }

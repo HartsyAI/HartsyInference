@@ -40,6 +40,9 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): Qwen-Image-Edit (2509 / 2511) is deferred — the SwarmUI loader additionally built the

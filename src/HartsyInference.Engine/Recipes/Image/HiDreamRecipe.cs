@@ -34,6 +34,9 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.DitSharding;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // The Llama-3.1 branch needs a real 128k-vocab BPE tokenizer, shipped as an embedded resource only when the

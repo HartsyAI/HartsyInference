@@ -46,6 +46,9 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): image-to-video conditioning and a VideoRequest.Components LLaVA/CLIP/VAE override are

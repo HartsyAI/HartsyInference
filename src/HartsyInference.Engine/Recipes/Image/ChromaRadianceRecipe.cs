@@ -31,6 +31,9 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4): honor a user-picked T5 override from ImageRequest.Components (the SwarmUI loader read

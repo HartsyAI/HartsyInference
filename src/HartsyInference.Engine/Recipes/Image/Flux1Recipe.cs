@@ -43,6 +43,9 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel | MemoryCapabilities.ComponentPlacement;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): split-file + GGUF transformer inputs, and honoring user CLIP-L/T5/VAE overrides from

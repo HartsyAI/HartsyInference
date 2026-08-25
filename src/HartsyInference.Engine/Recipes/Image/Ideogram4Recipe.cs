@@ -44,6 +44,9 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // Gate BEFORE the multi-minute weight load, not after.

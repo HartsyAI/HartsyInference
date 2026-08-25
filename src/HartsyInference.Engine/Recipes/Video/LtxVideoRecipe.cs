@@ -62,6 +62,9 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     }
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.ComponentPlacement;
+
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components T5 override are deferred —

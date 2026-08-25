@@ -45,6 +45,9 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         new VideoDefaults { Steps = 30, CfgScale = 1.0f, Width = 1344, Height = 768, Frames = 124, Fps = 24 };
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
+
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);

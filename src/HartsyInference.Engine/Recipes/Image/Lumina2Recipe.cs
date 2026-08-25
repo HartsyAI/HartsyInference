@@ -44,6 +44,9 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.DitSharding;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): user overrides from ImageRequest.Components (SwarmUI read GemmaModel / VAE) + img2img/

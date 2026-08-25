@@ -43,6 +43,9 @@ public sealed class ZImageRecipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.ComponentPlacement;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // Resolve the two side models synchronously (Construct is a sync seam): Qwen3-4B text encoder + Flux VAE.

@@ -57,6 +57,9 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4): honor user text-encoder / VAE overrides from ImageRequest.Components (the SwarmUI loader

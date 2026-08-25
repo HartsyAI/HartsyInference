@@ -47,4 +47,30 @@ public sealed record VramPolicy
 
     /// <summary>The tier's expansion with no lever overridden — what a backend uses before any request-level override.</summary>
     public static VramPolicy For(VramTier tier) => VramPolicyResolver.Expand(tier);
+
+    /// <summary>One line naming the tier and only the levers that differ from it, for the per-generation log.</summary>
+    /// <remarks>Listing every lever every generation would bury the one thing that is usually interesting — which
+    /// setting the operator actually pinned — so a policy that is just its tier prints just its tier.</remarks>
+    public string Describe()
+    {
+        VramPolicy preset = VramPolicyResolver.Expand(Tier);
+        List<string> pinned = [];
+        Add(pinned, nameof(KeepResident), KeepResident, preset.KeepResident);
+        Add(pinned, nameof(PhaseUnload), PhaseUnload, preset.PhaseUnload);
+        Add(pinned, nameof(WeightStreaming), WeightStreaming, preset.WeightStreaming);
+        Add(pinned, nameof(ActivationOffload), ActivationOffload, preset.ActivationOffload);
+        Add(pinned, nameof(FreeAfterGeneration), FreeAfterGeneration, preset.FreeAfterGeneration);
+        Add(pinned, nameof(QuantizedCompute), QuantizedCompute, preset.QuantizedCompute);
+        Add(pinned, nameof(MultiGpuSpill), MultiGpuSpill, preset.MultiGpuSpill);
+        if (Caches != preset.Caches) pinned.Add($"{nameof(Caches)}={Caches}");
+        if (Math.Abs(ChunkScale - preset.ChunkScale) > 1e-6f) pinned.Add($"{nameof(ChunkScale)}={ChunkScale:0.##}");
+        if (PrefetchAhead is int prefetch) pinned.Add($"{nameof(PrefetchAhead)}={prefetch}");
+        if (HeadroomBytes is long headroom) pinned.Add($"{nameof(HeadroomBytes)}={ByteFormat.Mb(headroom)}");
+        return pinned.Count == 0 ? Tier.ToString() : $"{Tier} ({string.Join(", ", pinned)})";
+    }
+
+    private static void Add(List<string> into, string name, LeverState actual, LeverState preset)
+    {
+        if (actual != preset) into.Add($"{name}={actual}");
+    }
 }
