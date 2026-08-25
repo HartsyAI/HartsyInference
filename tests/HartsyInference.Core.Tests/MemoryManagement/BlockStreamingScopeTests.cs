@@ -59,7 +59,8 @@ public sealed class BlockStreamingScopeTests
 
     private static BlockStreamingOptions Options(RecordingStreamingBackend backend, FakeDenoiser denoiser,
         long headroomBytes, long tokenLoad = 0, ResidentPrefixPin? pin = null,
-        LowVramMode mode = LowVramMode.Auto, bool perStepTrim = true)
+        LowVramMode mode = LowVramMode.Auto, bool perStepTrim = true,
+        BlockStreamingPolicy policy = BlockStreamingPolicy.ResidentPrefix)
         => new BlockStreamingOptions
         {
             Backend = backend,
@@ -70,6 +71,7 @@ public sealed class BlockStreamingScopeTests
             Pin = pin,
             Mode = mode,
             PerStepTrim = perStepTrim,
+            Policy = policy,
         };
 
     // ── Resident-vs-streamed decision ────────────────────────────────────
@@ -513,5 +515,59 @@ public sealed class BlockStreamingScopeTests
         int legacy = (int)Math.Clamp((free - headroom) / Math.Max(blockBytes, 1), 0, blockCount);
         Assert.Equal(expected, legacy);
         Assert.Equal(legacy, ResidentPrefixSizing.Size(free, headroom, blockBytes, blockCount));
+    }
+
+    // ── Forced streaming must displace an already-resident set ───────────
+
+    /// <summary>Without an eviction ahead of the plan, <see cref="VramPlanner.PlanPhase"/> answers Resident for a warm
+    /// pin (its availability query cannot see past the weights occupying the space it measures), so a forced stream
+    /// silently stays resident — the setting appearing to do nothing on exactly the generations it was set for.</summary>
+    [Fact]
+    public void AllOrNothing_ForcedStream_EvictsTheWarmPinAndStreams()
+    {
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), long.MaxValue);
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        ResidentPrefixPin pin = new ResidentPrefixPin { Resident = true };
+
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0, pin: pin,
+            mode: LowVramMode.ForceOn, policy: BlockStreamingPolicy.AllOrNothing));
+
+        Assert.Equal(0, scope.ResidentPrefixBlocks);
+        Assert.True(scope.Streaming);
+        Assert.False(pin.Resident);
+        Assert.Contains(backend.Calls, c => c.StartsWith("free:", StringComparison.Ordinal));
+    }
+
+    /// <summary>An unsized pin means the whole set is resident under this policy — freeing a <c>-1</c> range would free
+    /// nothing and leave the force inert a second way.</summary>
+    [Fact]
+    public void AllOrNothing_ForcedStream_FreesEveryBlockWhenThePinWasNeverSized()
+    {
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), long.MaxValue);
+        FakeDenoiser denoiser = new FakeDenoiser(4);
+        ResidentPrefixPin pin = new ResidentPrefixPin { Resident = true, PinnedBlocks = -1 };
+
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0, pin: pin,
+            mode: LowVramMode.ForceOn, policy: BlockStreamingPolicy.AllOrNothing));
+
+        string freed = string.Join(",", backend.Calls.Where(c => c.StartsWith("free:", StringComparison.Ordinal)));
+        Assert.Contains("b0", freed, StringComparison.Ordinal);
+        Assert.Contains("b3", freed, StringComparison.Ordinal);
+        Assert.Equal(0, scope.ResidentPrefixBlocks);
+    }
+
+    /// <summary>A cold pin has nothing to displace, so the force must not manufacture a free call.</summary>
+    [Fact]
+    public void AllOrNothing_ForcedStream_DoesNotFreeWhenNothingIsResident()
+    {
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), long.MaxValue);
+        FakeDenoiser denoiser = new FakeDenoiser(4);
+        ResidentPrefixPin pin = new ResidentPrefixPin { Resident = false };
+
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0, pin: pin,
+            mode: LowVramMode.ForceOn, policy: BlockStreamingPolicy.AllOrNothing));
+
+        Assert.DoesNotContain(backend.Calls, c => c.StartsWith("free:", StringComparison.Ordinal));
+        Assert.Equal(0, scope.ResidentPrefixBlocks);
     }
 }

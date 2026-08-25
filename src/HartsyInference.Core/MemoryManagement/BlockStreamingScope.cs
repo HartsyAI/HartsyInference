@@ -200,11 +200,31 @@ public sealed class BlockStreamingScope : IDisposable
     /// <summary>The <see cref="BlockStreamingPolicy.AllOrNothing"/> split, straight off <see cref="VramPlanner"/>.</summary>
     private static int PlanAllOrNothing(BlockStreamingOptions options, VramPlanner planner, IStreamingBlock[] blocks)
     {
+        IBackend backend = options.Backend;
+        IStreamableDenoiser denoiser = options.Denoiser;
+        ResidentPrefixPin? pin = options.Pin;
+
+        // Evict BEFORE planning, never by reordering the planner: PlanPhase honours residency ahead of the force
+        // because its availability query cannot see past weights occupying the space it measures. Leaving that order
+        // alone and displacing the weights here is what makes a forced stream take effect on a warm generation
+        // instead of silently staying resident. Mirrors PlanResidentPrefix's release-on-force branch.
+        if (planner.Mode == LowVramMode.ForceOn && pin is not null && pin.Resident)
+        {
+            // AllOrNothing never records a partial count, so an unsized pin means the whole set is resident.
+            int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blocks.Length;
+            backend.FreeWeights(BlockRangeWeights(denoiser, 0, residentBlocks));
+            backend.TrimMemoryPool();
+            pin.Resident = false;
+            pin.PinnedBlocks = -1;
+            Logs.Info($"[VRAM] {options.ModelName}/denoise: resident blocks released "
+                + $"({LowVramPolicy.EnvironmentVariable}=on forces streaming).");
+        }
+
         long totalBlockBytes = 0;
         foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
         PhasePlacement placement = planner.PlanPhase("denoise", totalBlockBytes, options.HeadroomBytes,
-            alreadyResident: options.Pin?.Resident == true, canStream: true);
-        options.Backend.PreloadWeights(options.Denoiser.EnumerateSharedWeights());
+            alreadyResident: pin?.Resident == true, canStream: true);
+        backend.PreloadWeights(denoiser.EnumerateSharedWeights());
         return placement == PhasePlacement.Resident ? blocks.Length : 0;
     }
 
