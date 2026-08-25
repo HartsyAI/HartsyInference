@@ -569,19 +569,11 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     /// <summary>Picks the in-flight prefetch depth that keeps the streaming peak inside the free-VRAM budget.</summary>
     private static int ChoosePrefetchAhead(IStreamingWeightCache cache, IStreamingBlock[] blocks, long activationReserve)
     {
-        long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
-        if (avail <= 0) return 0;
-
-        // Size against the LARGEST block, not block 0: the 20 double-stream blocks carry two full
-        // attention+FFN streams and are roughly twice a single-stream block.
+        // Heterogeneous blocks: budget on the WIDEST, not the first, or a deep window overcommits on the big ones.
         long perBlockBytes = 0;
         foreach (IStreamingBlock block in blocks) perBlockBytes = Math.Max(perBlockBytes, block.EstimatedWeightBytes);
-        if (perBlockBytes <= 0) return 1;
-
-        // The working set briefly hits (prefetchAhead + 2) blocks when block N+1 is made resident before
-        // block N-1 is evicted. Cap at 2 — deeper burns VRAM without hiding more latency.
-        int maxByBudget = (int)(avail / perBlockBytes) - 2;
-        return Math.Clamp(maxByBudget, 0, 2);
+        return PrefetchDepth.Choose(cache.QueryAvailableWeightCacheBytes(activationReserve), perBlockBytes,
+            maxDepth: 2, unknownBlockDepth: 1);
     }
 
     /// <summary>Patchifies <c>[B, C, H, W]</c> -&gt; <c>[B, S, p²·C]</c> with channel-outer ordering inside each patch (matches the diffusers <c>einops.rearrange("B C (H p) (W q) -&gt; B (H W) (p q C)")</c>).</summary>

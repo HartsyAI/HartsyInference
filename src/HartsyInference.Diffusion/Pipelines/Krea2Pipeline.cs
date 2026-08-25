@@ -270,7 +270,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
                 long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
                 long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
-                int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
+                int prefetchAhead = PrefetchDepth.Choose(avail, perBlock);
                 streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
                 streamer.Prime();

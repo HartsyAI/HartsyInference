@@ -1213,19 +1213,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         IStreamingBlock[] blocks,
         long activationReserve)
     {
-        long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
-        if (avail <= 0) return 0;
-
+        // Block 0 is a double-stream block, the widest in the set, so budgeting on it keeps the window safe
+        // for every block. unknownBlockDepth: 1 keeps an unmeasurable block overlapping one upload.
         long perBlockBytes = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
-        if (perBlockBytes <= 0) return 1;
-
-        // The streaming working set briefly hits (prefetchAhead + 2) blocks at the moment we
-        // make block N+1 resident before evicting block N-1 (see BlockStreamingController.
-        // BeforeBlockForward). Pick the largest prefetch that keeps that peak under budget.
-        // Cap at 2 — beyond that we burn VRAM without much extra latency hiding.
-        int maxByBudget = (int)(avail / perBlockBytes) - 2;
-        int chosen = Math.Clamp(maxByBudget, 0, 2);
-        return chosen;
+        return PrefetchDepth.Choose(cache.QueryAvailableWeightCacheBytes(activationReserve), perBlockBytes,
+            maxDepth: 2, unknownBlockDepth: 1);
     }
 
     /// <summary>Builds the initial packed latent for Flux denoising. T2I: fresh Gaussian noise scaled by the scheduler's initial sigma. Img2img: VAE-encoded source latent (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.

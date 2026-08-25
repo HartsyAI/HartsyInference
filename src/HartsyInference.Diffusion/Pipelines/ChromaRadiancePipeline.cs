@@ -263,7 +263,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 // The widest block sizes the window: block 0 is a double-stream block (~2x a single-stream one),
                 // so budgeting on it keeps the deepest prefetch safe for every block.
                 long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
-                int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
+                int prefetchAhead = PrefetchDepth.Choose(avail, perBlock);
                 streamer = new BlockStreamingController(
                     Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;

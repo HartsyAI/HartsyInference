@@ -823,7 +823,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
         // Budget is split across the two live windows, hence the /2; -2 covers the transient overlap where block
         // N+1 becomes resident before N-1 is evicted. Cap at 1 rather than Flux's 2 for the same reason.
-        int prefetchAhead = perBlock > 0 ? Math.Clamp((int)(avail / 2 / perBlock) - 2, 0, 1) : 0;
+        int prefetchAhead = PrefetchDepth.Choose(avail / 2, perBlock, maxDepth: 1);
 
         BlockStreamingController streamer = new BlockStreamingController(
             Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
