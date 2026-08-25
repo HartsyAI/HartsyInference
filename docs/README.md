@@ -40,6 +40,12 @@ history — when an item ships, delete the line. Git is the archive.
 
 **4. `MULTI_GPU.md` — the one long-form user guide**, because sharding and placement have no other home.
 
+**5. `ENV_VARS.md` — the environment-variable inventory.** Earns its place on the *Disposition* column, not
+the list: which knobs are supported controls, which are undocumented default-ON numerics switches, which
+silently corrupt output, and which survive only in a doc. The names themselves are re-derivable (the file
+ends with the grep), so treat the table as scaffolding for the judgement, and delete a row when its variable
+goes rather than letting the list rot into another stale doc.
+
 ## Conventions
 
 **One number, one home.** Every measured performance figure lives in
