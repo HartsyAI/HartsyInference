@@ -36,6 +36,26 @@ public static class MemorySupportReport
             + $"model supports {(declared == MemoryCapabilities.None ? "nothing" : declared.ToString())}.");
     }
 
+    /// <summary>The same report for a modality that has no recipe layer — audio, vision, world, 3D and text all construct in their service rather than through a <see cref="RecipeContext"/>.</summary>
+    /// <remarks>Those modalities are where a policy is currently LEAST likely to do anything, so leaving them out
+    /// until their levers are wired would keep the newest-reachable setting the quietest one. They pass
+    /// <see cref="MemoryCapabilities.None"/> until that work lands, which is the honest answer today.</remarks>
+    public static void ReportService(string serviceName, IBackend backend, VramPolicy? policy,
+        MemoryCapabilities declared = MemoryCapabilities.None)
+    {
+        ArgumentNullException.ThrowIfNull(serviceName);
+        ArgumentNullException.ThrowIfNull(backend);
+        (long free, long total) = backend.GetVramInfo();
+        string card = total > 0 ? $"{ByteFormat.Mb(free)} free of {ByteFormat.Mb(total)}" : "no VRAM report";
+        Logs.Info($"[VRAM] {serviceName}: policy {policy?.Describe() ?? "inherited (env)"}, "
+            + $"device {backend.Device} ({card}), "
+            + $"model supports {(declared == MemoryCapabilities.None ? "nothing" : declared.ToString())}.");
+        if (policy is not null)
+        {
+            ReportUnimplemented(serviceName, policy);
+        }
+    }
+
     /// <summary>Placement devices the operator paid for (a whole second GPU) that this family will not touch.</summary>
     private static void ReportPlacement(string recipeName, RecipeContext context, MemoryCapabilities declared)
     {
@@ -62,7 +82,9 @@ public static class MemorySupportReport
 
     /// <summary>VRAM levers the resolved policy asks for that this family cannot act on.</summary>
     /// <remarks>Only levers the policy EXPLICITLY pins are reported. Auto is the default everywhere, so warning about
-    /// it would fire on every generation of every model and train the operator to ignore the channel.</remarks>
+    /// it would fire on every generation of every model and train the operator to ignore the channel.
+    /// <para>Reads the policy the pipeline was CONSTRUCTED with. Pipelines are cached, so a later generation that
+    /// varies its per-request overrides is not re-reported — the construction-time answer is the one this covers.</para></remarks>
     private static void ReportPolicy(string recipeName, RecipeContext context, MemoryCapabilities declared)
     {
         VramPolicy? policy = context.VramPolicy;
@@ -75,22 +97,33 @@ public static class MemorySupportReport
             Warn(recipeName, "Weight streaming", "this denoiser exposes no streamable blocks, so every weight stays "
                 + "resident and an oversized request will still fail");
         }
-        if (policy.Caches == CachePrecision.Half && !declared.HasFlag(MemoryCapabilities.HalfPrecisionCaches))
+        ReportUnimplemented(recipeName, policy);
+    }
+
+    /// <summary>Names levers the operator pinned that NO model can honour yet, because the engine does not read them.</summary>
+    /// <remarks>Blaming the recipe for these would be a lie in the honesty layer itself: "this family holds its
+    /// components for the whole generation" reads as a property of the model when the truth is that nothing consumes
+    /// the lever anywhere. Only <see cref="VramPolicy.WeightStreaming"/> (via the planner) and
+    /// <see cref="VramPolicy.KeepResident"/> (via <see cref="VramLevers"/>) are wired today; the rest arrive with the
+    /// per-modality work. Move a lever out of this list the moment something reads it, or the warning becomes the
+    /// stale one.</remarks>
+    private static void ReportUnimplemented(string recipeName, VramPolicy policy)
+    {
+        List<string> pending = [];
+        if (policy.PhaseUnload == LeverState.On) pending.Add("phase unload");
+        if (policy.Caches == CachePrecision.Half) pending.Add("half-precision caches");
+        if (policy.ActivationOffload == LeverState.On) pending.Add("activation offload");
+        if (policy.QuantizedCompute == LeverState.On) pending.Add("quantized compute");
+        if (policy.FreeAfterGeneration == LeverState.On) pending.Add("free-after-generation");
+        if (policy.MultiGpuSpill == LeverState.On) pending.Add("multi-GPU spill");
+        if (policy.ChunkScale < 1.0f) pending.Add("chunk scaling");
+        if (pending.Count == 0)
         {
-            Warn(recipeName, "Half-precision caches", "this family keeps its caches at full precision");
+            return;
         }
-        if (policy.QuantizedCompute == LeverState.On && !declared.HasFlag(MemoryCapabilities.QuantizedCompute))
-        {
-            Warn(recipeName, "Quantized compute", "this family dequantizes its weights regardless");
-        }
-        if (policy.ChunkScale < 1.0f && !declared.HasFlag(MemoryCapabilities.Chunking))
-        {
-            Warn(recipeName, "Chunk scaling", "this family does not chunk its work, so the activation peak is unchanged");
-        }
-        if (policy.PhaseUnload == LeverState.On && !declared.HasFlag(MemoryCapabilities.PhaseUnload))
-        {
-            Warn(recipeName, "Phase unload", "this family holds its components for the whole generation");
-        }
+        Logs.Warning($"[{recipeName}] The engine does not act on {string.Join(", ", pending)} yet — "
+            + "these levers are accepted and recorded but not consumed by any model, so this generation behaves as "
+            + "if they were unset. Weight streaming and keep-resident are the levers in effect today.");
     }
 
     /// <summary>Levers the BACKEND cannot perform whatever the recipe declares — the case a model-only check misses.</summary>

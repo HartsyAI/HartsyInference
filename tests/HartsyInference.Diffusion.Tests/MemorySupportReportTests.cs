@@ -76,7 +76,9 @@ public sealed class MemorySupportReportTests
             | MemoryCapabilities.HalfPrecisionCaches | MemoryCapabilities.Chunking
             | MemoryCapabilities.PhaseUnload));
 
-        Assert.DoesNotContain(lines, l => l.StartsWith("Warning|", StringComparison.Ordinal));
+        // No PER-MODEL blame. Balanced still pins PhaseUnload, which nothing consumes engine-wide yet, so the
+        // separate "the engine does not act on this" notice is expected and is not this test's subject.
+        Assert.DoesNotContain(lines, l => l.Contains("not wired for this model", StringComparison.Ordinal));
     }
 
     /// <summary>Auto is the default everywhere, so it must never warn — otherwise every generation of every model
@@ -116,6 +118,36 @@ public sealed class MemorySupportReportTests
         Assert.Contains("[VRAM] Fake:", info, StringComparison.Ordinal);
         Assert.Contains("Balanced", info, StringComparison.Ordinal);
         Assert.Contains("BlockStreaming", info, StringComparison.Ordinal);
+    }
+
+    /// <summary>A lever nothing consumes must be blamed on the ENGINE, not on the model. Balanced pins PhaseUnload,
+    /// which no recipe can declare yet, so a per-model warning here would be a lie inside the honesty layer.</summary>
+    [Fact]
+    public void UnimplementedLever_BlamesTheEngineNotTheFamily()
+    {
+        using IBackend backend = Cpu();
+        List<string> lines = Capture(() => MemorySupportReport.Report("Fake",
+            Context(backend, VramPolicy.For(VramTier.Balanced)), MemoryCapabilities.None));
+
+        string warnings = string.Join("\n", lines.Where(l => l.StartsWith("Warning|", StringComparison.Ordinal)));
+        Assert.Contains("does not act on", warnings, StringComparison.Ordinal);
+        Assert.Contains("phase unload", warnings, StringComparison.Ordinal);
+        Assert.DoesNotContain("not wired for this model", warnings, StringComparison.Ordinal);
+    }
+
+    /// <summary>The non-recipe modalities get the same line, so the setting Phase 2 made reachable for audio is not
+    /// the one that stays silent about doing nothing.</summary>
+    [Fact]
+    public void ServiceOverload_ReportsPolicyAndPendingLevers()
+    {
+        using IBackend backend = Cpu();
+        List<string> lines = Capture(() => MemorySupportReport.ReportService("MusicService", backend,
+            VramPolicy.For(VramTier.Maximum)));
+
+        string all = string.Join("\n", lines);
+        Assert.Contains("[VRAM] MusicService:", all, StringComparison.Ordinal);
+        Assert.Contains("Maximum", all, StringComparison.Ordinal);
+        Assert.Contains("does not act on", all, StringComparison.Ordinal);
     }
 
     /// <summary>Describe names only what was pinned away from the tier, so the interesting part is not buried.</summary>
