@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para>The pipeline loads TWO instances of this class: a conditional transformer (<c>transformer/</c> weights) and an unconditional one (<c>unconditional_transformer/</c> weights) — same architecture, different weights — for the asymmetric CFG.</para>
 ///
 /// <para>Forward fuses text and image into one length-L sequence by masked addition: image tokens contribute <c>input_proj(x)</c>, text tokens contribute <c>llm_cond_proj(llm_cond_norm(llm_features))</c>, and an <c>image_indicator</c> embedding tags each token. Only positions with <c>indicator == OUTPUT_IMAGE_INDICATOR(2)</c> produce meaningful velocity.</para></summary>
-public sealed unsafe class Ideogram4Transformer : IDisposable
+public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenoiser
 {
     private const int LlmTokenIndicator = 3;
     private const int OutputImageIndicator = 2;

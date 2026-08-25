@@ -12,7 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// Predicts <b>x0</b> [B, 3, H, W] in [-1, 1]; the pipeline converts to velocity via
 /// <c>HartsyInference.Diffusion.Utilities.X0Prediction.ToVelocity</c>. No final modulation norm is applied before the
 /// NeRF head (verified against ComfyUI <c>ChromaRadiance.forward</c>); the modulation table's last two rows go unused.</summary>
-public sealed class ChromaRadianceTransformer : IDisposable
+public sealed class ChromaRadianceTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly ChromaTransformer _backbone;
     private readonly ChromaRadianceImagePatchifier _patchifier;

@@ -15,7 +15,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// grid — byte-compatible with Krea 2's FluxPosEmbed convention) and <see cref="DiTUtils"/>. The only Krea 2-specific
 /// pieces are the sigmoid output-gate attention, the 6-way <c>scale_shift_table</c> modulation, and the text-fusion
 /// stage (see <see cref="Krea2Block"/> / <see cref="Krea2TextFusion"/>).</para></summary>
-public sealed unsafe class Krea2Transformer : IDisposable
+public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
 {
     private readonly Krea2Config _config;
     private readonly FluxRope _rope;

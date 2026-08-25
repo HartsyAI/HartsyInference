@@ -6,7 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>HunyuanVideo MM-DiT — the base offline-video transformer and the backbone the Hunyuan-GameCraft world model finetunes. Reuses <see cref="HunyuanImageBlock"/> (dual-stream) and <see cref="HunyuanImageSingleBlock"/> (single-stream) with a <b>3-axis (T,H,W) RoPE</b> via the generalized <see cref="HunyuanImageRope"/>. Predicts rectified-flow velocity over the 16-channel latent from a patchified input (16-ch plain, or GameCraft's 33-ch noisy+history+mask), Llava text tokens refined by the <see cref="HunyuanVideoTokenRefiner"/>, a pooled CLIP vector, a timestep, and — for plain HunyuanVideo (<c>guidance_embeds=True</c>) — an embedded guidance scalar. Optional <c>cameraTokens</c> are token-added to the image stream (GameCraft CameraNet). <para>Faithful to diffusers <c>transformer_hunyuan_video.py</c>: <c>temb = timestep_emb + guidance_emb + pooled_vec_emb</c>, the 2-layer token refiner replaces the plain <c>txt_in</c> projection, and the final AdaLN-continuous chunks <c>[shift, scale]</c> (Tencent order). The 60 double+single blocks are streamable via <see cref="GetBlock"/>/<see cref="BeforeBlockForward"/> for the 24 GB-class bf16 checkpoint.</para></summary>
-public sealed unsafe class HunyuanVideoDit : IDisposable
+public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
 {
     private readonly HunyuanVideoConfig _cfg;
     private readonly HunyuanImageBlock[] _double;

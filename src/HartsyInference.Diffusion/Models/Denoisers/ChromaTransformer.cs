@@ -22,7 +22,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// </list>
 ///
 /// Reference: <c>diffusers/models/transformers/transformer_chroma.py:423-624</c>.</summary>
-public sealed unsafe class ChromaTransformer : IDisposable
+public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly ChromaConfig _config;
     private readonly ChromaCombinedTimestepEmbeddings _timestepEmbed;

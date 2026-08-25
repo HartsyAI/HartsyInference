@@ -9,7 +9,7 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Flux Diffusion Transformer. Processes packed latent image tokens and T5 text embeddings through double-stream (joint attention) and single-stream (parallel attention+MLP) blocks with RoPE positional encoding.</summary>
-public sealed unsafe class FluxTransformer : IDisposable
+public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly FluxConfig _config;
     private readonly FluxDoubleStreamBlock[] _doubleBlocks;

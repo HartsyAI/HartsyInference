@@ -6,7 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Hunyuan Image 2.1 MMDiT transformer (<c>HunyuanImageTransformer2DModel</c>). Processes 64-channel latents with a 32× VAE downscale and unit patches (<c>patch_size=1</c>) through 20 dual-stream <see cref="HunyuanImageBlock"/>s and 40 single-stream <see cref="HunyuanImageSingleBlock"/>s with shared image-only RoPE. Top-level layout follows <c>diffusers/models/transformers/transformer_hunyuanimage.py</c>: <c>x_embedder</c> 1x1 patchify conv → <c>context_embedder</c> (Hunyuan token refiner: pooled prompt + timestep → AdaNorm-gated self-attn × N) → <c>time_guidance_embed</c> sinusoidal+MLP (timestep + optional distilled-guidance) → 20 × <see cref="HunyuanImageBlock"/> → 40 × <see cref="HunyuanImageSingleBlock"/> → <c>norm_out</c> AdaLN-continuous → <c>proj_out</c> Linear(hidden, patch² * out_channels). Outputs predicted velocity in patched form <c>[B, postPatchH * postPatchW, patch² * out_channels]</c>; the pipeline unpatchifies back to <c>[B, 64, H, W]</c>. ByT5 secondary text encoder is supported when <see cref="HunyuanImageConfig.TextEmbedDim2"/> is non-null and a <c>encoder_hidden_states_2</c> tensor is supplied to <see cref="Forward"/>.</summary>
-public sealed unsafe class HunyuanImageTransformer : IDisposable
+public sealed unsafe class HunyuanImageTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly HunyuanImageConfig _config;
     private readonly HunyuanImageBlock[] _doubleBlocks;

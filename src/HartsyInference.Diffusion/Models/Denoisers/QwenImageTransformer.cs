@@ -7,7 +7,7 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Qwen-Image MMDiT transformer (<c>QwenImageTransformer2DModel</c>). Processes packed image patch tokens and Qwen2.5-VL text embeddings through 60 dual-stream transformer blocks with QK-norm, AdaLN-Zero modulation, and 3-axis (frame, height, width) RoPE applied separately to each stream before joint attention. Top-level layout follows <c>diffusers/models/transformers/transformer_qwenimage.py</c>: <c>img_in</c> Linear → <c>txt_norm</c> RMSNorm → <c>txt_in</c> Linear → <c>time_text_embed</c> sinusoidal+MLP → 60 × <see cref="QwenImageBlock"/> → <c>norm_out</c> AdaLN-continuous → <c>proj_out</c> Linear. Outputs predicted velocity in packed token form <c>[B, imgSeqLen, patch_size² * out_channels]</c>; pipeline unpacks back to <c>[B, C, H, W]</c>.</summary>
-public sealed unsafe class QwenImageTransformer : IDisposable
+public sealed unsafe class QwenImageTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly QwenImageConfig _config;
     private readonly QwenImageBlock[] _blocks;
