@@ -5,6 +5,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Services;
 using HartsyInference.Vision.Codec;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Cli.Dispatch;
 
@@ -63,6 +64,7 @@ public static class GenerationDispatch
             Sampler = parameters.GetStringOrNull("sampler"),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             SigmaShift = parameters.GetDoubleOrNull("sigma-shift"),
+            Vram = ParseVramOverrides(parameters),
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             Img2Img = BuildImg2Img(parameters),
@@ -877,4 +879,23 @@ public static class GenerationDispatch
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
+    /// <summary>The per-run VRAM override from <c>--vram-mode</c>, or null when the caller did not ask for one.</summary>
+    /// <remarks>Null rather than an explicit Auto: null means "follow the engine", which is a different statement
+    /// from "pin Auto" once a host has configured a backend policy.</remarks>
+    private static VramOverrides? ParseVramOverrides(ParamState parameters)
+    {
+        string? mode = parameters.GetStringOrNull("vram-mode");
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return null;
+        }
+        if (!Enum.TryParse(mode.Trim(), ignoreCase: true, out VramTier tier))
+        {
+            Logs.Warning($"[VRAM] --vram-mode '{mode}' is not recognized; ignoring it. "
+                + "Valid: Performance, Auto, Balanced, Aggressive, Maximum.");
+            return null;
+        }
+        return new VramOverrides { Tier = tier };
+    }
+
 }

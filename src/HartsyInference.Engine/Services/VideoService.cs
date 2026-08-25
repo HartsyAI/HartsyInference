@@ -4,6 +4,7 @@ using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Engine.Services;
 
@@ -75,6 +76,8 @@ public sealed class VideoService : IVideoService
         return await Task.Run(
             () =>
             {
+                using IDisposable vramScope = VramPolicyScope.Push(
+                    request.Vram is null ? null : VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec, request);
                 VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
                 VideoGenerationResult result = pipeline.Generate(resolved, progress, cancel);

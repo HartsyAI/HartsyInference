@@ -2,6 +2,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Engine.Services;
 
@@ -25,6 +26,11 @@ public sealed class ImagesService : IImagesService
             {
                 // A generic-refiner request keeps the refiner checkpoint cached across generations too — see
                 // EvictOtherCheckpointPipelines' alsoKeepPath doc for the ping-pong this prevents.
+                // In force for the whole generation, including the refiner and segment passes nested below, so a
+                // per-request override reaches the levers decided mid-generation rather than only the ones baked
+                // in while the pipeline was constructed (it is cached, so those run once and never again).
+                using IDisposable vramScope = VramPolicyScope.Push(
+                    request.Vram is null ? null : VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
                 string? keepRefiner = request.Refiner?.Model;
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);

@@ -26,9 +26,16 @@ public static class VramPolicyRegistry
         _policies.Remove(backend);
     }
 
-    /// <summary>The policy governing <paramref name="backend"/>: its pinned entry, else the environment-derived default. A null backend resolves the environment only.</summary>
+    /// <summary>The policy governing <paramref name="backend"/>: the running generation's scope first, then its pinned entry, then the environment-derived default. A null backend resolves the scope and environment only.</summary>
+    /// <remarks>The scope wins because it is strictly more specific: it exists only while a request that overrode
+    /// something is actually generating, and that request asked for this behavior for itself. The registry stays
+    /// the answer for everything outside a generation, and for every generation that overrode nothing.</remarks>
     public static VramPolicy Resolve(IBackend? backend)
     {
+        if (VramPolicyScope.Current is VramPolicy scoped)
+        {
+            return scoped;
+        }
         if (backend is not null && _policies.TryGetValue(backend, out VramPolicy? pinned))
         {
             return pinned;

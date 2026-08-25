@@ -84,7 +84,7 @@ public sealed class VramPlanner
 
         if (_mode == LowVramMode.ForceOff)
         {
-            Logs.Info($"[VRAM] {_modelName}/{phase}: resident (HARTSY_LOWVRAM=off). {Describe(weightBytes, activationReserveBytes)}");
+            Logs.Info($"[VRAM] {_modelName}/{phase}: resident (the resolved policy forbids streaming). {Describe(weightBytes, activationReserveBytes)}");
             return PhasePlacement.Resident;
         }
         if (alreadyResident)
@@ -103,7 +103,7 @@ public sealed class VramPlanner
         long available = _cache.QueryAvailableWeightCacheBytes(activationReserveBytes);
         if (_mode == LowVramMode.ForceOn)
         {
-            Logs.Info($"[VRAM] {_modelName}/{phase}: streamed (HARTSY_LOWVRAM=on forces it). " +
+            Logs.Info($"[VRAM] {_modelName}/{phase}: streamed (the resolved policy forces it). " +
                 $"{Describe(weightBytes, activationReserveBytes)}, available {ByteFormat.Mb(available)}");
             return PhasePlacement.Streamed;
         }

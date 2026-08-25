@@ -72,6 +72,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Flow-match sigma shift (default: the model family's trained shift).")]
         public double? SigmaShift { get; init; }
 
+        /// <summary>Per-run VRAM posture; unset follows the engine's own (the HARTSY_LOWVRAM environment).</summary>
+        [CommandOption("--vram-mode")]
+        [Description("VRAM posture for THIS run: Performance (never stream, fail instead), Auto, Balanced, Aggressive (always stream) or Maximum. Unset follows the engine default. A model that cannot honour it says so in the log rather than ignoring it.")]
+        public string? VramMode { get; init; }
+
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
         [Description("RNG seed; negative randomizes.")]
@@ -168,6 +173,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("sampler", settings.Sampler);
         parameters.PutIfSet("scheduler", settings.Scheduler);
         parameters.PutIfSet("sigma-shift", settings.SigmaShift);
+        parameters.PutIfSet("vram-mode", settings.VramMode);
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("creativity", settings.Creativity);
         parameters.PutIfSet("ip2p-cfg", settings.Ip2pCfg);

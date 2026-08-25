@@ -47,7 +47,7 @@ public sealed class BlockStreamingScope : IDisposable
         {
             backend.PreloadWeights(EnumerateAll(denoiser));
             Logs.Info($"[VRAM] {options.ModelName}/denoise: resident prefix {blockCount}, streamed 0 " +
-                $"({(cache is null ? "backend has no streaming cache" : $"{LowVramPolicy.EnvironmentVariable}=off")}).");
+                $"({(cache is null ? "backend has no streaming cache" : "the resolved policy forbids streaming")}).");
             return new BlockStreamingScope(options, blockCount, streamer: null);
         }
 
@@ -154,7 +154,7 @@ public sealed class BlockStreamingScope : IDisposable
             pin.Resident = false;
             pin.PinnedBlocks = -1;
             Logs.Info($"[VRAM] {options.ModelName}/denoise: resident prefix released " + (forceStream
-                ? $"({LowVramPolicy.EnvironmentVariable}=on forces streaming)."
+                ? "(the resolved policy forces streaming)."
                 : $"for re-size (token load {options.TokenLoad} > sized {pin.SizedTokens})."));
         }
         // FreeMemoryBytes counts pool-retained blocks as USED, so an untrimmed read carries the previous phase's
@@ -221,7 +221,7 @@ public sealed class BlockStreamingScope : IDisposable
             pin.Resident = false;
             pin.PinnedBlocks = -1;
             Logs.Info($"[VRAM] {options.ModelName}/denoise: resident blocks released "
-                + $"({LowVramPolicy.EnvironmentVariable}=on forces streaming).");
+                + "(the resolved policy forces streaming).");
         }
 
         long totalBlockBytes = 0;
