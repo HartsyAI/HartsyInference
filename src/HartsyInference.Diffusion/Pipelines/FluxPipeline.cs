@@ -542,6 +542,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // pipeline makes it the same way and HARTSY_LOWVRAM can override it. On the default `auto` policy
             // this is exactly the comparison that was inlined here.
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Flux", Backend);
+            // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            // FreeResidentTransformer also invalidates the step graph, which a streamed forward must not replay.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                Backend.Sync();
+                FreeResidentTransformer();
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)

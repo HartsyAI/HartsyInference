@@ -617,6 +617,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             long reserve = EstimateActivationReserveBytes(txtSeqLen, forwardImgSeqLen, _config.HiddenSize) + sharedBytes;
 
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "QwenImage", Backend);
+            // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                EvictResidentTransformer("forced low-VRAM streaming");
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)

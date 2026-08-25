@@ -122,6 +122,32 @@ public sealed class VramPlannerTests
         Assert.Contains("streaming cannot", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>The companion to <see cref="AlreadyResident_SkipsTheAvailabilityQueryEntirely"/>: that short-circuit is
+    /// what makes a forced stream inert on a warm model, so the planner has to tell the caller when to evict first.
+    /// Only ForceOn asks for it — Auto still measures, and ForceOff wants the weights kept.</summary>
+    [Theory]
+    [InlineData(LowVramMode.ForceOn, true, true)]
+    [InlineData(LowVramMode.ForceOn, false, false)]
+    [InlineData(LowVramMode.Auto, true, false)]
+    [InlineData(LowVramMode.ForceOff, true, false)]
+    public void ShouldDisplaceResident_OnlyWhenForcingStreamOverWarmWeights(
+        LowVramMode mode, bool alreadyResident, bool expected)
+    {
+        VramPlanner planner = new VramPlanner(new BudgetCache(8000 * Mb), "test", mode);
+        Assert.Equal(expected, planner.ShouldDisplaceResident(alreadyResident));
+    }
+
+    /// <summary>Once the caller has evicted, the planner must actually choose the streamed layout — proving the
+    /// displace-then-plan pair produces the placement the force asked for.</summary>
+    [Fact]
+    public void ForceOn_AfterDisplacement_PlansStreamed()
+    {
+        VramPlanner planner = new VramPlanner(new BudgetCache(99000 * Mb), "test", LowVramMode.ForceOn);
+        Assert.True(planner.ShouldDisplaceResident(alreadyResident: true));
+        Assert.Equal(PhasePlacement.Streamed,
+            planner.PlanPhase("denoise", 1 * Mb, 1 * Mb, alreadyResident: false, canStream: true));
+    }
+
     [Theory]
     [InlineData(null, LowVramMode.Auto)]
     [InlineData("", LowVramMode.Auto)]

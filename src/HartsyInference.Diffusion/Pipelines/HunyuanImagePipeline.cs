@@ -337,6 +337,13 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             // decides identically and HARTSY_LOWVRAM can override it. The reserve estimate above stays here:
             // it is genuinely per-architecture, unlike the decision.
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "HunyuanImage", Backend);
+            // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                Backend.Sync();
+                FreeTransformerWeights();
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, activationReserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)

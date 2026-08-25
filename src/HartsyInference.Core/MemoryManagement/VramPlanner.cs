@@ -118,6 +118,17 @@ public sealed class VramPlanner
         return PhasePlacement.Streamed;
     }
 
+    /// <summary>True when a forced-streaming policy needs the caller to displace weights a previous generation left resident, BEFORE it asks <see cref="PlanPhase"/> for a placement.</summary>
+    /// <remarks><see cref="PlanPhase"/> honours <paramref name="alreadyResident"/> ahead of
+    /// <see cref="LowVramMode.ForceOn"/> on purpose: its availability query cannot see past weights that are
+    /// themselves occupying the space it measures, so a warm generation would otherwise flip between resident and
+    /// streamed on alternate runs. The cost is that forcing low-VRAM on does nothing to an already-warm model — the
+    /// setting appears inert on exactly the generations it was set for. Resolving that inside the planner is not
+    /// possible: it is a pure decision function that never frees, so returning <see cref="PhasePlacement.Streamed"/>
+    /// would stand the streaming machinery up beside weights that are still resident. The caller owns the eviction
+    /// because only it knows which backends hold which block ranges; this just answers whether one is needed.</remarks>
+    public bool ShouldDisplaceResident(bool alreadyResident) => alreadyResident && _mode == LowVramMode.ForceOn;
+
     /// <summary>True when an upcoming phase cannot get <paramref name="requiredBytes"/> of headroom without evicting what a previous phase left resident.</summary>
     /// <remarks>This is the cross-phase half of low-VRAM handling, and the half ComfyUI gets most of its 12 GB-card
     /// advantage from: peak VRAM spans text-encode → denoise → VAE-decode as <i>sequential</i> phases, so dropping the

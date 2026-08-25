@@ -307,6 +307,15 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             long reserve = EstimateActivationReserveBytes(seqLen, _config.EmbDim, _config.IntermediateSize) + sharedBytes;
 
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Ideogram4", Backend);
+            // Forced streaming has to displace warm DiTs before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                Backend.Sync();
+                Backend.FreeWeights(_conditional.EnumerateWeights());
+                Backend.FreeWeights(_unconditional.EnumerateWeights());
+                _ditResident = false;
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", condBytes + uncondBytes, reserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)

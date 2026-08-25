@@ -235,6 +235,25 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             long reserve = EstimateActivationReserveBytes(txtSeqLen, imageSeqLen, _config) + sharedBytes;
 
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Krea2", Backend);
+            // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            // Frees per-backend like the post-denoise path: an unsharded free would no-op on the shard's range.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                Backend.Sync();
+                _transformer.InvalidateStepGraph(Backend);
+                if (DitShardBackend is not null)
+                {
+                    Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+                    Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+                    DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
+                }
+                else
+                {
+                    Backend.FreeWeights(_transformer.EnumerateWeights());
+                }
+                _ditResident = false;
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
             if (placement == PhasePlacement.Resident)

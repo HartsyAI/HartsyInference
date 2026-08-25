@@ -238,6 +238,14 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 padHeight, padWidth, _config.NerfHidden, patch, (int)condContext.Shape[1]) + sharedBytes;
 
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "ChromaRadiance", Backend);
+            // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
+            // short-circuit answers Resident and the setting does nothing on exactly the generations it was set for.
+            if (planner.ShouldDisplaceResident(_ditResident))
+            {
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
             PhasePlacement placement = planner.PlanPhase(
                 "denoise", totalBlockBytes, reserve, alreadyResident: _ditResident, canStream: true);
             // Assigned unconditionally below (null on the resident branch): the transformer outlives this call,
