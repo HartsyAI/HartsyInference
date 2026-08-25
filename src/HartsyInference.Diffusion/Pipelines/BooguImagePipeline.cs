@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -26,8 +27,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
     private readonly BooguImageConfig _config;
 
     /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): the ~10 GB fp8 transformer stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     /// <summary>Frees the resident transformer weights (no-op when not resident). For the loader's TE ⇄ DiT staging on a prompt-cache miss.</summary>

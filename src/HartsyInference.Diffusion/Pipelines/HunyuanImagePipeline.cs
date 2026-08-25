@@ -38,8 +38,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly HunyuanImageConfig _config;
 
     /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline staging pattern). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the Qwen token ids — the

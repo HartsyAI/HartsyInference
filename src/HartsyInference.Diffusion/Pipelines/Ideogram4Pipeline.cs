@@ -36,8 +36,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private const int ImagePositionOffset = 65536;
 
     /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): raw budget 0.3 confined to the LATE half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>

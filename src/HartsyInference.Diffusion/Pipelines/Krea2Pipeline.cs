@@ -21,8 +21,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
     /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Whether the DiT's weights are currently ALL on the device from a previous generation (<see cref="KeepModelsResident"/>). Fed to <see cref="VramPlanner.PlanPhase"/> as <c>alreadyResident</c> — the availability query cannot see past weights that are themselves occupying the space it measures, so without this a warm generation reports "does not fit" and flips between resident and streamed on alternate runs.</summary>
     private bool _ditResident;

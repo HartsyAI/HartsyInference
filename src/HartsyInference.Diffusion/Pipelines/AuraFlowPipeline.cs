@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -24,8 +25,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private readonly float _schedulerShift;
 
     /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): transformer weights stay GPU-resident across generations. On a prompt-cache miss the Pile-T5-XL encoder is preloaded/freed around the encode as before.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-embedding cache: repeat prompts skip the whole Pile-T5-XL phase. Keyed on token ids +
@@ -364,6 +364,9 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         else
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            // Clearing this is load-bearing once the lever can change between generations: leaving it set after a
+            // free makes the next generation's `if (!_ditResident)` skip the preload and run on freed weights.
+            _ditResident = false;
         }
 
         // ── 5. VAE decode ────────────────────────────────────────────────

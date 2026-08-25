@@ -73,7 +73,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     // The count is sized once and pinned; re-sized only when the token load grows past what the sizing
     // reserved headroom for. A prompt-cache MISS evicts the prefix when the ~12 GB Gemma encode doesn't fit
     // beside it (decided from measured free VRAM, logged either way).
-    private static readonly bool KeepModelsResident = EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private readonly ResidentPrefixPin _prefixPin = new ResidentPrefixPin();
     private long _gemmaWeightBytes = -1;
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Schedulers;
@@ -29,8 +30,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private readonly float _vaeScalingFactor;
 
     /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): UNet weights stay GPU-resident across generations, skipping the per-generation free + ~2 s re-upload. SDXL's UNet (2.5 GB F16) + BF16 VAE + dual CLIP fit 24 GB together, so no evict-for-TE dance is needed.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _unetResident;
 
     // Prompt-embedding cache: repeat prompts skip the whole dual-CLIP phase (~4.4 s/gen measured at

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -32,8 +33,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private readonly HiDreamConfig _config;
 
     /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
-    private static readonly bool KeepModelsResident =
-        HartsyInference.Core.Runtime.EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-conditioning cache (one cond + one uncond slot): the quad encode (CLIP-L/G + T5 + Llama-8B,

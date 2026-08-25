@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -29,8 +30,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     private readonly int[] _hiddenLayers;
 
     /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this pipeline stages weights at all. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-embedding cache (last-used), keyed on the tokenizer ids — the Krea2/Chroma pattern. A hit

@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -24,8 +25,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     private readonly ZImageConfig _config;
 
     /// <summary>Keeps lazily promoted DiT weights and fused-attention plans resident across generations. A prompt-cache miss still evicts them before a same-device Qwen encode because the 8 GB encoder and 6.2 GB Z-Image transformer cannot coexist on a 12 GB card.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Explicit bring-up probe. Each scan deliberately materializes a prediction on the host, so it is disabled in production; use it to localize non-finite Base outputs before the CFG combine.</summary>
     private static readonly bool PredictionStatsEnabled =

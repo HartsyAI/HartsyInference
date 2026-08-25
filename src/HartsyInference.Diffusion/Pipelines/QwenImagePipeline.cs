@@ -29,8 +29,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly QwenImageConfig _config;
 
     /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     /// <summary>True when N-way DiT block-range sharding (Phase 8+ generalization) is configured for this pipeline. Qwen-Image is the one pipeline that reads <see cref="DiffusionPipelineBase.DitShardStages"/> instead of the base class's 2-way <c>DitShardBackend</c>/<c>DitShardSplitBlock</c> — see <c>QwenImageRecipe</c> for how the stage list is built from <c>PlacementConfig.ShardDevices</c>.</summary>

@@ -33,8 +33,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// <summary>True when the current residency is the sharded asymmetric layout (shared + [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, [split, BlockCount) on <see cref="DiffusionPipelineBase.DitShardBackend"/>) rather than the whole DiT on the primary — the free path must mirror whichever preload shape actually ran or the shard backend's range leaks.</summary>
     private bool _ditShardResident;
 
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the CLIP-L and T5 token ids —

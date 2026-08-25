@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -51,7 +52,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     private WanVideoTransformer? _loadedExpert;
 
     /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS, default on): the single-expert DiT stays GPU-resident across generations so the next gen's preload is a cache-hit no-op; every VAE phase beside it is gated on measured free VRAM (evict when short).</summary>
-    private static readonly bool KeepModelsResident = EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     // Cross-generation I2V conditioning cache: the [mask, cond-latent] tensor is a deterministic function of
     // (init frame, last frame, geometry), tiny (~1.4 MB host), and its whole-padded-clip VAE encode is the ONE

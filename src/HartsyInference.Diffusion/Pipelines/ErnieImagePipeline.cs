@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -35,8 +36,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     private readonly float _schedulerShift;
 
     /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): transformer weights stay GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
-    private static readonly bool KeepModelsResident =
-        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     // Prompt-embedding cache: identical (tokens, realLen) reuse the previous gen's hidden states — the whole
