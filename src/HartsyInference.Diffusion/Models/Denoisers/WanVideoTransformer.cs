@@ -2,11 +2,12 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Wan-Video DiT (<c>WanTransformer3DModel</c>, Wan2.2 TI2V-5B), ported from diffusers. B=1 over a VAE latent <c>[1,48,T,H,W]</c>: Conv3d <c>(1,2,2)</c> patchify → 30 blocks (self-attn + per-head 3D RoPE / cross-attn to umT5 / FFN, 6-param AdaLN, FP32 LayerNorms) → final AdaLN + <c>proj_out</c> + unpatchify → <c>[1,48,T,H,W]</c>. Reuses backend ops + <see cref="DiTUtils"/> + (pipeline) the <c>Wan22VaeDecoder</c> + T5 encoder. See <c>docs/Research/WAN_VIDEO_ARCHITECTURE.md</c>.</summary>
-public sealed unsafe class WanVideoTransformer : IDisposable
+public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
@@ -61,11 +62,26 @@ public sealed unsafe class WanVideoTransformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
+        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+    }
+
+    /// <inheritdoc/>
+    public int BlockCount => _blocks.Length;
+
+    /// <inheritdoc/>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <inheritdoc/>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Everything outside the block stack: patch embed, time/text projections, the image embedder and the final layer. Defined as the complement of the blocks so <see cref="EnumerateWeights"/> stays their union and the two cannot drift.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _projOutW, _projOutB, _finalScaleShift,
             _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB, _textW1, _textB1, _textW2, _textB2 })
             if (t is not null) yield return t;
         foreach (Tensor t in _imgEmbedder.EnumerateWeights()) yield return t;
-        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
     }
 
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c>; <paramref name="encoder"/> is raw umT5 features <c>[L, textDim]</c>. Returns <c>[1, outChannels, T, H, W]</c>.</summary>
@@ -170,6 +186,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         {
             if (vramLog is not null)
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block 0: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
+            BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: "b0");
             cur.Dispose();
@@ -193,6 +210,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         {
             if (vramLog is not null)
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvExchange: kvExchange);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();

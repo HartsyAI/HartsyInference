@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -10,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// that run on the VAE-encoded control video and emit per-layer hints, which are added into the main stream at the
 /// matching block indices (scaled by the per-layer control scale). Reuses <see cref="WanDitOps"/> + the main
 /// <see cref="WanVideoBlock"/> exactly as <see cref="WanVideoTransformer"/> does. B=1; numerics validation-pending.</summary>
-public sealed unsafe class WanVaceTransformer : IDisposable
+public sealed unsafe class WanVaceTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
@@ -60,10 +61,30 @@ public sealed unsafe class WanVaceTransformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
+        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+    }
+
+    /// <inheritdoc/>
+    public int BlockCount => _blocks.Length;
+
+    /// <inheritdoc/>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <inheritdoc/>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Everything outside the streamed block stack, INCLUDING the whole VACE control stack.</summary>
+    /// <remarks>The VACE blocks deliberately do not stream. They run as a complete pass of their own before the
+    /// main loop starts, and every hint they produce is held until the matching main block consumes it, so they are
+    /// all live at once — a single sliding window over the main blocks cannot express that lifetime, and giving them
+    /// a second window would only park the hints somewhere else. They are also a subset of the layer count, so the
+    /// bytes they cost are a fraction of what streaming the main stack saves.</remarks>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _vacePatchW2d, _vacePatchB, _projOutW, _projOutB, _finalScaleShift,
             _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB, _textW1, _textB1, _textW2, _textB2 })
             if (t is not null) yield return t;
-        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
         for (int i = 0; i < _vaceBlocks.Length; i++) foreach (Tensor t in _vaceBlocks[i].EnumerateWeights()) yield return t;
     }
 
@@ -108,6 +129,7 @@ public sealed unsafe class WanVaceTransformer : IDisposable
         Tensor cur = hidden;
         for (int i = 0; i < _blocks.Length; i++)
         {
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, s);
             cur.Dispose();
             cur = next;

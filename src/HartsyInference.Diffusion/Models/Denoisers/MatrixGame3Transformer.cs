@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -13,7 +14,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// Reuses <see cref="WanVideoBlock"/>/<see cref="WanRope"/>/<see cref="WanDitOps"/> directly — only the sequence
 /// assembly and readout differ from <see cref="WanVideoTransformer"/>. Numerics are validation-pending.
 /// See <c>docs/Research/MATRIX_GAME_3_ARCHITECTURE.md</c>.</summary>
-public sealed unsafe class MatrixGame3Transformer : IDisposable
+public sealed unsafe class MatrixGame3Transformer : IDisposable, IStreamableDenoiser
 {
     private readonly MatrixGame3Config _config;
     private readonly WanVideoBlock[] _blocks;
@@ -95,17 +96,32 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
+        for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+    }
+
+    /// <inheritdoc/>
+    public int BlockCount => _blocks.Length;
+
+    /// <inheritdoc/>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <inheritdoc/>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Everything outside the streamed block stack. The per-block action modules and camera injectors stay resident: they are indexed per block but are not part of the block's own weight set, so a block window cannot carry them. Defined as the complement of the blocks so <see cref="EnumerateWeights"/> stays their union and the two cannot drift.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _projOutW, _projOutB, _finalScaleShift,
             _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB, _textW1, _textB1, _textW2, _textB2,
             _pluckerProjW, _pluckerProjB, _pluckerH1W, _pluckerH1B, _pluckerH2W, _pluckerH2B })
             if (t is not null) yield return t;
-        for (int i = 0; i < _blocks.Length; i++)
-        {
-            foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
+        // Per-block but NOT part of WanVideoBlock, so they cannot ride the block window: they stay resident.
+        for (int i = 0; i < _actionModules.Length; i++)
             if (_actionModules[i] is not null)
                 foreach (Tensor t in _actionModules[i]!.EnumerateWeights()) yield return t;
+        for (int i = 0; i < _camInjectors.Length; i++)
             foreach (Tensor t in _camInjectors[i].EnumerateWeights()) yield return t;
-        }
     }
 
     /// <summary>Velocity prediction over the assembled memory-augmented sequence.
@@ -158,6 +174,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
             MatrixGame3CamInjector camInj = _camInjectors[i];
             Action<Tensor>? camHook = pluckerEmb is not null && camInj.Loaded
                 ? h => camInj.Apply(backend, h, pluckerEmb) : null;
+            BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook, postSelfAttnHook: camHook);
             cur.Dispose();
             cur = next;
