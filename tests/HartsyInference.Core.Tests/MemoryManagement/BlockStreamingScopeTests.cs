@@ -495,7 +495,10 @@ public sealed class BlockStreamingScopeTests
 
         Assert.Equal(legacyPrefix, scope.ResidentPrefixBlocks);
         // Block tags are per-denoiser instances but the ids repeat, so the recorded strings compare directly.
-        Assert.Equal(legacyBackend.Calls, backend.Calls);
+        // graph-reset is excluded deliberately: the hand-rolled LTX-2 plan this pins parity against never invalidated
+        // the step graph before freeing the prefix, which is the latent hazard the scope now fixes. Parity is about
+        // WHICH weights move and in what order, not about reproducing that omission.
+        Assert.Equal(legacyBackend.Calls, backend.Calls.Where(c => c != "graph-reset").ToList());
         Assert.Equal(legacyPin.ResidentPrefixBlocks, pin.PinnedBlocks);
         Assert.Equal(legacyPin.PrefixSizedTokens, pin.SizedTokens);
         Assert.Equal(legacyPin.PrefixResident, pin.Resident);
@@ -554,6 +557,30 @@ public sealed class BlockStreamingScopeTests
         Assert.Contains("b0", freed, StringComparison.Ordinal);
         Assert.Contains("b3", freed, StringComparison.Ordinal);
         Assert.Equal(0, scope.ResidentPrefixBlocks);
+    }
+
+    /// <summary>A captured graph bakes pointers into the very weights this scope frees (LTX-2 replays one over it), so
+    /// the invalidation has to be ordered BEFORE the release, not merely present somewhere in the call sequence.</summary>
+    [Fact]
+    public void ForcedStream_InvalidatesTheStepGraphBeforeFreeingTheResidentPrefix()
+    {
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), long.MaxValue)
+        {
+            StepGraphReady = true,
+            StepGraphOwner = new object(),
+        };
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        ResidentPrefixPin pin = new ResidentPrefixPin { PinnedBlocks = 4, SizedTokens = 1000, Resident = true };
+
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 0, tokenLoad: 1000,
+            pin: pin, mode: LowVramMode.ForceOn));
+
+        int reset = backend.Calls.IndexOf("graph-reset");
+        int freed = backend.Calls.FindIndex(c => c.StartsWith("free:", StringComparison.Ordinal));
+        Assert.True(reset >= 0, "the step graph was never invalidated");
+        Assert.True(freed >= 0, "the resident prefix was never freed");
+        Assert.True(reset < freed, $"invalidate must precede free, got {string.Join(",", backend.Calls)}");
+        Assert.Null(backend.StepGraphOwner);
     }
 
     /// <summary>A cold pin has nothing to displace, so the force must not manufacture a free call.</summary>

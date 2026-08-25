@@ -39,6 +39,19 @@ internal sealed class RecordingStreamingBackend : IBackend
 
     public void FreeWeights(IEnumerable<Tensor> weights) => Calls.Add($"free:{Describe(weights)}");
 
+    /// <summary>Pretends to support step-graph capture so the ordering of invalidate-vs-free is observable; a stub that reported false would make the guard a silent no-op and the ordering test vacuous.</summary>
+    public bool StepGraphSupported => true;
+
+    public bool StepGraphReady { get; set; }
+
+    public object? StepGraphOwner { get; set; }
+
+    public void StepGraphReset()
+    {
+        StepGraphReady = false;
+        Calls.Add("graph-reset");
+    }
+
     public DeviceKind Device => DeviceKind.Cpu;
 
     public BackendCapabilities Capabilities { get; } = new BackendCapabilities { Name = "recording-streaming-stub" };

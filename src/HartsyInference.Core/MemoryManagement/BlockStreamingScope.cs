@@ -146,6 +146,9 @@ public sealed class BlockStreamingScope : IDisposable
 
         if (pin is not null && pin.Resident && (options.TokenLoad > pin.SizedTokens || forceStream))
         {
+            // The prefix being freed may be exactly what a previous generation's captured graph baked pointers to
+            // (LTX-2 replays one over this very scope), so the graph has to go before the memory does.
+            VramGraphGuard.InvalidateBeforeRelease(backend);
             backend.FreeWeights(BlockRangeWeights(denoiser, 0, pin.PinnedBlocks));
             backend.TrimMemoryPool();
             pin.Resident = false;
@@ -212,6 +215,7 @@ public sealed class BlockStreamingScope : IDisposable
         {
             // AllOrNothing never records a partial count, so an unsized pin means the whole set is resident.
             int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blocks.Length;
+            VramGraphGuard.InvalidateBeforeRelease(backend);
             backend.FreeWeights(BlockRangeWeights(denoiser, 0, residentBlocks));
             backend.TrimMemoryPool();
             pin.Resident = false;
