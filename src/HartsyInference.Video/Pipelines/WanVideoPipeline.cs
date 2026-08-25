@@ -249,7 +249,32 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         {
             RecordCfgParallelDecision("fell-back(moe-two-expert)");
         }
-        if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // Single-expert only: the MoE path already frees and reloads a whole expert per step (SwapToExpert), so
+        // a sliding window underneath that would re-upload the same bytes twice. Streaming is decided by the
+        // policy against measured free VRAM — on a card with headroom this resolves to the full-residency
+        // preload the line below always did.
+        BlockStreamingScope? stream = null;
+        if (_transformer2 is null)
+        {
+            stream = BlockStreamingScope.Open(new BlockStreamingOptions
+            {
+                Backend = Backend,
+                Denoiser = _transformer,
+                ModelName = "Wan",
+                HeadroomBytes = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim),
+                Policy = BlockStreamingPolicy.AllOrNothing,
+            });
+            if (stream.Streaming)
+            {
+                // Replicating the DiT for concurrent CFG needs it resident on BOTH cards; a streamed denoiser has
+                // it on neither. Same fallback Flux records when its own streaming activates.
+                if (cfgParallelEnabled)
+                {
+                    RecordCfgParallelDecision("fell-back(block-streaming-active)");
+                    cfgParallelEnabled = false;
+                }
+            }
+        }
         if (cfgParallelEnabled)
         {
             // Replicating ~the whole DiT on the second card can genuinely not fit (TI2V-5B fp16 needs ~10 GB
@@ -498,6 +523,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             DumpStats($"step {k} latent(post-step)", latents);
             vCond.Dispose();
             vUncond?.Dispose();
+            // Returns the stream-ordered pool's reservations; without it the streamed path grows the pool by
+            // roughly a block per step. Inert when nothing is streaming.
+            stream?.EndStep();
             sw.Stop();
             // Latent is a borrowed reference for preview encoders (latent2rgb decodes the middle frame).
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
@@ -532,6 +560,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Logs.Info($"CFG interval: uncond forward skipped on {cfgSkippedSteps}/{steps} steps");
 
         Backend.Sync();
+        // Before ReleaseOrKeepTransformer: disposing the scope evicts the streamed window, and the residency
+        // decision below reasons about what is left resident.
+        stream?.Dispose();
         ReleaseOrKeepTransformer(numFrames, width, height);
         return latents;
     }
@@ -889,6 +920,19 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Logs.Info($"[wan-phase] cond encode fits beside the resident DiT " +
                 $"(need ~{encodeNeedBytes >> 20} MB + 2048 MB margin, free {free >> 20} MB) — evict skipped.");
         }
+    }
+
+    /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>
+    /// <remarks>The dominant terms are the per-block activations over the full token grid, and Wan's are F32. The
+    /// token count is the patchified grid, not the pixel grid. A generous constant rides on top for cuBLAS
+    /// workspace, RoPE tables and the encoder projections — under-reserving here does not fail cleanly, it
+    /// over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
+    private static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim)
+    {
+        long tokens = (long)tLat * hLat * wLat;
+        // q/k/v + attention output + the FFN's two wide intermediates, all F32, plus the block's own residual.
+        long perForward = tokens * innerDim * 4L * 8L;
+        return perForward + (1536L * 1024 * 1024);
     }
 
     /// <summary>Post-denoise DiT residency (the HARTSY_KEEP_MODELS idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>

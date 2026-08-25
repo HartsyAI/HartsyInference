@@ -146,7 +146,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <inheritdoc/>
-    public MemoryCapabilities MemorySupports => MemoryCapabilities.CfgParallel | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.CfgParallel
+        | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
 
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
