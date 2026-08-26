@@ -1,7 +1,9 @@
 using HartsyInference.Cli.Commands;
+using HartsyInference.Cli.Infra;
 using HartsyInference.Cli.Repl;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
+using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli;
@@ -17,6 +19,32 @@ public static class Program
         // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild.
         Logs.MinLevel = Enum.TryParse(EngineKnobs.LogLevel.Value, ignoreCase: true, out LogLevel level)
             ? level : LogLevel.Warning;
+
+        if (args.Contains("--list-settings", StringComparer.Ordinal))
+        {
+            KnobCli.ListSettings();
+            return 0;
+        }
+
+        // Applied here rather than per command: it must be in force before the engine is constructed, since
+        // construction-scoped settings are read while the model loads. The CLI is one run per process, so a
+        // process-lifetime scope cannot leak into anyone else's generation.
+        IDisposable? knobScope = null;
+        try
+        {
+            KnobProfile? profile = KnobCli.Build(ArgValue(args, "--profile"), ArgValues(args, "--set"));
+            if (profile is not null)
+            {
+                knobScope = profile.Push();
+                AnsiConsole.MarkupLine($"[#9aa4af]settings[/] [#2ea5e0]{Markup.Escape(profile.ToString())}[/]");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
+            return 1;
+        }
+        using IDisposable? scopedSettings = knobScope;
 
         if (args.Length == 0)
         {
@@ -93,4 +121,32 @@ public static class Program
 
         return app.Run(args);
     }
+
+    /// <summary>Last value of a repeated <c>--flag value</c> pair, or null when absent.</summary>
+    private static string? ArgValue(string[] args, string flag)
+    {
+        for (int i = args.Length - 2; i >= 0; i--)
+        {
+            if (string.Equals(args[i], flag, StringComparison.Ordinal))
+            {
+                return args[i + 1];
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Every value of a repeated <c>--flag value</c> pair, in order.</summary>
+    private static string[] ArgValues(string[] args, string flag)
+    {
+        List<string> values = [];
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], flag, StringComparison.Ordinal))
+            {
+                values.Add(args[i + 1]);
+            }
+        }
+        return [.. values];
+    }
+
 }

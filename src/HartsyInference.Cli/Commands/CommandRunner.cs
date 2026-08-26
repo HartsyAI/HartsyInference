@@ -25,7 +25,6 @@ public static class CommandRunner
     {
         using CancellationTokenSource cts = new CancellationTokenSource();
         using IDisposable cancelBinding = BindCancelKey(cts);
-
         using InferenceEngine engine = gpuOrdinal.HasValue || engineOptions is not null
             ? new InferenceEngine(backendSelector, gpuOrdinal ?? 0, engineOptions)
             : new InferenceEngine(backendSelector);

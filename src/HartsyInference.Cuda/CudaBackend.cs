@@ -893,7 +893,8 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Opt-in flag for the hand-written tensor-core HGEMM in the F16 Linear path. Defaults to <c>false</c>.</summary>
-    /// <remarks>The kernel is validated bit-exact against cuBLAS (<c>TensorCoreGemmTests</c>) but is the unoptimized
+    /// <remarks>The kernel is validated against cuBLAS within an F16 tolerance (<c>TensorCoreGemmTests</c> asserts
+    /// avg_err &lt; 0.05, NOT bit-exactness) and is the unoptimized
     /// one-warp-per-tile baseline, so it is opt-in pending a perf comparison against cuBLAS on the target GPU. Only
     /// dispatches when operands and output are F16 and dimensions are aligned (M%16, N%8, K%16 == 0); otherwise
     /// falls through to cuBLAS.</remarks>

@@ -43,8 +43,16 @@ public static class KnobStore
 
     public static bool HasOverride<T>(Knob<T> knob) => _overrides.ContainsKey(knob.Id);
 
+    /// <remarks>Resolution order is scoped profile → process override → legacy environment → declared default.
+    /// The profile comes first so a per-request override beats a process-wide one, which is what lets one
+    /// generation run at reference numerics while others keep the machine's settings.</remarks>
     internal static T Resolve<T>(Knob<T> knob)
     {
+        if (KnobProfileScope.Current is { } profile
+            && profile.Values.TryGetValue(knob.Id, out object? scoped) && scoped is T scopedTyped)
+        {
+            return scopedTyped;
+        }
         if (_overrides.TryGetValue(knob.Id, out object? o) && o is T typed)
         {
             return typed;
