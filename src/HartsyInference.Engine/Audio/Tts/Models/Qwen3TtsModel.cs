@@ -18,9 +18,18 @@ internal static class Qwen3TtsModel
     /// <summary>English codec-space language id (LanguageIdBase 2050) used to condition voice_clone.</summary>
     private const int EnglishLanguageId = 2050;
 
+    /// <summary>Shared by the loader and prefetch. The codec is fetched before the talker weights that mark
+    /// the model installed.</summary>
+    private static readonly AudioModelFile[] ModelFiles =
+    [
+        new("speech_tokenizer/model.safetensors"),
+        new("model.safetensors"),
+    ];
+
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = ResolveRepo,
+        ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(ModelFiles),
         LoadAsync = async (_, variant, cancel) =>
         {
             string repo = ResolveRepo(variant);
@@ -29,8 +38,10 @@ internal static class Qwen3TtsModel
 
             // Two checkpoints: model.safetensors carries talker.* (+ MTP under talker.code_predictor.*) and
             // speaker_encoder.* (ECAPA); speech_tokenizer/model.safetensors carries the codec.
-            string talkerPath = await AudioModelCache.GetAsync(repo, "model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
-            string codecPath = await AudioModelCache.GetAsync(repo, "speech_tokenizer/model.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+                .FetchAllAsync(repo, ModelFiles, category: "tts", ct: cancel).ConfigureAwait(false);
+            string talkerPath = fetched["model.safetensors"];
+            string codecPath = fetched["speech_tokenizer/model.safetensors"];
             SafeTensorsLoader talkerLoader = new SafeTensorsLoader();
             talkerLoader.Load(talkerPath);
             SafeTensorsLoader codecLoader = new SafeTensorsLoader();

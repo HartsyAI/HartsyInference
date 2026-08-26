@@ -23,15 +23,28 @@ internal static class CosyVoiceModel
     private const string Repo = "FunAudioLLM/CosyVoice2-0.5B";
     private const string FrozenRepo = "ResembleAI/chatterbox";
 
+    /// <summary>Shared by the loader and prefetch. The LM is last — it is the artifact that marks CosyVoice
+    /// installed — and the S3 generator comes from the frozen Chatterbox repo rather than this model's own.</summary>
+    private static readonly AudioModelFile[] ModelFiles =
+    [
+        new("s3gen.safetensors", Repo: FrozenRepo),
+        new("flow.pt"),
+        new("hift.pt"),
+        new("llm.pt"),
+    ];
+
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
+        ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(ModelFiles),
         LoadAsync = async (context, _, cancel) =>
         {
-            string llmPath = await AudioModelCache.GetAsync(Repo, "llm.pt", category: "tts", ct: cancel).ConfigureAwait(false);
-            string flowPath = await AudioModelCache.GetAsync(Repo, "flow.pt", category: "tts", ct: cancel).ConfigureAwait(false);
-            string hiftPath = await AudioModelCache.GetAsync(Repo, "hift.pt", category: "tts", ct: cancel).ConfigureAwait(false);
-            string s3genPath = await AudioModelCache.GetAsync(FrozenRepo, "s3gen.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
+            IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+                .FetchAllAsync(Repo, ModelFiles, category: "tts", ct: cancel).ConfigureAwait(false);
+            string llmPath = fetched["llm.pt"];
+            string flowPath = fetched["flow.pt"];
+            string hiftPath = fetched["hift.pt"];
+            string s3genPath = fetched["s3gen.safetensors"];
 
             PytorchPickleLoader llmLoader = new PytorchPickleLoader();
             llmLoader.Load(llmPath);

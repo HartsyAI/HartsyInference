@@ -30,6 +30,7 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             {
                 Modality.Transcribe => await PrefetchSttAsync(selector, progress, cancel).ConfigureAwait(false),
                 Modality.Speech => await PrefetchTtsAsync(selector, progress, cancel).ConfigureAwait(false),
+                Modality.Music => await PrefetchMusicAsync(selector, progress, cancel).ConfigureAwait(false),
                 _ => ModelPrefetchResult.Unsupported(selector.Id, $"the {spec.Modality} path has no declared weight list yet"),
             };
         }
@@ -58,6 +59,27 @@ public sealed class ModelPrefetchService : IModelPrefetchService
         Logs.Info($"[Audio][Prefetch] Fetching {files.Count} file(s) for '{selector.Id}:{selector.Variant}' from '{repo}'.");
         IReadOnlyDictionary<string, string> fetched = await AudioModelCache
             .FetchAllAsync(repo, files, category: "tts", progress: progress, ct: cancel).ConfigureAwait(false);
+        return new ModelPrefetchResult(true, $"Fetched {fetched.Count} file(s) for '{selector.Id}:{selector.Variant}' from '{repo}'.",
+            [.. fetched.Values], PrimaryPathOf(files, fetched));
+    }
+
+    private static async Task<ModelPrefetchResult> PrefetchMusicAsync(AudioModelSelector selector,
+        IProgress<AudioFetchProgress>? progress, CancellationToken cancel)
+    {
+        MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
+        if (!descriptor.ManagesOwnWeights)
+        {
+            return ModelPrefetchResult.Unsupported(selector.Id, "it loads a checkpoint you place yourself");
+        }
+        if (descriptor.ResolveFiles is null)
+        {
+            return ModelPrefetchResult.Unsupported(selector.Id, "its weight list is still implicit in the load path");
+        }
+        string repo = descriptor.CacheKey(selector);
+        IReadOnlyList<AudioModelFile> files = await descriptor.ResolveFiles(selector, cancel).ConfigureAwait(false);
+        Logs.Info($"[Audio][Prefetch] Fetching {files.Count} file(s) for '{selector.Id}:{selector.Variant}' from '{repo}'.");
+        IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+            .FetchAllAsync(repo, files, category: "music", progress: progress, ct: cancel).ConfigureAwait(false);
         return new ModelPrefetchResult(true, $"Fetched {fetched.Count} file(s) for '{selector.Id}:{selector.Variant}' from '{repo}'.",
             [.. fetched.Values], PrimaryPathOf(files, fetched));
     }

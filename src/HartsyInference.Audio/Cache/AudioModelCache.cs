@@ -187,6 +187,13 @@ public static class AudioModelCache
         {
             return false;
         }
+        if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            throw new UnauthorizedAccessException(
+                $"HuggingFace returned {(int)response.StatusCode} for {hfRepoId}/{filename}. "
+                + "If this is a gated repo, set the HF_TOKEN environment variable to a token with read access. "
+                + "Visit https://huggingface.co/settings/tokens to create one.");
+        }
         if (!response.IsSuccessStatusCode)
         {
             // Only a 404 means "absent". Reporting a transient failure as absence makes a caller probing for a

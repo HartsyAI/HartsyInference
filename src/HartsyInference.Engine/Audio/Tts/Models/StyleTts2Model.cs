@@ -17,6 +17,7 @@ internal static class StyleTts2Model
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
+        ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>([new AudioModelFile(CheckpointFile)]),
         LoadAsync = async (_, _, cancel) =>
         {
             string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, category: "tts", ct: cancel).ConfigureAwait(false);

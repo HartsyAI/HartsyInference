@@ -15,16 +15,30 @@ internal static class ChatterboxModel
 {
     private const string Repo = "ResembleAI/chatterbox";
 
+    /// <summary>Shared by the loader and prefetch so installing cannot fetch a different set than loading reads.
+    /// The T3 checkpoint is last: it is the artifact whose presence marks Chatterbox installed.</summary>
+    private static readonly AudioModelFile[] ModelFiles =
+    [
+        new("s3gen.safetensors"),
+        new("ve.safetensors"),
+        new("tokenizer.json"),
+        new("conds.pt"),
+        new("t3_cfg.safetensors"),
+    ];
+
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
+        ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(ModelFiles),
         LoadAsync = async (_, _, cancel) =>
         {
-            string t3Path = await AudioModelCache.GetAsync(Repo, "t3_cfg.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
-            string s3Path = await AudioModelCache.GetAsync(Repo, "s3gen.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
-            string vePath = await AudioModelCache.GetAsync(Repo, "ve.safetensors", category: "tts", ct: cancel).ConfigureAwait(false);
-            string tokenizerPath = await AudioModelCache.GetAsync(Repo, "tokenizer.json", category: "tts", ct: cancel).ConfigureAwait(false);
-            string condsPath = await AudioModelCache.GetAsync(Repo, "conds.pt", category: "tts", ct: cancel).ConfigureAwait(false);
+            IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+                .FetchAllAsync(Repo, ModelFiles, category: "tts", ct: cancel).ConfigureAwait(false);
+            string t3Path = fetched["t3_cfg.safetensors"];
+            string s3Path = fetched["s3gen.safetensors"];
+            string vePath = fetched["ve.safetensors"];
+            string tokenizerPath = fetched["tokenizer.json"];
+            string condsPath = fetched["conds.pt"];
 
             // Merge the three checkpoints under the prefixes ChatterboxPipeline.LoadWeights validates.
             Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);

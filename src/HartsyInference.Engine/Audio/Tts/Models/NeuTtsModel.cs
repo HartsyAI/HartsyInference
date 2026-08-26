@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Audio.Models.NeuTts;
 using HartsyInference.Audio.Pipelines;
@@ -19,6 +20,17 @@ internal static class NeuTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : BackboneRepo,
+        ResolveFiles = async (_, cancel) =>
+        {
+            // Codec first; the backbone is what marks NeuTTS installed.
+            List<AudioModelFile> files = [];
+            foreach (AudioModelFile codecFile in await AudioCheckpoints.ResolveCheckpointFilesAsync(CodecRepo, "tts", cancel).ConfigureAwait(false))
+            {
+                files.Add(codecFile with { Repo = CodecRepo });
+            }
+            files.AddRange(await AudioCheckpoints.ResolveCheckpointFilesAsync(BackboneRepo, "tts", cancel).ConfigureAwait(false));
+            return files;
+        },
         LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =

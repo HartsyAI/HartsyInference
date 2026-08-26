@@ -34,6 +34,7 @@ internal static class MusicCatalog
     {
         ManagesOwnWeights = true,
         CacheKey = selector => ResolveMusicGenRepo(selector.Variant),
+        ResolveFiles = (selector, cancel) => ResolveMusicGenFilesAsync(ResolveMusicGenRepo(selector.Variant), audioGen: false, cancel),
         LoadAsync = (_, selector, cancel) => LoadMusicGenFamilyAsync(ResolveMusicGenRepo(selector.Variant), audioGen: false, cancel),
     };
 
@@ -42,8 +43,29 @@ internal static class MusicCatalog
     {
         ManagesOwnWeights = true,
         CacheKey = _ => "facebook/audiogen-medium",
+        ResolveFiles = (_, cancel) => ResolveMusicGenFilesAsync("facebook/audiogen-medium", audioGen: true, cancel),
         LoadAsync = (_, _, cancel) => LoadMusicGenFamilyAsync("facebook/audiogen-medium", audioGen: true, cancel),
     };
+
+    /// <summary>Mirrors <see cref="LoadMusicGenFamilyAsync"/>'s branch: the AudioCraft layout (separate decoder,
+    /// codec and a standalone T5) versus the single combined checkpoint small/medium ship. Weights last.</summary>
+    private static async Task<IReadOnlyList<AudioModelFile>> ResolveMusicGenFilesAsync(string repo, bool audioGen,
+        CancellationToken cancel)
+    {
+        bool audioCraft = audioGen || repo.Contains("large", StringComparison.OrdinalIgnoreCase);
+        if (audioCraft)
+        {
+            string t5Repo = audioGen ? "google-t5/t5-large" : "google-t5/t5-base";
+            return
+            [
+                new AudioModelFile("pytorch_model.bin", Repo: t5Repo),
+                new AudioModelFile("compression_state_dict.bin"),
+                new AudioModelFile("state_dict.bin"),
+            ];
+        }
+        bool safetensors = await AudioModelCache.ExistsAsync(repo, "model.safetensors", "music", ct: cancel).ConfigureAwait(false);
+        return [new AudioModelFile(safetensors ? "model.safetensors" : "pytorch_model.bin")];
+    }
 
     private static Dictionary<string, MusicModelDescriptor>? _registry;
 
