@@ -58,9 +58,23 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(cfg.NumMelBins));
     }
 
-    /// <summary>Loads a Whisper pipeline from a HuggingFace repo. Downloads
-    /// <c>model.safetensors</c>, <c>vocab.json</c>, <c>merges.txt</c>, and (where
-    /// applicable) <c>added_tokens.json</c> into the shared cache on first use.</summary>
+    /// <summary>Files a Whisper repo contributes. Load and prefetch share this list, so installing a variant
+    /// fetches exactly what loading it will ask for. The weights sit last because their presence is what marks
+    /// the model installed — see <see cref="AudioModelCache.FetchAllAsync"/>.</summary>
+    public static IReadOnlyList<AudioModelFile> ModelFiles { get; } =
+    [
+        new("vocab.json"),
+        new("merges.txt"),
+        new("config.json"),
+        // Only multilingual checkpoints ship these.
+        new("added_tokens.json", Required: false),
+        new("tokenizer_config.json", Required: false),
+        new("generation_config.json", Required: false),
+        new("model.safetensors"),
+    ];
+
+    /// <summary>Loads a Whisper pipeline from a HuggingFace repo, downloading <see cref="ModelFiles"/> into the
+    /// shared cache on first use.</summary>
     /// <param name="hfRepoId">Repo id, e.g. <c>"openai/whisper-tiny"</c>.</param>
     /// <param name="cfg">Override config; if null we infer it from the repo name
     /// (works for the standard OpenAI / distil-whisper releases).</param>
@@ -72,18 +86,11 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         WhisperConfig resolvedCfg = cfg ?? InferConfig(hfRepoId);
 
         string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
-        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", category: "stt", ct: ct);
-        Task<string> vocab = AudioModelCache.GetAsync(hfRepoId, "vocab.json", category: "stt", ct: ct);
-        Task<string> merges = AudioModelCache.GetAsync(hfRepoId, "merges.txt", category: "stt", ct: ct);
-        Task<string> config = AudioModelCache.GetAsync(hfRepoId, "config.json", category: "stt", ct: ct);
-        // added_tokens is optional — only multilingual checkpoints ship it.
-        Task<string> addedTokens = TryGetOptional(hfRepoId, "added_tokens.json", ct);
-        Task<string> tokenizerConfig = TryGetOptional(hfRepoId, "tokenizer_config.json", ct);
-        Task<string> generationConfig = TryGetOptional(hfRepoId, "generation_config.json", ct);
-        await Task.WhenAll(safetensors, vocab, merges, config, addedTokens, tokenizerConfig, generationConfig).ConfigureAwait(false);
+        IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+            .FetchAllAsync(hfRepoId, ModelFiles, category: "stt", ct: ct).ConfigureAwait(false);
 
         SafeTensorsLoader loader = new();
-        loader.Load(safetensors.Result);
+        loader.Load(fetched["model.safetensors"]);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         WhisperEncoder encoder = new(resolvedCfg);
@@ -294,12 +301,6 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             for (int f = 0; f < nFrames; f++)
                 dst[m * nFrames + f] = mel[m, f];
         return t;
-    }
-
-    private static async Task<string> TryGetOptional(string hfRepoId, string filename, CancellationToken ct)
-    {
-        try { return await AudioModelCache.GetAsync(hfRepoId, filename, category: "stt", ct: ct).ConfigureAwait(false); }
-        catch (FileNotFoundException) { return string.Empty; }
     }
 
     /// <summary>Infers a <see cref="WhisperConfig"/> from a HuggingFace repo name. Covers

@@ -45,6 +45,9 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Audio effects: stem separation and enhancement.</summary>
     IFxService Fx { get; }
 
+    /// <summary>Downloads a model's weights ahead of first use, for installers.</summary>
+    IModelPrefetchService ModelPrefetch { get; }
+
     /// <summary>Vision: embed / detect / segment.</summary>
     IVisionService Vision { get; }
 

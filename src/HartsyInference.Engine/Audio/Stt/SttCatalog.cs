@@ -41,6 +41,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor Whisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
+        ResolveFiles = _ => WhisperPipeline.ModelFiles,
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -56,6 +57,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor DistilWhisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveDistilWhisperRepo,
+        ResolveFiles = _ => WhisperPipeline.ModelFiles,
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -133,6 +135,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor WhisperStreaming { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
+        ResolveFiles = _ => WhisperPipeline.ModelFiles,
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);

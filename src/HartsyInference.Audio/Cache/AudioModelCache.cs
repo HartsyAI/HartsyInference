@@ -102,6 +102,90 @@ public static class AudioModelCache
         }
     }
 
+    /// <summary>Resolves every file in <paramref name="files"/>, downloading whatever is missing, and returns
+    /// them keyed by <see cref="AudioModelFile.Name"/>.
+    ///
+    /// <para>A pipeline's load path and its prefetch both go through this with the same list, which is what
+    /// keeps "installed" honest: a model cannot report a clean install and then fail to load on a file the
+    /// installer never fetched. Optional entries that the repo does not have are simply absent from the result.</para>
+    ///
+    /// <para>The required file listed LAST is fetched last on purpose. Presence of the primary artifact is what
+    /// the model scanner treats as "this model is installed", so it must not appear until its companions are
+    /// already on disk — otherwise an interrupted download leaves a model that looks selectable and cannot load.</para></summary>
+    /// <param name="progress">Reports each file as it completes, for install UIs.</param>
+    public static async Task<IReadOnlyDictionary<string, string>> FetchAllAsync(
+        string hfRepoId,
+        IReadOnlyList<AudioModelFile> files,
+        string category,
+        string revision = "main",
+        IProgress<AudioFetchProgress>? progress = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        Dictionary<string, string> resolved = new(StringComparer.Ordinal);
+        // Everything but the last required file downloads concurrently; the last one is awaited afterwards so
+        // it cannot land before its companions.
+        int lastRequired = -1;
+        for (int i = 0; i < files.Count; i++)
+        {
+            if (files[i].Required)
+            {
+                lastRequired = i;
+            }
+        }
+        List<(AudioModelFile File, Task<string?> Task)> pending = [];
+        for (int i = 0; i < files.Count; i++)
+        {
+            if (i == lastRequired)
+            {
+                continue;
+            }
+            pending.Add((files[i], FetchOneAsync(hfRepoId, files[i], category, revision, ct)));
+        }
+        int done = 0;
+        int total = files.Count;
+        foreach ((AudioModelFile file, Task<string?> task) in pending)
+        {
+            string? path = await task.ConfigureAwait(false);
+            done++;
+            if (path is not null)
+            {
+                resolved[file.Name] = path;
+                progress?.Report(new AudioFetchProgress(file.Name, done, total));
+            }
+        }
+        if (lastRequired >= 0)
+        {
+            AudioModelFile primary = files[lastRequired];
+            string? path = await FetchOneAsync(hfRepoId, primary, category, revision, ct).ConfigureAwait(false);
+            if (path is not null)
+            {
+                resolved[primary.Name] = path;
+            }
+            progress?.Report(new AudioFetchProgress(primary.Name, total, total));
+        }
+        return resolved;
+    }
+
+    private static async Task<string?> FetchOneAsync(string hfRepoId, AudioModelFile file, string category, string revision,
+        CancellationToken ct)
+    {
+        try
+        {
+            string path = await GetAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
+            if (file.Sha256 is not null)
+            {
+                VerifySha256(path, file.Sha256);
+            }
+            return path;
+        }
+        catch (Exception ex) when (!file.Required && ex is not OperationCanceledException)
+        {
+            Logs.Debug($"[AudioCache] Optional file '{file.Name}' not available in '{hfRepoId}': {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>Throws if <paramref name="filePath"/>'s SHA-256 does not match the pinned
     /// <paramref name="expectedHex"/> (case-insensitive). Used to verify a repacked single-file
     /// model against the hash recorded in its repack manifest.</summary>

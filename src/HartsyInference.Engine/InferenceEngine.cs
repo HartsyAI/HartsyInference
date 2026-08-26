@@ -43,6 +43,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<TranscribeService> _transcribe;
     private readonly Lazy<VoiceConversionService> _voiceConversion;
     private readonly Lazy<FxService> _fx;
+    private readonly Lazy<ModelPrefetchService> _modelPrefetch;
     private readonly Lazy<VisionService> _vision;
     private readonly Lazy<RestoreService> _restore;
     private readonly Lazy<MeshService> _mesh;
@@ -65,6 +66,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _transcribe = new Lazy<TranscribeService>(() => new TranscribeService(this));
         _voiceConversion = new Lazy<VoiceConversionService>(() => new VoiceConversionService(this));
         _fx = new Lazy<FxService>(() => new FxService(this));
+        _modelPrefetch = new Lazy<ModelPrefetchService>(() => new ModelPrefetchService(this));
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
@@ -119,6 +121,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IFxService Fx => _fx.Value;
+
+    /// <inheritdoc/>
+    public IModelPrefetchService ModelPrefetch => _modelPrefetch.Value;
 
     /// <inheritdoc/>
     public IVisionService Vision => _vision.Value;
