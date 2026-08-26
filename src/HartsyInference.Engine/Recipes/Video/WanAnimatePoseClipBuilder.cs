@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Detection;
@@ -49,7 +50,7 @@ internal static class WanAnimatePoseClipBuilder
     /// <summary>Writes the rendered skeletons as PPMs under <c>HARTSY_ANIMATE_POSE_DUMP</c>. The pose clip is the one driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as a model failure.</summary>
     private static void DumpSkeletons(byte[][] skeletons, int width, int height)
     {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_POSE_DUMP");
+        string? dir = EngineKnobs.AnimatePoseDump.Value;
         if (string.IsNullOrEmpty(dir)) return;
         try
         {

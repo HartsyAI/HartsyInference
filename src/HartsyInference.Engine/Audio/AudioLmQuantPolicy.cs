@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -9,7 +10,7 @@ internal static class AudioLmQuantPolicy
 
     internal static AudioLmQuant Resolve(bool sharded)
     {
-        string? env = Environment.GetEnvironmentVariable(EnvVar)?.Trim().ToLowerInvariant();
+        string? env = EngineKnobs.AudioLmQuant.Value?.Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(env))
         {
             return sharded ? AudioLmQuant.Off : AudioLmQuant.Q4K;

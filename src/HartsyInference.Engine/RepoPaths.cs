@@ -1,3 +1,5 @@
+using HartsyInference.Core.Configuration;
+
 namespace HartsyInference.Engine;
 
 /// <summary>Resolves the well-known roots (repo, models, output) once, honoring env overrides, so commands do not
@@ -8,7 +10,7 @@ public static class RepoPaths
     /// executable that contains <c>HartsyInference.sln</c>, else the current directory.</summary>
     public static string RepoRoot()
     {
-        string? overridden = Environment.GetEnvironmentVariable("HARTSYINFERENCE_REPO_ROOT");
+        string? overridden = EngineKnobs.RepoRoot.Value;
         if (!string.IsNullOrEmpty(overridden) && Directory.Exists(overridden))
             return Path.GetFullPath(overridden);
 
@@ -27,11 +29,11 @@ public static class RepoPaths
 
     /// <summary>The models root: the <c>HARTSYINFERENCE_MODELS</c> override, else <c>&lt;repo&gt;/Models</c>.</summary>
     public static string ModelsRoot() =>
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS") is { Length: > 0 } m ? Path.GetFullPath(m)
+        EngineKnobs.ModelsRoot.Value is { Length: > 0 } m ? Path.GetFullPath(m)
             : Path.Combine(RepoRoot(), "Models");
 
     /// <summary>The output root: the <c>HARTSYINFERENCE_OUTPUT</c> override, else <c>&lt;repo&gt;/Output</c>.</summary>
     public static string OutputRoot() =>
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_OUTPUT") is { Length: > 0 } o ? Path.GetFullPath(o)
+        EngineKnobs.OutputRoot.Value is { Length: > 0 } o ? Path.GetFullPath(o)
             : Path.Combine(RepoRoot(), "Output");
 }

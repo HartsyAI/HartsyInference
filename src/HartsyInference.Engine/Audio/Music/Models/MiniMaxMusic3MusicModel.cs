@@ -3,8 +3,8 @@ using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -116,7 +116,7 @@ internal static class MiniMaxMusic3MusicModel
             MiniMaxMusic3WeightPolicy.PrepareLanguageModel(languageWeights, repo, quant, out IDisposable? quantCache);
         // HARTSY_MM3_DEPTH_QUANT=0 leaves the depth decoder at checkpoint precision, so its share of the
         // autoregressive stage can be measured independently of the language model's.
-        string? depthQuant = EnvSwitch.IsEnabled("HARTSY_MM3_DEPTH_QUANT", defaultOn: true) ? quant : null;
+        string? depthQuant = EngineKnobs.Mm3DepthQuant.Value ? quant : null;
         IReadOnlyDictionary<string, Tensor> preparedDepth =
             MiniMaxMusic3WeightPolicy.PrepareDepthDecoder(depthWeights, repo, depthQuant, out IDisposable? depthQuantCache);
         IReadOnlyDictionary<string, Tensor> preparedDit =

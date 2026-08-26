@@ -1,5 +1,6 @@
 using System.Linq;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Dispatch;
@@ -279,7 +280,7 @@ public sealed class VisionService : IVisionService, IDisposable
         Tensor pixels = NormalBaePreprocessor.Preprocess(resized, w, h);
         try
         {
-            bool probe = Environment.GetEnvironmentVariable("HARTSY_VISION_PROBE") == "1";
+            bool probe = EngineKnobs.VisionProbe.Value;
             Tensor normals = model.Forward(Backend, pixels, probe ? ProbeStats : null);
             try
             {
@@ -332,7 +333,7 @@ public sealed class VisionService : IVisionService, IDisposable
         Tensor pixels = UperNetSegPreprocessor.Preprocess(resized, size, size);
         try
         {
-            bool probe = Environment.GetEnvironmentVariable("HARTSY_VISION_PROBE") == "1";
+            bool probe = EngineKnobs.VisionProbe.Value;
             Tensor logits = model.Forward(Backend, pixels, probe ? ProbeStats : null);
             try
             {

@@ -1,6 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -138,14 +138,14 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // (LtxVideo25TemporalChunks), exact rather than blended, so the geometry ceiling is gone and
             // 768x512x97f decodes. It stays opt-in on cost, not correctness: ~40x the conv decoder at matched
             // geometry (12.9 s vs 2.878 s at 768x512x97f).
-            bool wantDiffusionVae = EnvSwitch.IsEnabled("HARTSY_LTX2_DIFFUSION_VAE", defaultOn: false);
+            bool wantDiffusionVae = EngineKnobs.Ltx2DiffusionVae.Value;
             bool haveConvDecoder = conv.Vae.ContainsKey("decoder.conv_in.conv.weight");
             LtxVideo25DiffusionDecoder? diffusionVae = null;
             if (conv.VaeDiffusionDecoder.Count > 0 && wantDiffusionVae)
             {
                 // Pinning the budget pins the chunk PLAN, and decode time is a function of the plan — so an A/B or a
                 // reproducible benchmark row needs this, and so does proving a plan change leaves the pixels alone.
-                long chunkMb = Math.Max(0, EnvSwitch.GetLong("HARTSY_LTX25_VAE_CHUNK_MB", 0));
+                long chunkMb = Math.Max(0, EngineKnobs.Ltx25VaeChunkMb.Value);
                 diffusionVae = chunkMb > 0
                     ? new LtxVideo25DiffusionDecoder(new LtxVideo25DiffusionDecoderConfig { ChunkWorkspaceBytes = chunkMb << 20 })
                     : new LtxVideo25DiffusionDecoder();
@@ -297,7 +297,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration, so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c> (auto-downloaded when absent).</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
-        if (!EnvSwitch.IsEnabled("HARTSY_LTX2_TWO_STAGE", defaultOn: config.TwoStage))
+        if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
         {
             return null;
         }
@@ -307,7 +307,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 + "the two-stage sigma schedule and upsample point are only documented for ltx-2.5-distilled. Running single-pass.");
             return null;
         }
-        string? named = Environment.GetEnvironmentVariable("HARTSY_LTX2_UPSAMPLER") is { Length: > 0 } n ? n : null;
+        string? named = EngineKnobs.Ltx2Upsampler.Value is { Length: > 0 } n ? n : null;
         string requested = named ?? DefaultLatentUpsamplerFile;
         // The folder scan is DISCOVERY for the default name only. Falling back to it when the caller named a file
         // would load a different upsampler than the one they asked for, with only an Info line to notice. When

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -17,7 +18,7 @@ internal sealed class AudioRuntime
 
     /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the machine, so the floor is generous. Override via HARTSY_AUDIO_EVICT_BELOW_GB. Host RAM is process-wide, so with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM floor below is genuinely per-device.</summary>
     private static readonly long EvictBelowAvailableKb =
-        (long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUDIO_EVICT_BELOW_GB"), out long gb) && gb > 0 ? gb : 14L) * 1024 * 1024;
+        EngineKnobs.AudioEvictBelowGb.Value * 1024 * 1024;
 
     /// <summary>Free-VRAM floor: a prior model's promoted weights can hold most of the card, so the next model would OOM at load even with plenty of host RAM free.</summary>
     private const long EvictBelowFreeVramBytes = 3L * 1024 * 1024 * 1024;

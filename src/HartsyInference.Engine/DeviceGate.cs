@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 
 namespace HartsyInference.Engine;
 
@@ -10,7 +11,7 @@ namespace HartsyInference.Engine;
 /// gates. <c>HARTSY_SAME_GPU_CONCURRENT=1</c> disables the gate once the concurrency milestone lands/soaks.</summary>
 public static class DeviceGate
 {
-    private static readonly bool _concurrent = Environment.GetEnvironmentVariable("HARTSY_SAME_GPU_CONCURRENT") == "1";
+    private static readonly bool _concurrent = EngineKnobs.SameGpuConcurrent.Value;
     private static readonly ConcurrentDictionary<int, SemaphoreSlim> _gates = new();
     private static readonly IDisposable _noop = new NoopReleaser();
 

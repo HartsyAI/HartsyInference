@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -115,7 +116,7 @@ public sealed class RestoreService : IRestoreService
             // BF16 VAE activations on CUDA (reference precision): halves the fp32 activation peak that
             // OOMs 24 GB at 720p-area. HARTSY_SEEDVR2_VAE_F32=1 is the kill-switch back to full precision.
             bool vaeBf16 = _engine.Backend.Device.IsCuda
-                && Environment.GetEnvironmentVariable("HARTSY_SEEDVR2_VAE_F32") != "1";
+                && !EngineKnobs.Seedvr2VaeF32.Value;
             SeedVr2VaeConfig vaeConfig = SeedVr2VaeConfig.Default with
             {
                 ActivationDType = vaeBf16 ? DType.BF16 : DType.F32,
