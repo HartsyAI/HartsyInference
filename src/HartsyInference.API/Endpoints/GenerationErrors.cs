@@ -16,6 +16,9 @@ internal static class GenerationErrors
         HartsyInferenceException => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error"),
         // Checkpoint resolved but no recipe is lifted into the Engine for that family yet.
         NotSupportedException => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status501NotImplemented, ex.Message, "invalid_request_error"),
+        // A malformed request.settings block: unknown id, unparsable value, or a setting that binds at model load
+        // and so cannot be changed per request. All three are the caller's to fix.
+        ArgumentException => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error"),
         _ => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status500InternalServerError, ex.Message, "server_error"),
     };
 }
