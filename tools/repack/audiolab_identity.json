@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "_comment": "Identity contract for AudioLab audio artifacts. Maps a staged path (category/family/variant) to the SAI ModelSpec architecture SwarmUI classifies on, plus the hartsy.* fields the extension's projection matches against. 'architecture' MUST be AudioLab's per-variant ModelClassId (not the provider id) — the extension's archToCategory param-gating map is keyed on class id, and several families override it per variant. Verified against the running SwarmUI's ListModels output on 2026-08-25.",
+  "families": {
+    "stt/whisper": {
+      "provider_id": "whisper_stt", "engine_id": "whisper", "prefix": "Whisper",
+      "architecture": "whisper_stt", "author": "OpenAI", "license": "apache-2.0",
+      "primary": "model.safetensors"
+    },
+    "stt/whisper-streaming": {
+      "provider_id": "whisperstreaming_stt", "engine_id": "whisper", "prefix": "WhisperStreaming",
+      "architecture": "whisperstreaming_stt", "author": "OpenAI", "license": "apache-2.0",
+      "primary": "model.safetensors",
+      "alias_of": "stt/whisper/base",
+      "_comment": "Backed by the Whisper base artifact — the projection admits on artifact identity so this row still resolves."
+    },
+    "stt/distil-whisper": {
+      "provider_id": "distilwhisper_stt", "engine_id": "distilwhisper", "prefix": "DistilWhisper",
+      "architecture": "distilwhisper_stt", "author": "Hugging Face", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "stt/moonshine": {
+      "provider_id": "moonshine_stt", "engine_id": "moonshine", "prefix": "Moonshine",
+      "architecture": "moonshine_stt", "author": "Useful Sensors", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "stt/moonshine-streaming": {
+      "provider_id": "moonshinestreaming_stt", "engine_id": "moonshine", "prefix": "MoonshineStreaming",
+      "architecture": "moonshinestreaming_stt", "author": "Useful Sensors", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "stt/kyutai-stt": {
+      "provider_id": "kyutaistt_stt", "engine_id": "kyutaistt", "prefix": "KyutaiSTT",
+      "architecture": "kyutaistt_stt", "author": "Kyutai", "license": "cc-by-4.0",
+      "primary": "model.safetensors"
+    },
+    "tts/vibevoice": {
+      "provider_id": "vibevoice_tts", "engine_id": "vibevoice", "prefix": "VibeVoice",
+      "architecture": "vibevoice_tts", "author": "Microsoft", "license": "mit",
+      "primary": "model-00001-of-*.safetensors"
+    },
+    "tts/kokoro": {
+      "provider_id": "kokoro_tts", "engine_id": "kokoro", "prefix": "Kokoro",
+      "architecture": "kokoro_tts", "author": "hexgrad", "license": "apache-2.0",
+      "primary": "kokoro-82m.safetensors",
+      "components": { "voices/*.safetensors": "voice" }
+    },
+    "tts/bark": {
+      "provider_id": "bark_tts", "engine_id": "bark", "prefix": "Bark",
+      "architecture": "bark_tts", "author": "Suno", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "tts/dia": {
+      "provider_id": "dia_tts", "engine_id": "dia", "prefix": "Dia",
+      "architecture": "dia_tts", "author": "Nari Labs", "license": "apache-2.0",
+      "primary": "model.safetensors",
+      "components": { "dac.safetensors": "codec" }
+    },
+    "tts/orpheus": {
+      "provider_id": "orpheus_tts", "engine_id": "orpheus", "prefix": "Orpheus",
+      "architecture": "orpheus_tts", "author": "Canopy Labs", "license": "apache-2.0",
+      "primary": "model/model-00001-of-*.safetensors",
+      "components": { "snac/model.safetensors": "codec" }
+    },
+    "tts/csm": {
+      "provider_id": "csm_tts", "engine_id": "csm", "prefix": "CSM",
+      "architecture": "csm_tts", "author": "Sesame", "license": "apache-2.0",
+      "primary": "model.safetensors"
+    },
+    "tts/neutts": {
+      "provider_id": "neutts_tts", "engine_id": "neutts", "prefix": "NeuTTS",
+      "architecture": "neutts_tts", "author": "Neuphonic", "license": "gated-review-required",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "tts/fish-speech": {
+      "provider_id": "fishspeech_tts", "engine_id": "fishspeech", "prefix": "FishSpeech",
+      "architecture": "fishspeech_tts", "author": "Fish Audio", "license": "review-required",
+      "primary": "model.safetensors",
+      "components": { "codec.safetensors": "codec" }, "upload_allowed": false
+    },
+    "tts/cosyvoice2": {
+      "provider_id": "cosyvoice_tts", "engine_id": "cosyvoice", "prefix": "CosyVoice",
+      "architecture": "cosyvoice_tts", "author": "Alibaba FunAudioLLM", "license": "apache-2.0",
+      "primary": "llm.safetensors",
+      "components": { "flow.safetensors": "flow", "hift.safetensors": "vocoder", "s3gen.safetensors": "codec" }
+    },
+    "tts/f5-tts": {
+      "provider_id": "f5_tts", "engine_id": "f5", "prefix": "F5TTS",
+      "architecture": "f5_tts", "author": "SWivid", "license": "cc-by-nc-4.0",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "tts/zipvoice": {
+      "provider_id": "zipvoice_tts", "engine_id": "zipvoice", "prefix": "ZipVoice",
+      "architecture": "zipvoice_tts", "author": "k2-fsa", "license": "apache-2.0",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "tts/qwen3-tts": {
+      "provider_id": "qwen3_tts", "engine_id": "qwen3tts", "prefix": "Qwen3TTS",
+      "architecture": "qwen3_tts", "author": "Alibaba Qwen", "license": "apache-2.0",
+      "primary": "model.safetensors",
+      "variant_architecture": {
+        "0.6b-base": "qwen3_tts_clone", "1.7b-base": "qwen3_tts_clone",
+        "0.6b-customvoice": "qwen3_tts_custom", "1.7b-customvoice": "qwen3_tts_custom",
+        "1.7b-voicedesign": "qwen3_tts_design"
+      },
+      "variant_id": {
+        "0.6b-base": "0.6B-Base", "1.7b-base": "1.7B-Base",
+        "0.6b-customvoice": "0.6B-CustomVoice", "1.7b-customvoice": "1.7B-CustomVoice",
+        "1.7b-voicedesign": "1.7B-VoiceDesign"
+      }
+    },
+    "tts/chatterbox": {
+      "provider_id": "chatterbox_tts", "engine_id": "chatterbox", "prefix": "Chatterbox",
+      "architecture": "chatterbox_tts", "author": "Resemble AI", "license": "mit",
+      "primary": "t3_cfg.safetensors",
+      "components": { "s3gen.safetensors": "codec", "ve.safetensors": "voice-encoder" }
+    },
+    "tts/kyutai-tts": {
+      "provider_id": "kyutaitts_tts", "engine_id": "kyutaitts", "prefix": "KyutaiTTS",
+      "architecture": "kyutaitts_tts", "author": "Kyutai", "license": "cc-by-4.0",
+      "primary": "dsm_tts_*.safetensors",
+      "components": { "tokenizer-*.safetensors": "tokenizer" }
+    },
+    "tts/piper": {
+      "provider_id": "piper_tts", "engine_id": "piper", "prefix": "Piper",
+      "architecture": "piper_tts", "author": "Rhasspy", "license": "mit",
+      "primary": "*.onnx", "format": "onnx",
+      "_comment": "ONNX is not scanned by SwarmUI core today — Piper stays virtual until the Phase 5 extension-list opt-in.",
+      "variant_id": { "*": "default" }
+    },
+    "tts/melotts": {
+      "provider_id": "melotts_tts", "engine_id": "melotts", "prefix": "MeloTTS",
+      "architecture": "melotts_tts", "author": "MyShell", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "tts/spark-tts": {
+      "provider_id": "sparktts_tts", "engine_id": "sparktts", "prefix": "SparkTTS",
+      "architecture": "sparktts_tts", "author": "SparkAudio", "license": "cc-by-nc-sa-4.0",
+      "primary": "model.safetensors", "upload_allowed": false,
+      "variant_id": { "0.5b": "0.5B" }
+    },
+    "tts/pocket-tts": {
+      "provider_id": "pockettts_tts", "engine_id": "pockettts", "prefix": "PocketTTS",
+      "architecture": "pockettts_tts", "author": "Pocket", "license": "apache-2.0",
+      "primary": "model.safetensors"
+    },
+    "tts/styletts2": {
+      "provider_id": "styletts2_tts", "engine_id": "styletts2", "prefix": "StyleTTS2",
+      "architecture": "styletts2_tts", "author": "yl4579", "license": "mit",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "tts/zonos": {
+      "provider_id": "zonos_tts", "engine_id": "zonos", "prefix": "Zonos",
+      "architecture": "zonos_tts", "author": "Zyphra", "license": "apache-2.0",
+      "primary": "model.safetensors"
+    },
+    "tts/gpt-sovits": {
+      "provider_id": "gptsovits_clone", "engine_id": "gptsovits", "prefix": "GPTSoVITS",
+      "architecture": "gptsovits_clone", "author": "RVC-Boss", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "music/ace-step-1.5": {
+      "provider_id": "acestep_music", "engine_id": "acestep", "prefix": "AceStep",
+      "architecture": "acestep_music", "author": "ACE Studio", "license": "apache-2.0",
+      "primary": "model.safetensors",
+      "variant_architecture": {
+        "turbo": "acestep_music_turbo", "turbo-shift1": "acestep_music_turbo",
+        "turbo-shift3": "acestep_music_turbo", "turbo-continuous": "acestep_music_turbo",
+        "xl-turbo": "acestep_music_turbo"
+      },
+      "shared_components": {
+        "_shared/vae/ace_1.5_vae.safetensors": "vae",
+        "_shared/qwen-embedding/model.safetensors": "text-encoder",
+        "_shared/silence_latent.safetensors": "latent"
+      },
+      "_comment": "Core SwarmUI already owns an 'ace-step-1_5' class that matches ACE-Step by tensor heuristic. Embedded architecture wins (metadata is checked before predicates), so stamping is what keeps these routed to AudioLab rather than core's class."
+    },
+    "music/yue": {
+      "provider_id": "yue_music", "engine_id": "yue", "prefix": "YuE",
+      "architecture": "yue_music", "author": "m-a-p", "license": "apache-2.0",
+      "primary": "model-00001-of-*.safetensors",
+      "shared_components": { "_shared/xcodec.safetensors": "codec" }
+    },
+    "music/heartmula": {
+      "provider_id": "heartlib_music", "engine_id": "heartmula", "prefix": "HeartLib",
+      "architecture": "heartlib_music", "author": "HeartMuLa", "license": "apache-2.0",
+      "primary": "model-00001-of-*.safetensors",
+      "shared_components": { "_shared-heartcodec/model-*.safetensors": "codec" },
+      "variant_id": { "3b-base-bf16": "3b-base", "3b-hny-bf16": "3b-hny", "3b-rl-bf16": "3b-rl" },
+      "_comment": "q8/q4 variants are an on-device conversion cache of the bf16 weights, not a separate download — their catalog rows are backed by the bf16 artifact and carried by EngineConfig['quant']."
+    },
+    "music/musicgen": {
+      "provider_id": "musicgen_music", "engine_id": "musicgen", "prefix": "MusicGen",
+      "architecture": "musicgen_music", "author": "Meta", "license": "cc-by-nc-4.0",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "music/audiogen": {
+      "provider_id": "audiogen_sfx", "engine_id": "audiogen", "prefix": "AudioGen",
+      "architecture": "audiogen_sfx", "author": "Meta", "license": "cc-by-nc-4.0",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "music/stable-audio-open-small": {
+      "provider_id": "stableaudio_music", "engine_id": "stableaudio", "prefix": "StableAudio",
+      "architecture": "stableaudio_music", "author": "Stability AI", "license": "stability-community",
+      "primary": "model.safetensors", "upload_allowed": false
+    },
+    "vc/rvc": {
+      "provider_id": "rvc_clone", "engine_id": "rvc", "prefix": "RVC",
+      "architecture": "rvc_clone", "author": "RVC-Project", "license": "mit",
+      "primary": "model.safetensors",
+      "shared_components": { "shared/contentvec.safetensors": "feature-extractor", "shared/rmvpe.safetensors": "pitch-extractor" },
+      "_comment": "The selectable RVC model is user-supplied; only the shared feature/pitch extractors are shipped."
+    },
+    "vc/openvoice": {
+      "provider_id": "openvoice_clone", "engine_id": "openvoice", "prefix": "OpenVoice",
+      "architecture": "openvoice_clone", "author": "MyShell", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "fx/demucs": {
+      "provider_id": "demucs_fx", "engine_id": "demucs", "prefix": "Demucs",
+      "architecture": "demucs_fx", "author": "Meta", "license": "mit",
+      "primary": "model.safetensors"
+    },
+    "fx/resemble-enhance": {
+      "provider_id": "resemble_enhance_fx", "engine_id": "resembleenhance", "prefix": "ResembleEnhance",
+      "architecture": "resemble_enhance_fx", "author": "Resemble AI", "license": "mit",
+      "primary": "model.safetensors",
+      "shared_components": { "_shared/model.safetensors": "enhancer" }
+    }
+  }
+}
