@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -245,7 +246,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 
         (int pt2, int ph2, int pw2) = _config.PatchSize;
         long tokenLoad = (long)(tTotal / pt2) * (hLat / ph2) * (wLat / pw2);
-        long headroomBytes = Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE_HEADROOM_MB", 3072) * 1024 * 1024,
+        long headroomBytes = Math.Max(EngineKnobs.AnimateHeadroomMb.Value * 1024 * 1024,
             tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
         BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
         {

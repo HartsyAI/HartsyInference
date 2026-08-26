@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -142,12 +143,12 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
         scheduler.SetTimesteps(steps, shift);
 
-        bool wanDebug = Environment.GetEnvironmentVariable("HARTSY_WAN_DEBUG") == "1";
+        bool wanDebug = EngineKnobs.WanDebug.Value;
         // Text-only CFG: run the SAME audio on both branches so guidance steers text adherence without pushing the
         // sample away from the audio contribution. The reference zeroes the negative branch's audio, but our
         // silence-audio uncond darkens the output roughly linearly in (cfg−1) until the numeric parity of that path
         // is settled — this mode is the usable interim for cfg>2 (HARTSY_S2V_TEXT_CFG=1).
-        bool textOnlyCfg = Environment.GetEnvironmentVariable("HARTSY_S2V_TEXT_CFG") == "1";
+        bool textOnlyCfg = EngineKnobs.S2vTextCfg.Value;
         Tensor uncondLocal = textOnlyCfg ? audioLocalC : audioLocalU;
         Tensor uncondGlobal = textOnlyCfg ? audioGlobalC : audioGlobalU;
         for (int k = 0; k < steps; k++)
@@ -178,7 +179,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             // vs trim OFF 4.23 s/step / 169 retries — beside a near-capacity pool the per-step trim PREVENTS the
             // allocation-retry stalls, it is not merely an OOM band-aid. WAN_S2V_TRIM=0 skips it for A/Bs.
             Backend.FreeActivations();
-            if (Environment.GetEnvironmentVariable("WAN_S2V_TRIM") != "0")
+            if (EngineKnobs.WanS2vTrim.Value)
                 Backend.TrimMemoryPool();
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-free   free={Backend.FreeMemoryBytes() >> 20}MB");
         }

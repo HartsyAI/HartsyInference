@@ -104,14 +104,7 @@ src/HartsyInference.ThreeD/Models/Hunyuan3D/Hunyuan3DDebugDump.cs 1
 src/HartsyInference.ThreeD/Models/Hunyuan3D/Hunyuan3DShapeVae.cs 1
 src/HartsyInference.ThreeD/Pipelines/Hunyuan3DShapePipeline.cs 1
 src/HartsyInference.ThreeD/Pipelines/TripoSrPipeline.cs 1
-src/HartsyInference.Video/Pipelines/LtxVideo2Pipeline.cs 6
-src/HartsyInference.Video/Pipelines/LtxVideoPipeline.cs 2
-src/HartsyInference.Video/Pipelines/MiniMaxH3Pipeline.cs 2
 src/HartsyInference.Video/Pipelines/WanAnimate2DrivingCachePolicy.cs 1
-src/HartsyInference.Video/Pipelines/WanAnimate2Pipeline.cs 1
-src/HartsyInference.Video/Pipelines/WanAnimatePipeline.cs 1
-src/HartsyInference.Video/Pipelines/WanS2VPipeline.cs 3
-src/HartsyInference.Video/Pipelines/WanVideoPipeline.cs 4
 src/HartsyInference.Vulkan/VulkanBackend.cs 7
 src/HartsyInference.Vulkan/VulkanDevice.cs 1
 src/HartsyInference.Vulkan/VulkanGpuTransferHelper.cs 1

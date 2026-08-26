@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -68,7 +69,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
     /// placed — the exact quantity <see cref="GenerateChunk"/> hands to <see cref="BlockStreamingScope"/>, shared so
     /// the recipe's up-front dtype decision and the chunk's placement cannot disagree.</summary>
     public static long ActivationReserveBytes(long tokenLoad) =>
-        Math.Max(EnvSwitch.GetLong("HARTSY_ANIMATE2_HEADROOM_MB", 3072) * 1024 * 1024,
+        Math.Max(EngineKnobs.Animate2HeadroomMb.Value * 1024 * 1024,
             tokenLoad * ActivationBytesPerToken + FixedHeadroomBytes);
 
     /// <summary>Weights that must sit on the device even with every block streamed: the shared (non-block) weights

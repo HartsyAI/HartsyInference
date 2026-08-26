@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
@@ -75,7 +76,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     // (scheduler writes latents host-side; velocity is host-coherent per the working Flux/Lance pattern). Identical
     // velocity stats across steps ⇒ the GPU is re-reading a stale (frozen) latent input; NaN/inf or exploding
     // magnitudes ⇒ transformer/scheduler math. See memory wan22-video-first-run-state.
-    private static readonly bool WanDebug = Environment.GetEnvironmentVariable("HARTSY_WAN_DEBUG") == "1";
+    private static readonly bool WanDebug = EngineKnobs.WanDebug.Value;
     private static void DumpStats(string tag, Tensor t)
     {
         if (!WanDebug) return;
@@ -300,7 +301,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // VALIDATION-PENDING: Wan 2.2 ships UniPCMultistepScheduler (solver_order=2, bh2, predict_x0=true,
         // use_flow_sigmas=true, time_shift_type="exponential"); verify the UniPC sigma grid + bh2 update-coefficients
         // against diffusers WanPipeline at the configured step count (e.g. 50).
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: EngineKnobs.WanSolverOrder.Value);
         scheduler.SetTimesteps(steps, shift);
         float[]? frameTs = (firstFrameLatent is null && lastFrameLatent is null) ? null : new float[tLat];
 
@@ -657,7 +658,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
         // shift) — verify the I2V concat path's UniPC trajectory vs diffusers WanImageToVideoPipeline.
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: EngineKnobs.WanSolverOrder.Value);
         scheduler.SetTimesteps(steps, shift);
 
         for (int k = 0; k < steps; k++)
@@ -774,7 +775,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // history starts at step 0; a mid-trajectory start (startStep > 0) needs the diffusers
         // begin_index / init-timestep handling to seed the history correctly. Match WanVideoPipeline.RunDenoise once
         // the partial-trajectory UniPC start is designed + verified vs diffusers WanVideoToVideoPipeline.
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: EngineKnobs.WanSolverOrder.Value);
         scheduler.SetTimesteps(steps, shift);
         float sigma0 = scheduler.Sigmas[startStep];
         Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);

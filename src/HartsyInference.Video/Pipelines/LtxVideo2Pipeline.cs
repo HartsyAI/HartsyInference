@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using System.Globalization;
 using HartsyInference.Core.Backends;
@@ -190,7 +191,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // seed and geometry, the 2-4 kHz dynamic range is 39.5 dB ancestral against 47.8 dB plain, and the noise
         // floor -5.6 dB against -14.2 dB. Three ancestral injections is enough to leave a broadband bed the 3-step
         // refine cannot re-absorb. Plain Euler is the default in both arms; HARTSY_LTX2_ANCESTRAL=1 opts back in.
-        bool ancestral = EnvSwitch.IsEnabled("HARTSY_LTX2_ANCESTRAL", defaultOn: _config.EulerAncestral);
+        bool ancestral = EngineKnobs.Ltx2Ancestral.Value ?? _config.EulerAncestral;
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps}{(twoStage ? $"+{refineSteps}" : "")} steps, " +
             $"cfg={guidance}, seed={seed} (video {tLat}x{(twoStage ? hLatStage1 : hLat)}x{(twoStage ? wLatStage1 : wLat)}" +
@@ -287,7 +288,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             Backend = Backend,
             Denoiser = _transformer,
             ModelName = "LTX-2",
-            HeadroomBytes = EnvSwitch.GetLong("HARTSY_LTX2_HEADROOM_MB", 3072) * 1024 * 1024,
+            HeadroomBytes = EngineKnobs.Ltx2HeadroomMb.Value * 1024 * 1024,
             TokenLoad = (long)sv + audioFrames,
             Pin = _prefixPin,
             PerStepTrim = false,
@@ -765,7 +766,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// cref="LtxVideo2Config.ShiftMaxTokens"/> (or <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>, which wins) caps it.</summary>
     internal static int ShiftTokens(int videoTokens, LtxVideo2Config config)
     {
-        int cap = EnvSwitch.GetInt("HARTSY_LTX2_SHIFT_MAX_TOKENS", config.ShiftMaxTokens);
+        int cap = EngineKnobs.Ltx2ShiftMaxTokens.Value ?? config.ShiftMaxTokens;
         return cap > 0 && videoTokens > cap ? cap : videoTokens;
     }
 
@@ -777,7 +778,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// count fed here (4096 reproduces diffusers' constant 7.768).</summary>
     internal static float ComputeShift(int videoTokens, LtxVideo2Config config)
     {
-        float direct = EnvSwitch.GetFloat("HARTSY_LTX2_SHIFT", config.ShiftOverride);
+        float direct = EngineKnobs.Ltx2Shift.Value ?? config.ShiftOverride;
         return direct > 0f ? direct : FormulaShift(ShiftTokens(videoTokens, config));
     }
 
@@ -845,7 +846,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <c>HARTSY_LTX2_AUDIO_DUMP</c>; no-op when unset. Lets the reference implementation decode OUR tensors.</summary>
     private static void DumpTensor(string name, Tensor tensor)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_AUDIO_DUMP") is not { Length: > 0 } dir)
+        if (EngineKnobs.Ltx2AudioDump.Value is not { Length: > 0 } dir)
         {
             return;
         }
@@ -865,7 +866,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
     private static void ProbeTensor(string label, Tensor tensor)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") != "1")
+        if (!EngineKnobs.Ltx2Probe.Value)
         {
             return;
         }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -207,8 +208,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Tensor stepLatent = condCache is null ? _transformer.PrepareGraphLatent(Backend, latents) : latents;
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
-        string? diagFile = Environment.GetEnvironmentVariable("LTX_DIAG_FILE");
-        bool dbg = diagFile is not null || Environment.GetEnvironmentVariable("LTX_DIAG") == "1";
+        string? diagFile = EngineKnobs.LtxDiagFile.Value;
+        bool dbg = diagFile is not null || EngineKnobs.LtxDiag.Value;
         void Diag(string m) { Logs.Info(m); if (diagFile is not null) File.AppendAllText(diagFile, m + "\n"); }
         if (dbg) Diag($"[LTX-DIAG] promptEmbeds {Stat(promptEmbeds)} | negEmbeds {Stat(negativeEmbeds)} | initLatent {Stat(latents)}");
 
