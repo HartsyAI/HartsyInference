@@ -42,19 +42,25 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
         _loader = loader;
     }
 
-    /// <summary>Loads a streaming Moonshine pipeline from a HuggingFace repo. Auto-downloads
-    /// model.safetensors and tokenizer.json on first use.</summary>
+    /// <summary>Files a streaming-Moonshine repo contributes. Unlike the batch pipeline this family infers its
+    /// config from the repo name and never reads config.json, so the list is deliberately shorter.</summary>
+    public static IReadOnlyList<AudioModelFile> ModelFiles { get; } =
+    [
+        new("tokenizer.json"),
+        new("model.safetensors"),
+    ];
+
+    /// <summary>Loads a streaming Moonshine pipeline, downloading <see cref="ModelFiles"/> on first use.</summary>
     public static async Task<MoonshineStreamingPipeline> LoadAsync(string hfRepoId, MoonshineConfig? cfg = null, CancellationToken ct = default)
     {
         MoonshineConfig resolved = cfg ?? InferConfig(hfRepoId);
         string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
 
-        Task<string> safetensors = AudioModelCache.GetAsync(hfRepoId, "model.safetensors", category: "stt", ct: ct);
-        Task<string> tokenizerJson = AudioModelCache.GetAsync(hfRepoId, "tokenizer.json", category: "stt", ct: ct);
-        await Task.WhenAll(safetensors, tokenizerJson).ConfigureAwait(false);
+        IReadOnlyDictionary<string, string> fetched = await AudioModelCache
+            .FetchAllAsync(hfRepoId, ModelFiles, category: "stt", ct: ct).ConfigureAwait(false);
 
         SafeTensorsLoader loader = new();
-        loader.Load(safetensors.Result);
+        loader.Load(fetched["model.safetensors"]);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         MoonshineStreamingEncoder encoder = new(resolved);

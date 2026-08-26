@@ -41,7 +41,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor Whisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
-        ResolveFiles = _ => WhisperPipeline.ModelFiles,
+        ResolveFiles = (_, _) => Task.FromResult(WhisperPipeline.ModelFiles),
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -57,7 +57,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor DistilWhisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveDistilWhisperRepo,
-        ResolveFiles = _ => WhisperPipeline.ModelFiles,
+        ResolveFiles = (_, _) => Task.FromResult(WhisperPipeline.ModelFiles),
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -73,6 +73,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor Moonshine { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveMoonshineRepo,
+        ResolveFiles = (_, _) => Task.FromResult(MoonshinePipeline.ModelFiles),
         LoadAsync = async (repo, cancel) =>
         {
             MoonshinePipeline pipeline = await MoonshinePipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -84,6 +85,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor MoonshineStreaming { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveMoonshineStreamingRepo,
+        ResolveFiles = (_, _) => Task.FromResult(MoonshineStreamingPipeline.ModelFiles),
         LoadAsync = async (repo, cancel) =>
         {
             MoonshineStreamingPipeline pipeline = await MoonshineStreamingPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
@@ -104,6 +106,17 @@ internal static class SttCatalog
                 return id;
             }
             return id.Contains("1b", StringComparison.OrdinalIgnoreCase) ? "kyutai/stt-1b-en_fr-trfs" : "kyutai/stt-2.6b-en-trfs";
+        },
+        ResolveFiles = async (variant, cancel) =>
+        {
+            bool small = (variant ?? string.Empty).Contains("1b", StringComparison.OrdinalIgnoreCase);
+            string repo = small ? "kyutai/stt-1b-en_fr-trfs" : "kyutai/stt-2.6b-en-trfs";
+            (string spmRepo, string spmFile) = small ? ("kyutai/stt-1b-en_fr", "tokenizer_en_fr_audio_8000.model")
+                : ("kyutai/stt-2.6b-en", "tokenizer_en_audio_4000.model");
+            // Tokenizer first, weights after, so the checkpoint is never the first thing on disk.
+            List<AudioModelFile> files = [new AudioModelFile(spmFile, Repo: spmRepo)];
+            files.AddRange(await AudioCheckpoints.ResolveCheckpointFilesAsync(repo, "stt", cancel).ConfigureAwait(false));
+            return files;
         },
         LoadAsync = async (repo, cancel) =>
         {
@@ -135,7 +148,7 @@ internal static class SttCatalog
     internal static SttModelDescriptor WhisperStreaming { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
-        ResolveFiles = _ => WhisperPipeline.ModelFiles,
+        ResolveFiles = (_, _) => Task.FromResult(WhisperPipeline.ModelFiles),
         LoadAsync = async (repo, cancel) =>
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);

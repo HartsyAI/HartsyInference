@@ -52,7 +52,7 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             return ModelPrefetchResult.Unsupported(selector.Id, "its weight list is still implicit in the load path");
         }
         string repo = descriptor.ResolveRepo(selector.Variant);
-        IReadOnlyList<AudioModelFile> files = descriptor.ResolveFiles(selector.Variant);
+        IReadOnlyList<AudioModelFile> files = await descriptor.ResolveFiles(selector.Variant, cancel).ConfigureAwait(false);
         Logs.Info($"[Audio][Prefetch] Fetching {files.Count} file(s) for '{selector.Id}:{selector.Variant}' from '{repo}'.");
         IReadOnlyDictionary<string, string> fetched = await AudioModelCache
             .FetchAllAsync(repo, files, category: "stt", progress: progress, ct: cancel).ConfigureAwait(false);

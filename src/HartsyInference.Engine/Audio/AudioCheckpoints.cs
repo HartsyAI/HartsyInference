@@ -55,6 +55,35 @@ internal static class AudioCheckpoints
         return (pickle.GetAllTensors(), [pickle]);
     }
 
+    /// <summary>Names the files <see cref="LoadAsync"/> would read, without loading any tensors — for
+    /// prefetching a checkpoint ahead of first use.
+    ///
+    /// <para>Resolution mirrors <see cref="LoadAsync"/>'s: single-file safetensors, else the shard index, else
+    /// the pickle. A sharded repo cannot state its own file list without the index, so that one small file is
+    /// downloaded here to read the shard names out of it.</para></summary>
+    internal static async Task<IReadOnlyList<AudioModelFile>> ResolveCheckpointFilesAsync(string repo, string category,
+        CancellationToken cancel)
+    {
+        // Probed, not downloaded: fetching the weights here to find out whether they exist would land the
+        // primary artifact before its companions, which is the one ordering this whole path guarantees.
+        if (await AudioModelCache.ExistsAsync(repo, "model.safetensors", category, ct: cancel).ConfigureAwait(false))
+        {
+            return [new AudioModelFile("model.safetensors")];
+        }
+        if (await AudioModelCache.ExistsAsync(repo, "model.safetensors.index.json", category, ct: cancel).ConfigureAwait(false))
+        {
+            string indexPath = await AudioModelCache.GetAsync(repo, "model.safetensors.index.json", category, ct: cancel).ConfigureAwait(false);
+            List<AudioModelFile> files = [new AudioModelFile("model.safetensors.index.json")];
+            foreach (string shard in ReadShardNames(indexPath))
+            {
+                files.Add(new AudioModelFile(shard));
+            }
+            return files;
+        }
+        Logs.Debug($"[Audio] '{repo}' has neither a single-file nor a sharded safetensors layout; assuming a pickle.");
+        return [new AudioModelFile("pytorch_model.bin")];
+    }
+
     /// <summary>Loads one SUBFOLDER of a repo, fetching only that subfolder's files. Multi-component checkpoints (diffusers-style: <c>transformer/</c>, <c>vocoder/</c>, …) have no weights at the repo root, and pulling the whole repo would drag in every sibling component — for MiniMax Music 3 that is tens of gigabytes of formats the engine never reads.</summary>
     internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadSubfolderAsync(
         string repo, string subfolder, string category, CancellationToken cancel)

@@ -14,8 +14,11 @@ internal sealed class SttModelDescriptor
     /// <summary>Rate the input is decoded to before transcription (Whisper/Moonshine 16 kHz; Kyutai 24 kHz).</summary>
     internal int InputSampleRate { get; init; } = 16_000;
 
-    /// <summary>The files this model pulls from its repo, or null for a family whose weight list is still
-    /// implicit in its load path. Set it and the model becomes pre-downloadable; leave it and prefetch reports
-    /// the family as unsupported instead of pretending to install it.</summary>
-    internal Func<string, IReadOnlyList<AudioModelFile>>? ResolveFiles { get; init; }
+    /// <summary>The files this model pulls, or null for a family whose weight list is still implicit in its
+    /// load path. Set it and the model becomes pre-downloadable; leave it and prefetch reports the family as
+    /// unsupported instead of pretending to install it.
+    ///
+    /// <para>Async because a sharded family cannot know its own file list without first reading the shard
+    /// index, which is itself a (small) download.</para></summary>
+    internal Func<string, CancellationToken, Task<IReadOnlyList<AudioModelFile>>>? ResolveFiles { get; init; }
 }

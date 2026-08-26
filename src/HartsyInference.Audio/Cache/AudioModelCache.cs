@@ -140,7 +140,7 @@ public static class AudioModelCache
             {
                 continue;
             }
-            pending.Add((files[i], FetchOneAsync(hfRepoId, files[i], category, revision, ct)));
+            pending.Add((files[i], FetchOneAsync(files[i].Repo ?? hfRepoId, files[i], category, revision, ct)));
         }
         int done = 0;
         int total = files.Count;
@@ -157,7 +157,7 @@ public static class AudioModelCache
         if (lastRequired >= 0)
         {
             AudioModelFile primary = files[lastRequired];
-            string? path = await FetchOneAsync(hfRepoId, primary, category, revision, ct).ConfigureAwait(false);
+            string? path = await FetchOneAsync(primary.Repo ?? hfRepoId, primary, category, revision, ct).ConfigureAwait(false);
             if (path is not null)
             {
                 resolved[primary.Name] = path;
@@ -165,6 +165,33 @@ public static class AudioModelCache
             progress?.Report(new AudioFetchProgress(primary.Name, total, total));
         }
         return resolved;
+    }
+
+    /// <summary>Whether the repo has this file, without downloading it — a cached copy answers immediately,
+    /// otherwise a HEAD request does. Lets a caller discover a checkpoint's layout (single-file vs sharded)
+    /// without pulling gigabytes just to find out which one it is.</summary>
+    public static async Task<bool> ExistsAsync(string hfRepoId, string filename, string category, string revision = "main",
+        CancellationToken ct = default)
+    {
+        string localPath = Path.Combine(GetRepoDirectory(hfRepoId, category), filename);
+        if (IsUsableFile(localPath))
+        {
+            return true;
+        }
+        string endpoint = Environment.GetEnvironmentVariable("HF_ENDPOINT") ?? DefaultEndpoint;
+        string url = $"{endpoint}/{hfRepoId}/resolve/{revision}/{filename}";
+        try
+        {
+            using HttpRequestMessage request = new(HttpMethod.Head, url);
+            using HttpResponseMessage response = await _http.Value.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
+                .ConfigureAwait(false);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logs.Debug($"[AudioCache] Could not probe '{hfRepoId}/{filename}': {ex.Message}");
+            return false;
+        }
     }
 
     private static async Task<string?> FetchOneAsync(string hfRepoId, AudioModelFile file, string category, string revision,
