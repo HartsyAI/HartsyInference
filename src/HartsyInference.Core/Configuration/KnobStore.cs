@@ -50,7 +50,14 @@ public static class KnobStore
             return typed;
         }
         string? raw = ReadLegacy(knob.LegacyEnv);
-        if (string.IsNullOrEmpty(raw))
+        if (raw is null)
+        {
+            return knob.Default;
+        }
+        // Set-but-empty is NOT unset for a string knob. Presence-only call sites test `is null`, so folding ""
+        // into the default would make `HARTSY_MUSICGEN_GRAPH_OFF=` stop disabling graph decode. Consumers that
+        // want empty to mean absent apply their own IsNullOrEmpty, as DebugDumpSink does.
+        if (raw.Length == 0 && typeof(T) != typeof(string))
         {
             return knob.Default;
         }

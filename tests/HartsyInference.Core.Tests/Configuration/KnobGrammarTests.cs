@@ -111,11 +111,14 @@ public sealed class KnobGrammarTests
         With(value, () => Assert.Equal(expected, knob.Value));
     }
 
-    /// <summary>A string knob yields the raw value; unset yields its default, which is usually null for dump directories.</summary>
+    /// <summary>A string knob yields the raw value; only a genuinely unset variable yields its default. A set-but-empty variable is PRESENT for a string knob, because presence-only call sites test <c>is null</c>.</summary>
+    /// <remarks>Folding <c>""</c> into the default would make <c>HARTSY_MUSICGEN_GRAPH_OFF=</c> stop disabling
+    /// graph decode, since that site reads <c>is null</c>. Consumers wanting empty to mean absent apply their own
+    /// <c>IsNullOrEmpty</c>, as <c>DebugDumpSink</c> does.</remarks>
     [Theory]
     [InlineData("/tmp/dump", "/tmp/dump")]
     [InlineData(null, null)]
-    [InlineData("", null)]
+    [InlineData("", "")]
     public void StringKnob_YieldsRawValue(string? value, string? expected)
     {
         Knob<string?> knob = new($"test.str.{value ?? "null"}", Var, null, KnobScope.Runtime, KnobDomain.Diagnostics, "test knob");
