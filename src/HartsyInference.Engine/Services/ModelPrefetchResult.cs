@@ -8,7 +8,8 @@ namespace HartsyInference.Engine.Services;
 /// <param name="Supported">Whether this model family can be prefetched by this build.</param>
 /// <param name="Message">Human-readable outcome, suitable for an install log.</param>
 /// <param name="Files">Absolute paths fetched or already cached; empty when unsupported.</param>
-public sealed record ModelPrefetchResult(bool Supported, string Message, IReadOnlyList<string> Files)
+/// <param name="PrimaryPath">The model's entrypoint artifact — the file whose presence means "this model is installed", and the one a caller attaches identity metadata to. Null when unsupported. Stated explicitly because the position of the primary within <paramref name="Files"/> is an ordering detail, not a contract.</param>
+public sealed record ModelPrefetchResult(bool Supported, string Message, IReadOnlyList<string> Files, string? PrimaryPath = null)
 {
     /// <summary>Result for a family this build cannot prefetch.</summary>
     public static ModelPrefetchResult Unsupported(string id, string reason)

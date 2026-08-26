@@ -180,18 +180,22 @@ public static class AudioModelCache
         }
         string endpoint = Environment.GetEnvironmentVariable("HF_ENDPOINT") ?? DefaultEndpoint;
         string url = $"{endpoint}/{hfRepoId}/resolve/{revision}/{filename}";
-        try
+        using HttpRequestMessage request = new(HttpMethod.Head, url);
+        using HttpResponseMessage response = await _http.Value.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
+            .ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
         {
-            using HttpRequestMessage request = new(HttpMethod.Head, url);
-            using HttpResponseMessage response = await _http.Value.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
-                .ConfigureAwait(false);
-            return response.IsSuccessStatusCode;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            Logs.Debug($"[AudioCache] Could not probe '{hfRepoId}/{filename}': {ex.Message}");
             return false;
         }
+        if (!response.IsSuccessStatusCode)
+        {
+            // Only a 404 means "absent". Reporting a transient failure as absence makes a caller probing for a
+            // layout pick the wrong one and then fail on a file that was never the right guess.
+            throw new HttpRequestException(
+                $"Could not probe '{hfRepoId}/{filename}': HTTP {(int)response.StatusCode}. "
+                + "This is a transport or access failure, not a missing file.");
+        }
+        return true;
     }
 
     private static async Task<string?> FetchOneAsync(string hfRepoId, AudioModelFile file, string category, string revision,

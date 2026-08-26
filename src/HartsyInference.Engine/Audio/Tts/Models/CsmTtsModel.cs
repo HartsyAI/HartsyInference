@@ -36,6 +36,7 @@ internal static class CsmTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
+        ResolveFiles = (_, cancel) => AudioCheckpoints.ResolveCheckpointFilesAsync(Repo, "tts", cancel),
         LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> modelDict, IDisposable[] modelLoaders) =

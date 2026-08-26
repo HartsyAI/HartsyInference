@@ -109,8 +109,12 @@ internal static class SttCatalog
         },
         ResolveFiles = async (variant, cancel) =>
         {
-            bool small = (variant ?? string.Empty).Contains("1b", StringComparison.OrdinalIgnoreCase);
-            string repo = small ? "kyutai/stt-1b-en_fr-trfs" : "kyutai/stt-2.6b-en-trfs";
+            string id = (variant ?? string.Empty).Trim();
+            bool small = id.Contains("1b", StringComparison.OrdinalIgnoreCase);
+            // Honor the same full-repo-id passthrough ResolveRepo allows, or the layout would be probed on one
+            // repo while the weights came from another.
+            string repo = id.Contains('/', StringComparison.Ordinal) ? id
+                : small ? "kyutai/stt-1b-en_fr-trfs" : "kyutai/stt-2.6b-en-trfs";
             (string spmRepo, string spmFile) = small ? ("kyutai/stt-1b-en_fr", "tokenizer_en_fr_audio_8000.model")
                 : ("kyutai/stt-2.6b-en", "tokenizer_en_audio_4000.model");
             // Tokenizer first, weights after, so the checkpoint is never the first thing on disk.

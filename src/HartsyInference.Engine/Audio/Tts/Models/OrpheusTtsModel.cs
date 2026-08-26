@@ -27,6 +27,17 @@ internal static class OrpheusTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => BackboneRepo,
+        ResolveFiles = async (_, cancel) =>
+        {
+            // SNAC codec first, backbone last: the backbone is the artifact that marks Orpheus installed.
+            List<AudioModelFile> files = [];
+            foreach (AudioModelFile snac in await AudioCheckpoints.ResolveCheckpointFilesAsync(SnacRepo, "tts", cancel).ConfigureAwait(false))
+            {
+                files.Add(snac with { Repo = SnacRepo });
+            }
+            files.AddRange(await AudioCheckpoints.ResolveCheckpointFilesAsync(BackboneRepo, "tts", cancel).ConfigureAwait(false));
+            return files;
+        },
         LoadAsync = async (_, _, cancel) =>
         {
             (IReadOnlyDictionary<string, Tensor> backbone, IDisposable[] backboneLoaders) =

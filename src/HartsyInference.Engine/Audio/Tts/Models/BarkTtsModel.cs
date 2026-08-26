@@ -30,6 +30,15 @@ internal static class BarkTtsModel
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => Repo,
+        ResolveFiles = async (_, cancel) =>
+        {
+            // Bark's text frontend borrows BERT's vocab from a third-party repo.
+            List<AudioModelFile> files = [new AudioModelFile("vocab.txt", Repo: "google-bert/bert-base-multilingual-cased")];
+            // Mirrors LoadBarkWeightsAsync's safetensors-then-pickle preference, probed rather than downloaded.
+            bool safetensors = await AudioModelCache.ExistsAsync(Repo, "model.safetensors", "tts", ct: cancel).ConfigureAwait(false);
+            files.Add(new AudioModelFile(safetensors ? "model.safetensors" : "pytorch_model.bin"));
+            return files;
+        },
         LoadAsync = async (_, _, cancel) =>
         {
             string vocabPath = await AudioModelCache.GetAsync("google-bert/bert-base-multilingual-cased", "vocab.txt", category: "tts", ct: cancel).ConfigureAwait(false);
