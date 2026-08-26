@@ -5,6 +5,7 @@ using Xunit;
 namespace HartsyInference.Core.Tests.MemoryManagement;
 
 /// <summary>Pins the equivalence that makes absorbing <c>HARTSY_KEEP_MODELS</c> a no-op for existing deployments: an unpinned lever must resolve to exactly what the raw environment read produced.</summary>
+[Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramLeversTests
 {
     private static void WithKeepModels(string? value, Action body)

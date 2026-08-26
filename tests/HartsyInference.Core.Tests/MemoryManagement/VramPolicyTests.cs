@@ -7,6 +7,7 @@ namespace HartsyInference.Core.Tests.MemoryManagement;
 /// <summary>Covers the tier→lever expansion, the per-request override merge, and the legacy bridge.</summary>
 /// <remarks>The whole resolver is pure, so every tier × lever combination is assertable on CPU with no GPU — which is
 /// what makes "every combination is selectable" verifiable without a run per model.</remarks>
+[Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramPolicyTests
 {
     /// <summary>Runs <paramref name="body"/> with <c>HARTSY_LOWVRAM</c> pinned, then restores it — resolution falls

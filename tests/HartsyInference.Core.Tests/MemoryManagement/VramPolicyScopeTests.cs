@@ -4,6 +4,7 @@ using Xunit;
 namespace HartsyInference.Core.Tests.MemoryManagement;
 
 /// <summary>Covers the scope that makes a per-request override reach the levers decided mid-generation, and — more importantly — that it never outlives the request that set it.</summary>
+[Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramPolicyScopeTests
 {
     [Fact]

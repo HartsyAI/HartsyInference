@@ -9,6 +9,7 @@ namespace HartsyInference.Core.Tests.MemoryManagement;
 /// <summary>Decision-table tests for <see cref="VramPlanner"/>: the placement it returns is a pure function of
 /// (policy, free bytes, weight bytes, residency, streamability), so a fake cache reporting a fixed budget covers it
 /// with no GPU.</summary>
+[Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramPlannerTests
 {
     /// <summary>Fake cache that reports a fixed device budget, so a test can state "the card has N bytes free" directly.</summary>
