@@ -152,6 +152,8 @@ public sealed class KnobRegistryTests
         {
             // Enabled (default OFF) and EnabledDefaultOn (default ON): =0 kills both, =1 forces both.
             ["HARTSY_DIT_GRAPH"] = 2,
+            // Default-ON (!= "0") plus an explicit opt-in (== "1") that alone unlocks the unsafe V-narrowing path.
+            ["HARTSY_SAGE_ATTN"] = 2,
         };
 
         Dictionary<string, List<string>> declared = DeclaredByLegacyName();

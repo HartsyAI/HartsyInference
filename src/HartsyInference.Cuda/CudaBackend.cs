@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
@@ -565,11 +566,7 @@ public sealed class CudaBackend : IBackend
     /// polls it per forward.</para></remarks>
     /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32 accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed to HBM and read straight back. 0 or >= n disables tiling. Override with HARTSY_INT8_N_CHUNK.</summary>
     private static int Int8ResidentColChunk(int n)
-    {
-        if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_N_CHUNK"), out int env))
-            return env <= 0 ? int.MaxValue : env;
-        return DefaultInt8ColChunk;
-    }
+        => EngineKnobs.Int8NChunk.Value is int env ? (env <= 0 ? int.MaxValue : env) : DefaultInt8ColChunk;
 
     // OFF. MEASURED 2026-08-13 at LTX-2.5 768x512x97f: no tiling 1457.2 ms/step, 2048 -> 1474.0, 1024 -> 1596.3
     // — monotonically worse, the same shape of result as the row chunk's own L2 experiment. Making the int32
@@ -579,9 +576,7 @@ public sealed class CudaBackend : IBackend
     private const int DefaultInt8ColChunk = int.MaxValue;
 
     /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving it from free VRAM. 0 keeps the derived behaviour.</summary>
-    private static readonly long RowChunkBudgetOverrideBytes =
-        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_INT8_ROW_BUDGET_MB"), out long mb) && mb > 0
-            ? mb << 20 : 0;
+    private static readonly long RowChunkBudgetOverrideBytes = EngineKnobs.Int8RowBudgetMb.Value << 20;
 
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
     {
@@ -907,7 +902,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Fused BF16/F16 decode GEMV for small-m (≤8) F32-activation matmuls; replaces cuBLAS GemmEx (slow at m=1). On by default.</summary>
     /// <remarks>Faster and at least as accurate as the cuBLAS BF16 path (activations stay F32). Set
     /// <c>HARTSY_BF16_GEMV=0</c> to fall back to cuBLAS for A/B.</remarks>
-    public bool EnableBf16Gemv { get; set; } = Environment.GetEnvironmentVariable("HARTSY_BF16_GEMV") != "0";
+    public bool EnableBf16Gemv { get; set; } = EngineKnobs.Bf16Gemv.Value;
 
     /// <summary>Lazily-initialized tensor-core HGEMM launcher. Requires PTX directory and SM 8.0+.</summary>
     public TensorCoreGemm TensorCoreGemm
@@ -936,23 +931,20 @@ public sealed class CudaBackend : IBackend
         _context.EnsureCurrent();
     }
 
-    /// <summary>Reads a <c>HARTSY_*</c> boolean env var; unset or any non-"1" value is treated as off.</summary>
-    /// <remarks>Mirrors <see cref="Profiling.NvtxRange.ProfileEnabled"/>.</remarks>
-    private static bool EnvFlag(string name) => Environment.GetEnvironmentVariable(name) == "1";
-
     /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>HARTSY_SAGE_ATTN=0</c>.</summary>
-    private static bool UseSageAttn => Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN") != "0";
+    private static bool UseSageAttn => EngineKnobs.SageAttn.Value;
 
-    private static bool SageExplicitlyEnabled => EnvFlag("HARTSY_SAGE_ATTN");
+    /// <summary>The explicit <c>=1</c> sense of the Sage switch, distinct from the default-ON <see cref="UseSageAttn"/>.</summary>
+    private static bool SageExplicitlyEnabled => EngineKnobs.SageAttnExplicit.Value;
 
     /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>HARTSY_LTX25_NA3D_TILED=0</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
-    private static bool UseLtx25Na3dTiled => Environment.GetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED") != "0";
+    private static bool UseLtx25Na3dTiled => EngineKnobs.Ltx25Na3dTiled.Value;
 
     /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
     /// <remarks>The current Sage prologue materializes V as F16, so an F32 value outside the finite F16 range
     /// becomes infinity. Requiring a second, plainly unsafe opt-in quarantines that path until V is range-safe.</remarks>
     internal static bool SageF32ValueNarrowingEnabled =>
-        SageExplicitlyEnabled && EnvFlag("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
+        SageExplicitlyEnabled && EngineKnobs.SageUnsafeF32VNarrow.Value;
 
     /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>HARTSY_NO_TF32=1</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
@@ -1027,7 +1019,7 @@ public sealed class CudaBackend : IBackend
         // decides, and a later same-device backend's construction can no longer flip a live sibling's pool. The
         // OOM path (AllocateAsync → SyncStreamsAndReleasePool) and explicit cuMemPoolTrimTo still return memory on
         // demand either way.
-        bool mempoolKeep = EnvSwitch.IsEnabled("HARTSY_MEMPOOL_KEEP", defaultOn: true);
+        bool mempoolKeep = EngineKnobs.MempoolKeep.Value;
         DeviceMempoolPolicy.Acquire(_context.DeviceOrdinal, mempoolKeep);
         Volatile.Write(ref _mempoolPolicyAcquired, 1);
         // CUDA_VISIBLE_DEVICES defaults to fastest-first ordering, so an ordinal does not identify the card —
@@ -1043,30 +1035,30 @@ public sealed class CudaBackend : IBackend
         // otherwise pays a separate BiasAdd kernel + an output-sized HBM round-trip (~700/step on the SDXL
         // UNet, measured −0.16 s/gen). Falls back to GemmEx+BiasAdd when Lt is unavailable or shapes
         // don't qualify; HARTSY_EPILOGUE_FUSION=0 is the kill-switch.
-        EnableEpilogueFusion = EnvSwitch.IsEnabled("HARTSY_EPILOGUE_FUSION", defaultOn: true);
+        EnableEpilogueFusion = EngineKnobs.EpilogueFusion.Value;
         // dp4a int8-activation decode GEMV: promoted to the standard profile 2026-07-22 after the
         // full Q4_K/Q6_K/Q8_0 kernel set measured +13-27% end-to-end decode on both benchmark models
         // with ground-truth-bounded numerics (Dp4aGemvGroundTruthTests, LLM_DECODE_PERF_GRIND.md).
-        EnableDp4aGemv = EnvSwitch.IsEnabled("HARTSY_DP4A_ON", defaultOn: true);
-        EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
+        EnableDp4aGemv = EngineKnobs.Dp4aOn.Value;
+        EnableTensorCoreGemm = EngineKnobs.TensorcoreGemm.Value;
         // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
         bool fp8TensorCores = _context.ComputeCapabilityMajor > 8
             || (_context.ComputeCapabilityMajor == 8 && _context.ComputeCapabilityMinor >= 9);
-        EnableNativeFp8Gemm = EnvSwitch.IsEnabled("HARTSY_FP8_NATIVE", defaultOn: fp8TensorCores);
-        EnableRopeHeadMajorV2 = EnvSwitch.IsEnabled("HARTSY_ROPE_V2", defaultOn: true);
-        EnableStaticFp8InputScale = EnvSwitch.IsEnabled("HARTSY_FP8_STATIC_INPUT_SCALE", defaultOn: true);
-        EnableModulateEmitFp8 = EnvSwitch.IsEnabled("HARTSY_MODULATE_EMIT_FP8", defaultOn: true);
-        EnableW8A8 = EnvSwitch.IsEnabled("HARTSY_W8A8", defaultOn: false);
-        HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
-        EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
-        EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
-        _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EnvFlag("HARTSY_NO_TF32");
-        _gemmFast16 = _context.ComputeCapabilityMajor >= 8 && EnvFlag("HARTSY_GEMM_F16");
+        EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
+        EnableRopeHeadMajorV2 = EngineKnobs.RopeV2.Value;
+        EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
+        EnableModulateEmitFp8 = EngineKnobs.ModulateEmitFp8.Value;
+        EnableW8A8 = EngineKnobs.W8a8.Value;
+        HighPrecisionGemm = EngineKnobs.HighPrecisionGemm.Value;
+        EnableFp8F16Gemm = EngineKnobs.Fp8F16.Value;
+        EnableFp8F32Gemm = EngineKnobs.Fp8F32.Value;
+        _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EngineKnobs.NoTf32.Value;
+        _gemmFast16 = _context.ComputeCapabilityMajor >= 8 && EngineKnobs.GemmF16.Value;
         // F16 SDPA is gated PER-CALL via the allowF16 arg (callers with bounded/RMS-normed scores like Wan pass true);
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
-        _sdpaF16ForceOn = EnvFlag("HARTSY_SDPA_F16");
-        _sdpaF16Disabled = EnvFlag("HARTSY_SDPA_NO_F16");
+        _sdpaF16ForceOn = EngineKnobs.SdpaF16.Value;
+        _sdpaF16Disabled = EngineKnobs.SdpaNoF16.Value;
         // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
@@ -1075,16 +1067,16 @@ public sealed class CudaBackend : IBackend
         // Every cuDNN fast path is AND-gated on availability, so a missing/mismatched cuDNN cleanly stays on the
         // im2col+cuBLAS / custom-flash fallbacks instead of throwing per-op or hanging.
         CudnnRuntime.LogStatus();
-        _sdpaCudnn = CudnnRuntime.SupportsSdpa && EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
+        _sdpaCudnn = CudnnRuntime.SupportsSdpa && EngineKnobs.SdpaCudnn.Value;
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
-        _convCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
+        _convCudnn = CudnnRuntime.Available && EngineKnobs.ConvCudnn.Value;
         // Audio conv1d cuDNN (1D→2D, H=1, F32 output via TF32 tensor cores): default ON. The Oobleck/EnCodec
         // vocoder decoders are conv-bound — routing their forward convs through cuDNN is ~1.6-2× on ACE-Step
         // end-to-end (bigger on longer audio, where the VAE decode dominates) with corr 0.9999 vs the direct
         // kernel (same-seed A/B, verified coherent across ACE-Step/MusicGen/AudioGen). Same session-sticky
         // self-disable-on-failure contract as the 2D path, so shapes cuDNN can't serve fall back safely.
-        _audioConvCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: true);
+        _audioConvCudnn = CudnnRuntime.Available && EngineKnobs.AudioConvCudnn.Value;
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
@@ -1190,9 +1182,7 @@ public sealed class CudaBackend : IBackend
     /// weights — 1 GB verified live for the Flux.2 VAE beside Ideogram 4's 18.6 GB resident DiTs (2 GB still OOM'd
     /// there); band size costs no GEMM efficiency (m stays ≥ tens of thousands of rows). Override via
     /// HARTSY_IM2COL_BAND_MB (also lets tests force banding on small shapes).</remarks>
-    private static readonly long Im2ColBandCapBytes =
-        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_IM2COL_BAND_MB"), out long capMb) && capMb > 0
-            ? capMb << 20 : 1L << 30;
+    private static readonly long Im2ColBandCapBytes = EngineKnobs.Im2colBandMb.Value << 20;
 
     #region Linear Algebra
 
@@ -1354,7 +1344,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default: −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
-    internal static bool FusedMmaGemm = Environment.GetEnvironmentVariable("HARTSY_INT8_FUSED_MMA") != "0";
+    internal static bool FusedMmaGemm = EngineKnobs.Int8FusedMma.Value;
 
     /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on the three shapes the microbenchmark covered.</summary>
     private const int FusedMmaMinRows = 1024;
@@ -1374,10 +1364,10 @@ public sealed class CudaBackend : IBackend
     /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
     /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
     /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>), which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
-    private static readonly bool WideMmaGate = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_WIDE_GATE") == "1";
+    private static readonly bool WideMmaGate = EngineKnobs.Int8MmaWideGate.Value;
 
     /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces. **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
-    private static readonly bool UseWideConvRotQuant = Environment.GetEnvironmentVariable("HARTSY_CONVROT_WIDE") == "1";
+    private static readonly bool UseWideConvRotQuant = EngineKnobs.ConvrotWide.Value;
 
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
         FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
@@ -1526,7 +1516,7 @@ public sealed class CudaBackend : IBackend
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
 
     /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
-    internal static bool FuseHeadGateIntoQuant = Environment.GetEnvironmentVariable("HARTSY_LTX2_GATEFUSE") != "0";
+    internal static bool FuseHeadGateIntoQuant = EngineKnobs.Ltx2Gatefuse.Value;
 
     /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place exactly as the caller's own sequence did.</summary>
     /// <remarks>The gate is a full read AND write of a <c>[seq, heads·headDim]</c> tensor — 81.8 MB per call at
@@ -1575,7 +1565,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
-    internal static bool GroupedLinear = Environment.GetEnvironmentVariable("HARTSY_GROUPED_LINEAR") != "0";
+    internal static bool GroupedLinear = EngineKnobs.GroupedLinear.Value;
 
     /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
     public unsafe void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)
@@ -2952,8 +2942,7 @@ public sealed class CudaBackend : IBackend
             $"cached-new={System.Threading.Interlocked.Exchange(ref _castCachedNew, 0)}");
     }
 
-    private static readonly bool _quantAtProducer =
-        Environment.GetEnvironmentVariable("HARTSY_QUANT_AT_PRODUCER") != "0";
+    private static readonly bool _quantAtProducer = EngineKnobs.QuantAtProducer.Value;
 
     /// <summary>Allocates the Q8_1 sidecar (xq/xd/xs) for a K-wide single row, returns the three pointers.</summary>
     private static (ulong xq, ulong xd, ulong xs) AllocSidecar(int k)
@@ -6826,20 +6815,20 @@ public sealed class CudaBackend : IBackend
 
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
-            if (EnvFlag("HARTSY_SDPA_V2")
+            if (EngineKnobs.SdpaV2.Value
                 && FlashAttentionV2ContractSatisfied(output, query, key, value, mask, scale, _allowTf32))
             {
                 FlashAttentionV2(output, query, key, value, scale);
                 return;
             }
-            if (EnvFlag("HARTSY_SDPA_FORCE_FLASH"))
+            if (EngineKnobs.SdpaForceFlash.Value)
             {
                 FlashAttention(output, query, key, value, (int)skv, kvGroup: 1, causal: false, qOffset: 0, scale);
                 return;
             }
             ulong scoreBytesEst = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
             (nuint freeBytes, _) = _context.GetMemoryInfo();
-            if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || scoreBytesEst > (ulong)freeBytes / 2)
+            if (EngineKnobs.SdpaForceTiled.Value || scoreBytesEst > (ulong)freeBytes / 2)
             {
                 SdpaTiledF32(output, query, key, value, scale);
                 return;
@@ -6854,7 +6843,7 @@ public sealed class CudaBackend : IBackend
         {
             ulong keyBiasScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
             (nuint keyBiasFree, _) = _context.GetMemoryInfo();
-            if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
+            if (EngineKnobs.SdpaForceTiled.Value || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
             {
                 SdpaTiledF32(output, query, key, value, scale, mask);
                 return;
@@ -7514,8 +7503,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
-    private static readonly bool SageTokenMajorDetour =
-        Environment.GetEnvironmentVariable("HARTSY_LTX2_SAGE_TOKENMAJOR") == "1";
+    private static readonly bool SageTokenMajorDetour = EngineKnobs.Ltx2SageTokenmajor.Value;
 
     /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash. Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
     private bool SageF16Preferred(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask,
@@ -7533,11 +7521,8 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Min Skv (override: HARTSY_SAGE_F16_MIN_SKV) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>
-    private static int SageF16MinSkv()
-    {
-        string? v = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
-        return int.TryParse(v, out int n) && n > 0 ? n : 8192;   // measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060)
-    }
+    // Measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060).
+    private static int SageF16MinSkv() => EngineKnobs.SageF16MinSkv.Value;
 
     /// <summary>SageAttention-v1 INT8 flash attention (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
     /// <remarks>Four launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
@@ -7660,7 +7645,7 @@ public sealed class CudaBackend : IBackend
             long Br = (long)((ulong)freeBytes / 4) / Math.Max(1, perRow);
             if (Br < 1) Br = 1;
             if (Br > sq) Br = sq;
-            if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_SDPA_TILE"), out int envBr) && envBr > 0)
+            if (EngineKnobs.SdpaTile.Value is int envBr && envBr > 0)
                 Br = Math.Min(envBr, sq);
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
@@ -8981,8 +8966,8 @@ public sealed class CudaBackend : IBackend
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
         // HARTSY_PROFILE_EACH=1: dump the accumulated per-op profile at each Sync (end of a generation) — the Swarm
         // ShutdownServer path does not reliably dispose the backend, so this is the reliable per-gen dump hook.
-        if (Environment.GetEnvironmentVariable("HARTSY_PROFILE_EACH") == "1")
-            Profiling.NvtxRange.DumpProfile(Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt");
+        if (EngineKnobs.ProfileEach.Value)
+            Profiling.NvtxRange.DumpProfile(EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt");
     }
 
     #endregion
@@ -9164,7 +9149,7 @@ public sealed class CudaBackend : IBackend
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
             // heads, so the monolithic path put 4 blocks on 28 SMs (measured 5.4× slower than llama.cpp e2e).
             bool splitEligible = pSink == 0 && pAlibi == 0;
-            bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
+            bool forceSplit = EngineKnobs.FlashSplitForce.Value;
             // Occupancy-limited = the LLM decode case (tq=1, few heads → e.g. 16 blocks on 28 SMs). Splitting the
             // key axis there fills the GPU and is a large decode win (attention was ~30% of decode; split-K ≈ +38%
             // end-to-end on Qwen3). The split kernel is numerically exact vs monolithic (online-softmax merge). The
@@ -9174,7 +9159,7 @@ public sealed class CudaBackend : IBackend
             // worth splitting even at short kvLen; the 128 floor only applies to moderately-occupied shapes.
             int engageLen = baseBlocks <= _context.MultiprocessorCount ? 32 : 128;
             int splits = 1;
-            if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
+            if (!EngineKnobs.FlashSplitOff.Value
                 && splitEligible && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : engageLen))
             {
                 // Target/minChunk tuned the same way as FlashAttentionDev's graph-decode split formula below
@@ -9728,7 +9713,7 @@ public sealed class CudaBackend : IBackend
         // on EVERY replay (measured on gemma3: 1672 of the graph's 2264 nodes — ~2-3 ms/token of pure
         // memory-node overhead on sub-2B models). Arena buffers persist for the backend's lifetime, so
         // captured pointers stay valid across replays; overflow falls back to pool nodes (correct, slower).
-        if (Environment.GetEnvironmentVariable("HARTSY_GRAPH_ARENA") != "0")
+        if (EngineKnobs.GraphArena.Value)
         {
             graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
             try { graph.Capture(recordWork); }
@@ -10758,7 +10743,7 @@ public sealed class CudaBackend : IBackend
     /// <inheritdoc/>
     public void DumpOpProfile(string label)
     {
-        string basePath = Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt";
+        string basePath = EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt";
         NvtxRange.DumpProfile($"{basePath}.{label}");
     }
 
@@ -10813,7 +10798,7 @@ public sealed class CudaBackend : IBackend
 
             if (!abandoned && NvtxRange.ProfileEnabled)
                 Attempt("NVTX profile dump", () => NvtxRange.DumpProfile(
-                    Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt"));
+                    EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt"));
 
             if (_context is not null) Attempt("context binding", _context.EnsureCurrent);
             CudaGraph? graph = _stepGraph;

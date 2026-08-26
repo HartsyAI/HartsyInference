@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
@@ -6,7 +7,7 @@ namespace HartsyInference.Cuda;
 /// <summary>Probe/enable memo for CUDA peer (P2P/NVLink) access between device pairs. Enablement is per DIRECTED context pair and sticky for the contexts' lifetime, so each pair is probed once and remembered. <c>HARTSY_P2P_DISABLE=1</c> forces every query to false — the deterministic consumer-path test switch (and escape hatch for the flaky-P2P boards the design doc warns about).</summary>
 internal static class CudaPeerAccess
 {
-    private static readonly bool _disabled = Environment.GetEnvironmentVariable("HARTSY_P2P_DISABLE") == "1";
+    private static readonly bool _disabled = EngineKnobs.P2pDisable.Value;
 
     /// <summary>CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED — a repeat enable, i.e. success for our purposes.</summary>
     private const int AlreadyEnabled = 704;

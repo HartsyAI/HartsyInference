@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
@@ -1010,7 +1011,7 @@ public sealed class CudaKernels : IDisposable
         // On by default (HARTSY_BF16_GEMV=0 disables). The PTX targets sm_80 like the engine's other lm/world
         // kernels, so it JITs on every GPU this engine already runs on; a genuine load failure is caught below
         // and falls back to cuBLAS. This is a large decode win — see the lm_head GEMV note in GenericTransformer.
-        if (Environment.GetEnvironmentVariable("HARTSY_BF16_GEMV") != "0")
+        if (EngineKnobs.Bf16Gemv.Value)
         {
             try
             {
@@ -2327,7 +2328,7 @@ public sealed class CudaKernels : IDisposable
     internal const uint Int8MmaSharedBytesPad = 3u * (128u + 256u) * 80u;
 
     /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>HARTSY_INT8_MMA_SWIZZLE=0</c> picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is <c>HARTSY_INT8_FUSED_MMA=0</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
-    internal static readonly bool Int8MmaSwizzle = Environment.GetEnvironmentVariable("HARTSY_INT8_MMA_SWIZZLE") != "0";
+    internal static readonly bool Int8MmaSwizzle = EngineKnobs.Int8MmaSwizzle.Value;
 
     /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
     private const int Int8MmaTileN = 256;
@@ -2429,7 +2430,7 @@ public sealed class CudaKernels : IDisposable
     public bool HasSageV1 => _sageAttnV1Module is not null;
 
     /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via HARTSY_SAGE_V0=1) — the caller must then provide the pre-transposed F16 V workspace.</summary>
-    public bool UseSageV1 => _sageAttnV1Module is not null && Environment.GetEnvironmentVariable("HARTSY_SAGE_V0") != "1";
+    public bool UseSageV1 => _sageAttnV1Module is not null && !EngineKnobs.SageV0.Value;
 
     /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16, amortizing per-tile re-transpose.</summary>
     public unsafe void LaunchSageVF16T(ulong vt16, ulong v, int b, int h, int skv, int d, nint stream, bool srcF16 = false)
@@ -2471,7 +2472,7 @@ public sealed class CudaKernels : IDisposable
             uint smemBytes = (uint)(2 * (bc * d + d * bc * 2 + bc * sizeof(float)));
             // E1 experiment knob: HARTSY_SAGE_PV=f16acc selects the F16-accumulate PV variant (2× PV mma
             // rate on GeForce Ampere; P pre-scaled 1/16 in-kernel for overflow headroom to ~349k keys).
-            bool f16Acc = Environment.GetEnvironmentVariable("HARTSY_SAGE_PV") == "f16acc";
+            bool f16Acc = EngineKnobs.SagePv.Value == "f16acc";
             if (f16Io && !UseSageV1)
                 throw new InvalidOperationException("F16-ingest Sage requires the v1 module (HARTSY_SAGE_V0=1 is F32-only).");
             nint func = f16Io
@@ -3059,13 +3060,13 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Qwen3.5 delta-rule recurrence + gated RMSNorm, one block per value head; state is device-persistent across tokens.</summary>
-    private static readonly bool _ssmDeltaRowParallel = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_V2") != "0";
+    private static readonly bool _ssmDeltaRowParallel = EngineKnobs.SsmDeltaV2.Value;
     // Byte-verified 4/4 prompts vs the legacy kernel and 2.7× faster in the isolated-graph
     // microbenchmark (20.5 vs 55 µs/call — the block-per-row shape's 512-byte blocks can't hide
     // DRAM latency; a plain Add over the same tensors streams at 7.4 µs). An earlier e2e A/B
     // wrongly concluded "no gain": it predated the per-head scalar hoist, whose per-thread
     // transcendentals were masking the schedule win. Kill-switch HARTSY_SSM_DELTA_WARPROW=0.
-    private static readonly bool _ssmDeltaWarpRow = Environment.GetEnvironmentVariable("HARTSY_SSM_DELTA_WARPROW") != "0";
+    private static readonly bool _ssmDeltaWarpRow = EngineKnobs.SsmDeltaWarprow.Value;
 
     public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
         ulong alphaRaw, ulong betaRaw, ulong dtBias, ulong ssmA, ulong normW,
@@ -4593,15 +4594,13 @@ public sealed class CudaKernels : IDisposable
     // under-occupied; splitting each row across 4 warps multiplies resident parallelism with a
     // deterministic shared-memory combine. Gated tightly: at N ≥ ~2560 warp-per-row measured equal or
     // better (2026-07-22 sweep). HARTSY_GEMV_KSPLIT=0 disables, =W forces W warps/row everywhere.
-    private static readonly int _ksplitOverride =
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_GEMV_KSPLIT"), out int v) ? v : -1;
+    private static readonly int _ksplitOverride = EngineKnobs.GemvKsplit.Value;
 
     // Rows-per-block for the warp-per-row GEMV kernels (sweep knob HARTSY_GEMV_WPB). Default 4: the
     // 2026-07-23 sweep measured WPB=4 equal-or-faster than the original 8 at every production shape class
     // (Q4_K K=4096: N=256 11.4 vs 13.0 µs, N=4096 37.8 vs 38.4, N=27392 197.1 vs 198.1) — finer blocks
     // (128 threads) smooth the launch/drain tail; resident-warp occupancy is unchanged (12 blocks/SM).
-    private static readonly int _wpbOverride =
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_GEMV_WPB"), out int w) ? Math.Clamp(w, 1, 16) : 4;
+    private static readonly int _wpbOverride = EngineKnobs.GemvWpb.Value;
 
     private static uint GemvKsplitWarps(int rows, int k)
     {

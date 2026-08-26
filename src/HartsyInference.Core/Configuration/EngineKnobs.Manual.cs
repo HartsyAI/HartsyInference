@@ -104,6 +104,16 @@ public static partial class EngineKnobs
         Bool("diagnostics.ltxDiag", "LTX_DIAG", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Enables LTX-Video per-step diagnostics on the console.");
 
+    /// <summary>The explicit opt-in sense of <c>HARTSY_SAGE_ATTN</c>: true only when it is set to exactly <c>1</c>.</summary>
+    /// <remarks>Shares its legacy name with <see cref="SageAttn"/>, which carries the default-ON <c>!= "0"</c>
+    /// sense. Both readings are deliberate and were in the code before this migration: SageAttention is on unless
+    /// you set 0, but the unsafe F32-to-F16 V-narrowing path additionally requires a plain <c>=1</c>, so merely
+    /// leaving Sage at its default never unlocks it. Collapsing the pair into one knob would open that path by
+    /// default. Same shape as <see cref="DitGraph"/> / <see cref="DitGraphDefaultOn"/>.</remarks>
+    public static readonly Knob<bool> SageAttnExplicit =
+        Bool("numerics.sageAttnExplicit", "HARTSY_SAGE_ATTN", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Numerics,
+            "The explicit opt-in sense of the Sage attention switch: true only when it is set to exactly 1.");
+
     // ── Constant defaults that live in a hand-written parsing expression ──
 
     /// <summary>Host-RAM floor in GB below which the audio cache evicts a prior model before loading the next.</summary>

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Cuda;
 
@@ -116,13 +116,13 @@ public static class CudnnRuntime
         }
     }
 
-    private static bool AutofetchEnabled() => EnvSwitch.IsEnabled("HARTSY_CUDNN_AUTOFETCH", defaultOn: false);
+    private static bool AutofetchEnabled() => EngineKnobs.CudnnAutofetch.Value;
 
     /// <summary>The first search dir (env / cache / bundled) that actually holds the cuDNN dispatcher, or null.</summary>
     private static string? ResolveExistingDir(int cudaMajor)
     {
         string soname = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cudnn64_9.dll" : "libcudnn.so.9";
-        foreach (string? dir in new[] { Environment.GetEnvironmentVariable("HARTSY_CUDNN_DIR"), CacheLibDir(cudaMajor), BundledDir() })
+        foreach (string? dir in new[] { EngineKnobs.CudnnDir.Value, CacheLibDir(cudaMajor), BundledDir() })
         {
             if (!string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, soname)))
             {
@@ -139,7 +139,7 @@ public static class CudnnRuntime
         {
             bool win = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             string plat = win ? "windows-x86_64" : "linux-x86_64";
-            string? url = Environment.GetEnvironmentVariable("HARTSY_CUDNN_URL");
+            string? url = EngineKnobs.CudnnUrl.Value;
             if (string.IsNullOrEmpty(url))
             {
                 // NVIDIA publishes cuDNN 9.21 redist archives for CUDA 12/13 only — the CUDA 11 URL 404s.
@@ -152,7 +152,7 @@ public static class CudnnRuntime
                 // NVIDIA redist. Version is pinned but overridable; the redist layout is stable per major.
                 // The custom SDPA graph uses the public softmax operation added in cuDNN 9.21, so older
                 // CUDA-13 redistributables can run convolution but cannot construct this attention graph.
-                string ver = Environment.GetEnvironmentVariable("HARTSY_CUDNN_VERSION") ?? "9.21.0.82";
+                string ver = EngineKnobs.CudnnVersion.Value ?? "9.21.0.82";
                 string ext = win ? "zip" : "tar.xz";
                 url = $"https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/{plat}/" +
                       $"cudnn-{plat}-{ver}_cuda{cudaMajor}-archive.{ext}";

@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Configuration;
 
 namespace HartsyInference.Cuda;
 
@@ -23,7 +24,7 @@ public static class CudaLibraryResolver
     private static string[] BuildProbeDirs()
     {
         List<string> dirs = new();
-        string? overrideDir = Environment.GetEnvironmentVariable("HARTSY_CUDA_LIB_DIR");
+        string? overrideDir = EngineKnobs.CudaLibDir.Value;
         if (!string.IsNullOrEmpty(overrideDir))
         {
             dirs.Add(overrideDir);
@@ -36,11 +37,11 @@ public static class CudaLibraryResolver
         // cuDNN search dirs (provisioned/bundled): an explicit override, the per-user cache (per CUDA major — the
         // driver isn't queried here to avoid a circular load during static init, so all common majors are listed;
         // File.Exists filters), and a 'cudnn' folder beside the assembly. See CudnnRuntime.
-        string? cudnnDir = Environment.GetEnvironmentVariable("HARTSY_CUDNN_DIR");
+        string? cudnnDir = EngineKnobs.CudnnDir.Value;
         if (!string.IsNullOrEmpty(cudnnDir)) dirs.Add(cudnnDir);
         // NCCL commonly lives inside a torch venv (site-packages/nvidia/nccl/lib) rather than the loader
         // path; this override (or a copy/hardlink in any dir above) makes it resolvable without apt.
-        string? ncclDir = Environment.GetEnvironmentVariable("HARTSY_NCCL_DIR");
+        string? ncclDir = EngineKnobs.NcclDir.Value;
         if (!string.IsNullOrEmpty(ncclDir)) dirs.Add(ncclDir);
         foreach (int major in new[] { 13, 12, 11 }) dirs.Add(CudnnRuntime.CacheLibDir(major));
         dirs.Add(CudnnRuntime.BundledDir());

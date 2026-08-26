@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -107,11 +108,10 @@ internal static unsafe class GpuTransferHelper
     internal sealed class UploadState { public int Count; public bool Promoted; public bool Blocked; }
 
     /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
-    public static readonly bool AutoPromoteWeights = Environment.GetEnvironmentVariable("HARTSY_NO_AUTOPROMOTE") != "1";
+    public static readonly bool AutoPromoteWeights = !EngineKnobs.NoAutopromote.Value;
 
     /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
-    private static readonly long _autoPromoteHeadroomBytes =
-        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUTOPROMOTE_HEADROOM_MB"), out long mb) ? mb << 20 : 1536L << 20;
+    private static readonly long _autoPromoteHeadroomBytes = EngineKnobs.AutopromoteHeadroomMb.Value << 20;
 
     /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are the most likely to be mutated scratch buffers.</summary>
     private const nuint AutoPromoteMinBytes = 1 << 20;
@@ -139,7 +139,7 @@ internal static unsafe class GpuTransferHelper
     private static readonly ConcurrentDictionary<nint, bool> _ambiguityWarned = new();
 
     /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
-    private static readonly bool _assertAmbient = Environment.GetEnvironmentVariable("HARTSY_ASSERT_AMBIENT") == "1";
+    private static readonly bool _assertAmbient = EngineKnobs.AssertAmbient.Value;
 
     /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
     private static readonly State _unregistered = new();
@@ -396,12 +396,11 @@ internal static unsafe class GpuTransferHelper
     // distinguishable from ordinary activation traffic. Small misses are logged too — a DiT that re-uploads a
     // handful of tiny per-channel vectors every block hides thousands of them per step behind a trace that only
     // showed the megabyte-scale ones.
-    private static readonly bool _traceBigMisses = Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE") == "1";
+    private static readonly bool _traceBigMisses = EngineKnobs.H2dTrace.Value;
     private static int _bigMissTraceCount;
 
     /// <summary>How many big misses to log; raise it to see past the text-encode phase into denoise.</summary>
-    private static readonly int _traceBigMissLimit =
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_H2D_TRACE_LIMIT"), out int lim) ? lim : 24;
+    private static readonly int _traceBigMissLimit = EngineKnobs.H2dTraceLimit.Value;
 
     /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
@@ -453,7 +452,7 @@ internal static unsafe class GpuTransferHelper
         }
         // A miss during graph capture bakes a per-replay H2D memcpy node into the graph — always worth
         // knowing about (HARTSY_GRAPH_DUMP=1 logs the offender so it can be made resident pre-capture).
-        if (s.ArenaActive && Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") == "1")
+        if (s.ArenaActive && EngineKnobs.GraphDump.Value)
         {
             string shape = string.Join(",", Enumerable.Range(0, cpuTensor.Shape.Rank).Select(i => cpuTensor.Shape[i]));
             Logs.Info($"[Cuda] H2D MISS inside graph capture: shape=[{shape}] dtype={cpuTensor.DType} bytes={byteSize}");
@@ -513,7 +512,7 @@ internal static unsafe class GpuTransferHelper
     public static ulong BeginGraphArena()
     {
         State s = Resolve();
-        long mb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_GRAPH_ARENA_MB"), out long v) ? Math.Clamp(v, 8, 2048) : 32;
+        long mb = EngineKnobs.GraphArenaMb.Value;
         nuint cap = (nuint)(mb << 20);
         ulong basePtr;
         try { basePtr = CudaMemory.Allocate(cap); }
@@ -582,8 +581,7 @@ internal static unsafe class GpuTransferHelper
     /// still parked provably has no owner. Sweeping here rather than inside CacheActivation is what keeps the
     /// in-place case (where the displaced buffer is the op's own input) from being double-freed.</remarks>
     /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
-    private static readonly bool OrphanSweepEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_ORPHAN_SWEEP") != "0";
+    private static readonly bool OrphanSweepEnabled = EngineKnobs.OrphanSweep.Value;
 
     internal static void SweepOrphans()
     {

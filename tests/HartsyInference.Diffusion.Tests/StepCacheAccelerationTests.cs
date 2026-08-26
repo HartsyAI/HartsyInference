@@ -1,5 +1,6 @@
 using Xunit;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -284,20 +285,23 @@ public sealed unsafe class StepCacheAccelerationTests
     [Fact]
     public void GuidanceInterval_FromEnvironment_UnsetIsAlways()
     {
-        const string variable = "HARTSY_CFG_INTERVAL_TEST_UNSET";
-        Environment.SetEnvironmentVariable(variable, null);
-        Assert.True(GuidanceInterval.FromEnvironment(variable).IsAlways);
-
-        Environment.SetEnvironmentVariable(variable, "0.3,0.7");
+        // The knob resolves override → legacy env → default, so the ambient env value has to be parked
+        // for the unset arm to mean anything on a machine that has HARTSY_CFG_INTERVAL exported.
+        string? saved = Environment.GetEnvironmentVariable("HARTSY_CFG_INTERVAL");
+        Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", null);
         try
         {
-            GuidanceInterval interval = GuidanceInterval.FromEnvironment(variable);
+            Assert.True(GuidanceInterval.FromEnvironment().IsAlways);
+
+            KnobStore.Set(EngineKnobs.CfgInterval, "0.3,0.7");
+            GuidanceInterval interval = GuidanceInterval.FromEnvironment();
             Assert.Equal(0.3f, interval.Start);
             Assert.Equal(0.7f, interval.End);
         }
         finally
         {
-            Environment.SetEnvironmentVariable(variable, null);
+            KnobStore.Clear(EngineKnobs.CfgInterval);
+            Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", saved);
         }
     }
 

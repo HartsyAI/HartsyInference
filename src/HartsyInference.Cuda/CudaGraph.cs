@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
@@ -96,7 +97,7 @@ public sealed class CudaGraph : IDisposable
     /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
     private static void DumpNodeHistogram(nint graph)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DUMP") != "1") return;
+        if (!EngineKnobs.GraphDump.Value) return;
         nuint count = 0;
         if (CudaDriverApi.cuGraphGetNodes(graph, null, ref count) != 0 || count == 0) return;
         nint[] nodes = new nint[count];
@@ -131,7 +132,7 @@ public sealed class CudaGraph : IDisposable
         CudaDriverApi.cuStreamEndCapture(_stream, out nint graph).ThrowOnError();
         try
         {
-            string? dotPath = Environment.GetEnvironmentVariable("HARTSY_GRAPH_DOT");
+            string? dotPath = EngineKnobs.GraphDot.Value;
             if (!string.IsNullOrEmpty(dotPath))
             {
                 int dotRc = CudaDriverApi.cuGraphDebugDotPrint(graph, dotPath, 1);
