@@ -118,3 +118,4 @@ src/HartsyInference.Vulkan/VulkanGpuTransferHelper.cs 1
 src/HartsyInference.Vulkan/VulkanInstance.cs 1
 src/HartsyInference.Vulkan/VulkanMemory.cs 1
 src/HartsyInference.Vulkan/VulkanProfiler.cs 2
+src/HartsyInference.Core/Configuration/KnobStore.cs 1

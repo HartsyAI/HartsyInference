@@ -57,18 +57,56 @@ public static class KnobStore
         return Parse(knob, raw);
     }
 
+    /// <remarks>Dispatches on the DECLARED type, not the default's runtime type: an override knob declares
+    /// <c>bool?</c> with a null default, and switching on the value would send every one of them to the string arm.</remarks>
     private static T Parse<T>(Knob<T> knob, string raw)
     {
-        object? parsed = knob.Default switch
+        Type t = typeof(T);
+        object? parsed;
+        if (t == typeof(bool))
         {
-            bool d => ParseBool(raw, d, knob.Grammar),
-            int d => int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v : d,
-            long d => long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long v) ? v : d,
-            float d => float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : d,
-            _ => raw,
-        };
-        // A string knob declared with a null default lands in the default arm above, which already yields raw.
-        return parsed is T typed ? typed : knob.Default;
+            parsed = ParseBool(raw, (bool)(object)knob.Default!, knob.Grammar);
+        }
+        else if (t == typeof(bool?))
+        {
+            // No opinion when unrecognized, so the call site keeps its contextual default.
+            parsed = ParseBoolOverride(raw);
+        }
+        else if (t == typeof(int) || t == typeof(int?))
+        {
+            parsed = int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v : null;
+        }
+        else if (t == typeof(long) || t == typeof(long?))
+        {
+            parsed = long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long v) ? v : null;
+        }
+        else if (t == typeof(float) || t == typeof(float?))
+        {
+            parsed = float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : null;
+        }
+        else
+        {
+            parsed = raw;
+        }
+        if (parsed is not T typed)
+        {
+            return knob.Default;
+        }
+        return knob.Coerce is null ? typed : knob.Coerce(typed);
+    }
+
+    /// <summary>Tri-state override: only a recognized spelling takes a position, anything else defers to the caller.</summary>
+    private static bool? ParseBoolOverride(string raw)
+    {
+        if (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        if (raw == "0" || raw.Equals("false", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        return null;
     }
 
     private static bool ParseBool(string raw, bool defaultValue, BoolGrammar grammar)
