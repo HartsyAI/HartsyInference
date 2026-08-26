@@ -1,5 +1,6 @@
 using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Repl;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using Spectre.Console.Cli;
 
@@ -14,7 +15,7 @@ public static class Program
     {
         // Warning by default keeps the REPL/one-shot output clean; HARTSY_LOG_LEVEL exposes the engine's
         // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild.
-        Logs.MinLevel = Enum.TryParse(Environment.GetEnvironmentVariable("HARTSY_LOG_LEVEL"), ignoreCase: true, out LogLevel level)
+        Logs.MinLevel = Enum.TryParse(EngineKnobs.LogLevel.Value, ignoreCase: true, out LogLevel level)
             ? level : LogLevel.Warning;
 
         if (args.Length == 0)

@@ -1,5 +1,5 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -37,9 +37,6 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
     public const int DefaultSteps = 30;
 
     private const int LatentChannels = 128;
-
-    /// <summary>Kill switch for the batch-2 guidance forward.</summary>
-    public const string CfgBatchSwitch = "HARTSY_MM3_FLOW_CFG_BATCH";
 
     private readonly MiniMaxMusic3ConditionEncoder _conditionEncoder;
     private readonly MiniMaxMusic3Dit _dit;
@@ -131,7 +128,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
         int stepCount = Math.Max(1, steps);
         // HARTSY_MM3_FLOW_CFG_BATCH=0 restores the two-forward shape. Worth 3.7% of the flow stage, and the
         // diffusers flow-parity gate passes against the batched path.
-        bool batched = EnvSwitch.IsEnabled(CfgBatchSwitch, defaultOn: true);
+        bool batched = EngineKnobs.Mm3FlowCfgBatch.Value;
         int[] starts = ChunkStarts(frames);
         Tensor[] chunks = new Tensor[starts.Length];
         int totalSteps = starts.Length * stepCount;

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
@@ -19,7 +20,7 @@ public static unsafe class Hunyuan3DDebugDump
                 lock (Lock)
                     if (!s_initialized)
                     {
-                        s_dir = Environment.GetEnvironmentVariable("HARTSYINFERENCE_HUNYUAN3D_DEBUG_DIR");
+                        s_dir = EngineKnobs.Hunyuan3dDebugDir.Value;
                         if (!string.IsNullOrEmpty(s_dir)) Directory.CreateDirectory(s_dir);
                         s_initialized = true;
                     }

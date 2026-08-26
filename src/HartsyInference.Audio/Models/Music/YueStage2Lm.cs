@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -148,7 +149,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
             _lm.Forward(backend, BuildWindowPrompt(vCb0), 1, 0, cacheV).Dispose();
             _lm.Forward(backend, BuildWindowPrompt(aCb0), 1, 0, cacheA).Dispose();
 
-            bool prof = Environment.GetEnvironmentVariable("HARTSY_YUE_PROFILE") == "1";
+            bool prof = EngineKnobs.YueProfile.Value;
             long tProj = 0, tArg = 0, tFeed = 0;   // proj+D2H-drain / host-argmax / feed-queue (ticks)
             for (int fr = 0; fr < wlen; fr++)
             {

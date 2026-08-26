@@ -3,8 +3,8 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -40,7 +40,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 
     private readonly MiniMaxMusic3GlobalLm _languageModel;
     private readonly MiniMaxMusic3DepthDecoder _depthDecoder;
-    private readonly bool _batchCfg = EnvSwitch.IsEnabled("HARTSY_MM3_CFG_BATCH", defaultOn: true);
+    private readonly bool _batchCfg = EngineKnobs.Mm3CfgBatch.Value;
     private int _disposed;
 
     public MiniMaxMusic3ArPipeline(MiniMaxMusic3GlobalLm languageModel, MiniMaxMusic3DepthDecoder depthDecoder)

@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
@@ -28,8 +29,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Explicit bring-up probe. Each scan deliberately materializes a prediction on the host, so it is disabled in production; use it to localize non-finite Base outputs before the CFG combine.</summary>
-    private static readonly bool PredictionStatsEnabled =
-        EnvSwitch.IsEnabled("HARTSY_ZIMAGE_PRED_STATS", defaultOn: false);
+    private static readonly bool PredictionStatsEnabled = EngineKnobs.ZimagePredStats.Value;
 
     private GenerationDefaults VariantDefaults =>
         _config.IsBase ? GenerationDefaults.ZImageBase : GenerationDefaults.ZImageTurbo;
@@ -922,8 +922,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 
     /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level. Used to bracket the pre/post VAE state when tracking down all-black output bugs — healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5, mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0. Outside those bands means the model or VAE saturated.</summary>
     /// <summary>Diagnostic gate for the per-channel latent/VAE stats (HARTSY_ZIMAGE_STATS=1). Unconditional stats forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
-    private static readonly bool LatentStatsEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_ZIMAGE_STATS") == "1";
+    private static readonly bool LatentStatsEnabled = EngineKnobs.ZimageStats.Value;
 
     private static void LogLatentStatsPerChannel(string name, Tensor t)
     {

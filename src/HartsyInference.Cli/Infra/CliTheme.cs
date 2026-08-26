@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Vision.Codec;
 using Spectre.Console;
@@ -52,7 +53,7 @@ public static class CliTheme
 
     private static bool DetectLightBackground()
     {
-        string? forced = Environment.GetEnvironmentVariable("HARTSY_THEME");
+        string? forced = EngineKnobs.Theme.Value;
         if (string.Equals(forced, "light", StringComparison.OrdinalIgnoreCase))
             return true;
         if (string.Equals(forced, "dark", StringComparison.OrdinalIgnoreCase))

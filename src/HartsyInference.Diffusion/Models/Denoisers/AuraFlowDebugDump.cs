@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for AuraFlow. When the environment variable <c>AURAFLOW_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Used to diff against a Python (diffusers) reference. Pattern mirrors <see cref="Sd3DebugDump"/>.</summary>
 internal static class AuraFlowDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("AURAFLOW_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.AuraflowDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

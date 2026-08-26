@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Codecs;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
@@ -166,12 +167,7 @@ public sealed unsafe class HeartCodecScalarModel
 
     // HARTSY_HEARTCODEC_SCALAR_CHUNK overrides the decode chunk length in latent frames; 0 (or negative)
     // restores the monolithic whole-latent decode.
-    private static int ReadChunkOverride()
-    {
-        string? env = Environment.GetEnvironmentVariable("HARTSY_HEARTCODEC_SCALAR_CHUNK");
-        if (env is not null && int.TryParse(env, out int value)) return value;
-        return ChunkFrames;
-    }
+    private static int ReadChunkOverride() => EngineKnobs.HeartcodecScalarChunk.Value ?? ChunkFrames;
 
     public IEnumerable<Tensor> EnumerateWeights()
     {

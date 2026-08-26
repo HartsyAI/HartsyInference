@@ -7,6 +7,7 @@ using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
@@ -261,7 +262,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         int sampleStart = _cfg.CodeStart;
         int sampleCount = vocab - sampleStart;
 
-        bool prof = Environment.GetEnvironmentVariable("HARTSY_ORPHEUS_PROF") == "1";
+        bool prof = EngineKnobs.OrpheusProf.Value;
         double tLogits = 0, tSample = 0, tFwd = 0; int profSteps = 0;
         Stopwatch psw = new();
 

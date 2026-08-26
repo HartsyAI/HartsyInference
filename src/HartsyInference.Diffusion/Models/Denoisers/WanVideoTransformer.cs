@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -172,7 +173,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
         Tensor cur = hidden;
         _fwdCounter++;
-        string? vramLog = Environment.GetEnvironmentVariable("HARTSY_WAN_VRAM");
+        string? vramLog = EngineKnobs.WanVram.Value;
         Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange =
             cp is null ? null : (k, v) => cp.Exchange.Exchange(cp.Rank, k, v);
 

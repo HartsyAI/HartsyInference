@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Utilities;
@@ -25,8 +26,7 @@ public sealed class DeviceFeatureCache : IDisposable
     /// indicator snapshot to host as they are produced, trading one PCIe round trip per step for their full device
     /// size. Off by default. Defensible only because both are read at most ONCE PER STEP — the same treatment applied
     /// to a per-block tensor loses outright (docs/Research/MEMORY_SCHEDULING_SERVING.md §9).</summary>
-    private static readonly bool OffloadEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_OFFLOAD") == "1";
+    private static readonly bool OffloadEnabled = EngineKnobs.StepCacheOffload.Value;
 
     private readonly float _threshold;
     private readonly int _maxConsecutiveReuse;

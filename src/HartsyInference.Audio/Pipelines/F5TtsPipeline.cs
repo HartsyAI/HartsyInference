@@ -5,6 +5,7 @@ using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Preprocessing;
 using F5SwaySamplingScheduler = HartsyInference.Audio.Models.F5Tts.F5SwaySamplingScheduler;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -115,12 +116,12 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
-        bool profG = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+        bool profG = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
         Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
         if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] DiT sample loop: {gsw.Elapsed.TotalMilliseconds:0}ms"); gsw.Restart(); }
         // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
-        string? melPath = Environment.GetEnvironmentVariable("F5_DUMP_MEL");
+        string? melPath = EngineKnobs.F5DumpMel.Value;
         if (melPath is not null)
         {
             int md = (int)mel.Shape[1], mt = (int)mel.Shape[2];
@@ -147,7 +148,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         string refText, string targetText, F5TtsOptions? options = null)
     {
         ThrowIfDisposed();
-        bool prof = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+        bool prof = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch _secSw = System.Diagnostics.Stopwatch.StartNew();
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
         int sr = melCfg.SampleRate;
@@ -235,7 +236,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         F5TtsOptions opts = options ?? new F5TtsOptions();
-        if (Environment.GetEnvironmentVariable("F5_DUMP_MEL") is not null)
+        if (EngineKnobs.F5DumpMel.Value is not null)
         {
             long rn = refMel.ElementCount; double rs = 0, rs2 = 0, rmn = double.MaxValue, rmx = double.MinValue;
             unsafe { float* rp = (float*)refMel.DataPointer; for (long i = 0; i < rn; i++) { float v = rp[i]; rs += v; rs2 += (double)v * v; rmn = Math.Min(rmn, v); rmx = Math.Max(rmx, v); } }

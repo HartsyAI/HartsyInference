@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for Lance. When <c>LANCE_DEBUG_DIR</c> is set, writes each named tensor as raw little-endian F32 to <c>{dir}/layers/{safe_name}.bin</c>; zero-cost otherwise. Mirrors <see cref="Ideogram4DebugDump"/> — used for Python layer-diff validation.</summary>
 internal static class LanceDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("LANCE_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.LanceDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

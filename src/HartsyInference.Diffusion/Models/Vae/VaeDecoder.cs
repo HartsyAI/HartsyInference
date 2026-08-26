@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -259,13 +260,11 @@ public sealed class VaeDecoder
     /// <summary>Diagnostic gate (HARTSY_VAE_STATS=1) for the per-tile/per-image min/max/mean scans below.
     /// These were bring-up instrumentation for the black-tile bug; unconditional they force full host scans
     /// of multi-megapixel tensors every generation.</summary>
-    private static readonly bool VaeStatsEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_VAE_STATS") == "1";
+    private static readonly bool VaeStatsEnabled = EngineKnobs.VaeStats.Value;
 
     /// <summary>Kill switch (HARTSY_VAE_FULLRES=0) for the full-resolution direct-decode attempt in
     /// <see cref="DecodeTiled"/>, forcing the always-tiled behavior.</summary>
-    private static readonly bool FullResEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_VAE_FULLRES") != "0";
+    private static readonly bool FullResEnabled = EngineKnobs.VaeFullres.Value;
 
     /// <summary>Set when a full-resolution decode attempt failed (OOM) — tiles for the rest of the session.</summary>
     private bool _fullResDisabled;

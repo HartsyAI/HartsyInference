@@ -4,8 +4,8 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -284,7 +284,7 @@ public sealed unsafe class CsmModel : IDisposable
         // CUDA-graph decode collapses each single-row backbone step (~layers×kernels launches, the per-frame hot
         // path over a whole song) into one graph replay. Only the steady-state one-row appends are graphed; the
         // frame-0 prefill (many rows) and the standalone uncond dummy stay eager. Env-gated with an eager fallback.
-        bool graphEnabled = EnvSwitch.IsEnabled("HARTSY_CSM_GRAPH", defaultOn: true)
+        bool graphEnabled = EngineKnobs.CsmGraph.Value
             && backend.GraphDecodeSupported && _backbone.SupportsGraphDecode(backend);
 
         // CFG steady state runs cond+uncond as ONE B=2 batched backbone step: the two streams are
@@ -295,7 +295,7 @@ public sealed unsafe class CsmModel : IDisposable
         // per-frame cost in CFG runs. The batched step itself is graph-captured when eligible (see below);
         // otherwise it runs eager. Kill-switch HARTSY_CSM_CFG_BATCH=0 restores two-stream.
         if (useCfg && !uncondStandalone && (int)condNewEmbeds.Shape[1] == 1 && (int)uncondNewEmbeds!.Shape[1] == 1
-            && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_BATCH", defaultOn: true))
+            && EngineKnobs.CsmCfgBatch.Value)
         {
             FixedKvCache ucB = session.Uncond ?? throw new InvalidOperationException("CFG StepFrame needs a CFG session (useCfg:true).");
             // Graph-captured batched step: the whole B=2 backbone step replays as ONE cuGraphLaunch, killing the
@@ -304,7 +304,7 @@ public sealed unsafe class CsmModel : IDisposable
             // length, frames appended to both — so one devicePos serves both rows' rope AND kvLen; the equality
             // check is a safety net that falls back to the eager batched path, never wrong math). Kill-switch
             // HARTSY_CSM_CFG_GRAPH=0 restores the eager batched step below.
-            if (graphEnabled && EnvSwitch.IsEnabled("HARTSY_CSM_CFG_GRAPH", defaultOn: true)
+            if (graphEnabled && EngineKnobs.CsmCfgGraph.Value
                 && _backbone.SupportsDualGraphDecode(backend) && session.Backbone.CurrentLength == ucB.CurrentLength)
             {
                 (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, condNewEmbeds, uncondNewEmbeds!, bh);

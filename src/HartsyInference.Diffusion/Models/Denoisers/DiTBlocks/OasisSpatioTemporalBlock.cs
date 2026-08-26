@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -12,7 +13,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 public sealed unsafe class OasisSpatioTemporalBlock
 {
     // ── Diagnostic phase timers (HARTSY_OASIS_PHASE=1, eager path only) — Sync-bracketed GPU time per phase. ──
-    internal static readonly bool Prof = Environment.GetEnvironmentVariable("HARTSY_OASIS_PHASE") == "1";
+    internal static readonly bool Prof = EngineKnobs.OasisPhase.Value;
     internal static double TSdpa, TAttnRest, TMlp, TModNorm;
     private static double Now() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 

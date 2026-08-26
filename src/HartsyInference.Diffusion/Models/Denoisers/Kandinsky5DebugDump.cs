@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// against a Python (diffusers) reference. Mirrors <see cref="AuraFlowDebugDump"/>.</summary>
 internal static class Kandinsky5DebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("KANDINSKY5_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.Kandinsky5DebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

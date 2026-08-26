@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -65,7 +66,7 @@ public sealed class Ideogram4CheckpointConverter
             // Default-off perf knob (INFERENCE_ACCEL_GRIND §H3.2): fuse the SwiGLU w1/w3 pair into one w13
             // GEMM per block. fp8_scaled pairs get a common-scale requant first (per-block fallback when the
             // introduced error exceeds 1/16). Ideogram4Block detects the fused key and runs the 1-GEMM path.
-            if (Environment.GetEnvironmentVariable("HARTSY_FUSED_FFN") == "1")
+            if (EngineKnobs.FusedFfn.Value)
             {
                 (int fused, float worstErr) = CheckpointConvertUtils.FuseSwiGluPairs(
                     folded, ".feed_forward.w1.weight", ".feed_forward.w3.weight", ".feed_forward.w13.weight");

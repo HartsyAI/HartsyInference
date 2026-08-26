@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// Python reference produced by <c>dump_anima_llm_adapter.py</c>. Mirrors <c>QwenImageVaeDebugDump</c>.</summary>
 internal static class AnimaLlmAdapterDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("ANIMA_LLM_ADAPTER_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.AnimaLlmAdapterDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

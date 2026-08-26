@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -8,8 +9,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// keeps the CFG cond/uncond forwards of the same step from colliding. For Python layer-diff validation.</summary>
 public static unsafe class WanVideoDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("WAN_DEBUG_DIR");
-    private static string _tag = Environment.GetEnvironmentVariable("WAN_DEBUG_TAG") is { Length: > 0 } t ? t + "_" : "";
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.WanDebugDir);
+    private static string _tag = EngineKnobs.WanDebugTag.Value is { Length: > 0 } t ? t + "_" : "";
     private static readonly object _lock = new();
     private static readonly HashSet<string> _shapesWritten = new();
 

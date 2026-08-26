@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Moonshine;  // RotaryEmbedding (interleaved x_transformers-style)
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
@@ -18,7 +19,7 @@ namespace HartsyInference.Audio.Models.F5Tts;
 internal sealed unsafe class F5DitBlock
 {
     // ── Section profiling (HARTSY_F5_PROFILE=1): sync-bracketed ms accumulators, dumped per generation ──
-    internal static readonly bool Prof = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+    internal static readonly bool Prof = EngineKnobs.F5Profile.Value;
     internal static double _tAttn, _tQkv, _tFfn, _tBlock; internal static int _nBlocks;
     private static readonly System.Diagnostics.Stopwatch _swAttn = new(), _swQkv = new(), _swFfn = new(), _swBlk = new();
     internal static void DumpProfile()

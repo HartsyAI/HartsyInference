@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
 
@@ -68,7 +69,7 @@ public sealed unsafe class Hunyuan3DShapeVae
         // Larger chunks = fewer per-chunk host stream-drains (the occ.DataPointer readback). The old 4096 bound the
         // MATERIALIZED cross-attn scores buffer, but the geo-decoder SDPA runs cuDNN fused-flash (allowF16), so no
         // scores materialize — the chunk is bounded only by activation memory. HARTSY_HY3D_VAE_CHUNK overrides.
-        if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_HY3D_VAE_CHUNK"), out int envChunk) && envChunk > 0)
+        if (EngineKnobs.Hy3dVaeChunk.Value is int envChunk && envChunk > 0)
             chunkSize = envChunk;
 
         Tensor processed = ProcessLatents(backend, latent);

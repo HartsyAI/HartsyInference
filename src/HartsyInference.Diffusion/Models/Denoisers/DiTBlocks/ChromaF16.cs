@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -30,8 +31,7 @@ public static unsafe class ChromaF16
 
     /// <summary>HARTSY_CHROMA_F16TRACE=1: logs min/max/nan/inf of key block intermediates for the first few
     /// forwards to locate F16 overflow sites. Each probe D2H-drains the tensor (very slow); debug only.</summary>
-    private static readonly bool TraceEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_CHROMA_F16TRACE") == "1";
+    private static readonly bool TraceEnabled = EngineKnobs.ChromaF16trace.Value;
     private static int _traceCallsLeft = TraceEnabled ? 2000 : 0;
 
     /// <summary>Returns a value-scaled F32 copy of a bias tensor (weight damping rides the GEMM alpha, but the

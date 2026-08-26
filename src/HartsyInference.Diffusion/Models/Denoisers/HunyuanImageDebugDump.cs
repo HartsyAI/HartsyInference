@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for Hunyuan Image. When the environment variable <c>HUNYUAN_IMAGE_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 little-endian to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Mirrors <see cref="Sd3DebugDump"/> / <see cref="QwenImageDebugDump"/> — used to diff against a Python diffusers reference dump.</summary>
 internal static class HunyuanImageDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("HUNYUAN_IMAGE_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.HunyuanImageDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -22,7 +23,7 @@ public sealed class ZetaChromaTransformer : IDisposable
 
     // Binary stage dumps for the torch oracle (HARTSY_ZETA_DUMP=<dir>): raw F32 .bin per stage on the
     // FIRST forward only (step-0 cond pass — the pipeline runs cond before uncond), plus a shapes manifest.
-    private static readonly string? ZetaDumpDir = Environment.GetEnvironmentVariable("HARTSY_ZETA_DUMP");
+    private static readonly string? ZetaDumpDir = EngineKnobs.ZetaDump.Value;
     private static int _dumpForwardIndex = -1;
 
     /// <summary>True while the step-0 cond forward is being dumped (HARTSY_ZETA_DUMP set).</summary>

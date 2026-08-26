@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for Microsoft Lens. When <c>LENS_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 little-endian to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Mirrors <see cref="QwenImageDebugDump"/> / <see cref="Sd3DebugDump"/> — used by <c>tests/python-reference/dump_lens_full_forward.py</c> + <c>diff_lens_layers.py</c> + <c>LensDiffTests</c> to validate the transformer against the diffusers reference.</summary>
 internal static class LensDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("LENS_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.LensDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

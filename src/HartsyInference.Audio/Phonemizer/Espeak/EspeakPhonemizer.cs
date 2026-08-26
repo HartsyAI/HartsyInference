@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 
@@ -50,7 +51,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         string? env = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
         if (!string.IsNullOrEmpty(env)) yield return env;
 
-        string? cacheRoot = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODEL_CACHE");
+        string? cacheRoot = EngineKnobs.ModelCacheRoot.Value;
         if (string.IsNullOrEmpty(cacheRoot))
             cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "hartsyinference", "models");
         yield return Path.Combine(cacheRoot, "Hartsy--espeak-ng-data", "espeak-ng-data");

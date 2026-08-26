@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 
@@ -10,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Vae.QwenImage;
 /// Mirrors <c>AnimaDebugDump</c>.</summary>
 internal static class QwenImageVaeDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("QWEN_VAE_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.QwenVaeDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

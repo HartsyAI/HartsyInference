@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -88,7 +89,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     // F16-activation headroom probe (streams riding >60k overflow F16). Host sync per probe, debug only.
     // Reads whichever dtype the stream is in: since the block path went F16 this must decode halves, and the
     // old raw-float read would have reported nonsense at exactly the moment the probe is worth running.
-    private static readonly bool Ltx2Probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
+    private static readonly bool Ltx2Probe = EngineKnobs.Ltx2Probe.Value;
     private static bool _probedOnce;
 
     private static void Probe(string label, Tensor t)

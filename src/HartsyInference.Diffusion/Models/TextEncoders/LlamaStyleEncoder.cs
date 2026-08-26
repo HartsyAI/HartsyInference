@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.TextEncoders;
@@ -83,7 +84,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
     // Diagnostic (HARTSY_TE_PROBE=1): per-layer absmax of the hidden stream — forces a host sync per
     // layer, so leave off outside debugging sessions.
-    private static readonly bool TeProbe = Environment.GetEnvironmentVariable("HARTSY_TE_PROBE") == "1";
+    private static readonly bool TeProbe = EngineKnobs.TeProbe.Value;
 
     private static unsafe void ProbeAbsmax(string label, Tensor t)
     {

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -11,7 +12,7 @@ internal static class AceStepDebugDump
     // Resolved per call (NOT cached): the DiT/DCAE/vocoder parity tests each set ACE_STEP_DEBUG_DIR to their own
     // dir, and a static-cached value would pin whichever test ran first — so the others would dump to the wrong
     // place and fail. Reading the env each call keeps every test's dumps in its own directory.
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("ACE_STEP_DEBUG_DIR", perCallResolve: true);
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.AceStepDebugDir, perCallResolve: true);
 
     /// <summary>Writes the tensor's data as raw F32 to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)

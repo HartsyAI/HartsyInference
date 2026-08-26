@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Codecs.XCodec;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -305,7 +306,7 @@ public sealed unsafe class YuePipeline : IDisposable
     private void DumpParityArtifacts(IBackend backend, int[][] vocalCodes, int[][] accompCodes,
         float[] vocalWav, float[] instWav, float[] vocoderMix, float[] draftMix, float[] final)
     {
-        string? directory = Environment.GetEnvironmentVariable("HARTSY_YUE_DUMP");
+        string? directory = EngineKnobs.YueDump.Value;
         if (string.IsNullOrWhiteSpace(directory)) return;
         try
         {

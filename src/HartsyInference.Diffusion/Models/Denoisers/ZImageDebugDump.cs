@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for Z-Image. When the environment variable <c>Z_IMAGE_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Used to diff against a Python (diffusers) reference produced by <c>dump_zimage_full_forward.py</c>.</summary>
 internal static class ZImageDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("Z_IMAGE_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.ZImageDebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

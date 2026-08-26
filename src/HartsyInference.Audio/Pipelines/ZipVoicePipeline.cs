@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Models.ZipVoice;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -122,7 +123,7 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         Tensor textCondition = _model.GatherTextCondition(textHidden, frameToTokenIndex);
         textHidden.Dispose();
 
-        if (Environment.GetEnvironmentVariable("HARTSY_ZIPVOICE_DEBUG") == "1")
+        if (EngineKnobs.ZipvoiceDebug.Value)
         {
             int avg = joint.Length > 0 ? totalFrames / joint.Length : 0;
             int impliedPromptBoundary = avg * promptTokens.Length;

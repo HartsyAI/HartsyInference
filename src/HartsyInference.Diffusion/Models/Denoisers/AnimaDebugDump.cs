@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// from <see cref="ErnieImageDebugDump"/> verbatim.</summary>
 internal static class AnimaDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("ANIMA_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.AnimaDebugDir);
 
     /// <summary>Writes the tensor's data as raw F32 little-endian to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)

@@ -5,6 +5,7 @@ using HartsyInference.Audio.Models.Zonos;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
@@ -130,7 +131,7 @@ public sealed unsafe class ZonosPipeline : IDisposable
         int eosStep = -1, lastStep = cap - 1;
         Span<int> frame = stackalloc int[ch];
 
-        string? logitDump = Environment.GetEnvironmentVariable("ZONOS_LOGIT_DUMP");
+        string? logitDump = EngineKnobs.ZonosLogitDump.Value;
         int logitDumpSteps = logitDump != null ? 33 : 0;
         List<float>? logitBuf = logitDump != null ? new List<float>() : null;
 

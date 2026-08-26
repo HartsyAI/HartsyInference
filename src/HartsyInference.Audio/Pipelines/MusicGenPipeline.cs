@@ -4,6 +4,7 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -75,7 +76,7 @@ public sealed unsafe class MusicGenPipeline(MusicGenConfig cfg, MusicGenDecoder 
         // inside capture does a sync upload); the capture step records + launches; later steps replay. Any
         // capture-illegal op falls back to eager for the rest of the generation.
         bool graphOn = backend.StepGraphSupported && backend.GraphDecodeSupported
-            && Environment.GetEnvironmentVariable("HARTSY_MUSICGEN_GRAPH_OFF") is null;
+            && EngineKnobs.MusicgenGraphOff.Value is null;
         bool graphDead = false;
         const int GraphCaptureStep = 3;
         if (graphOn)

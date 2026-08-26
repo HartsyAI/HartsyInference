@@ -1,5 +1,6 @@
 using System.Linq;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -214,7 +215,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         if ((int)latent.Shape[1] != _latentChannels)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != {_latentChannels}.", nameof(latent));
 
-        bool probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
+        bool probe = EngineKnobs.Ltx2Probe.Value;
         Tensor denorm = Denormalize(latent);
         if (probe) ProbeStats("denorm", denorm);
         Tap?.Invoke("denorm", denorm);

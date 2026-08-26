@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -17,7 +18,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
     /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
-    private static readonly bool DiagnosticStats = Environment.GetEnvironmentVariable("ANIMA_DEBUG_STATS") == "1";
+    private static readonly bool DiagnosticStats = EngineKnobs.AnimaDebugStats.Value;
 
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;
@@ -108,7 +109,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         // either way. If output becomes coherent with the bypass, the LlmAdapter implementation is the
         // dominant issue and we need to revisit its forward (e.g., cross-attn K/V source) per the
         // PHASE_3 troubleshooting methodology.
-        bool bypassAdapter = Environment.GetEnvironmentVariable("ANIMA_BYPASS_LLM_ADAPTER") == "1";
+        bool bypassAdapter = EngineKnobs.AnimaBypassLlmAdapter.Value;
         Tensor refinedText;
         if (bypassAdapter)
         {

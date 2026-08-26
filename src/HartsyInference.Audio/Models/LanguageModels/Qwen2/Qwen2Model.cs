@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -42,8 +43,8 @@ public sealed class Qwen2Model : IDisposable
         AttentionBias = cfg.AttentionBias,
         QkNorm = false,
         TieWordEmbeddings = cfg.TieWordEmbeddings,
-        // Per-config opt-in OR the global env (TransformerConfig.LowVramQuant defaults to the env; OR-ing preserves it).
-        LowVramQuant = cfg.LowVramQuant || Environment.GetEnvironmentVariable("HARTSY_LOWVRAM_QUANT") == "1",
+        // Per-config opt-in OR the global knob (TransformerConfig.LowVramQuant defaults to it; OR-ing preserves that).
+        LowVramQuant = cfg.LowVramQuant || EngineKnobs.LowvramQuant.Value,
         Rope = cfg.Rope,
     };
 

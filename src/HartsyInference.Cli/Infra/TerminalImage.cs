@@ -1,4 +1,5 @@
 using System.Text;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cli.Infra;
@@ -17,7 +18,7 @@ public static class TerminalImage
     /// <c>HARTSY_NO_IMAGE=1</c>.</remarks>
     public static bool IsSupported =>
         !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null
-        && Environment.GetEnvironmentVariable("HARTSY_NO_IMAGE") != "1";
+        && !EngineKnobs.NoImage.Value;
 
     /// <summary>Prints <paramref name="rgb"/> scaled to fit <paramref name="maxCellWidth"/> columns; no-op when unsupported.</summary>
     /// <remarks>See <see cref="RenderToLines"/> for the parameter meanings.</remarks>

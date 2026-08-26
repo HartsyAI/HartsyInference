@@ -6,6 +6,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
@@ -139,7 +140,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         int eosStep = -1, lastStep = cap - 1;
         int nextSettled = 0; // next real (delay-reverted) frame index not yet reported via onSettledFrame.
         // DEBUG: dump per-step channel-0 tokens to localize the repetition loop (DIA_DEBUG_TOKENS=path).
-        string? dbgPath = Environment.GetEnvironmentVariable("DIA_DEBUG_TOKENS");
+        string? dbgPath = EngineKnobs.DiaDebugTokens.Value;
         System.Text.StringBuilder? dbg = dbgPath is null ? null : new();
         Span<int> frame = stackalloc int[ch];
         for (int s = 0; s < cap - 1; s++)

@@ -1,4 +1,4 @@
-using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -88,7 +88,7 @@ public sealed class ChromaCheckpointConverter
         // passes per stream. The fp8_scaled companion was folded onto the FUSED tensor above, so Q/K/V
         // share one scale by construction — no requant needed for BFL sources. Only plain linear dtypes
         // fuse (GGUF block-quant tensors keep the proven split path).
-        bool fuseQkv = Environment.GetEnvironmentVariable("HARTSY_CHROMA_FUSED_QKV") == "1";
+        bool fuseQkv = EngineKnobs.ChromaFusedQkv.Value;
         static bool FusableDType(Tensor t) =>
             t.DType == DType.F32 || t.DType == DType.F16 || t.DType == DType.BF16 || t.DType == DType.F8E4M3;
 
@@ -105,7 +105,7 @@ public sealed class ChromaCheckpointConverter
         {
             if (key.StartsWith("nerf_", StringComparison.Ordinal)) { isRadiance = true; break; }
         }
-        bool fp8Blocks = isRadiance && EnvSwitch.IsEnabled("HARTSY_RADIANCE_FP8", defaultOn: true);
+        bool fp8Blocks = isRadiance && EngineKnobs.RadianceFp8.Value;
 
         // ── Double transformer blocks ───────────────────────────────────
         for (int i = 0; i < numDoubles; i++)

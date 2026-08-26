@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
@@ -667,7 +668,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                     noisedSource = sourceLatent;
                 }
                 MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
-                if (Environment.GetEnvironmentVariable("HARTSY_SDXL_DEBUG") == "1")
+                if (EngineKnobs.SdxlDebug.Value)
                 {
                     unsafe
                     {

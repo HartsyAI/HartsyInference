@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -31,7 +32,7 @@ public sealed unsafe class LtxVideo2Rope
     /// it takes the fused QK kernel 0.189 -> 0.156 ms (-17.5%) but only 1461.0 -> 1456.0 ms/step end-to-end,
     /// because that kernel is just ~2.5% of the step — and it costs a real output change (SSIM 0.9956 across the
     /// clip). Not a trade worth taking by default; the seam stays so the experiment is repeatable.</summary>
-    internal static bool F16Tables = Environment.GetEnvironmentVariable("HARTSY_LTX2_ROPEF16") == "1";
+    internal static bool F16Tables = EngineKnobs.Ltx2Ropef16.Value;
 
     private enum Modality { Video, Audio }
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -18,8 +19,7 @@ public sealed unsafe class ZImageBlock
 
     /// <summary>HARTSY_ZIMAGE_F16TRACE=1: logs min/max/nan of every block intermediate for the first few block
     /// forwards — locates the first F16 overflow site. Each probe D2H-drains the tensor (very slow); debug only.</summary>
-    private static readonly bool F16TraceEnabled =
-        Environment.GetEnvironmentVariable("HARTSY_ZIMAGE_F16TRACE") == "1";
+    private static readonly bool F16TraceEnabled = EngineKnobs.ZimageF16trace.Value;
     private static int _traceCallsLeft = F16TraceEnabled ? 300 : 0;   // covers all blocks of an 8-step gen
 
     private readonly int _hiddenSize;

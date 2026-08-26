@@ -4,6 +4,7 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.QwenTts;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
@@ -23,7 +24,7 @@ namespace HartsyInference.Audio.Pipelines;
 /// text-vocab dependency — the caller supplies the already-tokenized per-frame text stream.</para></summary>
 public sealed unsafe class Qwen3TtsPipeline : IDisposable
 {
-    private static readonly bool DebugCodes = Environment.GetEnvironmentVariable("QWEN3_DEBUG") == "1";
+    private static readonly bool DebugCodes = EngineKnobs.Qwen3Debug.Value;
 
     /// <summary>Codec-stream sentinel marking the prefill position where the ECAPA x-vector embedding is
     /// injected in place of a token lookup (voice_clone). Any value the codec vocab never uses.</summary>

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for Ideogram 4. When <c>IDEOGRAM4_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw little-endian F32 to <c>{dir}/layers/{safe_name}.bin</c>; zero-cost otherwise. Used to diff against a Python (upstream) reference. Pattern copied from <see cref="ErnieImageDebugDump"/>.</summary>
 internal static class Ideogram4DebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("IDEOGRAM4_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.Ideogram4DebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

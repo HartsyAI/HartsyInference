@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
@@ -83,7 +84,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         int steps = request.Steps > 0 ? request.Steps : _cfg.NumInferenceSteps;
         float guidance = request.CfgScale > 0 ? request.CfgScale : _cfg.GuidanceScale;
         int gridRes = request.GridResolution > 0 ? request.GridResolution : _cfg.GridResolution;
-        bool phase = Environment.GetEnvironmentVariable("HARTSY_3D_PHASE") == "1";
+        bool phase = EngineKnobs.ThreeDPhase.Value;
         System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
         void Probe(string tag) { if (phase) { Backend.Sync(); Console.WriteLine($"[hy3d-phase] {tag}: {pw.ElapsedMilliseconds} ms"); pw.Restart(); } }
 

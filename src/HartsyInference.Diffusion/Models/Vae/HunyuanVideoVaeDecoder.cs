@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -269,7 +270,7 @@ public sealed class HunyuanVideoVaeDecoder
     /// <summary>Diagnostic: logs mean/std/range of a decode intermediate (forces a D2H sync — debug only).</summary>
     private static unsafe void Stat(IBackend backend, string tag, Tensor t)
     {
-        if (Environment.GetEnvironmentVariable("HYV_VAE_STAGES") != "1") return;
+        if (!EngineKnobs.HyvVaeStages.Value) return;
         backend.Sync();
         float* p = (float*)t.DataPointer; long n = t.Shape.ElementCount;
         double s = 0, s2 = 0; float mn = float.MaxValue, mx = float.MinValue; long nan = 0;

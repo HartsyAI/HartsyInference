@@ -1,33 +1,34 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Shared plumbing behind the per-model debug-dump hooks: env-var dump-dir resolution, <c>layers/</c> creation, and raw-F32 tensor writes. Cached mode resolves the env var once per process; per-call mode re-reads it on every access, for hooks whose parity tests point the same var at per-test directories.</summary>
+/// <summary>Shared plumbing behind the per-model debug-dump hooks: dump-dir knob resolution, <c>layers/</c> creation, and raw-F32 tensor writes. Cached mode resolves the knob once per process; per-call mode re-reads it on every access, for hooks whose parity tests point the same knob at per-test directories.</summary>
 internal sealed unsafe class DebugDumpSink
 {
-    private readonly string _envVar;
+    private readonly Knob<string?> _knob;
     private readonly bool _perCall;
     private readonly string? _cachedDir;
     private readonly object _lock = new object();
     private bool _initialized;
 
-    public DebugDumpSink(string envVar, bool perCallResolve = false)
+    public DebugDumpSink(Knob<string?> knob, bool perCallResolve = false)
     {
-        _envVar = envVar;
+        _knob = knob;
         _perCall = perCallResolve;
         if (!perCallResolve)
-            _cachedDir = Resolve(envVar);
+            _cachedDir = Resolve(knob);
     }
 
     /// <summary>Dump root directory, or null when dumping is disabled.</summary>
-    public string? Dir => _perCall ? Resolve(_envVar) : _cachedDir;
+    public string? Dir => _perCall ? Resolve(_knob) : _cachedDir;
 
-    /// <summary>True when the env var points at a dump directory.</summary>
+    /// <summary>True when the knob points at a dump directory.</summary>
     public bool Enabled => Dir is not null;
 
-    private static string? Resolve(string envVar)
+    private static string? Resolve(Knob<string?> knob)
     {
-        string? dir = Environment.GetEnvironmentVariable(envVar);
+        string? dir = knob.Value;
         return string.IsNullOrEmpty(dir) ? null : dir;
     }
 

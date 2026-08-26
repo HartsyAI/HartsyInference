@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Cache;
@@ -425,11 +426,11 @@ public static class AudioModelCache
 
     private static string ResolveCacheRoot()
     {
-        string? cacheOverride = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODEL_CACHE");
+        string? cacheOverride = EngineKnobs.ModelCacheRoot.Value;
         if (!string.IsNullOrEmpty(cacheOverride)) return cacheOverride;
-        // Read via the env var (not a reference to RepoPaths/AudioModelRoot) to respect the
+        // Read via the knob (not a reference to RepoPaths/AudioModelRoot) to respect the
         // Audio package's dependency direction -- Engine depends on Audio, not the reverse.
-        string? modelsRoot = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS");
+        string? modelsRoot = EngineKnobs.ModelsRoot.Value;
         if (!string.IsNullOrEmpty(modelsRoot)) return Path.Combine(modelsRoot, "audio");
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return Path.Combine(home, ".cache", "hartsyinference", "models");

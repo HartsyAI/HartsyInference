@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -93,7 +94,7 @@ public sealed unsafe class OasisDit : IDisposable
             throw new ArgumentException($"actions must be [{t}, {_config.ExternalCondDim}].", nameof(actions));
         if (t > _config.MaxFrames) throw new ArgumentException($"window {t} exceeds max_frames {_config.MaxFrames}.", nameof(latents));
 
-        bool prof = taps is null && Environment.GetEnvironmentVariable("HARTSY_OASIS_PHASE") == "1";
+        bool prof = taps is null && EngineKnobs.OasisPhase.Value;
 
         Tensor cond = BuildCondition(backend, noiseIndices, actions, t, dim);
         Tensor x = Patchify(backend, latents, t, gh, gw);

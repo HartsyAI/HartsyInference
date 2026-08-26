@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -78,7 +79,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
         int gridRes = request.GridResolution > 0 ? request.GridResolution : _cfg.GridResolution;
-        bool phase = Environment.GetEnvironmentVariable("HARTSY_3D_PHASE") == "1";
+        bool phase = EngineKnobs.ThreeDPhase.Value;
         System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
         void Probe(string tag) { if (phase) { Backend.Sync(); Console.WriteLine($"[triposr-phase] {tag}: {pw.ElapsedMilliseconds} ms"); pw.Restart(); } }
 

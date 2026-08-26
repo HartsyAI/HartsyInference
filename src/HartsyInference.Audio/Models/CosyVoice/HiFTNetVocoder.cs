@@ -3,6 +3,7 @@ using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
@@ -115,7 +116,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         // F0 → NSF harmonic source, computed fresh from t=0 (this is the non-streaming path — no phase state
         // to carry). Deterministic (no-noise) NSF source for parity validation; production stays stochastic.
         Tensor f0 = _f0.Forward(backend, mel);                       // [1, 1, T_mel] Hz
-        int noiseSeed = Environment.GetEnvironmentVariable("HIFT_DETERMINISTIC") == "1" ? -1 : 0;
+        int noiseSeed = EngineKnobs.HiftDeterministic.Value ? -1 : 0;
         float[] harSource = NsfVocoderDsp.GenerateHarmonicSource(f0, upProd * _cfg.IstftHopSize, _cfg.SampleRate, Harmonics, _mSourceW!, _mSourceB!, SineAmp, NoiseStd, VoicedThreshold, noiseSeed);
         f0.Dispose();
         return ForwardCore(backend, mel, harSource);
@@ -135,7 +136,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
             for (int i = 0; i < melArray.Length; i++) melArray[i] = mp[i];
         }
         float[] f0Array = _f0.ForwardHostCpu(melArray, melBins, tMel);
-        int noiseSeed = Environment.GetEnvironmentVariable("HIFT_DETERMINISTIC") == "1" ? -1 : 0;
+        int noiseSeed = EngineKnobs.HiftDeterministic.Value ? -1 : 0;
         double[] phase = new double[Harmonics];
         uint rng = noiseSeed == 0 ? 0x9E3779B9u : DeterministicRng.Seed(Math.Abs(noiseSeed));
         float[] harSource = NsfVocoderDsp.GenerateHarmonicSourceChunk(f0Array, phase, ref rng,
@@ -219,10 +220,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     // floor (same class as F0Predictor's, just far smaller since it doesn't feed an accumulator), not a
     // correctness bug; see HiftStreamParityTests for the real-generation listen-test verification this rests
     // on. Recalibrate via HARTSY_HIFT_STREAM_MARGIN whenever this network's conv/resblock shapes change.
-    private static readonly int StreamMarginSamples = ReadMarginOverride() ?? 96_000;
-
-    private static int? ReadMarginOverride() =>
-        int.TryParse(Environment.GetEnvironmentVariable("HARTSY_HIFT_STREAM_MARGIN"), out int v) ? v : null;
+    private static readonly int StreamMarginSamples = EngineKnobs.HiftStreamMargin.Value ?? 96_000;
 
     /// <summary>Streaming counterpart to <see cref="Forward"/>: feed successive mel chunks of one utterance and get back only the audio newly settled by this chunk.</summary>
     /// <remarks>Consumed via <paramref name="state"/>. Set
@@ -289,7 +287,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         }
         float[] f0Window = _f0.ForwardHostCpu(melWindow, melBins, f0WindowLen);   // covers [f0WindowStart, tMel)
 
-        int noiseSeed = Environment.GetEnvironmentVariable("HIFT_DETERMINISTIC") == "1" ? -1 : 0;
+        int noiseSeed = EngineKnobs.HiftDeterministic.Value ? -1 : 0;
         bool addNoise = noiseSeed >= 0;
 
         // Consume exactly the NEWLY settled F0 range into the carried phase/RNG — permanent, never redone.

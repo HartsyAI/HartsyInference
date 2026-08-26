@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Moonshine;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
@@ -41,7 +42,7 @@ public sealed unsafe class F5Dit : IDisposable
     // allocates+frees intermediate tensors per-forward, so pool addresses shift on replay and the recorded
     // kernels read stale pointers. Landing this needs graph-stable scratch: pre-allocate every F5DitBlock
     // intermediate ONCE so the captured region does zero alloc/free (the remaining work). Keep OFF.
-    private static readonly bool GraphEnabled = Environment.GetEnvironmentVariable("HARTSY_F5_GRAPH") == "1";
+    private static readonly bool GraphEnabled = EngineKnobs.F5Graph.Value;
     private bool _graphDead;
     private Tensor? _xFixed, _siluFixed, _graphVelocity;
     private long _graphSig = long.MinValue;

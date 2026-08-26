@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.QwenTts;
@@ -122,7 +123,7 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
 
     /// <summary>Decodes a <c>[16, T]</c> codebook grid (row 0 = semantic, rows 1..15 = acoustic) into 24 kHz
     /// mono PCM of length <c>T * 1920</c>.</summary>
-    private static readonly bool DebugStages = Environment.GetEnvironmentVariable("QWEN3_DEBUG") == "1";
+    private static readonly bool DebugStages = EngineKnobs.Qwen3Debug.Value;
     private static void Dbg(string stage, Tensor x)
     {
         if (!DebugStages) return;

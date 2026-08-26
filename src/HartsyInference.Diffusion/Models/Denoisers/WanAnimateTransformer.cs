@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -168,7 +169,7 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
             throw new ArgumentException("ref_conv token-prepend and the face pathway cannot combine: the fuser's " +
                 "temporal grouping (T | S) breaks once ref tokens are prepended (same constraint as the reference).");
 
-        string? dumpDir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_DUMP");
+        string? dumpDir = EngineKnobs.AnimateDump.Value;
         if (dumpDir is not null && Interlocked.Exchange(ref _dumpDone, 1) != 0) dumpDir = null;   // first forward only
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);

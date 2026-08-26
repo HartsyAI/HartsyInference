@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for ERNIE-Image. When the environment variable <c>ERNIE_IMAGE_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Used to diff against a Python (diffusers) reference. Pattern copied from <see cref="Sd3DebugDump"/> verbatim.</summary>
 internal static class ErnieImageDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("ERNIE_IMAGE_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.ErnieImageDebugDir);
 
     /// <summary>Writes the tensor's data as raw F32 little-endian to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -5,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Optional layer-by-layer debug dump for SD3 / SD3.5. When the environment variable <c>SD3_DEBUG_DIR</c> is set, the transformer writes each named tensor as raw F32 to that directory under <c>layers/&lt;safe_name&gt;.bin</c>. Disabled (zero-cost) otherwise. Used to diff against a Python (diffusers) reference produced by <c>dump_sd35_full_forward.py</c>. Pattern copied from <see cref="ZImageDebugDump"/> (see PHASE_3_DEVIATIONS #28 for the methodology).</summary>
 internal static class Sd3DebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("SD3_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.Sd3DebugDir);
 
     public static bool Enabled => _sink.Enabled;
 

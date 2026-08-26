@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -7,7 +8,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// cref="LanceDebugDump"/> — for first-run Python layer-diff validation.</summary>
 internal static class LtxVideoDebugDump
 {
-    private static readonly DebugDumpSink _sink = new DebugDumpSink("LTX_DEBUG_DIR");
+    private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.LtxDebugDir);
 
     /// <summary>Writes the tensor's data as raw F32 little-endian to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)

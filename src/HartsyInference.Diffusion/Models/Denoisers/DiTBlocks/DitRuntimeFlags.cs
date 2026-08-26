@@ -1,5 +1,5 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -17,8 +17,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// conversion pattern).</para></summary>
 public static class DitDtype
 {
-    public static readonly DType Act =
-        EnvSwitch.IsEnabled("HARTSY_DIT_F16", defaultOn: true) ? DType.F16 : DType.F32;
+    public static readonly DType Act = EngineKnobs.DitF16.Value ? DType.F16 : DType.F32;
 
     /// <summary>Casts an F32 block-input stream to <see cref="Act"/> (F16 on the <c>HARTSY_DIT_F16</c> hot path, else
     /// a no-op passthrough that returns the source unchanged). Disposes the source when it casts. Device-resident.
@@ -46,9 +45,7 @@ public static class DitDtype
 /// Chroma). <c>HARTSY_DIT_GRAPH=0</c> kills both; <c>=1</c> forces both.</para></summary>
 public static class DitStepGraph
 {
-    public static readonly bool Enabled =
-        EnvSwitch.IsEnabled("HARTSY_DIT_GRAPH", defaultOn: false);
+    public static readonly bool Enabled = EngineKnobs.DitGraph.Value;
 
-    public static readonly bool EnabledDefaultOn =
-        EnvSwitch.IsEnabled("HARTSY_DIT_GRAPH", defaultOn: true);
+    public static readonly bool EnabledDefaultOn = EngineKnobs.DitGraphDefaultOn.Value;
 }

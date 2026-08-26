@@ -1,6 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
@@ -190,7 +191,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         // device CfgEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
         // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
         // HARTSY_AURAFLOW_PACKED=0 is the kill-switch (A/B against the reference loop).
-        bool fusedLoop = !isMaskedInpaint && EnvSwitch.IsEnabled("HARTSY_AURAFLOW_PACKED", defaultOn: true);
+        bool fusedLoop = !isMaskedInpaint && EngineKnobs.AuraflowPacked.Value;
 
         // Sampler selection (2026-08-20). AuraFlow is flow-matching, so it had no user-selectable sampler at all
         // before this. The sampler owns the integrator and the sigma spacing; the family keeps owning its own sigma

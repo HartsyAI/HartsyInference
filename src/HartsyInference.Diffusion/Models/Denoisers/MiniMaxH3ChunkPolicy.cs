@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -28,8 +29,7 @@ public static class MiniMaxH3ChunkPolicy
     /// (0, 0), so this is also how a CPU-only test forces the chunked path to A/B it against the same weights.</summary>
     public static int ResolveChunkRows(int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes)
     {
-        string? overrideValue = Environment.GetEnvironmentVariable("HARTSY_H3_CHUNK_ROWS");
-        if (overrideValue is not null && int.TryParse(overrideValue, out int forced) && forced > 0)
+        if (EngineKnobs.H3ChunkRows.Value is int forced && forced > 0)
         {
             return forced;
         }

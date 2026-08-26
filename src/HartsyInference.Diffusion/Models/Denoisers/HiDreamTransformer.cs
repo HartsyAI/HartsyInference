@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -32,7 +33,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
 
     // Diagnostic (HARTSY_HIDREAM_PROBE=1): per-block absmax/rms of the residual streams — forces a host
     // sync per probe, first forward only. Used to decide F16-activation viability (needs absmax << 65k).
-    private static readonly bool StreamProbe = Environment.GetEnvironmentVariable("HARTSY_HIDREAM_PROBE") == "1";
+    private static readonly bool StreamProbe = EngineKnobs.HidreamProbe.Value;
     private static bool _probedOnce;
 
     /// <summary>First-forward-only absmax/rms probe of a stream tensor (host-sync; diagnostic only).</summary>

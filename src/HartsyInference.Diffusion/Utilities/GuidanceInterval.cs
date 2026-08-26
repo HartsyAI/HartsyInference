@@ -1,3 +1,5 @@
+using HartsyInference.Core.Configuration;
+
 namespace HartsyInference.Diffusion.Utilities;
 
 /// <summary>Noise-level band in which classifier-free guidance applies (limited-interval guidance,
@@ -33,12 +35,12 @@ public readonly record struct GuidanceInterval(float Start, float End)
         return new GuidanceInterval(start, end);
     }
 
-    /// <summary>Reads the interval from an environment variable ("start,end"), returning <see cref="Always"/>
-    /// when unset/empty so the default path is byte-identical to pre-feature behavior. A malformed value throws —
-    /// silently ignoring a mistyped perf knob would invalidate an A/B run.</summary>
-    public static GuidanceInterval FromEnvironment(string variable = "HARTSY_CFG_INTERVAL")
+    /// <summary>Reads the interval from <see cref="EngineKnobs.CfgInterval"/> ("start,end"), returning
+    /// <see cref="Always"/> when unset/empty so the default path is byte-identical to pre-feature behavior. A
+    /// malformed value throws — silently ignoring a mistyped perf knob would invalidate an A/B run.</summary>
+    public static GuidanceInterval FromEnvironment()
     {
-        string? spec = Environment.GetEnvironmentVariable(variable);
+        string? spec = EngineKnobs.CfgInterval.Value;
         return string.IsNullOrWhiteSpace(spec) ? Always : Parse(spec);
     }
 }
