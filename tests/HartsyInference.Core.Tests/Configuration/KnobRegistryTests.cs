@@ -30,9 +30,56 @@ public sealed class KnobRegistryTests
         "HARTSY_STEP_CACHE_CALIB",
     };
 
-    private static readonly Regex EnvName = new(
-        @"(?:Environment\.GetEnvironmentVariable|EnvSwitch\.(?:IsEnabled|GetInt|GetFloat|GetLong))\s*\(\s*""((?:HARTSY|HM)_[A-Z0-9_]+)""",
-        RegexOptions.Compiled);
+    /// <summary>Third-party and platform names the engine consumes but does not own. Not knobs.</summary>
+    private static readonly HashSet<string> Foreign = new(StringComparer.Ordinal)
+    {
+        "HF_TOKEN", "HF_HOME", "HF_ENDPOINT", "HUGGINGFACE_HUB_TOKEN",
+        "NO_COLOR", "COLORFGBG", "ESPEAK_DATA_DIR",
+        "PATH", "HOME", "TEMP", "TMP", "USERPROFILE", "LD_LIBRARY_PATH",
+    };
+
+    /// <summary>Engine knobs that exist but are not declared yet, with why. Emptied as the migration proceeds.</summary>
+    /// <remarks>Found while piloting the Video package: the first inventory only matched <c>HARTSY_</c>/<c>HM_</c>
+    /// prefixes, so these were invisible to it. They are ordinary engine knobs that happen to be named after their
+    /// model or subsystem instead. Listed rather than quietly excluded so the registry cannot claim a completeness
+    /// it does not have.</remarks>
+    private static readonly HashSet<string> NotYetDeclared = new(StringComparer.Ordinal)
+    {
+        "ANIMA_BYPASS_LLM_ADAPTER", "ANIMA_DEBUG_STATS", "DIA_DEBUG_TOKENS", "ERNIE_DIAG",
+        "F5_DUMP_MEL", "FLUX_DEBUG_DIR", "HIFT_DETERMINISTIC", "HYV_VAE_STAGES",
+        "LENS_DEBUG_STATS", "OMNIGEN2_DEBUG_DIR", "QWEN3_DEBUG", "WAN_DEBUG_TAG",
+        "ZONOS_LOGIT_DUMP",
+        // The Vulkan backend's own family, plus the engine path roots.
+        "HARTSYINFERENCE_VK_COOPMAT2", "HARTSYINFERENCE_VK_DISABLE_COOPMAT", "HARTSYINFERENCE_VK_DUMP_COOPMAT2",
+        "HARTSYINFERENCE_VK_INT8", "HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE", "HARTSYINFERENCE_VK_PROFILE",
+        "HARTSYINFERENCE_VK_PROFILE_FILE", "HARTSYINFERENCE_VK_PUSH_DESCRIPTORS", "HARTSYINFERENCE_VK_SUBMIT_PER_OP",
+        "HARTSYINFERENCE_VK_VALIDATION", "HARTSYINFERENCE_HUNYUAN3D_DEBUG_DIR",
+        "HARTSYINFERENCE_MODELS", "HARTSYINFERENCE_MODEL_CACHE", "HARTSYINFERENCE_OUTPUT", "HARTSYINFERENCE_REPO_ROOT",
+        // Reached only through the EnvFlag helper or a const, so the literal-only inventory never saw them.
+        "HARTSY_FLASH_SPLIT_FORCE", "HARTSY_FLASH_SPLIT_OFF", "HARTSY_FP8_F16", "HARTSY_FP8_F32",
+        "HARTSY_GEMM_F16", "HARTSY_HIGH_PRECISION_GEMM", "HARTSY_NO_TF32", "HARTSY_SAGE_UNSAFE_F32_V_NARROW",
+        "HARTSY_SDPA_F16", "HARTSY_SDPA_FORCE_FLASH", "HARTSY_SDPA_NO_F16", "HARTSY_SDPA_V2",
+        "HARTSY_TENSORCORE_GEMM", "HARTSY_MM3_FLOW_CFG_BATCH", "HARTSY_AUDIO_LM_QUANT",
+        // Three-state on/off/auto grammar with its own logging, like the step-cache family. C3.
+        "HARTSY_ANIMATE2_BF16_DRIVING_CACHE",
+    };
+
+    /// <summary>Names already absorbed into <c>VramPolicy</c>, where the environment read is the documented lowest-precedence fallback rather than a knob to declare.</summary>
+    private static readonly HashSet<string> Absorbed = new(StringComparer.Ordinal)
+    {
+        "HARTSY_LOWVRAM", "HARTSY_KEEP_MODELS",
+    };
+
+    /// <remarks>Three forms, because a literal-only scan of <c>GetEnvironmentVariable</c> understated the surface
+    /// badly. It missed every name reached through the <c>EnvFlag</c> helper (a whole family of GEMM and SDPA
+    /// flags) and every name held in a <c>const</c> and passed by reference. Both were invisible to the inventory
+    /// that produced the generated declarations.</remarks>
+    private static readonly Regex[] EnvNamePatterns =
+    [
+        new(@"(?:Environment\.GetEnvironmentVariable|EnvSwitch\.(?:IsEnabled|GetInt|GetFloat|GetLong))\s*\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", RegexOptions.Compiled),
+        new(@"EnvFlag\s*\(\s*""([A-Z0-9_]+)""", RegexOptions.Compiled),
+        new(@"const\s+string\s+\w+\s*=\s*""((?:HARTSY|HM)_[A-Z0-9_]+)""", RegexOptions.Compiled),
+    ];
 
     private static HashSet<string> ScanSourceForEnvNames()
     {
@@ -45,9 +92,13 @@ public sealed class KnobRegistryTests
             {
                 continue;
             }
-            foreach (Match m in EnvName.Matches(File.ReadAllText(file)))
+            string text = File.ReadAllText(file);
+            foreach (Regex pattern in EnvNamePatterns)
             {
-                found.Add(m.Groups[1].Value);
+                foreach (Match m in pattern.Matches(text))
+                {
+                    found.Add(m.Groups[1].Value);
+                }
             }
         }
         return found;
@@ -79,13 +130,14 @@ public sealed class KnobRegistryTests
         Dictionary<string, List<string>> declared = DeclaredByLegacyName();
 
         List<string> undeclared = [.. inSource
-            .Where(n => !declared.ContainsKey(n) && !Deferred.Contains(n))
+            .Where(n => !declared.ContainsKey(n) && !Deferred.Contains(n)
+                     && !Foreign.Contains(n) && !NotYetDeclared.Contains(n) && !Absorbed.Contains(n))
             .Order()];
 
         Assert.True(undeclared.Count == 0,
-            "These environment names are read by src/ but neither declared in EngineKnobs nor on the deferred list:\n"
+            "These environment names are read by src/ but are neither declared in EngineKnobs nor listed:\n"
             + string.Join("\n", undeclared.Select(n => "  " + n))
-            + "\n\nDeclare them in EngineKnobs, or add them to Deferred with the reason.");
+            + "\n\nDeclare them in EngineKnobs, or add them to Deferred / NotYetDeclared / Foreign with the reason.");
     }
 
     /// <summary>A deferred entry that nothing reads any more must be deleted, so the list cannot hold stale exemptions.</summary>
@@ -93,10 +145,10 @@ public sealed class KnobRegistryTests
     public void DeferredListHasNoStaleEntries()
     {
         HashSet<string> inSource = ScanSourceForEnvNames();
-        List<string> stale = [.. Deferred.Where(n => !inSource.Contains(n)).Order()];
+        List<string> stale = [.. Deferred.Concat(NotYetDeclared).Concat(Absorbed).Where(n => !inSource.Contains(n)).Order()];
 
         Assert.True(stale.Count == 0,
-            "These names are on the deferred list but nothing reads them any more — delete the entries:\n"
+            "These names are deferred or backlogged but nothing reads them any more — delete the entries:\n"
             + string.Join("\n", stale.Select(n => "  " + n)));
     }
 

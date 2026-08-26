@@ -81,6 +81,29 @@ public static partial class EngineKnobs
         Bool("numerics.ditGraphDefaultOn", "HARTSY_DIT_GRAPH", true, BoolGrammar.TriState, KnobScope.Runtime, KnobDomain.Numerics,
             "Default-ON tier of DiT step-graph capture, for architectures where the per-generation graph is a validated win.");
 
+    // ── Knobs named after their model rather than the engine, so the first inventory's HARTSY_ prefix missed them ──
+
+    /// <summary>Solver order for the Wan FlowUniPC multistep scheduler; non-positive falls back to 2.</summary>
+    public static readonly Knob<int> WanSolverOrder =
+        Int("numerics.wanSolverOrder", "WAN_SOLVER_ORDER", 2, KnobScope.Runtime, KnobDomain.Numerics,
+            "Solver order for the Wan FlowUniPC multistep scheduler; non-positive falls back to 2.",
+            v => v > 0 ? v : 2);
+
+    /// <summary>Trims the Wan-S2V motion-frame prefix from the decoded clip. On unless explicitly set to 0.</summary>
+    public static readonly Knob<bool> WanS2vTrim =
+        Bool("numerics.wanS2vTrim", "WAN_S2V_TRIM", true, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Numerics,
+            "Trims the Wan-S2V motion-frame prefix from the decoded clip.");
+
+    /// <summary>Writes LTX-Video per-step diagnostics to this file.</summary>
+    public static readonly Knob<string?> LtxDiagFile =
+        Str("diagnostics.ltxDiagFile", "LTX_DIAG_FILE", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Writes LTX-Video per-step diagnostics to this file.");
+
+    /// <summary>Enables LTX-Video per-step diagnostics on the console.</summary>
+    public static readonly Knob<bool> LtxDiag =
+        Bool("diagnostics.ltxDiag", "LTX_DIAG", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Enables LTX-Video per-step diagnostics on the console.");
+
     // ── Constant defaults that live in a hand-written parsing expression ──
 
     /// <summary>Host-RAM floor in GB below which the audio cache evicts a prior model before loading the next.</summary>
