@@ -6,8 +6,33 @@
 > default-ON numerics switch, a debug hook that silently corrupts output, or a name that only survives in a
 > doc. That judgement is the point of this file; the table is the scaffolding it hangs on.
 
-**Scale: ~195 distinct variables** (191 engine + 4 extension), of which roughly 150 are test-fixture paths.
-That count is itself the headline finding.
+> ⚠️ **Superseded in part, 2026-08-26.** `EngineKnobs` (`src/HartsyInference.Core/Configuration/`) is now the
+> declared registry: **209 knobs**, each with an id, type, default, scope, domain and its legacy environment
+> name. `KnobRegistryTests` ties that surface to a source scan, so the registry — not this file — is the
+> authority on *what exists*. This doc remains the authority on **disposition**, and on the history below.
+
+**Scale.** The original estimate of "~45 real knobs" and the first inventory's "146" were both wrong. A
+literal scan for `GetEnvironmentVariable("HARTSY_…")` has **five** blind spots, each found the hard way:
+
+| Blind spot | Example | Count |
+|---|---|---|
+| Named after the model, not the engine | `WAN_SOLVER_ORDER`, `LTX_DIAG`, `QWEN3_DEBUG` | 18 |
+| Reached only through a helper | `EnvFlag("HARTSY_NO_TF32")` — the GEMM/SDPA family | 13 |
+| Held in a `const`, passed by reference | `HARTSY_AUDIO_LM_QUANT`, `HARTSY_ANIMATE2_BF16_DRIVING_CACHE` | 4 |
+| A helper **constructor** argument | `new DebugDumpSink("WAN_DEBUG_DIR")` | 19 |
+| Only ever a **default parameter value** | `FromEnvironment(string v = "HARTSY_CFG_INTERVAL")` | 1 |
+
+The real engine surface is **~209 knobs**. A further ~150 names are test-fixture paths read by test code, not
+the engine, and are out of scope.
+
+**Three boolean grammars are live and they genuinely disagree** — this is why the migration preserves each
+rather than unifying them:
+
+- **Exact** (the historic `== "1"` / `!= "0"` sites): only the exact opposite-of-default spelling flips it, so
+  on a default-ON knob `HARTSY_X=false` resolves to **true**.
+- **TriState** (`EnvSwitch.IsEnabled`): `true`/`false` are also recognized.
+- **Presence-only** (`is null`): **any** set value enables it, **including `0`**. `MUSICGEN_GRAPH_OFF=0` still
+  disables graph decode. These are declared as `string?` knobs so that stays true.
 
 ---
 
