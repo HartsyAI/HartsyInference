@@ -7,9 +7,26 @@
 > doc. That judgement is the point of this file; the table is the scaffolding it hangs on.
 
 > ⚠️ **Superseded in part, 2026-08-26.** `EngineKnobs` (`src/HartsyInference.Core/Configuration/`) is now the
-> declared registry: **209 knobs**, each with an id, type, default, scope, domain and its legacy environment
+> declared registry: **210 knobs**, each with an id, type, default, scope, domain and its legacy environment
 > name. `KnobRegistryTests` ties that surface to a source scan, so the registry — not this file — is the
 > authority on *what exists*. This doc remains the authority on **disposition**, and on the history below.
+>
+> **How to set something now.** Environment variables still work — every knob records its legacy name and
+> `KnobStore` honours it — but they are the lowest-precedence layer and will be retired in C7. Prefer:
+>
+> | Where | How |
+> |---|---|
+> | CLI | `--set numerics.sageAttn=0`, `--profile reference`, `--list-settings` |
+> | API | `{"settings": {"profile": "reference", "set": {"numerics.ditF16": "0"}}}` |
+> | Precedence | scoped profile → process override → legacy env var → declared default |
+>
+> `--profile reference` pins 49 knobs to their most numerically faithful setting for parity work.
+>
+> ⚠️ **Per-request settings reach per-call knobs only.** Anything bound while the engine, backend or pipeline is
+> built is already fixed when a request arrives on a long-lived server — including the backend's TF32, F16-GEMM
+> and native-FP8 decisions, which are assigned in `CudaBackend`'s constructor. A request naming a load-time
+> setting is rejected with 400 rather than silently ignored. The CLI does not have this limit, because it applies
+> settings before the engine is constructed.
 
 **Scale.** The original estimate of "~45 real knobs" and the first inventory's "146" were both wrong. A
 literal scan for `GetEnvironmentVariable("HARTSY_…")` has **five** blind spots, each found the hard way:
