@@ -156,4 +156,41 @@ public sealed class KnobProfileTests
 
     [Fact]
     public void ByName_ReturnsNullForUnknown() => Assert.Null(KnobProfiles.ByName("nope"));
+
+    /// <summary>A per-request override of a load-time setting is REJECTED, because accepting it would report success and change nothing.</summary>
+    /// <remarks>Measured, not theorised: an API generation with the reference profile returned a byte-identical
+    /// image to one without it, because the backend's TF32/F16-GEMM/FP8 decisions are assigned in the CudaBackend
+    /// constructor and are fixed before any request arrives on a long-lived server.</remarks>
+    [Fact]
+    public void RequestSettings_RejectConstructionScopedOverrides()
+    {
+        RequestSettings settings = new() { Set = new Dictionary<string, string> { ["numerics.ltx2TwoStage"] = "1" } };
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => settings.Resolve());
+        Assert.Contains("cannot be changed per request", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("numerics.ltx2TwoStage", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A per-call setting is accepted, so the rejection above is specific rather than blanket.</summary>
+    [Fact]
+    public void RequestSettings_AcceptRuntimeScopedOverrides()
+    {
+        RequestSettings settings = new() { Set = new Dictionary<string, string> { ["numerics.sageAttn"] = "0" } };
+        KnobProfile? profile = settings.Resolve();
+        Assert.NotNull(profile);
+        Assert.Equal(1, profile!.Count);
+    }
+
+    /// <summary>An empty settings block resolves to null so an ordinary request pushes no scope.</summary>
+    [Fact]
+    public void RequestSettings_EmptyResolvesToNull() => Assert.Null(new RequestSettings().Resolve());
+
+    /// <summary>The reference profile names what a request could not move, which is what lets a caller refuse instead of silently ignoring.</summary>
+    [Fact]
+    public void UnreachablePerRequest_NamesTheLoadTimeKnobs()
+    {
+        IReadOnlyList<string> unreachable = RequestSettings.UnreachablePerRequest(KnobProfiles.Reference);
+        Assert.NotEmpty(unreachable);
+        Assert.All(unreachable, id => Assert.Equal(KnobScope.Construction,
+            KnobRegistry.Describe(KnobRegistry.Find(id)!).Scope));
+    }
 }
