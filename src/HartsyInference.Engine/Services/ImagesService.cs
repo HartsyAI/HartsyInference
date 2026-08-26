@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -31,6 +32,9 @@ public sealed class ImagesService : IImagesService
                 // in while the pipeline was constructed (it is cached, so those run once and never again).
                 using IDisposable vramScope = VramPolicyScope.Push(
                     request.Vram is null ? null : VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
+                // Same lifetime as the VRAM scope, and for the same reason: settings read DURING the
+                // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
+                using IDisposable settingsScope = KnobProfileScope.Push(request.Settings?.Resolve());
                 string? keepRefiner = request.Refiner?.Model;
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);

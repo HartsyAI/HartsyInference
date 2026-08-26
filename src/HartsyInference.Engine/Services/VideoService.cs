@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using HartsyInference.Engine.Audio;
@@ -78,6 +79,9 @@ public sealed class VideoService : IVideoService
             {
                 using IDisposable vramScope = VramPolicyScope.Push(
                     request.Vram is null ? null : VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
+                // Same lifetime as the VRAM scope, and for the same reason: settings read DURING the
+                // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
+                using IDisposable settingsScope = KnobProfileScope.Push(request.Settings?.Resolve());
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(spec, request);
                 VideoRequest resolved = InferenceEngine.VideoDefaultsFor(spec).Apply(request);
                 VideoGenerationResult result = pipeline.Generate(resolved, progress, cancel);

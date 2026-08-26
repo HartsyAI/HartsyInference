@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Engine.Requests;
@@ -61,4 +62,7 @@ public sealed record TextRequest
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
+
+    /// <summary>Per-request engine settings (profile + individual overrides); null keeps the machine's configuration.</summary>
+    public RequestSettings? Settings { get; init; }
 }
