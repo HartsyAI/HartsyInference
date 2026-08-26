@@ -19,8 +19,10 @@ public static class PickleCheckpointRepacker
     /// <summary>Loads a pickle checkpoint and writes the selected tensors to <paramref name="outputPath"/> as safetensors, via a temp file so a crash mid-write can't leave a truncated checkpoint in place.</summary>
     /// <param name="keyMap">Maps each source key to its output key, or returns null to drop that tensor. Null keeps every tensor under its original key. Source order is preserved, which keeps the output byte-identical to the hand-rolled conversions this replaced.</param>
     /// <param name="recursiveFlatten">Passed through to <see cref="PytorchPickleLoader.Load"/> — true for checkpoints whose root is a dict of state dicts rather than a flat state dict.</param>
+    /// <param name="metadata">Optional string map embedded as the output header's <c>__metadata__</c>. A <c>modelspec.hash_sha256</c> entry whose value is empty is filled with <c>0x</c> + the tensor-payload SHA-256.</param>
     /// <returns>The number of tensors written.</returns>
-    public static int Repack(string sourcePath, string outputPath, Func<string, string?>? keyMap = null, bool recursiveFlatten = false)
+    public static int Repack(string sourcePath, string outputPath, Func<string, string?>? keyMap = null, bool recursiveFlatten = false,
+        IReadOnlyDictionary<string, string>? metadata = null)
     {
         using PytorchPickleLoader loader = new();
         loader.Load(sourcePath, recursiveFlatten);
@@ -42,10 +44,18 @@ public static class PickleCheckpointRepacker
         {
             Directory.CreateDirectory(outputDir);
         }
+        if (metadata is not null && metadata.TryGetValue("modelspec.hash_sha256", out string? hashSlot) && string.IsNullOrEmpty(hashSlot))
+        {
+            Dictionary<string, string> filled = new(metadata, StringComparer.Ordinal)
+            {
+                ["modelspec.hash_sha256"] = "0x" + SafeTensorsWriter.ComputeTensorDataSha256(keep),
+            };
+            metadata = filled;
+        }
         string tempPath = outputPath + ".tmp";
         try
         {
-            SafeTensorsWriter.Save(tempPath, keep);
+            SafeTensorsWriter.Save(tempPath, keep, metadata);
             File.Move(tempPath, outputPath, overwrite: true);
         }
         catch

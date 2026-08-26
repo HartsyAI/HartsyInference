@@ -74,6 +74,50 @@ public sealed class PickleCheckpointRepackerTests
         }
     }
 
+    [Fact]
+    public void Repack_EmbedsMetadataAndFillsHashSlot()
+    {
+        string source = WriteSamplePickle();
+        string output = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
+        string bare = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+            {
+                ["modelspec.architecture"] = "yue_music",
+                ["hartsy.component"] = "codec",
+                ["modelspec.hash_sha256"] = "",
+            };
+            PickleCheckpointRepacker.Repack(source, output, keyMap: null, recursiveFlatten: false, metadata: metadata);
+            PickleCheckpointRepacker.Repack(source, bare, keyMap: null);
+
+            using SafeTensorsLoader loader = new();
+            loader.Load(output);
+            Assert.NotNull(loader.Metadata);
+            Assert.Equal("yue_music", loader.Metadata!["modelspec.architecture"]);
+            Assert.Equal("codec", loader.Metadata["hartsy.component"]);
+
+            string embedded = loader.Metadata["modelspec.hash_sha256"];
+            Assert.StartsWith("0x", embedded, StringComparison.Ordinal);
+            // The embedded digest must describe the payload, so the unstamped file of the same tensors matches it.
+            Assert.Equal(embedded[2..], PayloadSha256(bare));
+            Assert.Equal(embedded[2..], PayloadSha256(output));
+        }
+        finally
+        {
+            Delete(source, output, bare, output + ".tmp", bare + ".tmp");
+        }
+    }
+
+    private static string PayloadSha256(string path)
+    {
+        using FileStream fs = File.OpenRead(path);
+        Span<byte> lengthBytes = stackalloc byte[8];
+        fs.ReadExactly(lengthBytes);
+        fs.Seek(8 + BitConverter.ToInt64(lengthBytes), SeekOrigin.Begin);
+        return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+    }
+
     private static void RunComparison(Func<string, string?>? keyMap, Func<Dictionary<string, Tensor>, Dictionary<string, Tensor>> legacyTransform)
     {
         string source = WriteSamplePickle();
