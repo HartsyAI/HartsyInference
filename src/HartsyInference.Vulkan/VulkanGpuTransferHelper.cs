@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
@@ -16,8 +17,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     /// <summary>Per-weight, per-target-dtype cast cache — casts a preloaded weight to the GEMM dtype once instead of on every Linear.</summary>
     private readonly Dictionary<Tensor, Dictionary<string, VulkanBuffer>> _weightCastCache = new(ReferenceEqualityComparer.Instance);
     /// <summary>Master kill-switch for weight dtype-cast caching (mirrors <c>CudaBackend.CacheWeightCasts</c> exactly, exposed on <see cref="VulkanBackend.CacheWeightCasts"/>). Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>, settable afterward — a large FP8/quantized model whose full dtype-cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights needs this off (transient, recomputed-and-freed-per-call dequant) instead of caching every layer's cast forever. Found via a real OOM running Krea2 (13 GB fp8) on Vulkan: with no way to disable it, EVERY layer's F32-cast weight stayed resident permanently on top of the raw FP8 weights, exhausting VRAM partway through just the 4B-param text encoder. See TROUBLESHOOTING.md.</summary>
-    public bool CacheWeightCasts { get; set; } =
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE") != "1";
+    public bool CacheWeightCasts { get; set; } = !EngineKnobs.VkNoWeightCastCache.Value;
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
     /// <summary>Uncached upload buffers from CopyToDevice cache-misses, drained when the command stream flushes.</summary>
     private readonly List<VulkanBuffer> _transientBuffers = new();

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Runtime.InteropServices;
 using static HartsyInference.Vulkan.VulkanUtilities;
 
@@ -29,8 +30,7 @@ public sealed class VulkanInstance : IDisposable
     {
         VulkanLibraryResolver.Register();
 
-        bool enableVal = enableValidation
-            ?? Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_VALIDATION") == "1";
+        bool enableVal = enableValidation ?? EngineKnobs.VkValidation.Value;
 
         List<string> layers = new();
         if (enableVal && IsLayerAvailable("VK_LAYER_KHRONOS_validation"))

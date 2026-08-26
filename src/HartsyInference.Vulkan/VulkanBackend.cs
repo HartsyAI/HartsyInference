@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -115,8 +116,7 @@ public sealed class VulkanBackend : IBackend
         // (129.5 s → 139.6 s) because the per-dispatch descriptor write into the command buffer
         // costs more than the pool-flip approach. Default off; enable via HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1
         // when measuring on AMD/Intel — outcome there may differ.
-        bool enablePushDescriptor = Vk.HasPushDescriptor
-            && Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PUSH_DESCRIPTORS") == "1";
+        bool enablePushDescriptor = Vk.HasPushDescriptor && EngineKnobs.VkPushDescriptors.Value;
         _descriptors = new VulkanDescriptorManager(_vkDevice.Handle, enablePushDescriptor: enablePushDescriptor);
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
@@ -124,8 +124,8 @@ public sealed class VulkanBackend : IBackend
 
         // Opt-in INT8 dot-product GEMM path for Linear (see TryDispatchInt8Linear). Strict "1" opt-in,
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
-        // default-on profile feature (see EnvSwitch.cs's remarks on that distinction).
-        EnableInt8Linear = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_INT8") == "1";
+        // default-on profile feature (see EnvSwitch's remarks on that distinction).
+        EnableInt8Linear = EngineKnobs.VkInt8.Value;
 
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
@@ -229,8 +229,7 @@ public sealed class VulkanBackend : IBackend
 
     /// <summary>When set, submits a command buffer per op instead of batching until <see cref="FlushThreshold"/> dispatches accumulate.</summary>
     // Batching cuts one vkQueueSubmit2 per tiny op — the dominant per-dispatch host cost for small-op-heavy workloads.
-    private static readonly bool _submitPerOp =
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_SUBMIT_PER_OP") == "1";
+    private static readonly bool _submitPerOp = EngineKnobs.VkSubmitPerOp.Value;
 
     private unsafe void Dispatch(
         VulkanKernel kernel,
@@ -395,8 +394,7 @@ public sealed class VulkanBackend : IBackend
     private static uint TileSharedBytes(uint BM, uint BN, uint BK) => (BM * (BK + 1) + BK * BN) * sizeof(float);
 
     /// <summary>Env override to force-disable the cooperative-matrix fast path (perf comparison / debugging).</summary>
-    private static readonly bool _disableCoopmat =
-        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_DISABLE_COOPMAT") == "1";
+    private static readonly bool _disableCoopmat = EngineKnobs.VkDisableCoopmat.Value;
 
     /// <summary>Attempts the cooperative-matrix matmul fast path; returns true when the kernel was dispatched (op fully handled).</summary>
     // Returns false when the path doesn't apply and the caller should fall through to matmul_tiled. Constraints
@@ -617,7 +615,7 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>) from <see cref="DispatchMatmul"/>. Default-ON as of 2026-07-31 (settable/overridable via <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>) after a full validation pass against real Krea2 weights on the RTX 4090: correctness held byte-identical to the coopmat1 baseline across every configuration tested — 2-step, 4-step, and 8-step generations (the exact step count at which an EARLIER, unrelated coopmat1 M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` — see docs/Checklists/TROUBLESHOOTING.md), aligned and non-16-aligned M, with and without bias, F16 and F32 output, across dozens of real generations. Performance: a controlled same-session comparison (4 runs each config, alternating, isolating this box's real GPU-contention variance) showed a statistically significant ~4% real-wall-clock win at 2 steps (Welch's t≈2.88) and a ~10% win at 8 steps — this SUPERSEDES an earlier same-day finding of a "~5% regression," which turned out to be a cross-session comparison artifact (this shared box's run-to-run variance from contending processes, not a real property of coopmat2 — see the full writeup for how that got sorted out). The only failure mode found anywhere in this investigation (a step-graph-capture VRAM peak causing a graceful OOM-and-fallback on this box at 4+ steps) is root-caused, unrelated to coopmat2 specifically (reproduces identically with this flag off), and already recovers correctly via the existing capture-fallback path.</summary>
-    public bool EnableCoopMat2 { get; set; } = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_COOPMAT2") != "0";
+    public bool EnableCoopMat2 { get; set; } = EngineKnobs.VkCoopmat2.Value;
 
     /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on <c>matmul_coopmat2.comp.glsl</c> (<c>VK_NV_cooperative_matrix2</c> — workgroup-scope, tensor-layout-addressed, hardware-clamped GEMM; see docs/Checklists/TROUBLESHOOTING.md for the full coopmat1-vs-coopmat2 investigation this came out of). Unlike <see cref="TryDispatchCoopmat"/>, this has NO M/N/K alignment requirement at all — the hardware clamp mode zero-fills/drops out-of-bounds tensor accesses. Specialized for transposeA=false, transposeB=true (the only combination <see cref="Linear"/> — the real caller this exists for — ever uses) — throws for any other combination rather than silently computing the wrong answer. Bias is fused directly into the shader via a broadcast tensorLayoutNV (2026-07-31 revision) — an earlier follow-up-BroadcastAdd-dispatch design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in a real Krea2 e2e run: the extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see ROADMAP.md's "per-dispatch barrier scoping" entry) isn't visible to VkQueryPool-timestamp-only measurement, but it's very real — see docs/Checklists/TROUBLESHOOTING.md for the full writeup.</summary>
     internal bool TryDispatchCoopMat2(
@@ -1992,13 +1990,13 @@ public sealed class VulkanBackend : IBackend
         // callers keep Br = Sq (untiled), so the mask-offset math below is unchanged for them.
         long Br = Sq;
         ulong fullScoreBytes = (ulong)(totalHeads * Sq * Skv) * (ulong)dtype.SizeInBytes;
-        bool forceTile = Environment.GetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED") == "1";
+        bool forceTile = EngineKnobs.SdpaForceTiled.Value;
         if (mask is null && (forceTile || fullScoreBytes > (1UL << 30)))   // > 1 GiB score matrix → tile
         {
             long perRow = totalHeads * Skv * dtype.SizeInBytes;            // bytes per query row across all heads
             Br = Math.Max(1, (512L * 1024 * 1024) / Math.Max(1, perRow));  // ~512 MB score-tile budget
             if (Br > Sq) Br = Sq;
-            if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_SDPA_TILE"), out int envBr) && envBr > 0)
+            if (EngineKnobs.SdpaTile.Value is int envBr && envBr > 0)
                 Br = Math.Min(envBr, Sq);
         }
 

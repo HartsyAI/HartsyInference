@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Logging;
 using static HartsyInference.Vulkan.VulkanUtilities;
@@ -365,7 +366,7 @@ public sealed class VulkanDevice : IDisposable
             for (uint i = 0; i < count; i++)
             {
                 VkCooperativeMatrixFlexibleDimensionsPropertiesNV e = p[i];
-                if (System.Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_DUMP_COOPMAT2") == "1")
+                if (EngineKnobs.VkDumpCoopmat2.Value)
                 {
                     Logs.Warning($"coopmat2[{i}]: M/N/Kgran={e.MGranularity}/{e.NGranularity}/{e.KGranularity} A={e.AType} B={e.BType} C={e.CType} R={e.ResultType} sat={e.saturatingAccumulation} scope={e.scope} wgInvocations={e.workgroupInvocations}");
                 }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using System.Numerics;
 using HartsyInference.Core.Logging;
@@ -420,7 +421,7 @@ public sealed class VulkanBuffer : IDisposable
 /// <summary>Diagnostic-only counters for per-<see cref="VulkanBuffer"/> object overhead (<c>vkCreateBuffer</c>/<c>vkGetBufferMemoryRequirements</c>/<c>vkBindBufferMemory</c>/<c>vkDestroyBuffer</c>) — separate from <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/>, which only measures the underlying <c>vkAllocateMemory</c> block calls. A tensor pays this cost on every create/destroy regardless of whether its memory came from a pooled block or a fresh one, so it can dominate even when block-pooling is working perfectly. Process-wide (not per-backend) since <see cref="VulkanBufferFactory"/> is static; diff two snapshots around the region being measured. Counts are always on (a `long` increment is free, same convention as <c>VulkanBackend</c>'s GEMM engagement counters); the per-call <see cref="Stopwatch"/> timing is gated on <c>HARTSYINFERENCE_VK_PROFILE=1</c> since this runs on every tensor create/destroy in every model, not just diagnostic benchmarks.</summary>
 public static class VulkanBufferDiagnostics
 {
-    internal static readonly bool TimingEnabled = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE") == "1";
+    internal static readonly bool TimingEnabled = EngineKnobs.VkProfile.Value;
 
     private static long _createCount;
     private static double _createTotalMs;

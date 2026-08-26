@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Logging;
 
@@ -19,7 +20,7 @@ internal sealed class VulkanProfiler
 
     public VulkanProfiler()
     {
-        _enabled = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE") == "1";
+        _enabled = EngineKnobs.VkProfile.Value;
     }
 
     public void Record(string opName, long elapsedTicks, int dispatches)
@@ -44,7 +45,7 @@ internal sealed class VulkanProfiler
         if (!_enabled || _totalOps == 0) return;
 
         TextWriter writer = Console.Error;
-        string? path = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE_FILE");
+        string? path = EngineKnobs.VkProfileFile.Value;
         StreamWriter? fileWriter = null;
         if (!string.IsNullOrEmpty(path))
         {
