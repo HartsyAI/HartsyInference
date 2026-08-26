@@ -64,6 +64,10 @@ public sealed class KnobRegistryTests
         new(@"(?:Environment\.GetEnvironmentVariable|EnvSwitch\.(?:IsEnabled|GetInt|GetFloat|GetLong))\s*\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", RegexOptions.Compiled),
         new(@"EnvFlag\s*\(\s*""([A-Z0-9_]+)""", RegexOptions.Compiled),
         new(@"const\s+string\s+\w+\s*=\s*""((?:HARTSY|HM)_[A-Z0-9_]+)""", RegexOptions.Compiled),
+        // Names passed to a helper's constructor or method, e.g. new DebugDumpSink("WAN_DEBUG_DIR").
+        new(@"new\s+DebugDumpSink\s*\(\s*""([A-Z0-9_]+)""", RegexOptions.Compiled),
+        // Names that only ever appear as a default parameter value, e.g. FromEnvironment(string v = "HARTSY_CFG_INTERVAL").
+        new(@"string\s+\w+\s*=\s*""((?:HARTSY|HM)_[A-Z0-9_]+)""", RegexOptions.Compiled),
     ];
 
     private static HashSet<string> ScanSourceForEnvNames()
