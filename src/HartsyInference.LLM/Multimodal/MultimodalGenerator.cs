@@ -102,8 +102,6 @@ public sealed class MultimodalGenerator
             for (long i = 0; i < n; i++) { float v = ie[i]; sum += v; max = Math.Max(max, Math.Abs(v)); if (!float.IsFinite(v)) fin = false; }
             Console.Error.WriteLine($"[vlm] imageEmbeds: tokens={imgTokens} dim={hidden} mean={sum / n:F4} maxabs={max:F4} finite={fin} first8=[{ie[0]:F3},{ie[1]:F3},{ie[2]:F3},{ie[3]:F3},{ie[4]:F3},{ie[5]:F3},{ie[6]:F3},{ie[7]:F3}]");
         }
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_ENCODE_ONLY") == "1") return "";
-
         // 2. Tokenize the family-specific prompt segments that wrap the image.
         (int[] pre, int[] post) = BuildPrompt(question);
 

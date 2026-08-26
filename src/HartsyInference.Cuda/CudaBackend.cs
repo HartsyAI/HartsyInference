@@ -5086,29 +5086,6 @@ public sealed class CudaBackend : IBackend
     public unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
-        if (Environment.GetEnvironmentVariable("HM_ROPE_CPU") == "1")   // TEMP perf-repro gate: old CPU-fallback path
-        {
-            int b = (int)x.Shape[0], sl = (int)x.Shape[1], nh = (int)x.Shape[2], hd = (int)x.Shape[3], hf = hd / 2;
-            int rdim = rotaryDim <= 0 || rotaryDim > hd ? hd : rotaryDim;
-            float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
-            for (int bi = 0; bi < b; bi++)
-                for (int s = 0; s < sl; s++)
-                {
-                    long fb = ((long)bi * sl + s) * hd;
-                    for (int h = 0; h < nh; h++)
-                    {
-                        float* v = xp + (((long)bi * sl + s) * nh + h) * hd;
-                        for (int i = 0; i < hf; i++)
-                        {
-                            if (2 * i >= rdim) break;
-                            float xe = v[2 * i], xo = v[2 * i + 1];
-                            v[2 * i] = xe * cp[fb + i] - xo * sp[fb + i];
-                            v[2 * i + 1] = xo * cp[fb + i] + xe * sp[fb + i];
-                        }
-                    }
-                }
-            return;
-        }
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA ApplyRopeInterleaved supports F32 only.");
         EnterOp();

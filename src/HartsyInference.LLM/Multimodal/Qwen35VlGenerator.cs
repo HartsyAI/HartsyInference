@@ -32,8 +32,6 @@ public sealed class Qwen35VlGenerator
         // 1. Encode the image → [1, imgTokens, hidden].
         using Tensor imageEmbeds = _vision.Encode(_backend, pixelValues);
         int imgTokens = (int)imageEmbeds.Shape[1];
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_ENCODE_ONLY") == "1") return "";
-
         // 2. Qwen-VL ChatML wrapping (same token layout as qwen25vl):
         //    "<|im_start|>user\n<|vision_start|> [image] <|vision_end|>{q}<|im_end|>\n<|im_start|>assistant\n"
         int[] pre = _tok.Encode("<|im_start|>user\n<|vision_start|>", addSpecial: true);

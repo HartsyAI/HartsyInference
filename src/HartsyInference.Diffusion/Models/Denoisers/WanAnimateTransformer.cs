@@ -170,14 +170,12 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
 
         string? dumpDir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_DUMP");
         if (dumpDir is not null && Interlocked.Exchange(ref _dumpDone, 1) != 0) dumpDir = null;   // first forward only
-        bool noPose = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_NO_POSE") == "1";
-        bool noFace = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_NO_FACE") == "1";
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
         if (dumpDir is not null) DumpTensor(backend, dumpDir, "01_patchified", hidden);
 
         // after_patch_embedding: pose tokens added to frames 1..pose_T (x[:, :, 1:pose_T+1] += pose[:, :, :x_T−1]).
-        if (pose is not null && !noPose)
+        if (pose is not null)
         {
             Tensor poseTokens = WanDitOps.Patchify(backend, pose, _poseChannels, dim, _config.PatchSize, _posePatchW2d!, _posePatchB);
             int gtPose = (int)pose.Shape[2] / pt;
@@ -185,7 +183,6 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
             poseTokens.Dispose();
             if (dumpDir is not null) DumpTensor(backend, dumpDir, "02_afterpose", hidden);
         }
-        if (noFace) motion = null;
 
         // Face pathway: pixels → motion vectors → face features; zero frame prepended, then padded/truncated to gt.
         // Prefer the caller's precomputed features (EncodeMotion) — the per-forward encode is a debug/compat path.

@@ -130,9 +130,6 @@ public sealed unsafe class FluxRope
         if (seqLen != _cachedSeqLen)
             throw new InvalidOperationException($"FluxRope.ApplyGpu: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
 
-        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely (parity with Forward).
-        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
-
         (Tensor cos, Tensor sin) = GetGpuTables(backend);
         backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
         backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numHeads, _headDim);
@@ -152,9 +149,6 @@ public sealed unsafe class FluxRope
         int seqLen = (int)q.Shape[1];
         if (seqLen != _cachedSeqLen)
             throw new InvalidOperationException($"FluxRope.ApplyGpuGqa: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
-
-        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely (parity with Forward).
-        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
 
         (Tensor cos, Tensor sin) = GetGpuTables(backend);
         backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
@@ -219,9 +213,6 @@ public sealed unsafe class FluxRope
     {
         if (_cosCache == null || _sinCache == null)
             throw new InvalidOperationException("FluxRope.Precompute must be called before Forward.");
-
-        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely to isolate the D2H-sync-barrier cost from GPU work.
-        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
 
         int halfDim = _headDim / 2;
         // q/k are [B, numHeads, seqLen, headDim]; each (b,h,s) vector rotates independently → parallelize over

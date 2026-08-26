@@ -218,7 +218,7 @@ limitation and confirms a real bug specific to this engine's glm4 forward pass.
 
 Ruled out so far: tokenizer round-trip (digits tokenize/decode cleanly), chat-template rendering (byte-for-
 byte structural match against the GGUF's own `tokenizer.chat_template`), and the CUDA-kernel-vs-CPU-fallback
-RoPE split (`HM_ROPE_CPU=1` reproduces the identical wrong output, so it isn't a PTX/kernel-launch bug).
+RoPE split (the CPU-fallback path reproduced the identical wrong output, so it isn't a PTX/kernel-launch bug; that `HM_ROPE_CPU` gate was deleted 2026-08-26).
 **Localized (2026-07-22): the F32 forward-pass math is proven correct; the bug is isolated to the quantized
 (Q4_K / `--low-vram-quant`) compute path.** Built the synthetic-weights harness
 (`tests/python-reference/dump_glm4_synthetic_ref.py`) into a real C#-side parity test
