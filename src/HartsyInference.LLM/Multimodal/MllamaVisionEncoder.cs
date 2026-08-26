@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
@@ -242,7 +243,7 @@ public sealed unsafe class MllamaVisionEncoder : IDisposable
 
     private void Dump(string stage, Tensor t)
     {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_MLLAMA_DUMP");
+        string? dir = EngineKnobs.MllamaDump.Value;
         if (dir is null) return;
         Directory.CreateDirectory(dir);
         using FileStream fs = File.Create(Path.Combine(dir, $"cs_{stage}.f32"));

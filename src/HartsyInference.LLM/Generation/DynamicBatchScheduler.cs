@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Threading.Channels;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -269,7 +270,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // ActiveSeq's GraphSession field doc for why this is safe and why it's a one-way admission decision
         // (never converted later).
         bool graphEligible = solo && !_graphCaptureUnavailable && req.Sampling.Greedy && !req.Sampling.HasJsonConstraint
-            && (req.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1"))
+            && (req.GraphDecode ?? EngineKnobs.GraphDecode.Value)
             && (TestForceSupportsGraphDecode ?? _model.SupportsGraphDecode(_backend));
 
         // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —

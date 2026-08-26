@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -413,7 +414,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null)
     {
         if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && !_isMoe
-            && Environment.GetEnvironmentVariable("HARTSY_SSM_DEVICE_STEP") != "0")
+            && EngineKnobs.SsmDeviceStep.Value)
             return BlockAttnDeviceStep(backend, hIn, i, stepCos, stepSin!);
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
         string p = $"blk.{i}";
@@ -736,7 +737,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     private Tensor BlockLinear(IBackend backend, Tensor hIn, int i, int seq)
     {
         if (seq == 1 && backend.GraphDecodeSupported && !_isMoe
-            && Environment.GetEnvironmentVariable("HARTSY_SSM_DEVICE_STEP") != "0")   // kill-switch
+            && EngineKnobs.SsmDeviceStep.Value)   // kill-switch
             return BlockLinearDeviceStep(backend, hIn, i);
         EnsureStateOnHost(i);
         int d = DModel;

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
@@ -94,7 +95,7 @@ public sealed class MultimodalGenerator
         IBackend visionBackend = Staged ? _placement!.Stages[0].Backend : _backend;
         using Tensor imageEmbeds = _vision.Encode(visionBackend, pixelValues);
         int imgTokens = (int)imageEmbeds.Shape[1];
-        bool dbg = Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") == "1";
+        bool dbg = EngineKnobs.VlmDebug.Value;
         if (dbg)
         {
             float* ie = (float*)imageEmbeds.DataPointer;

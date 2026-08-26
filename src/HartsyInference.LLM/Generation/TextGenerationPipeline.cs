@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
@@ -169,7 +170,7 @@ public sealed class TextGenerationPipeline
         // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
         // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
         // cross-attention/sliding-window models fall through to the verified default loop unchanged.
-        bool graphDecodeRequested = request.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1");
+        bool graphDecodeRequested = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
         // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
         // including any JSON grammar step — so combining the two would silently produce unconstrained output.
         // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
@@ -183,7 +184,7 @@ public sealed class TextGenerationPipeline
         // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
         // eligible — it's the more mature, unconditionally-faster path). See GenerateSpeculative's doc for why
         // this is restricted to greedy, non-JSON-mode requests.
-        bool specDecodeRequested = request.SpeculativeDecode ?? (Environment.GetEnvironmentVariable("HARTSY_SPEC_DECODE") == "1");
+        bool specDecodeRequested = request.SpeculativeDecode ?? EngineKnobs.SpecDecode.Value;
         bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
             && !Staged && specDecodeRequested;
 

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
@@ -69,7 +70,7 @@ public sealed class SsmGenerationPipeline
         // into the device caches (no memcpy nodes) and produces the second token.
         bool useGraph = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
             && request.Sampling.RepetitionPenalty == 1.0f && _model is ISsmGraphDecodable { GraphDecodeReady: true }
-            && _backend.GraphDecodeSupported && Environment.GetEnvironmentVariable("HARTSY_SSM_GRAPH") != "0";
+            && _backend.GraphDecodeSupported && EngineKnobs.SsmGraph.Value;
         if (useGraph && !stops.Contains(next) && request.MaxTokens > 0)
         {
             ISsmGraphDecodable g = (ISsmGraphDecodable)_model;

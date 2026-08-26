@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -529,7 +530,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public bool SupportsGraphDecode(IBackend backend)
     {
         bool ok = SupportsGraphDecodeCore(backend);
-        if (!ok && Environment.GetEnvironmentVariable("HARTSY_GRAPH_GATE_LOG") == "1")
+        if (!ok && EngineKnobs.GraphGateLog.Value)
             HartsyInference.Core.Logging.Logs.Info(
                 $"[GraphGate] backend={backend.GraphDecodeSupported} mla={_cfg.Mla is null} moe={_cfg.Moe is null} " +
                 $"cross={_cfg.CrossAttnLayers.Count == 0} sink={!_cfg.AttnSink} alibi={_cfg.AlibiMaxBias <= 0f} " +
@@ -1062,7 +1063,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                     _qkvB = ConcatRows(_qB, _kB, _vB);
             }
             else if (hasOwnKv && _qW.DType == _kW!.DType
-                && Environment.GetEnvironmentVariable("HARTSY_QK_FUSION") != "0")
+                && EngineKnobs.QkFusion.Value)
             {
                 // Mixed-dtype v (see _qkW's doc comment): fuse what still matches.
                 _qkW = ConcatRows(_qW, _kW);
@@ -1653,7 +1654,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             else if (_cfg.QkNorm && !_cfg.QkNormFullDim && !_cfg.UseLayerNorm && !_cfg.VNorm
                 && (_qkvW is not null || _qkW is not null)
-                && Environment.GetEnvironmentVariable("HARTSY_QKNORM_SCATTER") != "0")   // kill-switch
+                && EngineKnobs.QknormScatter.Value)   // kill-switch
             {
                 // Per-head QK-norm epilogue (Qwen3/Gemma-3): ONE kernel consumes the fused projection
                 // output, per-head RMS-norms q/k, ropes, and scatters k/v into the cache — replacing
@@ -1686,7 +1687,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 }
             }
             else if (!_cfg.QkNorm && !_cfg.VNorm && _qkW is not null
-                && Environment.GetEnvironmentVariable("HARTSY_QK_SCATTER") != "0")   // kill-switch, mirrors HARTSY_QK_FUSION
+                && EngineKnobs.QkScatter.Value)   // kill-switch, mirrors HARTSY_QK_FUSION
             {
                 // Partial fusion (mixed-dtype v, no QK-norm): one [q|k] GEMV plus v's own projection feed the
                 // same rope+scatter kernel — q/k come from the concatenated buffer, v from its own tensor.
@@ -1761,7 +1762,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             bool plainPreNorm = _cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm
                 && _postNormBias is null && _postNorm is not null && _cfg.ResidualMultiplier == 1f;
-            bool sandwichFusion = Environment.GetEnvironmentVariable("HARTSY_SANDWICH_FUSION") != "0";   // kill-switch
+            bool sandwichFusion = EngineKnobs.SandwichFusion.Value;   // kill-switch
             Tensor afterAttn = new(flat, DType.F32);
             Tensor preMlp = new(flat, DType.F32);
             // Sandwich layers (Gemma-2/3, GLM-4): post-attn norm + residual add + pre-FFN norm collapse
@@ -1913,7 +1914,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             // Residual/norm tail: identical op sequence to ForwardGraphStep, just over 2 rows.
             bool plainPreNorm = _cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm
                 && _postNormBias is null && _postNorm is not null && _cfg.ResidualMultiplier == 1f;
-            bool sandwichFusion = Environment.GetEnvironmentVariable("HARTSY_SANDWICH_FUSION") != "0";   // kill-switch
+            bool sandwichFusion = EngineKnobs.SandwichFusion.Value;   // kill-switch
             Tensor afterAttn = new(flat, DType.F32);
             Tensor preMlp = new(flat, DType.F32);
             if (plainPreNorm && _postAttnNorm is not null && sandwichFusion)

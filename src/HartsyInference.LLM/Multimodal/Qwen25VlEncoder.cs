@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
@@ -103,14 +104,14 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
 
     private static void Dbg(IBackend backend, string tag, Tensor t)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") != "1" && Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP") is null) return;
+        if (!EngineKnobs.VlmDebug.Value && EngineKnobs.VlmDump.Value is null) return;
         backend.Sync();
         float* p = (float*)t.DataPointer;
         long n = t.ElementCount; double sum = 0, max = 0;
         for (long i = 0; i < n; i++) { float v = p[i]; sum += v; max = Math.Max(max, Math.Abs(v)); }
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") == "1")
+        if (EngineKnobs.VlmDebug.Value)
             Console.Error.WriteLine($"[qvis:{tag}] mean={sum / n:F4} maxabs={max:F4} [0..2]=[{p[0]:F3},{p[1]:F3},{p[2]:F3}]");
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP");
+        string? dir = EngineKnobs.VlmDump.Value;
         if (dir is not null)
         {
             Directory.CreateDirectory(dir);

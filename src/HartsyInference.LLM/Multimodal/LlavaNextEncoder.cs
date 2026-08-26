@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -74,14 +75,14 @@ public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
     /// <summary>Same <c>HARTSY_VLM_DUMP</c> capture-hook convention as <see cref="SiglipVlmEncoder"/>'s internal <c>Dbg</c> — raw little-endian f32, file <c>cs_{tag}.f32</c> — so the same Python reference harness (<c>dump_llavanext_vision_ref.py</c>) can load and compare them.</summary>
     private static void Dbg(IBackend backend, string tag, Tensor t)
     {
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") != "1" && Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP") is null) return;
+        if (!EngineKnobs.VlmDebug.Value && EngineKnobs.VlmDump.Value is null) return;
         backend.Sync();
         float* p = (float*)t.DataPointer;
         long n = t.ElementCount; double sum = 0, max = 0;
         for (long i = 0; i < n; i++) { float v = p[i]; sum += v; max = Math.Max(max, Math.Abs(v)); }
-        if (Environment.GetEnvironmentVariable("HARTSY_VLM_DEBUG") == "1")
+        if (EngineKnobs.VlmDebug.Value)
             Console.Error.WriteLine($"[vis-next:{tag}] mean={sum / n:F4} maxabs={max:F4} shape={t.Shape}");
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_VLM_DUMP");
+        string? dir = EngineKnobs.VlmDump.Value;
         if (dir is not null)
         {
             Directory.CreateDirectory(dir);
