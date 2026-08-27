@@ -1,5 +1,5 @@
 using HartsyInference.Core.MemoryManagement;
-using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Configuration;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.MemoryManagement;
@@ -8,40 +8,31 @@ namespace HartsyInference.Core.Tests.MemoryManagement;
 [Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramLeversTests
 {
-    private static void WithKeepModels(string? value, Action body)
+    /// <summary>Runs <paramref name="body"/> with the residency fallback pinned, then restores it.</summary>
+    private static void WithKeepModels(bool? value, Action body)
     {
-        string? previous = Environment.GetEnvironmentVariable(VramLevers.KeepModelsVariable);
         try
         {
-            Environment.SetEnvironmentVariable(VramLevers.KeepModelsVariable, value);
+            if (value is bool v)
+            {
+                KnobStore.Set(EngineKnobs.KeepModels, v);
+            }
             body();
         }
         finally
         {
-            Environment.SetEnvironmentVariable(VramLevers.KeepModelsVariable, previous);
+            KnobStore.Clear(EngineKnobs.KeepModels);
         }
     }
 
-    /// <summary>The regression gate for Phase 1a. Every spelling the 15 pipelines used to read directly must survive
-    /// the move to the policy unchanged — a drift here silently flips cross-generation residency fleet-wide.</summary>
+    /// <summary>An unpinned lever takes the fallback knob's value, which is what makes a tier able to state a default at all.</summary>
     [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("1")]
-    [InlineData("true")]
-    [InlineData("TRUE")]
-    [InlineData("0")]
-    [InlineData("false")]
-    [InlineData("False")]
-    [InlineData("nonsense")]
-    public void AutoLever_MatchesTheRawEnvironmentReadItReplaces(string? value)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AutoLever_TakesTheFallbackKnob(bool configured)
     {
-        WithKeepModels(value, () =>
-        {
-            bool legacy = EnvSwitch.IsEnabled(VramLevers.KeepModelsVariable, defaultOn: true);
-            bool viaPolicy = VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Auto));
-            Assert.Equal(legacy, viaPolicy);
-        });
+        WithKeepModels(configured, () =>
+            Assert.Equal(configured, VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Auto))));
     }
 
     /// <summary>Unset must keep weights resident — the shipped default the 15 pipelines encoded as <c>defaultOn: true</c>.</summary>
@@ -49,13 +40,13 @@ public sealed class VramLeversTests
     public void AutoLever_DefaultsToKeepingWeightsResident()
         => WithKeepModels(null, () => Assert.True(VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Auto))));
 
-    /// <summary>A pinned lever must beat the environment in BOTH directions, or a tier could never override a machine's exported default.</summary>
+    /// <summary>A pinned lever must beat the fallback in BOTH directions, or a tier could never override the machine's configuration.</summary>
     [Theory]
-    [InlineData(LeverState.On, "0", true)]
+    [InlineData(LeverState.On, false, true)]
     [InlineData(LeverState.On, null, true)]
-    [InlineData(LeverState.Off, "1", false)]
+    [InlineData(LeverState.Off, true, false)]
     [InlineData(LeverState.Off, null, false)]
-    public void PinnedLever_WinsOverTheEnvironment(LeverState state, string? env, bool expected)
+    public void PinnedLever_WinsOverTheFallback(LeverState state, bool? env, bool expected)
     {
         WithKeepModels(env, () =>
         {

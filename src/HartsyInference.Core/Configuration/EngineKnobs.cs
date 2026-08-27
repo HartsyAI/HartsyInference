@@ -4,8 +4,10 @@ namespace HartsyInference.Core.Configuration;
 /// <remarks>Declarations live in the <c>EngineKnobs.*.cs</c> partials, one per <see cref="KnobDomain"/>. Nothing
 /// here reads the environment — <see cref="KnobStore"/> is the only file that does, so the C1 allowlist can be
 /// driven to a single entry.
-/// <para>Ids are dotted and vendor-free (<c>numerics.sageAttention</c>, not <c>HARTSY_SAGE_ATTN</c>); the legacy
-/// environment name is recorded per knob and honored until C7 retires it.</para></remarks>
+/// <para>Ids are dotted and vendor-free (<c>numerics.sageAttention</c>, not <c>HARTSY_SAGE_ATTN</c>). The legacy
+/// environment name is still recorded per knob, but is NO LONGER READ — it exists so
+/// <see cref="KnobStore.ReportStaleEnvironmentVariables"/> can tell an operator which exported variable stopped
+/// working and which setting replaced it.</para></remarks>
 public static partial class EngineKnobs
 {
     /// <summary>Forces the declaration partials' field initializers so <see cref="KnobRegistry"/> sees a complete surface.</summary>
@@ -13,21 +15,21 @@ public static partial class EngineKnobs
     public static void EnsureDeclared()
         => System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(EngineKnobs).TypeHandle);
 
-    private static Knob<bool> Bool(string id, string? legacyEnv, bool defaultValue, BoolGrammar grammar,
+    private static Knob<bool> Bool(string id, string? legacyEnv, bool defaultValue,
         KnobScope scope, KnobDomain domain, string summary)
-        => new(id, legacyEnv, defaultValue, scope, domain, summary, grammar);
+        => new(id, legacyEnv, defaultValue, scope, domain, summary);
 
     private static Knob<int> Int(string id, string? legacyEnv, int defaultValue, KnobScope scope, KnobDomain domain, string summary,
         Func<int, int>? coerce = null)
-        => new(id, legacyEnv, defaultValue, scope, domain, summary, BoolGrammar.Exact, coerce);
+        => new(id, legacyEnv, defaultValue, scope, domain, summary, coerce);
 
     private static Knob<long> Long(string id, string? legacyEnv, long defaultValue, KnobScope scope, KnobDomain domain, string summary,
         Func<long, long>? coerce = null)
-        => new(id, legacyEnv, defaultValue, scope, domain, summary, BoolGrammar.Exact, coerce);
+        => new(id, legacyEnv, defaultValue, scope, domain, summary, coerce);
 
     private static Knob<float> Float(string id, string? legacyEnv, float defaultValue, KnobScope scope, KnobDomain domain, string summary,
         Func<float, float>? coerce = null)
-        => new(id, legacyEnv, defaultValue, scope, domain, summary, BoolGrammar.Exact, coerce);
+        => new(id, legacyEnv, defaultValue, scope, domain, summary, coerce);
 
     private static Knob<string?> Str(string id, string? legacyEnv, string? defaultValue, KnobScope scope, KnobDomain domain, string summary)
         => new(id, legacyEnv, defaultValue, scope, domain, summary);

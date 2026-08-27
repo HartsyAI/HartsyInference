@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using Xunit;
@@ -169,14 +170,19 @@ public sealed class VramPolicyTests
     /// <summary>With no per-backend policy the environment still decides, so an existing deployment that sets only
     /// <c>HARTSY_LOWVRAM</c> keeps behaving exactly as it did.</summary>
     [Fact]
-    public void Registry_FallsBackToTheEnvironmentWhenNoPolicyIsPinned()
+    public void Registry_FallsBackToTheConfiguredPostureWhenNoPolicyIsPinned()
     {
-        WithEnvironment("on", () =>
+        try
         {
-            using RecordingStreamingBackend backend = new RecordingStreamingBackend(cache: null);
-            Assert.Equal(LeverState.On, VramPolicyRegistry.Resolve(backend).WeightStreaming);
-            Assert.Equal(LeverState.On, VramPolicyRegistry.Resolve(null).WeightStreaming);
-        });
+            KnobStore.Set(EngineKnobs.LowVram, "on");
+            LowVramPolicy.ResetCacheForTests();
+            Assert.Equal(LeverState.On, VramPolicyRegistry.Resolve(backend: null, overrides: null).WeightStreaming);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.LowVram);
+            LowVramPolicy.ResetCacheForTests();
+        }
     }
 
     /// <summary>A per-request override must beat the backend's pinned policy for the runtime levers.</summary>

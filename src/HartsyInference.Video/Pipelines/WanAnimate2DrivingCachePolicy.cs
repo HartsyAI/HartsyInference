@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
@@ -35,7 +36,7 @@ public static class WanAnimate2DrivingCachePolicy
         long activationReserveBytes, long streamedWeightFloorBytes, long? measuredFreeBytes = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        string? env = Environment.GetEnvironmentVariable(EnvironmentVariable);
+        string? env = EngineKnobs.Animate2Bf16DrivingCache.Value;
         bool? forced = ParseEnv(env, ShouldLog(env));
         LowVramMode mode = forced is null ? LowVramPolicy.Resolve(backend) : default;
         long freeBytes = 0;

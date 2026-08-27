@@ -21,14 +21,8 @@ public sealed class KnobRegistryTests
     /// silently-ignored perf knob cannot invalidate an A/B run — and <c>HARTSY_STEP_CACHE</c> resolves against the
     /// pipeline's <c>StepCacheProfile</c>, which a nullary <c>Knob.Value</c> cannot express. <c>StepCacheEnv</c> is
     /// already the single reader for the family, which is the shape C3 wants anyway.</remarks>
-    private static readonly HashSet<string> Deferred = new(StringComparer.Ordinal)
-    {
-        "HARTSY_STEP_CACHE",
-        "HARTSY_STEP_CACHE_CAP",
-        "HARTSY_STEP_CACHE_LATE",
-        "HARTSY_STEP_CACHE_POLY",
-        "HARTSY_STEP_CACHE_CALIB",
-    };
+    /// <summary>Empty: every engine knob is now declared. Kept as the place to record a deliberate exemption if one ever returns.</summary>
+    private static readonly HashSet<string> Deferred = new(StringComparer.Ordinal);
 
     /// <summary>Third-party and platform names the engine consumes but does not own. Not knobs.</summary>
     private static readonly HashSet<string> Foreign = new(StringComparer.Ordinal)
@@ -43,17 +37,12 @@ public sealed class KnobRegistryTests
     /// prefixes, so these were invisible to it. They are ordinary engine knobs that happen to be named after their
     /// model or subsystem instead. Listed rather than quietly excluded so the registry cannot claim a completeness
     /// it does not have.</remarks>
-    private static readonly HashSet<string> NotYetDeclared = new(StringComparer.Ordinal)
-    {
-        // Three-state on/off/auto grammar with its own logging, like the step-cache family. C3.
-        "HARTSY_ANIMATE2_BF16_DRIVING_CACHE",
-    };
+    /// <summary>Empty: the backlog was cleared when the environment layer was removed.</summary>
+    private static readonly HashSet<string> NotYetDeclared = new(StringComparer.Ordinal);
 
     /// <summary>Names already absorbed into <c>VramPolicy</c>, where the environment read is the documented lowest-precedence fallback rather than a knob to declare.</summary>
-    private static readonly HashSet<string> Absorbed = new(StringComparer.Ordinal)
-    {
-        "HARTSY_LOWVRAM", "HARTSY_KEEP_MODELS",
-    };
+    /// <summary>Empty: HARTSY_LOWVRAM and HARTSY_KEEP_MODELS are now declared knobs like everything else.</summary>
+    private static readonly HashSet<string> Absorbed = new(StringComparer.Ordinal);
 
     /// <remarks>Three forms, because a literal-only scan of <c>GetEnvironmentVariable</c> understated the surface
     /// badly. It missed every name reached through the <c>EnvFlag</c> helper (a whole family of GEMM and SDPA

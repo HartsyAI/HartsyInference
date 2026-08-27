@@ -8,31 +8,16 @@ namespace HartsyInference.Core.Tests.Configuration;
 [Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class KnobProfileTests
 {
-    private const string Var = "HARTSY_PROFILE_TEST";
-
-    private static void With(string? value, Action body)
-    {
-        string? previous = Environment.GetEnvironmentVariable(Var);
-        try
-        {
-            Environment.SetEnvironmentVariable(Var, value);
-            body();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(Var, previous);
-        }
-    }
-
     private static Knob<bool> Declare(string id, bool defaultValue = false)
-        => new(id, Var, defaultValue, KnobScope.Runtime, KnobDomain.Numerics, "test knob");
+        => new(id, legacyEnv: null, defaultValue, KnobScope.Runtime, KnobDomain.Numerics, "test knob");
 
-    /// <summary>A scoped profile beats the machine's exported value — the property that makes one request able to run at reference numerics.</summary>
+    /// <summary>A scoped profile beats the machine's configured value — the property that lets one request run at reference numerics while others keep the machine's settings.</summary>
     [Fact]
-    public void ScopedProfile_BeatsTheEnvironment()
+    public void ScopedProfile_BeatsTheConfiguredValue()
     {
-        Knob<bool> knob = Declare("test.profile.env");
-        With("1", () =>
+        Knob<bool> knob = Declare("test.profile.configured");
+        KnobStore.Set(knob, true);
+        try
         {
             Assert.True(knob.Value);
             using (KnobProfile.Create("t").With(knob, false).Push())
@@ -40,7 +25,11 @@ public sealed class KnobProfileTests
                 Assert.False(knob.Value);
             }
             Assert.True(knob.Value);
-        });
+        }
+        finally
+        {
+            KnobStore.Clear(knob);
+        }
     }
 
     /// <summary>Leaving the scope restores the previous profile, not merely "no profile", so nesting cannot leak.</summary>
@@ -127,14 +116,13 @@ public sealed class KnobProfileTests
         }
     }
 
-    /// <summary>The reference profile has to beat an exported value, or it would be useless on exactly the machines that need it.</summary>
+    /// <summary>The reference profile has to beat a configured value, or it would be useless on exactly the machines that need it.</summary>
     [Fact]
-    public void ReferenceProfile_BeatsAnExportedValue()
+    public void ReferenceProfile_BeatsAConfiguredValue()
     {
-        string? previous = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
+        KnobStore.Set(EngineKnobs.SageAttn, true);
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
             Assert.True(EngineKnobs.SageAttn.Value);
             using (KnobProfiles.Reference.Push())
             {
@@ -143,7 +131,7 @@ public sealed class KnobProfileTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previous);
+            KnobStore.Clear(EngineKnobs.SageAttn);
         }
     }
 

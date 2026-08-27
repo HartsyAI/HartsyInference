@@ -20,6 +20,13 @@ public static class Program
         Logs.MinLevel = Enum.TryParse(EngineKnobs.LogLevel.Value, ignoreCase: true, out LogLevel level)
             ? level : LogLevel.Warning;
 
+        foreach ((string variable, string setting) in KnobStore.ReportStaleEnvironmentVariables())
+        {
+            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(variable)} is exported but no longer read. "
+                + $"Set [/][#2ea5e0]{Markup.Escape(setting)}[/][yellow] in hartsyinference.settings.json, "
+                + "or pass --set.[/]");
+        }
+
         if (args.Contains("--list-settings", StringComparer.Ordinal))
         {
             KnobCli.ListSettings();

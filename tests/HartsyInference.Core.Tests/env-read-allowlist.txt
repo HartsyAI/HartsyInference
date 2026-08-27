@@ -11,10 +11,5 @@ src/HartsyInference.Audio/Cache/AudioModelCache.cs 3
 src/HartsyInference.Audio/Phonemizer/Espeak/EspeakPhonemizer.cs 1
 src/HartsyInference.Cli/Infra/CliTheme.cs 1
 src/HartsyInference.Cli/Infra/TerminalImage.cs 1
-src/HartsyInference.Core/MemoryManagement/LowVramMode.cs 1
-src/HartsyInference.Core/MemoryManagement/VramLevers.cs 1
-src/HartsyInference.Core/Runtime/EnvSwitch.cs 4
-src/HartsyInference.Diffusion/Utilities/StepCacheEnv.cs 9
 src/HartsyInference.Engine/HuggingFace/HuggingFaceClient.cs 1
-src/HartsyInference.Video/Pipelines/WanAnimate2DrivingCachePolicy.cs 1
 src/HartsyInference.Core/Configuration/KnobStore.cs 1

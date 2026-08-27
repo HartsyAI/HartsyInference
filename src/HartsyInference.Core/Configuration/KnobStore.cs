@@ -1,144 +1,78 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 
 namespace HartsyInference.Core.Configuration;
 
-/// <summary>How a boolean knob's legacy environment spelling maps to a value. Preserved per knob because the two grammars genuinely disagree.</summary>
-/// <remarks><see cref="Exact"/> covers the historic <c>== "1"</c> and <c>!= "0"</c> call sites: only the exact
-/// opposite-of-default spelling flips it, anything else is the default — so <c>HARTSY_X=false</c> on a
-/// default-ON <c>!= "0"</c> knob resolves to <b>true</b>, which is what that code did.
-/// <see cref="TriState"/> is the <c>EnvSwitch.IsEnabled</c> convention, where <c>false</c> also means false.
-/// Unifying them is deliberately deferred: C2 changes where knobs are declared, not what they mean.</remarks>
-public enum BoolGrammar
-{
-    /// <summary>Only the exact opposite-of-default spelling (<c>"1"</c> or <c>"0"</c>) flips it; every other value is the default.</summary>
-    Exact,
-
-    /// <summary><c>1</c>/<c>true</c> → true, <c>0</c>/<c>false</c> → false, anything else → default.</summary>
-    TriState,
-}
-
-/// <summary>The single place the engine reads process environment. Resolution order is override → legacy environment → declared default.</summary>
-/// <remarks>Every other file gets its settings from a <see cref="Knob{T}"/>, so the C1 allowlist can be driven to
-/// this one entry and stay monotonic. When C7 retires the legacy names, the environment lookup here is deleted and
-/// the allowlist reaches zero.
-/// <para>Deliberately does not cache: call sites that want a value bound once already hold it in a
-/// <c>static readonly</c> field, so caching here would only add a second, staler layer.</para></remarks>
+/// <summary>Resolves a knob's value: scoped profile → explicit override → declared default.</summary>
+/// <remarks>The engine no longer reads its configuration from the process environment. Settings come from
+/// <see cref="KnobFile"/>, from <see cref="Set{T}"/> (what a host or extension calls), or from a scoped
+/// <see cref="KnobProfile"/> for one generation.
+/// <para>The environment was removed rather than kept as a lowest-precedence fallback because a fallback is what
+/// let the old surface rot: ~210 names accumulated in six mutually inconsistent value grammars, several
+/// documented as working that nothing read, and a doc that was always one commit stale. A second source of truth
+/// re-creates that pressure no matter how tidy the first one is.
+/// <para>Removing it silently would have been its own trap, so <see cref="ReportStaleEnvironmentVariables"/>
+/// names any legacy variable still exported and points at the setting that replaced it.</para></remarks>
 public static class KnobStore
 {
     private static readonly ConcurrentDictionary<string, object?> _overrides = new(StringComparer.Ordinal);
 
-    /// <summary>Reads the legacy environment name. The only environment access in the engine.</summary>
-    private static string? ReadLegacy(string? name)
-        => string.IsNullOrEmpty(name) ? null : Environment.GetEnvironmentVariable(name);
-
-    /// <summary>Sets an explicit value, beating the environment. Used by CLI <c>--set</c> and the API in C4.</summary>
+    /// <summary>Sets an explicit value. Beats the settings file; beaten by a scoped profile.</summary>
     public static void Set<T>(Knob<T> knob, T value) => _overrides[knob.Id] = value;
 
-    /// <summary>Clears an override so the knob falls back to environment then default.</summary>
+    /// <summary>Sets by dotted id with an already-parsed value. Used by <see cref="KnobFile"/>, which owns the parsing.</summary>
+    internal static void SetByIdRaw(string id, object? value) => _overrides[id] = value;
+
+    /// <summary>Clears an override so the knob falls back to its declared default.</summary>
     public static void Clear<T>(Knob<T> knob) => _overrides.TryRemove(knob.Id, out _);
 
-    /// <summary>Drops every override. For tests.</summary>
+    /// <summary>Drops every override. For tests and <see cref="KnobFile.Reload"/>.</summary>
     public static void ResetOverrides() => _overrides.Clear();
 
     public static bool HasOverride<T>(Knob<T> knob) => _overrides.ContainsKey(knob.Id);
 
-    /// <remarks>Resolution order is scoped profile → process override → legacy environment → declared default.
-    /// The profile comes first so a per-request override beats a process-wide one, which is what lets one
-    /// generation run at reference numerics while others keep the machine's settings.</remarks>
     internal static T Resolve<T>(Knob<T> knob)
     {
+        // The settings file is discovered rather than injected, because the SwarmUI extension is loaded as a
+        // library and never gets a Main to call a loader from.
+        KnobFile.EnsureLoaded();
         if (KnobProfileScope.Current is { } profile
             && profile.Values.TryGetValue(knob.Id, out object? scoped) && scoped is T scopedTyped)
         {
-            return scopedTyped;
+            return Coerce(knob, scopedTyped);
         }
         if (_overrides.TryGetValue(knob.Id, out object? o) && o is T typed)
         {
-            return typed;
+            return Coerce(knob, typed);
         }
-        string? raw = ReadLegacy(knob.LegacyEnv);
-        if (raw is null)
-        {
-            return knob.Default;
-        }
-        // Set-but-empty is NOT unset for a string knob. Presence-only call sites test `is null`, so folding ""
-        // into the default would make `HARTSY_MUSICGEN_GRAPH_OFF=` stop disabling graph decode. Consumers that
-        // want empty to mean absent apply their own IsNullOrEmpty, as DebugDumpSink does.
-        if (raw.Length == 0 && typeof(T) != typeof(string))
-        {
-            return knob.Default;
-        }
-        return Parse(knob, raw);
+        return knob.Default;
     }
 
-    /// <remarks>Dispatches on the DECLARED type, not the default's runtime type: an override knob declares
-    /// <c>bool?</c> with a null default, and switching on the value would send every one of them to the string arm.</remarks>
-    private static T Parse<T>(Knob<T> knob, string raw)
-    {
-        Type t = typeof(T);
-        object? parsed;
-        if (t == typeof(bool))
-        {
-            parsed = ParseBool(raw, (bool)(object)knob.Default!, knob.Grammar);
-        }
-        else if (t == typeof(bool?))
-        {
-            // No opinion when unrecognized, so the call site keeps its contextual default.
-            parsed = ParseBoolOverride(raw);
-        }
-        else if (t == typeof(int) || t == typeof(int?))
-        {
-            parsed = int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v : null;
-        }
-        else if (t == typeof(long) || t == typeof(long?))
-        {
-            parsed = long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long v) ? v : null;
-        }
-        else if (t == typeof(float) || t == typeof(float?))
-        {
-            parsed = float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : null;
-        }
-        else
-        {
-            parsed = raw;
-        }
-        if (parsed is not T typed)
-        {
-            return knob.Default;
-        }
-        return knob.Coerce is null ? typed : knob.Coerce(typed);
-    }
+    /// <summary>Applies the knob's range rule to a supplied value. The declared default is trusted as already valid.</summary>
+    /// <remarks>Load-bearing for settings that arrive from a file or <c>--set</c>: without it
+    /// <c>numerics.gemvWpb = 17</c> would reach a kernel that expects 1..16, and <c>vram.audioEvictBelowGb = -5</c>
+    /// would be accepted where the original call site rejected it.</remarks>
+    private static T Coerce<T>(Knob<T> knob, T value)
+        => knob.Coerce is null ? value : knob.Coerce(value);
 
-    /// <summary>Tri-state override: only a recognized spelling takes a position, anything else defers to the caller.</summary>
-    private static bool? ParseBoolOverride(string raw)
+    /// <summary>Legacy environment variables that are still exported but are no longer read, paired with the setting that replaced each.</summary>
+    /// <remarks>A machine that exported <c>HARTSY_LTX2_TWO_STAGE=1</c> for months would otherwise just quietly
+    /// stop two-stage sampling. Hosts call this at startup and log the result.</remarks>
+    public static IReadOnlyList<(string Variable, string Setting)> ReportStaleEnvironmentVariables()
     {
-        if (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase))
+        List<(string, string)> stale = [];
+        foreach (object knob in KnobRegistry.All)
         {
-            return true;
-        }
-        if (raw == "0" || raw.Equals("false", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-        return null;
-    }
-
-    private static bool ParseBool(string raw, bool defaultValue, BoolGrammar grammar)
-    {
-        if (grammar == BoolGrammar.TriState)
-        {
-            if (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase))
+            (string id, string? legacy, _, _, _, _, _) = KnobRegistry.Describe(knob);
+            if (legacy is null || id.StartsWith("test.", StringComparison.Ordinal))
             {
-                return true;
+                continue;
             }
-            if (raw == "0" || raw.Equals("false", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(legacy)))
             {
-                return false;
+                stale.Add((legacy, id));
             }
-            return defaultValue;
         }
-        // Exact: only the opposite-of-default spelling flips it.
-        return defaultValue ? raw != "0" : raw == "1";
+        stale.Sort((a, b) => string.CompareOrdinal(a.Item1, b.Item1));
+        return stale;
     }
 }

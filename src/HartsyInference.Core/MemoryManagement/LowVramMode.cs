@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 
@@ -61,7 +62,7 @@ public static class LowVramPolicy
     /// <summary>The environment variable's mode, ignoring any per-backend policy. <see cref="VramPolicyRegistry"/> calls this for its fallback, so it must never route back through <see cref="Resolve(IBackend?)"/>.</summary>
     public static LowVramMode ResolveEnvironment()
     {
-        string? value = Environment.GetEnvironmentVariable(EnvironmentVariable);
+        string? value = EngineKnobs.LowVram.Value;
         return Parse(value, ShouldLog(value));
     }
 

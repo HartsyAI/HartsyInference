@@ -12,47 +12,47 @@ public static partial class EngineKnobs
     /// <summary>Kill-switch for the VK_NV_cooperative_matrix2 F16 GEMM fast path, which is tried first by default.</summary>
     /// <remarks>Default ON, so only a literal <c>0</c> disables it.</remarks>
     public static readonly Knob<bool> VkCoopmat2 =
-        Bool("numerics.vkCoopmat2", "HARTSYINFERENCE_VK_COOPMAT2", true, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.vkCoopmat2", "HARTSYINFERENCE_VK_COOPMAT2", true, KnobScope.Construction, KnobDomain.Numerics,
             "Kill-switch for the VK_NV_cooperative_matrix2 F16 GEMM fast path, which is tried first by default.");
 
     /// <summary>Force-disables the cooperative-matrix matmul path so GEMMs fall back to the scalar shaders.</summary>
     public static readonly Knob<bool> VkDisableCoopmat =
-        Bool("numerics.vkDisableCoopmat", "HARTSYINFERENCE_VK_DISABLE_COOPMAT", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.vkDisableCoopmat", "HARTSYINFERENCE_VK_DISABLE_COOPMAT", false, KnobScope.Construction, KnobDomain.Numerics,
             "Force-disables the cooperative-matrix matmul path so GEMMs fall back to the scalar shaders.");
 
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
-        Bool("numerics.vkInt8", "HARTSYINFERENCE_VK_INT8", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.vkInt8", "HARTSYINFERENCE_VK_INT8", false, KnobScope.Construction, KnobDomain.Numerics,
             "Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.");
 
     /// <summary>Uses VK_KHR_push_descriptor instead of the descriptor-pool ring when the extension is available.</summary>
     public static readonly Knob<bool> VkPushDescriptors =
-        Bool("numerics.vkPushDescriptors", "HARTSYINFERENCE_VK_PUSH_DESCRIPTORS", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.vkPushDescriptors", "HARTSYINFERENCE_VK_PUSH_DESCRIPTORS", false, KnobScope.Construction, KnobDomain.Numerics,
             "Uses VK_KHR_push_descriptor instead of the descriptor-pool ring when the extension is available.");
 
     /// <summary>Submits one command buffer per op instead of batching dispatches, for isolating a faulting op.</summary>
     public static readonly Knob<bool> VkSubmitPerOp =
-        Bool("numerics.vkSubmitPerOp", "HARTSYINFERENCE_VK_SUBMIT_PER_OP", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.vkSubmitPerOp", "HARTSYINFERENCE_VK_SUBMIT_PER_OP", false, KnobScope.Construction, KnobDomain.Numerics,
             "Submits one command buffer per op instead of batching dispatches, for isolating a faulting op.");
 
     /// <summary>Disables the per-weight dtype-cast cache, trading re-cast cost for lower resident memory.</summary>
     public static readonly Knob<bool> VkNoWeightCastCache =
-        Bool("vram.vkNoWeightCastCache", "HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Vram,
+        Bool("vram.vkNoWeightCastCache", "HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE", false, KnobScope.Construction, KnobDomain.Vram,
             "Disables the per-weight dtype-cast cache, trading re-cast cost for lower resident memory.");
 
     /// <summary>Enables VK_LAYER_KHRONOS_validation when the layer is present.</summary>
     public static readonly Knob<bool> VkValidation =
-        Bool("diagnostics.vkValidation", "HARTSYINFERENCE_VK_VALIDATION", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Diagnostics,
+        Bool("diagnostics.vkValidation", "HARTSYINFERENCE_VK_VALIDATION", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Enables VK_LAYER_KHRONOS_validation when the layer is present.");
 
     /// <summary>Enables per-op host-side Vulkan timing and buffer create/destroy accounting.</summary>
     public static readonly Knob<bool> VkProfile =
-        Bool("diagnostics.vkProfile", "HARTSYINFERENCE_VK_PROFILE", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Diagnostics,
+        Bool("diagnostics.vkProfile", "HARTSYINFERENCE_VK_PROFILE", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Enables per-op host-side Vulkan timing and buffer create/destroy accounting.");
 
     /// <summary>Logs every enumerated coopmat2 flexible-dimension config during Vulkan device setup.</summary>
     public static readonly Knob<bool> VkDumpCoopmat2 =
-        Bool("diagnostics.vkDumpCoopmat2", "HARTSYINFERENCE_VK_DUMP_COOPMAT2", false, BoolGrammar.Exact, KnobScope.Construction, KnobDomain.Diagnostics,
+        Bool("diagnostics.vkDumpCoopmat2", "HARTSYINFERENCE_VK_DUMP_COOPMAT2", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Logs every enumerated coopmat2 flexible-dimension config during Vulkan device setup.");
 
     /// <summary>File to write the Vulkan op profile to; an unopenable path falls back to stderr at the call site.</summary>

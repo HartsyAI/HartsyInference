@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
 
@@ -21,14 +22,14 @@ public static class VramLevers
     public static bool KeepResident(VramPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        return Resolve(policy.KeepResident, KeepModelsVariable, defaultOn: true);
+        return Resolve(policy.KeepResident, EngineKnobs.KeepModels);
     }
 
-    /// <summary>The lever's concrete value: an explicit <see cref="LeverState.On"/>/<see cref="LeverState.Off"/> wins, and <see cref="LeverState.Auto"/> defers to <paramref name="environmentVariable"/>.</summary>
-    public static bool Resolve(LeverState state, string environmentVariable, bool defaultOn) => state switch
+    /// <summary>The lever's concrete value: an explicit <see cref="LeverState.On"/>/<see cref="LeverState.Off"/> wins, and <see cref="LeverState.Auto"/> defers to <paramref name="fallback"/>.</summary>
+    public static bool Resolve(LeverState state, Knob<bool> fallback) => state switch
     {
         LeverState.On => true,
         LeverState.Off => false,
-        _ => EnvSwitch.IsEnabled(environmentVariable, defaultOn),
+        _ => fallback.Value,
     };
 }

@@ -14,37 +14,37 @@ public static partial class EngineKnobs
 {
     /// <summary>Bypasses the Anima LLM adapter, swapping which conditioning path the model takes.</summary>
     public static readonly Knob<bool> AnimaBypassLlmAdapter =
-        Bool("numerics.animaBypassLlmAdapter", "ANIMA_BYPASS_LLM_ADAPTER", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.animaBypassLlmAdapter", "ANIMA_BYPASS_LLM_ADAPTER", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Bypasses the Anima LLM adapter, swapping which conditioning path the model takes.");
 
     /// <summary>Seeds HiFTNet's noise source deterministically, which disables the NSF additive noise.</summary>
     public static readonly Knob<bool> HiftDeterministic =
-        Bool("numerics.hiftDeterministic", "HIFT_DETERMINISTIC", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.hiftDeterministic", "HIFT_DETERMINISTIC", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Seeds HiFTNet's noise source deterministically, disabling the NSF additive noise.");
 
     /// <summary>Batched CFG for the MiniMax-Music3 flow pipeline; off runs two separate forwards.</summary>
     public static readonly Knob<bool> Mm3FlowCfgBatch =
-        Bool("numerics.mm3FlowCfgBatch", "HARTSY_MM3_FLOW_CFG_BATCH", true, BoolGrammar.TriState, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.mm3FlowCfgBatch", "HARTSY_MM3_FLOW_CFG_BATCH", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Batched CFG for the MiniMax-Music3 flow pipeline; off runs two separate forwards.");
 
     /// <summary>Logs per-stage Anima tensor statistics.</summary>
     public static readonly Knob<bool> AnimaDebugStats =
-        Bool("diagnostics.animaDebugStats", "ANIMA_DEBUG_STATS", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+        Bool("diagnostics.animaDebugStats", "ANIMA_DEBUG_STATS", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Logs per-stage Anima tensor statistics.");
 
     /// <summary>Logs per-stage Lens tensor statistics.</summary>
     public static readonly Knob<bool> LensDebugStats =
-        Bool("diagnostics.lensDebugStats", "LENS_DEBUG_STATS", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+        Bool("diagnostics.lensDebugStats", "LENS_DEBUG_STATS", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Logs per-stage Lens tensor statistics.");
 
     /// <summary>Logs Qwen3 decode diagnostics.</summary>
     public static readonly Knob<bool> Qwen3Debug =
-        Bool("diagnostics.qwen3Debug", "QWEN3_DEBUG", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+        Bool("diagnostics.qwen3Debug", "QWEN3_DEBUG", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Logs Qwen3 decode diagnostics.");
 
     /// <summary>Logs HunyuanVideo VAE stage boundaries.</summary>
     public static readonly Knob<bool> HyvVaeStages =
-        Bool("diagnostics.hyvVaeStages", "HYV_VAE_STAGES", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+        Bool("diagnostics.hyvVaeStages", "HYV_VAE_STAGES", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Logs HunyuanVideo VAE stage boundaries.");
 
     // ── Presence-only: any set value enables, including "0" ──

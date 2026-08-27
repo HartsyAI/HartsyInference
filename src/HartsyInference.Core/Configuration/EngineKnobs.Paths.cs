@@ -10,7 +10,7 @@ public static partial class EngineKnobs
 
     /// <summary>Lets the cuDNN probe download the NVIDIA cuDNN 9 redist into the per-user cache when none is found locally.</summary>
     public static readonly Knob<bool> CudnnAutofetch =
-        Bool("paths.cudnnAutofetch", "HARTSY_CUDNN_AUTOFETCH", false, BoolGrammar.TriState, KnobScope.Construction, KnobDomain.Paths, "Lets the cuDNN probe download the NVIDIA cuDNN 9 redist into the per-user cache when none is found locally.");
+        Bool("paths.cudnnAutofetch", "HARTSY_CUDNN_AUTOFETCH", false, KnobScope.Construction, KnobDomain.Paths, "Lets the cuDNN probe download the NVIDIA cuDNN 9 redist into the per-user cache when none is found locally.");
 
     /// <summary>First directory searched for libcudnn.so.9/cudnn64_9.dll, ahead of the per-user cache and bundled copy.</summary>
     public static readonly Knob<string?> CudnnDir =

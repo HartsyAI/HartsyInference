@@ -78,7 +78,7 @@ public static partial class EngineKnobs
     /// and <c>=1</c> forces both while unset leaves each at its own per-architecture default. Declared here rather
     /// than generated because the inventory keys by environment name and collapses the pair to one entry.</remarks>
     public static readonly Knob<bool> DitGraphDefaultOn =
-        Bool("numerics.ditGraphDefaultOn", "HARTSY_DIT_GRAPH", true, BoolGrammar.TriState, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.ditGraphDefaultOn", "HARTSY_DIT_GRAPH", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Default-ON tier of DiT step-graph capture, for architectures where the per-generation graph is a validated win.");
 
     // ── Knobs named after their model rather than the engine, so the first inventory's HARTSY_ prefix missed them ──
@@ -95,7 +95,7 @@ public static partial class EngineKnobs
     /// allocation-retry stalls rather than merely averting OOM: measured 3.44 s/step with it on against 4.23 s/step
     /// off, and 68 async-OOM retries against 169.</remarks>
     public static readonly Knob<bool> WanS2vTrim =
-        Bool("vram.wanS2vTrim", "WAN_S2V_TRIM", true, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Vram,
+        Bool("vram.wanS2vTrim", "WAN_S2V_TRIM", true, KnobScope.Runtime, KnobDomain.Vram,
             "Trims the CUDA memory pool after each Wan-S2V denoise step, which prevents allocation-retry stalls.");
 
     /// <summary>Writes LTX-Video per-step diagnostics to this file.</summary>
@@ -105,7 +105,7 @@ public static partial class EngineKnobs
 
     /// <summary>Enables LTX-Video per-step diagnostics on the console.</summary>
     public static readonly Knob<bool> LtxDiag =
-        Bool("diagnostics.ltxDiag", "LTX_DIAG", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Diagnostics,
+        Bool("diagnostics.ltxDiag", "LTX_DIAG", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Enables LTX-Video per-step diagnostics on the console.");
 
     /// <summary>The explicit opt-in sense of <c>HARTSY_SAGE_ATTN</c>: true only when it is set to exactly <c>1</c>.</summary>
@@ -115,7 +115,7 @@ public static partial class EngineKnobs
     /// leaving Sage at its default never unlocks it. Collapsing the pair into one knob would open that path by
     /// default. Same shape as <see cref="DitGraph"/> / <see cref="DitGraphDefaultOn"/>.</remarks>
     public static readonly Knob<bool> SageAttnExplicit =
-        Bool("numerics.sageAttnExplicit", "HARTSY_SAGE_ATTN", false, BoolGrammar.Exact, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.sageAttnExplicit", "HARTSY_SAGE_ATTN", false, KnobScope.Runtime, KnobDomain.Numerics,
             "The explicit opt-in sense of the Sage attention switch: true only when it is set to exactly 1.");
 
     // ── Constant defaults that live in a hand-written parsing expression ──

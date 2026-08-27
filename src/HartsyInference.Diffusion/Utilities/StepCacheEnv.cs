@@ -1,3 +1,5 @@
+using HartsyInference.Core.Configuration;
+
 namespace HartsyInference.Diffusion.Utilities;
 
 /// <summary>Env-knob parsing for the across-step feature cache (`HARTSY_STEP_CACHE`, `HARTSY_STEP_CACHE_CAP`) —
@@ -11,7 +13,7 @@ public static class StepCacheEnv
     /// any other non-negative float = that threshold.</summary>
     public static float ReadThreshold()
     {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE");
+        string? value = EngineKnobs.StepCache.Value;
         if (string.IsNullOrWhiteSpace(value)) return 0f;
         if (value == "0") return 0f;
         if (value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase)) return 0.10f;
@@ -28,16 +30,16 @@ public static class StepCacheEnv
     /// so A/B harnesses and users can probe alternatives without code changes.</summary>
     public static (float Threshold, int Cap, float[]? Poly, float LateWindow) Resolve(StepCacheProfile? profile)
     {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE");
+        string? value = EngineKnobs.StepCache.Value;
         bool isDefaultOn = value == "1" || (value?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false);
         float threshold = isDefaultOn && profile is not null ? profile.Threshold : ReadThreshold();
         if (threshold <= 0f) return (0f, 0, null, 0f);
 
-        int cap = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP") is { Length: > 0 } ? ReadCap()
+        int cap = EngineKnobs.StepCacheCap.Value is { Length: > 0 } ? ReadCap()
             : profile?.Cap ?? ReadCap();
-        float[]? poly = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY") is { Length: > 0 } ? ReadPoly()
+        float[]? poly = EngineKnobs.StepCachePoly.Value is { Length: > 0 } ? ReadPoly()
             : profile?.Poly;
-        float late = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE") is { Length: > 0 } ? ReadLateWindow()
+        float late = EngineKnobs.StepCacheLate.Value is { Length: > 0 } ? ReadLateWindow()
             : profile?.LateWindow ?? 0f;
         return (threshold, cap, poly, late);
     }
@@ -47,7 +49,7 @@ public static class StepCacheEnv
     /// drift pairs for fitting). Null when unset; malformed poly THROWS.</summary>
     public static float[]? ReadPoly()
     {
-        string? v = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_POLY");
+        string? v = EngineKnobs.StepCachePoly.Value;
         if (string.IsNullOrWhiteSpace(v)) return null;
         string[] parts = v.Split(',');
         float[] c = new float[parts.Length];
@@ -57,7 +59,7 @@ public static class StepCacheEnv
         return c;
     }
 
-    public static string? ReadCalibFile() => Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CALIB");
+    public static string? ReadCalibFile() => EngineKnobs.StepCacheCalib.Value;
 
     /// <summary>Reads HARTSY_STEP_CACHE_LATE: fraction of the schedule (measured from the END) where cache
     /// reuse is allowed; steps before the window run uncached. 0 (default) = whole schedule. For models whose
@@ -66,7 +68,7 @@ public static class StepCacheEnv
     /// alone cannot see it.</summary>
     public static float ReadLateWindow()
     {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_LATE");
+        string? value = EngineKnobs.StepCacheLate.Value;
         if (string.IsNullOrWhiteSpace(value)) return 0f;
         if (!float.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out float late)
             || late < 0f || late > 1f)
@@ -77,7 +79,7 @@ public static class StepCacheEnv
     /// <summary>Reads HARTSY_STEP_CACHE_CAP (max consecutive cached steps), default 3.</summary>
     public static int ReadCap()
     {
-        string? value = Environment.GetEnvironmentVariable("HARTSY_STEP_CACHE_CAP");
+        string? value = EngineKnobs.StepCacheCap.Value;
         if (string.IsNullOrWhiteSpace(value)) return 3;
         if (!int.TryParse(value, out int cap) || cap < 1)
             throw new ArgumentException($"HARTSY_STEP_CACHE_CAP must be a positive integer; got '{value}'.");

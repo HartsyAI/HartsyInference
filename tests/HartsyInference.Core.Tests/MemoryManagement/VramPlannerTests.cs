@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.MemoryManagement;
@@ -149,6 +150,7 @@ public sealed class VramPlannerTests
             planner.PlanPhase("denoise", 1 * Mb, 1 * Mb, alreadyResident: false, canStream: true));
     }
 
+    /// <summary>Every spelling the posture setting accepts. The value is a three-state word, so the spelling table is real behavior, not parsing trivia.</summary>
     [Theory]
     [InlineData(null, LowVramMode.Auto)]
     [InlineData("", LowVramMode.Auto)]
@@ -162,16 +164,15 @@ public sealed class VramPlannerTests
     [InlineData("False", LowVramMode.ForceOff)]
     public void Policy_ParsesEveryDocumentedSpelling(string? value, LowVramMode expected)
     {
-        string? previous = Environment.GetEnvironmentVariable(LowVramPolicy.EnvironmentVariable);
         try
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, value);
+            KnobStore.Set(EngineKnobs.LowVram, value);
             LowVramPolicy.ResetCacheForTests();
             Assert.Equal(expected, LowVramPolicy.Resolve());
         }
         finally
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, previous);
+            KnobStore.Clear(EngineKnobs.LowVram);
             LowVramPolicy.ResetCacheForTests();
         }
     }
