@@ -213,7 +213,11 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Flux,
+            });
         }
 
         sourceLatent?.Dispose();

@@ -254,16 +254,19 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             sw.Stop();
             if (onProgress is not null)
             {
-                // The working latent is token-packed [S, C]; hand preview encoders an NCHW
-                // middle-frame slice instead (small copy: h·w·128 floats). Owned here, disposed
-                // after the callback returns — encoders must not retain it.
-                Tensor previewFrame = LtxVideo2Pipeline.ExtractMiddleFrame(stepLatent, tLat, hLat, wLat, _latentChannels);
+                // Snapshot before the host-side unpack. Reading the fixed graph latent directly would evict its
+                // device allocation and invalidate the address captured by the transformer step graph.
+                Tensor previewTokens = new Tensor(stepLatent.Shape, DType.F32);
+                Backend.CopyInto(previewTokens, stepLatent);
+                Tensor previewLatent = LtxVideo2Pipeline.UnpackVideoLatents(
+                    previewTokens, tLat, hLat, wLat, _latentChannels);
+                previewTokens.Dispose();
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
-                    Latent = previewFrame,
+                    Latent = previewLatent,
                     LatentArch = LatentArchitecture.Ltx,
                 });
-                previewFrame.Dispose();
+                previewLatent.Dispose();
             }
         }
 

@@ -298,10 +298,18 @@ _transformer.InvalidateStepGraph(Backend);
 
                 stepSw.Stop();
                 Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                if (onProgress is not null)
                 {
-                    LatentArch = LatentArchitecture.Flux2,
-                });
+                    Tensor previewPacked = _transformer.SnapshotGraphLatent(Backend);
+                    Tensor previewLatent = CreatePreviewLatent(previewPacked, patH, patW);
+                    previewPacked.Dispose();
+                    onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    {
+                        Latent = previewLatent,
+                        LatentArch = LatentArchitecture.Flux2,
+                    });
+                    previewLatent.Dispose();
+                }
                 continue;
             }
 
@@ -394,18 +402,16 @@ _transformer.InvalidateStepGraph(Backend);
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            // No live preview for Flux.2 yet. Three things would need to line up:
-            //   1. Unpack packedLatent [B, S, 128] → [B, 128, patH, patW] (mechanical).
-            //   2. Reverse the pipeline's BN normalization using _bnMean/_bnVar (also mechanical).
-            //   3. Unpatchify [B, 128, patH, patW] → [B, 32, latH, latW] (already in this file).
-            // But (4) we'd then need a Flux.2-specific 32×3 latent2rgb factor matrix that
-            // doesn't exist publicly, AND there's no published TAESD checkpoint for the
-            // 32-channel Flux.2 VAE. So Flux.2 emits progress percentages only — no preview
-            // frames. PreviewEncoder skips when Latent is null.
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            if (onProgress is not null)
             {
-                LatentArch = LatentArchitecture.Flux2,
-            });
+                Tensor previewLatent = CreatePreviewLatent(packedLatent, patH, patW);
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Flux2,
+                });
+                previewLatent.Dispose();
+            }
         }
 
         if (stepCacheInst is not null)
@@ -546,6 +552,18 @@ _transformer.InvalidateStepGraph(Backend);
             }
         }
         return unpacked;
+    }
+
+    /// <summary>Converts the working packed/BN-normalized Flux.2 latent into the canonical 32-channel
+    /// VAE layout expected by the shared preview decoder.</summary>
+    private Tensor CreatePreviewLatent(Tensor packed, int patchHeight, int patchWidth)
+    {
+        Tensor unpackedPatched = UnpackLatent(packed, patchHeight, patchWidth);
+        Tensor unnormalized = ApplyBnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
+        unpackedPatched.Dispose();
+        Tensor preview = UnpatchifyLatent(unnormalized, _config.VaeLatentChannels, _config.PatchSize);
+        unnormalized.Dispose();
+        return preview;
     }
 
     /// <summary>Applies BatchNorm un-normalization on the patchified latent: <c>z = z * sqrt(var + eps) + mean</c>, per-channel (mean/var have shape <c>[128]</c>).</summary>

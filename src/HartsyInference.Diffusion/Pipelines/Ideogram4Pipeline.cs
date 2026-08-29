@@ -442,12 +442,19 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
                 ? $" | attn {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.AttentionMs:F0}ms mlp {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.MlpMs:F0}ms (both passes) | cfgΔ {cfgDelta:F3}"
                 : "";
             Logs.Info($"[Ideogram4] step {steps - i}/{steps} t={tVal:F3} gw={gw:F1} {stepSw.ElapsedMilliseconds}ms | VRAM {vram} | D2H syncs {syncs}{profile}");
-            // Tag the latent family for live-preview decoders (Flux.2 VAE, shared with Lens). The working
-            // latent is token-packed [1, nImg, 128], so no per-step Latent snapshot is provided.
-            onProgress?.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds)
+            if (onProgress is not null)
             {
-                LatentArch = LatentArchitecture.Flux2,
-            });
+                Tensor previewTokens = CopyTensor(z);
+                ApplyLatentNorm(previewTokens);
+                Tensor previewLatent = Unpatchify(previewTokens, gridH, gridW, _config.PatchSize);
+                previewTokens.Dispose();
+                onProgress.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Flux2,
+                });
+                previewLatent.Dispose();
+            }
 
             // Masked inpaint is the one path that must read z on the host every step (the blend above already
             // did); protect the blended host copy from the next forward's stale device pointer with a per-step
@@ -801,6 +808,14 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             for (int c = 0; c < channels; c++)
                 zp[baseOff + c] = zp[baseOff + c] * scale[c] + shift[c];
         }
+    }
+
+    /// <summary>Copies an F32 tensor for non-mutating preview transforms without evicting the working device tensor.</summary>
+    private Tensor CopyTensor(Tensor source)
+    {
+        Tensor copy = new Tensor(source.Shape, DType.F32);
+        Backend.CopyInto(copy, source);
+        return copy;
     }
 
     /// <summary>Total streamable (per-block) bytes for one transformer.</summary>

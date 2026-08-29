@@ -44,6 +44,20 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
     /// Stills (<c>frames.Count == 1</c>) flow through the same path with T=1.</summary>
     public (List<byte[]> Frames, int Width, int Height) Restore(IReadOnlyList<byte[]> frames, int width,
         int height, SeedVr2RestoreOptions options, Action<Core.Pipelines.GenerationProgress>? onProgress = null)
+        => RestoreCore(frames, width, height, options, onProgress, null);
+
+    /// <summary>Restores RGB24 frames while reporting each completed output chunk as directly displayable frames.</summary>
+    public (List<byte[]> Frames, int Width, int Height) RestoreWithPreviews(IReadOnlyList<byte[]> frames, int width,
+        int height, SeedVr2RestoreOptions options,
+        Action<Core.Pipelines.GenerationProgress, IReadOnlyList<VideoFrame>> onProgress)
+    {
+        ArgumentNullException.ThrowIfNull(onProgress);
+        return RestoreCore(frames, width, height, options, null, onProgress);
+    }
+
+    private (List<byte[]> Frames, int Width, int Height) RestoreCore(IReadOnlyList<byte[]> frames, int width,
+        int height, SeedVr2RestoreOptions options, Action<Core.Pipelines.GenerationProgress>? onProgress,
+        Action<Core.Pipelines.GenerationProgress, IReadOnlyList<VideoFrame>>? onPreview)
     {
         ThrowIfDisposed();
         long startTicks = Environment.TickCount64;
@@ -85,8 +99,14 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
                 weight[dst] = 1f;
             }
             chunkIndex++;
-            onProgress?.Invoke(new Core.Pipelines.GenerationProgress(chunkIndex, totalChunks,
-                Environment.TickCount64 - startTicks));
+            Core.Pipelines.GenerationProgress update = new(chunkIndex, totalChunks,
+                Environment.TickCount64 - startTicks);
+            onProgress?.Invoke(update);
+            if (onPreview is not null)
+            {
+                int previewCount = Math.Max(0, Math.Min(len, pre.OriginalFrames - begin));
+                onPreview.Invoke(update, ConvertFrames(output, pre.Frames, begin, previewCount, outH, outW));
+            }
             if (begin + len >= pre.Frames)
                 break;
         }
@@ -95,22 +115,31 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
             for (int f = 0; f < pre.OriginalFrames; f++)
                 TransplantFrame(output, pre.Data, pre.Frames, f, outH, outW, options.Strength);
 
-        List<byte[]> result = new List<byte[]>(pre.OriginalFrames);
-        for (int f = 0; f < pre.OriginalFrames; f++)
+        List<byte[]> result = ConvertFrames(output, pre.Frames, 0, pre.OriginalFrames, outH, outW)
+            .Select(frame => frame.Rgb)
+            .ToList();
+        return (result, outW, outH);
+    }
+
+    private static List<VideoFrame> ConvertFrames(float[] source, int totalFrames, int start, int count,
+        int height, int width)
+    {
+        List<VideoFrame> result = new List<VideoFrame>(count);
+        for (int frame = start; frame < start + count; frame++)
         {
-            byte[] rgb = new byte[outH * outW * 3];
+            byte[] rgb = new byte[height * width * 3];
             for (int c = 0; c < 3; c++)
             {
-                long plane = ((long)c * pre.Frames + f) * outH * outW;
-                for (int i = 0; i < outH * outW; i++)
+                long plane = ((long)c * totalFrames + frame) * height * width;
+                for (int i = 0; i < height * width; i++)
                 {
-                    float v = (Math.Clamp(output[plane + i], -1f, 1f) * 0.5f + 0.5f) * 255f;
+                    float v = (Math.Clamp(source[plane + i], -1f, 1f) * 0.5f + 0.5f) * 255f;
                     rgb[i * 3 + c] = (byte)Math.Clamp(MathF.Round(v), 0f, 255f);
                 }
             }
-            result.Add(rgb);
+            result.Add(new VideoFrame(frame, width, height, rgb));
         }
-        return (result, outW, outH);
+        return result;
     }
 
     private float[] RestoreChunk(SeedVr2Preprocess.Result pre, int begin, int len,

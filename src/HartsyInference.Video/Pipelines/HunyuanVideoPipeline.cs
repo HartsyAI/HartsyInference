@@ -166,13 +166,11 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             sw.Stop();
             if (onProgress is not null)
             {
-                Tensor preview = ExtractMiddleFrame(latent, tLat, hLat, wLat, _config.OutChannels);
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
-                    Latent = preview,
-                    LatentArch = LatentArchitecture.Ltx,
+                    Latent = latent,
+                    LatentArch = LatentArchitecture.HunyuanVideo,
                 });
-                preview.Dispose();
             }
             // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and any
             // not read-back/disposed linger until GC, accumulating to OOM (they held ~18 GB → the VAE decode OOM'd).
@@ -208,17 +206,4 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
         return latent;
     }
 
-    /// <summary>Middle latent frame <c>[1, C, H, W]</c> from a <c>[1, C, T, H, W]</c> latent, for latent2rgb previews.</summary>
-    private static Tensor ExtractMiddleFrame(Tensor latent, int t, int h, int w, int channels)
-    {
-        Tensor outT = new(new TensorShape([1L, channels, h, w]), DType.F32);
-        float* sp = (float*)latent.DataPointer; float* dp = (float*)outT.DataPointer;
-        long spatial = (long)t * h * w;
-        int mid = t / 2;
-        for (int c = 0; c < channels; c++)
-            for (int hi = 0; hi < h; hi++)
-                for (int wi = 0; wi < w; wi++)
-                    dp[((long)c * h + hi) * w + wi] = sp[(long)c * spatial + ((long)mid * h + hi) * w + wi];
-        return outT;
-    }
 }

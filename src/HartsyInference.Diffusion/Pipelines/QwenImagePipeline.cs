@@ -871,7 +871,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            if (onProgress is not null)
+            {
+                Tensor previewLatent = UnpackLatent(
+                    packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Anima,
+                });
+                previewLatent.Dispose();
+            }
 
             // Reclaim GPU-resident activation buffers between steps ONLY on the host paths (their
             // scheduler.Step/blends leave the latent host-resident, so nothing device-only is lost). The

@@ -295,7 +295,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                 sampler.Step(Backend, latent, predictor, i);
                 stepSw.Stop();
                 Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                ReportProgress(onProgress, latent, i + 1, steps, stepSw.Elapsed.TotalMilliseconds);
                 continue;
             }
 
@@ -344,7 +344,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            ReportProgress(onProgress, latent, i + 1, steps, stepSw.Elapsed.TotalMilliseconds);
         }
 
         // Host-materialize the (device-resident on the drain-free path) final latent before the host-side
@@ -428,6 +428,32 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"ERNIE-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Reports a canonical 32-channel Flux.2 preview without mutating the working normalized latent.</summary>
+    private void ReportProgress(Action<GenerationProgress>? onProgress, Tensor latent, int step, int totalSteps,
+        double elapsedMilliseconds)
+    {
+        if (onProgress is null)
+        {
+            return;
+        }
+
+        Tensor normalized = latent;
+        Tensor? unnormalized = null;
+        if (_vaeBnMean is not null && _vaeBnVar is not null)
+        {
+            unnormalized = ApplyBnUnnormalize(latent, _vaeBnMean, _vaeBnVar, _vaeBnEps);
+            normalized = unnormalized;
+        }
+        Tensor preview = UnpatchifyLatent(normalized);
+        unnormalized?.Dispose();
+        onProgress.Invoke(new GenerationProgress(step, totalSteps, elapsedMilliseconds)
+        {
+            Latent = preview,
+            LatentArch = LatentArchitecture.Flux2,
+        });
+        preview.Dispose();
     }
 
     /// <summary>Builds the initial 128-channel latent. T2I: noise * initSigma. Img2img: the source goes VAE-encode (<c>[1, 32, 2·latentH, 2·latentW]</c>, VaeConfig.Flux2 scaling is identity) → 2×2 patchify (<c>[1, 128, latentH, latentW]</c>, inverse of <see cref="UnpatchifyLatent"/>) → BN-normalize (<c>(z − mean)/std</c>, inverse of <see cref="ApplyBnUnnormalize"/>; skipped when no BN stats were supplied, symmetric with decode) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.

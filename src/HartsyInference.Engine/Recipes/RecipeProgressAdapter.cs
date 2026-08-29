@@ -20,12 +20,25 @@ internal static class RecipeProgressAdapter
             }
 
             byte[]? previewRgb = null;
+            byte[][]? previewFramesRgb = null;
             int previewWidth = 0;
             int previewHeight = 0;
             if (source.Latent is not null)
             {
-                previewRgb = LatentPreview.DecodeLatent2Rgb(
-                    source.Latent, source.LatentArch, out previewWidth, out previewHeight);
+                if (source.Latent.Shape.Rank == 5 && source.Latent.Shape[2] > 1)
+                {
+                    previewFramesRgb = LatentPreview.DecodeVideoLatent2RgbFrames(
+                        source.Latent, source.LatentArch, out previewWidth, out previewHeight);
+                    if (previewFramesRgb is { Length: > 0 })
+                    {
+                        previewRgb = previewFramesRgb[previewFramesRgb.Length / 2];
+                    }
+                }
+                else
+                {
+                    previewRgb = LatentPreview.DecodeLatent2Rgb(
+                        source.Latent, source.LatentArch, out previewWidth, out previewHeight);
+                }
             }
 
             target.Report(new StepPreview
@@ -33,6 +46,7 @@ internal static class RecipeProgressAdapter
                 Step = stepOffset + source.Step,
                 TotalSteps = totalSteps ?? source.TotalSteps,
                 PreviewRgb = previewRgb,
+                PreviewFramesRgb = previewFramesRgb,
                 PreviewWidth = previewWidth,
                 PreviewHeight = previewHeight,
             });

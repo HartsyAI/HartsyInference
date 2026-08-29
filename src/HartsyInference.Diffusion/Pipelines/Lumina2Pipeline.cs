@@ -200,7 +200,11 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Lumina 2.0 step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Flux,
+            });
         }
 
         sourceLatent?.Dispose();

@@ -147,6 +147,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Directory to save the image (defaults to the output root).")]
         public string? Output { get; init; }
 
+        /// <summary>Optional path continuously overwritten with the latest latent preview PNG.</summary>
+        [CommandOption("--preview-output")]
+        [Description("Write the latest denoise preview to this PNG path as generation runs.")]
+        public string? PreviewOutput { get; init; }
+
         /// <summary>Suppress progress output.</summary>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
@@ -189,6 +194,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("redux-multiply", settings.ReduxMultiply);
         parameters.PutIfSet("redux-merge", settings.ReduxMerge);
         parameters.PutIfSet("redux-apply-start", settings.ReduxApplyStart);
+        parameters.PutIfSet("preview-output", settings.PreviewOutput);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);

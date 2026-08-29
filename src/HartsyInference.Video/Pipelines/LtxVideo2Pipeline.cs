@@ -558,12 +558,15 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             sw.Stop();
             Logs.Info($"[ltx2-phase] {stageTag}step {stepBase + k + 1}/{stepTotal}: {sw.ElapsedMilliseconds} ms "
                 + (paired ? "(paired CFG)" : "(single branch)"));
-            // The preview drain reads the latent on host, which EVICTS it from the GPU — incompatible with the step
-            // graph, whose capture bakes the resident latent's device address (a re-upload would move it). Skip the
-            // preview while the graph is active (correctness > the optional live thumbnail).
-            if (onProgress is not null && !_transformer.StepGraphActive)
+            if (onProgress is not null)
             {
-                Tensor preview = ExtractMiddleFrame(videoLat, grid.Frames, grid.Height, grid.Width, videoChannels);
+                // Snapshot before the host-side unpack. Reading the fixed graph latent directly would evict its
+                // device allocation and invalidate the address captured by the transformer step graph.
+                Tensor previewTokens = new Tensor(videoLat.Shape, DType.F32);
+                Backend.CopyInto(previewTokens, videoLat);
+                Tensor preview = UnpackVideoLatents(
+                    previewTokens, grid.Frames, grid.Height, grid.Width, videoChannels);
+                previewTokens.Dispose();
                 onProgress.Invoke(new GenerationProgress(stepBase + k + 1, stepTotal, sw.Elapsed.TotalMilliseconds)
                 {
                     Latent = preview,
@@ -1025,21 +1028,4 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         return outT;
     }
 
-    /// <summary>Middle latent frame <c>[1, C, H, W]</c> for latent2rgb previews.</summary>
-    internal static Tensor ExtractMiddleFrame(Tensor tokens, int t, int h, int w, int channels)
-    {
-        Tensor outT = new Tensor(new TensorShape([1L, channels, h, w]), DType.F32);
-        float* sp = (float*)tokens.DataPointer;
-        float* dp = (float*)outT.DataPointer;
-        long frameBase = (long)(t / 2) * h * w;
-        for (int hi = 0; hi < h; hi++)
-            for (int wi = 0; wi < w; wi++)
-            {
-                long token = frameBase + (long)hi * w + wi;
-                long pix = (long)hi * w + wi;
-                for (int c = 0; c < channels; c++)
-                    dp[(long)c * h * w + pix] = sp[token * channels + c];
-            }
-        return outT;
-    }
 }

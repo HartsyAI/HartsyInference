@@ -308,10 +308,21 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
                 Logs.Info($"[Lens] step {i + 1}/{steps} sigma={sigma:F4} {stepSw.ElapsedMilliseconds}ms | " +
                           $"D2H syncs {Backend.GetD2hSyncCount()} (forwards {forwardSyncs})");
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            if (onProgress is not null)
             {
-                LatentArch = LatentArchitecture.Flux2,
-            });
+                Tensor previewPatched = UnpackLatent(packedLatent, patH, patW);
+                Tensor previewUnnormalized = ApplyBnUnNormalize(previewPatched, _bnMean, _bnVar, _bnEps);
+                previewPatched.Dispose();
+                Tensor previewLatent = UnpatchifyLatent(
+                    previewUnnormalized, _config.OutChannels, _config.PatchSize);
+                previewUnnormalized.Dispose();
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Flux2,
+                });
+                previewLatent.Dispose();
+            }
         }
 
         // Free transformer (matches PHASE_3_DEVIATIONS #18: eviction before VAE).

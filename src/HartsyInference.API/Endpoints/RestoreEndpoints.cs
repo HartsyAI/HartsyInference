@@ -23,7 +23,7 @@ public static class RestoreEndpoints
             {
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
-                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                    writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
                 int frameCount = 0;
                 List<VideoFrame> collected = new List<VideoFrame>();
                 await foreach (VideoFrame frame in engine.Restore.RestoreAsync(spec, req.Request, progress, ct))

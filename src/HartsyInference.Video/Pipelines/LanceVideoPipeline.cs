@@ -145,7 +145,20 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             sampler.Step(Backend, latents, predictor, k);
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            if (onProgress is not null)
+            {
+                (int previewPt, int previewPh, int previewPw) = _config.LatentPatchSize;
+                Tensor previewChannelLast = LanceLatentPatch.Unpatchify(
+                    latents, gridT, gridH, gridW, previewPt, previewPh, previewPw, VaeChannels);
+                Tensor previewLatent = LancePipelineCommon.ChannelLastToBcthw(previewChannelLast);
+                previewChannelLast.Dispose();
+                onProgress.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Wan,
+                });
+                previewLatent.Dispose();
+            }
         }
 
         Backend.Sync();

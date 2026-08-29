@@ -361,9 +361,19 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                     sampler.Step(Backend, packed!, predictor, i);
                     stepSw.Stop();
                     Logs.Verbose($"[zimage-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
-                    // No Latent in the progress event: the packed tokens must never be DataPointer-read mid-loop
-                    // (the lazy D2H would free the device buffer). Previews skip gracefully when Latent is null.
-                    onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                    if (onProgress is not null)
+                    {
+                        Tensor previewTokens = _transformer.SnapshotGraphLatent(Backend);
+                        Tensor previewLatent = _transformer.UnpatchifyPacked(
+                            previewTokens, _config.InChannels, fpH, fpW);
+                        previewTokens.Dispose();
+                        onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                        {
+                            Latent = previewLatent,
+                            LatentArch = LatentArchitecture.ZImage,
+                        });
+                        previewLatent.Dispose();
+                    }
                     continue;
                 }
 

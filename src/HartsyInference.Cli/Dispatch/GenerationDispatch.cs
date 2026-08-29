@@ -74,7 +74,8 @@ public static class GenerationDispatch
             Extra = BuildImageExtra(parameters),
         };
 
-        ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
+        ConsoleStepProgress? progress = quiet ? null
+            : new ConsoleStepProgress("denoise", parameters.Get("preview-output"));
         ImageResult result;
         try
         {
@@ -421,7 +422,8 @@ public static class GenerationDispatch
                 .ToList(),
         };
 
-        ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("denoise");
+        ConsoleStepProgress? progress = quiet ? null
+            : new ConsoleStepProgress("denoise", parameters.Get("preview-output"));
         VideoGenerationResult generated;
         try
         {

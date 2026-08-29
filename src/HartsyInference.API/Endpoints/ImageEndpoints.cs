@@ -36,7 +36,7 @@ public static class ImageEndpoints
                 // the service directly here, never the GenerateAsync helper below, or the second EnqueueAsync
                 // would deadlock waiting on the semaphore this frame already holds.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
-                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                    writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
                 ImageResult result = await engine.Images.GenerateAsync(spec, ApplyImageComposition(req), progress, ct);
                 writer.TryWrite(SseHelpers.Event("complete", ToResponse(result, Persist(req, result, req.Request.Prompt)), jsonOptions));
             }, ct);

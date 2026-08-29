@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.Mage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -80,15 +81,14 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         // reference image and has no masked-inpaint path — its Supports omits Inpaint, so a mask is refused upstream.
         using Img2ImgResolver.Img2ImgSpec? editSpec = Img2ImgResolver.Resolve(request.Img2Img, null, width, height);
 
-        progress?.Report(new StepPreview { Step = 0, TotalSteps = steps });
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
         Tensor image = _pipeline.GenerateFromTokens(promptTokens, promptDrop, useCfg ? negTokens : null, negDrop,
             width, height, steps, cfg, seed, editSpec?.SourceTensor, request.SeamlessTiling,
             request.VariationSeed?.Seed ?? -1, request.VariationSeed?.Strength ?? 0,
             // Mage-Flow takes primitives rather than a TextToImageRequest, so the sampler selection is threaded
             // explicitly. Validated by the resolver, which refuses an unavailable name instead of silently
             // substituting Euler.
-            SamplingParamResolver.ResolveSchedulerName(request));
-        progress?.Report(new StepPreview { Step = steps, TotalSteps = steps });
+            SamplingParamResolver.ResolveSchedulerName(request), bridge);
 
         byte[] rgb = ToRgbBytes(image, out int outW, out int outH);
         image.Dispose();

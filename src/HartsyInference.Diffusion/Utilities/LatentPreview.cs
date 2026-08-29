@@ -112,11 +112,12 @@ public static unsafe class LatentPreview
             return direct;
         }
 
-        float[,]? factors = GetFactors(arch);
+        int channels = (int)latent.Shape[1];
+        float[,]? factors = GetFactors(arch, channels);
         if (factors is null) return null;
 
         bool video = latent.Shape.Rank == 5;
-        int c = (int)latent.Shape[1];
+        int c = channels;
         int t = video ? (int)latent.Shape[2] : 1;
         int h = (int)latent.Shape[video ? 3 : 2];
         int w = (int)latent.Shape[video ? 4 : 3];
@@ -124,7 +125,7 @@ public static unsafe class LatentPreview
 
         width = w;
         height = h;
-        float[] bias = GetBias(arch);
+        float[] bias = GetBias(arch, channels);
         int frame = t / 2;
 
         byte[] rgb = new byte[w * h * 3];
@@ -159,6 +160,72 @@ public static unsafe class LatentPreview
         return rgb;
     }
 
+    /// <summary>Decodes every temporal frame in the first batch element of a canonical video latent
+    /// <c>[1, C, T, H, W]</c> into HWC-interleaved RGB24 buffers. Returns null when the tensor or
+    /// architecture cannot be previewed.</summary>
+    /// <param name="latent">The borrowed in-flight video latent. This method does not dispose it.</param>
+    /// <param name="arch">The model family used to select latent-to-RGB factors.</param>
+    /// <param name="width">Set to the latent frame width.</param>
+    /// <param name="height">Set to the latent frame height.</param>
+    public static byte[][]? DecodeVideoLatent2RgbFrames(
+        Tensor latent, LatentArchitecture arch, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        if (latent is null || latent.DType != DType.F32 || latent.Shape.Rank != 5)
+        {
+            return null;
+        }
+
+        int channels = (int)latent.Shape[1];
+        float[,]? factors = GetFactors(arch, channels);
+        if (factors is null)
+        {
+            return null;
+        }
+
+        int frameCount = (int)latent.Shape[2];
+        int h = (int)latent.Shape[3];
+        int w = (int)latent.Shape[4];
+        if (frameCount <= 0 || h <= 0 || w <= 0)
+        {
+            return null;
+        }
+
+        width = w;
+        height = h;
+        float[] bias = GetBias(arch, channels);
+        byte[][] frames = new byte[frameCount][];
+        float* source = (float*)latent.DataPointer;
+        int plane = h * w;
+        long channelStride = (long)frameCount * plane;
+
+        for (int frame = 0; frame < frameCount; frame++)
+        {
+            byte[] rgb = new byte[plane * 3];
+            long frameOffset = (long)frame * plane;
+            for (int pixel = 0; pixel < plane; pixel++)
+            {
+                float r = bias[0];
+                float g = bias[1];
+                float b = bias[2];
+                for (int channel = 0; channel < channels; channel++)
+                {
+                    float value = source[channel * channelStride + frameOffset + pixel];
+                    r += value * factors[channel, 0];
+                    g += value * factors[channel, 1];
+                    b += value * factors[channel, 2];
+                }
+                int outputOffset = pixel * 3;
+                rgb[outputOffset] = ToByte(r);
+                rgb[outputOffset + 1] = ToByte(g);
+                rgb[outputOffset + 2] = ToByte(b);
+            }
+            frames[frame] = rgb;
+        }
+        return frames;
+    }
+
     private static byte ToByte(float v)
     {
         // Latent2RGB factor calibration assumes ~[-1, 1] dynamic range. Clamp + shift to [0, 255].
@@ -167,15 +234,13 @@ public static unsafe class LatentPreview
         return (byte)((v * 0.5f + 0.5f) * 255.0f + 0.5f);
     }
 
-    private static float[,]? GetFactors(LatentArchitecture arch) => arch switch
+    private static float[,]? GetFactors(LatentArchitecture arch, int channels = -1) => arch switch
     {
         LatentArchitecture.Sd15 => _sd15Factors,
         LatentArchitecture.Sdxl => _sdxlFactors,
         LatentArchitecture.Sd3 => _sd3Factors,
         LatentArchitecture.Flux => _fluxFactors,
-        // Flux.2 uses Flux.1 factors as a starting point — replace with arch-specific
-        // factors when published. Previews will be approximate but hue-trending correct.
-        LatentArchitecture.Flux2 => _fluxFactors,
+        LatentArchitecture.Flux2 => _flux2Factors,
         LatentArchitecture.Chroma => _fluxFactors,
         LatentArchitecture.ZImage => _fluxFactors,
         // Anima uses the Qwen-Image VAE (16 ch). Flux factors are a reasonable approximation
@@ -183,20 +248,29 @@ public static unsafe class LatentPreview
         LatentArchitecture.Anima => _fluxFactors,
         LatentArchitecture.FLite => _sd3Factors,
         LatentArchitecture.AuraFlow => _sdxlFactors,
+        LatentArchitecture.Wan when channels == 16 => _wan21Factors,
         LatentArchitecture.Wan => _wan22Factors,
         LatentArchitecture.Ltx => _ltxFactors,
+        LatentArchitecture.HunyuanVideo => _hunyuanVideoFactors,
+        LatentArchitecture.MiniMaxH3 => _miniMaxH3Factors,
+        LatentArchitecture.HunyuanImage => _hunyuanImageFactors,
+        LatentArchitecture.MageFlow => _mageFlowFactors,
         _ => null,
     };
 
-    private static float[] GetBias(LatentArchitecture arch) => arch switch
+    private static float[] GetBias(LatentArchitecture arch, int channels = -1) => arch switch
     {
         LatentArchitecture.Sd3 => _sd3Bias,
         LatentArchitecture.Flux or LatentArchitecture.Flux2
             or LatentArchitecture.Chroma or LatentArchitecture.ZImage
             or LatentArchitecture.Anima => _fluxBias,
         LatentArchitecture.FLite => _sd3Bias,
+        LatentArchitecture.Wan when channels == 16 => _wan21Bias,
         LatentArchitecture.Wan => _wan22Bias,
         LatentArchitecture.Ltx => _ltxBias,
+        LatentArchitecture.HunyuanVideo => _hunyuanVideoBias,
+        LatentArchitecture.MiniMaxH3 => _miniMaxH3Bias,
+        LatentArchitecture.HunyuanImage => _hunyuanImageBias,
         _ => _zeroBias,
     };
 
@@ -263,6 +337,159 @@ public static unsafe class LatentPreview
         { -0.1262f, -0.0982f, -0.0778f },
     };
     private static readonly float[] _fluxBias = [-0.0329f, -0.0718f, -0.0851f];
+
+    // Flux.2: 32×3 + bias, after its 128-channel 2×2 patch latent is unpatchified.
+    // Source: comfy/latent_formats.py Flux2.
+    private static readonly float[,] _flux2Factors = new float[,]
+    {
+        { 0.0058f, 0.0113f, 0.0073f }, { 0.0495f, 0.0443f, 0.0836f },
+        { -0.0099f, 0.0096f, 0.0644f }, { 0.2144f, 0.3009f, 0.3652f },
+        { 0.0166f, -0.0039f, -0.0054f }, { 0.0157f, 0.0103f, -0.0160f },
+        { -0.0398f, 0.0902f, -0.0235f }, { -0.0052f, 0.0095f, 0.0109f },
+        { -0.3527f, -0.2712f, -0.1666f }, { -0.0301f, -0.0356f, -0.0180f },
+        { -0.0107f, 0.0078f, 0.0013f }, { 0.0746f, 0.0090f, -0.0941f },
+        { 0.0156f, 0.0169f, 0.0070f }, { -0.0034f, -0.0040f, -0.0114f },
+        { 0.0032f, 0.0181f, 0.0080f }, { -0.0939f, -0.0008f, 0.0186f },
+        { 0.0018f, 0.0043f, 0.0104f }, { 0.0284f, 0.0056f, -0.0127f },
+        { -0.0024f, -0.0022f, -0.0030f }, { 0.1207f, -0.0026f, 0.0065f },
+        { 0.0128f, 0.0101f, 0.0142f }, { 0.0137f, -0.0072f, -0.0007f },
+        { 0.0095f, 0.0092f, -0.0059f }, { 0.0000f, -0.0077f, -0.0049f },
+        { -0.0465f, -0.0204f, -0.0312f }, { 0.0095f, 0.0012f, -0.0066f },
+        { 0.0290f, -0.0034f, 0.0025f }, { 0.0220f, 0.0169f, -0.0048f },
+        { -0.0332f, -0.0457f, -0.0468f }, { -0.0085f, 0.0389f, 0.0609f },
+        { -0.0076f, 0.0003f, -0.0043f }, { -0.0111f, -0.0460f, -0.0614f },
+    };
+
+    // Wan2.1 video: 16×3 + bias. Source: comfy/latent_formats.py Wan21.
+    private static readonly float[,] _wan21Factors = new float[,]
+    {
+        { -0.1299f, -0.1692f, 0.2932f },
+        { 0.0671f, 0.0406f, 0.0442f },
+        { 0.3568f, 0.2548f, 0.1747f },
+        { 0.0372f, 0.2344f, 0.1420f },
+        { 0.0313f, 0.0189f, -0.0328f },
+        { 0.0296f, -0.0956f, -0.0665f },
+        { -0.3477f, -0.4059f, -0.2925f },
+        { 0.0166f, 0.1902f, 0.1975f },
+        { -0.0412f, 0.0267f, -0.1364f },
+        { -0.1293f, 0.0740f, 0.1636f },
+        { 0.0680f, 0.3019f, 0.1128f },
+        { 0.0032f, 0.0581f, 0.0639f },
+        { -0.1251f, 0.0927f, 0.1699f },
+        { 0.0060f, -0.0633f, 0.0005f },
+        { 0.3477f, 0.2275f, 0.2950f },
+        { 0.1984f, 0.0913f, 0.1861f },
+    };
+    private static readonly float[] _wan21Bias = [-0.1835f, -0.0868f, -0.3360f];
+
+    // HunyuanVideo (also Kandinsky 5 Video's shared VAE): 16×3 + bias.
+    // Source: comfy/latent_formats.py HunyuanVideo.
+    private static readonly float[,] _hunyuanVideoFactors = new float[,]
+    {
+        { -0.0395f, -0.0331f, 0.0445f },
+        { 0.0696f, 0.0795f, 0.0518f },
+        { 0.0135f, -0.0945f, -0.0282f },
+        { 0.0108f, -0.0250f, -0.0765f },
+        { -0.0209f, 0.0032f, 0.0224f },
+        { -0.0804f, -0.0254f, -0.0639f },
+        { -0.0991f, 0.0271f, -0.0669f },
+        { -0.0646f, -0.0422f, -0.0400f },
+        { -0.0696f, -0.0595f, -0.0894f },
+        { -0.0799f, -0.0208f, -0.0375f },
+        { 0.1166f, 0.1627f, 0.0962f },
+        { 0.1165f, 0.0432f, 0.0407f },
+        { -0.2315f, -0.1920f, -0.1355f },
+        { -0.0270f, 0.0401f, -0.0821f },
+        { -0.0616f, -0.0997f, -0.0727f },
+        { 0.0249f, -0.0469f, -0.1703f },
+    };
+    private static readonly float[] _hunyuanVideoBias = [0.0259f, -0.0192f, -0.0761f];
+
+    // MiniMax H3 video: 24×3 + bias. Source: comfy/latent_formats.py MiniMaxH3Video.
+    private static readonly float[,] _miniMaxH3Factors = new float[,]
+    {
+        { -0.018555f, 0.024344f, -0.017536f },
+        { 0.150164f, 0.137244f, 0.129221f },
+        { 0.027367f, -0.050369f, -0.208606f },
+        { -0.000793f, -0.164622f, -0.323161f },
+        { -0.048556f, 0.013970f, -0.074286f },
+        { 0.011740f, 0.014172f, -0.006906f },
+        { 0.061517f, 0.061212f, 0.110025f },
+        { 0.035321f, 0.086879f, 0.110059f },
+        { -0.017426f, 0.002997f, 0.035356f },
+        { 0.531539f, 0.548819f, 0.624404f },
+        { -0.024968f, -0.040234f, -0.034302f },
+        { -0.032549f, -0.029096f, -0.017221f },
+        { 0.022609f, 0.020286f, 0.050661f },
+        { -0.084001f, -0.038131f, -0.020805f },
+        { -0.018830f, 0.010412f, 0.061120f },
+        { 0.020777f, 0.011196f, -0.030994f },
+        { -0.008390f, -0.012201f, -0.025687f },
+        { -0.013281f, -0.002924f, 0.006331f },
+        { 0.000260f, 0.001833f, -0.011038f },
+        { 0.105471f, 0.100482f, 0.132106f },
+        { 0.016529f, 0.015213f, 0.009999f },
+        { -0.014015f, -0.017438f, -0.019134f },
+        { -0.033787f, -0.009984f, -0.019725f },
+        { 0.004224f, 0.017284f, 0.027196f },
+    };
+    private static readonly float[] _miniMaxH3Bias = [0.057426f, -0.022078f, -0.071449f];
+
+    // Hunyuan Image 2.1: 64×3 + bias. Source: comfy/latent_formats.py HunyuanImage21.
+    private static readonly float[,] _hunyuanImageFactors = new float[,]
+    {
+        { -0.0154f, -0.0397f, -0.0521f }, { 0.0005f, 0.0093f, 0.0006f },
+        { -0.0805f, -0.0773f, -0.0586f }, { -0.0494f, -0.0487f, -0.0498f },
+        { -0.0212f, -0.0076f, -0.0261f }, { -0.0179f, -0.0417f, -0.0505f },
+        { 0.0158f, 0.0310f, 0.0239f }, { 0.0409f, 0.0516f, 0.0201f },
+        { 0.0350f, 0.0553f, 0.0036f }, { -0.0447f, -0.0327f, -0.0479f },
+        { -0.0038f, -0.0221f, -0.0365f }, { -0.0423f, -0.0718f, -0.0654f },
+        { 0.0039f, 0.0368f, 0.0104f }, { 0.0655f, 0.0217f, 0.0122f },
+        { 0.0490f, 0.1638f, 0.2053f }, { 0.0932f, 0.0829f, 0.0650f },
+        { -0.0186f, -0.0209f, -0.0135f }, { -0.0080f, -0.0076f, -0.0148f },
+        { -0.0284f, -0.0201f, 0.0011f }, { -0.0642f, -0.0294f, -0.0777f },
+        { -0.0035f, 0.0076f, -0.0140f }, { 0.0519f, 0.0731f, 0.0887f },
+        { -0.0102f, 0.0095f, 0.0704f }, { 0.0068f, 0.0218f, -0.0023f },
+        { -0.0726f, -0.0486f, -0.0519f }, { 0.0260f, 0.0295f, 0.0263f },
+        { 0.0250f, 0.0333f, 0.0341f }, { 0.0168f, -0.0120f, -0.0174f },
+        { 0.0226f, 0.1037f, 0.0114f }, { 0.2577f, 0.1906f, 0.1604f },
+        { -0.0646f, -0.0137f, -0.0018f }, { -0.0112f, 0.0309f, 0.0358f },
+        { -0.0347f, 0.0146f, -0.0481f }, { 0.0234f, 0.0179f, 0.0201f },
+        { 0.0157f, 0.0313f, 0.0225f }, { 0.0423f, 0.0675f, 0.0524f },
+        { -0.0031f, 0.0027f, -0.0255f }, { 0.0447f, 0.0555f, 0.0330f },
+        { -0.0152f, 0.0103f, 0.0299f }, { -0.0755f, -0.0489f, -0.0635f },
+        { 0.0853f, 0.0788f, 0.1017f }, { -0.0272f, -0.0294f, -0.0471f },
+        { 0.0440f, 0.0400f, -0.0137f }, { 0.0335f, 0.0317f, -0.0036f },
+        { -0.0344f, -0.0621f, -0.0984f }, { -0.0127f, -0.0630f, -0.0620f },
+        { -0.0648f, 0.0360f, 0.0924f }, { -0.0781f, -0.0801f, -0.0409f },
+        { 0.0363f, 0.0613f, 0.0499f }, { 0.0238f, 0.0034f, 0.0041f },
+        { -0.0135f, 0.0258f, 0.0310f }, { 0.0614f, 0.1086f, 0.0589f },
+        { 0.0428f, 0.0350f, 0.0205f }, { 0.0153f, 0.0173f, -0.0018f },
+        { -0.0288f, -0.0455f, -0.0091f }, { 0.0344f, 0.0109f, -0.0157f },
+        { -0.0205f, -0.0247f, -0.0187f }, { 0.0487f, 0.0126f, 0.0064f },
+        { -0.0220f, -0.0013f, 0.0074f }, { -0.0203f, -0.0094f, -0.0048f },
+        { -0.0719f, 0.0429f, -0.0442f }, { 0.1042f, 0.0497f, 0.0356f },
+        { -0.0659f, -0.0578f, -0.0280f }, { -0.0060f, -0.0322f, -0.0234f },
+    };
+    private static readonly float[] _hunyuanImageBias = [0.0007f, -0.0256f, -0.0206f];
+
+    // Mage-Flow has no published latent2rgb regression yet. A fixed, low-amplitude projection over all
+    // 128 channels still exposes denoise structure and motion without guessing another VAE family's factors.
+    private static readonly float[,] _mageFlowFactors = CreateDeterministicProjection(128);
+
+    /// <summary>Builds a stable all-channel RGB projection for architectures awaiting calibrated factors.</summary>
+    private static float[,] CreateDeterministicProjection(int channels)
+    {
+        float[,] factors = new float[channels, 3];
+        float scale = 0.12f / MathF.Sqrt(channels);
+        for (int channel = 0; channel < channels; channel++)
+        {
+            factors[channel, 0] = MathF.Sin((channel + 1) * 1.37f) * scale;
+            factors[channel, 1] = MathF.Sin((channel + 1) * 2.11f + 0.7f) * scale;
+            factors[channel, 2] = MathF.Sin((channel + 1) * 2.83f + 1.4f) * scale;
+        }
+        return factors;
+    }
 
     // Wan2.2 video: 48×3 + bias. Source: comfy/latent_formats.py Wan22.latent_rgb_factors / _bias.
     private static readonly float[,] _wan22Factors = new float[,]

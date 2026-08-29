@@ -34,7 +34,7 @@ public sealed class RecipeProgressAdapterTests
     [Fact]
     public void VideoLatent_PopulatesRgbPreviewAndPreservesChunkProgress()
     {
-        using Tensor latent = new Tensor(new TensorShape(1, 128, 4, 6), DType.F32);
+        using Tensor latent = new Tensor(new TensorShape([1, 128, 3, 4, 6]), DType.F32);
         CapturingProgress target = new CapturingProgress();
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(
             target, CancellationToken.None, stepOffset: 8, totalSteps: 24);
@@ -51,6 +51,8 @@ public sealed class RecipeProgressAdapterTests
         Assert.Equal(4, target.Value.PreviewHeight);
         Assert.NotNull(target.Value.PreviewRgb);
         Assert.Equal(6 * 4 * 3, target.Value.PreviewRgb!.Length);
+        Assert.NotNull(target.Value.PreviewFramesRgb);
+        Assert.Equal(3, target.Value.PreviewFramesRgb!.Length);
     }
 
     [Fact]

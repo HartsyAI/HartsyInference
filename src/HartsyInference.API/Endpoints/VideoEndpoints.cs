@@ -24,7 +24,7 @@ public static class VideoEndpoints
             {
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
-                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                    writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
                 VideoGenerationResult result = await engine.Video.GenerateAsync(spec, req.Request, progress, ct);
                 foreach (VideoFrame frame in result.Frames)
                 {

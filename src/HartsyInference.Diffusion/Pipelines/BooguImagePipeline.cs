@@ -127,7 +127,18 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             sampler.Step(Backend, latent, predictor, i);
 
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            if (onProgress is not null)
+            {
+                Tensor previewLatent = new Tensor(latentShape, DType.F32);
+                Backend.UnpatchifyTokens(previewLatent, latent, _config.InChannels, hPacked, wPacked,
+                    _config.PatchSize, innerChannelFastest: true);
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.Flux,
+                });
+                previewLatent.Dispose();
+            }
         }
 
         Backend.Sync();
@@ -261,7 +272,11 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             dropText.Dispose();
 
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Flux,
+            });
         }
 
         Backend.Sync();

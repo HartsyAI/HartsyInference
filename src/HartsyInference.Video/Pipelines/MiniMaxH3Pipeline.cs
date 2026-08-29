@@ -177,7 +177,18 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     DitShardBackend?.Sync();
                     sw.Stop();
                     Logs.Info($"[minimax-h3] step {step + 1}/{request.Steps}: {sw.ElapsedMilliseconds} ms");
-                    onProgress?.Invoke(new GenerationProgress(step + 1, request.Steps, sw.Elapsed.TotalMilliseconds));
+                    if (onProgress is not null)
+                    {
+                        Tensor previewLatent = MiniMaxH3Latents.UnpackVideo(
+                            videoLat, latentT, latentH, latentW, _config);
+                        onProgress.Invoke(new GenerationProgress(
+                            step + 1, request.Steps, sw.Elapsed.TotalMilliseconds)
+                        {
+                            Latent = previewLatent,
+                            LatentArch = LatentArchitecture.MiniMaxH3,
+                        });
+                        previewLatent.Dispose();
+                    }
                     // Window the op profiler onto the steady-state steps: step 0 carries the weight-residency
                     // warm-up, and everything before the loop is text encode. Both are one-time and vary enough
                     // run to run that differencing two runs to cancel them does not work. No-op when off.

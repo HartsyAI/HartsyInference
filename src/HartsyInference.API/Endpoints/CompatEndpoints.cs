@@ -290,7 +290,7 @@ public static class CompatEndpoints
             await SseHelpers.RunAsync(ctx, queue, async (writer, jsonOptions) =>
             {
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
-                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                    writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
                 // Runs inside the queue's held slot — call the service directly, not the GenerateAsync helper.
                 ImageResult result = await engine.Images.GenerateAsync(spec, imageRequest, progress, ct);
                 byte[] pngBytes = PngEncoder.Encode(result.Rgb, result.Width, result.Height);

@@ -163,6 +163,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Directory to write the frame sequence into (defaults to the output root).")]
         public string? Output { get; init; }
 
+        /// <summary>Optional PNG path for the latest latent preview and its numbered temporal frames.</summary>
+        [CommandOption("--preview-output")]
+        [Description("Write live video-latent preview frames beside this PNG path as generation runs.")]
+        public string? PreviewOutput { get; init; }
+
         /// <summary>Suppress progress output.</summary>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
@@ -199,6 +204,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         }
         parameters.PutIfSet("swap-model", settings.SwapModel);
         parameters.PutIfSet("swap-percent", settings.SwapPercent);
+        parameters.PutIfSet("preview-output", settings.PreviewOutput);
         // Repeatable options collapse to one newline-joined value: the parameter bag is flat strings, and a path
         // cannot contain a newline.
         if (settings.ReferenceImages is { Length: > 0 })

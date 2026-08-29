@@ -12,7 +12,7 @@ public enum LatentArchitecture
     Sd3 = 3,
     /// <summary>Flux.1 (dev / schnell) — 16-channel latent, 8x downscale.</summary>
     Flux = 4,
-    /// <summary>Flux.2 — 16-channel latent, distinct factors from Flux.1; falls back to Flux.1 factors if Flux.2-specific ones aren't published.</summary>
+    /// <summary>Flux.2 — canonical 32-channel latent after its 128-channel patch representation is unpatchified.</summary>
     Flux2 = 5,
     /// <summary>Chroma — reuses the Flux VAE, so Flux factors apply.</summary>
     Chroma = 6,
@@ -24,12 +24,21 @@ public enum LatentArchitecture
     ZImage = 9,
     /// <summary>Anima (Cosmos-Predict2 2B) — 16-channel Qwen-Image VAE, 8× downscale; same channel count as Flux/SD3 so Flux factors are a reasonable preview approximation until Qwen-Image-specific factors are derived.</summary>
     Anima = 10,
-    /// <summary>Wan2.2 video — 48-channel 3-D latent <c>[1, 48, T, H, W]</c>, 16× spatial downscale; previews decode the middle latent frame.</summary>
+    /// <summary>Wan video — 16-channel Wan 2.1 or 48-channel Wan 2.2 3-D latent.</summary>
     Wan = 11,
-    /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale. The pipeline hands the preview a single-frame <c>[1, 128, H, W]</c> slice (its working latent is token-packed).</summary>
+    /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale.</summary>
     Ltx = 12,
     /// <summary>Chroma Radiance — pixel-space (no VAE); the "latent" IS the RGB image in [-1, 1], so previews convert it directly without a factor matrix.</summary>
     ChromaRadiance = 13,
     /// <summary>Zeta-Chroma — pixel-space Z-Image S3-DiT (no VAE). Direct RGB preview like <see cref="ChromaRadiance"/>.</summary>
     ZetaChroma = 14,
+    /// <summary>HunyuanVideo and Kandinsky 5 Video — 16-channel 3-D latent.</summary>
+    HunyuanVideo = 15,
+    /// <summary>MiniMax H3 video — 24-channel 3-D latent.</summary>
+    MiniMaxH3 = 16,
+    /// <summary>Hunyuan Image 2.1 — 64-channel image latent.</summary>
+    HunyuanImage = 17,
+    /// <summary>Mage-Flow — 128-channel image latent. Uses an approximate deterministic projection until
+    /// calibrated latent-to-RGB factors are published.</summary>
+    MageFlow = 18,
 }

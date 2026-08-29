@@ -267,7 +267,11 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
 
             sw.Stop();
             Logs.Debug($"Kandinsky5-Video step {i + 1}/{steps} (t={t:F1}) in {sw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds)
+            {
+                Latent = noisy,
+                LatentArch = LatentArchitecture.HunyuanVideo,
+            });
 
             // Reclaim GPU-resident activations between steps (undisposed cached intermediates otherwise
             // accumulate to OOM over the loop). Safe: the sampler's device step is materialized to the host above,

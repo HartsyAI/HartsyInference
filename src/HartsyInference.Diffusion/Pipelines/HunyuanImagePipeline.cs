@@ -448,7 +448,18 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             }
 
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            if (onProgress is not null)
+            {
+                Tensor previewLatent = new Tensor(latentShape, DType.F32);
+                Backend.UnpatchifyTokens(previewLatent, latentTokens, inChannels, hPacked, wPacked, patch,
+                    innerChannelFastest: true);
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewLatent,
+                    LatentArch = LatentArchitecture.HunyuanImage,
+                });
+                previewLatent.Dispose();
+            }
         }
         sourceTokens?.Dispose();
         tokenMask?.Dispose();

@@ -458,7 +458,23 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
                 stepSw.Stop();
                 Logs.Verbose($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                if (onProgress is not null)
+                {
+                    Tensor previewTokens = graphMode
+                        ? _transformer.SnapshotGraphLatent(Backend)
+                        : patchLatent!;
+                    Tensor previewLatent = _transformer.UnpatchifyLatent(previewTokens, hPacked, wPacked);
+                    if (graphMode)
+                    {
+                        previewTokens.Dispose();
+                    }
+                    onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    {
+                        Latent = previewLatent,
+                        LatentArch = LatentArchitecture.Anima,
+                    });
+                    previewLatent.Dispose();
+                }
                 TrimPoolOnStreamedPath(streamer);
                 continue;
             }
@@ -507,7 +523,11 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             }
 
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Anima,
+            });
             TrimPoolOnStreamedPath(streamer);
         }
 

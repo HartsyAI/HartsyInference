@@ -50,11 +50,23 @@ public sealed class RestoreService : IRestoreService
         (List<byte[]> restored, int outW, int outH) = await Task.Run(() =>
         {
             SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec);
-            return pipeline.Restore(frames, width, height, options, p => progress?.Report(new StepPreview
+            if (progress is null)
             {
-                Step = p.Step,
-                TotalSteps = p.TotalSteps,
-            }));
+                return pipeline.Restore(frames, width, height, options);
+            }
+            return pipeline.RestoreWithPreviews(frames, width, height, options, (p, previewFrames) =>
+            {
+                byte[][] rgbFrames = [.. previewFrames.Select(frame => frame.Rgb)];
+                progress.Report(new StepPreview
+                {
+                    Step = p.Step,
+                    TotalSteps = p.TotalSteps,
+                    PreviewRgb = rgbFrames.Length > 0 ? rgbFrames[rgbFrames.Length / 2] : null,
+                    PreviewFramesRgb = rgbFrames.Length > 1 ? rgbFrames : null,
+                    PreviewWidth = previewFrames.Count > 0 ? previewFrames[0].Width : 0,
+                    PreviewHeight = previewFrames.Count > 0 ? previewFrames[0].Height : 0,
+                });
+            });
         }, cancel).ConfigureAwait(false);
 
         for (int i = 0; i < restored.Count; i++)

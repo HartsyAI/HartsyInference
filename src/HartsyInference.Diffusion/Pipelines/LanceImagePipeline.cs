@@ -153,7 +153,20 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
                 noisedSource.Dispose();
             }
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            if (onProgress is not null)
+            {
+                (int previewPt, int previewPh, int previewPw) = _config.LatentPatchSize;
+                Tensor previewChannelLast = LanceLatentPatch.Unpatchify(
+                    latents, gridT, gridH, gridW, previewPt, previewPh, previewPw, VaeChannels);
+                Tensor previewVideoLatent = LancePipelineCommon.ChannelLastToBcthw(previewChannelLast);
+                previewChannelLast.Dispose();
+                onProgress.Invoke(new GenerationProgress(k + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = previewVideoLatent,
+                    LatentArch = LatentArchitecture.Wan,
+                });
+                previewVideoLatent.Dispose();
+            }
         }
 
         Backend.Sync();

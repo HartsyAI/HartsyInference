@@ -33,7 +33,7 @@ public static class MeshEndpoints
             {
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
-                    writer.TryWrite(SseHelpers.Event("progress", new { step = p.Step, total = p.TotalSteps }, jsonOptions)));
+                    writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
                 MeshResult result = await engine.Mesh.GenerateAsync(spec, req.Request, progress, ct);
                 writer.TryWrite(SseHelpers.Event("complete",
                     WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)), jsonOptions));
