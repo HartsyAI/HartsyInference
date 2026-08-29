@@ -36,11 +36,7 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(RecipeRequestMapper.ToTextToImage(request, negative), img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokens, negTokens, promptMask, negMask, inner, bridge);

@@ -72,11 +72,7 @@ public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPip
                 Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             };
 
-            Action<GenerationProgress> bridge = p2 =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p2.Step, TotalSteps = p2.TotalSteps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(promptEmbeds, pooled, inner, numFrames, bridge);
             Logs.Info($"[HunyuanVideoRecipePipeline] Pipeline returned {frames.Length} frames {outW}x{outH}.");

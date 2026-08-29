@@ -142,11 +142,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + "— generating anyway; motion coherence and audio sync may drift past that length.");
         }
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         List<Keyframe> keyframes = [];
         List<Reference> references = [];

@@ -106,11 +106,7 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         byte[] rgb; int outW, outH, usedSeed;
         try

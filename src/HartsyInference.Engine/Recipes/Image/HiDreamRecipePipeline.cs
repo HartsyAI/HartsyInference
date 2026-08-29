@@ -76,11 +76,7 @@ public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenize
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             clipTokens, negClipTokens,

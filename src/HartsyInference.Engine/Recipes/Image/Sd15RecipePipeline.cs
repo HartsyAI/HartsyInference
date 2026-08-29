@@ -67,11 +67,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
 
         TextToImageRequest inner = BuildInner(request, negative, plan);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokens, negativeTokens, inner, bridge,

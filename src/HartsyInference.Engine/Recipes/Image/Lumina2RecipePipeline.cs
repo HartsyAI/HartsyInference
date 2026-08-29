@@ -74,11 +74,7 @@ public sealed class Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend bac
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromEmbeddings(
             condEmbeds, inner,

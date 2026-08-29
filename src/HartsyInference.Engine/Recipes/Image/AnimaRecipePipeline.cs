@@ -106,11 +106,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
 
         try
         {
-            Action<GenerationProgress> bridge = p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
             (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromEmbeddings(
                 positiveEmbeddings,

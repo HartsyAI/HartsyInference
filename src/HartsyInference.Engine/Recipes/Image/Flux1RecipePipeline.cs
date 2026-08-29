@@ -114,11 +114,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 },
                 img2img);
 
-            Action<GenerationProgress> bridge = p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
             regionalPlan = BuildRegionalPlan(prompt, reqWidth, reqHeight, steps);
 

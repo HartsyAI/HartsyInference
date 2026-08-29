@@ -85,11 +85,7 @@ public sealed unsafe class Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline,
                 },
                 img2img);
 
-            Action<GenerationProgress> bridge = p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
             (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromEmbeddings(
                 qwenEmbeds, clipPooled, negQwenEmbeds, negClipPooled, inner, bridge);

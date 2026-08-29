@@ -105,11 +105,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             FlowShift = DefaultFlowShift,
         };
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         Tensor? imageEmbeds = null;
         Tensor? firstFrameLatent = null;
@@ -232,11 +228,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             FlowShift = DefaultFlowShift,
         };
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         try
         {

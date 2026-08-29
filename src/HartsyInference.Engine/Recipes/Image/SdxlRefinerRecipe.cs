@@ -142,11 +142,9 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
                 // routing through the resolver here is what turns a named sampler into a refusal instead of a drop.
                 Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             };
-            Action<GenerationProgress>? bridge = progress is null ? null : p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
-            };
+            Action<GenerationProgress>? bridge = progress is null
+                ? null
+                : RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
             (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.RefineFromTokens(tokensG, negG, eosG, negEosG, inner, bridge);
             return new ImageResult
             {

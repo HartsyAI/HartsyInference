@@ -112,7 +112,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         int totalSteps = request.Steps ?? SdxlRecipe.FamilyDefaults.Steps;
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             tokensL, negL, tokensG, negG, eosG, negEosG, inner,
-            p => progress?.Report(new StepPreview { Step = p.Step, TotalSteps = totalSteps }),
+            RecipeProgressAdapter.Create(progress, cancel, totalSteps: totalSteps),
             controlNets: plan.ControlNets?.Conditionings,
             refiner: stepSwapRefiner,
             ipAdapters: plan.IpAdapters?.Conditionings,

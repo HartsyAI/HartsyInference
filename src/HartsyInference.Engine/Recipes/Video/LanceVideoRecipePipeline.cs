@@ -68,11 +68,7 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
             Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         try
         {

@@ -98,11 +98,7 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
                 Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
             };
 
-            Action<GenerationProgress> bridge = p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
             (byte[][] frames, int outW, int outH, int _) = _pipeline.GenerateFromEmbeddings(
                 qwenEmbeds, clipPooled, negQwenEmbeds, negClipPooled, inner, numFrames, bridge, firstFrameLatent);

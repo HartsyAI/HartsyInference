@@ -56,11 +56,7 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokensClip, negTokensClip,

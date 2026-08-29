@@ -89,11 +89,7 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
         RegionalPlan? regionalPlan = null;
         try

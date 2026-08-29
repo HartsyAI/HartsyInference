@@ -78,11 +78,7 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
             Scheduler = SamplingParamResolver.ResolveSchedulerName(request),
         };
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = refEdit is null
             ? _pipeline.GenerateFromEmbeddings(

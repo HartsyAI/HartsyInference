@@ -169,11 +169,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                         carriedTensor = VideoRecipeUtils.RgbToReferenceTensor(carriedFrame, width, height);
                     }
                     int stepsBefore = chunkIndex * steps, stepsTotal = Math.Max(plannedChunks, chunkIndex + 1) * steps;
-                    Action<GenerationProgress> bridge = p =>
-                    {
-                        cancel.ThrowIfCancellationRequested();
-                        progress?.Report(new StepPreview { Step = stepsBefore + p.Step, TotalSteps = stepsTotal });
-                    };
+                    Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(
+                        progress, cancel, stepOffset: stepsBefore, totalSteps: stepsTotal);
                     VideoGenerationRequest inner = new VideoGenerationRequest
                     {
                         Prompt = request.Prompt,

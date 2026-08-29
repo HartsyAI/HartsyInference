@@ -81,11 +81,7 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = steps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             ids, mask, negIds, negMask, inner, onProgress: bridge);

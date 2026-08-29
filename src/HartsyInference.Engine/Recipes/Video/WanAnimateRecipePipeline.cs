@@ -207,11 +207,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
                             assembled.GetRange(assembled.Count - prefix, prefix), width, height);
                     }
                     int stepsBefore = chunkIndex * steps, stepsTotal = plannedChunks * steps;
-                    Action<GenerationProgress> bridge = p =>
-                    {
-                        cancel.ThrowIfCancellationRequested();
-                        progress?.Report(new StepPreview { Step = stepsBefore + p.Step, TotalSteps = stepsTotal });
-                    };
+                    Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(
+                        progress, cancel, stepOffset: stepsBefore, totalSteps: stepsTotal);
 
                     // Only chunk 0 is cacheable: a continuation chunk's conditioning carries that chunk's motion
                     // prefix and its own driving slice.

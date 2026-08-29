@@ -111,11 +111,7 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
                 FlowShift = DefaultFlowShift,
             };
 
-            Action<GenerationProgress> bridge = p =>
-            {
-                cancel.ThrowIfCancellationRequested();
-                progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-            };
+            Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
             int tLat = (numFrames - 1) / _config.VaeTemporalCompression + 1;
             resampled = WanS2VPipeline.ResampleAudioFeatures(audioLayers, tLat * 4);

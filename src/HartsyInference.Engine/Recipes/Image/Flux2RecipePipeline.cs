@@ -70,11 +70,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
             },
             img2img);
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         RegionalPlan? regionalPlan = null;
         try

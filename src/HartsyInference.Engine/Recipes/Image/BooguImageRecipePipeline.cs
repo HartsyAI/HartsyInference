@@ -115,11 +115,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
             _backend.FreeActivations();
         }
 
-        Action<GenerationProgress> bridge = p =>
-        {
-            cancel.ThrowIfCancellationRequested();
-            progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-        };
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         // IP2P image guidance: drop-text and drop-all share the same "no text" embedding with the text-only
         // encoder; the image drop happens transformer-side via refLatents: null on the drop-all forward.
