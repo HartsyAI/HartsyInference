@@ -1,0 +1,20 @@
+{
+  "solution": {
+    "path": "HartsyInference.sln",
+    "projects": [
+      "src\\HartsyInference.Core\\HartsyInference.Core.csproj",
+      "src\\HartsyInference.Cpu\\HartsyInference.Cpu.csproj",
+      "src\\HartsyInference.Cuda\\HartsyInference.Cuda.csproj",
+      "src\\HartsyInference.Diffusion\\HartsyInference.Diffusion.csproj",
+      "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
+      "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
+      "src\\HartsyInference.Vision\\HartsyInference.Vision.csproj",
+      "src\\HartsyInference.Vulkan\\HartsyInference.Vulkan.csproj",
+      "tests\\HartsyInference.Core.Tests\\HartsyInference.Core.Tests.csproj",
+      "tests\\HartsyInference.Cpu.Tests\\HartsyInference.Cpu.Tests.csproj",
+      "tests\\HartsyInference.Cuda.Tests\\HartsyInference.Cuda.Tests.csproj",
+      "tests\\HartsyInference.Tests.Common\\HartsyInference.Tests.Common.csproj",
+      "tests\\HartsyInference.Vulkan.Tests\\HartsyInference.Vulkan.Tests.csproj"
+    ]
+  }
+}

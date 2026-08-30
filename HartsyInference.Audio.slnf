@@ -1,0 +1,17 @@
+{
+  "solution": {
+    "path": "HartsyInference.sln",
+    "projects": [
+      "src\\HartsyInference.Audio\\HartsyInference.Audio.csproj",
+      "src\\HartsyInference.Core\\HartsyInference.Core.csproj",
+      "src\\HartsyInference.Cpu\\HartsyInference.Cpu.csproj",
+      "src\\HartsyInference.Cuda\\HartsyInference.Cuda.csproj",
+      "src\\HartsyInference.Diffusion\\HartsyInference.Diffusion.csproj",
+      "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
+      "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
+      "tests\\HartsyInference.Audio.Phonemizer.Tests\\HartsyInference.Audio.Phonemizer.Tests.csproj",
+      "tests\\HartsyInference.Audio.Tests\\HartsyInference.Audio.Tests.csproj",
+      "tests\\HartsyInference.Tests.Common\\HartsyInference.Tests.Common.csproj"
+    ]
+  }
+}

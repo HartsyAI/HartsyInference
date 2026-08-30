@@ -1,0 +1,23 @@
+{
+  "solution": {
+    "path": "HartsyInference.sln",
+    "projects": [
+      "src\\HartsyInference.API\\HartsyInference.API.csproj",
+      "src\\HartsyInference.Audio\\HartsyInference.Audio.csproj",
+      "src\\HartsyInference.Cli\\HartsyInference.Cli.csproj",
+      "src\\HartsyInference.Core\\HartsyInference.Core.csproj",
+      "src\\HartsyInference.Cpu\\HartsyInference.Cpu.csproj",
+      "src\\HartsyInference.Cuda\\HartsyInference.Cuda.csproj",
+      "src\\HartsyInference.Diffusion\\HartsyInference.Diffusion.csproj",
+      "src\\HartsyInference.Engine\\HartsyInference.Engine.csproj",
+      "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
+      "src\\HartsyInference.Meta\\HartsyInference.Meta.csproj",
+      "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
+      "src\\HartsyInference.ThreeD\\HartsyInference.ThreeD.csproj",
+      "src\\HartsyInference.Video\\HartsyInference.Video.csproj",
+      "src\\HartsyInference.Vision\\HartsyInference.Vision.csproj",
+      "src\\HartsyInference.Vulkan\\HartsyInference.Vulkan.csproj",
+      "src\\HartsyInference.World\\HartsyInference.World.csproj"
+    ]
+  }
+}
