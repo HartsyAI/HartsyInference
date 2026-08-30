@@ -17,7 +17,9 @@ public sealed record ModelSpec
     /// <summary>The resolved on-disk path (file or directory), or null when nothing local was found.</summary>
     public string? LocalPath { get; init; }
 
+    /// <summary>Optional checkpoint-profile hint; it may select or confirm a structurally compatible profile but never overrides a conflicting artifact hash.</summary>
+    public string? ProfileId { get; init; }
+
     /// <summary>Auxiliary load-time paths for multi-file models (e.g. "text-encoder-path", "vae-path", "tokenizer-path"), keyed by role. Empty for single-file models.</summary>
     public IReadOnlyDictionary<string, string> Aux { get; init; } = new Dictionary<string, string>();
 }
-

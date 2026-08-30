@@ -1,6 +1,8 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Xunit;
@@ -65,26 +67,30 @@ public sealed class VideoServiceGateTests
     }
 
     [Fact]
-    public void RejectUnsupported_ThrowsForReferenceImagesOnNonDeclaringFamily()
+    public async Task PlanningRejectsReferenceImagesOnNonDeclaringFamily()
     {
         VideoRequest request = Request() with
         {
             ReferenceImages = [new ImageData { Rgb = [0, 0, 0], Width = 1, Height = 1 }],
         };
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(
-            () => VideoService.RejectUnsupported(Spec("wan-22-5b"), request));
-        Assert.Contains("ReferenceImages", ex.Message, StringComparison.Ordinal);
+        VideoPlan plan = await PlanGenericAsync("wan-22-5b", request);
+        VideoPlanIssue issue = Assert.Single(plan.Issues, item => item.Code == "video.feature.unsupported");
+        Assert.Contains("ReferenceImages", issue.Message, StringComparison.Ordinal);
+        Assert.False(plan.IsValid);
     }
 
     [Fact]
-    public void RejectUnsupported_ThrowsForDrivingVideoOnNonDeclaringFamily()
+    public async Task PlanningRejectsDrivingVideoOnNonDeclaringFamily()
     {
         VideoRequest request = Request() with { DrivingVideo = new VideoClip { Data = TinyClip } };
-        Assert.Throws<NotSupportedException>(() => VideoService.RejectUnsupported(Spec("wan-22-5b"), request));
+        VideoPlan plan = await PlanGenericAsync("wan-22-5b", request);
+        VideoPlanIssue issue = Assert.Single(plan.Issues, item => item.Code == "video.feature.unsupported");
+        Assert.Contains("DrivingVideo", issue.Message, StringComparison.Ordinal);
+        Assert.False(plan.IsValid);
     }
 
     [Fact]
-    public void RejectUnsupported_AcceptsReferencesOnMiniMaxH3()
+    public void RequestedFeaturesAcceptsReferencesDeclaredByMiniMaxH3()
     {
         VideoRequest request = Request() with
         {
@@ -92,6 +98,15 @@ public sealed class VideoServiceGateTests
             ReferenceVideos = [new ReferenceVideo { Video = new VideoClip { Data = TinyClip } }],
             ReferenceAudios = [new AudioClip { Data = TinyClip }],
         };
-        VideoService.RejectUnsupported(Spec("minimax-h3"), request);
+        VideoFeatures missing = VideoService.RequestedFeatures(request) & ~new MiniMaxH3Recipe().Supports;
+        Assert.Equal(VideoFeatures.None, missing);
+    }
+
+    private static Task<VideoPlan> PlanGenericAsync(string family, VideoRequest request)
+    {
+        ModelSpec spec = Spec(family);
+        VideoDefaults defaults = InferenceEngine.VideoDefaultsFor(spec);
+        VideoFeatures features = InferenceEngine.SupportedVideoFeatures(spec);
+        return VideoProfileResolver.ResolveAsync(spec, request, family, defaults, features, CancellationToken.None);
     }
 }

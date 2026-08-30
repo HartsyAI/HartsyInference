@@ -112,7 +112,58 @@ jobs:
             echo "::error::Incomplete package set for ${VER} — refusing to publish a partial release."
             exit 1
           fi
-          echo "All 15 packages present for ${VER}."
+          echo "All required packages present for ${VER}."
+
+      - name: Verify CUDA sparse-attention PTX package contents
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          CUDA_PACKAGE="artifacts/HartsyInference.Cuda.${VER}.nupkg"
+          if ! unzip -t "$CUDA_PACKAGE" 'ptx/h3_vsa.ptx' >/dev/null; then
+            echo "::error::${CUDA_PACKAGE} does not contain a valid ptx/h3_vsa.ptx."
+            exit 1
+          fi
+          echo "Verified valid ptx/h3_vsa.ptx in ${CUDA_PACKAGE}."
+
+      # The PTX can be present in the CUDA nupkg yet still fail to reach an application that references only
+      # the HartsyInference meta-package. Build a clean consumer from the just-packed local feed to exercise
+      # the buildTransitive target exactly as downstream applications do.
+      - name: Verify PTX in clean consumer output
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          CONSUMER_DIR=$(mktemp -d)
+          trap 'rm -rf "$CONSUMER_DIR"' EXIT
+          CONSUMER_PACKAGES="$CONSUMER_DIR/packages"
+          CUDA_PACKAGE="$GITHUB_WORKSPACE/artifacts/HartsyInference.Cuda.${VER}.nupkg"
+          dotnet new console --framework net10.0 --output "$CONSUMER_DIR" --no-restore
+          CONSUMER_PROJECT=$(find "$CONSUMER_DIR" -maxdepth 1 -name '*.csproj' -print -quit)
+          dotnet add "$CONSUMER_PROJECT" package HartsyInference --version "$VER" --no-restore
+          NUGET_PACKAGES="$CONSUMER_PACKAGES" dotnet restore "$CONSUMER_PROJECT" \
+            --source "$GITHUB_WORKSPACE/artifacts" \
+            --source https://api.nuget.org/v3/index.json \
+            --no-cache \
+            --force-evaluate
+          CACHED_META=$(find "$CONSUMER_PACKAGES/hartsyinference" -name 'hartsyinference.*.nupkg' -print -quit)
+          CACHED_CUDA=$(find "$CONSUMER_PACKAGES/hartsyinference.cuda" -name 'hartsyinference.cuda.*.nupkg' -print -quit)
+          if ! cmp -s "$GITHUB_WORKSPACE/artifacts/HartsyInference.${VER}.nupkg" "$CACHED_META" || \
+             ! cmp -s "$CUDA_PACKAGE" "$CACHED_CUDA"; then
+            echo "::error::Clean consumer restore did not use the just-packed HartsyInference meta/CUDA packages."
+            exit 1
+          fi
+          NUGET_PACKAGES="$CONSUMER_PACKAGES" dotnet build "$CONSUMER_PROJECT" -c Release --no-restore
+          PTX="$CONSUMER_DIR/bin/Release/net10.0/Ptx/h3_vsa.ptx"
+          if [ ! -s "$PTX" ]; then
+            echo "::error::Clean HartsyInference consumer output is missing Ptx/h3_vsa.ptx."
+            exit 1
+          fi
+          PACKED_PTX="$CONSUMER_DIR/h3_vsa.packed.ptx"
+          unzip -p "$CUDA_PACKAGE" 'ptx/h3_vsa.ptx' > "$PACKED_PTX"
+          if ! cmp -s "$PACKED_PTX" "$PTX"; then
+            echo "::error::Consumer Ptx/h3_vsa.ptx differs from the PTX in ${CUDA_PACKAGE}."
+            exit 1
+          fi
+          echo "Verified ${PTX} is byte-identical to the packaged PTX."
 
       # Exchange the GitHub OIDC token for a short-lived (1-hour) NuGet API key.
       # Run this right before the push so the key doesn't expire mid-job.

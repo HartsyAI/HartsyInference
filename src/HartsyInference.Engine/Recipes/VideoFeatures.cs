@@ -31,4 +31,19 @@ public enum VideoFeatures
 
     /// <summary>A driving motion video (or pose/face override clips) the output animation follows (Wan-Animate).</summary>
     DrivingVideo = 64,
+
+    /// <summary>One or more signed-frame visual or audio guide entries.</summary>
+    Guides = 128,
+
+    /// <summary>Per-video-row continuous denoising mask.</summary>
+    VideoDenoiseMask = 256,
+
+    /// <summary>Per-audio-row continuous denoising mask.</summary>
+    AudioDenoiseMask = 512,
+
+    /// <summary>One or more preprocessed video ControlNet streams.</summary>
+    VideoControlNet = 1024,
+
+    /// <summary>ControlNet-Union inpainting with visibility and masked-source channels.</summary>
+    VideoInpaint = 2048,
 }

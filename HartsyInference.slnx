@@ -18,6 +18,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/HartsyInference.Tests.Common/HartsyInference.Tests.Common.csproj" />
     <Project Path="tests/HartsyInference.Core.Tests/HartsyInference.Core.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Cli.Tests/HartsyInference.Cli.Tests.csproj" />
     <Project Path="tests/HartsyInference.ModelAssets.Tests/HartsyInference.ModelAssets.Tests.csproj" />
     <Project Path="tests/HartsyInference.Cpu.Tests/HartsyInference.Cpu.Tests.csproj" />
     <Project Path="tests/HartsyInference.ModelAssets.Tokenizers.Tests/HartsyInference.ModelAssets.Tokenizers.Tests.csproj" />

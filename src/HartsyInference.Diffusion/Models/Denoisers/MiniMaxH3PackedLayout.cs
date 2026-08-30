@@ -25,6 +25,7 @@ public sealed class MiniMaxH3PackedLayout
 
     public (int TextLen, int LatentT, int LatentH, int LatentW, int AudioT) Signature { get; }
 
+    /// <summary>Builds the segment and position tables for one complete packed sequence.</summary>
     public MiniMaxH3PackedLayout(int textLen, int latentT, int latentH, int latentW, int audioT,
         IReadOnlyList<MiniMaxH3Keyframe>? keyframes = null, IReadOnlyList<MiniMaxH3RefBlock>? refs = null,
         int? frameCount = null)
@@ -45,45 +46,60 @@ public sealed class MiniMaxH3PackedLayout
         int row = 0;
         Append(segments, positions, ref row, MiniMaxH3SegmentKind.Text, textLen, textPos);
 
-        double cursor = textLen;
+        double targetCursor = textLen;
+        if (refs is { Count: > 0 })
+        {
+            foreach (MiniMaxH3RefBlock blk in refs)
+            {
+                targetCursor += ReferenceTimeSpan(blk);
+            }
+        }
+
         if (keyframes is { Count: > 0 })
         {
             foreach (MiniMaxH3Keyframe kf in keyframes)
             {
-                double condT;
-                if (kf.ResolvedFrameIndex == 0)
+                if (kf.ResolvedFrameIndex < 0 || frameCount is int count && kf.ResolvedFrameIndex >= count)
                 {
-                    condT = textLen;
+                    throw new ArgumentOutOfRangeException(nameof(keyframes), kf.ResolvedFrameIndex,
+                        frameCount is int total
+                            ? $"MiniMax-H3 guide frame must be in [0, {total}); got {kf.ResolvedFrameIndex}."
+                            : $"MiniMax-H3 guide frame must be non-negative; got {kf.ResolvedFrameIndex}.");
                 }
-                else if (frameCount is not null && kf.ResolvedFrameIndex == frameCount.Value - 1)
+                if (kf.VideoLatentFrames < 0 || kf.AudioLatentFrames < 0
+                    || kf.VideoLatentFrames == 0 && kf.AudioLatentFrames == 0)
                 {
-                    condT = textLen + SumVideoSpans(latentT) - FrameRescale;
+                    throw new ArgumentException(
+                        "A MiniMax-H3 guide must carry at least one visual or audio latent row.", nameof(keyframes));
                 }
-                else
+
+                double condT = targetCursor + FrameRescale * kf.ResolvedFrameIndex;
+                if (kf.VideoLatentFrames > 0)
                 {
-                    throw new ArgumentException("MiniMax-H3 supports only first/last keyframe anchors.");
+                    int videoCondRows = kf.VideoLatentFrames * frameRows;
+                    Append(segments, positions, ref row, MiniMaxH3SegmentKind.Cond, videoCondRows,
+                        VideoGrid(kf.VideoLatentFrames, frame, condT));
+                    imageUpdate.AddRange(Enumerable.Repeat(false, videoCondRows));
                 }
-                double[] g = new double[frameRows * 3];
-                for (int i = 0; i < frameRows; i++)
+                if (kf.AudioLatentFrames > 0)
                 {
-                    g[i * 3] = condT;
-                    g[i * 3 + 1] = frame[i * 2];
-                    g[i * 3 + 2] = frame[i * 2 + 1];
+                    int audioCondRows = kf.AudioLatentFrames * 2;
+                    Append(segments, positions, ref row, MiniMaxH3SegmentKind.CondAudio, audioCondRows,
+                        AudioGrid(condT, kf.AudioLatentFrames, wGrid[0], wGrid[^1]));
+                    audioUpdate.AddRange(Enumerable.Repeat(false, audioCondRows));
                 }
-                Append(segments, positions, ref row, MiniMaxH3SegmentKind.Cond, frameRows, g);
-                imageUpdate.AddRange(Enumerable.Repeat(false, frameRows));
             }
         }
 
         double targetWLow = wGrid[0], targetWHigh = wGrid[^1];
+        double cursor = textLen;
         if (refs is { Count: > 0 })
         {
-            cursor = textLen;
             foreach (MiniMaxH3RefBlock blk in refs)
             {
                 if (blk.Kind == "image")
                 {
-                    (double[] rFrame, _) = FrameGrid(blk.LatentH, blk.LatentW);
+                    (double[] rFrame, _) = FrameGrid(PadToPatch(blk.LatentH, 2), PadToPatch(blk.LatentW, 2));
                     int n = rFrame.Length / 2;
                     double[] g = new double[n * 3];
                     for (int i = 0; i < n; i++)
@@ -110,7 +126,8 @@ public sealed class MiniMaxH3PackedLayout
                 else if (blk.Kind is "video" or "video_audio")
                 {
                     int rt = blk.RefAudioT, vt = blk.LatentT;
-                    (double[] rFrame, double[] rWGrid) = FrameGrid(blk.LatentH, blk.LatentW);
+                    (double[] rFrame, double[] rWGrid) =
+                        FrameGrid(PadToPatch(blk.LatentH, 2), PadToPatch(blk.LatentW, 2));
                     if (rt > 0)
                     {
                         Append(segments, positions, ref row, MiniMaxH3SegmentKind.RefAudio, rt * 2,
@@ -130,11 +147,12 @@ public sealed class MiniMaxH3PackedLayout
         }
 
         Append(segments, positions, ref row, MiniMaxH3SegmentKind.Audio, audioT * 2,
-            AudioGrid(cursor, audioT, targetWLow, targetWHigh));
+            AudioGrid(targetCursor, audioT, targetWLow, targetWHigh));
         audioUpdate.AddRange(Enumerable.Repeat(true, audioT * 2));
 
         int videoRows = latentT * frameRows;
-        Append(segments, positions, ref row, MiniMaxH3SegmentKind.Video, videoRows, VideoGrid(latentT, frame, cursor));
+        Append(segments, positions, ref row, MiniMaxH3SegmentKind.Video, videoRows,
+            VideoGrid(latentT, frame, targetCursor));
         imageUpdate.AddRange(Enumerable.Repeat(true, videoRows));
 
         SequenceLength = row;
@@ -200,6 +218,23 @@ public sealed class MiniMaxH3PackedLayout
             sum += FrameRescale * FramePerToken[k % 5];
         }
         return sum;
+    }
+
+    private static double ReferenceTimeSpan(MiniMaxH3RefBlock block) => block.Kind switch
+    {
+        "image" => 1.0,
+        "audio" => block.RefAudioT,
+        "video" or "video_audio" => Math.Max(block.RefAudioT, SumVideoSpans(block.LatentT)),
+        _ => 0.0,
+    };
+
+    private static int PadToPatch(int size, int patch)
+    {
+        if (size <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(size), size, "MiniMax-H3 latent axes must be positive.");
+        }
+        return size + (patch - size % patch) % patch;
     }
 
     /// <summary>Origin plus the exclusive cumulative sum of per-token frame spans.</summary>

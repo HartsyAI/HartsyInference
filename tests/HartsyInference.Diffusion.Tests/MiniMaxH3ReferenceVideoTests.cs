@@ -2,6 +2,9 @@ using Xunit;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -126,6 +129,8 @@ public sealed class MiniMaxH3ReferenceVideoTests
     {
         Assert.Equal((768, 768), MiniMaxH3Geometry.AdaptCanvas(256, 256));
         Assert.Equal((256, 256), MiniMaxH3Geometry.RefVideoCanvas(256, 256));
+        Assert.Equal((32, 32), MiniMaxH3Geometry.RefVideoCanvas(48, 48));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3Geometry.RefVideoCanvas(16, 48));
     }
 
     /// <summary>The only branch where the shrink guard stays out of the way: a clip larger than the canvas takes the
@@ -135,6 +140,71 @@ public sealed class MiniMaxH3ReferenceVideoTests
     {
         Assert.Equal((1344, 768), MiniMaxH3Geometry.AdaptCanvas(1920, 1080));
         Assert.Equal((1344, 768), MiniMaxH3Geometry.RefVideoCanvas(1920, 1080));
+    }
+
+    [Fact]
+    public void ProfileReferenceSizing_SelectsNativeOrMatchTargetCanvas()
+    {
+        Assert.Equal((1344, 768), MiniMaxH3RecipePipeline.ReferenceCanvas(
+            1920, 1080, 320, 192, VideoReferenceSizing.Native));
+        // MatchTarget deliberately floors both scaled axes to the 32-pixel patch grid. Rounding the 186-pixel
+        // height up to 192 would exceed the requested 320x192 pixel budget.
+        Assert.Equal((320, 160), MiniMaxH3RecipePipeline.ReferenceCanvas(
+            1920, 1080, 320, 192, VideoReferenceSizing.MatchTarget));
+        Assert.Equal((256, 256), MiniMaxH3RecipePipeline.ReferenceCanvas(
+            256, 256, 1344, 768, VideoReferenceSizing.MatchTarget));
+        Assert.Equal((32, 32), MiniMaxH3RecipePipeline.ReferenceCanvas(
+            48, 48, 1344, 768, VideoReferenceSizing.MatchTarget));
+        (int width, int height) = MiniMaxH3RecipePipeline.ReferenceCanvas(
+            1300, 790, 1344, 768, VideoReferenceSizing.MatchTarget);
+        Assert.True((long)width * height <= 1344L * 768);
+    }
+
+    [Theory]
+    [InlineData(32, 1024, 32, 32, 32, 32)]
+    [InlineData(1024, 32, 32, 32, 32, 32)]
+    [InlineData(32, 1024, 64, 64, 32, 128)]
+    [InlineData(1024, 32, 64, 64, 128, 32)]
+    public void MatchTargetReferenceSizing_HonorsAreaAfterMinimumAxisClamp(
+        int sourceWidth, int sourceHeight, int targetWidth, int targetHeight, int expectedWidth, int expectedHeight)
+    {
+        (int width, int height) = MiniMaxH3RecipePipeline.ReferenceCanvas(
+            sourceWidth, sourceHeight, targetWidth, targetHeight, VideoReferenceSizing.MatchTarget);
+
+        Assert.Equal((expectedWidth, expectedHeight), (width, height));
+        Assert.InRange(width, MiniMaxH3Geometry.CanvasMultiple, sourceWidth);
+        Assert.InRange(height, MiniMaxH3Geometry.CanvasMultiple, sourceHeight);
+        Assert.Equal(0, width % MiniMaxH3Geometry.CanvasMultiple);
+        Assert.Equal(0, height % MiniMaxH3Geometry.CanvasMultiple);
+        Assert.True((long)width * height <= (long)targetWidth * targetHeight);
+    }
+
+    [Theory]
+    [InlineData(31, 64, 64, 64)]
+    [InlineData(64, 31, 64, 64)]
+    [InlineData(64, 64, 31, 64)]
+    [InlineData(64, 64, 64, 31)]
+    public void MatchTargetReferenceSizing_RejectsAxesSmallerThanOnePatch(
+        int sourceWidth, int sourceHeight, int targetWidth, int targetHeight)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3RecipePipeline.ReferenceCanvas(
+            sourceWidth, sourceHeight, targetWidth, targetHeight, VideoReferenceSizing.MatchTarget));
+    }
+
+    [Fact]
+    public void LegacyStartAndEndGuidesKeepTheirDirectResizeBehavior()
+    {
+        ImageData aspectMismatched = new ImageData
+        {
+            Width = 2,
+            Height = 1,
+            Rgb = [255, 0, 0, 0, 0, 255],
+        };
+
+        byte[] expected = VideoRecipeUtils.ResizeRgb24(aspectMismatched, 4, 4);
+        byte[] actual = MiniMaxH3RecipePipeline.FitLegacyGuideFrame(aspectMismatched, 4, 4);
+
+        Assert.Equal(expected, actual);
     }
 
     [Theory]

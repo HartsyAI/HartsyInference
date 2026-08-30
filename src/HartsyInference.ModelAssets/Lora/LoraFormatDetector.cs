@@ -24,6 +24,7 @@ public static class LoraFormatDetector
         bool hasTe2 = false;
         bool hasBareDit = false;
         bool hasComfyBfl = false;
+        bool hasDiffusersMiniMaxH3 = false;
 
         foreach (string key in descriptors.Keys)
         {
@@ -42,6 +43,11 @@ public static class LoraFormatDetector
             if (!HasKnownWrapperPrefix(key) && HasLoraSuffix(key))
             {
                 hasBareDit = true;
+            }
+            if (key.StartsWith("token_refiner.refiner_blocks.", StringComparison.Ordinal)
+                && key.Contains(".attn.to_", StringComparison.Ordinal) && HasLoraSuffix(key))
+            {
+                hasDiffusersMiniMaxH3 = true;
             }
             // HuggingFace PEFT diffusers format — the `transformer.`-wrapped counterpart of the bare-root arm
             // above, and the format most community LoRAs actually ship in. The mapper is architecture-agnostic:
@@ -115,6 +121,7 @@ public static class LoraFormatDetector
         if (hasKohyaFluxBlocks) return LoraFormat.KohyaFlux;
         if (hasKohyaUnetBlocks && hasTe2) return LoraFormat.KohyaSdxl;
         if (hasKohyaUnetBlocks) return LoraFormat.KohyaSd15;
+        if (hasDiffusersMiniMaxH3) return LoraFormat.DiffusersMiniMaxH3;
         if (hasBareDit) return LoraFormat.DiffusersBareDit;
 
         return LoraFormat.Unknown;
@@ -137,6 +144,8 @@ public static class LoraFormatDetector
     private static bool HasLoraSuffix(string key) =>
         key.EndsWith(".lora_A.weight", StringComparison.Ordinal)
         || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)
+        || key.EndsWith(".lora_A.default.weight", StringComparison.Ordinal)
+        || key.EndsWith(".lora_B.default.weight", StringComparison.Ordinal)
         || key.EndsWith(".lora_down.weight", StringComparison.Ordinal)
         || key.EndsWith(".lora_up.weight", StringComparison.Ordinal);
 }

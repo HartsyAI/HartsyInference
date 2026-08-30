@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-/// <summary>How a lower-rank spatial or packed mask is broadcast over a latent tensor.</summary>
+/// <summary>How a lower-rank spatial, packed-patch, or per-row mask is broadcast over a latent tensor.</summary>
 public enum MaskBroadcastLayout
 {
     /// <summary><c>target/source/noise=[B,C,H,W]</c>, <c>mask=[B,1,H,W]</c>; mask broadcasts over C.</summary>
@@ -13,6 +13,9 @@ public enum MaskBroadcastLayout
 
     /// <summary><c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=P·C</c>; feature <c>f=p·C+c</c> uses mask entry <c>p</c>.</summary>
     PackedChannelInner,
+
+    /// <summary><c>target/source/noise=[S,F]</c>, <c>mask=[S]</c>; one mask value broadcasts over every feature in its row.</summary>
+    Rows,
 }
 
 /// <summary>Validated launch geometry for a mask-broadcast affine mix.</summary>
@@ -95,6 +98,8 @@ internal static class MixContract
                 ValidateDense(target, mask, count),
             MaskBroadcastLayout.PackedChannelOuter or MaskBroadcastLayout.PackedChannelInner =>
                 ValidatePacked(target, mask, count, layout),
+            MaskBroadcastLayout.Rows =>
+                ValidateRows(target, mask, count),
             _ => throw new InvalidOperationException("Validated mask layout was not dispatchable."),
         };
     }
@@ -147,6 +152,27 @@ internal static class MixContract
         return new MaskedMixGeometry(
             layout, count, batch, 0, 0, CheckedMultiply(batch, tokens, nameof(target), "Packed token geometry"),
             featureDimension, patchArea);
+    }
+
+    private static MaskedMixGeometry ValidateRows(Tensor target, Tensor mask, long count)
+    {
+        if (target.Shape.Rank != 2)
+            throw new ArgumentException(
+                $"Rows target must be rank-2 [S,F]; got {target.Shape}.", nameof(target));
+        if (mask.Shape.Rank != 1)
+            throw new ArgumentException(
+                $"Rows mask must be rank-1 [S]; got {mask.Shape}.", nameof(mask));
+
+        long rows = target.Shape[0];
+        long featureDimension = target.Shape[1];
+        if (mask.Shape[0] != rows)
+            throw new ArgumentException(
+                $"Rows mask length must equal target row count {rows}; got {mask.Shape}.", nameof(mask));
+
+        // The packed CUDA primitive with a one-element patch is exactly a row broadcast. Keeping that geometry here
+        // avoids a separate kernel while preserving the rank-2 latent's device allocation throughout denoising.
+        return new MaskedMixGeometry(
+            MaskBroadcastLayout.Rows, count, 1, 0, 0, rows, featureDimension, 1);
     }
 
     private static void RejectTargetAlias(string operation, Tensor target, Tensor input, string parameterName)

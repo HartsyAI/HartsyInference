@@ -14,13 +14,29 @@ public static class MiniMaxH3Conditioning
     public static (float[] Timesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> RowOf) BuildTimestepRows(
         MiniMaxH3PackedLayout layout, float tVideo, float tAudio, float visualCondTimestep, float audioCondTimestep)
     {
+        MiniMaxH3TimestepPlan plan = BuildMaskedTimestepRows(
+            layout, tVideo, tAudio, visualCondTimestep, audioCondTimestep, null, null);
+        return (plan.Timesteps, plan.RowOf);
+    }
+
+    /// <summary>Builds scalar conditioning rows and optional per-target-row timesteps for continuous AV denoise
+    /// masks. A target mask value <c>m</c> uses <c>t = min(1 - m·sigma, max(tStream, conditionPin))</c>: white
+    /// follows the stream exactly, black is pinned as clean conditioning, and intermediate values remain continuous.
+    /// All-white inputs collapse to the scalar path so an omitted mask and a white mask execute identically.</summary>
+    public static MiniMaxH3TimestepPlan BuildMaskedTimestepRows(
+        MiniMaxH3PackedLayout layout, float tVideo, float tAudio, float visualCondTimestep,
+        float audioCondTimestep, IReadOnlyList<float>? videoMaskRows, IReadOnlyList<float>? audioMaskRows)
+    {
         ArgumentNullException.ThrowIfNull(layout);
-        bool hasVisualCond = false, hasAudioCond = false;
+        HashSet<MiniMaxH3SegmentKind> kinds = new HashSet<MiniMaxH3SegmentKind>();
         foreach (MiniMaxH3Segment seg in layout.Segments)
         {
-            hasVisualCond |= seg.Kind is MiniMaxH3SegmentKind.Cond or MiniMaxH3SegmentKind.RefImage;
-            hasAudioCond |= seg.Kind is MiniMaxH3SegmentKind.RefAudio;
+            kinds.Add(seg.Kind);
         }
+        bool hasVisualCond = kinds.Contains(MiniMaxH3SegmentKind.Cond)
+            || kinds.Contains(MiniMaxH3SegmentKind.RefImage);
+        bool hasAudioCond = kinds.Contains(MiniMaxH3SegmentKind.CondAudio)
+            || kinds.Contains(MiniMaxH3SegmentKind.RefAudio);
 
         float tCond = Math.Max(tVideo, visualCondTimestep);
         float tRefAudio = Math.Max(tAudio, audioCondTimestep);
@@ -32,6 +48,23 @@ public static class MiniMaxH3Conditioning
         if (hasAudioCond)
         {
             distinct.Add(tRefAudio);
+        }
+
+        int videoTargetRows = TargetRows(layout, MiniMaxH3SegmentKind.Video);
+        int audioTargetRows = TargetRows(layout, MiniMaxH3SegmentKind.Audio);
+        IReadOnlyList<float>? effectiveVideoMask = ValidateMask(videoMaskRows, videoTargetRows, nameof(videoMaskRows));
+        IReadOnlyList<float>? effectiveAudioMask = ValidateMask(audioMaskRows, audioTargetRows, nameof(audioMaskRows));
+        float[]? videoRowTimesteps = effectiveVideoMask is null ? null
+            : MaskedRowTimesteps(effectiveVideoMask, 1f - tVideo, tCond);
+        float[]? audioRowTimesteps = effectiveAudioMask is null ? null
+            : MaskedRowTimesteps(effectiveAudioMask, 1f - tAudio, tRefAudio);
+        if (videoRowTimesteps is not null)
+        {
+            distinct.UnionWith(videoRowTimesteps);
+        }
+        if (audioRowTimesteps is not null)
+        {
+            distinct.UnionWith(audioRowTimesteps);
         }
 
         float[] timesteps = new float[distinct.Count];
@@ -48,16 +81,92 @@ public static class MiniMaxH3Conditioning
             [MiniMaxH3SegmentKind.Video] = rowOfTimestep[tVideo],
             [MiniMaxH3SegmentKind.Audio] = rowOfTimestep[tAudio],
         };
-        if (hasVisualCond)
+        if (kinds.Contains(MiniMaxH3SegmentKind.Cond))
         {
             rowOf[MiniMaxH3SegmentKind.Cond] = rowOfTimestep[tCond];
+        }
+        if (kinds.Contains(MiniMaxH3SegmentKind.RefImage))
+        {
             rowOf[MiniMaxH3SegmentKind.RefImage] = rowOfTimestep[tCond];
         }
-        if (hasAudioCond)
+        if (kinds.Contains(MiniMaxH3SegmentKind.CondAudio))
+        {
+            rowOf[MiniMaxH3SegmentKind.CondAudio] = rowOfTimestep[tRefAudio];
+        }
+        if (kinds.Contains(MiniMaxH3SegmentKind.RefAudio))
         {
             rowOf[MiniMaxH3SegmentKind.RefAudio] = rowOfTimestep[tRefAudio];
         }
-        return (timesteps, rowOf);
+        return new MiniMaxH3TimestepPlan
+        {
+            Timesteps = timesteps,
+            RowOf = rowOf,
+            VideoRowOf = IndexRows(videoRowTimesteps, rowOfTimestep),
+            AudioRowOf = IndexRows(audioRowTimesteps, rowOfTimestep),
+        };
+    }
+
+    private static int TargetRows(MiniMaxH3PackedLayout layout, MiniMaxH3SegmentKind kind)
+    {
+        foreach (MiniMaxH3Segment segment in layout.Segments)
+        {
+            if (segment.Kind == kind)
+            {
+                return segment.Stop - segment.Start;
+            }
+        }
+        return 0;
+    }
+
+    private static IReadOnlyList<float>? ValidateMask(
+        IReadOnlyList<float>? values, int expectedRows, string parameterName)
+    {
+        if (values is null)
+        {
+            return null;
+        }
+        if (values.Count != expectedRows)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 {parameterName} has {values.Count} values, expected {expectedRows} target rows.",
+                parameterName);
+        }
+        bool allWhite = true;
+        for (int i = 0; i < values.Count; i++)
+        {
+            float value = values[i];
+            if (!float.IsFinite(value) || value < 0f || value > 1f)
+            {
+                throw new ArgumentOutOfRangeException(parameterName, value,
+                    $"MiniMax-H3 mask values must be finite and in [0,1]; row {i} was {value}.");
+            }
+            allWhite &= value == 1f;
+        }
+        return allWhite ? null : values;
+    }
+
+    private static float[] MaskedRowTimesteps(IReadOnlyList<float> mask, float sigma, float conditionPin)
+    {
+        float[] rows = new float[mask.Count];
+        for (int i = 0; i < mask.Count; i++)
+        {
+            rows[i] = Math.Min(1f - mask[i] * sigma, conditionPin);
+        }
+        return rows;
+    }
+
+    private static int[]? IndexRows(float[]? values, IReadOnlyDictionary<float, int> rowOfTimestep)
+    {
+        if (values is null)
+        {
+            return null;
+        }
+        int[] rows = new int[values.Length];
+        for (int i = 0; i < values.Length; i++)
+        {
+            rows[i] = rowOfTimestep[values[i]];
+        }
+        return rows;
     }
 
     /// <summary>Conditioning row counts for the video and audio streams, and the assertion that earns the packed-row

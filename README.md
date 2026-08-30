@@ -163,6 +163,16 @@ end-user surface.
 with **continuous batching** and a **paged KV cache**), `/v1/images/generations`, and model
 load/list/pull/unload. Runs from source; not published as a package.
 
+Native video has a separate preflight contract. `POST /v1/native/video/plan` resolves the checkpoint
+profile, effective geometry/sampling values, component formats, and every compatibility issue without
+constructing model weights. `POST /v1/native/video/stream` runs that same plan and returns named SSE
+events (`progress`, repeated `frame`, optional `audio`, then successful terminal `complete`); a generation failure
+after streaming begins emits terminal `error`. For MiniMax-H3, `complete` includes the exact profile-resolved
+`VideoExecutionSummary` (legacy families leave it null until their pipeline-specific normalization is exposed).
+Unsafe profile/adapter/control combinations return a typed HTTP 422 before
+SSE begins. Base64 guide and control clips are bounded by `HartsyInference:MaxVideoRequestBodyBytes`
+(256 MiB by default).
+
 ---
 
 ## Requirements
@@ -228,4 +238,10 @@ work in [`ROADMAP.md`](docs/Checklists/ROADMAP.md), measured numbers in
 
 ## License
 
-[MIT](LICENSE).
+HartsyInference's source code and NuGet packages are [MIT licensed](LICENSE). Model weights are separate
+works under their publishers' terms. In particular, MiniMax-H3 is distributed under the
+[MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE), whose
+applicable territory excludes the EU, UK, South Korea, and USA absent separate authorization and which
+includes notice, disclosure, acceptable-use, commercial-display, and revenue-related obligations.
+HartsyInference downloads or redistributes no H3 expansion weights; using local files does not remove the
+operator's licensing obligations.

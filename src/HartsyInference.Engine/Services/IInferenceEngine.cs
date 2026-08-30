@@ -27,6 +27,10 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Video generation.</summary>
     IVideoService Video { get; }
 
+    /// <summary>Checkpoint-aware video preflight; defaults to the video service when an external engine implementation has not exposed a separate planner.</summary>
+    IVideoPlanningService VideoPlanning => Video as IVideoPlanningService
+        ?? throw new NotSupportedException("This inference-engine implementation does not expose video planning.");
+
     /// <summary>Chat / text generation, including the multimodal VLM path.</summary>
     ITextService Text { get; }
 

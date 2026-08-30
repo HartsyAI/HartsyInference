@@ -47,6 +47,13 @@ public static class KnobStore
         return knob.Default;
     }
 
+    /// <summary>Temporary exact-value bridge for explicitly approved release gates. Keeping the raw read here
+    /// preserves the repository's single environment-access boundary.</summary>
+    internal static bool IsLegacyEnvironmentExactly(string variable, string expected) =>
+        string.Equals(ReadEnvironmentVariable(variable), expected, StringComparison.Ordinal);
+
+    private static string? ReadEnvironmentVariable(string variable) => Environment.GetEnvironmentVariable(variable);
+
     /// <summary>Applies the knob's range rule to a supplied value. The declared default is trusted as already valid.</summary>
     /// <remarks>Load-bearing for settings that arrive from a file or <c>--set</c>: without it
     /// <c>numerics.gemvWpb = 17</c> would reach a kernel that expects 1..16, and <c>vram.audioEvictBelowGb = -5</c>
@@ -67,7 +74,12 @@ public static class KnobStore
             {
                 continue;
             }
-            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(legacy)))
+            // H3 expansion switches are documented, exact-value temporary release gates, not stale settings.
+            if (legacy is EngineKnobs.H3VsaExperimentalEnvironment or EngineKnobs.H3ExpansionExperimentalEnvironment)
+            {
+                continue;
+            }
+            if (!string.IsNullOrEmpty(ReadEnvironmentVariable(legacy)))
             {
                 stale.Add((legacy, id));
             }

@@ -1,15 +1,21 @@
 # MiniMax-H3 — research notes
 
-> **Status 2026-08-08: SHIPPED AND VERIFIED ON REAL WEIGHTS.** H3 generates video plus its jointly
-> generated stereo soundtrack end to end on the fp8 build, including fl2va keyframes, ref2va references,
-> LoRA merge, and DiT sharding across two GPUs. Everything below the "Release status" heading is
-> **historical provenance** — it records what was known before the weights dropped and how the port was
-> derived from Kijai's ComfyUI PR **#15224**. Where this doc and the code disagree, the code is right.
+> **Status 2026-08-08: THE ORIGINAL DENSE PORT SHIPPED AND IS VERIFIED ON REAL WEIGHTS.** H3 generates
+> video plus its jointly generated stereo soundtrack end to end on the fp8 build, including fl2va
+> keyframes, ref2va references, LoRA merge, and DiT sharding across two GPUs. Everything below the
+> "Release status" heading is **historical provenance** — it records what was known before the weights
+> dropped and how the port was derived from Kijai's ComfyUI PR **#15224**. The dated 2026-08-29 native-
+> expansion section is the sole current exception. Where this doc and the code disagree, the code is right.
 >
 > For current state, read these instead: `docs/Checklists/MODEL_STATUS_VIDEO.md` (what works),
 > `docs/Checklists/PARITY_VERIFICATION.md` (real-weight parity), and the recipe/pipeline sources
 > themselves. Still-live findings kept here: the NVFP4-AWQ text-encoder conventions, and the
 > SageAttention F16-V measurement in "Bring-up notes".
+>
+> **Expansion boundary, 2026-08-29:** the real-weight claim above does not cover the new checkpoint-
+> profile, Turbo/Hybrid, PDD, VSA, arbitrary-guide/mask, Fun ControlNet, or int8-video-VAE paths. Those
+> paths have focused structural validation only. Operator-provided checkpoint canaries, numerical parity,
+> performance gates, package-consumer validation, and a live Swarm generation remain release blockers.
 
 ## What H3 is
 
@@ -18,8 +24,9 @@ takes text, images, video, and audio as input and generates video with a **joint
 stereo soundtrack** — the audio is not a separate TTS/foley pass. Output is up to **15 seconds at 2K,
 24 fps**.
 
-MiniMax state they "plan to open up the model weights in the coming days, subject to applicable laws
-and regulations," and that a full H3 Technical Report is coming. Neither has shipped.
+At announcement MiniMax said the weights and a full Technical Report would follow. The weights later
+shipped on 2026-08-02 under the territory-limited MiniMax H3 Community License; no implementation here
+relies on an unpublished report.
 
 ## Release status — verified, not assumed
 
@@ -343,8 +350,80 @@ writing a single line of forward pass.
       from the video sigma in closed form with the velocity scaled by d(sigma_a)/d(sigma_v).
 - [ ] **In-Context Regeneration mechanics** — how the low-res pass feeds back for 2K. Not obviously in the
       PR; may be a pipeline-level two-pass rather than a model feature.
-- [ ] **License** — MiniMax say "subject to applicable laws and regulations," which is not a license
-      name. Confirm before shipping catalog assets.
+- [x] **License** — the official [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE)
+      is dated 2026-08-02 and grants rights only in its "Applicable Territory," explicitly excluding the
+      EU, UK, Republic of Korea, and USA absent separate authorization. Redistribution carries license,
+      modified-file, and NOTICE duties; commercial products must prominently display "MiniMax H3" and
+      annual revenue above USD 20 million requires prior written authorization. Hosted services also carry
+      user-notice, acceptable-use, safeguards, and disclosure duties. Local user-supplied weights do not
+      erase those terms; Hartsy exposes provenance, while execution and distribution compliance remain the
+      operator's responsibility.
+
+## Native expansion snapshot (2026-08-29) — provenance, not certification
+
+This section records upstream facts that are easy to lose when the implementations move. ComfyUI is an
+oracle for formats and expected behavior only; Hartsy adds no Comfy backend, node, workflow, or runtime
+dependency. The native paths present in the worktree are not promoted by this document: no new artifact was
+downloaded for validation, no expansion profile has an operator-provided real-weight canary recorded here,
+and no VSA or int8-VAE performance target has been measured.
+
+**Upstream snapshot (verified against the GitHub pull-request records on 2026-08-29):**
+
+| Surface | Upstream state at the snapshot | Provenance consequence |
+|---|---|---|
+| PDD | ComfyUI [#15908](https://github.com/Comfy-Org/ComfyUI/pull/15908) merged 2026-08-28 | The official Alibaba PAI adapters, not filenames or generic LoRA heuristics, define the projection-bank and NFE contracts. |
+| VSA | ComfyUI [#15958](https://github.com/Comfy-Org/ComfyUI/pull/15958) is an open draft; sparse CUDA remains separate and [comfy-kitchen #117](https://github.com/Comfy-Org/comfy-kitchen/pull/117) is open | Gate detection alone is not execution evidence. Hartsy keeps VSA behind `HARTSY_EXPERIMENTAL_H3_VSA=1` until real-weight parity and the full benchmark matrix pass. |
+| Fun ControlNet-Union | ComfyUI [#15860](https://github.com/Comfy-Org/ComfyUI/pull/15860) is open | Treat that branch and the published Alibaba PAI checkpoint as an oracle, not as a merged compatibility guarantee. |
+| Arbitrary guides / AV masks / int8 video VAE | ComfyUI [#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439), [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375), and [#15334](https://github.com/Comfy-Org/ComfyUI/pull/15334) are merged | These establish the published data contracts, but do not validate Hartsy's independent execution. |
+| Conditioning padding / VAE tile advance | ComfyUI [#15769](https://github.com/Comfy-Org/ComfyUI/pull/15769) and [#15901](https://github.com/Comfy-Org/ComfyUI/pull/15901) are open | Preserve the odd-latent padding and minimum tile-advance guards locally; an open upstream fix is not a release gate substitute. |
+
+**Artifact and semantic traps:**
+
+- The authoritative adapter identities live in `VideoProfileManifest`; a filename is never evidence of
+  Turbo, Hybrid, PDD, VSA, ControlNet, or quantized-VAE semantics. Unknown community variants need a local
+  sidecar bound to the full-file SHA-256. Hartsy manifests contain hashes and provenance only, never weights.
+- PDD comes from the official [MiniMax-H3 acceleration adapters](https://huggingface.co/alibaba-pai/MiniMax-H3-Acc-LoRAs).
+  Full-base adapters apply to the matching full base. A pruned base requires a local affine rebase whose
+  output records every source hash; Hartsy does not ship a derived basis or converted adapter.
+- The Kijai consolidated VSA artifact is bound to `ComfySol64V1`; the official
+  [FastVideo VSA artifact](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree)
+  uses `FastVideoVsa64V1`. Their prefix and routing semantics are intentionally distinct. A 256-token
+  profile remains unclaimed until a published H3 artifact binds to it.
+- The official [Fun ControlNet-Union checkpoint](https://huggingface.co/alibaba-pai/MiniMax-H3-Fun-Controlnet-Union)
+  is a full-width five-block branch. The upstream inpaint UI starts with a white-**regenerate** mask and
+  derives visibility; Hartsy's engine contract takes a preprocessed white-**visible** `VisibilityMask` plus
+  `MaskedSource`. Confusing those polarities preserves the wrong pixels. Pruned FL2VA bases require a local,
+  source-hash-bound affine rebase; no converted control weights are distributed by Hartsy.
+- The published [int8 ConvRot video VAE](https://huggingface.co/Comfy-Org/MiniMax-H3) applies quantization
+  companions to transformer linears, not to convolutions or normalization. It makes no claim about an int8
+  audio VAE.
+
+**Operator-facing inspection and wire contracts:**
+
+- `hartsy inspect --modality video --model-path MODEL [--model-profile ID] [--json]` performs the same
+  header-first plan used by generation without paging tensor payloads into memory. `--profile` remains the
+  Engine settings profile; it is intentionally unrelated to `--model-profile`.
+- An unknown but structurally valid community checkpoint may be accompanied by either
+  `MODEL.safetensors.hartsy-video-profile.json` or `MODEL.hartsy-video-profile.json`. The sidecar must bind
+  the exact full-file `sha256` and provide `profileId`, `task`, `steps`, plus any certified acceleration,
+  attention, shifts, sampler, scheduler, locked geometry, reference sizing, provenance, and license. String
+  enums are case-insensitive. A stale hash fails planning; a filename never enables acceleration.
+- Guide manifests accept either a bare JSON array or `{ "guides": [...] }`. Each entry has signed `frame`
+  plus `image` xor `video`, optional `audio`, and `fit` (`cover`, `contain`, or `stretch`). Control manifests
+  likewise accept an array or `{ "controls": [...] }`; entries carry `model`, already-preprocessed `video`,
+  `kind`, `strength`, `start`, and `end`. Inpaint entries additionally require `visibilityMask` and
+  `maskedSource`. Paths inside a manifest resolve relative to that manifest; direct CLI paths resolve from
+  the process working directory. The simple control flags deliberately exclude inpaint because they cannot
+  express its two extra payloads.
+- `hartsy convert h3-pdd` and `hartsy convert h3-controlnet` write local, source-hash-recorded pruned-base
+  conversions. They never overwrite an input and do not download or redistribute a basis or model weight.
+- `POST /v1/native/video/plan` and `/v1/native/video/stream` accept the same `NativeVideoRequest`. Invalid
+  profiles and combinations return `NativeVideoPlanProblem` with machine-readable `issues` and an optional
+  resolved `plan` at HTTP 422 before SSE headers. A valid stream emits `progress`, `frame`, optional `audio`,
+  and successful terminal `complete` events; a post-start generation failure emits terminal `error`.
+  `complete.execution` is the actual profile, aligned geometry, seed,
+  sampling recipe, execution path, and component formats. Configure large base64 guide/control bodies with
+  `HartsyInference:MaxVideoRequestBodyBytes`; the default is 256 MiB.
 
 ## Engine state (HISTORICAL — this section described the pre-weights seam)
 

@@ -9,6 +9,8 @@ public static class DiffusersFluxMapper
 {
     private const string DownSuffix = ".lora_A.weight";
     private const string UpSuffix = ".lora_B.weight";
+    private const string DefaultDownSuffix = ".lora_A.default.weight";
+    private const string DefaultUpSuffix = ".lora_B.default.weight";
     private const string AlphaSuffix = ".alpha";
     // Kohya spellings of the same two roles — lightx2v's Lightning LoRAs ship bare diffusers roots with
     // .lora_down/.lora_up suffixes, so both suffix families are accepted on every root this parser takes.
@@ -26,7 +28,17 @@ public static class DiffusersFluxMapper
         {
             string root;
             LoraRole role;
-            if (key.EndsWith(DownSuffix, StringComparison.Ordinal))
+            if (key.EndsWith(DefaultDownSuffix, StringComparison.Ordinal))
+            {
+                role = LoraRole.Down;
+                root = key[..^DefaultDownSuffix.Length];
+            }
+            else if (key.EndsWith(DefaultUpSuffix, StringComparison.Ordinal))
+            {
+                role = LoraRole.Up;
+                root = key[..^DefaultUpSuffix.Length];
+            }
+            else if (key.EndsWith(DownSuffix, StringComparison.Ordinal))
             {
                 role = LoraRole.Down;
                 root = key[..^DownSuffix.Length];

@@ -107,13 +107,18 @@ public static class MiniMaxH3Geometry
         Math.Max(CanvasMultiple, (int)Math.Round(pixels / CanvasMultiple) * CanvasMultiple);
 
     /// <summary>Canvas a reference clip is resized onto: <see cref="AdaptCanvas"/>, unless that would enlarge the clip
-    /// — then each axis rounds to its own size instead, so a small reference is never upscaled into a bigger canvas.</summary>
+    /// — then each axis rounds down to its own size, so a small reference is never upscaled into a bigger canvas.</summary>
     public static (int Width, int Height) RefVideoCanvas(int width, int height)
     {
+        if (width < CanvasMultiple || height < CanvasMultiple)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width),
+                $"MiniMax-H3 reference axes must each be at least {CanvasMultiple} pixels.");
+        }
         (int canvasWidth, int canvasHeight) = AdaptCanvas(width, height);
         if ((long)width * height < (long)canvasWidth * canvasHeight)
         {
-            return (Round(width), Round(height));
+            return (Floor(width), Floor(height));
         }
         return (canvasWidth, canvasHeight);
     }

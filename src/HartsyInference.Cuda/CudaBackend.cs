@@ -243,6 +243,22 @@ public sealed class CudaBackend : IBackend
     /// <summary>The default compute stream.</summary>
     public CudaStream Stream => _stream;
 
+    /// <inheritdoc/>
+    public bool SupportsVideoSparseAttention => _context.ComputeCapabilityMajor >= 8
+        && _ptxDir is not null && File.Exists(Path.Combine(_ptxDir, "h3_vsa.ptx"));
+
+    /// <inheritdoc/>
+    public IVideoSparseAttentionSession CreateVideoSparseAttentionSession(VideoSparseAttentionPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (!SupportsVideoSparseAttention)
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 VSA requires CUDA SM80+ and the packaged h3_vsa.ptx kernel.");
+        }
+        return new CudaVideoSparseAttentionSession(this, plan, Path.Combine(_ptxDir!, "h3_vsa.ptx"));
+    }
+
     /// <summary>The loaded kernel table (null if PTX kernels unavailable); internal for tests and optional-kernel launch glue.</summary>
     internal CudaKernels? Kernels => _kernels;
 

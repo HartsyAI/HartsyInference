@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -36,13 +37,16 @@ public sealed record MiniMaxH3Assets
     private static readonly string[] _textEncoderFolders = ["text_encoders", "clip", "llm"];
 
     /// <summary>Resolves every component from whatever the caller pointed at.</summary>
-    public static MiniMaxH3Assets Resolve(string checkpointPath)
+    public static MiniMaxH3Assets Resolve(string checkpointPath) => Resolve(checkpointPath, null);
+
+    /// <summary>Resolves the component set while allowing explicit request overrides to replace missing defaults.</summary>
+    public static MiniMaxH3Assets Resolve(string checkpointPath, ComponentOverrides? components)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         string? root = FolderRoot(checkpointPath);
         if (root is not null)
         {
-            return FromFolder(root);
+            return FromFolder(root, components);
         }
         if (!File.Exists(checkpointPath))
         {
@@ -50,7 +54,7 @@ public sealed record MiniMaxH3Assets
                 $"MiniMax-H3 checkpoint not found at '{checkpointPath}' (expected a folder with a transformer/ "
                 + "subfolder, or the DiT .safetensors file itself).");
         }
-        return FromFlat(checkpointPath);
+        return FromFlat(checkpointPath, components);
     }
 
     /// <summary>The vendor folder root for <paramref name="path"/>, or null when this is the flat layout.</summary>
@@ -85,7 +89,7 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
-    private static MiniMaxH3Assets FromFolder(string root)
+    private static MiniMaxH3Assets FromFolder(string root, ComponentOverrides? components)
     {
         string? audioDir = Directory.Exists(Path.Combine(root, "audio_vae")) ? Path.Combine(root, "audio_vae") : null;
         string? tokenizer = null;
@@ -102,15 +106,15 @@ public sealed record MiniMaxH3Assets
         return new MiniMaxH3Assets
         {
             Dit = FirstSafetensors(Path.Combine(root, "transformer")),
-            VideoVae = FirstSafetensors(Path.Combine(root, "video_vae")),
-            AudioVae = audioDir is null ? null : FirstSafetensors(audioDir),
-            TextEncoder = FirstSafetensors(Path.Combine(root, "text_encoder")),
+            VideoVae = components?.VideoVae ?? components?.Vae ?? FirstSafetensors(Path.Combine(root, "video_vae")),
+            AudioVae = components?.AudioVae ?? (audioDir is null ? null : FirstSafetensors(audioDir)),
+            TextEncoder = components?.Qwen ?? FirstSafetensors(Path.Combine(root, "text_encoder")),
             TokenizerDir = tokenizer,
             IsFolderLayout = true,
         };
     }
 
-    private static MiniMaxH3Assets FromFlat(string ditFile)
+    private static MiniMaxH3Assets FromFlat(string ditFile, ComponentOverrides? components)
     {
         string? ditDir = Path.GetDirectoryName(ditFile);
         List<string> roots = [];
@@ -118,12 +122,12 @@ public sealed record MiniMaxH3Assets
         {
             roots.Add(d);
         }
-        string video = FindFlat(roots, _vaeFolders, ["video_vae"])
+        string video = components?.VideoVae ?? components?.Vae ?? FindFlat(roots, _vaeFolders, ["video_vae"])
             ?? throw new FileNotFoundException(
                 $"MiniMax-H3 video VAE not found near '{ditFile}'. The flat layout expects a file whose name contains "
                 + "'minimax_h3' and 'video_vae' under a vae/ folder (SwarmUI downloads it to Models/vae/MiniMaxH3/).");
-        string? audio = FindFlat(roots, _vaeFolders, ["audio_vae"]);
-        string text = FindFlat(roots, _textEncoderFolders, ["qwen3vl", "qwen3_vl"])
+        string? audio = components?.AudioVae ?? FindFlat(roots, _vaeFolders, ["audio_vae"]);
+        string text = components?.Qwen ?? FindFlat(roots, _textEncoderFolders, ["qwen3vl", "qwen3_vl"])
             ?? throw new FileNotFoundException(
                 $"MiniMax-H3 text encoder not found near '{ditFile}'. Expected a Qwen3-VL file whose name contains "
                 + "'minimax_h3' under a text_encoders/ folder.");

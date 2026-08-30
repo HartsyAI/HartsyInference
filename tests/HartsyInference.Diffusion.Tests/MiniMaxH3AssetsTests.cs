@@ -1,5 +1,6 @@
 using Xunit;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -81,10 +82,10 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.Null(assets.TokenizerDir);
     }
 
-    /// <summary>Comfy stages several variants of a component together. <c>int8_convrot</c> is unimplemented, so it
-    /// must lose to bf16 even though it is the smaller file.</summary>
+    /// <summary>Comfy stages several variants of a component together. The now-supported resident
+    /// <c>int8_convrot</c> build should beat BF16, with file size breaking ties between supported quant formats.</summary>
     [Fact]
-    public void FlatLayout_PrefersLoadableFormatsOverSmallerUnsupportedOnes()
+    public void FlatLayout_PrefersSupportedInt8OverBf16()
     {
         string dit = BuildFlatLayout();
         File.Delete(Path.Combine(_root, "Models", "text_encoders", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
@@ -94,8 +95,8 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
             new byte[8]);
 
         MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(dit);
-        Assert.Contains("bf16", assets.TextEncoder);
-        Assert.DoesNotContain("convrot", assets.TextEncoder);
+        Assert.Contains("int8_convrot", assets.TextEncoder);
+        Assert.DoesNotContain("bf16", assets.TextEncoder);
     }
 
     /// <summary>With every variant staged, the quantized-but-supported build wins. This is the preference the recipe
@@ -132,6 +133,30 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         string dit = BuildFlatLayout();
         File.Delete(Path.Combine(_root, "Models", "vae", "MiniMaxH3", "minimax_h3_audio_vae_fp32.safetensors"));
         Assert.Null(MiniMaxH3Assets.Resolve(dit).AudioVae);
+    }
+
+    [Fact]
+    public void FlatLayout_ExplicitComponentOverridesReplaceMissingDefaults()
+    {
+        string dit = BuildFlatLayout();
+        string defaultVideo = Path.Combine(_root, "Models", "vae", "MiniMaxH3",
+            "minimax_h3_video_vae_fp16.safetensors");
+        File.Delete(defaultVideo);
+        string video = Touch("overrides", "video.safetensors");
+        string audio = Touch("overrides", "audio.safetensors");
+        string text = Touch("overrides", "qwen.safetensors");
+        ComponentOverrides components = new ComponentOverrides
+        {
+            VideoVae = video,
+            AudioVae = audio,
+            Qwen = text,
+        };
+
+        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(dit, components);
+
+        Assert.Equal(video, assets.VideoVae);
+        Assert.Equal(audio, assets.AudioVae);
+        Assert.Equal(text, assets.TextEncoder);
     }
 
     [Fact]

@@ -6,6 +6,7 @@ using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -103,6 +104,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IVideoService Video => _video.Value;
+
+    /// <inheritdoc/>
+    public IVideoPlanningService VideoPlanning => _video.Value;
 
     /// <inheritdoc/>
     public ITextService Text => _text.Value;
@@ -396,7 +400,8 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Resolves the video recipe for <paramref name="spec"/> and constructs (or returns a cached) pipeline.
     /// Throws when no video recipe is registered for the family yet.</summary>
-    internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec, VideoRequest? request = null)
+    internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec, VideoRequest? request = null,
+        VideoPlan? plan = null)
     {
         if (spec.LocalPath is null)
         {
@@ -406,7 +411,8 @@ public sealed class InferenceEngine : IInferenceEngine
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
         // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
-        string key = $"video-recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        string planKey = plan is null ? "" : plan.CacheIdentity;
+        string key = $"video-recipe:{spec.LocalPath}|{planKey}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
@@ -432,6 +438,7 @@ public sealed class InferenceEngine : IInferenceEngine
             CpBackends = EnsureCpBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
+            VideoPlan = plan,
             VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
             VideoSwapPercent = request?.VideoSwapPercent,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),

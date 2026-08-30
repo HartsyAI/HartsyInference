@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Cli.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="HartsyInference.Engine" />
     <Using Include="HartsyInference.Engine.Dispatch" />
     <Using Include="HartsyInference.Engine.Registry" />

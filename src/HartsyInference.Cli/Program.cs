@@ -59,6 +59,17 @@ public static class Program
             return repl.Run();
         }
 
+        // Keep the long-standing voice-conversion command at `hartsy convert <audio>` while exposing model
+        // conversion as the additive `hartsy convert h3-pdd ...` spelling. Spectre cannot make one token both a
+        // leaf and a branch, so dispatch the two H3 spellings through a dedicated root command. This also keeps
+        // their generated help on the public spelling instead of leaking an implementation-only command name.
+        if (args.Length >= 2 && string.Equals(args[0], "convert", StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(args[1], "h3-pdd", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(args[1], "h3-controlnet", StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunH3Conversion(args[1], args[2..]);
+        }
+
         CommandApp app = new CommandApp();
         app.Configure(config =>
         {
@@ -92,7 +103,7 @@ public static class Program
                 .WithDescription("Generate music from a prompt with MusicGen (saves a WAV).")
                 .WithExample("music", "\"lofi hip hop, mellow piano\"", "--model-path", "musicgen-small.safetensors");
             config.AddCommand<ConvertCommand>("convert")
-                .WithDescription("Re-voice a source clip with RVC or OpenVoice (saves a WAV).")
+                .WithDescription("Re-voice audio, or run `convert h3-pdd|h3-controlnet` for a local H3 conversion.")
                 .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
             config.AddBranch("fx", fx =>
             {
@@ -124,9 +135,27 @@ public static class Program
             config.AddCommand<PullCommand>("pull")
                 .WithDescription("Download a model from HuggingFace (or register a local path) into the cache.")
                 .WithExample("pull", "stabilityai/stable-diffusion-xl-base-1.0");
+            config.AddCommand<InspectCommand>("inspect")
+                .WithDescription("Inspect a checkpoint header and resolve its execution profile without loading weights.")
+                .WithExample("inspect", "--modality", "video", "--model-path", "/models/h3.safetensors", "--json");
         });
 
         return app.Run(args);
+    }
+
+    /// <summary>Runs an H3 checkpoint converter while preserving its public two-token command name in help.</summary>
+    private static int RunH3Conversion(string command, string[] args)
+    {
+        if (string.Equals(command, "h3-pdd", StringComparison.OrdinalIgnoreCase))
+        {
+            CommandApp<H3PddConvertCommand> app = new CommandApp<H3PddConvertCommand>();
+            app.Configure(config => config.SetApplicationName("hartsy convert h3-pdd"));
+            return app.Run(args);
+        }
+
+        CommandApp<H3ControlNetConvertCommand> controlApp = new CommandApp<H3ControlNetConvertCommand>();
+        controlApp.Configure(config => config.SetApplicationName("hartsy convert h3-controlnet"));
+        return controlApp.Run(args);
     }
 
     /// <summary>Last value of a repeated <c>--flag value</c> pair, or null when absent.</summary>

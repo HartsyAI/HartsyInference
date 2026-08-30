@@ -732,7 +732,8 @@ public interface IBackend : IDisposable
             {
                 long feature = i % geometry.FeatureDimension;
                 long token = i / geometry.FeatureDimension;
-                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter ? feature % geometry.PatchArea
+                long patchIndex = layout is MaskBroadcastLayout.PackedChannelOuter or MaskBroadcastLayout.Rows
+                    ? feature % geometry.PatchArea
                     : feature / channels;
                 MixAt(i, token * geometry.PatchArea + patchIndex);
             }
@@ -2239,6 +2240,15 @@ public interface IBackend : IDisposable
     #endregion
 
     #region Attention
+
+    /// <summary>Whether this backend can execute the versioned MiniMax-H3 video sparse-attention contract without
+    /// falling back to dense attention. Planning must check this before model construction.</summary>
+    bool SupportsVideoSparseAttention => false;
+
+    /// <summary>Creates persistent generation-scoped VSA state. The default refuses so unsupported backends cannot
+    /// silently reinterpret a sparse checkpoint as dense attention.</summary>
+    IVideoSparseAttentionSession CreateVideoSparseAttentionSession(VideoSparseAttentionPlan plan)
+        => throw new NotSupportedException($"{GetType().Name} does not support video sparse attention.");
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
     /// <param name="allowF16">When true, a backend MAY run the attention in F16 for speed (halves score-matrix

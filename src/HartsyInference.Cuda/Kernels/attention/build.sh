@@ -25,6 +25,7 @@ if [[ -z "${CUDA_INC:-}" ]]; then
 fi
 
 KERNELS=(
+    "h3_vsa"
     "sage_attn_int8"
     "sage_attn_int8_v1"
 )

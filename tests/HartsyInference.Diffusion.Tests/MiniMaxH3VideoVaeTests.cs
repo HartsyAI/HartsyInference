@@ -142,6 +142,35 @@ public unsafe class MiniMaxH3VideoVaeTests
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 
+    [Fact]
+    public void PartialLoadFailure_CanBeDisposedWithoutTakingSourceWeights()
+    {
+        MiniMaxH3VideoVaeConfig config = TinyConfig();
+        Dictionary<string, Tensor> weights = BuildWeights(config);
+        Tensor[] sourceTensors = weights.Values.Distinct().ToArray();
+        weights.Remove("decoder.transformer_blocks.1.ff.w2.weight");
+        MiniMaxH3VideoVaeDecoder decoder = new MiniMaxH3VideoVaeDecoder(config);
+        try
+        {
+            Assert.Throws<KeyNotFoundException>(() => decoder.LoadWeights(weights));
+
+            decoder.Dispose();
+            decoder.Dispose();
+            foreach (Tensor source in sourceTensors)
+            {
+                Assert.NotEqual(0, (nint)source.DataPointer);
+            }
+        }
+        finally
+        {
+            decoder.Dispose();
+            foreach (Tensor source in sourceTensors)
+            {
+                source.Dispose();
+            }
+        }
+    }
+
     /// <summary>The shipped FL2VA configs, verbatim. <c>time_up</c> is JSON null, so the temporal ratio has to fall
     /// through to the encoder's <c>time_down</c> list — the branch that would silently yield ratio 1.</summary>
     [Fact]

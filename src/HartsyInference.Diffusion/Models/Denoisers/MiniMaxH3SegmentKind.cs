@@ -10,4 +10,5 @@ public enum MiniMaxH3SegmentKind
     RefAudio,
     Audio,
     Video,
+    CondAudio,
 }

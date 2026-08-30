@@ -121,20 +121,33 @@ public sealed record MiniMaxH3VideoVaeConfig
     public int FrameOverlap => Math.Max(TokenOverlap * VaeRatioT - FramePrePadding, 0);
 
     /// <summary>Tile starts/lengths/overlaps in PIXEL space, shared by the encoder and decoder so both cut the same
-    /// grid. Overlaps absorb the remainder in <see cref="VaeRatio"/> steps, keeping every boundary on a latent cell.</summary>
+    /// grid. Overlaps absorb the remainder in <see cref="VaeRatio"/> steps, keeping every boundary on a latent cell
+    /// and guaranteeing that each tile advances by at least one latent unit.</summary>
     public (int[] Start, int[] Length, int[] Overlap) SplitTiles(int inputLen)
     {
+        if (inputLen <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(inputLen), inputLen, "The tiled VAE axis must be positive.");
+        }
         if (TileSize >= inputLen)
         {
             return ([0], [inputLen], []);
         }
+        if (TileSize < VaeRatio * 2 || TileSize % VaeRatio != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(TileSize), TileSize,
+                $"MiniMax-H3 VAE tile size must be a multiple of {VaeRatio} and at least {VaeRatio * 2} "
+                + "when an axis needs multiple tiles.");
+        }
+        int overlapMin = Math.Clamp(TileOverlapMin, VaeRatio, TileSize - VaeRatio);
+        overlapMin -= overlapMin % VaeRatio;
         int n = (inputLen + TileSize - 1) / TileSize;
         int[] overlaps;
         int remaining;
         while (true)
         {
             overlaps = new int[n - 1];
-            Array.Fill(overlaps, TileOverlapMin);
+            Array.Fill(overlaps, overlapMin);
             int sum = 0;
             foreach (int o in overlaps)
             {

@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelAssets.MiniMaxH3;
 
 namespace HartsyInference.Video.Pipelines;
 
@@ -24,16 +25,24 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     private readonly MiniMaxH3AudioVaeDecoder? _audioVae;
     private readonly MiniMaxH3Config _config;
     private readonly bool _preloadTransformer;
+    private readonly MiniMaxH3PddAdapter? _pddAdapter;
+    private readonly float _pddAdapterStrength;
+    private readonly VideoSparseAttentionProfileKind? _sparseAttentionProfile;
 
     /// <param name="preloadTransformer">False for checkpoints too large to stay device-resident (the bf16 build).</param>
     public MiniMaxH3Pipeline(IBackend backend, MiniMaxH3Transformer transformer, MiniMaxH3VideoVaeDecoder videoVae,
-        MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer = true) : base(backend)
+        MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer = true,
+        MiniMaxH3PddAdapter? pddAdapter = null, float pddAdapterStrength = 1f,
+        VideoSparseAttentionProfileKind? sparseAttentionProfile = null) : base(backend)
     {
         _preloadTransformer = preloadTransformer;
         _transformer = transformer;
         _videoVae = videoVae;
         _audioVae = audioVae;
         _config = transformer.Config;
+        _pddAdapter = pddAdapter;
+        _pddAdapterStrength = pddAdapterStrength;
+        _sparseAttentionProfile = sparseAttentionProfile;
     }
 
     /// <summary>Whether <see cref="DiffusionPipelineBase.VaeBackend"/> is a device the DiT does not use — the operator
@@ -95,6 +104,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
         MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, latentT, latentH, latentW, audioT,
             request.Keyframes, request.Refs, request.FrameCount);
+        VideoSparseAttentionPlan? sparsePlan = ResolveSparseAttentionPlan(layout, request);
         int frameRows = (latentH / _config.PatchH) * (latentW / _config.PatchW);
         int videoRowCount = latentT * frameRows;
         int audioRowCount = audioT * 2;
@@ -103,8 +113,32 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         RequireConditioningRows(request.CondVideoRows, condVideoRows, _config.VideoPatchDim, "video");
         RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioLatentsDim, "audio");
 
+        if (request.Controls?.Any(static control => control.IsInpaint) == true
+            && (request.VideoDenoiseMaskRows is not null || request.AudioDenoiseMaskRows is not null))
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 Fun ControlNet inpainting cannot be combined with video or audio denoise masks.");
+        }
+        IReadOnlyList<float>? videoMaskRows = NormalizeDenoiseMaskRows(
+            request.VideoDenoiseMaskRows, request.VideoDenoiseSourceRows,
+            videoRowCount, _config.VideoPatchDim, "video");
+        IReadOnlyList<float>? audioMaskRows = NormalizeDenoiseMaskRows(
+            request.AudioDenoiseMaskRows, request.AudioDenoiseSourceRows,
+            audioRowCount, _config.AudioLatentsDim, "audio");
+        if (_pddAdapter is not null && (videoMaskRows is not null || audioMaskRows is not null))
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 PDD cannot be combined with video or audio denoise masks.");
+        }
+
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
+        Tensor? videoFixedNoise = videoMaskRows is null ? null
+            : SeedGenerator.CreateNoise(videoLat.Shape, seed);
+        Tensor? audioFixedNoise = audioMaskRows is null ? null
+            : SeedGenerator.CreateNoise(audioLat.Shape, seed ^ 0x5D2B);
+        Tensor? videoMask = RowMaskTensor(videoMaskRows);
+        Tensor? audioMask = RowMaskTensor(audioMaskRows);
         (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
         // The reference re-derives augmented conditioning from the same seeded stream on every forward, so hoisting it
         // out of the loop is the same values for a fraction of the work.
@@ -112,12 +146,33 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         Tensor? condAudio = NoiseAugment(request.CondAudioRows, request.AudioCondNoiseAug, seed + 1);
 
         double shiftV = request.SigmaShiftVideo, shiftA = request.SigmaShiftAudio;
-        double[] sigmas = MiniMaxH3Schedule.VideoSigmas(request.Steps, shiftV);
+        MiniMaxH3PddSchedule? pddSchedule = _pddAdapter is null ? null : MiniMaxH3PddSchedule.Create(
+            new MiniMaxH3PddExecutionSettings
+            {
+                Nfe = request.Steps,
+                Sampler = request.Sampler,
+                CfgScale = request.CfgScale,
+                VideoFlowShift = shiftV,
+                AudioFlowShift = shiftA,
+                Strength = _pddAdapterStrength,
+                HasHybrid = request.HybridProfile,
+            });
+        double[] sigmas = pddSchedule is null
+            ? MiniMaxH3Schedule.VideoSigmas(request.Steps, shiftV)
+            : pddSchedule.Sigmas.ToArray();
+        IReadOnlyList<MiniMaxH3FunControlCondition>?[] controlSchedule = BuildControlSchedule(
+            request.Controls, request.Steps);
 
+        using IVideoSparseAttentionSession? sparseAttentionPrimary = sparsePlan is null
+            ? null : Backend.CreateVideoSparseAttentionSession(sparsePlan);
+        using IVideoSparseAttentionSession? sparseAttentionShard = sparsePlan is null || DitShardBackend is null
+            ? null : DitShardBackend.CreateVideoSparseAttentionSession(sparsePlan);
         // Park the DiT on device up front. Without this its weights land in the cache lazily per op and get evicted
         // by whatever else is resident, so every Linear pays a fresh host->device upload. Gated on it actually
         // fitting: the 66 GB bf16 build is larger than the card and must stay on the per-call streaming path.
         bool preloaded = TryPreloadTransformer();
+        using PddHeadFusionSession? pddFusion = _pddAdapter is null
+            ? null : new PddHeadFusionSession(Backend, _pddAdapter.HeadBank);
         try
         {
             try
@@ -128,9 +183,14 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     double sigma = sigmas[step];
                     double dSigma = sigmas[step + 1] - sigma;
                     (float tVideo, float tAudio) = MiniMaxH3Schedule.Timesteps(sigma, shiftV, shiftA);
-                    (float[] uniqueT, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-                        MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, tAudio,
-                            request.VisualCondNoiseAug, request.AudioCondNoiseAug);
+                    MiniMaxH3TimestepPlan timestepPlan = MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+                        layout, tVideo, tAudio, request.VisualCondNoiseAug, request.AudioCondNoiseAug,
+                        videoMaskRows, audioMaskRows);
+
+                    ApplyDenoiseMask(videoLat, request.VideoDenoiseSourceRows, videoFixedNoise, videoMask,
+                        (float)sigma);
+                    ApplyDenoiseMask(audioLat, request.AudioDenoiseSourceRows, audioFixedNoise, audioMask,
+                        (float)MiniMaxH3Schedule.ShiftSigma(sigma, shiftV, shiftA));
 
                     if (step == 0)
                     {
@@ -143,12 +203,24 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     Tensor audioIn = PackConditioned(condAudio, audioLat);
                     try
                     {
+                        using PddFusedHeads? pddHeads = pddFusion is null || pddSchedule is null
+                            ? null : pddFusion.Fuse(pddSchedule, sigma, sigmas[step + 1]);
                         (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
                             ? _transformer.ForwardSharded(
-                                Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf,
-                                DitShardSplitBlock, textTagRuns)
+                                Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin,
+                                timestepPlan.Timesteps, timestepPlan.RowOf, DitShardSplitBlock,
+                                textTagRuns: textTagRuns, pddHeads: pddHeads, controls: controlSchedule[step],
+                                videoTimestepRows: timestepPlan.VideoRowOf,
+                                audioTimestepRows: timestepPlan.AudioRowOf,
+                                sparseAttentionA: sparseAttentionPrimary,
+                                sparseAttentionB: sparseAttentionShard)
                             : _transformer.Forward(
-                                Backend, layout, videoIn, audioIn, textStates, cos, sin, uniqueT, rowOf, textTagRuns);
+                                Backend, layout, videoIn, audioIn, textStates, cos, sin,
+                                timestepPlan.Timesteps, timestepPlan.RowOf, textTagRuns: textTagRuns,
+                                pddHeads: pddHeads, controls: controlSchedule[step],
+                                videoTimestepRows: timestepPlan.VideoRowOf,
+                                audioTimestepRows: timestepPlan.AudioRowOf,
+                                sparseAttention: sparseAttentionPrimary);
                         try
                         {
                             // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
@@ -161,6 +233,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                             }
                             EulerStep(videoLat, vVideo, (float)-dSigma);
                             EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
+                            double nextSigmaVideo = sigmas[step + 1];
+                            ApplyDenoiseMask(videoLat, request.VideoDenoiseSourceRows,
+                                videoFixedNoise, videoMask, (float)nextSigmaVideo);
+                            ApplyDenoiseMask(audioLat, request.AudioDenoiseSourceRows,
+                                audioFixedNoise, audioMask,
+                                (float)MiniMaxH3Schedule.ShiftSigma(nextSigmaVideo, shiftV, shiftA));
                         }
                         finally
                         {
@@ -206,6 +284,10 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             }
             finally
             {
+                // Persistent VSA route/stat buffers are generation-owned and must leave before the VAE competes
+                // for memory. Dispose is idempotent; the using declarations remain the exception-safe fallback.
+                sparseAttentionShard?.Dispose();
+                sparseAttentionPrimary?.Dispose();
                 // Denoising is done (or failed): hand the DiT's ~20 GB back before the VAE needs its own ~5 GB, and
                 // so a failed generation doesn't leak it resident for every later request on this cached pipeline —
                 // load-bearing for CheckVramFeasibility, which assumes weights are resident only while a Generate
@@ -266,8 +348,21 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             if (_audioVae is not null)
             {
                 Tensor audioLatent = MiniMaxH3Latents.UnpackAudio(audioLat, audioT, _config);
-                bool audioVaePreloaded = TryPreloadWeights(vaeBackend, "audio VAE decoder", _audioVae.EnumerateWeights());
-                Tensor wave = _audioVae.Decode(vaeBackend, audioLatent);
+                bool audioVaePreloaded = false;
+                Tensor wave = DecodeAudioWithCleanup(audioLatent,
+                    () =>
+                    {
+                        audioVaePreloaded = TryPreloadWeights(
+                            vaeBackend, "audio VAE decoder", _audioVae.EnumerateWeights());
+                        return _audioVae.Decode(vaeBackend, audioLatent);
+                    },
+                    () =>
+                    {
+                        if (audioVaePreloaded && !VaeIsWarmPlaced)
+                        {
+                            vaeBackend.FreeWeights(_audioVae.EnumerateWeights());
+                        }
+                    });
                 try
                 {
                     sampleRate = _audioVae.SampleRate;
@@ -282,9 +377,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 }
                 finally
                 {
-                    audioLatent.Dispose();
                     wave.Dispose();
-                    if (audioVaePreloaded && !VaeIsWarmPlaced) vaeBackend.FreeWeights(_audioVae.EnumerateWeights());
                 }
             }
             return new Result(frames, outW, outH, seed, audio, sampleRate);
@@ -297,7 +390,77 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             sin.Dispose();
             if (!ReferenceEquals(condVideo, request.CondVideoRows)) { condVideo?.Dispose(); }
             if (!ReferenceEquals(condAudio, request.CondAudioRows)) { condAudio?.Dispose(); }
+            videoFixedNoise?.Dispose();
+            audioFixedNoise?.Dispose();
+            videoMask?.Dispose();
+            audioMask?.Dispose();
         }
+    }
+
+    /// <summary>Runs audio decode setup/decode while guaranteeing that its unpacked input and any staged weights
+    /// are released even when preload or decode throws before a waveform exists.</summary>
+    internal static Tensor DecodeAudioWithCleanup(Tensor audioLatent, Func<Tensor> decode,
+        Action releaseWeights)
+    {
+        ArgumentNullException.ThrowIfNull(audioLatent);
+        ArgumentNullException.ThrowIfNull(decode);
+        ArgumentNullException.ThrowIfNull(releaseWeights);
+        try
+        {
+            return decode();
+        }
+        finally
+        {
+            try
+            {
+                audioLatent.Dispose();
+            }
+            finally
+            {
+                releaseWeights();
+            }
+        }
+    }
+
+    /// <summary>Performs the execution-boundary VSA preflight and builds the one layout every main block reuses.
+    /// Any mismatch is terminal; a sparse checkpoint is never retried as dense after construction or launch.</summary>
+    private VideoSparseAttentionPlan? ResolveSparseAttentionPlan(MiniMaxH3PackedLayout layout,
+        MiniMaxH3GenerationRequest request)
+    {
+        if (_sparseAttentionProfile is not VideoSparseAttentionProfileKind profile)
+        {
+            return null;
+        }
+        if (_pddAdapter is not null || request.HybridProfile)
+        {
+            throw new NotSupportedException("MiniMax-H3 VSA cannot be combined with PDD or Hybrid execution.");
+        }
+        if (request.Keyframes is { Count: > 0 } || request.Refs is { Count: > 0 }
+            || request.CondVideoRows is not null || request.CondAudioRows is not null
+            || request.VideoDenoiseMaskRows is not null || request.AudioDenoiseMaskRows is not null
+            || request.Controls is { Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 VSA is T2VA-only and cannot consume references, guides, masks, or ControlNet.");
+        }
+        if (request.Steps != 4 || request.CfgScale != 1f
+            || !string.Equals(request.Sampler, "euler", StringComparison.OrdinalIgnoreCase)
+            || request.SigmaShiftVideo != 12f || request.SigmaShiftAudio != 3f)
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 VSA requires exactly four Euler evaluations, CFG 1, and video/audio shifts 12/3.");
+        }
+        if (!Backend.SupportsVideoSparseAttention)
+        {
+            throw new NotSupportedException(
+                $"Backend '{Backend.Capabilities.Name}' cannot execute the required MiniMax-H3 VSA profile.");
+        }
+        if (DitShardBackend is not null && !DitShardBackend.SupportsVideoSparseAttention)
+        {
+            throw new NotSupportedException(
+                $"DiT shard backend '{DitShardBackend.Capabilities.Name}' cannot execute profile '{profile}'.");
+        }
+        return _transformer.CreateVideoSparseAttentionPlan(layout, profile);
     }
 
     /// <summary>The packed input for one stream: conditioning rows then the denoise target. Returns
@@ -311,6 +474,104 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         Tensor packed = new Tensor(new TensorShape(conditioning.Shape[0] + target.Shape[0], target.Shape[1]), target.DType);
         Backend.Concat(packed, [conditioning, target], 0);
         return packed;
+    }
+
+    private static IReadOnlyList<float>? NormalizeDenoiseMaskRows(IReadOnlyList<float>? rows, Tensor? source,
+        int expectedRows, int expectedFeatures, string modality)
+    {
+        if (rows is null)
+        {
+            return null;
+        }
+        if (rows.Count != expectedRows)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 {modality} denoise mask has {rows.Count} rows, expected {expectedRows}.");
+        }
+        bool allWhite = true;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            float value = rows[i];
+            if (!float.IsFinite(value) || value < 0f || value > 1f)
+            {
+                throw new ArgumentOutOfRangeException(nameof(rows), value,
+                    $"MiniMax-H3 {modality} mask row {i} must be finite and in [0,1].");
+            }
+            allWhite &= value == 1f;
+        }
+        if (allWhite)
+        {
+            return null;
+        }
+        if (source is null)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 {modality} denoise mask preserves rows but has no source latent.");
+        }
+        TensorShape expectedShape = new TensorShape(expectedRows, expectedFeatures);
+        if (source.DType != DType.F32 || source.Shape != expectedShape)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 {modality} denoise source must be F32 {expectedShape}; got "
+                + $"{source.DType} {source.Shape}.", nameof(source));
+        }
+        return rows;
+    }
+
+    private static unsafe Tensor? RowMaskTensor(IReadOnlyList<float>? rows)
+    {
+        if (rows is null)
+        {
+            return null;
+        }
+        Tensor mask = new Tensor(new TensorShape(rows.Count), DType.F32);
+        float* destination = (float*)mask.DataPointer;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            destination[i] = rows[i];
+        }
+        return mask;
+    }
+
+    private void ApplyDenoiseMask(
+        Tensor target, Tensor? source, Tensor? fixedNoise, Tensor? mask, float nativeSigma)
+    {
+        if (mask is null)
+        {
+            return;
+        }
+        if (source is null || fixedNoise is null)
+        {
+            throw new InvalidOperationException("Validated MiniMax-H3 denoise mask lost its source or fixed noise.");
+        }
+        float sigma = Math.Clamp(nativeSigma, 0f, 1f);
+        Backend.MaskedAffineMixInPlace(target, source, sigma == 0f ? null : fixedNoise, mask,
+            sourceScale: 1f - sigma, noiseScale: sigma, layout: MaskBroadcastLayout.Rows);
+    }
+
+    /// <summary>Resolves strength windows once before sampling, keeping managed allocations out of the denoise loop.</summary>
+    private static IReadOnlyList<MiniMaxH3FunControlCondition>?[] BuildControlSchedule(
+        IReadOnlyList<MiniMaxH3FunControlCondition>? controls, int steps)
+    {
+        IReadOnlyList<MiniMaxH3FunControlCondition>?[] schedule =
+            new IReadOnlyList<MiniMaxH3FunControlCondition>?[steps];
+        if (controls is null || controls.Count == 0)
+        {
+            return schedule;
+        }
+        for (int step = 0; step < steps; step++)
+        {
+            List<MiniMaxH3FunControlCondition>? active = null;
+            foreach (MiniMaxH3FunControlCondition control in controls)
+            {
+                if (control.IsActive(step, steps))
+                {
+                    (active ??= new List<MiniMaxH3FunControlCondition>()).Add(control);
+                }
+            }
+            schedule[step] = active;
+        }
+        return schedule;
     }
 
     /// <summary>Blends conditioning rows toward seeded noise by <c>1 - aug</c>, keeping the model from treating them as
@@ -475,5 +736,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             if (_audioVae is not null) { VaeBackend.FreeWeights(_audioVae.EnumerateWeights()); }
         }
         _transformer.Dispose();
+        _pddAdapter?.Dispose();
+        _videoVae.Dispose();
+        _audioVae?.Dispose();
     }
 }

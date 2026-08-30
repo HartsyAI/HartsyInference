@@ -30,6 +30,9 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>Maximum queued (waiting) long-running requests before the server returns HTTP 429.</summary>
     public int MaxLongRunningQueueDepth { get; set; } = 4;
 
+    /// <summary>Maximum native-video JSON body size; defaults to 256 MiB to accommodate base64 guide/control clips.</summary>
+    public long MaxVideoRequestBodyBytes { get; set; } = 256L * 1024 * 1024;
+
     /// <summary>How long an interactive world session may sit with no action/stream activity before the server evicts it and releases its backend resources.</summary>
     public int WorldSessionIdleTimeoutMinutes { get; set; } = 10;
 

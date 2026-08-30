@@ -32,6 +32,7 @@ public sealed unsafe class MixPrimitivesTests
         { MaskBroadcastLayout.DenseNchwBroadcast, new TensorShape(2, 5, 3, 7), new TensorShape(2, 1, 3, 7) },
         { MaskBroadcastLayout.PackedChannelOuter, new TensorShape(3, 11, 30), new TensorShape(3, 11, 6) },
         { MaskBroadcastLayout.PackedChannelInner, new TensorShape(3, 11, 30), new TensorShape(3, 11, 6) },
+        { MaskBroadcastLayout.Rows, new TensorShape(33, 30), new TensorShape(33) },
     };
 
     [Fact]
@@ -104,6 +105,31 @@ public sealed unsafe class MixPrimitivesTests
         using IBackend cpu = new CpuBackend();
         RunMaskedCase(cpu, null, layout, targetShape, maskShape, withNoise: true);
         RunMaskedCase(cpu, null, layout, targetShape, maskShape, withNoise: false);
+    }
+
+    [Fact]
+    public void RowMask_ReusesFixedNoiseAndRestoresBlackRowsExactlyAtSigmaZero()
+    {
+        TensorShape shape = new TensorShape(3, 2);
+        using Tensor target = TensorFrom([10f, 11f, 20f, 21f, 30f, 31f], shape);
+        using Tensor source = TensorFrom([2f, 4f, 6f, 8f, 10f, 12f], shape);
+        using Tensor fixedNoise = TensorFrom([-2f, -4f, -6f, -8f, -10f, -12f], shape);
+        using Tensor mask = TensorFrom([0f, 0.5f, 1f], new TensorShape(3));
+        using IBackend cpu = new CpuBackend();
+
+        cpu.MaskedAffineMixInPlace(target, source, fixedNoise, mask,
+            sourceScale: 0.25f, noiseScale: 0.75f, layout: MaskBroadcastLayout.Rows);
+        AssertExact([-1f, -2f, 8.5f, 8.5f, 30f, 31f], Snapshot(target), "H3 current-sigma row mix");
+
+        // A later step uses the same request noise, not freshly sampled noise. At the terminal native sigma the
+        // black row must be the source exactly; gray stays a continuous blend and white keeps the generated state.
+        cpu.MaskedAffineMixInPlace(target, source, fixedNoise, mask,
+            sourceScale: 0.75f, noiseScale: 0.25f, layout: MaskBroadcastLayout.Rows);
+        AssertExact([1f, 2f, 5.75f, 6.25f, 30f, 31f], Snapshot(target), "H3 next-sigma row mix");
+
+        cpu.MaskedAffineMixInPlace(target, source, null, mask,
+            sourceScale: 1f, noiseScale: 0f, layout: MaskBroadcastLayout.Rows);
+        AssertExact([2f, 4f, 5.875f, 7.125f, 30f, 31f], Snapshot(target), "H3 terminal row mix");
     }
 
     [Theory]
@@ -257,6 +283,15 @@ public sealed unsafe class MixPrimitivesTests
         Assert.Throws<ArgumentException>(() => backend.MaskedAffineMixInPlace(
             dense, denseSource, null, denseMask, 1f, 0f, MaskBroadcastLayout.PackedChannelOuter));
 
+        using Tensor rowTarget = new(new TensorShape(7, 30), DType.F32);
+        using Tensor rowSource = new(rowTarget.Shape, DType.F32);
+        using Tensor rowMask = new(new TensorShape(7), DType.F32);
+        using Tensor wrongRowMask = new(new TensorShape(6), DType.F32);
+        Assert.Throws<ArgumentException>(() => backend.MaskedAffineMixInPlace(
+            rowTarget, rowSource, null, wrongRowMask, 1f, 0f, MaskBroadcastLayout.Rows));
+        Assert.Throws<ArgumentException>(() => backend.MaskedAffineMixInPlace(
+            packed, packedSource, null, rowMask, 1f, 0f, MaskBroadcastLayout.Rows));
+
         // Reshape and borrowed overlaps are separate Tensor objects but share storage. Validation must catch both
         // without consulting DataPointer and accidentally draining a resident target.
         using Tensor owner = TensorFrom(Values(32, 401, 1f), new TensorShape(32));
@@ -303,8 +338,18 @@ public sealed unsafe class MixPrimitivesTests
         long batchPlane = layout == MaskBroadcastLayout.DenseNchwBroadcast
             ? targetShape[1] * spatial
             : 0;
-        long featureDimension = layout == MaskBroadcastLayout.DenseNchwBroadcast ? 0 : targetShape[2];
-        long patchArea = layout == MaskBroadcastLayout.DenseNchwBroadcast ? 0 : maskShape[2];
+        long featureDimension = layout switch
+        {
+            MaskBroadcastLayout.DenseNchwBroadcast => 0,
+            MaskBroadcastLayout.Rows => targetShape[1],
+            _ => targetShape[2],
+        };
+        long patchArea = layout switch
+        {
+            MaskBroadcastLayout.DenseNchwBroadcast => 0,
+            MaskBroadcastLayout.Rows => 1,
+            _ => maskShape[2],
+        };
         long channels = layout == MaskBroadcastLayout.DenseNchwBroadcast ? 0 : featureDimension / patchArea;
 
         for (long i = 0; i < output.LongLength; i++)
@@ -319,7 +364,7 @@ public sealed unsafe class MixPrimitivesTests
             {
                 long feature = i % featureDimension;
                 long token = i / featureDimension;
-                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter
+                long patchIndex = layout is MaskBroadcastLayout.PackedChannelOuter or MaskBroadcastLayout.Rows
                     ? feature % patchArea
                     : feature / channels;
                 maskIndex = token * patchArea + patchIndex;

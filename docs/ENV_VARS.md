@@ -7,7 +7,7 @@
 > doc. That judgement is the point of this file; the table is the scaffolding it hangs on.
 
 > ⚠️ **Superseded in part, 2026-08-26.** `EngineKnobs` (`src/HartsyInference.Core/Configuration/`) is now the
-> declared registry: **210 knobs**, each with an id, type, default, scope, domain and its legacy environment
+> declared registry: **212 knobs**, each with an id, type, default, scope, domain and its legacy environment
 > name. `KnobRegistryTests` ties that surface to a source scan, so the registry — not this file — is the
 > authority on *what exists*. This doc remains the authority on **disposition**, and on the history below.
 >
@@ -39,7 +39,7 @@ literal scan for `GetEnvironmentVariable("HARTSY_…")` has **five** blind spots
 | A helper **constructor** argument | `new DebugDumpSink("WAN_DEBUG_DIR")` | 19 |
 | Only ever a **default parameter value** | `FromEnvironment(string v = "HARTSY_CFG_INTERVAL")` | 1 |
 
-The real engine surface is **~209 knobs**. A further ~150 names are test-fixture paths read by test code, not
+The real engine surface is **~210 knobs**. A further ~150 names are test-fixture paths read by test code, not
 the engine, and are out of scope.
 
 **Three boolean grammars are live and they genuinely disagree** — this is why the migration preserves each
@@ -130,6 +130,24 @@ override that decides something. `VideoRequest` and `MusicRequest` carry the ide
 | `HARTSY_SAME_GPU_CONCURRENT` | off | Bypasses the per-device gate | **KEEP** (documented; genuinely experimental) |
 | `HARTSY_AUDIO_EVICT_BELOW_GB` | **14** | Free-VRAM threshold for audio eviction | **DOCUMENT** — a hard-coded GB threshold that silently changes behavior near it |
 | `HARTSY_STREAM_PIN` | **ON** | Pinned host staging for streaming | **DOCUMENT** |
+
+### Temporary MiniMax-H3 VSA release gate
+
+`HARTSY_EXPERIMENTAL_H3_VSA=1` is a deliberate temporary exception to the retired environment-variable
+configuration layer. Without that exact value, every detected H3 VSA profile returns the typed planning error
+`video.vsa.experimental_disabled` before model construction or SSE begins. The equivalent declared process
+setting is `numerics.h3VsaExperimental`; both default off.
+
+This switch is for controlled validation only. It does not certify release readiness: operator-provided
+real-weight parity, the 12k/29k/66k/80k/113k benchmark matrix, the ≥1.5× complete-step speed target, and the
+no-greater-peak-scratch requirement remain unmet. Remove the gate only after those checks pass on the published
+checkpoint profiles.
+
+`HARTSY_EXPERIMENTAL_H3_EXPANSION=1` is the parallel exact-value gate for the non-VSA expansion paths
+whose operator-provided canaries are still unavailable: Turbo/Hybrid, PDD, Fun ControlNet, and the int8
+video VAE. Its declared process setting is `numerics.h3ExpansionExperimental`; both default off. Dense
+base H3 plus ordinary guides and masks do not require this switch. Like the VSA gate, it is a controlled-
+validation mechanism, not a compatibility or release-readiness claim.
 
 ## 4. CUDA numerics — the largest undocumented surface
 

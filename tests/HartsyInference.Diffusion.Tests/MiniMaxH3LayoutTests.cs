@@ -64,10 +64,69 @@ public class MiniMaxH3LayoutTests
     }
 
     [Fact]
-    public void OnlyFirstAndLastKeyframeAnchorsAreAccepted()
+    public void ArbitraryResolvedGuideAnchorsAreAcceptedAndBoundsChecked()
     {
-        Assert.Throws<ArgumentException>(() => new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
-            keyframes: [new MiniMaxH3Keyframe { ResolvedFrameIndex = 3 }], frameCount: 17));
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes: [new MiniMaxH3Keyframe { ResolvedFrameIndex = 3 }], frameCount: 17);
+        MiniMaxH3Segment condition = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.Cond);
+        Assert.Equal(TextLen + 3 * 5.0 / 3.0, layout.PositionIds[condition.Start * 3], 12);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new MiniMaxH3PackedLayout(
+            TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes: [new MiniMaxH3Keyframe { ResolvedFrameIndex = -1 }], frameCount: 17));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new MiniMaxH3PackedLayout(
+            TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes: [new MiniMaxH3Keyframe { ResolvedFrameIndex = 17 }], frameCount: 17));
+    }
+
+    [Fact]
+    public void HybridKeepsReferenceAndTargetTimelinesIndependent()
+    {
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes: [new MiniMaxH3Keyframe { ResolvedFrameIndex = 3 }],
+            refs: [new MiniMaxH3RefBlock { Kind = "image", LatentH = 8, LatentW = 8 }], frameCount: 17);
+        MiniMaxH3Segment condition = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.Cond);
+        MiniMaxH3Segment reference = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.RefImage);
+        MiniMaxH3Segment audio = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.Audio);
+        MiniMaxH3Segment video = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.Video);
+
+        Assert.Equal(TextLen, layout.PositionIds[reference.Start * 3], 12);
+        Assert.Equal(TextLen + 1 + 3 * 5.0 / 3.0, layout.PositionIds[condition.Start * 3], 12);
+        Assert.Equal(TextLen + 1, layout.PositionIds[audio.Start * 3], 12);
+        Assert.Equal(TextLen + 1, layout.PositionIds[video.Start * 3], 12);
+    }
+
+    [Fact]
+    public void GuideCanCarryVisualClipAndPairedAudio()
+    {
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes:
+            [
+                new MiniMaxH3Keyframe
+                {
+                    ResolvedFrameIndex = 4,
+                    VideoLatentFrames = 2,
+                    AudioLatentFrames = 3,
+                },
+            ],
+            frameCount: 17);
+        Assert.Equal(
+            [MiniMaxH3SegmentKind.Text, MiniMaxH3SegmentKind.Cond, MiniMaxH3SegmentKind.CondAudio,
+                MiniMaxH3SegmentKind.Audio, MiniMaxH3SegmentKind.Video],
+            layout.Segments.Select(s => s.Kind));
+        int frameRows = (LatentH / 2) * (LatentW / 2);
+        Assert.Equal(2 * frameRows, layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.Cond).Length);
+        Assert.Equal(6, layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.CondAudio).Length);
+        Assert.Equal((2 * frameRows, 6), MiniMaxH3Conditioning.ConditioningRowCounts(layout));
+    }
+
+    [Fact]
+    public void OddReferenceAxesArePaddedBeforeRowAccounting()
+    {
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
+            refs: [new MiniMaxH3RefBlock { Kind = "image", LatentH = 5, LatentW = 7 }]);
+        MiniMaxH3Segment reference = layout.Segments.Single(s => s.Kind == MiniMaxH3SegmentKind.RefImage);
+        Assert.Equal((6 / 2) * (8 / 2), reference.Length);
     }
 
     [Fact]

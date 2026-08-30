@@ -24,9 +24,20 @@ public static class RecipeCacheKey
             return "";
         }
         string key = Describe(request.Loras, request.Components);
+        if (!string.IsNullOrWhiteSpace(request.VideoModel))
+        {
+            key += $"video-model:{request.VideoModel};";
+        }
         if (!string.IsNullOrWhiteSpace(request.VideoSwapModel))
         {
             key += $"swap:{request.VideoSwapModel}@{(request.VideoSwapPercent?.ToString("R", CultureInfo.InvariantCulture) ?? "auto")};";
+        }
+        if (request.Controls is { Count: > 0 })
+        {
+            foreach (VideoControl control in request.Controls)
+            {
+                key += $"control:{control.Model};";
+            }
         }
         return key;
     }
@@ -47,7 +58,8 @@ public static class RecipeCacheKey
         if (components is not null)
         {
             builder.Append("cmp:")
-                .Append(components.Vae).Append('|').Append(components.T5Xxl).Append('|')
+                .Append(components.Vae).Append('|').Append(components.VideoVae).Append('|')
+                .Append(components.AudioVae).Append('|').Append(components.T5Xxl).Append('|')
                 .Append(components.ClipL).Append('|').Append(components.ClipG).Append('|')
                 .Append(components.ClipVision).Append('|').Append(components.Qwen).Append('|')
                 .Append(components.Llama).Append('|').Append(components.Gemma).Append(';');
