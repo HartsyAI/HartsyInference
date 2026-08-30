@@ -114,19 +114,23 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         RequireConditioningRows(request.CondVideoRows, condVideoRows, _config.VideoPatchDim, "video");
         RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioLatentsDim, "audio");
 
-        if (request.Controls?.Any(static control => control.IsInpaint) == true
-            && (request.VideoDenoiseMaskRows is not null || request.AudioDenoiseMaskRows is not null))
+        (IReadOnlyList<float>? videoMaskRows, IReadOnlyList<float>? videoFeatureMaskValues) =
+            NormalizeDenoiseMask(
+                request.VideoDenoiseMaskRows, request.VideoDenoiseFeatureMaskValues,
+                request.VideoDenoiseSourceRows, videoRowCount, _config.VideoPatchDim,
+                _config.PatchT * _config.PatchH * _config.PatchW, "video");
+        (IReadOnlyList<float>? audioMaskRows, IReadOnlyList<float>? audioFeatureMaskRows) =
+            NormalizeDenoiseMask(
+                request.AudioDenoiseMaskRows, request.AudioDenoiseFeatureMaskRows,
+                request.AudioDenoiseSourceRows, audioRowCount, _config.AudioLatentsDim,
+                patchArea: 1, modality: "audio");
+        bool hasDenoiseMask = videoFeatureMaskValues is not null || audioFeatureMaskRows is not null;
+        if (request.Controls?.Any(static control => control.IsInpaint) == true && hasDenoiseMask)
         {
             throw new NotSupportedException(
                 "MiniMax-H3 Fun ControlNet inpainting cannot be combined with video or audio denoise masks.");
         }
-        IReadOnlyList<float>? videoMaskRows = NormalizeDenoiseMaskRows(
-            request.VideoDenoiseMaskRows, request.VideoDenoiseSourceRows,
-            videoRowCount, _config.VideoPatchDim, "video");
-        IReadOnlyList<float>? audioMaskRows = NormalizeDenoiseMaskRows(
-            request.AudioDenoiseMaskRows, request.AudioDenoiseSourceRows,
-            audioRowCount, _config.AudioLatentsDim, "audio");
-        if (_pddAdapter is not null && (videoMaskRows is not null || audioMaskRows is not null))
+        if (_pddAdapter is not null && hasDenoiseMask)
         {
             throw new NotSupportedException(
                 "MiniMax-H3 PDD cannot be combined with video or audio denoise masks.");
@@ -134,12 +138,16 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
-        Tensor? videoFixedNoise = videoMaskRows is null ? null
-            : SeedGenerator.CreateNoise(videoLat.Shape, seed);
-        Tensor? audioFixedNoise = audioMaskRows is null ? null
-            : SeedGenerator.CreateNoise(audioLat.Shape, seed ^ 0x5D2B);
-        Tensor? videoMask = RowMaskTensor(videoMaskRows);
-        Tensor? audioMask = RowMaskTensor(audioMaskRows);
+        Tensor? videoFixedNoise = null;
+        Tensor? videoInjection = null;
+        Tensor? videoTokenMask = null;
+        Tensor? videoFeatureMask = null;
+        Tensor? videoModelScratch = null;
+        Tensor? videoDenoisedScratch = null;
+        Tensor? audioTokenMask = null;
+        Tensor? audioFeatureMask = null;
+        Tensor? audioModelScratch = null;
+        Tensor? audioDenoisedScratch = null;
         (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
         // The reference re-derives augmented conditioning from the same seeded stream on every forward, so hoisting it
         // out of the loop is the same values for a fraction of the work.
@@ -178,6 +186,27 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         {
             try
             {
+                if (videoFeatureMaskValues is not null)
+                {
+                    videoFixedNoise = SeedGenerator.CreateNoise(videoLat.Shape, seed);
+                    videoInjection = new Tensor(videoLat.Shape, DType.F32);
+                    BuildVideoMaskInjection(Backend, videoInjection,
+                        request.VideoDenoiseSourceRows!, videoFixedNoise);
+                    videoTokenMask = RowMaskTensor(videoMaskRows)!;
+                    videoFeatureMask = FeatureMaskTensor(
+                        videoFeatureMaskValues, videoRowCount,
+                        _config.PatchT * _config.PatchH * _config.PatchW);
+                    videoModelScratch = new Tensor(videoLat.Shape, DType.F32);
+                    videoDenoisedScratch = new Tensor(videoLat.Shape, DType.F32);
+                }
+                if (audioFeatureMaskRows is not null)
+                {
+                    audioTokenMask = RowMaskTensor(audioMaskRows)!;
+                    audioFeatureMask = RowMaskTensor(audioFeatureMaskRows)!;
+                    audioModelScratch = new Tensor(audioLat.Shape, DType.F32);
+                    audioDenoisedScratch = new Tensor(audioLat.Shape, DType.F32);
+                }
+
                 for (int step = 0; step < request.Steps; step++)
                 {
                     Stopwatch sw = Stopwatch.StartNew();
@@ -188,10 +217,19 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                         layout, tVideo, tAudio, request.VisualCondNoiseAug, request.AudioCondNoiseAug,
                         videoMaskRows, audioMaskRows);
 
-                    ApplyDenoiseMask(videoLat, request.VideoDenoiseSourceRows, videoFixedNoise, videoMask,
-                        (float)sigma);
-                    ApplyDenoiseMask(audioLat, request.AudioDenoiseSourceRows, audioFixedNoise, audioMask,
-                        (float)MiniMaxH3Schedule.ShiftSigma(sigma, shiftV, shiftA));
+                    Tensor videoModelTarget = videoModelScratch ?? videoLat;
+                    if (videoModelScratch is not null)
+                    {
+                        BuildMaskedModelInput(
+                            Backend, videoModelTarget, videoLat, videoInjection!, videoTokenMask!);
+                    }
+                    Tensor audioModelTarget = audioModelScratch ?? audioLat;
+                    if (audioModelScratch is not null)
+                    {
+                        BuildMaskedModelInput(
+                            Backend, audioModelTarget, audioLat,
+                            request.AudioDenoiseSourceRows!, audioTokenMask!);
+                    }
 
                     if (step == 0)
                     {
@@ -200,8 +238,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     }
                     // Conditioning rows ride every forward at their fixed content and are never integrated, so they are
                     // spliced back in fresh each step rather than living in the state the sampler advances.
-                    Tensor videoIn = PackConditioned(condVideo, videoLat);
-                    Tensor audioIn = PackConditioned(condAudio, audioLat);
+                    Tensor videoIn = PackConditioned(condVideo, videoModelTarget);
+                    Tensor audioIn = PackConditioned(condAudio, audioModelTarget);
                     try
                     {
                         using PddFusedHeads? pddHeads = pddFusion is null || pddSchedule is null
@@ -224,22 +262,46 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                                 sparseAttention: sparseAttentionPrimary);
                         try
                         {
-                            // Both heads return the flow velocity; the audio one is integrated over the video sigma, so it
-                            // takes the schedule map's derivative as an extra factor.
+                            // Both heads return native-stream flow velocity. Unmasked audio keeps the derivative-scaled
+                            // video-sigma integrator; masked audio uses the exact current/next native audio sigmas below.
                             float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
                             if (step == 0 || step == request.Steps / 2 || step == request.Steps - 1)
                             {
                                 Probe($"DiT velocity (video, step {step})", vVideo);
                                 Probe($"DiT velocity (audio, step {step}, sigmaV={sigma:F4} tA={tAudio:F4} slope={slope:F4})", vAudio);
                             }
-                            EulerStep(videoLat, vVideo, (float)-dSigma);
-                            EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
                             double nextSigmaVideo = sigmas[step + 1];
-                            ApplyDenoiseMask(videoLat, request.VideoDenoiseSourceRows,
-                                videoFixedNoise, videoMask, (float)nextSigmaVideo);
-                            ApplyDenoiseMask(audioLat, request.AudioDenoiseSourceRows,
-                                audioFixedNoise, audioMask,
-                                (float)MiniMaxH3Schedule.ShiftSigma(nextSigmaVideo, shiftV, shiftA));
+                            if (videoModelScratch is null)
+                            {
+                                EulerStep(videoLat, vVideo, (float)-dSigma);
+                            }
+                            else
+                            {
+                                AdvanceMaskedState(
+                                    Backend, videoModelScratch, videoDenoisedScratch!, videoLat,
+                                    videoModelTarget, vVideo, request.VideoDenoiseSourceRows!, videoFeatureMask!,
+                                    MaskBroadcastLayout.PackedChannelOuter, (float)sigma, (float)nextSigmaVideo);
+                                Tensor previousVideoState = videoLat;
+                                videoLat = videoModelScratch;
+                                videoModelScratch = previousVideoState;
+                            }
+                            if (audioModelScratch is null)
+                            {
+                                EulerStep(audioLat, vAudio, (float)(-dSigma * slope));
+                            }
+                            else
+                            {
+                                float sigmaAudio = (float)MiniMaxH3Schedule.ShiftSigma(sigma, shiftV, shiftA);
+                                float nextSigmaAudio = (float)MiniMaxH3Schedule.ShiftSigma(
+                                    nextSigmaVideo, shiftV, shiftA);
+                                AdvanceMaskedState(
+                                    Backend, audioModelScratch, audioDenoisedScratch!, audioLat,
+                                    audioModelTarget, vAudio, request.AudioDenoiseSourceRows!, audioFeatureMask!,
+                                    MaskBroadcastLayout.Rows, sigmaAudio, nextSigmaAudio);
+                                Tensor previousAudioState = audioLat;
+                                audioLat = audioModelScratch;
+                                audioModelScratch = previousAudioState;
+                            }
                         }
                         finally
                         {
@@ -249,8 +311,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     }
                     finally
                     {
-                        if (!ReferenceEquals(videoIn, videoLat)) { videoIn.Dispose(); }
-                        if (!ReferenceEquals(audioIn, audioLat)) { audioIn.Dispose(); }
+                        if (!ReferenceEquals(videoIn, videoModelTarget)) { videoIn.Dispose(); }
+                        if (!ReferenceEquals(audioIn, audioModelTarget)) { audioIn.Dispose(); }
                     }
                     Backend.Sync();
                     DitShardBackend?.Sync();
@@ -387,14 +449,20 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         {
             videoLat.Dispose();
             audioLat.Dispose();
+            videoModelScratch?.Dispose();
+            videoDenoisedScratch?.Dispose();
+            audioModelScratch?.Dispose();
+            audioDenoisedScratch?.Dispose();
             cos.Dispose();
             sin.Dispose();
             if (!ReferenceEquals(condVideo, request.CondVideoRows)) { condVideo?.Dispose(); }
             if (!ReferenceEquals(condAudio, request.CondAudioRows)) { condAudio?.Dispose(); }
             videoFixedNoise?.Dispose();
-            audioFixedNoise?.Dispose();
-            videoMask?.Dispose();
-            audioMask?.Dispose();
+            videoInjection?.Dispose();
+            videoTokenMask?.Dispose();
+            videoFeatureMask?.Dispose();
+            audioTokenMask?.Dispose();
+            audioFeatureMask?.Dispose();
         }
     }
 
@@ -439,6 +507,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         if (request.Keyframes is { Count: > 0 } || request.Refs is { Count: > 0 }
             || request.CondVideoRows is not null || request.CondAudioRows is not null
             || request.VideoDenoiseMaskRows is not null || request.AudioDenoiseMaskRows is not null
+            || request.VideoDenoiseFeatureMaskValues is not null
+            || request.AudioDenoiseFeatureMaskRows is not null
             || request.Controls is { Count: > 0 })
         {
             throw new NotSupportedException(
@@ -477,32 +547,64 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         return packed;
     }
 
-    private static IReadOnlyList<float>? NormalizeDenoiseMaskRows(IReadOnlyList<float>? rows, Tensor? source,
-        int expectedRows, int expectedFeatures, string modality)
+    /// <summary>Validates the token and raw-feature views as one mask. Activity follows the raw view: a patch may
+    /// pool to token value one while still preserving some of its individual features.</summary>
+    internal static (IReadOnlyList<float>? TokenRows, IReadOnlyList<float>? FeatureValues) NormalizeDenoiseMask(
+        IReadOnlyList<float>? tokenRows, IReadOnlyList<float>? featureValues, Tensor? source,
+        int expectedRows, int expectedFeatures, int patchArea, string modality)
     {
-        if (rows is null)
+        if (expectedRows <= 0 || expectedFeatures <= 0 || patchArea <= 0
+            || expectedFeatures % patchArea != 0)
         {
-            return null;
+            throw new ArgumentOutOfRangeException(nameof(expectedRows),
+                "MiniMax-H3 denoise-mask geometry must be positive and patch-aligned.");
         }
-        if (rows.Count != expectedRows)
+
+        bool tokenAllWhite = ValidateMaskValues(tokenRows, expectedRows, "token", modality);
+        int expectedFeatureValues = checked(expectedRows * patchArea);
+        bool featureAllWhite = ValidateMaskValues(
+            featureValues, expectedFeatureValues, "feature", modality);
+        if (featureValues is null)
+        {
+            if (tokenRows is not null && !tokenAllWhite)
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 {modality} denoise mask has active token rows but no raw feature values.",
+                    nameof(featureValues));
+            }
+            return (null, null);
+        }
+        if (featureAllWhite)
+        {
+            if (tokenRows is not null && !tokenAllWhite)
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 {modality} raw mask is all-white but its token rows are active.",
+                    nameof(tokenRows));
+            }
+            return (null, null);
+        }
+        if (tokenRows is null)
         {
             throw new ArgumentException(
-                $"MiniMax-H3 {modality} denoise mask has {rows.Count} rows, expected {expectedRows}.");
+                $"MiniMax-H3 {modality} denoise mask has raw feature values but no pooled token rows.",
+                nameof(tokenRows));
         }
-        bool allWhite = true;
-        for (int i = 0; i < rows.Count; i++)
+        for (int row = 0; row < expectedRows; row++)
         {
-            float value = rows[i];
-            if (!UnitInterval.Contains(value))
+            float maximum = float.NegativeInfinity;
+            int offset = row * patchArea;
+            for (int patch = 0; patch < patchArea; patch++)
             {
-                throw new ArgumentOutOfRangeException(nameof(rows), value,
-                    $"MiniMax-H3 {modality} mask row {i} must be finite and in [0,1].");
+                maximum = Math.Max(maximum, featureValues[offset + patch]);
             }
-            allWhite &= value == 1f;
-        }
-        if (allWhite)
-        {
-            return null;
+            float expectedToken = MiniMaxH3Masking.QuantizeTokenMask(maximum);
+            if (tokenRows[row] != expectedToken)
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 {modality} denoise token row {row} is {tokenRows[row]:R}, but the raw feature "
+                    + $"maximum requires {expectedToken:R} on the 1/256 grid.", nameof(tokenRows));
+            }
         }
         if (source is null)
         {
@@ -516,7 +618,34 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 $"MiniMax-H3 {modality} denoise source must be F32 {expectedShape}; got "
                 + $"{source.DType} {source.Shape}.", nameof(source));
         }
-        return rows;
+        return (tokenRows, featureValues);
+
+        static bool ValidateMaskValues(
+            IReadOnlyList<float>? values, int expected, string representation, string modalityName)
+        {
+            if (values is null)
+            {
+                return true;
+            }
+            if (values.Count != expected)
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 {modalityName} denoise {representation} mask has {values.Count} value(s), "
+                    + $"expected {expected}.");
+            }
+            bool allWhite = true;
+            for (int i = 0; i < values.Count; i++)
+            {
+                float value = values[i];
+                if (!UnitInterval.Contains(value))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(values), value,
+                        $"MiniMax-H3 {modalityName} {representation} mask value {i} must be finite and in [0,1].");
+                }
+                allWhite &= value == 1f;
+            }
+            return allWhite;
+        }
     }
 
     private static unsafe Tensor? RowMaskTensor(IReadOnlyList<float>? rows)
@@ -534,20 +663,61 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         return mask;
     }
 
-    private void ApplyDenoiseMask(
-        Tensor target, Tensor? source, Tensor? fixedNoise, Tensor? mask, float nativeSigma)
+    private static unsafe Tensor FeatureMaskTensor(
+        IReadOnlyList<float> values, int rows, int patchArea)
     {
-        if (mask is null)
+        Tensor mask = new Tensor(new TensorShape(rows, patchArea), DType.F32);
+        float* destination = (float*)mask.DataPointer;
+        for (int i = 0; i < values.Count; i++)
         {
-            return;
+            destination[i] = values[i];
         }
-        if (source is null || fixedNoise is null)
+        return mask;
+    }
+
+    /// <summary>H3 trains preserved video content at a fixed near-clean condition strength, not at the sampler's
+    /// current sigma. The seeded noise stays fixed for the whole request.</summary>
+    internal static void BuildVideoMaskInjection(
+        IBackend backend, Tensor injection, Tensor source, Tensor fixedNoise)
+    {
+        float sourceStrength = MiniMaxH3Schedule.VisualCondTimestep;
+        backend.AffineMix(
+            injection, source, fixedNoise, sourceStrength, 1f - sourceStrength);
+    }
+
+    /// <summary>Builds the DiT input <c>q = M*z + (1-M)*I</c> without mutating sampler state <c>z</c>.</summary>
+    internal static void BuildMaskedModelInput(
+        IBackend backend, Tensor modelInput, Tensor state, Tensor injection, Tensor tokenMask)
+    {
+        backend.Scale(modelInput, state, 1f);
+        backend.MaskedAffineMixInPlace(
+            modelInput, injection, null, tokenMask,
+            sourceScale: 1f, noiseScale: 0f, layout: MaskBroadcastLayout.Rows);
+    }
+
+    /// <summary>Translates Comfy's masked x0 wrapper into Hartsy's positive-velocity Euler convention. First
+    /// <c>Dmodel=q+sigma*V</c>, then raw <c>m</c> produces <c>D=m*Dmodel+(1-m)*S</c>, and the exact native-sigma
+    /// Euler step is <c>zNext=(sigmaNext/sigma)*z+(1-sigmaNext/sigma)*D</c>. <paramref name="nextState"/> may be
+    /// the same tensor as <paramref name="modelInput"/> because the latter is consumed before the final mix.</summary>
+    internal static void AdvanceMaskedState(
+        IBackend backend, Tensor nextState, Tensor denoisedScratch, Tensor state, Tensor modelInput,
+        Tensor velocity, Tensor source, Tensor featureMask, MaskBroadcastLayout featureLayout,
+        float nativeSigma, float nextNativeSigma)
+    {
+        if (!float.IsFinite(nativeSigma) || !float.IsFinite(nextNativeSigma)
+            || nativeSigma <= 0f || nextNativeSigma < 0f || nextNativeSigma > nativeSigma)
         {
-            throw new InvalidOperationException("Validated MiniMax-H3 denoise mask lost its source or fixed noise.");
+            throw new ArgumentOutOfRangeException(nameof(nativeSigma), nativeSigma,
+                $"MiniMax-H3 masked Euler sigmas must satisfy 0 <= next <= current; got "
+                + $"{nextNativeSigma} and {nativeSigma}.");
         }
-        float sigma = Math.Clamp(nativeSigma, 0f, 1f);
-        Backend.MaskedAffineMixInPlace(target, source, sigma == 0f ? null : fixedNoise, mask,
-            sourceScale: 1f - sigma, noiseScale: sigma, layout: MaskBroadcastLayout.Rows);
+        backend.AffineMix(denoisedScratch, modelInput, velocity, 1f, nativeSigma);
+        backend.MaskedAffineMixInPlace(
+            denoisedScratch, source, null, featureMask,
+            sourceScale: 1f, noiseScale: 0f, layout: featureLayout);
+        float stateStrength = nextNativeSigma / nativeSigma;
+        backend.AffineMix(
+            nextState, state, denoisedScratch, stateStrength, 1f - stateStrength);
     }
 
     /// <summary>Resolves strength windows once before sampling, keeping managed allocations out of the denoise loop.</summary>

@@ -145,6 +145,26 @@ public class MiniMaxH3ConditioningTests
     }
 
     [Fact]
+    public void MaskPinsStayFixedWhenGuideAugmentationIsCustomized()
+    {
+        MiniMaxH3PackedLayout layout = Fl2va();
+        int videoRows = LatentT * (LatentH / 2) * (LatentW / 2);
+        float[] videoMask = Enumerable.Repeat(1f, videoRows).ToArray();
+        videoMask[0] = 0f;
+        float[] audioMask = Enumerable.Repeat(1f, AudioT * 2).ToArray();
+        audioMask[0] = 0f;
+        const float customGuideAug = 0.75f;
+
+        MiniMaxH3TimestepPlan plan = MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, tVideo: 0.5f, tAudio: 0.8f, customGuideAug, audioCondTimestep: 0.9f,
+            videoMask, audioMask);
+
+        Assert.Equal(customGuideAug, plan.Timesteps[plan.RowOf[MiniMaxH3SegmentKind.Cond]]);
+        Assert.Equal(MiniMaxH3Schedule.VisualCondTimestep, plan.Timesteps[plan.VideoRowOf![0]]);
+        Assert.Equal(MiniMaxH3Schedule.AudioCondTimestep, plan.Timesteps[plan.AudioRowOf![0]]);
+    }
+
+    [Fact]
     public void AllWhiteMasksCollapseExactlyToTheScalarTimestepPath()
     {
         MiniMaxH3PackedLayout layout = T2va();

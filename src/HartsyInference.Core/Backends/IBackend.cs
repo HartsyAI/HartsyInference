@@ -699,6 +699,7 @@ public interface IBackend : IDisposable
     }
 
     /// <summary>In-place masked affine replacement: <c>target = mask·target + (1−mask)·(sourceScale·source + noiseScale·noise)</c>. When <paramref name="noiseScale"/> is zero, <paramref name="noise"/> must be null and the noise term is omitted. Mask values are consumed exactly as supplied (never clamped). Source, noise, and mask remain unchanged.</summary>
+    /// <remarks>Packed layouts accept <c>[B,S,F]</c>/<c>[B,S,P]</c> or implicit-batch <c>[S,F]</c>/<c>[S,P]</c>.</remarks>
     unsafe void MaskedAffineMixInPlace(
         Tensor target,
         Tensor source,

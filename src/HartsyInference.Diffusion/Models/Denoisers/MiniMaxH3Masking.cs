@@ -79,10 +79,22 @@ public static class MiniMaxH3Masking
     }
 
     /// <summary>Resamples a continuous latent-space <c>[T,H,W]</c> video mask into patch rows with spatial
-    /// <c>amax</c>. Values remain continuous; only the 2-D patch reduction changes them. Returns null for an
-    /// all-white result so the caller can preserve the exact unmasked execution path.</summary>
+    /// <c>amax</c>, then rounds each token value upward to Comfy's 1/256 mask grid. Returns null only when the raw
+    /// mask is exactly all-white, so a mixed patch whose maximum is one remains distinguishable from a no-op.</summary>
     public static float[]? PackVideoMaskRows(ReadOnlySpan<float> latentMask, int latentFrames, int latentHeight,
         int latentWidth, int patchHeight = 2, int patchWidth = 2)
+    {
+        return PackVideoMaskRows(latentMask, latentFrames, latentHeight, latentWidth,
+            out _, patchHeight, patchWidth);
+    }
+
+    /// <summary>Resamples a continuous latent-space <c>[T,H,W]</c> video mask into both representations required
+    /// by MiniMax-H3 masking. The return value is the upward-quantized spatial <c>amax</c> per DiT token. The raw
+    /// <paramref name="featureMaskValues"/> retain every patch value in <c>[row, patchHeight*patchWidth]</c> order
+    /// (<c>py</c>, then <c>px</c>), matching the channel-outer feature order of
+    /// <see cref="MiniMaxH3Latents.PackVideo"/>. Both outputs are null only for an exactly all-white raw mask.</summary>
+    public static float[]? PackVideoMaskRows(ReadOnlySpan<float> latentMask, int latentFrames, int latentHeight,
+        int latentWidth, out float[]? featureMaskValues, int patchHeight = 2, int patchWidth = 2)
     {
         if (latentFrames <= 0 || latentHeight <= 0 || latentWidth <= 0)
         {
@@ -101,10 +113,22 @@ public static class MiniMaxH3Masking
         }
         ValidateValues(latentMask, nameof(latentMask));
 
+        bool rawAllWhite = true;
+        for (int i = 0; i < latentMask.Length; i++)
+        {
+            rawAllWhite &= latentMask[i] == 1f;
+        }
+        if (rawAllWhite)
+        {
+            featureMaskValues = null;
+            return null;
+        }
+
         int patchRows = MiniMaxH3Geometry.DivideRoundUp(latentHeight, patchHeight);
         int patchColumns = MiniMaxH3Geometry.DivideRoundUp(latentWidth, patchWidth);
         float[] rows = new float[checked(latentFrames * patchRows * patchColumns)];
-        bool allWhite = true;
+        int patchArea = checked(patchHeight * patchWidth);
+        featureMaskValues = new float[checked(rows.Length * patchArea)];
         int output = 0;
         for (int frame = 0; frame < latentFrames; frame++)
         {
@@ -116,20 +140,20 @@ public static class MiniMaxH3Masking
                     float maximum = float.NegativeInfinity;
                     for (int y = 0; y < patchHeight; y++)
                     {
-                        int sourceY = (patchY * patchHeight + y) % latentHeight;
+                        int sourceY = Math.Min(patchY * patchHeight + y, latentHeight - 1);
                         for (int x = 0; x < patchWidth; x++)
                         {
-                            int sourceX = (patchX * patchWidth + x) % latentWidth;
-                            maximum = Math.Max(maximum,
-                                latentMask[frameOffset + sourceY * latentWidth + sourceX]);
+                            int sourceX = Math.Min(patchX * patchWidth + x, latentWidth - 1);
+                            float value = latentMask[frameOffset + sourceY * latentWidth + sourceX];
+                            featureMaskValues[output * patchArea + y * patchWidth + x] = value;
+                            maximum = Math.Max(maximum, value);
                         }
                     }
-                    rows[output++] = maximum;
-                    allWhite &= maximum == 1f;
+                    rows[output++] = QuantizeTokenMask(maximum);
                 }
             }
         }
-        return allWhite ? null : rows;
+        return rows;
     }
 
     /// <summary>Linearly resamples mask values from their declared cadence to H3's 40-Hz audio rows, then repeats
@@ -137,6 +161,15 @@ public static class MiniMaxH3Masking
     /// for all-white output.</summary>
     public static float[]? ResampleAudioMask(IReadOnlyList<float> values, float sourceRate,
         int targetAudioLatentFrames, int channels = 2)
+    {
+        return ResampleAudioMask(values, sourceRate, targetAudioLatentFrames, out _, channels);
+    }
+
+    /// <summary>Resamples a continuous mask to H3's channel-major 40-Hz audio rows. The return value is rounded
+    /// upward to Comfy's 1/256 token-mask grid; <paramref name="featureMaskRows"/> retains the unquantized rows for
+    /// sampler blending. Both outputs are null only when every raw output row is exactly one.</summary>
+    public static float[]? ResampleAudioMask(IReadOnlyList<float> values, float sourceRate,
+        int targetAudioLatentFrames, out float[]? featureMaskRows, int channels = 2)
     {
         ArgumentNullException.ThrowIfNull(values);
         if (values.Count == 0)
@@ -171,15 +204,33 @@ public static class MiniMaxH3Masking
         }
         if (allWhite)
         {
+            featureMaskRows = null;
             return null;
         }
 
-        float[] rows = new float[checked(channels * targetAudioLatentFrames)];
+        featureMaskRows = new float[checked(channels * targetAudioLatentFrames)];
+        float[] tokenRows = new float[featureMaskRows.Length];
         for (int channel = 0; channel < channels; channel++)
         {
-            Array.Copy(mono, 0, rows, channel * targetAudioLatentFrames, mono.Length);
+            int offset = channel * targetAudioLatentFrames;
+            Array.Copy(mono, 0, featureMaskRows, offset, mono.Length);
+            for (int i = 0; i < mono.Length; i++)
+            {
+                tokenRows[offset + i] = QuantizeTokenMask(mono[i]);
+            }
         }
-        return rows;
+        return tokenRows;
+    }
+
+    /// <summary>Rounds one validated continuous mask value upward to H3's 1/256 token-mask grid.</summary>
+    public static float QuantizeTokenMask(float value)
+    {
+        if (!UnitInterval.Contains(value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(value), value,
+                "MiniMax-H3 mask values must be finite and in [0,1].");
+        }
+        return Math.Min(1f, MathF.Ceiling(value * 256f) / 256f);
     }
 
     private static void ValidateValues(ReadOnlySpan<float> values, string parameterName)

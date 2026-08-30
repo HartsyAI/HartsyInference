@@ -55,10 +55,15 @@ public static class MiniMaxH3Conditioning
         int audioTargetRows = TargetRows(layout, MiniMaxH3SegmentKind.Audio);
         IReadOnlyList<float>? effectiveVideoMask = ValidateMask(videoMaskRows, videoTargetRows, nameof(videoMaskRows));
         IReadOnlyList<float>? effectiveAudioMask = ValidateMask(audioMaskRows, audioTargetRows, nameof(audioMaskRows));
+        // Guide augmentation is request-configurable, but the denoise-mask source is injected at H3's fixed training
+        // condition strength. Reusing the guide value here would label identical masked content differently merely
+        // because an unrelated guide changed its augmentation knob.
+        float videoMaskPin = Math.Max(tVideo, MiniMaxH3Schedule.VisualCondTimestep);
+        float audioMaskPin = Math.Max(tAudio, MiniMaxH3Schedule.AudioCondTimestep);
         float[]? videoRowTimesteps = effectiveVideoMask is null ? null
-            : MaskedRowTimesteps(effectiveVideoMask, 1f - tVideo, tCond);
+            : MaskedRowTimesteps(effectiveVideoMask, 1f - tVideo, videoMaskPin);
         float[]? audioRowTimesteps = effectiveAudioMask is null ? null
-            : MaskedRowTimesteps(effectiveAudioMask, 1f - tAudio, tRefAudio);
+            : MaskedRowTimesteps(effectiveAudioMask, 1f - tAudio, audioMaskPin);
         if (videoRowTimesteps is not null)
         {
             distinct.UnionWith(videoRowTimesteps);

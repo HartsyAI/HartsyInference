@@ -8,10 +8,12 @@ public enum MaskBroadcastLayout
     /// <summary><c>target/source/noise=[B,C,H,W]</c>, <c>mask=[B,1,H,W]</c>; mask broadcasts over C.</summary>
     DenseNchwBroadcast,
 
-    /// <summary><c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=C·P</c>; feature <c>f=c·P+p</c> uses mask entry <c>p</c>.</summary>
+    /// <summary>For packed features <c>F=C·P</c>, feature <c>f=c·P+p</c> uses mask entry <c>p</c>.</summary>
+    /// <remarks>Accepts <c>target/source/noise=[B,S,F]</c> with <c>mask=[B,S,P]</c>, or implicit-batch <c>[S,F]</c> with <c>[S,P]</c>.</remarks>
     PackedChannelOuter,
 
-    /// <summary><c>target/source/noise=[B,S,F]</c>, <c>mask=[B,S,P]</c>, <c>F=P·C</c>; feature <c>f=p·C+c</c> uses mask entry <c>p</c>.</summary>
+    /// <summary>For packed features <c>F=P·C</c>, feature <c>f=p·C+c</c> uses mask entry <c>p</c>.</summary>
+    /// <remarks>Accepts <c>target/source/noise=[B,S,F]</c> with <c>mask=[B,S,P]</c>, or implicit-batch <c>[S,F]</c> with <c>[S,P]</c>.</remarks>
     PackedChannelInner,
 
     /// <summary><c>target/source/noise=[S,F]</c>, <c>mask=[S]</c>; one mask value broadcasts over every feature in its row.</summary>
@@ -130,20 +132,26 @@ internal static class MixContract
     private static MaskedMixGeometry ValidatePacked(
         Tensor target, Tensor mask, long count, MaskBroadcastLayout layout)
     {
-        if (target.Shape.Rank != 3)
+        if (target.Shape.Rank is not (2 or 3))
             throw new ArgumentException(
-                $"{layout} target must be rank-3 [B,S,F]; got {target.Shape}.", nameof(target));
-        if (mask.Shape.Rank != 3)
+                $"{layout} target must be rank-2 [S,F] or rank-3 [B,S,F]; got {target.Shape}.", nameof(target));
+        if (mask.Shape.Rank != target.Shape.Rank)
             throw new ArgumentException(
-                $"{layout} mask must be rank-3 [B,S,P]; got {mask.Shape}.", nameof(mask));
+                $"{layout} mask rank must match target rank as [S,P] or [B,S,P]; " +
+                $"got target={target.Shape}, mask={mask.Shape}.", nameof(mask));
 
-        long batch = target.Shape[0];
-        long tokens = target.Shape[1];
-        long featureDimension = target.Shape[2];
-        long patchArea = mask.Shape[2];
-        if (mask.Shape[0] != batch || mask.Shape[1] != tokens)
+        bool hasExplicitBatch = target.Shape.Rank == 3;
+        long batch = hasExplicitBatch ? target.Shape[0] : 1;
+        long tokens = hasExplicitBatch ? target.Shape[1] : target.Shape[0];
+        long featureDimension = hasExplicitBatch ? target.Shape[2] : target.Shape[1];
+        long patchArea = hasExplicitBatch ? mask.Shape[2] : mask.Shape[1];
+        bool leadingShapeMatches = hasExplicitBatch
+            ? mask.Shape[0] == batch && mask.Shape[1] == tokens
+            : mask.Shape[0] == tokens;
+        if (!leadingShapeMatches)
             throw new ArgumentException(
-                $"{layout} mask must have leading shape [{batch},{tokens}]; got {mask.Shape}.", nameof(mask));
+                $"{layout} mask must have leading shape " +
+                $"{(hasExplicitBatch ? $"[{batch},{tokens}]" : $"[{tokens}]")}; got {mask.Shape}.", nameof(mask));
         if (featureDimension % patchArea != 0)
             throw new ArgumentException(
                 $"{layout} feature dimension F={featureDimension} must be divisible by inferred patch area P={patchArea}.",

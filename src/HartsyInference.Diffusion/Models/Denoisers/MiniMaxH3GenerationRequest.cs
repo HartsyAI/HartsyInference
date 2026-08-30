@@ -57,15 +57,22 @@ public sealed record MiniMaxH3GenerationRequest
     /// <summary>Pre-encoded Fun ControlNet streams; identical model indices share one registered branch.</summary>
     public IReadOnlyList<MiniMaxH3FunControlCondition>? Controls { get; init; }
 
-    /// <summary>Continuous target-video mask in packed row order, where one generates and zero preserves. Null is
-    /// the exact unmasked path.</summary>
+    /// <summary>Upward-quantized target-video token mask in packed row order, where one generates and zero
+    /// preserves. Each value is the spatial <c>amax</c> of one 2x2 latent patch. Null is the exact unmasked path.</summary>
     public IReadOnlyList<float>? VideoDenoiseMaskRows { get; init; }
+
+    /// <summary>Raw continuous target-video mask flattened as <c>[row, patchArea]</c> in channel-outer packed-feature
+    /// order. For H3's 1x2x2 patch this is <c>py</c>, then <c>px</c>. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? VideoDenoiseFeatureMaskValues { get; init; }
 
     /// <summary>Packed source-video rows restored below one, borrowed for the generation's lifetime.</summary>
     public Tensor? VideoDenoiseSourceRows { get; init; }
 
-    /// <summary>Continuous channel-major target-audio mask rows. Null is the exact unmasked path.</summary>
+    /// <summary>Upward-quantized channel-major target-audio token-mask rows. Null is the exact unmasked path.</summary>
     public IReadOnlyList<float>? AudioDenoiseMaskRows { get; init; }
+
+    /// <summary>Raw continuous channel-major target-audio feature-mask rows. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? AudioDenoiseFeatureMaskRows { get; init; }
 
     /// <summary>Channel-major source-audio rows restored below one, borrowed for the generation's lifetime.</summary>
     public Tensor? AudioDenoiseSourceRows { get; init; }

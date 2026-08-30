@@ -127,8 +127,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private sealed record PreparedDenoiseMasks : IDisposable
     {
         public float[]? VideoRows { get; init; }
+        public float[]? VideoFeatureValues { get; init; }
         public Tensor? VideoSourceRows { get; init; }
         public float[]? AudioRows { get; init; }
+        public float[]? AudioFeatureRows { get; init; }
         public Tensor? AudioSourceRows { get; init; }
 
         public void Dispose()
@@ -311,8 +313,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     CondVideoRows = condVideoRows,
                     CondAudioRows = condAudioRows,
                     VideoDenoiseMaskRows = denoiseMasks.VideoRows,
+                    VideoDenoiseFeatureMaskValues = denoiseMasks.VideoFeatureValues,
                     VideoDenoiseSourceRows = denoiseMasks.VideoSourceRows,
                     AudioDenoiseMaskRows = denoiseMasks.AudioRows,
+                    AudioDenoiseFeatureMaskRows = denoiseMasks.AudioFeatureRows,
                     AudioDenoiseSourceRows = denoiseMasks.AudioSourceRows,
                     Controls = controls.Count == 0 ? null : controls,
                 };
@@ -881,11 +885,20 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         int latentH = height / VaeSpatialRatio;
         int latentW = width / VaeSpatialRatio;
         int audioT = MiniMaxH3Geometry.AudioLatentFrames(frames);
-        float[]? videoMaskRows = request.VideoDenoiseMask is null ? null
-            : PrepareVideoMaskRows(request.VideoDenoiseMask, latentT, latentH, latentW, cancel);
-        float[]? audioMaskRows = request.AudioDenoiseMask is null ? null
-            : MiniMaxH3Masking.ResampleAudioMask(request.AudioDenoiseMask.Values,
-                request.AudioDenoiseMask.Rate, audioT);
+        float[]? videoMaskRows = null;
+        float[]? videoFeatureMaskValues = null;
+        if (request.VideoDenoiseMask is not null)
+        {
+            videoMaskRows = PrepareVideoMaskRows(request.VideoDenoiseMask, latentT, latentH, latentW,
+                cancel, out videoFeatureMaskValues);
+        }
+        float[]? audioMaskRows = null;
+        float[]? audioFeatureMaskRows = null;
+        if (request.AudioDenoiseMask is not null)
+        {
+            audioMaskRows = MiniMaxH3Masking.ResampleAudioMask(request.AudioDenoiseMask.Values,
+                request.AudioDenoiseMask.Rate, audioT, out audioFeatureMaskRows);
+        }
 
         Tensor? videoSourceRows = null;
         Tensor? audioSourceRows = null;
@@ -946,8 +959,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             PreparedDenoiseMasks prepared = new PreparedDenoiseMasks
             {
                 VideoRows = videoMaskRows,
+                VideoFeatureValues = videoFeatureMaskValues,
                 VideoSourceRows = videoSourceRows,
                 AudioRows = audioMaskRows,
+                AudioFeatureRows = audioFeatureMaskRows,
                 AudioSourceRows = audioSourceRows,
             };
             videoSourceRows = null;
@@ -962,7 +977,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     }
 
     private static float[]? PrepareVideoMaskRows(VideoDenoiseMask mask, int latentT, int latentH, int latentW,
-        CancellationToken cancel)
+        CancellationToken cancel, out float[]? featureMaskValues)
     {
         List<byte[]> grayscale;
         if (mask.MaskImage is not null)
@@ -1015,7 +1030,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             }
         }
         return MiniMaxH3Masking.PackVideoMaskRows(latentMask, latentT, latentH, latentW,
-            patchHeight: 2, patchWidth: 2);
+            out featureMaskValues, patchHeight: 2, patchWidth: 2);
     }
 
     private static IReadOnlyList<byte[]> PrepareVideoMaskSource(
