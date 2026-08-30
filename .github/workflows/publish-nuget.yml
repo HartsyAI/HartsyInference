@@ -138,7 +138,11 @@ jobs:
             ROOT_LOWER=$(printf '%s' "$ROOT_PACKAGE" | tr '[:upper:]' '[:lower:]')
             CONSUMER_DIR="$CONSUMER_ROOT/$ROOT_LOWER"
             CONSUMER_PACKAGES="$CONSUMER_DIR/packages"
-            dotnet new console --framework net10.0 --output "$CONSUMER_DIR" --no-restore
+            # --name is load-bearing: without it the project is named after its directory, so the
+            # HartsyInference consumer becomes hartsyinference.csproj and referencing HartsyInference is a
+            # self-reference (NU1108 "Cycle detected"). The pre-loop version escaped this only because
+            # mktemp -d gave the directory a random name.
+            dotnet new console --framework net10.0 --output "$CONSUMER_DIR" --name ptxconsumer --no-restore
             CONSUMER_PROJECT=$(find "$CONSUMER_DIR" -maxdepth 1 -name '*.csproj' -print -quit)
             dotnet add "$CONSUMER_PROJECT" package "$ROOT_PACKAGE" --version "$VER" --no-restore
             NUGET_PACKAGES="$CONSUMER_PACKAGES" dotnet restore "$CONSUMER_PROJECT" \
