@@ -188,8 +188,7 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         if (spec.LocalPath is null)
         {
-            throw new FileNotFoundException(
-                "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
+            throw NoCheckpoint(spec);
         }
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity.
@@ -405,8 +404,7 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         if (spec.LocalPath is null)
         {
-            throw new FileNotFoundException(
-                "No checkpoint found for this model. Pass a checkpoint via --model-path or let the catalog fetch it first.");
+            throw NoCheckpoint(spec);
         }
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
@@ -449,13 +447,26 @@ public sealed class InferenceEngine : IInferenceEngine
         return pipeline;
     }
 
+    /// <summary>Names the unresolved selection instead of letting a null path reach a loader that can only report
+    /// the empty path it was handed.</summary>
+    private static FileNotFoundException NoCheckpoint(ModelSpec spec) => new FileNotFoundException(
+        $"No checkpoint found for model '{spec.Requested}'. Pass a checkpoint via --model-path, or let the "
+        + "catalog fetch it first.");
+
     /// <summary>The family id (catalog slug) for <paramref name="spec"/>: the catalog id when present, else a slug
     /// mapped from the coarse tensor-signature architecture the Engine can detect from a raw checkpoint.</summary>
     private static string ResolveFamilyId(ModelSpec spec)
     {
         if (spec.Catalog is not null)
             return spec.Catalog.Id;
-        ModelArchitecture arch = PipelineFactory.DetectArchitecture(spec.LocalPath!);
+        // Reached before every construction guard, via SupportedFeatures/DefaultsFor. An unknown selection has no
+        // catalog entry AND no located file, so without this the null path lands in the layout resolver and the
+        // caller is told "Model path not found: " with nothing after the colon.
+        if (spec.LocalPath is null)
+        {
+            throw NoCheckpoint(spec);
+        }
+        ModelArchitecture arch = PipelineFactory.DetectArchitecture(spec.LocalPath);
         return arch switch
         {
             ModelArchitecture.Sdxl => "sdxl",
