@@ -186,7 +186,7 @@ public sealed class InferenceEngine : IInferenceEngine
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
     internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null)
     {
-        if (spec.LocalPath is null)
+        if (string.IsNullOrEmpty(spec.LocalPath))
         {
             throw NoCheckpoint(spec);
         }
@@ -402,7 +402,7 @@ public sealed class InferenceEngine : IInferenceEngine
     internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec, VideoRequest? request = null,
         VideoPlan? plan = null)
     {
-        if (spec.LocalPath is null)
+        if (string.IsNullOrEmpty(spec.LocalPath))
         {
             throw NoCheckpoint(spec);
         }
@@ -462,7 +462,7 @@ public sealed class InferenceEngine : IInferenceEngine
         // Reached before every construction guard, via SupportedFeatures/DefaultsFor. An unknown selection has no
         // catalog entry AND no located file, so without this the null path lands in the layout resolver and the
         // caller is told "Model path not found: " with nothing after the colon.
-        if (spec.LocalPath is null)
+        if (string.IsNullOrEmpty(spec.LocalPath))
         {
             throw NoCheckpoint(spec);
         }

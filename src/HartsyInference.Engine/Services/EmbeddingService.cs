@@ -29,8 +29,8 @@ public sealed class EmbeddingService : IEmbeddingService, IDisposable
         if (string.IsNullOrEmpty(path))
         {
             throw new HartsyInferenceException(
-                "Embedding model has no local path. Pass a .gguf file via the model spec (looked under " +
-                $"'{RepoPaths.ModelsRoot()}').");
+                $"No checkpoint found for model '{spec.Requested}'. Pass a .gguf file via the model spec " +
+                $"(looked under '{RepoPaths.ModelsRoot()}').");
         }
 
         DecoderEmbeddingModel model = _models.GetOrAdd(path, p => DecoderEmbeddingModel.Load(p));
