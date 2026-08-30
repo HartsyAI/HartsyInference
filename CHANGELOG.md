@@ -8,6 +8,26 @@ stable release will require. Dates are UTC.
 
 ## [Unreleased]
 
+### Fixed
+- **A missing checkpoint is now one contract: HTTP 400, naming the model the caller asked for.** Selecting a
+  model that is neither in the catalog nor on disk reported `Model path not found: ` — an empty path, and no
+  mention of the selection that failed. `InferenceEngine.ResolveFamilyId` is reached through
+  `SupportedFeatures`/`DefaultsFor` before either construction guard, and handed its null `LocalPath` straight
+  to `ModelLayoutResolver`, which could only echo the empty path it was given. Three engine guards now share
+  one helper, and every modality service was brought onto the same contract:
+  - Text, embedding, mesh, world and restore name the requested model instead of a generic noun.
+  - Vision's embed path and its per-annotator `RequirePath` raised `InvalidOperationException`, which no
+    `GenerationErrors` arm maps — so an absent checkpoint surfaced as **HTTP 500 `server_error`**. They now
+    raise `FileNotFoundException` (400), and `RequirePath` names both the caller's id and the family it
+    resolved to rather than a hardcoded label the caller may never have typed.
+  - The four vision annotator "not installed" errors (CLIPSeg, YOLO, Grounding DINO, RT-DETR) were 500s for
+    the same reason and are now 400s.
+  - An empty model id resolved `Path.Combine(root, "Vision", "")` to the modality *folder*, which exists — so
+    it passed every null guard and failed deep inside a loader, naming a server path the caller never sent.
+    `ModelResolver` now declines a blank id.
+  - `WorldService` checked for a checkpoint before its "catalogued but not loadable" cases, so `matrix-game-2`
+    and `matrix-game-3` reported a missing file instead of the explanation that no file would help.
+
 ### Changed
 - **LTX-2.5 defaults are template-faithful.** Distilled checkpoints now run the shipped ComfyUI workflow by
   default: 8-step fixed-sigma base pass at the half grid, learned x2 latent upsample (auto-downloaded side

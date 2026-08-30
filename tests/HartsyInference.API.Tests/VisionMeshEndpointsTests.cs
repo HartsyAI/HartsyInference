@@ -1,15 +1,15 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
 namespace HartsyInference.API.Tests;
 
 /// <summary>In-process tests for <c>/v1/native/{vision,mesh}</c>. Runs on the CPU backend with no model ever
-/// loaded. Each "unresolvable model" expectation below was confirmed by reading the actual service source first —
-/// this repo's services are NOT consistent about which exception type signals "no checkpoint", so guessing a
-/// single status code across modalities would be wrong (Vision's Embed path hits an unmapped
-/// InvalidOperationException → 500; Mesh hits FileNotFoundException → 400, same as images).</summary>
+/// loaded. "No checkpoint" is now one contract across modalities — FileNotFoundException, mapped to 400, with the
+/// caller's own selection named in the message — so these assert that rather than the per-service exception
+/// accidents they used to document.</summary>
 public sealed class VisionMeshEndpointsTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory;
@@ -20,18 +20,21 @@ public sealed class VisionMeshEndpointsTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
-    public async Task Vision_Embed_UnresolvableModel_Returns500()
+    public async Task Vision_Embed_UnresolvableModel_Returns400NamingTheModel()
     {
-        // VisionService.Embed throws InvalidOperationException for a null LocalPath, which GenerationErrors
-        // doesn't special-case (unlike FileNotFoundException/HartsyInferenceException) — documenting the real
-        // current behavior, not an aspirational 400.
+        // A checkpoint the caller can supply is the caller's problem to fix, so VisionService.Embed raises
+        // FileNotFoundException and GenerationErrors maps it to 400 — it used to raise InvalidOperationException
+        // and fall through to a 500 that named nothing.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/vision", new
         {
             model = "not-a-real-vision-model",
             request = new { image = new { rgb = Convert.ToBase64String([0, 0, 0]), width = 1, height = 1 }, mode = "Embed" },
         });
-        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains("not-a-real-vision-model", body.GetProperty("error").GetProperty("message").GetString()!,
+            StringComparison.Ordinal);
     }
 
     [Fact]

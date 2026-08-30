@@ -249,8 +249,8 @@ public sealed class TextService : ITextService, IDisposable
         string? path = spec.LocalPath;
         if (string.IsNullOrEmpty(path))
             throw new HartsyInferenceException(
-                "Text model has no local path. Pass a .gguf file via the model spec (looked under " +
-                $"'{RepoPaths.ModelsRoot()}').");
+                $"No checkpoint found for model '{spec.Requested}'. Pass a .gguf file via the model spec " +
+                $"(looked under '{RepoPaths.ModelsRoot()}').");
         if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
             return;
         string[] shardDevices = ResolveShardDevices(deviceKey);

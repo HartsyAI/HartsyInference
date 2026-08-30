@@ -47,11 +47,9 @@ public sealed class WorldService : IWorldService, IDisposable
     /// <summary>Loads (or returns the cached) world pipeline for <paramref name="spec"/>, chosen by catalog id.</summary>
     private LoadedWorld GetOrLoad(ModelSpec spec)
     {
-        if (spec.LocalPath is null)
-        {
-            throw new FileNotFoundException("No world-model checkpoint found. Pass it as the spec's local path.");
-        }
         string id = (spec.Catalog?.Id ?? "oasis").ToLowerInvariant();
+        // Ordered before the checkpoint guard: these two are not loadable at any path, so the generic
+        // "no checkpoint" line would send the caller hunting for weights that cannot help them.
         switch (id)
         {
             case "matrix-game-2":
@@ -64,6 +62,11 @@ public sealed class WorldService : IWorldService, IDisposable
                     "matrix-game-3 is catalogued but not yet loadable: its checkpoint set is ~27GB minimum, and it has "
                     + "no image-to-latent encoder ported (Wan22VaeEncoder is decode-only today) — the seed image cannot "
                     + "reach the pipeline yet even with weights present.");
+        }
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for world model '{spec.Requested}'. Supply its local path.");
         }
         lock (_gate)
         {

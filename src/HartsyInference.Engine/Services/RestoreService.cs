@@ -98,7 +98,9 @@ public sealed class RestoreService : IRestoreService
     private SeedVr2RestorePipeline GetOrLoadPipeline(ModelSpec spec)
     {
         string ditPath = spec.LocalPath
-            ?? throw new InvalidOperationException("SeedVR2 checkpoint path did not resolve.");
+            ?? throw new FileNotFoundException(
+                $"No checkpoint found for model '{spec.Requested}'. Supply its local path, or select a SeedVR2 "
+                + "catalog id so its assets download first.");
         lock (_lock)
         {
             if (_pipeline is not null && _loadedPath == ditPath)

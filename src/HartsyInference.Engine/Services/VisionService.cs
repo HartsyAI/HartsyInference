@@ -85,8 +85,9 @@ public sealed class VisionService : IVisionService, IDisposable
     {
         string id = (spec.Catalog?.Id ?? spec.Requested ?? "").ToLowerInvariant();
         string path = spec.LocalPath
-            ?? throw new InvalidOperationException(
-                $"'{id}' checkpoint not found. Pass --model-path, or select a catalog id with auto-download assets.");
+            ?? throw new FileNotFoundException(
+                $"No checkpoint found for model '{id}'. Supply its local path, or select a catalog id with "
+                + "auto-download assets.");
         return id switch
         {
             "siglip" => new VisionResult { Embedding = EmbedSiglip(path, request) },
@@ -352,11 +353,14 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>Resolves the checkpoint path for a single-asset catalog model, or throws with the model id in the message (mirrors the Embed-mode error, generalized to any single-primary-asset vision mode).</summary>
+    /// <summary>Resolves the checkpoint path for a single-asset catalog model, or throws naming BOTH the caller's
+    /// own selection and the family it resolved to — <paramref name="label"/> alone is a literal the caller may
+    /// never have typed.</summary>
     private static string RequirePath(ModelSpec spec, string label) =>
         spec.LocalPath
-        ?? throw new InvalidOperationException(
-            $"'{label}' checkpoint not found. Pass --model-path, or select -m {label} to auto-download.");
+        ?? throw new FileNotFoundException(
+            $"No checkpoint found for model '{spec.Catalog?.Id ?? spec.Requested}' (resolved to the '{label}' "
+            + $"family). Supply its local path, or select '{label}' to auto-download it.");
 
     /// <summary>Loads a raw <c>.pt</c>/<c>.pth</c> checkpoint and tracks its loader for the service's lifetime (its tensors are only valid while the loader is alive — see <see cref="_annotatorLoaders"/>).</summary>
     private Dictionary<string, Tensor> LoadPickle(string path)
@@ -496,7 +500,7 @@ public sealed class VisionService : IVisionService, IDisposable
         if (target.Kind == VisionTargetKind.ClipSeg)
         {
             string dir = VisionModelPaths.FindClipSegDirectory(spec.LocalPath)
-                ?? throw new InvalidOperationException(
+                ?? throw new FileNotFoundException(
                     "CLIPSeg model not found. Place the 'clipseg-rd64-refined' folder (with model.safetensors) inside "
                     + $"a '{VisionModelPaths.ClipSegFolder}' folder under '{RepoPaths.ModelsRoot()}'.");
             byte[]? mask = _clipSeg.Segment(Backend, dir, image, target.Query, MaskThreshold(request));
@@ -537,7 +541,7 @@ public sealed class VisionService : IVisionService, IDisposable
             case VisionTargetKind.Yolo:
             {
                 string path = VisionModelPaths.FindYolo(target.ModelName, spec.LocalPath)
-                    ?? throw new InvalidOperationException(
+                    ?? throw new FileNotFoundException(
                         $"YOLO model '{target.ModelName}' not found. Place a .safetensors YOLO model in a "
                         + $"'{VisionModelPaths.YoloFolder}' folder under '{RepoPaths.ModelsRoot()}' (the engine loads "
                         + "safetensors, not Ultralytics .pt files).");
@@ -548,7 +552,7 @@ public sealed class VisionService : IVisionService, IDisposable
                 (string? checkpoint, string? vocab) = VisionModelPaths.FindGroundingDino(spec.LocalPath);
                 if (checkpoint is null || vocab is null)
                 {
-                    throw new InvalidOperationException(
+                    throw new FileNotFoundException(
                         "Grounding DINO model not found. Place 'model.safetensors' and 'vocab.txt' (from "
                         + $"IDEA-Research/grounding-dino-tiny) in a '{VisionModelPaths.GroundingDinoFolder}' folder "
                         + $"under '{RepoPaths.ModelsRoot()}'.");
@@ -558,7 +562,7 @@ public sealed class VisionService : IVisionService, IDisposable
             case VisionTargetKind.RtDetr:
             {
                 string path = VisionModelPaths.FindCheckpoint(spec.LocalPath, VisionModelPaths.RtDetrFolder)
-                    ?? throw new InvalidOperationException(
+                    ?? throw new FileNotFoundException(
                         "RT-DETR model not found. Place a converted rtdetr_r18vd .safetensors in a "
                         + $"'{VisionModelPaths.RtDetrFolder}' folder under '{RepoPaths.ModelsRoot()}'.");
                 return _rtDetr.Detect(Backend, path, request.Image, threshold);
