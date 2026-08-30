@@ -26,13 +26,25 @@ public sealed record MiniMaxH3GenerationRequest
 
     public float SigmaShiftAudio { get; init; } = MiniMaxH3Schedule.DefaultShiftAudio;
 
-    /// <summary>First/last-frame anchors for fl2va; null is plain t2va.</summary>
+    /// <summary>Resolved sampler name. Native PDD revalidates this at the execution boundary.</summary>
+    public string Sampler { get; init; } = "euler";
+
+    /// <summary>Resolved classifier-free guidance value. H3 acceleration profiles require one.</summary>
+    public float CfgScale { get; init; } = 1f;
+
+    /// <summary>Resolved PDD adapter strength. Ordinary dense generations leave this at one and ignore it.</summary>
+    public float PddAdapterStrength { get; init; } = 1f;
+
+    /// <summary>Whether planning selected the Hybrid FL+reference packing contract.</summary>
+    internal bool HybridProfile { get; init; }
+
+    /// <summary>Target-relative visual/audio anchors; null is plain t2va or reference-only ref2va.</summary>
     public IReadOnlyList<MiniMaxH3Keyframe>? Keyframes { get; init; }
 
     /// <summary>Reference blocks for ref2va; null is plain t2va.</summary>
     public IReadOnlyList<MiniMaxH3RefBlock>? Refs { get; init; }
 
-    /// <summary>Aligned pixel frame count, required only to resolve a last-frame keyframe's anchor.</summary>
+    /// <summary>Aligned target frame count used to validate already-resolved guide indices.</summary>
     public int? FrameCount { get; init; }
 
     /// <summary>Patchified conditioning video rows in packed-segment order, borrowed for the generation's lifetime.
@@ -41,6 +53,29 @@ public sealed record MiniMaxH3GenerationRequest
 
     /// <summary>Channel-major conditioning audio rows in packed-segment order, borrowed for the generation's lifetime.</summary>
     public Tensor? CondAudioRows { get; init; }
+
+    /// <summary>Pre-encoded Fun ControlNet streams; identical model indices share one registered branch.</summary>
+    internal IReadOnlyList<MiniMaxH3FunControlCondition>? Controls { get; init; }
+
+    /// <summary>Upward-quantized target-video token mask in packed row order, where one generates and zero
+    /// preserves. Each value is the spatial <c>amax</c> of one 2x2 latent patch. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? VideoDenoiseMaskRows { get; init; }
+
+    /// <summary>Raw continuous target-video mask flattened as <c>[row, patchArea]</c> in channel-outer packed-feature
+    /// order. For H3's 1x2x2 patch this is <c>py</c>, then <c>px</c>. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? VideoDenoiseFeatureMaskValues { get; init; }
+
+    /// <summary>Packed source-video rows restored below one, borrowed for the generation's lifetime.</summary>
+    public Tensor? VideoDenoiseSourceRows { get; init; }
+
+    /// <summary>Upward-quantized channel-major target-audio token-mask rows. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? AudioDenoiseMaskRows { get; init; }
+
+    /// <summary>Raw continuous channel-major target-audio feature-mask rows. Null is the exact unmasked path.</summary>
+    public IReadOnlyList<float>? AudioDenoiseFeatureMaskRows { get; init; }
+
+    /// <summary>Channel-major source-audio rows restored below one, borrowed for the generation's lifetime.</summary>
+    public Tensor? AudioDenoiseSourceRows { get; init; }
 
     /// <summary>Blend toward noise applied to visual conditioning rows; also the timestep they modulate at. Below 1
     /// the reference blends in noise to keep conditioning from being trusted as perfectly clean.</summary>

@@ -61,6 +61,7 @@ public class MiniMaxH3ConditioningTests
         Assert.Equal([0.5f, 0.8f, VisAug], t);
         Assert.Equal(2, rowOf[MiniMaxH3SegmentKind.Cond]);
         Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Video]);
+        Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefImage));
         Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefAudio));
     }
 
@@ -72,6 +73,27 @@ public class MiniMaxH3ConditioningTests
         Assert.Equal([0.5f, 0.8f, VisAug, AudAug], t);
         Assert.Equal(2, rowOf[MiniMaxH3SegmentKind.RefImage]);
         Assert.Equal(3, rowOf[MiniMaxH3SegmentKind.RefAudio]);
+    }
+
+    [Fact]
+    public void PairedGuideAudioUsesThePinnedAudioTimestep()
+    {
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT,
+            keyframes:
+            [
+                new MiniMaxH3Keyframe
+                {
+                    ResolvedFrameIndex = 2,
+                    VideoLatentFrames = 0,
+                    AudioLatentFrames = 3,
+                },
+            ], frameCount: 17);
+        (float[] timesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
+            MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo: 0.5f, tAudio: 0.8f, VisAug, AudAug);
+        Assert.Equal([0.5f, 0.8f, AudAug], timesteps);
+        Assert.Equal(2, rowOf[MiniMaxH3SegmentKind.CondAudio]);
+        Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefAudio));
+        Assert.Equal((0, 6), MiniMaxH3Conditioning.ConditioningRowCounts(layout));
     }
 
     [Fact]
@@ -93,6 +115,81 @@ public class MiniMaxH3ConditioningTests
         Assert.Equal([0.5f, 0.8f], t);
         Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Audio]);
         Assert.Equal(1, rowOf[MiniMaxH3SegmentKind.Video]);
+    }
+
+    [Fact]
+    public void ContinuousMasksProducePerTargetRowTimestepsAndClampBlackRowsToTheConditionPin()
+    {
+        MiniMaxH3PackedLayout layout = T2va();
+        int videoRows = LatentT * (LatentH / 2) * (LatentW / 2);
+        int audioRows = AudioT * 2;
+        float[] videoMask = Enumerable.Repeat(1f, videoRows).ToArray();
+        float[] audioMask = Enumerable.Repeat(1f, audioRows).ToArray();
+        videoMask[0] = 0f;
+        videoMask[1] = 0.5f;
+        audioMask[0] = 0f;
+        audioMask[1] = 0.5f;
+
+        MiniMaxH3TimestepPlan plan = MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, tVideo: 0.5f, tAudio: 0.8f, VisAug, AudAug, videoMask, audioMask);
+
+        Assert.Equal([0.5f, 0.75f, 0.8f, 0.9f, VisAug, AudAug], plan.Timesteps);
+        Assert.NotNull(plan.VideoRowOf);
+        Assert.NotNull(plan.AudioRowOf);
+        Assert.Equal(4, plan.VideoRowOf![0]);
+        Assert.Equal(1, plan.VideoRowOf[1]);
+        Assert.Equal(0, plan.VideoRowOf[2]);
+        Assert.Equal(5, plan.AudioRowOf![0]);
+        Assert.Equal(3, plan.AudioRowOf[1]);
+        Assert.Equal(2, plan.AudioRowOf[2]);
+    }
+
+    [Fact]
+    public void MaskPinsStayFixedWhenGuideAugmentationIsCustomized()
+    {
+        MiniMaxH3PackedLayout layout = Fl2va();
+        int videoRows = LatentT * (LatentH / 2) * (LatentW / 2);
+        float[] videoMask = Enumerable.Repeat(1f, videoRows).ToArray();
+        videoMask[0] = 0f;
+        float[] audioMask = Enumerable.Repeat(1f, AudioT * 2).ToArray();
+        audioMask[0] = 0f;
+        const float customGuideAug = 0.75f;
+
+        MiniMaxH3TimestepPlan plan = MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, tVideo: 0.5f, tAudio: 0.8f, customGuideAug, audioCondTimestep: 0.9f,
+            videoMask, audioMask);
+
+        Assert.Equal(customGuideAug, plan.Timesteps[plan.RowOf[MiniMaxH3SegmentKind.Cond]]);
+        Assert.Equal(MiniMaxH3Schedule.VisualCondTimestep, plan.Timesteps[plan.VideoRowOf![0]]);
+        Assert.Equal(MiniMaxH3Schedule.AudioCondTimestep, plan.Timesteps[plan.AudioRowOf![0]]);
+    }
+
+    [Fact]
+    public void AllWhiteMasksCollapseExactlyToTheScalarTimestepPath()
+    {
+        MiniMaxH3PackedLayout layout = T2va();
+        float[] videoMask = Enumerable.Repeat(1f, LatentT * (LatentH / 2) * (LatentW / 2)).ToArray();
+        float[] audioMask = Enumerable.Repeat(1f, AudioT * 2).ToArray();
+
+        MiniMaxH3TimestepPlan plan = MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, tVideo: 0.5f, tAudio: 0.8f, VisAug, AudAug, videoMask, audioMask);
+
+        Assert.Equal([0.5f, 0.8f], plan.Timesteps);
+        Assert.Null(plan.VideoRowOf);
+        Assert.Null(plan.AudioRowOf);
+    }
+
+    [Fact]
+    public void MaskRowCountAndRangeAreValidatedBeforeEmbedding()
+    {
+        MiniMaxH3PackedLayout layout = T2va();
+        Assert.Throws<ArgumentException>(() => MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, 0.5f, 0.8f, VisAug, AudAug, [1f], null));
+
+        float[] audioMask = Enumerable.Repeat(1f, AudioT * 2).ToArray();
+        audioMask[3] = -0.01f;
+        Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3Conditioning.BuildMaskedTimestepRows(
+            layout, 0.5f, 0.8f, VisAug, AudAug, null, audioMask));
     }
 
     [Fact]

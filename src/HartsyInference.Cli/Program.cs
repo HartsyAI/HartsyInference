@@ -92,7 +92,7 @@ public static class Program
                 .WithDescription("Generate music from a prompt with MusicGen (saves a WAV).")
                 .WithExample("music", "\"lofi hip hop, mellow piano\"", "--model-path", "musicgen-small.safetensors");
             config.AddCommand<ConvertCommand>("convert")
-                .WithDescription("Re-voice a source clip with RVC or OpenVoice (saves a WAV).")
+                .WithDescription("Re-voice audio using a target speaker reference.")
                 .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
             config.AddBranch("fx", fx =>
             {
@@ -124,6 +124,9 @@ public static class Program
             config.AddCommand<PullCommand>("pull")
                 .WithDescription("Download a model from HuggingFace (or register a local path) into the cache.")
                 .WithExample("pull", "stabilityai/stable-diffusion-xl-base-1.0");
+            config.AddCommand<InspectCommand>("inspect")
+                .WithDescription("Inspect a checkpoint header and resolve its execution profile without loading weights.")
+                .WithExample("inspect", "--modality", "video", "--model-path", "/models/h3.safetensors", "--json");
         });
 
         return app.Run(args);

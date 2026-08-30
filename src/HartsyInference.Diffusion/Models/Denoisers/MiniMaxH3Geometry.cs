@@ -107,12 +107,14 @@ public static class MiniMaxH3Geometry
         Math.Max(CanvasMultiple, (int)Math.Round(pixels / CanvasMultiple) * CanvasMultiple);
 
     /// <summary>Canvas a reference clip is resized onto: <see cref="AdaptCanvas"/>, unless that would enlarge the clip
-    /// — then each axis rounds to its own size instead, so a small reference is never upscaled into a bigger canvas.</summary>
+    /// — then each axis uses the nearest patch-grid size instead of the trained 768-short-edge canvas.</summary>
     public static (int Width, int Height) RefVideoCanvas(int width, int height)
     {
         (int canvasWidth, int canvasHeight) = AdaptCanvas(width, height);
         if ((long)width * height < (long)canvasWidth * canvasHeight)
         {
+            // Ref2VA was real-weight verified with nearest-grid rounding. Flooring here silently removes one latent
+            // patch from every source axis whose remainder exceeds half a grid cell and changes reference tokens.
             return (Round(width), Round(height));
         }
         return (canvasWidth, canvasHeight);
@@ -148,5 +150,15 @@ public static class MiniMaxH3Geometry
             indices.Add(i);
         }
         return indices;
+    }
+
+    /// <summary>Ceiling division used by H3's circular-padded patch grids.</summary>
+    internal static int DivideRoundUp(int value, int divisor)
+    {
+        if (divisor <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(divisor), divisor, "Patch dimensions must be positive.");
+        }
+        return checked((value + divisor - 1) / divisor);
     }
 }

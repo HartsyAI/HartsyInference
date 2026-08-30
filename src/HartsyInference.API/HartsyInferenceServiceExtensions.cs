@@ -193,6 +193,31 @@ public static class HartsyInferenceServiceExtensions
             });
         });
 
+        // Body binding occurs after middleware but before a minimal-API handler. Set the feature here so a base64
+        // guide/control clip is bounded while it is still streaming in, rather than checking ContentLength after
+        // ASP.NET has already buffered/deserialized it. Chunked requests are covered by the same server feature.
+        app.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.StartsWithSegments("/v1/native/video"))
+            {
+                if (ctx.Request.ContentLength is long contentLength
+                    && contentLength > options.MaxVideoRequestBodyBytes)
+                {
+                    await WriteErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge,
+                        $"Native video request body exceeds the configured {options.MaxVideoRequestBodyBytes}-byte limit.",
+                        "invalid_request_error");
+                    return;
+                }
+                Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature? limit =
+                    ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+                if (limit is not null && !limit.IsReadOnly)
+                {
+                    limit.MaxRequestBodySize = options.MaxVideoRequestBodyBytes;
+                }
+            }
+            await next();
+        });
+
         // Optional API-key gate over everything except the liveness/readiness/version probes — those need to
         // stay reachable for an orchestrator's health checks regardless of auth config. Resolves the caller to a
         // named identity (not just a bool) and stashes it for the rate limiter, usage tracker, and tracing below.

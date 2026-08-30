@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -36,13 +37,16 @@ public sealed record MiniMaxH3Assets
     private static readonly string[] _textEncoderFolders = ["text_encoders", "clip", "llm"];
 
     /// <summary>Resolves every component from whatever the caller pointed at.</summary>
-    public static MiniMaxH3Assets Resolve(string checkpointPath)
+    public static MiniMaxH3Assets Resolve(string checkpointPath) => Resolve(checkpointPath, null);
+
+    /// <summary>Resolves the component set while allowing explicit request overrides to replace missing defaults.</summary>
+    public static MiniMaxH3Assets Resolve(string checkpointPath, ComponentOverrides? components)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         string? root = FolderRoot(checkpointPath);
         if (root is not null)
         {
-            return FromFolder(root);
+            return FromFolder(root, components);
         }
         if (!File.Exists(checkpointPath))
         {
@@ -50,7 +54,7 @@ public sealed record MiniMaxH3Assets
                 $"MiniMax-H3 checkpoint not found at '{checkpointPath}' (expected a folder with a transformer/ "
                 + "subfolder, or the DiT .safetensors file itself).");
         }
-        return FromFlat(checkpointPath);
+        return FromFlat(checkpointPath, components);
     }
 
     /// <summary>The vendor folder root for <paramref name="path"/>, or null when this is the flat layout.</summary>
@@ -85,7 +89,7 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
-    private static MiniMaxH3Assets FromFolder(string root)
+    private static MiniMaxH3Assets FromFolder(string root, ComponentOverrides? components)
     {
         string? audioDir = Directory.Exists(Path.Combine(root, "audio_vae")) ? Path.Combine(root, "audio_vae") : null;
         string? tokenizer = null;
@@ -102,15 +106,15 @@ public sealed record MiniMaxH3Assets
         return new MiniMaxH3Assets
         {
             Dit = FirstSafetensors(Path.Combine(root, "transformer")),
-            VideoVae = FirstSafetensors(Path.Combine(root, "video_vae")),
-            AudioVae = audioDir is null ? null : FirstSafetensors(audioDir),
-            TextEncoder = FirstSafetensors(Path.Combine(root, "text_encoder")),
+            VideoVae = components?.VideoVae ?? components?.Vae ?? FirstSafetensors(Path.Combine(root, "video_vae")),
+            AudioVae = components?.AudioVae ?? (audioDir is null ? null : FirstSafetensors(audioDir)),
+            TextEncoder = components?.Qwen ?? FirstSafetensors(Path.Combine(root, "text_encoder")),
             TokenizerDir = tokenizer,
             IsFolderLayout = true,
         };
     }
 
-    private static MiniMaxH3Assets FromFlat(string ditFile)
+    private static MiniMaxH3Assets FromFlat(string ditFile, ComponentOverrides? components)
     {
         string? ditDir = Path.GetDirectoryName(ditFile);
         List<string> roots = [];
@@ -118,12 +122,13 @@ public sealed record MiniMaxH3Assets
         {
             roots.Add(d);
         }
-        string video = FindFlat(roots, _vaeFolders, ["video_vae"])
+        string video = components?.VideoVae ?? components?.Vae
+            ?? FindFlat(roots, _vaeFolders, ["video_vae"], preferQuantized: false)
             ?? throw new FileNotFoundException(
                 $"MiniMax-H3 video VAE not found near '{ditFile}'. The flat layout expects a file whose name contains "
                 + "'minimax_h3' and 'video_vae' under a vae/ folder (SwarmUI downloads it to Models/vae/MiniMaxH3/).");
-        string? audio = FindFlat(roots, _vaeFolders, ["audio_vae"]);
-        string text = FindFlat(roots, _textEncoderFolders, ["qwen3vl", "qwen3_vl"])
+        string? audio = components?.AudioVae ?? FindFlat(roots, _vaeFolders, ["audio_vae"]);
+        string text = components?.Qwen ?? FindFlat(roots, _textEncoderFolders, ["qwen3vl", "qwen3_vl"])
             ?? throw new FileNotFoundException(
                 $"MiniMax-H3 text encoder not found near '{ditFile}'. Expected a Qwen3-VL file whose name contains "
                 + "'minimax_h3' under a text_encoders/ folder.");
@@ -143,8 +148,11 @@ public sealed record MiniMaxH3Assets
         };
     }
 
-    /// <summary>Searches each root's component folders for a <c>minimax_h3</c> file also matching one of <paramref name="hints"/>. Prefers the smallest match, which picks the quantized variant when several are staged side by side.</summary>
-    private static string? FindFlat(List<string> roots, string[] folders, string[] hints)
+    /// <summary>Searches each root's component folders for a <c>minimax_h3</c> file also matching one of
+    /// <paramref name="hints"/>. Quantized text encoders remain the practical default, but a validation-pending
+    /// quantized video VAE must be selected explicitly instead of displacing the proven FP16/BF16 component.</summary>
+    private static string? FindFlat(List<string> roots, string[] folders, string[] hints,
+        bool preferQuantized = true)
     {
         foreach (string root in roots)
         {
@@ -157,7 +165,7 @@ public sealed record MiniMaxH3Assets
                 }
                 string? best = Directory.EnumerateFiles(dir, "*.safetensors", SearchOption.AllDirectories)
                     .Where(f => Matches(Path.GetFileName(f), hints))
-                    .OrderBy(f => FormatRank(Path.GetFileName(f)))
+                    .OrderBy(f => FormatRank(Path.GetFileName(f), preferQuantized))
                     .ThenBy(f => new FileInfo(f).Length)
                     .FirstOrDefault();
                 if (best is not null)
@@ -169,14 +177,16 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
-    /// <summary>Prefers the quantized variants over BF16 when Comfy stages several side by side.</summary>
+    /// <summary>Ranks quantized variants before or after dense precision according to the component's release
+    /// status. File size breaks ties within the selected precision class.</summary>
     /// <remarks><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
     /// first-class resident format (<c>CudaBackend</c>'s int8 IMMA path), so it ranks with the other quantized
     /// builds and the size tie-break below decides between them.</remarks>
-    private static int FormatRank(string name)
+    private static int FormatRank(string name, bool preferQuantized)
     {
         string lower = name.ToLowerInvariant();
-        return lower.Contains("nvfp4") || lower.Contains("fp8") || lower.Contains("int8") ? 0 : 1;
+        bool quantized = lower.Contains("nvfp4") || lower.Contains("fp8") || lower.Contains("int8");
+        return quantized == preferQuantized ? 0 : 1;
     }
 
     private static bool Matches(string name, string[] hints)

@@ -29,4 +29,7 @@ public enum ModelArchitecture
 
     /// <summary>Chroma (Flux-lineage, distilled, radiance/nerf keys).</summary>
     Chroma,
+
+    /// <summary>MiniMax-H3 joint audio/video DiT (paired video/audio patch projections).</summary>
+    MiniMaxH3,
 }

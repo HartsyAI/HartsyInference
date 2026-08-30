@@ -7,7 +7,7 @@
 > doc. That judgement is the point of this file; the table is the scaffolding it hangs on.
 
 > ⚠️ **Superseded in part, 2026-08-26.** `EngineKnobs` (`src/HartsyInference.Core/Configuration/`) is now the
-> declared registry: **210 knobs**, each with an id, type, default, scope, domain and its legacy environment
+> declared registry: **212 knobs**, each with an id, type, default, scope, domain and its legacy environment
 > name. `KnobRegistryTests` ties that surface to a source scan, so the registry — not this file — is the
 > authority on *what exists*. This doc remains the authority on **disposition**, and on the history below.
 >
@@ -39,7 +39,7 @@ literal scan for `GetEnvironmentVariable("HARTSY_…")` has **five** blind spots
 | A helper **constructor** argument | `new DebugDumpSink("WAN_DEBUG_DIR")` | 19 |
 | Only ever a **default parameter value** | `FromEnvironment(string v = "HARTSY_CFG_INTERVAL")` | 1 |
 
-The real engine surface is **~209 knobs**. A further ~150 names are test-fixture paths read by test code, not
+The real engine surface is **~210 knobs**. A further ~150 names are test-fixture paths read by test code, not
 the engine, and are out of scope.
 
 **Three boolean grammars are live and they genuinely disagree** — this is why the migration preserves each

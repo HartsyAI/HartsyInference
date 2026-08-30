@@ -1,9 +1,13 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Engine.Planning;
 
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native, transport-agnostic text/image-to-video request. Carries the common generation props plus the video-specific model selections, framing, trimming, and audio-track inputs the backend reads.</summary>
+/// <remarks>Planning snapshots mutable collection membership but deliberately keeps media byte arrays zero-copy.
+/// Callers must not modify their contents from the start of planning until generation completes; media is bound by
+/// DTO and buffer reference plus length, not by a content hash.</remarks>
 public sealed record VideoRequest
 {
     /// <summary>The positive prompt.</summary>
@@ -26,6 +30,9 @@ public sealed record VideoRequest
 
     /// <summary>Flow-match sigma shift; null uses the family's officially recommended shift.</summary>
     public float? FlowShift { get; init; }
+
+    /// <summary>Audio-stream flow shift for joint audio/video models; null uses the detected profile's recommendation.</summary>
+    public float? AudioFlowShift { get; init; }
 
     /// <summary>Sampler name; null uses the family's canonical solver. A family that cannot honor the named sampler refuses rather than silently substituting its own.</summary>
     public string? Sampler { get; init; }
@@ -78,6 +85,24 @@ public sealed record VideoRequest
 
     /// <summary>Standalone reference audio clips, not tied to any reference video; null for none.</summary>
     public IReadOnlyList<AudioClip>? ReferenceAudios { get; init; }
+
+    /// <summary>Reference-media canvas policy; null uses the detected checkpoint profile.</summary>
+    public VideoReferenceSizing? ReferenceSizing { get; init; }
+
+    /// <summary>Arbitrary target-relative visual and audio conditioning anchors; null for none.</summary>
+    public IReadOnlyList<VideoGuide>? Guides { get; init; }
+
+    /// <summary>Continuous video denoising mask and its preservation source; null for ordinary sampling.</summary>
+    public VideoDenoiseMask? VideoDenoiseMask { get; init; }
+
+    /// <summary>Continuous audio denoising mask and its preservation source; null for ordinary sampling.</summary>
+    public AudioDenoiseMask? AudioDenoiseMask { get; init; }
+
+    /// <summary>Preprocessed Fun ControlNet-Union streams; null for none.</summary>
+    public IReadOnlyList<VideoControl>? Controls { get; init; }
+
+    /// <summary>Caller policy for profiles carrying learned video sparse-attention gates.</summary>
+    public SparseAttentionPolicy SparseAttentionPolicy { get; init; } = SparseAttentionPolicy.Auto;
 
     /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling <see cref="InitImage"/> across frames.</summary>
     public VideoClip? DrivingVideo { get; init; }

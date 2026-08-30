@@ -117,6 +117,44 @@ public unsafe class MiniMaxH3AudioVaeTests
             new MiniMaxH3AudioVaeDecoder(new MiniMaxH3AudioVaeConfig { LatentsMean = [0f, 1f] }));
     }
 
+    [Fact]
+    public void PartialLoadFailure_CanBeDisposedWithoutTakingSourceWeights()
+    {
+        MiniMaxH3AudioVaeConfig config = new()
+        {
+            LatentChannels = 4,
+            DecoderInputChannels = 8,
+            DecoderDim = 8,
+            UpsampleRates = [5, 2],
+            UpsampleKernels = [9, 4],
+            LatentsMean = [0.1f, -0.2f, 0.05f, 0.3f],
+            LatentsStd = [1.5f, 2.0f, 1.2f, 1.8f],
+        };
+        Dictionary<string, Tensor> weights = BuildWeights(config);
+        Tensor[] sourceTensors = weights.Values.Distinct().ToArray();
+        weights.Remove("decoder.conv_post.weight_v");
+        MiniMaxH3AudioVaeDecoder decoder = new MiniMaxH3AudioVaeDecoder(config);
+        try
+        {
+            Assert.Throws<KeyNotFoundException>(() => decoder.LoadWeights(weights));
+
+            decoder.Dispose();
+            decoder.Dispose();
+            foreach (Tensor source in sourceTensors)
+            {
+                Assert.NotEqual(0, (nint)source.DataPointer);
+            }
+        }
+        finally
+        {
+            decoder.Dispose();
+            foreach (Tensor source in sourceTensors)
+            {
+                source.Dispose();
+            }
+        }
+    }
+
     /// <summary>Emits every key the decoder reads, under the shipped checkpoint's own naming, at real shapes.</summary>
     private static Dictionary<string, Tensor> BuildWeights(MiniMaxH3AudioVaeConfig c)
     {

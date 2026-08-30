@@ -36,6 +36,95 @@ public sealed class LoraFileTests : IDisposable
     }
 
     [Fact]
+    public void Load_PreservesSafetensorsMetadata()
+    {
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
+        {
+            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] =
+                (DType.F32, [4, 320], new float[4 * 320]),
+            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] =
+                (DType.F32, [320, 4], new float[320 * 4]),
+        };
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+        {
+            ["pdd_num_steps"] = "32",
+            ["task"] = "fl2va",
+        };
+        string path = CreateSafeTensorsFile(_tempDir, "metadata", tensors, metadata);
+
+        using LoraFile file = LoraFile.Load(path);
+
+        Assert.NotNull(file.Metadata);
+        Assert.Equal("32", file.Metadata!["pdd_num_steps"]);
+        Assert.Equal("fl2va", file.Metadata["task"]);
+    }
+
+    [Fact]
+    public void Load_OfficialLightXMiniMaxH3Diffusers_FusesEveryTargetAndSwapsSwiGlu()
+    {
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new(StringComparer.Ordinal);
+        for (int i = 0; i < 50; i++)
+        {
+            string root = $"transformer_blocks.{i}";
+            AddQkv(root, known: i == 0);
+            AddPair($"{root}.attn.to_out.0", 2, 2, [1, 1]);
+            AddPair($"{root}.ff.net.0.proj", 2, 4, i == 0 ? [1, 2, 3, 4] : [1, 1, 1, 1]);
+            AddPair($"{root}.ff.net.2", 2, 2, [1, 1]);
+        }
+        for (int i = 0; i < 2; i++)
+        {
+            string root = $"token_refiner.refiner_blocks.{i}";
+            AddQkv(root, known: false);
+            AddPair($"{root}.attn.to_out.0", 2, 2, [1, 1]);
+            AddPair($"{root}.ff.net.0.proj", 2, 4, [1, 1, 1, 1]);
+            AddPair($"{root}.ff.net.2", 2, 2, [1, 1]);
+        }
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+        {
+            ["key_format"] = "minimax-h3-diffusers",
+            ["alpha"] = "8",
+        };
+        string path = CreateSafeTensorsFile(_tempDir, "lightx_h3_diffusers", tensors, metadata);
+
+        using LoraFile file = LoraFile.Load(path);
+
+        Assert.Equal(LoraFormat.DiffusersMiniMaxH3, file.Format);
+        Assert.Equal(208, file.Layers.Count);
+        Assert.Equal("minimax-h3-diffusers", file.Metadata!["key_format"]);
+        LoraLayer qkv = Assert.Single(file.Layers,
+            layer => layer.TargetKey == "blocks.0.attn.qkv_proj.weight");
+        Assert.Equal(3, qkv.Rank);
+        Assert.Equal(24.0f, qkv.Alpha);
+        Assert.Equal(new float[] { 1, 2, 3, 4, 5, 6 }, qkv.LoraDown.AsSpan<float>().ToArray());
+        LoraLayer fc1 = Assert.Single(file.Layers,
+            layer => layer.TargetKey == "blocks.0.mlp.fc1.weight");
+        Assert.Equal(new float[] { 3, 4, 1, 2 }, fc1.LoraUp.AsSpan<float>().ToArray());
+        Assert.Contains(file.Layers,
+            layer => layer.TargetKey == "token_refiner.blocks.1.attn.qkv_proj.weight");
+
+        void AddQkv(string root, bool known)
+        {
+            float[][] down = known ? [[1, 2], [3, 4], [5, 6]] : [[1, 1], [1, 1], [1, 1]];
+            float[][] up = known ? [[10, 11], [20, 21], [30, 31]] : [[1, 1], [1, 1], [1, 1]];
+            string[] names = ["q", "k", "v"];
+            for (int i = 0; i < names.Length; i++)
+            {
+                tensors[$"{root}.attn.to_{names[i]}.lora_A.default.weight"] =
+                    (DType.F32, [1, 2], down[i]);
+                tensors[$"{root}.attn.to_{names[i]}.lora_B.default.weight"] =
+                    (DType.F32, [2, 1], up[i]);
+            }
+        }
+
+        void AddPair(string root, int input, int output, float[] up)
+        {
+            tensors[root + ".lora_A.default.weight"] =
+                (DType.F32, [1, input], Enumerable.Repeat(1.0f, input).ToArray());
+            tensors[root + ".lora_B.default.weight"] = (DType.F32, [output, 1], up);
+        }
+    }
+
+    [Fact]
     public void Load_MissingFile_Throws()
     {
         string missing = Path.Combine(_tempDir, "does_not_exist.safetensors");
@@ -690,7 +779,8 @@ public sealed class LoraFileTests : IDisposable
     }
 
     private static string CreateSafeTensorsFile(string dir, string name,
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors)
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors,
+        IReadOnlyDictionary<string, string>? metadata = null)
     {
         using MemoryStream dataStream = new();
         Dictionary<string, (long start, long end)> offsets = [];
@@ -708,6 +798,10 @@ public sealed class LoraFileTests : IDisposable
         byte[] dataBlob = dataStream.ToArray();
 
         Dictionary<string, object> headerDict = [];
+        if (metadata is not null)
+        {
+            headerDict["__metadata__"] = metadata;
+        }
         foreach (KeyValuePair<string, (DType dtype, long[] shape, float[] data)> kvp in tensors)
         {
             (long start, long end) = offsets[kvp.Key];

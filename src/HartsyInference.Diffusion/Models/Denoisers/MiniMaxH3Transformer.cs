@@ -5,6 +5,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelAssets.MiniMaxH3;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -13,15 +14,18 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// segment carries its own modulation row, selected by (timestep class, modality tag).</summary>
 public sealed unsafe class MiniMaxH3Transformer : IDisposable
 {
+    private const string FunControlWeightPrefix = "__fun_control.";
+
     private readonly MiniMaxH3Config _config;
     private readonly Dictionary<string, Tensor> _weights = new Dictionary<string, Tensor>();
+    private readonly List<MiniMaxH3FunControlNet> _funControlNets = new List<MiniMaxH3FunControlNet>();
     private bool _disposed;
 
     /// <summary>Modality tag per segment kind; adaln packs three modalities (video 0, text 1, audio 2) per row.</summary>
     private static int ModalityTag(MiniMaxH3SegmentKind kind) => kind switch
     {
         MiniMaxH3SegmentKind.Text => 1,
-        MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.RefAudio => 2,
+        MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.CondAudio or MiniMaxH3SegmentKind.RefAudio => 2,
         _ => 0,
     };
 
@@ -51,7 +55,73 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Require("final_layer.video_out.weight");
     }
 
-    public IEnumerable<Tensor> EnumerateWeights() => _weights.Values;
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor tensor in _weights.Values)
+        {
+            yield return tensor;
+        }
+        foreach (MiniMaxH3FunControlNet controlNet in _funControlNets)
+        {
+            foreach (Tensor tensor in controlNet.EnumerateWeights())
+            {
+                yield return tensor;
+            }
+        }
+    }
+
+    /// <summary>Shape-checks the checkpoint-bound, validation-pending VSA contract before any denoise work begins. The two
+    /// token-refiner blocks intentionally have no gate and remain on exact dense attention.</summary>
+    internal void ValidateVideoSparseAttentionWeights()
+    {
+        if (_config.NumLayers != 50 || _config.HiddenSize != 5376 || _config.NumAttentionHeads != 56
+            || _config.AttentionHeadDim != 128)
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 VSA requires the published 50-block, hidden-5376, H56/D128 transformer geometry.");
+        }
+        for (int index = 0; index < 50; index++)
+        {
+            string prefix = $"blocks.{index}.attn.to_gate_compress";
+            Tensor weight = Require($"{prefix}.weight");
+            if (weight.Shape.Rank != 2 || weight.Shape[0] != 7168 || weight.Shape[1] != 5376)
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 VSA gate '{prefix}.weight' must be [7168,5376], got {weight.Shape}.");
+            }
+            Tensor? bias = Optional($"{prefix}.bias");
+            if (bias is not null && (bias.Shape.Rank != 1 || bias.Shape[0] != 7168))
+            {
+                throw new ArgumentException(
+                    $"MiniMax-H3 VSA gate '{prefix}.bias' must be [7168], got {bias.Shape}.");
+            }
+        }
+    }
+
+    /// <summary>Builds the immutable segment-pure / 4x4x4 source layout shared by every block and denoise
+    /// evaluation throughout one generation.</summary>
+    internal VideoSparseAttentionPlan CreateVideoSparseAttentionPlan(MiniMaxH3PackedLayout layout,
+        VideoSparseAttentionProfileKind profile)
+    {
+        ValidateVideoSparseAttentionWeights();
+        return MiniMaxH3SparseLayoutBuilder.Build(layout, profile);
+    }
+
+    /// <summary>Registers one deduplicated Fun branch and transfers its lifetime to this transformer.</summary>
+    internal int RegisterFunControlNet(MiniMaxH3FunControlNet controlNet)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(controlNet);
+        controlNet.Config.ValidateBase(_config);
+        if (_funControlNets.Contains(controlNet))
+        {
+            throw new ArgumentException("The same MiniMax-H3 Fun ControlNet instance is already registered.",
+                nameof(controlNet));
+        }
+        int index = _funControlNets.Count;
+        _funControlNets.Add(controlNet);
+        return index;
+    }
 
     /// <summary>Everything except the per-block weights: patch/condition projections, token refiner (its
     /// <c>token_refiner.blocks.*</c> keys don't collide — the block prefix match is anchored to the string start),
@@ -63,6 +133,15 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             if (!kv.Key.StartsWith("blocks.", StringComparison.Ordinal))
             {
                 yield return kv.Value;
+            }
+        }
+        // Fun control execution is currently pinned to the primary backend. A recipe with controls disables DiT
+        // sharding before construction, so this shared-set placement is also the complete unsharded weight set.
+        foreach (MiniMaxH3FunControlNet controlNet in _funControlNets)
+        {
+            foreach (Tensor tensor in controlNet.EnumerateWeights())
+            {
+                yield return tensor;
             }
         }
     }
@@ -102,18 +181,50 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return inv;
     }
 
-    private Tensor Require(string key) =>
-        _weights.TryGetValue(key, out Tensor? t) ? t : throw new KeyNotFoundException($"MiniMax-H3 weight '{key}' missing.");
+    private Tensor Require(string key)
+    {
+        if (TryResolveFunControlKey(key, out MiniMaxH3FunControlNet? controlNet, out string? controlKey))
+        {
+            return controlNet.Require(controlKey);
+        }
+        return _weights.TryGetValue(key, out Tensor? tensor) ? tensor
+            : throw new KeyNotFoundException($"MiniMax-H3 weight '{key}' missing.");
+    }
 
-    private Tensor? Optional(string key) => _weights.TryGetValue(key, out Tensor? t) ? t : null;
+    private Tensor? Optional(string key)
+    {
+        if (TryResolveFunControlKey(key, out MiniMaxH3FunControlNet? controlNet, out string? controlKey))
+        {
+            return controlNet.Optional(controlKey);
+        }
+        return _weights.TryGetValue(key, out Tensor? tensor) ? tensor : null;
+    }
+
+    /// <summary>Runs the released dense path through the token refiner, all blocks, and the dual output heads.
+    /// Profile-bound PDD, Fun ControlNet, and VSA inputs are available only to first-party service assemblies.</summary>
+    public (Tensor Video, Tensor Audio) Forward(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
+        Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
+        IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null) =>
+        ForwardPlanned(backend, layout, videoRows, audioRows, textStates, cos, sin, uniqueTimesteps,
+            timestepRowOf, textTagRuns, pddHeads: null, controls: null,
+            videoTimestepRows: videoTimestepRows, audioTimestepRows: audioTimestepRows,
+            sparseAttention: null);
 
     /// <summary>Runs the packed sequence through the token refiner, all blocks, and the dual output heads.
     /// <paramref name="videoRows"/>/<paramref name="audioRows"/> are the patchified latent rows in segment order;
     /// <paramref name="textStates"/> is the Qwen3-VL hidden state <c>[textLen, textDim]</c>.</summary>
-    public (Tensor Video, Tensor Audio) Forward(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
+    internal (Tensor Video, Tensor Audio) ForwardPlanned(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
         Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
-        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null)
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        PddFusedHeads? pddHeads = null,
+        IReadOnlyList<MiniMaxH3FunControlCondition>? controls = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null,
+        IVideoSparseAttentionSession? sparseAttention = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
@@ -133,17 +244,35 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         try
         {
             Tensor tEmb = BuildTimeEmbedding(backend, uniqueTimesteps);
-            Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns);
+            Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns,
+                videoTimestepRows, audioTimestepRows, uniqueTimesteps.Length);
+            List<FunControlRuntime>? controlRuntimes = null;
+            MiniMaxH3Segment? controlTargetAudio = null;
             try
             {
+                if (controls is { Count: > 0 })
+                {
+                    (controlRuntimes, controlTargetAudio) = InitializeFunControlStreams(
+                        backend, h, layout, controls);
+                }
                 for (int i = 0; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows);
+                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows, sparseAttention);
+                    ApplyFunControlAtLayer(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows,
+                        controlRuntimes, controlTargetAudio);
                 }
-                return FinalLayer(backend, h, tEmb, layout, timestepRowOf);
+                return FinalLayer(backend, h, tEmb, layout, timestepRowOf, pddHeads,
+                    videoTimestepRows, audioTimestepRows);
             }
             finally
             {
+                if (controlRuntimes is not null)
+                {
+                    foreach (FunControlRuntime runtime in controlRuntimes)
+                    {
+                        runtime.Dispose();
+                    }
+                }
                 modIndex.Dispose();
                 tEmb.Dispose();
             }
@@ -154,6 +283,18 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
+    /// <summary>Released dense DiT-sharded forward. Profile-bound acceleration inputs are internal.</summary>
+    public (Tensor Video, Tensor Audio) ForwardSharded(IBackend backendA, IBackend backendB,
+        MiniMaxH3PackedLayout layout, Tensor videoRows, Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin,
+        float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf, int splitBlock,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null) =>
+        ForwardShardedPlanned(backendA, backendB, layout, videoRows, audioRows, textStates, cos, sin,
+            uniqueTimesteps, timestepRowOf, splitBlock, textTagRuns, pddHeads: null, controls: null,
+            videoTimestepRows: videoTimestepRows, audioTimestepRows: audioTimestepRows,
+            sparseAttentionA: null, sparseAttentionB: null);
+
     /// <summary>DiT-sharded forward: blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also owns
     /// every shared weight — embeds, token refiner, final layer), <c>[splitBlock, NumLayers)</c> on
     /// <paramref name="backendB"/>. The residual stream <c>h</c> and the tiny time embedding cross via
@@ -162,14 +303,34 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// not latency: this is what makes the ~19.5 GB fp8 build fully resident across a 24+12 GB pair instead of
     /// streaming ~19 GB of weights per step. H3 has no step-graph/step-cache/block-streaming, so there are no
     /// exclusions to gate — the fp8-build-only constraint lives in the recipe's existing &lt;40 GB check.</summary>
-    public (Tensor Video, Tensor Audio) ForwardSharded(IBackend backendA, IBackend backendB,
+    internal (Tensor Video, Tensor Audio) ForwardShardedPlanned(IBackend backendA, IBackend backendB,
         MiniMaxH3PackedLayout layout, Tensor videoRows, Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin,
         float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf, int splitBlock,
-        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null)
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        PddFusedHeads? pddHeads = null,
+        IReadOnlyList<MiniMaxH3FunControlCondition>? controls = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null,
+        IVideoSparseAttentionSession? sparseAttentionA = null,
+        IVideoSparseAttentionSession? sparseAttentionB = null)
     {
         ArgumentNullException.ThrowIfNull(backendA);
         ArgumentNullException.ThrowIfNull(backendB);
         ArgumentNullException.ThrowIfNull(layout);
+        if (controls is { Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "MiniMax-H3 Fun ControlNet currently requires the unsharded DiT path; disable DiT sharding.");
+        }
+        if ((sparseAttentionA is null) != (sparseAttentionB is null))
+        {
+            throw new ArgumentException(
+                "Sharded MiniMax-H3 VSA requires a generation session on every shard backend.");
+        }
+        if (sparseAttentionA is not null && sparseAttentionA.Profile != sparseAttentionB!.Profile)
+        {
+            throw new ArgumentException("Every MiniMax-H3 DiT shard must implement the same VSA profile.");
+        }
         if (splitBlock <= 0 || splitBlock >= _config.NumLayers)
             throw new ArgumentOutOfRangeException(nameof(splitBlock),
                 $"splitBlock must be in (0, {_config.NumLayers}) exclusive, got {splitBlock}.");
@@ -188,12 +349,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
         Tensor h = EmbedSegments(backendA, layout, videoRows, audioRows, textStates);
         Tensor tEmb = BuildTimeEmbedding(backendA, uniqueTimesteps);
-        Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns);
+        Tensor modIndex = BuildModulationIndex(layout, seq, timestepRowOf, textTagRuns,
+            videoTimestepRows, audioTimestepRows, uniqueTimesteps.Length);
         try
         {
             for (int i = 0; i < splitBlock; i++)
             {
-                ForwardBlock(backendA, ref h, tEmb, modIndex, cos, sin, i, chunkRowsA);
+                ForwardBlock(backendA, ref h, tEmb, modIndex, cos, sin, i, chunkRowsA, sparseAttentionA);
             }
 
             // Boundary A→B: the residual stream MOVES; tEmb is only COPIED (the final layer on A reads it after
@@ -207,7 +369,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             {
                 for (int i = splitBlock; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backendB, ref h, tEmbB, modIndex, cos, sin, i, chunkRowsB);
+                    ForwardBlock(backendB, ref h, tEmbB, modIndex, cos, sin, i, chunkRowsB, sparseAttentionB);
                 }
             }
             finally
@@ -219,7 +381,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor hBack = CopyAcross(backendA, backendB, h);
             h.Dispose();
             h = hBack;
-            return FinalLayer(backendA, h, tEmb, layout, timestepRowOf);
+            return FinalLayer(backendA, h, tEmb, layout, timestepRowOf, pddHeads,
+                videoTimestepRows, audioTimestepRows);
         }
         finally
         {
@@ -256,7 +419,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 (Tensor src, int off) = seg.Kind switch
                 {
                     MiniMaxH3SegmentKind.Text => (textEmbed, textOffset),
-                    MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.RefAudio => (audioEmbed, audioOffset),
+                    MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.CondAudio or MiniMaxH3SegmentKind.RefAudio
+                        => (audioEmbed, audioOffset),
                     _ => (videoEmbed, videoOffset),
                 };
                 if (seg.Length > 0)
@@ -268,7 +432,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 switch (seg.Kind)
                 {
                     case MiniMaxH3SegmentKind.Text: textOffset += seg.Length; break;
-                    case MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.RefAudio: audioOffset += seg.Length; break;
+                    case MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.CondAudio
+                        or MiniMaxH3SegmentKind.RefAudio: audioOffset += seg.Length; break;
                     default: videoOffset += seg.Length; break;
                 }
             }
@@ -328,9 +493,17 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
-        Tensor cos, Tensor sin, int index, int chunkRows)
+        Tensor cos, Tensor sin, int index, int chunkRows, IVideoSparseAttentionSession? sparseAttention = null)
     {
-        string p = $"blocks.{index}";
+        ForwardNamedBlock(backend, ref h, tEmb, modIndex, cos, sin, $"blocks.{index}", chunkRows,
+            sparseAttention);
+    }
+
+    /// <summary>Shared H3 block implementation used by both the main 50-block trunk and each Fun control block.</summary>
+    private void ForwardNamedBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
+        Tensor cos, Tensor sin, string p, int chunkRows,
+        IVideoSparseAttentionSession? sparseAttention = null)
+    {
         int seq = (int)h.Shape[0];
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
         try
@@ -339,8 +512,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
                 Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
-            Tensor attn = seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
-                : Attention(backend, modulated, $"{p}.attn", cos, sin);
+            Tensor attn = sparseAttention is not null
+                ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, sparseAttention)
+                : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
+                    : Attention(backend, modulated, $"{p}.attn", cos, sin);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
             attn.Dispose();
@@ -362,6 +537,150 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             foreach (Tensor t in mod) t.Dispose();
         }
     }
+
+    private (List<FunControlRuntime> Runtimes, MiniMaxH3Segment TargetAudio) InitializeFunControlStreams(IBackend backend,
+        Tensor h, MiniMaxH3PackedLayout layout, IReadOnlyList<MiniMaxH3FunControlCondition> controls)
+    {
+        MiniMaxH3Segment targetVideo = layout.Segments.Last(segment => segment.Kind == MiniMaxH3SegmentKind.Video);
+        MiniMaxH3Segment targetAudio = layout.Segments.Last(segment => segment.Kind == MiniMaxH3SegmentKind.Audio);
+        List<FunControlRuntime> runtimes = new List<FunControlRuntime>(controls.Count);
+        try
+        {
+            foreach (MiniMaxH3FunControlCondition condition in controls)
+            {
+                if (condition.Strength == 0f)
+                {
+                    continue;
+                }
+                if (!float.IsFinite(condition.Strength))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(controls), "Fun control strength must be finite.");
+                }
+                if ((uint)condition.ModelIndex >= (uint)_funControlNets.Count)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(controls),
+                        $"Fun control model index {condition.ModelIndex} is not registered.");
+                }
+                MiniMaxH3FunControlNet controlNet = _funControlNets[condition.ModelIndex];
+                if (condition.ControlRows.DType != DType.F32 || condition.ControlRows.Shape.Rank != 2
+                    || condition.ControlRows.Shape[0] != targetVideo.Length
+                    || condition.ControlRows.Shape[1] != controlNet.Config.ControlPatchDim)
+                {
+                    throw new HartsyInferenceException(
+                        $"Fun control rows must be F32 [{targetVideo.Length},{controlNet.Config.ControlPatchDim}], got "
+                        + $"{condition.ControlRows.DType} {condition.ControlRows.Shape}.");
+                }
+                Tensor state = InitializeFunControlStream(backend, h, layout, condition);
+                runtimes.Add(new FunControlRuntime(condition.ModelIndex, condition.Strength, state));
+            }
+            return (runtimes, targetAudio);
+        }
+        catch
+        {
+            foreach (FunControlRuntime runtime in runtimes)
+            {
+                runtime.Dispose();
+            }
+            throw;
+        }
+    }
+
+    internal Tensor InitializeFunControlStream(IBackend backend, Tensor h, MiniMaxH3PackedLayout layout,
+        MiniMaxH3FunControlCondition condition)
+    {
+        int hidden = _config.HiddenSize;
+        MiniMaxH3Segment targetVideo = layout.Segments.Last(segment => segment.Kind == MiniMaxH3SegmentKind.Video);
+        string prefix = FunControlPrefix(condition.ModelIndex);
+        using Tensor projected = ProjectIntoStream(
+            backend, condition.ControlRows, prefix + ".control_proj_in", hidden);
+        using Tensor controlInput = new Tensor(h.Shape, BodyDType);
+        backend.SliceRowsGeneric(controlInput, h, 0);
+        backend.ScatterRowsGeneric(controlInput, projected, targetVideo.Start);
+        using Tensor before = ProjectIntoStream(
+            backend, controlInput, prefix + ".control_blocks.0.before_proj", hidden);
+        Tensor state = new Tensor(h.Shape, BodyDType);
+        try
+        {
+            backend.Add(state, h, before);
+            return state;
+        }
+        catch
+        {
+            state.Dispose();
+            throw;
+        }
+    }
+
+    private void ApplyFunControlAtLayer(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
+        Tensor cos, Tensor sin, int layer, int chunkRows, List<FunControlRuntime>? runtimes,
+        MiniMaxH3Segment? targetAudio)
+    {
+        if (runtimes is null || targetAudio is null)
+        {
+            return;
+        }
+        MiniMaxH3Segment audio = targetAudio.Value;
+        foreach (FunControlRuntime runtime in runtimes)
+        {
+            MiniMaxH3FunControlNet controlNet = _funControlNets[runtime.ModelIndex];
+            int blockIndex = runtime.NextBlock;
+            if (blockIndex >= controlNet.Config.NumBlocks
+                || controlNet.Config.InjectionLayers[blockIndex] != layer)
+            {
+                continue;
+            }
+
+            string prefix = FunControlPrefix(runtime.ModelIndex) + $".control_blocks.{blockIndex}";
+            ForwardNamedBlock(backend, ref runtime.State, tEmb, modIndex, cos, sin, prefix, chunkRows);
+            using Tensor skip = BuildFunControlSkip(
+                backend, runtime.State, runtime.ModelIndex, blockIndex, audio);
+            Tensor added = new Tensor(h.Shape, h.DType);
+            try
+            {
+                if (runtime.Strength == 1f)
+                {
+                    backend.Add(added, h, skip);
+                }
+                else
+                {
+                    using Tensor scaled = new Tensor(skip.Shape, skip.DType);
+                    backend.Scale(scaled, skip, runtime.Strength);
+                    backend.Add(added, h, scaled);
+                }
+                Swap(ref h, added);
+            }
+            catch
+            {
+                added.Dispose();
+                throw;
+            }
+            runtime.NextBlock++;
+        }
+    }
+
+    /// <summary>Projects the complete control residual stream and clears only the denoised audio rows. Text,
+    /// references, guides, and target-video rows remain part of the skip exactly as in the official Fun branch.</summary>
+    internal Tensor BuildFunControlSkip(IBackend backend, Tensor state, int modelIndex, int blockIndex,
+        MiniMaxH3Segment targetAudio)
+    {
+        string prefix = FunControlPrefix(modelIndex) + $".control_blocks.{blockIndex}";
+        Tensor skip = ProjectIntoStream(backend, state, prefix + ".after_proj", _config.HiddenSize);
+        try
+        {
+            using Tensor zeroAudio = new Tensor(
+                new TensorShape(targetAudio.Length, _config.HiddenSize), skip.DType);
+            backend.Fill(zeroAudio, 0f);
+            backend.ScatterRowsGeneric(skip, zeroAudio, targetAudio.Start);
+            return skip;
+        }
+        catch
+        {
+            skip.Dispose();
+            throw;
+        }
+    }
+
+    private static string FunControlPrefix(int index) => FunControlWeightPrefix + index;
 
     /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
     /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
@@ -449,6 +768,81 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         finally
         {
             q.Dispose(); k.Dispose(); v.Dispose();
+        }
+    }
+
+    /// <summary>Checkpoint-bound H3 VSA attention: QKV and the learned vector gate share one projection group,
+    /// Q/K retain the dense path's RMSNorm and 96-d split-half RoPE, and the backend computes exact routed attention
+    /// plus all-block coarse attention followed by <c>fine + gate * coarse</c> without a sigmoid.</summary>
+    private Tensor AttentionSparse(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin,
+        IVideoSparseAttentionSession sparseAttention)
+    {
+        int seq = (int)x.Shape[0];
+        int heads = _config.NumAttentionHeads;
+        int headDim = _config.AttentionHeadDim;
+        int inner = heads * headDim;
+        if (heads != 56 || headDim != 128 || inner != 7168)
+        {
+            throw new NotSupportedException("MiniMax-H3 VSA execution requires 56 heads with head dimension 128.");
+        }
+        TensorShape headed = new TensorShape(1, heads, seq, headDim);
+        Tensor q = new Tensor(headed, DType.F32);
+        Tensor k = new Tensor(headed, DType.F32);
+        Tensor v = new Tensor(headed, DType.F32);
+        Tensor gate = new Tensor(headed, DType.F32);
+        try
+        {
+            using (Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32))
+            using (Tensor gateTokenMajor = new Tensor(new TensorShape(seq, inner), DType.F32))
+            {
+                LinearOp[] projections =
+                [
+                    new LinearOp(qkv, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias")),
+                    new LinearOp(gateTokenMajor, Require($"{prefix}.to_gate_compress.weight"),
+                        Optional($"{prefix}.to_gate_compress.bias")),
+                ];
+                backend.LinearMulti(x, projections);
+                backend.QkvSplitNormHeadMajor(q, k, v, qkv, Require($"{prefix}.q_norm.weight"),
+                    Require($"{prefix}.k_norm.weight"), _config.QkNormEps);
+                backend.Permute0213(gate, gateTokenMajor, seq, heads, headDim);
+            }
+            if (cos is not null && sin is not null)
+            {
+                int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
+                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
+                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
+            }
+
+            Tensor attention = new Tensor(headed, DType.F32);
+            try
+            {
+                sparseAttention.Execute(attention, q, k, v, gate);
+                using Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
+                backend.Permute0213(merged, attention, heads, seq, headDim);
+                Tensor output = new Tensor(x.Shape, BodyDType);
+                try
+                {
+                    backend.Linear(output, merged, Require($"{prefix}.out_proj.weight"),
+                        Optional($"{prefix}.out_proj.bias"));
+                    return output;
+                }
+                catch
+                {
+                    output.Dispose();
+                    throw;
+                }
+            }
+            finally
+            {
+                attention.Dispose();
+            }
+        }
+        finally
+        {
+            gate.Dispose();
+            q.Dispose();
+            k.Dispose();
+            v.Dispose();
         }
     }
 
@@ -698,7 +1092,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     private (Tensor Video, Tensor Audio) FinalLayer(IBackend backend, Tensor h, Tensor tEmb,
-        MiniMaxH3PackedLayout layout, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf)
+        MiniMaxH3PackedLayout layout, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
+        PddFusedHeads? pddHeads, int[]? videoTimestepRows, int[]? audioTimestepRows)
     {
         Tensor[] mod = Adaln(backend, tEmb, "final_layer.adaln_proj", expand: 2, modalities: 1);
         // The heads are the checkpoint's F32 island, so the stream leaves the body dtype here — one cast for the tail.
@@ -707,8 +1102,12 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         {
             MiniMaxH3Segment videoSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Video);
             MiniMaxH3Segment audioSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Audio);
-            Tensor video = Head(backend, normed, mod[0], mod[1], videoSeg, timestepRowOf[MiniMaxH3SegmentKind.Video], "final_layer.video_out");
-            Tensor audio = Head(backend, normed, mod[0], mod[1], audioSeg, timestepRowOf[MiniMaxH3SegmentKind.Audio], "final_layer.audio_out");
+            Tensor video = Head(backend, normed, mod[0], mod[1], videoSeg,
+                timestepRowOf[MiniMaxH3SegmentKind.Video], "final_layer.video_out",
+                pddHeads?.VideoWeight, pddHeads?.VideoBias, videoTimestepRows);
+            Tensor audio = Head(backend, normed, mod[0], mod[1], audioSeg,
+                timestepRowOf[MiniMaxH3SegmentKind.Audio], "final_layer.audio_out",
+                pddHeads?.AudioWeight, pddHeads?.AudioBias, audioTimestepRows);
             return (video, audio);
         }
         finally
@@ -718,24 +1117,34 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
-    private Tensor Head(IBackend backend, Tensor normed, Tensor shift, Tensor scale, MiniMaxH3Segment seg, int row, string prefix)
+    private Tensor Head(IBackend backend, Tensor normed, Tensor shift, Tensor scale, MiniMaxH3Segment seg, int row,
+        string prefix, Tensor? weightOverride = null, Tensor? biasOverride = null,
+        int[]? targetTimestepRows = null)
     {
         int hidden = _config.HiddenSize, n = seg.Length;
         Tensor modulated = new Tensor(new TensorShape(n, hidden), DType.F32);
         using (Tensor slice = new Tensor(new TensorShape(n, hidden), DType.F32))
-        using (Tensor onePlus = new Tensor(new TensorShape(1, hidden), DType.F32))
-        using (Tensor s = new Tensor(new TensorShape(1, hidden), DType.F32))
-        using (Tensor b = new Tensor(new TensorShape(1, hidden), DType.F32))
         {
             backend.SliceRows(slice, normed, seg.Start);
-            backend.SliceRows(s, scale, row);
-            backend.SliceRows(b, shift, row);
-            backend.AddScalar(onePlus, s, 1f);
-            backend.AffineBroadcastLastDim(modulated, slice, onePlus, b);
+            if (targetTimestepRows is null)
+            {
+                using Tensor onePlus = new Tensor(new TensorShape(1, hidden), DType.F32);
+                using Tensor s = new Tensor(new TensorShape(1, hidden), DType.F32);
+                using Tensor b = new Tensor(new TensorShape(1, hidden), DType.F32);
+                backend.SliceRows(s, scale, row);
+                backend.SliceRows(b, shift, row);
+                backend.AddScalar(onePlus, s, 1f);
+                backend.AffineBroadcastLastDim(modulated, slice, onePlus, b);
+            }
+            else
+            {
+                using Tensor indices = TimestepIndexTensor(targetTimestepRows);
+                backend.AffineBroadcastRowIndexed(modulated, slice, scale, shift, indices);
+            }
         }
-        Tensor weight = Require($"{prefix}.weight");
+        Tensor weight = weightOverride ?? Require($"{prefix}.weight");
         Tensor outT = new Tensor(new TensorShape(n, weight.Shape[0]), DType.F32);
-        backend.Linear(outT, modulated, weight, Optional($"{prefix}.bias"));
+        backend.Linear(outT, modulated, weight, weightOverride is null ? Optional($"{prefix}.bias") : biasOverride);
         modulated.Dispose();
         return outT;
     }
@@ -746,13 +1155,47 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// uniform run silently mis-modulates every image/video-reference generation.</summary>
     private static Tensor BuildModulationIndex(MiniMaxH3PackedLayout layout, int seq,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
-        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns)
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns,
+        IReadOnlyList<int>? videoTimestepRows = null, IReadOnlyList<int>? audioTimestepRows = null,
+        int timestepCount = int.MaxValue)
     {
         Tensor index = new Tensor(new TensorShape(seq), DType.I32);
         int* p = (int*)index.DataPointer;
         for (int i = 0; i < seq; i++) p[i] = -1;
         foreach (MiniMaxH3Segment seg in layout.Segments)
         {
+            IReadOnlyList<int>? targetRows = seg.Kind switch
+            {
+                MiniMaxH3SegmentKind.Video => videoTimestepRows,
+                MiniMaxH3SegmentKind.Audio => audioTimestepRows,
+                _ => null,
+            };
+            if (targetRows is not null)
+            {
+                if (targetRows.Count != seg.Length)
+                {
+                    index.Dispose();
+                    throw new ArgumentException(
+                        $"MiniMax-H3 {seg.Kind} timestep index has {targetRows.Count} rows, expected {seg.Length}.",
+                        seg.Kind == MiniMaxH3SegmentKind.Video
+                            ? nameof(videoTimestepRows) : nameof(audioTimestepRows));
+                }
+                int modality = ModalityTag(seg.Kind);
+                for (int i = 0; i < seg.Length; i++)
+                {
+                    int timestepRow = targetRows[i];
+                    if (timestepRow < 0 || timestepRow >= timestepCount)
+                    {
+                        index.Dispose();
+                        throw new ArgumentOutOfRangeException(
+                            seg.Kind == MiniMaxH3SegmentKind.Video
+                                ? nameof(videoTimestepRows) : nameof(audioTimestepRows),
+                            timestepRow, $"Timestep row must be in [0,{timestepCount}).");
+                    }
+                    p[seg.Start + i] = timestepRow * 3 + modality;
+                }
+                continue;
+            }
             int rowBase = timestepRowOf[seg.Kind] * 3;
             if (seg.Kind == MiniMaxH3SegmentKind.Text && textTagRuns is { Count: > 0 })
             {
@@ -775,6 +1218,17 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
         }
         return index;
+    }
+
+    private static Tensor TimestepIndexTensor(IReadOnlyList<int> rows)
+    {
+        Tensor indices = new Tensor(new TensorShape(rows.Count), DType.I32);
+        int* destination = (int*)indices.DataPointer;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            destination[i] = rows[i];
+        }
+        return indices;
     }
 
     /// <summary>Sinusoidal embedding (cos before sin) then proj_in/SiLU/proj_out, or a lerp of the precomputed
@@ -832,6 +1286,27 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return outT;
     }
 
+    private bool TryResolveFunControlKey(string key, out MiniMaxH3FunControlNet controlNet,
+        out string controlKey)
+    {
+        controlNet = null!;
+        controlKey = string.Empty;
+        if (!key.StartsWith(FunControlWeightPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        int indexStart = FunControlWeightPrefix.Length;
+        int separator = key.IndexOf('.', indexStart);
+        if (separator <= indexStart || !int.TryParse(key.AsSpan(indexStart, separator - indexStart), out int index)
+            || (uint)index >= (uint)_funControlNets.Count || separator == key.Length - 1)
+        {
+            throw new KeyNotFoundException($"Invalid MiniMax-H3 Fun ControlNet weight route '{key}'.");
+        }
+        controlNet = _funControlNets[index];
+        controlKey = key[(separator + 1)..];
+        return true;
+    }
+
     /// <summary>Replaces the residual stream, disposing the tensor it displaces.</summary>
     private static void Swap(ref Tensor current, Tensor replacement)
     {
@@ -846,5 +1321,20 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         _disposed = true;
         foreach (Tensor t in _weights.Values) t.Dispose();
         _weights.Clear();
+        foreach (MiniMaxH3FunControlNet controlNet in _funControlNets)
+        {
+            controlNet.Dispose();
+        }
+        _funControlNets.Clear();
+    }
+
+    private sealed class FunControlRuntime(int modelIndex, float strength, Tensor state) : IDisposable
+    {
+        public int ModelIndex { get; } = modelIndex;
+        public float Strength { get; } = strength;
+        public Tensor State = state;
+        public int NextBlock;
+
+        public void Dispose() => State.Dispose();
     }
 }

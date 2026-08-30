@@ -148,5 +148,7 @@ public sealed class HardeningEndpointsTests : IClassFixture<WebApplicationFactor
         JsonElement paths = doc.GetProperty("paths");
         Assert.True(paths.TryGetProperty("/v1/native/images", out _));
         Assert.True(paths.TryGetProperty("/v1/native/text", out _));
+        Assert.True(paths.TryGetProperty("/v1/native/video/plan", out _));
+        Assert.True(paths.TryGetProperty("/v1/native/video/stream", out _));
     }
 }

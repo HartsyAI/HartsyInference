@@ -15,8 +15,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// stack into the transformer weight dict before <c>LoadWeights</c> (mirroring the existing
 /// <c>Sd3Recipe</c>/<c>SdxlRecipe</c>/<c>Flux1Recipe</c> call shape) and declares <see cref="VideoFeatures.Lora"/> —
 /// full engine path (<c>InferenceEngine</c> → <c>VideoService</c> → <c>WanVideoRecipe</c>), not a unit test in
-/// isolation, so this also proves <c>VideoService.RejectUnsupported</c> no longer refuses a LoRA-bearing Wan
-/// request. Same-seed A/B (LoRA off vs. on) on real TI2V-5B weights. Only covers the single (dense, non-MoE)
+/// isolation, so this also proves plan-driven feature validation accepts a LoRA-bearing Wan request.
+/// Same-seed A/B (LoRA off vs. on) on real TI2V-5B weights. Only covers the single (dense, non-MoE)
 /// expert — this box has no local Wan 2.2 A14B dual-expert checkpoint pair (2x ~14GB) and downloading one just
 /// for this test would violate the download→test→delete discipline for something this session already proved
 /// the mechanism for; the MoE second-expert merge (<c>WanVideoRecipe.ConstructBase</c>'s

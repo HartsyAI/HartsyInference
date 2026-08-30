@@ -32,18 +32,17 @@ public sealed class AudioEndpointsTests : IClassFixture<WebApplicationFactory<Pr
     }
 
     [Fact]
-    public async Task Speech_MissingText_Returns500()
+    public async Task Speech_MissingText_Returns400()
     {
-        // ArgumentException from SpeechService.SynthesizeAsync's own validation isn't in GenerationErrors' map
-        // (unlike the model-resolution exceptions), so it falls to the generic 500 branch — documenting the
-        // actual current behavior rather than asserting an aspirational 400.
+        // SpeechService.SynthesizeAsync validates the text itself with ArgumentException, which GenerationErrors
+        // maps to a caller error alongside the model-resolution exceptions.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/speech", new
         {
             model = "kokoro",
             request = new { text = "" },
         });
-        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
     [Fact]

@@ -30,7 +30,7 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     private readonly T5Tokenizer _tokenizer;
     private readonly T5TextEncoder _t5;
     private readonly LtxVideoTransformer _transformer;
-    /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only — see <see cref="LtxVideoRecipe.SupportsFor"/>); <see cref="Generate"/> refuses an init image in that case via <c>VideoService.RejectUnsupported</c> before this pipeline is even reached.</summary>
+    /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only — see <see cref="LtxVideoRecipe.SupportsFor"/>); plan-driven feature validation refuses an init image before this pipeline is reached.</summary>
     private readonly LtxVideoVaeEncoder? _vaeEncoder;
     private readonly List<SafeTensorsLoader> _loaders;
     private readonly MergedLoraStack? _loraStack;

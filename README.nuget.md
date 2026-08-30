@@ -59,6 +59,29 @@ Every modality follows the same shape: `engine.Images`, `engine.Text`, `engine.V
 `engine.Transcribe`, `engine.Music`, `engine.Vision`, `engine.Mesh`, `engine.World`, `engine.Restore`,
 `engine.VoiceConversion`, `engine.Fx`, `engine.Embeddings`.
 
+For H3 and other profile-aware video checkpoints, preflight before generation. The returned immutable plan
+drives defaults, capability checks, model-cache identity, construction, and execution; a profile hint may
+confirm detection but cannot override incompatible tensors or hashes.
+
+```csharp
+var videoSpec = new ModelSpec
+{
+    Requested = "minimax-h3",
+    Modality = Modality.Video,
+    LocalPath = "/models/minimax_h3_fl2va.safetensors",
+};
+var videoRequest = new VideoRequest { Prompt = "A dog running beside a stream", Seed = 42 };
+
+VideoPlan plan = await engine.VideoPlanning.PlanAsync(videoSpec, videoRequest);
+plan.ThrowIfInvalid();
+VideoGenerationResult video = await engine.Video.GenerateAsync(plan, videoRequest);
+Console.WriteLine(video.Execution?.ExecutionPath);
+```
+
+Header/hash recognition, Turbo/Hybrid compositions, PDD, VSA, arbitrary guides/masks, Fun ControlNet, and
+the int8 video VAE have distinct real-weight release gates. Consult the repository's video status checklist;
+the presence of an API type is not a claim that every expansion artifact has completed those gates.
+
 ## Performance
 
 **Krea 2 — faster than ComfyUI on both variants** (RTX 4090, same checkpoint and steps): Turbo **4.5 s**
@@ -129,4 +152,7 @@ ComfyUI backend — full generation UI, model browser and parameter controls, wi
 
 ## License
 
-MIT
+HartsyInference code and packages: **MIT**. Model weights retain their own licenses. MiniMax-H3 uses the
+[MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE), with
+territorial exclusions and operator notice/disclosure/commercial obligations. HartsyInference does not
+redistribute H3 expansion weights, and a user-supplied local checkpoint does not waive its model license.

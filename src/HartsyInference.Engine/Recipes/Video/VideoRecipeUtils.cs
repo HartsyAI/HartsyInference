@@ -118,6 +118,16 @@ internal static class VideoRecipeUtils
         return result;
     }
 
+    /// <summary>Fits an RGB24 guide onto a target canvas with the request's explicit aspect-ratio policy.</summary>
+    internal static byte[] FitGuideFrame(
+        ImageData image, int width, int height, VideoGuideFitMode fitMode) => fitMode switch
+    {
+        VideoGuideFitMode.Stretch => ResizeRgb24(image, width, height),
+        VideoGuideFitMode.Contain => LetterboxRgb24(image, width, height),
+        VideoGuideFitMode.Cover => CoverRgb24(image, width, height),
+        _ => throw new ArgumentOutOfRangeException(nameof(fitMode), fitMode, "Unknown video-guide fit mode."),
+    };
+
     /// <summary>Aspect-preserving resize onto a black <paramref name="width"/>×<paramref name="height"/> canvas — Wan2.2's <c>padding_resize</c>. The stretching <see cref="ResizeRgb24"/> squashes a portrait reference into a square job, so the identity conditioning sees a distorted face.</summary>
     internal static byte[] LetterboxRgb24(ImageData image, int width, int height)
     {
@@ -137,6 +147,29 @@ internal static class VideoRecipeUtils
             Array.Copy(inner, (long)y * innerW * 3, canvas, ((long)(y + offY) * width + offX) * 3, (long)innerW * 3);
         }
         return canvas;
+    }
+
+    /// <summary>Aspect-preserving resize that fills the target canvas, cropping equal margins from the long axis.</summary>
+    internal static byte[] CoverRgb24(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), $"Target size must be positive; got {width}x{height}.");
+        }
+        float scale = MathF.Max(width / (float)image.Width, height / (float)image.Height);
+        int resizedWidth = Math.Max(width, (int)MathF.Ceiling(image.Width * scale));
+        int resizedHeight = Math.Max(height, (int)MathF.Ceiling(image.Height * scale));
+        byte[] resized = ResizeRgb24(image, resizedWidth, resizedHeight);
+        int offsetX = (resizedWidth - width) / 2;
+        int offsetY = (resizedHeight - height) / 2;
+        byte[] output = new byte[checked(width * height * 3)];
+        for (int y = 0; y < height; y++)
+        {
+            Array.Copy(resized, ((long)(y + offsetY) * resizedWidth + offsetX) * 3,
+                output, (long)y * width * 3, (long)width * 3);
+        }
+        return output;
     }
 
     /// <summary>Colour-matches every frame of a continuation chunk to the static reference image's Lab stats in place, so drift cannot compound through the carried-frame chain. Chunk 0 is never touched — single-chunk generations stay byte-identical — and <paramref name="strength"/> &lt;= 0 is a no-op.</summary>

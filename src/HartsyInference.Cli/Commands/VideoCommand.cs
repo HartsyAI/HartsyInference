@@ -28,6 +28,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Path to a checkpoint (file or folder) of any registered video family; pair it with -m <family> when the layout is ambiguous.")]
         public string? ModelPath { get; init; }
 
+        /// <summary>Optional H3 checkpoint-profile id to confirm the header/hash detection.</summary>
+        [CommandOption("--model-profile")]
+        [Description("Confirm a detected H3 model profile. This cannot override incompatible tensors or hashes; --profile remains Engine tuning.")]
+        public string? ModelProfile { get; init; }
+
         /// <summary>Compute backend (must be cuda for video).</summary>
         [CommandOption("-b|--backend")]
         [Description("Backend (video requires cuda).")]
@@ -57,6 +62,26 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [CommandOption("--steps")]
         [Description("Denoising steps (default: the model family's recommended count).")]
         public int? Steps { get; init; }
+
+        /// <summary>Video flow-match shift.</summary>
+        [CommandOption("--flow-shift")]
+        [Description("Video flow-match shift; locked acceleration profiles reject incompatible values.")]
+        public float? FlowShift { get; init; }
+
+        /// <summary>Audio flow-match shift.</summary>
+        [CommandOption("--audio-flow-shift")]
+        [Description("Audio flow-match shift; MiniMax-H3 defaults independently from the video stream.")]
+        public float? AudioFlowShift { get; init; }
+
+        /// <summary>Sampler name.</summary>
+        [CommandOption("--sampler")]
+        [Description("Sampler name; locked H3 acceleration profiles require Euler.")]
+        public string? Sampler { get; init; }
+
+        /// <summary>Scheduler name.</summary>
+        [CommandOption("--scheduler")]
+        [Description("Sigma scheduler name; null keeps the detected profile recipe.")]
+        public string? Scheduler { get; init; }
 
         /// <summary>Start frame for image-to-video; families without keyframe conditioning ignore it.</summary>
         [CommandOption("--init-image")]
@@ -117,6 +142,98 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [CommandOption("--ref-audio")]
         [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
         public string[]? ReferenceAudios { get; init; }
+
+        /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
+        [CommandOption("--guide-image")]
+        [Description("Image guide as FRAME=PATH; repeat. Negative frames resolve from the aligned target end.")]
+        public string[]? GuideImages { get; init; }
+
+        /// <summary>Arbitrary video guides expressed as FRAME=PATH.</summary>
+        [CommandOption("--guide-video")]
+        [Description("Video guide as FRAME=PATH; repeat. A frame cannot contain both an image and video guide.")]
+        public string[]? GuideVideos { get; init; }
+
+        /// <summary>Arbitrary audio guides expressed as FRAME=PATH.</summary>
+        [CommandOption("--guide-audio")]
+        [Description("Audio guide as FRAME=PATH; repeat. It merges with a visual guide at the same frame.")]
+        public string[]? GuideAudios { get; init; }
+
+        /// <summary>JSON guide manifest.</summary>
+        [CommandOption("--guides-manifest")]
+        [Description("JSON file containing arbitrary visual/audio H3 guides.")]
+        public string? GuidesManifest { get; init; }
+
+        /// <summary>Continuous video denoise mask.</summary>
+        [CommandOption("--video-denoise-mask")]
+        [Description("Image/video mask: white generates, black preserves; non-white regions require --video-mask-source.")]
+        public string? VideoDenoiseMask { get; init; }
+
+        /// <summary>Video source preserved by the denoise mask.</summary>
+        [CommandOption("--video-mask-source")]
+        [Description("Image/video source preserved by black video-mask regions.")]
+        public string? VideoMaskSource { get; init; }
+
+        /// <summary>Continuous audio denoise mask values.</summary>
+        [CommandOption("--audio-denoise-mask")]
+        [Description("JSON or delimited audio-mask values between 0 and 1; cadence defaults to 40 Hz.")]
+        public string? AudioDenoiseMask { get; init; }
+
+        /// <summary>Audio source preserved by the denoise mask.</summary>
+        [CommandOption("--audio-mask-source")]
+        [Description("Audio source preserved wherever the audio mask is below one.")]
+        public string? AudioMaskSource { get; init; }
+
+        /// <summary>Audio-mask sample cadence.</summary>
+        [CommandOption("--audio-mask-rate")]
+        [Description("Audio-mask values per second (default 40, the H3 audio-latent cadence).")]
+        public float? AudioMaskRate { get; init; }
+
+        /// <summary>One simple Fun ControlNet model.</summary>
+        [CommandOption("--control-model")]
+        [Description("MiniMax-H3 Fun ControlNet-Union checkpoint for the simple control slot.")]
+        public string? ControlModel { get; init; }
+
+        /// <summary>Preprocessed video for the simple control slot.</summary>
+        [CommandOption("--control-video")]
+        [Description("Already-preprocessed video for --control-model.")]
+        public string? ControlVideo { get; init; }
+
+        /// <summary>Simple control provenance kind.</summary>
+        [CommandOption("--control-kind")]
+        [Description("Control kind: canny, depth, hed, mlsd, pose, or custom. Inpaint requires --controls-manifest so its visibility and masked-source videos are explicit.")]
+        public string? ControlKind { get; init; }
+
+        /// <summary>Simple control strength.</summary>
+        [CommandOption("--control-strength")]
+        public double? ControlStrength { get; init; }
+
+        /// <summary>Simple control start fraction.</summary>
+        [CommandOption("--control-start")]
+        public double? ControlStart { get; init; }
+
+        /// <summary>Simple control end fraction.</summary>
+        [CommandOption("--control-end")]
+        public double? ControlEnd { get; init; }
+
+        /// <summary>JSON control manifest for multiple streams.</summary>
+        [CommandOption("--controls-manifest")]
+        [Description("JSON file containing multiple independently windowed H3 controls.")]
+        public string? ControlsManifest { get; init; }
+
+        /// <summary>Video VAE override.</summary>
+        [CommandOption("--video-vae")]
+        [Description("Video VAE checkpoint override; legacy VAE remains the fallback.")]
+        public string? VideoVae { get; init; }
+
+        /// <summary>Audio VAE override.</summary>
+        [CommandOption("--audio-vae")]
+        [Description("Audio VAE checkpoint override, independent of the video VAE.")]
+        public string? AudioVae { get; init; }
+
+        /// <summary>Learned sparse-attention policy.</summary>
+        [CommandOption("--sparse-attention")]
+        [Description("Sparse-attention policy: auto, require, or disable. Known VSA profiles cannot silently run dense.")]
+        public string? SparseAttention { get; init; }
 
         /// <summary>LoRAs to merge into the denoiser; families that don't declare LoRA support refuse them.</summary>
         [CommandOption("--lora")]
@@ -191,6 +308,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("height", settings.Height);
         parameters.PutIfSet("frames", settings.Frames);
         parameters.PutIfSet("steps", settings.Steps);
+        parameters.PutIfSet("model-profile", settings.ModelProfile);
+        parameters.PutIfSet("flow-shift", settings.FlowShift);
+        parameters.PutIfSet("audio-flow-shift", settings.AudioFlowShift);
+        parameters.PutIfSet("sampler", settings.Sampler);
+        parameters.PutIfSet("scheduler", settings.Scheduler);
         parameters.PutIfSet("cfg", settings.Cfg);
         parameters.PutIfSet("fps", settings.Fps);
         parameters.PutIfSet("init-image", settings.InitImage);
@@ -223,6 +345,34 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         {
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
         }
+        if (settings.GuideImages is { Length: > 0 })
+        {
+            parameters.Put("guide-images", string.Join('\n', settings.GuideImages));
+        }
+        if (settings.GuideVideos is { Length: > 0 })
+        {
+            parameters.Put("guide-videos", string.Join('\n', settings.GuideVideos));
+        }
+        if (settings.GuideAudios is { Length: > 0 })
+        {
+            parameters.Put("guide-audios", string.Join('\n', settings.GuideAudios));
+        }
+        parameters.PutIfSet("guides-manifest", settings.GuidesManifest);
+        parameters.PutIfSet("video-denoise-mask", settings.VideoDenoiseMask);
+        parameters.PutIfSet("video-mask-source", settings.VideoMaskSource);
+        parameters.PutIfSet("audio-denoise-mask", settings.AudioDenoiseMask);
+        parameters.PutIfSet("audio-mask-source", settings.AudioMaskSource);
+        parameters.PutIfSet("audio-mask-rate", settings.AudioMaskRate);
+        parameters.PutIfSet("control-model", settings.ControlModel);
+        parameters.PutIfSet("control-video", settings.ControlVideo);
+        parameters.PutIfSet("control-kind", settings.ControlKind);
+        parameters.PutIfSet("control-strength", settings.ControlStrength);
+        parameters.PutIfSet("control-start", settings.ControlStart);
+        parameters.PutIfSet("control-end", settings.ControlEnd);
+        parameters.PutIfSet("controls-manifest", settings.ControlsManifest);
+        parameters.PutIfSet("video-vae", settings.VideoVae);
+        parameters.PutIfSet("audio-vae", settings.AudioVae);
+        parameters.PutIfSet("sparse-attention", settings.SparseAttention);
         if (settings.Loras is { Length: > 0 })
         {
             parameters.Put("loras", string.Join('\n', settings.Loras));
@@ -239,6 +389,10 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
+        if (!string.IsNullOrWhiteSpace(settings.ModelProfile))
+        {
+            spec = spec with { ProfileId = settings.ModelProfile };
+        }
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
         (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend,

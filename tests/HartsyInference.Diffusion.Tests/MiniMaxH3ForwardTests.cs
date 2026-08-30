@@ -220,4 +220,64 @@ public unsafe class MiniMaxH3ForwardTests
             v0.Dispose(); a0.Dispose(); v1.Dispose(); a1.Dispose(); cos.Dispose(); sin.Dispose();
         }
     }
+
+    [Fact]
+    public void TargetRowTimestepsDriveBothBlockModulationAndTheFinalHeads()
+    {
+        MiniMaxH3Config config = TinyConfig(curves: false);
+        IBackend backend = new CpuBackend();
+        using MiniMaxH3Transformer dit = new MiniMaxH3Transformer(config);
+        dit.LoadWeights(BuildWeights(config));
+
+        const int textLen = 3, latentT = 2, latentH = 4, latentW = 6, audioT = 2;
+        MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(
+            textLen, latentT, latentH, latentW, audioT);
+        int videoRowCount = latentT * (latentH / 2) * (latentW / 2);
+        int audioRowCount = audioT * 2;
+        using Tensor videoRows = Rand(videoRowCount, config.VideoPatchDim);
+        using Tensor audioRows = Rand(audioRowCount, config.AudioLatentsDim);
+        using Tensor text = Rand(textLen, config.TextDim);
+        (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(
+            layout.PositionIds, MiniMaxH3Rope.DefaultInvFreq(config.RopeInvFreqLen), config.AttentionHeadDim);
+        float[] uniqueT = [0.3f, 0.55f, 0.8f];
+        Dictionary<MiniMaxH3SegmentKind, int> rowOf = new()
+        {
+            [MiniMaxH3SegmentKind.Text] = 0,
+            [MiniMaxH3SegmentKind.Video] = 0,
+            [MiniMaxH3SegmentKind.Audio] = 1,
+        };
+        int[] scalarVideoRows = Enumerable.Repeat(0, videoRowCount).ToArray();
+        int[] scalarAudioRows = Enumerable.Repeat(1, audioRowCount).ToArray();
+        int[] mixedVideoRows = (int[])scalarVideoRows.Clone();
+        int[] mixedAudioRows = (int[])scalarAudioRows.Clone();
+        mixedVideoRows[0] = 2;
+        mixedAudioRows[0] = 2;
+
+        (Tensor baseVideo, Tensor baseAudio) = dit.Forward(
+            backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf);
+        (Tensor scalarVideo, Tensor scalarAudio) = dit.Forward(
+            backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf,
+            videoTimestepRows: scalarVideoRows, audioTimestepRows: scalarAudioRows);
+        (Tensor mixedVideo, Tensor mixedAudio) = dit.Forward(
+            backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf,
+            videoTimestepRows: mixedVideoRows, audioTimestepRows: mixedAudioRows);
+        try
+        {
+            Assert.Equal(baseVideo.AsReadOnlySpan<float>().ToArray(), scalarVideo.AsReadOnlySpan<float>().ToArray());
+            Assert.Equal(baseAudio.AsReadOnlySpan<float>().ToArray(), scalarAudio.AsReadOnlySpan<float>().ToArray());
+            Assert.False(baseVideo.AsReadOnlySpan<float>().SequenceEqual(mixedVideo.AsReadOnlySpan<float>()));
+            Assert.False(baseAudio.AsReadOnlySpan<float>().SequenceEqual(mixedAudio.AsReadOnlySpan<float>()));
+        }
+        finally
+        {
+            baseVideo.Dispose();
+            baseAudio.Dispose();
+            scalarVideo.Dispose();
+            scalarAudio.Dispose();
+            mixedVideo.Dispose();
+            mixedAudio.Dispose();
+            cos.Dispose();
+            sin.Dispose();
+        }
+    }
 }

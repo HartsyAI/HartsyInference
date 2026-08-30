@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Video.Pipelines;
@@ -108,20 +109,20 @@ public sealed class LtxVideo2SigmaScheduleTests
         Assert.Equal(ShiftForTokens(tokens), LtxVideo2Pipeline.ComputeShift(tokens, new LtxVideo2Config { ShiftMaxTokens = cap }));
     }
 
-    /// <summary>The env override exists so an arm can be selected without a rebuild; it must beat the config.</summary>
+    /// <summary>The setting override exists so an arm can be selected without a rebuild; it must beat the config.</summary>
     [Fact]
-    public void EnvOverrideBeatsTheConfiguredCap()
+    public void SettingOverrideBeatsTheConfiguredCap()
     {
         try
         {
-            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", "4096");
+            KnobStore.Set(EngineKnobs.Ltx2ShiftMaxTokens, 4096);
             Assert.True(System.Math.Abs(LtxVideo2Pipeline.ComputeShift(27280, new LtxVideo2Config()) - 7.768f) < 1e-2f);
-            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", "0");
+            KnobStore.Set(EngineKnobs.Ltx2ShiftMaxTokens, 0);
             Assert.True(LtxVideo2Pipeline.ComputeShift(27280, new LtxVideo2Config { ShiftMaxTokens = 4096 }) > 30000f);
         }
         finally
         {
-            System.Environment.SetEnvironmentVariable("HARTSY_LTX2_SHIFT_MAX_TOKENS", null);
+            KnobStore.Clear(EngineKnobs.Ltx2ShiftMaxTokens);
         }
     }
 

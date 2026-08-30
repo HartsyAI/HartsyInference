@@ -33,10 +33,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
     private const int MaxPixels = 12845056;
 
-    /// <summary>Guard on the dense causal mask, chosen to clear the reference's 3-reference-video cap (~18k tokens)
-    /// while turning a runaway presentation into a message instead of an out-of-memory kill.</summary>
-    private const int MaxMaskSequenceLength = 32768;
-
     /// <summary>Qwen3-VL image normalization used by H3 — plain <c>[0.5, 0.5, 0.5]</c>, not CLIP's statistics.</summary>
     private static readonly float[] NormalizationMean = [0.5f, 0.5f, 0.5f];
 
@@ -137,6 +133,11 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         if (_queryHeads * _headDim != first.Query.OutFeatures || _kvHeads * _headDim != first.Key.OutFeatures)
             throw new InvalidOperationException(
                 $"Attention projections are not a multiple of head_dim {_headDim} (q={first.Query.OutFeatures}, k={first.Key.OutFeatures}).");
+        if (_queryHeads % _kvHeads != 0)
+        {
+            throw new InvalidOperationException(
+                $"Query heads ({_queryHeads}) must be a multiple of KV heads ({_kvHeads}) for grouped-query attention.");
+        }
 
         LoadVisionTower(weights);
         Logs.Verbose($"MiniMaxH3TextEncoder loaded: {_blocks.Count} layers, hidden={_hiddenSize}, " +
@@ -181,7 +182,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         int[] tokenIds = presentation.TokenIds;
         int seqLen = tokenIds.Length;
         Tensor hidden = LookupEmbeddings(tokenIds);
-        Tensor causalMask = BuildCausalMask(seqLen);
         VisionResult[] visionOut = RunVisionTower(backend, presentation, referenceImages);
         // One buffer for every quantized linear in the tower, instead of a host allocation per projection per layer.
         Tensor? dequantScratch = _dequantScratchElements > 0 ? Nvfp4Linear.CreateDequantScratch(_dequantScratchElements)
@@ -197,7 +197,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
             for (int i = 0; i < _blocks.Count; i++)
             {
-                Tensor next = _blocks[i].Forward(backend, hidden, causalMask, cos, sin, seqLen, this, dequantScratch);
+                Tensor next = _blocks[i].Forward(backend, hidden, cos, sin, seqLen, this, dequantScratch);
                 hidden.Dispose();
                 hidden = next;
                 if (visionOut.Length > 0 && i < visionOut[0].Output.DeepstackFeatures.Length)
@@ -213,7 +213,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         {
             dequantScratch?.Dispose();
             hidden.Dispose();
-            causalMask.Dispose();
             foreach (VisionResult vr in visionOut)
             {
                 vr.Output.MergedTokens.Dispose();
@@ -360,22 +359,18 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         return output;
     }
 
-    private static Tensor BuildCausalMask(int seqLen)
+    /// <summary>Runs Qwen3-VL's causal grouped-query attention without expanding KV heads or materializing a score mask.</summary>
+    internal static void CausalGqaAttention(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value,
+        int queryHeads, int kvHeads, int seqLen, int headDim)
     {
-        // Dense [S, S] F32: reference videos push S into the thousands, where the mask alone outgrows host RAM.
-        if (seqLen > MaxMaskSequenceLength)
+        ArgumentNullException.ThrowIfNull(backend);
+        if (queryHeads <= 0 || kvHeads <= 0 || queryHeads % kvHeads != 0)
         {
-            throw new InvalidOperationException(
-                $"MiniMax-H3 conditioning is {seqLen} tokens; the dense causal mask would need "
-                + $"{(long)seqLen * seqLen * sizeof(float) / (1024 * 1024)} MiB (cap {MaxMaskSequenceLength} tokens). "
-                + "Use fewer or shorter reference videos.");
+            throw new ArgumentException(
+                $"Qwen3-VL query heads ({queryHeads}) must be a positive multiple of KV heads ({kvHeads}).");
         }
-        Tensor mask = new Tensor(new TensorShape(seqLen, seqLen), DType.F32);
-        float* p = (float*)mask.DataPointer;
-        for (int i = 0; i < seqLen; i++)
-            for (int j = 0; j < seqLen; j++)
-                p[(long)i * seqLen + j] = j > i ? -1e30f : 0f;
-        return mask;
+        backend.FlashAttention(output, query, key, value, seqLen, queryHeads / kvHeads, causal: true,
+            qOffset: 0, scale: 1.0f / MathF.Sqrt(headDim));
     }
 
     private static void SpliceVisionTokens(Tensor embeds, VisionResult[] visionOut, bool[] visualMask, int seqLen)
@@ -549,7 +544,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
                     yield return t;
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask, float[] ropeCos, float[] ropeSin,
+        public Tensor Forward(IBackend backend, Tensor hidden, float[] ropeCos, float[] ropeSin,
             int seqLen, MiniMaxH3TextEncoder owner, Tensor? dequantScratch)
         {
             int hiddenSize = owner._hiddenSize;
@@ -595,23 +590,11 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             ApplyRopeSplitHalf(qMh, ropeCos, ropeSin, queryHeads, seqLen, headDim);
             ApplyRopeSplitHalf(kMh, ropeCos, ropeSin, kvHeads, seqLen, headDim);
 
-            Tensor kRepeated = kMh;
-            Tensor vRepeated = vMh;
-            if (kvHeads != queryHeads)
-            {
-                kRepeated = new Tensor(queryHeadShape, DType.F32);
-                vRepeated = new Tensor(queryHeadShape, DType.F32);
-                RepeatKvHeads(kRepeated, kMh, kvHeads, queryHeads / kvHeads, seqLen, headDim);
-                RepeatKvHeads(vRepeated, vMh, kvHeads, queryHeads / kvHeads, seqLen, headDim);
-                kMh.Dispose();
-                vMh.Dispose();
-            }
-
             Tensor attnOut = new Tensor(queryHeadShape, DType.F32);
-            backend.ScaledDotProductAttention(attnOut, qMh, kRepeated, vRepeated, causalMask, 1.0f / MathF.Sqrt(headDim));
+            CausalGqaAttention(backend, attnOut, qMh, kMh, vMh, queryHeads, kvHeads, seqLen, headDim);
             qMh.Dispose();
-            kRepeated.Dispose();
-            vRepeated.Dispose();
+            kMh.Dispose();
+            vMh.Dispose();
 
             Tensor attnFlat = new Tensor(queryShape, DType.F32);
             HeadsToFlat(attnFlat, attnOut, seqLen, queryHeads, headDim);
@@ -691,17 +674,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
                 for (int h = 0; h < heads; h++)
                     Buffer.MemoryCopy(src + ((long)h * seqLen + s) * headDim,
                         dst + ((long)s * heads + h) * headDim, bytes, bytes);
-        }
-
-        private static void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize, int seqLen, int headDim)
-        {
-            float* src = (float*)input.DataPointer;
-            float* dst = (float*)output.DataPointer;
-            long perHead = (long)seqLen * headDim;
-            for (int h = 0; h < kvHeads; h++)
-                for (int g = 0; g < groupSize; g++)
-                    Buffer.MemoryCopy(src + h * perHead, dst + (long)(h * groupSize + g) * perHead,
-                        perHead * sizeof(float), perHead * sizeof(float));
         }
 
         private static void ApplyRopeSplitHalf(Tensor x, float[] cos, float[] sin, int heads, int seqLen, int headDim)

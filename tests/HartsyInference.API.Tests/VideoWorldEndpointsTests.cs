@@ -20,10 +20,10 @@ public sealed class VideoWorldEndpointsTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
-    public async Task VideoStream_UnresolvableModel_ReportsErrorEventNotHang()
+    public async Task VideoStream_UnresolvableModel_ReturnsTyped422BeforeStreaming()
     {
-        // VideoService.GenerateAsync routes through GetOrConstructVideoRecipe, same FileNotFoundException as
-        // images for an unresolvable model — confirmed by reading VideoService.cs, not assumed.
+        // Preflight runs before SSE commits its response. A model that cannot resolve therefore remains an
+        // ordinary typed HTTP error instead of producing an error event after a misleading 200 response.
         using HttpClient client = _factory.CreateClient();
         using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, "/v1/native/video/stream")
         {
@@ -35,16 +35,17 @@ public sealed class VideoWorldEndpointsTests : IClassFixture<WebApplicationFacto
         };
 
         using HttpResponseMessage resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        Assert.DoesNotContain("text/event-stream", resp.Content.Headers.ContentType?.MediaType ?? "");
         string body = await resp.Content.ReadAsStringAsync();
-        Assert.Contains("event: error", body);
-        Assert.Contains("checkpoint", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("video.plan.model_unresolvable", body, StringComparison.Ordinal);
+        Assert.Contains("model", body, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public async Task WorldOpen_UnresolvableModel_Returns400()
     {
-        // WorldService.Open requires InitImage before it even looks at the model (else ArgumentException/500,
+        // WorldService.Open requires InitImage before it even looks at the model (else ArgumentException/400,
         // a different case) — supplying one here to reach the FileNotFoundException/400 path being tested.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/world/sessions", new
@@ -56,17 +57,16 @@ public sealed class VideoWorldEndpointsTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
-    public async Task WorldOpen_MissingInitImage_Returns500()
+    public async Task WorldOpen_MissingInitImage_Returns400()
     {
-        // ArgumentException from WorldService.Open's own validation isn't in GenerationErrors' map, same as
-        // Speech's empty-text case — documenting the real current behavior, not an aspirational 400.
+        // WorldService validates InitImage with ArgumentException, which GenerationErrors maps to a caller error.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/world/sessions", new
         {
             model = "whatever",
             request = new { prompt = "a small room" },
         });
-        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
     [Fact]

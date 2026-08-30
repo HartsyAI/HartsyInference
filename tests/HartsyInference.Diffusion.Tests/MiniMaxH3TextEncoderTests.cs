@@ -262,4 +262,71 @@ public sealed unsafe class MiniMaxH3TextEncoderTests
         Assert.Equal([(0, presentation.Length, MiniMaxH3TextEncoding.TextTag)], result.TagRuns);
         result.HiddenStates.Dispose();
     }
+
+    [Fact]
+    public void ImplicitCausalGqaMatchesDenseRepeatedKvReference()
+    {
+        const int QueryHeads = 4, KvHeads = 2, Sequence = 5, HeadDim = 4;
+        IBackend backend = new CpuBackend();
+        using Tensor query = RandomF32(new TensorShape(1, QueryHeads, Sequence, HeadDim));
+        using Tensor key = RandomF32(new TensorShape(1, KvHeads, Sequence, HeadDim));
+        using Tensor value = RandomF32(new TensorShape(1, KvHeads, Sequence, HeadDim));
+        using Tensor actual = new Tensor(query.Shape, DType.F32);
+        MiniMaxH3TextEncoder.CausalGqaAttention(
+            backend, actual, query, key, value, QueryHeads, KvHeads, Sequence, HeadDim);
+
+        using Tensor repeatedKey = RepeatKv(key, QueryHeads / KvHeads);
+        using Tensor repeatedValue = RepeatKv(value, QueryHeads / KvHeads);
+        using Tensor mask = new Tensor(new TensorShape(Sequence, Sequence), DType.F32);
+        float* maskValues = (float*)mask.DataPointer;
+        for (int q = 0; q < Sequence; q++)
+        {
+            for (int k = 0; k < Sequence; k++)
+            {
+                maskValues[q * Sequence + k] = k > q ? -1e30f : 0f;
+            }
+        }
+        using Tensor expected = new Tensor(query.Shape, DType.F32);
+        backend.ScaledDotProductAttention(
+            expected, query, repeatedKey, repeatedValue, mask, 1.0f / MathF.Sqrt(HeadDim));
+
+        float* a = (float*)actual.DataPointer;
+        float* e = (float*)expected.DataPointer;
+        for (long i = 0; i < actual.ElementCount; i++)
+        {
+            Assert.Equal(e[i], a[i], 5);
+        }
+    }
+
+    private static Tensor RandomF32(TensorShape shape)
+    {
+        Tensor tensor = new Tensor(shape, DType.F32);
+        float* values = (float*)tensor.DataPointer;
+        for (long i = 0; i < tensor.ElementCount; i++)
+        {
+            values[i] = NextUniform() * 2f - 1f;
+        }
+        return tensor;
+    }
+
+    private static Tensor RepeatKv(Tensor input, int groupSize)
+    {
+        int kvHeads = (int)input.Shape[1];
+        int sequence = (int)input.Shape[2];
+        int headDim = (int)input.Shape[3];
+        Tensor output = new Tensor(new TensorShape(1, kvHeads * groupSize, sequence, headDim), DType.F32);
+        float* source = (float*)input.DataPointer;
+        float* destination = (float*)output.DataPointer;
+        long perHead = (long)sequence * headDim;
+        for (int head = 0; head < kvHeads; head++)
+        {
+            for (int group = 0; group < groupSize; group++)
+            {
+                Buffer.MemoryCopy(source + head * perHead,
+                    destination + (long)(head * groupSize + group) * perHead,
+                    perHead * sizeof(float), perHead * sizeof(float));
+            }
+        }
+        return output;
+    }
 }

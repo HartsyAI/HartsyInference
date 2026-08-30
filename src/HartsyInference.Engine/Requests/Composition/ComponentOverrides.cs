@@ -6,6 +6,12 @@ public sealed record ComponentOverrides
     /// <summary>VAE override.</summary>
     public string? Vae { get; init; }
 
+    /// <summary>Video VAE override; when null the legacy <see cref="Vae"/> value remains the video fallback.</summary>
+    public string? VideoVae { get; init; }
+
+    /// <summary>Audio VAE override, independent of <see cref="VideoVae"/>.</summary>
+    public string? AudioVae { get; init; }
+
     /// <summary>T5-XXL text-encoder override.</summary>
     public string? T5Xxl { get; init; }
 

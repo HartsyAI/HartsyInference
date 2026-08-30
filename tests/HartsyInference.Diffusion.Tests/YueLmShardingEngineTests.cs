@@ -5,6 +5,7 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
@@ -170,12 +171,12 @@ public sealed class YueLmShardingEngineTests
         }
     }
 
-    /// <summary>The explicit env override must beat the sharded auto-default (Off): with
-    /// <c>HARTSY_AUDIO_LM_QUANT=q4k</c> a sharded run still quantizes, observable in the runner cache key.</summary>
+    /// <summary>The explicit setting override must beat the sharded auto-default (Off): with
+    /// <c>numerics.audioLmQuant=q4k</c> a sharded run still quantizes, observable in the runner cache key.</summary>
     [Fact]
-    public async Task LmSharding_EnvQuantOverride_WinsOverShardedDefault()
+    public async Task LmSharding_SettingQuantOverride_WinsOverShardedDefault()
     {
-        Environment.SetEnvironmentVariable("HARTSY_AUDIO_LM_QUANT", "q4k");
+        KnobStore.Set(EngineKnobs.AudioLmQuant, "q4k");
         try
         {
             if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -203,7 +204,7 @@ public sealed class YueLmShardingEngineTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_AUDIO_LM_QUANT", null);
+            KnobStore.Clear(EngineKnobs.AudioLmQuant);
         }
     }
 

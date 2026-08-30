@@ -66,5 +66,18 @@ internal static class SseHelpers
     public static JsonSerializerOptions ResolveJsonOptions(HttpContext ctx) =>
         ctx.RequestServices.GetRequiredService<IOptions<JsonOptions>>().Value.SerializerOptions;
 
-    internal static string ErrorEvent(string message, JsonSerializerOptions options) => Event("error", new { message }, options);
+    /// <summary>Creates an inline progress sink. Unlike <see cref="Progress{T}"/>, this invokes the callback before
+    /// <see cref="IProgress{T}.Report"/> returns, so a producer cannot enqueue its terminal SSE event and complete
+    /// the channel while earlier progress callbacks are still waiting on the thread pool.</summary>
+    internal static IProgress<T> InlineProgress<T>(Action<T> report) => new InlineProgressSink<T>(report);
+
+    internal static string ErrorEvent(string message, JsonSerializerOptions options) =>
+        Event("error", new NativeSseErrorEvent { Message = message }, options);
+
+    private sealed class InlineProgressSink<T>(Action<T> report) : IProgress<T>
+    {
+        private readonly Action<T> _report = report ?? throw new ArgumentNullException(nameof(report));
+
+        public void Report(T value) => _report(value);
+    }
 }

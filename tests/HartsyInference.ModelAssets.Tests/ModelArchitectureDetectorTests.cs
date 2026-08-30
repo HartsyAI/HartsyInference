@@ -112,4 +112,27 @@ public sealed class ModelArchitectureDetectorTests
         string[] keys = ["some.random.tensor", "another.weight"];
         Assert.Equal(ModelArchitecture.Unknown, ModelArchitectureDetector.Detect(keys));
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("diffusion_model.")]
+    [InlineData("model.diffusion_model.")]
+    public void DetectsMiniMaxH3FromPairedPatchProjections(string prefix)
+    {
+        string[] keys =
+        [
+            prefix + "video_patch_proj.weight",
+            prefix + "audio_patch_proj.weight",
+            prefix + "blocks.0.attn.qkv_proj.weight",
+        ];
+
+        Assert.Equal(ModelArchitecture.MiniMaxH3, ModelArchitectureDetector.Detect(keys));
+    }
+
+    [Fact]
+    public void MiniMaxH3RequiresBothPatchProjections()
+    {
+        Assert.Equal(ModelArchitecture.Unknown,
+            ModelArchitectureDetector.Detect(["video_patch_proj.weight", "blocks.0.attn.qkv_proj.weight"]));
+    }
 }

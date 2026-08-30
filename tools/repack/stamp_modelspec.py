@@ -226,7 +226,8 @@ def main():
     planned, skipped, linked_bytes = [], [], 0
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in sorted(filenames):
-            if not name.endswith((".safetensors", ".sft")):
+            # .onnx carries no header we can stamp, but SwarmUI scans it now, so it still needs a sidecar.
+            if not name.endswith((".safetensors", ".sft", ".onnx", ".gguf")):
                 continue
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
@@ -264,9 +265,17 @@ def main():
             exit_code = 2
             continue
         try:
-            _header, _len, payload_offset = read_header(full)
-            tensor_hash = payload_sha256(full, payload_offset)
-            existing = _header.get("__metadata__") if isinstance(_header.get("__metadata__"), dict) else None
+            if rel.endswith((".safetensors", ".sft")):
+                _header, _len, payload_offset = read_header(full)
+                tensor_hash = payload_sha256(full, payload_offset)
+                existing = _header.get("__metadata__") if isinstance(_header.get("__metadata__"), dict) else None
+            else:
+                # No stampable header (ONNX, GGUF): hash the whole file and describe it from the sidecar only.
+                tensor_hash = payload_sha256(full, 0)
+                existing = None
+                if not args.sidecar_only:
+                    print(f"[skipped] {rel}: no safetensors header to stamp; re-run with --sidecar-only")
+                    continue
             meta = build_metadata(info, existing, tensor_hash)
             if args.sidecar_only:
                 with open(sidecar_path(full), "w", encoding="utf-8") as f:

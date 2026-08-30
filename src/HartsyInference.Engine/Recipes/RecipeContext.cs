@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Planning;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -119,6 +120,9 @@ public sealed record RecipeContext
     /// <summary>LoRA stack to merge into the loaded weights at construction; null for none. LoRA is baked into the
     /// weights, so the constructed pipeline is cached under a key that includes this stack.</summary>
     public LoraStack? Loras { get; init; }
+
+    /// <summary>Header- and hash-resolved video profile driving this construction; null for image recipes and legacy internal callers.</summary>
+    public VideoPlan? VideoPlan { get; init; }
 
     /// <summary>Second (low-noise) expert checkpoint for dual-expert families (Wan 2.2 A14B); null for none.
     /// Construction-affecting, so it is part of the pipeline cache key.</summary>

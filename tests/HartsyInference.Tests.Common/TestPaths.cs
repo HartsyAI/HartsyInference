@@ -363,6 +363,12 @@ public static class TestPaths
         /// Override with MINIMAX_H3_AUDIO_VAE.</summary>
         public static string AudioVae => Resolve("MINIMAX_H3_AUDIO_VAE", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "vae", "MiniMaxH3", "minimax_h3_audio_vae_fp32.safetensors"));
 
+        /// <summary>The Qwen3-VL text encoder used by the real MiniMax-H3 generation gates. Override with
+        /// MINIMAX_H3_TEXT_ENCODER.</summary>
+        public static string TextEncoder => Resolve("MINIMAX_H3_TEXT_ENCODER", Path.Combine(ModelsDir,
+            "Stable-Diffusion", "MiniMaxH3", "flat", "text_encoders",
+            "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
+
         /// <summary>The published step-distillation LoRA (larryvrh/MiniMax-H3-Turbo-Lora) — the only real-world H3
         /// LoRA, and the one that proved the bare-key format was unsupported. Override with MINIMAX_H3_TURBO_LORA.</summary>
         public static string TurboLora => Resolve("MINIMAX_H3_TURBO_LORA", Path.Combine(ModelsDir, "Lora", "minimax_h3_turbo_v4_step600_ema.safetensors"));

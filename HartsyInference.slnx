@@ -18,10 +18,13 @@
   <Folder Name="/tests/">
     <Project Path="tests/HartsyInference.Tests.Common/HartsyInference.Tests.Common.csproj" />
     <Project Path="tests/HartsyInference.Core.Tests/HartsyInference.Core.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Cli.Tests/HartsyInference.Cli.Tests.csproj" />
     <Project Path="tests/HartsyInference.ModelAssets.Tests/HartsyInference.ModelAssets.Tests.csproj" />
     <Project Path="tests/HartsyInference.Cpu.Tests/HartsyInference.Cpu.Tests.csproj" />
     <Project Path="tests/HartsyInference.ModelAssets.Tokenizers.Tests/HartsyInference.ModelAssets.Tokenizers.Tests.csproj" />
     <Project Path="tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Video.Tests/HartsyInference.Video.Tests.csproj" />
+    <Project Path="tests/HartsyInference.API.Tests/HartsyInference.API.Tests.csproj" />
     <Project Path="tests/HartsyInference.Audio.Tests/HartsyInference.Audio.Tests.csproj" />
     <Project Path="tests/HartsyInference.Vision.Tests/HartsyInference.Vision.Tests.csproj" />
     <Project Path="tests/HartsyInference.Vulkan.Tests/HartsyInference.Vulkan.Tests.csproj" />

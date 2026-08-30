@@ -699,6 +699,7 @@ public interface IBackend : IDisposable
     }
 
     /// <summary>In-place masked affine replacement: <c>target = mask·target + (1−mask)·(sourceScale·source + noiseScale·noise)</c>. When <paramref name="noiseScale"/> is zero, <paramref name="noise"/> must be null and the noise term is omitted. Mask values are consumed exactly as supplied (never clamped). Source, noise, and mask remain unchanged.</summary>
+    /// <remarks>Packed layouts accept <c>[B,S,F]</c>/<c>[B,S,P]</c> or implicit-batch <c>[S,F]</c>/<c>[S,P]</c>.</remarks>
     unsafe void MaskedAffineMixInPlace(
         Tensor target,
         Tensor source,
@@ -732,7 +733,8 @@ public interface IBackend : IDisposable
             {
                 long feature = i % geometry.FeatureDimension;
                 long token = i / geometry.FeatureDimension;
-                long patchIndex = layout == MaskBroadcastLayout.PackedChannelOuter ? feature % geometry.PatchArea
+                long patchIndex = layout is MaskBroadcastLayout.PackedChannelOuter or MaskBroadcastLayout.Rows
+                    ? feature % geometry.PatchArea
                     : feature / channels;
                 MixAt(i, token * geometry.PatchArea + patchIndex);
             }
@@ -2239,6 +2241,15 @@ public interface IBackend : IDisposable
     #endregion
 
     #region Attention
+
+    /// <summary>Whether this backend can execute the versioned MiniMax-H3 video sparse-attention contract without
+    /// falling back to dense attention. Planning must check this before model construction.</summary>
+    bool SupportsVideoSparseAttention => false;
+
+    /// <summary>Creates persistent generation-scoped VSA state. The default refuses so unsupported backends cannot
+    /// silently reinterpret a sparse checkpoint as dense attention.</summary>
+    IVideoSparseAttentionSession CreateVideoSparseAttentionSession(VideoSparseAttentionPlan plan)
+        => throw new NotSupportedException($"{GetType().Name} does not support video sparse attention.");
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
     /// <param name="allowF16">When true, a backend MAY run the attention in F16 for speed (halves score-matrix

@@ -403,6 +403,10 @@ public static class GenerationDispatch
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
+            FlowShift = parameters.GetFloatOrNull("flow-shift"),
+            AudioFlowShift = parameters.GetFloatOrNull("audio-flow-shift"),
+            Sampler = parameters.GetStringOrNull("sampler"),
+            Scheduler = parameters.GetStringOrNull("scheduler"),
             Frames = parameters.GetIntOrNull("frames"),
             Fps = parameters.GetIntOrNull("fps"),
             Seed = parameters.GetInt("seed", -1),
@@ -420,6 +424,12 @@ public static class GenerationDispatch
             ReferenceAudios = SplitPaths(parameters.GetStringOrNull("ref-audios"))
                 ?.Select(p => LoadAudioClip(p) ?? throw new FileNotFoundException($"Reference audio not found: {p}"))
                 .ToList(),
+            Guides = VideoInputManifest.Guides(parameters),
+            VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
+            AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
+            Controls = VideoInputManifest.Controls(parameters),
+            SparseAttentionPolicy = ParseSparseAttentionPolicy(parameters.GetStringOrNull("sparse-attention")),
+            Components = BuildVideoComponents(parameters),
         };
 
         ConsoleStepProgress? progress = quiet ? null
@@ -462,7 +472,48 @@ public static class GenerationDispatch
             }
             frames = restored;
         }
-        return FrameArtifact(frames, outputDir, prompt, "video", soundtrack, generated.Fps ?? 24);
+        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, prompt, "video", soundtrack, generated.Fps ?? 24);
+        if (generated.Execution is { } execution)
+        {
+            artifact.Meta["model_profile"] = execution.ProfileId;
+            artifact.Meta["task"] = execution.Task.ToString();
+            artifact.Meta["seed"] = execution.Seed.ToString(CultureInfo.InvariantCulture);
+            artifact.Meta["steps"] = execution.Steps.ToString(CultureInfo.InvariantCulture);
+            if (execution.FlowShift is float flowShift)
+            {
+                artifact.Meta["flow_shift"] = flowShift.ToString(CultureInfo.InvariantCulture);
+            }
+            if (execution.AudioFlowShift is float audioFlowShift)
+            {
+                artifact.Meta["audio_flow_shift"] = audioFlowShift.ToString(CultureInfo.InvariantCulture);
+            }
+            artifact.Meta["acceleration"] = execution.Acceleration.ToString();
+            artifact.Meta["attention"] = execution.Attention.ToString();
+            artifact.Meta["execution_path"] = execution.ExecutionPath;
+        }
+        return artifact;
+    }
+
+    private static ComponentOverrides? BuildVideoComponents(ParamState parameters)
+    {
+        string? videoVae = parameters.GetStringOrNull("video-vae");
+        string? audioVae = parameters.GetStringOrNull("audio-vae");
+        return videoVae is null && audioVae is null
+            ? null
+            : new ComponentOverrides { VideoVae = videoVae, AudioVae = audioVae };
+    }
+
+    private static SparseAttentionPolicy ParseSparseAttentionPolicy(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return SparseAttentionPolicy.Auto;
+        }
+        if (Enum.TryParse(value, true, out SparseAttentionPolicy policy))
+        {
+            return policy;
+        }
+        throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
     /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>

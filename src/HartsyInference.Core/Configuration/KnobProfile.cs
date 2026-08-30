@@ -5,8 +5,8 @@ namespace HartsyInference.Core.Configuration;
 /// <summary>A named set of knob values that can be pushed for the duration of one generation.</summary>
 /// <remarks>Built with <see cref="Create"/> and <see cref="With{T}"/>, which are typed per knob, so a profile
 /// cannot pin a bool knob to a string. Values are stored by knob id and resolved through <see cref="KnobStore"/>.
-/// <para>Deliberately not a record with one field per knob. There are 210 knobs; a record would need editing
-/// every time one is added, and a profile that pins four of them would still have to state the other 206.</para></remarks>
+/// <para>Deliberately not a record with one field per knob. There are more than 200 knobs; a record would need
+/// editing every time one is added, and a profile that pins four of them would still have to state every other one.</para></remarks>
 public sealed class KnobProfile
 {
     private KnobProfile(string name, ImmutableDictionary<string, object?> values)

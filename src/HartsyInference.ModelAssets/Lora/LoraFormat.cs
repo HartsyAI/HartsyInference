@@ -32,4 +32,7 @@ public enum LoraFormat
 
     /// <summary>PEFT suffixes on BARE checkpoint keys — no transformer./diffusion_model. wrapper at all, so the root is already the canonical weight name (MiniMax-H3's Turbo LoRA: blocks.0.attn.qkv_proj.lora_A.weight). Detected last, so a file carrying any recognized prefix never lands here.</summary>
     DiffusersBareDit,
+
+    /// <summary>Official LightX MiniMax-H3 Diffusers roots with split Q/K/V and <c>.lora_A.default</c> roles.</summary>
+    DiffusersMiniMaxH3,
 }

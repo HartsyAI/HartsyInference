@@ -3,12 +3,17 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Lora;
+using HartsyInference.ModelAssets.MiniMaxH3;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Pipelines;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
@@ -25,8 +30,9 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     public string Name => "minimax-h3";
 
     /// <inheritdoc/>
-    /// <remarks>MiniMax-H3 VAE-encodes the start and end images into keyframe conditioning, and is the first video
-    /// family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.</remarks>
+    /// <remarks>The released surface VAE-encodes legacy start/end conditioning and references, and is the first
+    /// video family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.
+    /// Arbitrary guides and AV masks remain implemented but unadvertised behind the Engine release gate.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
         | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios;
     /// <inheritdoc/>
@@ -45,16 +51,50 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         new VideoDefaults { Steps = 30, CfgScale = 1.0f, Width = 1344, Height = 768, Frames = 124, Fps = 24 };
 
     /// <inheritdoc/>
-    /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
 
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        VideoPlan executionPlan = context.VideoPlan is null
+            ? throw new InvalidOperationException(
+                "MiniMax-H3 construction requires a service-bound VideoPlan; call IVideoPlanningService.PlanAsync first.")
+            : VideoRequestExecutionBinding.RequirePlannedState(context.VideoPlan);
+        executionPlan.ThrowIfInvalid();
+        if (!string.Equals(executionPlan.Profile.FamilyId, Name, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"VideoPlan profile '{executionPlan.Profile.Id}' does not belong to the MiniMax-H3 recipe.",
+                nameof(context));
+        }
+        if (!executionPlan.ComponentPaths.TryGetValue("transformer", out string? plannedTransformer)
+            || !VideoArtifactPath.Comparer.Equals(VideoArtifactPath.Canonicalize(context.CheckpointPath),
+                VideoArtifactPath.Canonicalize(plannedTransformer)))
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 construction checkpoint does not match the service-bound VideoPlan.", nameof(context));
+        }
+        VideoRequest plannedRequest = executionPlan.RequestBinding!.Request;
+        if (!ReferenceEquals(context.Components, plannedRequest.Components)
+            || !ReferenceEquals(context.Loras, plannedRequest.Loras))
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 construction components and LoRAs must come from the service-bound VideoPlan.",
+                nameof(context));
+        }
+        context = context with { VideoPlan = executionPlan };
         WarnIfPlacementIgnored(context);
-        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath);
+        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath, context.Components);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         MergedLoraStack? loraStack = null;
+        MergedLoraStack? pddLoraStack = null;
+        MiniMaxH3PddAdapter? pddAdapter = null;
+        MiniMaxH3Pipeline? constructedPipeline = null;
+        MiniMaxH3Transformer? constructedTransformer = null;
+        MiniMaxH3VideoVaeDecoder? constructedVideoVae = null;
+        MiniMaxH3AudioVaeDecoder? constructedAudioVae = null;
+        MiniMaxH3AudioVaeEncoder? constructedAudioVaeEncoder = null;
+        MiniMaxH3TextEncoder? constructedTextEncoder = null;
         try
         {
             // The 66 GB bf16 build cannot stay device-resident on any consumer card, alone or sharded across two —
@@ -84,16 +124,33 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             DType bodyDType = DType.F32;
             MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType,
                 out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
+            constructedTransformer = transformer;
             // Must precede LoadWeights: the merge swaps dictionary entries, and device caches are identity-keyed, so a
             // tensor already captured by a layer would keep serving its stale device copy.
-            loraStack = ApplyLoras(context, ditWeights);
+            IReadOnlyList<LoraResolver.LoraSpec> loraSpecs = LoraResolver.Resolve(context.Loras);
+            (MiniMaxH3PddAdapter? Adapter, MergedLoraStack? Stack, int Index, float Strength) pdd =
+                ApplyPdd(context, ditWeights, loraSpecs);
+            pddAdapter = pdd.Adapter;
+            pddLoraStack = pdd.Stack;
+            int pddIndex = pdd.Index;
+            float pddStrength = pdd.Strength;
+            IReadOnlyList<LoraResolver.LoraSpec> ordinarySpecs = pddIndex < 0
+                ? loraSpecs
+                : loraSpecs.Where((_, index) => index != pddIndex).ToArray();
+            loraStack = ApplyLoras(context.Backend, ordinarySpecs, ditWeights);
             transformer.LoadWeights(ditWeights);
+            IReadOnlyDictionary<string, int> funControlModelIndices = LoadFunControlNets(
+                context, transformer, loaders);
             (MiniMaxH3VideoVaeDecoder videoVae, MiniMaxH3VideoVaeEncoder? videoVaeEncoder) =
                 LoadVideoVae(assets.VideoVae, loaders);
+            constructedVideoVae = videoVae;
             (MiniMaxH3AudioVaeDecoder? audioVae, MiniMaxH3AudioVaeEncoder? audioVaeEncoder) =
                 LoadAudioVae(assets.AudioVae, loaders);
+            constructedAudioVae = audioVae;
+            constructedAudioVaeEncoder = audioVaeEncoder;
 
             MiniMaxH3TextEncoder textEncoder = LoadTextEncoder(assets.TextEncoder, loaders);
+            constructedTextEncoder = textEncoder;
 
             // A real check, not the file-size proxy: the fp8 build normally fits, but a box that's already tight on
             // this card (another tenant, a prior leaked allocation) should stream rather than have PreloadWeights
@@ -125,7 +182,13 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // fitsResidentSingleBackend — sharding is precisely for when the DiT does NOT fit on one card alone.
             int ditShardSplitBlock = 0;
             IBackend? ditShardBackend = null;
-            if (context.DitShardBackend is not null && !ditIsHugeBf16Build)
+            if (context.DitShardBackend is not null && funControlModelIndices.Count > 0)
+            {
+                Logs.Warning("[MiniMaxH3Recipe] DiT sharding requested with Fun ControlNet, whose five-block branch "
+                    + "currently runs on the primary backend. Running the complete DiT and control branch "
+                    + "unsharded rather than failing after denoising starts.");
+            }
+            else if (context.DitShardBackend is not null && !ditIsHugeBf16Build)
             {
                 ditShardSplitBlock = DitShardPlanner.SplitBlockByCount(
                     context.Backend, context.DitShardBackend, config.NumLayers, transformer.EnumerateSharedWeights());
@@ -139,20 +202,53 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                     + "its blocks exceed any two-consumer-card pool; running the streaming path unsharded.");
             }
 
-            MiniMaxH3Pipeline pipeline =
-                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResidentSingleBackend)
+            Qwen2Tokenizer tokenizer = LoadTokenizer(assets.TokenizerDir);
+            VideoSparseAttentionProfileKind? sparseAttentionProfile = context.VideoPlan?.Profile.Attention switch
+            {
+                null or Planning.VideoAttentionKind.Dense => null,
+                Planning.VideoAttentionKind.ComfySol64V1 => VideoSparseAttentionProfileKind.ComfySol64V1,
+                Planning.VideoAttentionKind.FastVideoVsa64V1 => VideoSparseAttentionProfileKind.FastVideoVsa64V1,
+                Planning.VideoAttentionKind attention => throw new NotSupportedException(
+                    $"MiniMax-H3 VSA profile '{attention}' has no native execution mapping."),
+            };
+            if (sparseAttentionProfile is not null)
+            {
+                transformer.ValidateVideoSparseAttentionWeights();
+                if (!context.Backend.SupportsVideoSparseAttention
+                    || ditShardBackend is not null && !ditShardBackend.SupportsVideoSparseAttention)
+                {
+                    throw new NotSupportedException(
+                        "MiniMax-H3 VSA requires every DiT backend to support the same native sparse profile.");
+                }
+            }
+            constructedPipeline =
+                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResidentSingleBackend,
+                    pddAdapter, pddStrength, sparseAttentionProfile)
                 {
                     DitShardBackend = ditShardBackend,
                     DitShardSplitBlock = ditShardSplitBlock,
                     VaeBackend = context.VaeBackendOrDefault,
                 };
-            return new MiniMaxH3RecipePipeline(context.Backend, pipeline, config, textEncoder,
-                LoadTokenizer(assets.TokenizerDir), loaders, videoVaeEncoder, audioVaeEncoder, loraStack,
-                context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault);
+            bool supportsHybrid = context.VideoPlan?.Profile.Task == Planning.VideoTaskFamily.Hybrid;
+            return new MiniMaxH3RecipePipeline(context.Backend, constructedPipeline, config, textEncoder,
+                tokenizer, loaders, supportsHybrid, videoVaeEncoder, audioVaeEncoder, loraStack,
+                context.TextEncoderBackendOrDefault, context.VaeBackendOrDefault, pddLoraStack,
+                funControlModelIndices);
         }
         catch
         {
+            constructedPipeline?.Dispose();
+            if (constructedPipeline is null)
+            {
+                constructedVideoVae?.Dispose();
+                constructedAudioVae?.Dispose();
+                pddAdapter?.Dispose();
+                constructedTransformer?.Dispose();
+            }
+            constructedAudioVaeEncoder?.Dispose();
+            constructedTextEncoder?.Dispose();
             loraStack?.Dispose();
+            pddLoraStack?.Dispose();
             foreach (SafeTensorsLoader loader in loaders)
             {
                 loader.Dispose();
@@ -225,15 +321,151 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
     }
 
-    /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition projections), so no convolution path is needed. Both builds are supported: the fp8 targets are requantized per tensor by <see cref="MergedLoraStack"/>, and the int8-convrot build is already rejected at load.</summary>
-    private static MergedLoraStack? ApplyLoras(RecipeContext context, Dictionary<string, Tensor> weights)
+    /// <summary>Merges the request's ordinary LoRA stack into the DiT weights. Every H3 target is a Linear
+    /// (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, and the patch/condition
+    /// projections), so no convolution path is needed. FP8 and int8 ConvRot targets use the shared
+    /// merge-and-requantize implementation; planning handles acceleration adapters before this method.</summary>
+    private static MergedLoraStack? ApplyLoras(IBackend backend, IReadOnlyList<LoraResolver.LoraSpec> specs,
+        Dictionary<string, Tensor> weights)
     {
-        IReadOnlyList<LoraResolver.LoraSpec> specs = LoraResolver.Resolve(context.Loras);
         if (specs.Count == 0)
         {
             return null;
         }
-        return LoraApplier.BuildAndApply(specs, context.Backend, transformerWeights: weights);
+        return LoraApplier.BuildAndApply(specs, backend, transformerWeights: weights);
+    }
+
+    /// <summary>Loads each plan-deduplicated Fun branch once and binds its canonical path to the transformer's model
+    /// index. Request streams keep their own strengths and windows, so several streams can reuse one registered
+    /// branch without duplicating its weights.</summary>
+    private static IReadOnlyDictionary<string, int> LoadFunControlNets(RecipeContext context,
+        MiniMaxH3Transformer transformer, List<SafeTensorsLoader> loaders)
+    {
+        Dictionary<string, int> modelIndices = new Dictionary<string, int>(VideoArtifactPath.Comparer);
+        if (context.VideoPlan is null)
+        {
+            return modelIndices;
+        }
+
+        IEnumerable<KeyValuePair<string, string>> planned = context.VideoPlan.ComponentPaths
+            .Where(static pair => pair.Key.StartsWith("controlModel:", StringComparison.Ordinal))
+            .OrderBy(static pair => ControlSlot(pair.Key));
+        foreach (KeyValuePair<string, string> component in planned)
+        {
+            string path = VideoArtifactPath.Canonicalize(component.Value);
+            if (modelIndices.ContainsKey(path))
+            {
+                continue;
+            }
+
+            (Dictionary<string, Tensor> weights, SafeTensorsLoader loader) =
+                MiniMaxH3ControlNetCheckpointConverter.LoadAndConvert(path);
+            MiniMaxH3FunControlNet? controlNet = null;
+            bool weightsTransferred = false;
+            bool loaderTransferred = false;
+            try
+            {
+                MiniMaxH3FunControlConfig controlConfig = MiniMaxH3FunControlConfig.Detect(weights);
+                controlNet = new MiniMaxH3FunControlNet(controlConfig);
+                controlNet.LoadWeights(weights);
+                weightsTransferred = true;
+                int modelIndex = transformer.RegisterFunControlNet(controlNet);
+                controlNet = null;
+                modelIndices.Add(path, modelIndex);
+                loaders.Add(loader);
+                loaderTransferred = true;
+                Logs.Info($"[MiniMaxH3Recipe] Fun ControlNet {component.Key}: five blocks, hidden "
+                    + $"{controlConfig.HiddenSize}, time width {controlConfig.TimeEmbedDim}, model index "
+                    + $"{modelIndex}.");
+            }
+            finally
+            {
+                controlNet?.Dispose();
+                if (!weightsTransferred)
+                {
+                    foreach (Tensor tensor in weights.Values.Distinct())
+                    {
+                        tensor.Dispose();
+                    }
+                }
+                if (!loaderTransferred)
+                {
+                    loader.Dispose();
+                }
+            }
+        }
+        return modelIndices;
+    }
+
+    private static int ControlSlot(string role)
+    {
+        ReadOnlySpan<char> suffix = role.AsSpan("controlModel:".Length);
+        return int.TryParse(suffix, out int slot) ? slot : int.MaxValue;
+    }
+
+    /// <summary>Intercepts one planned PDD adapter before generic LoRA loading, applies every converted trunk
+    /// target strictly, and retains its projection banks for generation-time head fusion.</summary>
+    private static (MiniMaxH3PddAdapter? Adapter, MergedLoraStack? Stack, int Index, float Strength) ApplyPdd(
+        RecipeContext context, Dictionary<string, Tensor> weights, IReadOnlyList<LoraResolver.LoraSpec> specs)
+    {
+        if (context.VideoPlan?.Profile.Acceleration != Planning.VideoAccelerationKind.Pdd)
+        {
+            return (null, null, -1, 1f);
+        }
+
+        List<int> candidates = new List<int>();
+        for (int i = 0; i < specs.Count; i++)
+        {
+            using SafeTensorsLoader header = new SafeTensorsLoader();
+            header.Load(specs[i].FilePath);
+            if (MiniMaxH3PddAdapter.IsPddHeader(header.Descriptors))
+            {
+                candidates.Add(i);
+            }
+        }
+        if (candidates.Count != 1)
+        {
+            throw new NotSupportedException(
+                $"A PDD video plan must contain exactly one four-bank PDD adapter; found {candidates.Count}.");
+        }
+        int index = candidates[0];
+        LoraResolver.LoraSpec spec = specs[index];
+        if (Math.Abs(spec.ModelStrength - 1f) > 1e-6f || Math.Abs(spec.TencStrength - 1f) > 1e-6f)
+        {
+            throw new NotSupportedException("MiniMax-H3 PDD requires model and text strengths of exactly 1.");
+        }
+        MiniMaxH3PddTask task = context.VideoPlan.Profile.Task switch
+        {
+            Planning.VideoTaskFamily.Fl2Va => MiniMaxH3PddTask.Fl2Va,
+            Planning.VideoTaskFamily.Ref2Va => MiniMaxH3PddTask.Ref2Va,
+            _ => throw new NotSupportedException("MiniMax-H3 PDD supports only pure FL2VA or Ref2VA bases."),
+        };
+        MiniMaxH3PddAdapter adapter = MiniMaxH3PddAdapter.Load(spec.FilePath,
+            MiniMaxH3PddFormatHint.Auto, task);
+        MergedLoraStack stack = new MergedLoraStack();
+        try
+        {
+            stack.Add(adapter.LoraView, spec.ModelStrength);
+            int merged = stack.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
+            int expected = adapter.Trunk.Layers.Select(layer => layer.TargetKey)
+                .Concat(adapter.Trunk.FullWeightDiffs.Select(diff => diff.TargetKey))
+                .Distinct(StringComparer.Ordinal).Count();
+            if (merged != expected)
+            {
+                throw new NotSupportedException(
+                    $"MiniMax-H3 PDD applied {merged} of {expected} mandatory trunk targets. The adapter and base "
+                    + "are shape-incompatible; use the matching full base or a locally rebased pruned adapter.");
+            }
+            Logs.Info($"[MiniMaxH3Recipe] Native PDD: {merged} trunk targets, {adapter.HeadBank.StepCount} heads, "
+                + $"task={adapter.Task}, rank={adapter.Rank}.");
+            return (adapter, stack, index, spec.ModelStrength);
+        }
+        catch
+        {
+            stack.Dispose();
+            adapter.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
@@ -244,7 +476,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(file);
         loaders.Add(loader);
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(loader.GetAllTensors());
+        // The published int8 ConvRot VAE quantizes only rank-2 transformer Linears. Attach each layer's row scale
+        // and rotation descriptor before the VAE sees the dictionary; convolutions and norms remain in their
+        // checkpoint precision and therefore bypass the existing int8 Linear path naturally.
+        Dictionary<string, Tensor> weights = CheckpointConvertUtils.AttachInt8QuantInfo(
+            new Dictionary<string, Tensor>(loader.GetAllTensors()));
         string wrapper = Path.Combine(dir, "config.json");
         string source = Path.Combine(dir, "source", "config.json");
         MiniMaxH3VideoVaeConfig config = File.Exists(wrapper)
@@ -252,16 +488,27 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 File.Exists(source) ? File.ReadAllText(source) : null)
             : MiniMaxH3VideoVaeConfig.Detect(weights);
         MiniMaxH3VideoVaeDecoder decoder = new MiniMaxH3VideoVaeDecoder(config);
-        decoder.LoadWeights(weights);
-        MiniMaxH3VideoVaeEncoder? encoder = null;
-        if (MiniMaxH3VideoVaeConfig.MatchesEncoder(weights))
+        try
         {
-            encoder = new MiniMaxH3VideoVaeEncoder(config);
-            encoder.LoadWeights(weights);
+            decoder.LoadWeights(weights);
+            MiniMaxH3VideoVaeEncoder? encoder = null;
+            if (MiniMaxH3VideoVaeConfig.MatchesEncoder(weights))
+            {
+                // The encoder only borrows checkpoint tensors and owns no persistent allocations of its own.
+                encoder = new MiniMaxH3VideoVaeEncoder(config);
+                encoder.LoadWeights(weights);
+            }
+            int quantizedLinears = weights.Values.Count(t => t.QuantInfo is not null);
+            Logs.Info($"[MiniMaxH3Recipe] Video VAE: {weights.Count} tensors, {quantizedLinears} int8 ConvRot linears"
+                + (encoder is null ? " (decode only — no keyframe or reference conditioning)." : ", encoder included."));
+            return (decoder, encoder);
         }
-        Logs.Info($"[MiniMaxH3Recipe] Video VAE: {weights.Count} tensors"
-            + (encoder is null ? " (decode only — no keyframe or reference conditioning)." : ", encoder included."));
-        return (decoder, encoder);
+        catch
+        {
+            // Construction has not returned yet, so the outer ownership-transfer guard cannot see this decoder.
+            decoder.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a decode-only build must still generate soundtracks.</summary>
@@ -277,16 +524,26 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         loaders.Add(loader);
         Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(loader.GetAllTensors());
         MiniMaxH3AudioVaeDecoder decoder = new MiniMaxH3AudioVaeDecoder();
-        decoder.LoadWeights(weights);
         MiniMaxH3AudioVaeEncoder? encoder = null;
-        if (MiniMaxH3AudioVaeEncoder.Matches(weights))
+        try
         {
-            encoder = new MiniMaxH3AudioVaeEncoder();
-            encoder.LoadWeights(weights);
+            decoder.LoadWeights(weights);
+            if (MiniMaxH3AudioVaeEncoder.Matches(weights))
+            {
+                encoder = new MiniMaxH3AudioVaeEncoder();
+                encoder.LoadWeights(weights);
+            }
+            Logs.Info($"[MiniMaxH3Recipe] Audio VAE: {weights.Count} tensors @ {decoder.SampleRate} Hz"
+                + (encoder is null ? " (decode only — no reference audio)." : ", encoder included."));
+            return (decoder, encoder);
         }
-        Logs.Info($"[MiniMaxH3Recipe] Audio VAE: {weights.Count} tensors @ {decoder.SampleRate} Hz"
-            + (encoder is null ? " (decode only — no reference audio)." : ", encoder included."));
-        return (decoder, encoder);
+        catch
+        {
+            // A failed encoder load can own fused weight-normalization tensors even though this tuple never returns.
+            encoder?.Dispose();
+            decoder.Dispose();
+            throw;
+        }
     }
 
     private static MiniMaxH3TextEncoder LoadTextEncoder(string file, List<SafeTensorsLoader> loaders)

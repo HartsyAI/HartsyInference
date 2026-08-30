@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Video.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.Engine" />
   </ItemGroup>
 
 </Project>
