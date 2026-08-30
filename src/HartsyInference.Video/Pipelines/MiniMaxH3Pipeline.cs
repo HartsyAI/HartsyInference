@@ -32,9 +32,17 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
     /// <param name="preloadTransformer">False for checkpoints too large to stay device-resident (the bf16 build).</param>
     public MiniMaxH3Pipeline(IBackend backend, MiniMaxH3Transformer transformer, MiniMaxH3VideoVaeDecoder videoVae,
-        MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer = true,
-        MiniMaxH3PddAdapter? pddAdapter = null, float pddAdapterStrength = 1f,
-        VideoSparseAttentionProfileKind? sparseAttentionProfile = null) : base(backend)
+        MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer = true)
+        : this(backend, transformer, videoVae, audioVae, preloadTransformer, null, 1f, null)
+    {
+    }
+
+    /// <summary>Service-only constructor for profile-bound acceleration. Keeping these arguments internal prevents
+    /// low-level package consumers from bypassing the Engine's real-weight release gates.</summary>
+    internal MiniMaxH3Pipeline(IBackend backend, MiniMaxH3Transformer transformer,
+        MiniMaxH3VideoVaeDecoder videoVae, MiniMaxH3AudioVaeDecoder? audioVae, bool preloadTransformer,
+        MiniMaxH3PddAdapter? pddAdapter, float pddAdapterStrength,
+        VideoSparseAttentionProfileKind? sparseAttentionProfile) : base(backend)
     {
         _preloadTransformer = preloadTransformer;
         _transformer = transformer;
@@ -92,6 +100,11 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(textStates);
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Keyframes is { Count: > 0 } && request.Refs is { Count: > 0 } && !request.HybridProfile)
+        {
+            throw new NotSupportedException(
+                "Combining MiniMax-H3 guide/keyframe and reference segments requires a service-bound Hybrid profile.");
+        }
 
         int latentT = request.LatentFrames, latentH = request.Height / 16, latentW = request.Width / 16;
         if (latentH * 16 != request.Height || latentW * 16 != request.Width)
@@ -245,7 +258,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                         using PddFusedHeads? pddHeads = pddFusion is null || pddSchedule is null
                             ? null : pddFusion.Fuse(pddSchedule, sigma, sigmas[step + 1]);
                         (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
-                            ? _transformer.ForwardSharded(
+                            ? _transformer.ForwardShardedPlanned(
                                 Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin,
                                 timestepPlan.Timesteps, timestepPlan.RowOf, DitShardSplitBlock,
                                 textTagRuns: textTagRuns, pddHeads: pddHeads, controls: controlSchedule[step],
@@ -253,7 +266,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                                 audioTimestepRows: timestepPlan.AudioRowOf,
                                 sparseAttentionA: sparseAttentionPrimary,
                                 sparseAttentionB: sparseAttentionShard)
-                            : _transformer.Forward(
+                            : _transformer.ForwardPlanned(
                                 Backend, layout, videoIn, audioIn, textStates, cos, sin,
                                 timestepPlan.Timesteps, timestepPlan.RowOf, textTagRuns: textTagRuns,
                                 pddHeads: pddHeads, controls: controlSchedule[step],

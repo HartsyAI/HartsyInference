@@ -2,7 +2,7 @@ using HartsyInference.Core.Exceptions;
 
 namespace HartsyInference.ModelAssets.MiniMaxH3;
 
-/// <summary>Exact 32-interval schedule envelope certified by the released MiniMax-H3 PDD adapters.</summary>
+/// <summary>Exact 32-interval schedule envelope declared by the published MiniMax-H3 PDD adapters.</summary>
 public sealed class MiniMaxH3PddSchedule
 {
     /// <summary>Number of trained fine intervals in the published head banks.</summary>

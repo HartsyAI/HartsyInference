@@ -14,7 +14,6 @@ public sealed record VideoGenerationResult
     /// <summary>Playback rate the pipeline pinned (e.g. matched to a decoded driving clip); null defers to the request's fps / family default. <see cref="Services.VideoService"/> resolves the final value onto this property.</summary>
     public int? Fps { get; init; }
 
-    /// <summary>Resolved checkpoint profile, aligned geometry, sampling values, and component formats used by this run.</summary>
     /// <summary>The exact profile-resolved execution record for MiniMax-H3. Null for legacy families whose final
     /// geometry or schedule is still resolved inside the pipeline rather than by <c>VideoPlan</c>.</summary>
     public VideoExecutionSummary? Execution { get; init; }

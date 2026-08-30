@@ -18,7 +18,7 @@ public sealed record MiniMaxH3PddExecutionSettings
     /// <summary>Audio flow-shift value.</summary>
     public required double AudioFlowShift { get; init; }
 
-    /// <summary>Adapter strength; partial PDD heads are not a certified recipe.</summary>
+    /// <summary>Adapter strength; partial PDD heads are not a published recipe.</summary>
     public required float Strength { get; init; }
 
     /// <summary>Whether another baked or adapter-based distillation path is active.</summary>

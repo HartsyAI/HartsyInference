@@ -14,6 +14,14 @@ public static class ModelArchitectureDetector
     /// <summary>Ordered (architecture, predicate) rules. First match wins.</summary>
     private static readonly (ModelArchitecture Arch, Signature Match)[] Rules =
     [
+        // ── MiniMax-H3 joint audio/video DiT ─────────────────────────────
+        // Published component files are bare; bundled community repacks may add either diffusion wrapper.
+        (ModelArchitecture.MiniMaxH3, k =>
+            k.HasPair("video_patch_proj.", "audio_patch_proj.")
+            || k.HasPair("diffusion_model.video_patch_proj.", "diffusion_model.audio_patch_proj.")
+            || k.HasPair("model.diffusion_model.video_patch_proj.",
+                "model.diffusion_model.audio_patch_proj.")),
+
         // ── SDXL family (LDM single-file) ────────────────────────────────
         // Base has both CLIP embedders; refiner has only embedder 0 + ADM label_emb.
         (ModelArchitecture.Sdxl, k =>
@@ -108,5 +116,7 @@ public static class ModelArchitectureDetector
         /// <summary>True if any key starts with <paramref name="inner"/>, with or without the <paramref name="optionalOuter"/> wrapper (handles BFL <c>model.diffusion_model.</c> prefixing).</summary>
         public bool HasPrefixAfterOptional(string optionalOuter, string inner) =>
             HasPrefix(inner) || HasPrefix(optionalOuter + inner);
+
+        public bool HasPair(string first, string second) => HasPrefix(first) && HasPrefix(second);
     }
 }

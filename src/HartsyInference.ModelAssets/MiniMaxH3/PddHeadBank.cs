@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.MiniMaxH3;
 
-/// <summary>Validated video/audio parallel-decoder heads, normalized to one row view per fine interval.</summary>
+/// <summary>Shape-checked video/audio parallel-decoder heads, normalized to one row view per fine interval.</summary>
 public sealed unsafe class PddHeadBank : IDisposable
 {
     /// <summary>Published H3 video projection width after 1x2x2 patchification.</summary>

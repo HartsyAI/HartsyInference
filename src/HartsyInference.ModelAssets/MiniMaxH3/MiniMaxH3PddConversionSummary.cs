@@ -1,7 +1,7 @@
 namespace HartsyInference.ModelAssets.MiniMaxH3;
 
 /// <summary>Provenance and fit result emitted by a local pruned-PDD conversion.</summary>
-public sealed record MiniMaxH3PddConversionSummary
+internal sealed record MiniMaxH3PddConversionSummary
 {
     /// <summary>SHA-256 of the official PDD adapter.</summary>
     public required string AdapterSha256 { get; init; }

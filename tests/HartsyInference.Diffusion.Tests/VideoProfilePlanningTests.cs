@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -389,35 +388,11 @@ public sealed class VideoProfilePlanningTests : IDisposable
         Assert.Equal(VideoAttentionKind.FastVideoVsa64V1, bound.Profile.Attention);
         Assert.DoesNotContain(bound.Issues, issue => issue.Code is "video.vsa.profile_required" or "video.vsa.gates_required");
 
-        string? originalExperimental = Environment.GetEnvironmentVariable("HARTSY_EXPERIMENTAL_H3_VSA");
-        Environment.SetEnvironmentVariable("HARTSY_EXPERIMENTAL_H3_VSA", null);
-        try
-        {
-            VideoPlan releaseGated = VideoService.ApplyExperimentalH3VsaGate(bound);
-            Assert.Contains(releaseGated.Issues, issue => issue.Code == "video.vsa.experimental_disabled"
-                && issue.Severity == VideoPlanIssueSeverity.Error);
-
-            KnobStore.Set(EngineKnobs.H3VsaExperimental, true);
-            VideoPlan explicitlyEnabled = VideoService.ApplyExperimentalH3VsaGate(bound);
-            Assert.DoesNotContain(explicitlyEnabled.Issues,
-                issue => issue.Code == "video.vsa.experimental_disabled");
-
-            KnobStore.Clear(EngineKnobs.H3VsaExperimental);
-            Environment.SetEnvironmentVariable("HARTSY_EXPERIMENTAL_H3_VSA", "true");
-            VideoPlan nonExactEnvironment = VideoService.ApplyExperimentalH3VsaGate(bound);
-            Assert.Contains(nonExactEnvironment.Issues,
-                issue => issue.Code == "video.vsa.experimental_disabled");
-
-            Environment.SetEnvironmentVariable("HARTSY_EXPERIMENTAL_H3_VSA", "1");
-            VideoPlan environmentEnabled = VideoService.ApplyExperimentalH3VsaGate(bound);
-            Assert.DoesNotContain(environmentEnabled.Issues,
-                issue => issue.Code == "video.vsa.experimental_disabled");
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.H3VsaExperimental);
-            Environment.SetEnvironmentVariable("HARTSY_EXPERIMENTAL_H3_VSA", originalExperimental);
-        }
+        VideoPlan releaseGated = VideoService.ApplyH3VsaReleaseGate(bound);
+        VideoPlanIssue issue = Assert.Single(releaseGated.Issues,
+            candidate => candidate.Code == "video.vsa.release_blocked");
+        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
+        Assert.Contains("published build cannot execute", issue.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -684,7 +659,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
     }
 
     [Fact]
-    public async Task Sidecar_CannotActivatePddOrAnUncertifiedVsaMatrix()
+    public async Task Sidecar_CannotActivatePddOrAnUnsupportedVsaMatrix()
     {
         string pddCheckpoint = WriteHeaderOnlyH3("sidecar-pdd.safetensors");
         string pddHash = await VideoCheckpointHashCache.GetSha256Async(pddCheckpoint, CancellationToken.None);
@@ -725,6 +700,42 @@ public sealed class VideoProfilePlanningTests : IDisposable
                 ["sampler"] = "euler",
                 ["scheduler"] = "normal",
             }));
+    }
+
+    [Fact]
+    public async Task Sidecar_RejectsFilesystemAndCredentialBearingUrls()
+    {
+        string checkpoint = WriteHeaderOnlyH3("sidecar-private-urls.safetensors");
+        string hash = await VideoCheckpointHashCache.GetSha256Async(checkpoint, CancellationToken.None);
+        Dictionary<string, object> sidecar = new(StringComparer.Ordinal)
+        {
+            ["sha256"] = hash,
+            ["profileId"] = "operator-private-urls",
+            ["task"] = "Fl2Va",
+            ["acceleration"] = "None",
+            ["attention"] = "Dense",
+            ["steps"] = 30,
+            ["cfgScale"] = 1.0,
+            ["flowShift"] = 12.0,
+            ["audioFlowShift"] = 3.0,
+            ["sampler"] = "euler",
+            ["scheduler"] = "normal",
+            ["provenanceUrl"] = "/srv/private/model-notes",
+            ["licenseUrl"] = "https://operator-secret@example.invalid/license",
+        };
+        await File.WriteAllTextAsync(checkpoint + ".hartsy-video-profile.json",
+            JsonSerializer.Serialize(sidecar));
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(new ModelSpec
+        {
+            Requested = checkpoint,
+            LocalPath = checkpoint,
+            Modality = Modality.Video,
+        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
+            CancellationToken.None);
+
+        Assert.Contains(plan.Issues, issue => issue.Code == "video.profile.sidecar_url_invalid");
+        Assert.False(plan.Profile.IsSidecar);
     }
 
     [Fact]

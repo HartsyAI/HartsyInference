@@ -126,11 +126,11 @@ public unsafe class MiniMaxH3FunControlForwardTests
 
             (Tensor baseVideo, Tensor baseAudio) = transformer.Forward(
                 backend, layout, videoRows, audioRows, text, cos, sin, timesteps, rowOf);
-            (Tensor zeroVideo, Tensor zeroAudio) = transformer.Forward(
+            (Tensor zeroVideo, Tensor zeroAudio) = transformer.ForwardPlanned(
                 backend, layout, videoRows, audioRows, text, cos, sin, timesteps, rowOf, controls: [zero]);
-            (Tensor oneVideo, Tensor oneAudio) = transformer.Forward(
+            (Tensor oneVideo, Tensor oneAudio) = transformer.ForwardPlanned(
                 backend, layout, videoRows, audioRows, text, cos, sin, timesteps, rowOf, controls: [one]);
-            (Tensor twoVideo, Tensor twoAudio) = transformer.Forward(
+            (Tensor twoVideo, Tensor twoAudio) = transformer.ForwardPlanned(
                 backend, layout, videoRows, audioRows, text, cos, sin, timesteps, rowOf, controls: [one, one]);
             using (baseVideo)
             using (baseAudio)

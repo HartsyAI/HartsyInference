@@ -44,9 +44,9 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             return VideoRequestExecutionBinding.BindPlan(plan);
         }
-        plan = ApplyExperimentalH3VsaGate(plan);
-        plan = ApplyExperimentalH3ExpansionGate(plan, plannedRequest);
-        if (plan.Issues.Any(issue => issue.Code == "video.vsa.experimental_disabled"))
+        plan = ApplyH3VsaReleaseGate(plan);
+        plan = ApplyH3ExpansionReleaseGate(plan, plannedRequest);
+        if (!plan.IsValid)
         {
             return VideoRequestExecutionBinding.BindPlan(plan);
         }
@@ -123,11 +123,11 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         return plan with { Issues = issues };
     }
 
-    /// <summary>Applies the temporary production-release gate to a resolved VSA plan.</summary>
-    internal static VideoPlan ApplyExperimentalH3VsaGate(VideoPlan plan)
+    /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.</summary>
+    internal static VideoPlan ApplyH3VsaReleaseGate(VideoPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        if (plan.Profile.Attention == VideoAttentionKind.Dense || EngineKnobs.IsH3VsaExperimentalEnabled())
+        if (plan.Profile.Attention == VideoAttentionKind.Dense)
         {
             return plan;
         }
@@ -135,11 +135,11 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             new VideoPlanIssue
             {
-                Code = "video.vsa.experimental_disabled",
+                Code = "video.vsa.release_blocked",
                 Severity = VideoPlanIssueSeverity.Error,
-                Message = $"Profile '{plan.Profile.Id}' requires the experimental MiniMax-H3 VSA runtime. "
-                    + "Its real-weight, performance, and peak-memory release gates have not passed. "
-                    + "Set HARTSY_EXPERIMENTAL_H3_VSA=1 only for controlled validation.",
+                Message = $"Profile '{plan.Profile.Id}' requires the validation-pending MiniMax-H3 VSA runtime. "
+                    + "Its real-weight, performance, and peak-memory release gates have not passed, so this "
+                    + "published build cannot execute it.",
                 Field = nameof(VideoRequest.SparseAttentionPolicy),
             },
         };
@@ -148,12 +148,11 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
 
     /// <summary>Prevents structurally implemented expansion paths from becoming release claims before their
     /// operator-provided real-model generation and output-inspection gates have passed.</summary>
-    internal static VideoPlan ApplyExperimentalH3ExpansionGate(VideoPlan plan, VideoRequest request)
+    internal static VideoPlan ApplyH3ExpansionReleaseGate(VideoPlan plan, VideoRequest request)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(request);
-        if (!string.Equals(plan.Profile.FamilyId, "minimax-h3", StringComparison.OrdinalIgnoreCase)
-            || EngineKnobs.IsH3ExpansionExperimentalEnabled())
+        if (!string.Equals(plan.Profile.FamilyId, "minimax-h3", StringComparison.OrdinalIgnoreCase))
         {
             return plan;
         }
@@ -171,6 +170,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             pending.Add("Fun ControlNet");
         }
+        if (request.Guides is { Count: > 0 })
+        {
+            pending.Add("arbitrary guides");
+        }
+        if (request.VideoDenoiseMask is not null || request.AudioDenoiseMask is not null)
+        {
+            pending.Add("AV denoise masks");
+        }
         if (plan.ComponentFormats.TryGetValue("videoVae", out string? videoVaeFormat)
             && videoVaeFormat.Contains("int8", StringComparison.OrdinalIgnoreCase))
         {
@@ -185,11 +192,11 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             new VideoPlanIssue
             {
-                Code = "video.h3_expansion.experimental_disabled",
+                Code = "video.h3_expansion.release_blocked",
                 Severity = VideoPlanIssueSeverity.Error,
                 Message = $"Profile '{plan.Profile.Id}' requires validation-pending {string.Join(", ", pending.Distinct(StringComparer.Ordinal))}. "
-                    + "Its operator-provided real-generation and output-inspection release gate has not passed. "
-                    + "Set numerics.h3ExpansionExperimental=true (or HARTSY_EXPERIMENTAL_H3_EXPANSION=1) only for controlled validation.",
+                    + "Its operator-provided real-generation and output-inspection release gate has not passed, "
+                    + "so this published build cannot execute it.",
                 Field = nameof(ModelSpec.ProfileId),
             },
         };

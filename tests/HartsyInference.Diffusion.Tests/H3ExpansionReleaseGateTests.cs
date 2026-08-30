@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
@@ -17,7 +16,7 @@ public sealed class H3ExpansionReleaseGateTests
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Hybrid, null)]
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, "control")]
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, "int8-vae")]
-    public void ValidationPendingExpansionPaths_AreBlockedByDefault(
+    public void ValidationPendingExpansionPaths_AreBlockedInPublishedBuilds(
         VideoAccelerationKind acceleration,
         VideoTaskFamily task,
         string? component)
@@ -25,21 +24,17 @@ public sealed class H3ExpansionReleaseGateTests
         VideoRequest request = Request(component);
         VideoPlan plan = Plan(acceleration, task, component, request);
 
-        using (KnobProfile.Create("h3-expansion-default-gate")
-                   .With(EngineKnobs.H3ExpansionExperimental, false)
-                   .Push())
-        {
-            VideoPlan gated = VideoService.ApplyExperimentalH3ExpansionGate(plan, request);
+        VideoPlan gated = VideoService.ApplyH3ExpansionReleaseGate(plan, request);
 
-            VideoPlanIssue issue = Assert.Single(gated.Issues,
-                candidate => candidate.Code == "video.h3_expansion.experimental_disabled");
-            Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
-            Assert.False(gated.IsValid);
-        }
+        VideoPlanIssue issue = Assert.Single(gated.Issues,
+            candidate => candidate.Code == "video.h3_expansion.release_blocked");
+        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
+        Assert.Contains("published build cannot execute", issue.Message, StringComparison.Ordinal);
+        Assert.False(gated.IsValid);
     }
 
     [Fact]
-    public void DenseGuidesAndMasks_RemainAvailableWithoutExperimentalOptIn()
+    public void DenseGuidesAndMasks_AreBlockedUntilEveryReleaseSurfacePasses()
     {
         VideoRequest request = new VideoRequest
         {
@@ -63,32 +58,12 @@ public sealed class H3ExpansionReleaseGateTests
         };
         VideoPlan plan = Plan(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, null, request);
 
-        using (KnobProfile.Create("h3-expansion-dense-gate")
-                   .With(EngineKnobs.H3ExpansionExperimental, false)
-                   .Push())
-        {
-            VideoPlan gated = VideoService.ApplyExperimentalH3ExpansionGate(plan, request);
-            Assert.DoesNotContain(gated.Issues,
-                candidate => candidate.Code == "video.h3_expansion.experimental_disabled");
-            Assert.True(gated.IsValid);
-        }
-    }
-
-    [Fact]
-    public void ScopedExperimentalOptIn_OpensOnlyTheTemporaryExpansionGate()
-    {
-        VideoRequest request = Request("control");
-        VideoPlan plan = Plan(VideoAccelerationKind.Pdd, VideoTaskFamily.Hybrid, "int8-vae", request);
-
-        using (KnobProfile.Create("h3-expansion-controlled-validation")
-                   .With(EngineKnobs.H3ExpansionExperimental, true)
-                   .Push())
-        {
-            VideoPlan enabled = VideoService.ApplyExperimentalH3ExpansionGate(plan, request);
-            Assert.DoesNotContain(enabled.Issues,
-                candidate => candidate.Code == "video.h3_expansion.experimental_disabled");
-            Assert.True(enabled.IsValid);
-        }
+        VideoPlan gated = VideoService.ApplyH3ExpansionReleaseGate(plan, request);
+        VideoPlanIssue issue = Assert.Single(gated.Issues,
+            candidate => candidate.Code == "video.h3_expansion.release_blocked");
+        Assert.Contains("arbitrary guides", issue.Message, StringComparison.Ordinal);
+        Assert.Contains("AV denoise masks", issue.Message, StringComparison.Ordinal);
+        Assert.False(gated.IsValid);
     }
 
     [Fact]

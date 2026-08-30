@@ -45,7 +45,7 @@ public sealed class VideoWorldEndpointsTests : IClassFixture<WebApplicationFacto
     [Fact]
     public async Task WorldOpen_UnresolvableModel_Returns400()
     {
-        // WorldService.Open requires InitImage before it even looks at the model (else ArgumentException/500,
+        // WorldService.Open requires InitImage before it even looks at the model (else ArgumentException/400,
         // a different case) — supplying one here to reach the FileNotFoundException/400 path being tested.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/world/sessions", new

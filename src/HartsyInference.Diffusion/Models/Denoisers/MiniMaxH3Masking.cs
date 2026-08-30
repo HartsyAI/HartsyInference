@@ -222,7 +222,7 @@ public static class MiniMaxH3Masking
         return tokenRows;
     }
 
-    /// <summary>Rounds one validated continuous mask value upward to H3's 1/256 token-mask grid.</summary>
+    /// <summary>Rounds one finite unit-interval mask value upward to H3's 1/256 token-mask grid.</summary>
     public static float QuantizeTokenMask(float value)
     {
         if (!UnitInterval.Contains(value))

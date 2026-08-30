@@ -1,6 +1,6 @@
 namespace HartsyInference.Engine.Planning;
 
-/// <summary>Sampling fields a checkpoint profile fixes to its validated recipe.</summary>
+/// <summary>Sampling fields a checkpoint profile fixes to its declared recipe.</summary>
 [Flags]
 public enum VideoLockedFields
 {

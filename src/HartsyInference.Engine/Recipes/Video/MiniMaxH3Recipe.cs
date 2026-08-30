@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -29,13 +30,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     public string Name => "minimax-h3";
 
     /// <inheritdoc/>
-    /// <remarks>MiniMax-H3 VAE-encodes legacy and arbitrary AV guides, denoise-mask preservation sources, and
-    /// references, and is the first video family to merge LoRAs — on either build, since an fp8 target is
-    /// dequantized, merged and requantized.</remarks>
+    /// <remarks>The released surface VAE-encodes legacy start/end conditioning and references, and is the first
+    /// video family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.
+    /// Arbitrary guides and AV masks remain implemented but unadvertised behind the Engine release gate.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
-        | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios
-        | VideoFeatures.Guides | VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask
-        | VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint;
+        | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {
@@ -57,6 +56,33 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        VideoPlan executionPlan = context.VideoPlan is null
+            ? throw new InvalidOperationException(
+                "MiniMax-H3 construction requires a service-bound VideoPlan; call IVideoPlanningService.PlanAsync first.")
+            : VideoRequestExecutionBinding.RequirePlannedState(context.VideoPlan);
+        executionPlan.ThrowIfInvalid();
+        if (!string.Equals(executionPlan.Profile.FamilyId, Name, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"VideoPlan profile '{executionPlan.Profile.Id}' does not belong to the MiniMax-H3 recipe.",
+                nameof(context));
+        }
+        if (!executionPlan.ComponentPaths.TryGetValue("transformer", out string? plannedTransformer)
+            || !VideoArtifactPath.Comparer.Equals(VideoArtifactPath.Canonicalize(context.CheckpointPath),
+                VideoArtifactPath.Canonicalize(plannedTransformer)))
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 construction checkpoint does not match the service-bound VideoPlan.", nameof(context));
+        }
+        VideoRequest plannedRequest = executionPlan.RequestBinding!.Request;
+        if (!ReferenceEquals(context.Components, plannedRequest.Components)
+            || !ReferenceEquals(context.Loras, plannedRequest.Loras))
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 construction components and LoRAs must come from the service-bound VideoPlan.",
+                nameof(context));
+        }
+        context = context with { VideoPlan = executionPlan };
         WarnIfPlacementIgnored(context);
         MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath, context.Components);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
@@ -295,7 +321,10 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         return new MiniMaxH3Transformer(config) { BodyDType = bodyDType };
     }
 
-    /// <summary>Merges the request's LoRA stack into the DiT weights. Every H3 module a LoRA can target is a Linear (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, the patch/condition projections), so no convolution path is needed. Both builds are supported: the fp8 targets are requantized per tensor by <see cref="MergedLoraStack"/>, and the int8-convrot build is already rejected at load.</summary>
+    /// <summary>Merges the request's ordinary LoRA stack into the DiT weights. Every H3 target is a Linear
+    /// (<c>qkv_proj</c>, <c>out_proj</c>, <c>fc1</c>/<c>fc2</c>, <c>adaln_proj.linear</c>, and the patch/condition
+    /// projections), so no convolution path is needed. FP8 and int8 ConvRot targets use the shared
+    /// merge-and-requantize implementation; planning handles acceleration adapters before this method.</summary>
     private static MergedLoraStack? ApplyLoras(IBackend backend, IReadOnlyList<LoraResolver.LoraSpec> specs,
         Dictionary<string, Tensor> weights)
     {

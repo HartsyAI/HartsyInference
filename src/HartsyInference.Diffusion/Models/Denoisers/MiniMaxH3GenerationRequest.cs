@@ -36,7 +36,7 @@ public sealed record MiniMaxH3GenerationRequest
     public float PddAdapterStrength { get; init; } = 1f;
 
     /// <summary>Whether planning selected the Hybrid FL+reference packing contract.</summary>
-    public bool HybridProfile { get; init; }
+    internal bool HybridProfile { get; init; }
 
     /// <summary>Target-relative visual/audio anchors; null is plain t2va or reference-only ref2va.</summary>
     public IReadOnlyList<MiniMaxH3Keyframe>? Keyframes { get; init; }
@@ -55,7 +55,7 @@ public sealed record MiniMaxH3GenerationRequest
     public Tensor? CondAudioRows { get; init; }
 
     /// <summary>Pre-encoded Fun ControlNet streams; identical model indices share one registered branch.</summary>
-    public IReadOnlyList<MiniMaxH3FunControlCondition>? Controls { get; init; }
+    internal IReadOnlyList<MiniMaxH3FunControlCondition>? Controls { get; init; }
 
     /// <summary>Upward-quantized target-video token mask in packed row order, where one generates and zero
     /// preserves. Each value is the spatial <c>amax</c> of one 2x2 latent patch. Null is the exact unmasked path.</summary>

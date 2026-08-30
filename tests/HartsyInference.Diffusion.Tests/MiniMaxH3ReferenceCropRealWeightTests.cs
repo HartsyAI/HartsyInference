@@ -1,7 +1,7 @@
 using HartsyInference.Cuda;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
-using HartsyInference.Engine.Recipes;
-using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Vision;
 using HartsyInference.Tests.Common;
@@ -107,7 +107,7 @@ public sealed class MiniMaxH3ReferenceCropRealWeightTests
     }
 
     [Fact]
-    public void RefCrop_SameSeedAB_CroppedVsWholeReference_ProducesDifferentVideo()
+    public async Task RefCrop_SameSeedAB_CroppedVsWholeReference_ProducesDifferentVideo()
     {
         string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!CudaContext.IsAvailable())
@@ -133,9 +133,13 @@ public sealed class MiniMaxH3ReferenceCropRealWeightTests
         const int size = 256, frames = 5, steps = 6;
         ImageData reference = RedSquareOnGray(size);
 
-        using CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
-        RecipeContext context = new RecipeContext { CheckpointPath = TestPaths.MiniMaxH3.DitRef2VaFp8, Backend = backend };
-        using IVideoRecipePipeline pipeline = new MiniMaxH3Recipe().Construct(context);
+        using InferenceEngine engine = new InferenceEngine("cuda", 0);
+        ModelSpec spec = new ModelSpec
+        {
+            Requested = TestPaths.MiniMaxH3.DitRef2VaFp8,
+            LocalPath = TestPaths.MiniMaxH3.DitRef2VaFp8,
+            Modality = Modality.Video,
+        };
 
         VideoRequest baseRequest = new VideoRequest
         {
@@ -147,14 +151,14 @@ public sealed class MiniMaxH3ReferenceCropRealWeightTests
             Steps = steps,
             Seed = 4242,
         };
-        VideoGenerationResult whole = pipeline.Generate(baseRequest, progress: null, cancel: default);
+        VideoGenerationResult whole = await engine.Video.GenerateAsync(spec, baseRequest);
         _output.WriteLine($"Whole-reference: {whole.Frames[0].Width}x{whole.Frames[0].Height}, {whole.Frames.Count} frame(s).");
 
         VideoRequest croppedRequest = baseRequest with
         {
             Prompt = "<refcrop:1,the red square,0.5>the reference subject appears in a calm ocean scene at dusk",
         };
-        VideoGenerationResult cropped = pipeline.Generate(croppedRequest, progress: null, cancel: default);
+        VideoGenerationResult cropped = await engine.Video.GenerateAsync(spec, croppedRequest);
         _output.WriteLine($"Cropped-reference: {cropped.Frames[0].Width}x{cropped.Frames[0].Height}, {cropped.Frames.Count} frame(s).");
 
         Assert.Equal(whole.Frames[0].Width, cropped.Frames[0].Width);

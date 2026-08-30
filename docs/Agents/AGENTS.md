@@ -92,7 +92,7 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
   `~/.cache/hartsyinference`). Verified catalog downloads seed it immediately from their streamed verification,
   while an arbitrary local file pays one visible exact-hash pass before the result can survive process restarts. A
   filename is never profile evidence.
-- Planning errors and temporary experimental gates return before backend probing or model construction. Execution
+- Planning errors and non-bypassable release gates return before backend probing or model construction. Execution
   rechecks the planned artifact stamps, so a replaced checkpoint requires a new plan instead of reusing stale cache
   identity or profile semantics.
 

@@ -96,7 +96,8 @@ internal sealed class VideoRequestExecutionBinding
         return frozen with { ExecutionPlan = frozen };
     }
 
-    /// <summary>Returns the inaccessible plan snapshot after rejecting altered public plan fields.</summary>
+    /// <summary>Returns the verified bound plan after rejecting altered public fields. The returned outer plan keeps
+    /// its execution marker so first-party construction layers can independently re-verify the same handoff.</summary>
     internal static VideoPlan RequirePlannedState(VideoPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -117,7 +118,7 @@ internal sealed class VideoRequestExecutionBinding
                 "The VideoPlan was altered after planning. Re-plan and execute the returned plan unchanged.",
                 nameof(plan));
         }
-        return execution;
+        return plan;
     }
 
     private static ModelSpec FreezeModel(ModelSpec model) => model with

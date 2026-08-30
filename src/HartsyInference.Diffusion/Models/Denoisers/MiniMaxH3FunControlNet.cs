@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>One validated, reusable MiniMax-H3 Fun ControlNet-Union weight branch.</summary>
+/// <summary>One shape-checked, reusable MiniMax-H3 Fun ControlNet-Union weight branch.</summary>
 public sealed class MiniMaxH3FunControlNet(MiniMaxH3FunControlConfig config) : IDisposable
 {
     private readonly Dictionary<string, Tensor> _weights = new Dictionary<string, Tensor>(StringComparer.Ordinal);

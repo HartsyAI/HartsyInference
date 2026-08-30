@@ -34,6 +34,16 @@ public sealed class InspectCommand : Command<InspectCommand.Settings>
         [CommandOption("--model-profile")]
         public string? ModelProfile { get; init; }
 
+        /// <summary>LoRAs or acceleration adapters included in profile composition detection.</summary>
+        [CommandOption("--lora")]
+        [Description("LoRA or H3 acceleration adapter to inspect with the checkpoint; repeat for more.")]
+        public string[]? Loras { get; init; }
+
+        /// <summary>Per-adapter strengths, positionally matched to <see cref="Loras"/>.</summary>
+        [CommandOption("--lora-weight")]
+        [Description("Strength for the same-position --lora (default 1.0).")]
+        public double[]? LoraWeights { get; init; }
+
         /// <summary>Backend used for hardware preflight.</summary>
         [CommandOption("-b|--backend")]
         public string Backend { get; init; } = "auto";
@@ -61,7 +71,12 @@ public sealed class InspectCommand : Command<InspectCommand.Settings>
             spec = spec with { ProfileId = settings.ModelProfile };
         }
         using InferenceEngine engine = new InferenceEngine(settings.Backend);
-        VideoPlan plan = engine.VideoPlanning.PlanAsync(spec, new VideoRequest { Prompt = "" }).GetAwaiter().GetResult();
+        VideoPlan plan = engine.VideoPlanning.PlanAsync(spec, new VideoRequest
+        {
+            Prompt = "",
+            Loras = BuildLoraStack(settings),
+        }).GetAwaiter().GetResult();
+        plan = AsInspectionResult(plan);
         if (settings.Json)
         {
             JsonSerializerOptions options = new JsonSerializerOptions
@@ -95,5 +110,43 @@ public sealed class InspectCommand : Command<InspectCommand.Settings>
             }
         }
         return plan.IsValid ? 0 : 2;
+    }
+
+    /// <summary>Profile inspection has no generation media by design. Preserve structural, composition, hardware,
+    /// and release-boundary failures, while reporting Ref2VA's missing runtime reference as informational instead
+    /// of making a valid checkpoint impossible to inspect.</summary>
+    internal static VideoPlan AsInspectionResult(VideoPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        HashSet<string> generationOnly = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "video.profile.reference_required",
+        };
+        return plan with
+        {
+            Issues = plan.Issues.Select(issue => generationOnly.Contains(issue.Code)
+                ? issue with { Severity = VideoPlanIssueSeverity.Info }
+                : issue).ToArray(),
+        };
+    }
+
+    private static LoraStack? BuildLoraStack(Settings settings)
+    {
+        if (settings.Loras is not { Length: > 0 })
+        {
+            return null;
+        }
+        List<LoraEntry> entries = new List<LoraEntry>(settings.Loras.Length);
+        for (int i = 0; i < settings.Loras.Length; i++)
+        {
+            entries.Add(new LoraEntry
+            {
+                Model = settings.Loras[i],
+                Weight = settings.LoraWeights is not null && i < settings.LoraWeights.Length
+                    ? settings.LoraWeights[i]
+                    : 1.0,
+            });
+        }
+        return new LoraStack { Entries = entries };
     }
 }

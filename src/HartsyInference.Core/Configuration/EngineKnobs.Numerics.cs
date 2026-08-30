@@ -4,9 +4,6 @@ namespace HartsyInference.Core.Configuration;
 /// <remarks>Generated from the pre-migration call sites; defaults and grammars are those the code already had.</remarks>
 public static partial class EngineKnobs
 {
-    internal const string H3VsaExperimentalEnvironment = "HARTSY_EXPERIMENTAL_H3_VSA";
-    internal const string H3ExpansionExperimentalEnvironment = "HARTSY_EXPERIMENTAL_H3_EXPANSION";
-
     /// <summary>Routes audio conv1d through cuDNN (1D-as-2D, TF32) instead of the direct kernel; 0 disables.</summary>
     public static readonly Knob<bool> AudioConvCudnn =
         Bool("numerics.audioConvCudnn", "HARTSY_AUDIO_CONV_CUDNN", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes audio conv1d through cuDNN (1D-as-2D, TF32) instead of the direct kernel; 0 disables.");
@@ -74,29 +71,6 @@ public static partial class EngineKnobs
     /// <summary>Opts LLM decode into the captured CUDA-graph step (greedy, non-JSON, dense GQA only) over the eager loop.</summary>
     public static readonly Knob<bool> GraphDecode =
         Bool("numerics.graphDecode", "HARTSY_GRAPH_DECODE", false, KnobScope.Runtime, KnobDomain.Numerics, "Opts LLM decode into the captured CUDA-graph step (greedy, non-JSON, dense GQA only) over the eager loop.");
-
-    /// <summary>Explicitly opts into the unfinished MiniMax-H3 VSA path while real-weight, performance, and
-    /// peak-memory release gates remain open.</summary>
-    public static readonly Knob<bool> H3VsaExperimental =
-        Bool("numerics.h3VsaExperimental", H3VsaExperimentalEnvironment, false, KnobScope.Runtime,
-            KnobDomain.Numerics,
-            "Opts into experimental MiniMax-H3 VSA before its real-weight, performance, and peak-memory gates pass.");
-
-    /// <summary>Opts into the unverified H3 expansion execution paths while operator-provided Turbo/Hybrid,
-    /// PDD, Fun ControlNet, and int8-video-VAE real-generation gates remain open.</summary>
-    public static readonly Knob<bool> H3ExpansionExperimental =
-        Bool("numerics.h3ExpansionExperimental", H3ExpansionExperimentalEnvironment, false, KnobScope.Runtime,
-            KnobDomain.Numerics,
-            "Opts into MiniMax-H3 Turbo/Hybrid, PDD, Fun ControlNet, and int8-video-VAE execution before their real-weight gates pass.");
-
-    /// <summary>Whether the temporary H3 VSA release gate was explicitly opened through typed configuration or
-    /// the narrowly supported exact-value environment exception.</summary>
-    public static bool IsH3VsaExperimentalEnabled() => H3VsaExperimental.Value
-        || KnobStore.IsLegacyEnvironmentExactly(H3VsaExperimentalEnvironment, "1");
-
-    /// <summary>Whether controlled validation explicitly opened the non-VSA H3 expansion release gate.</summary>
-    public static bool IsH3ExpansionExperimentalEnabled() => H3ExpansionExperimental.Value
-        || KnobStore.IsLegacyEnvironmentExactly(H3ExpansionExperimentalEnvironment, "1");
 
     /// <summary>Kill-switch for grouped resident-int8 Linears sharing one activation rotate+quant pass across projections.</summary>
     public static readonly Knob<bool> GroupedLinear =

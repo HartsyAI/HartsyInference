@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
@@ -9,24 +10,23 @@ namespace HartsyInference.API.Tests;
 /// bug found via a live end-to-end run: several image/video catalog entries record their actual on-disk location
 /// via <c>Assets[].TargetSubdir</c> (e.g. "Stable-Diffusion/Krea2"), which does not match the coarse
 /// per-modality subdir guess ("Image"/"Video") <see cref="ModelResolver"/> falls back to — so a bare catalog id
-/// alone used to 400 with "no checkpoint found" even when the file was genuinely present. Uses the
-/// <c>HARTSYINFERENCE_MODELS</c> env override (honored by <c>RepoPaths.ModelsRoot()</c>) for a hermetic fixture —
-/// no real multi-GB checkpoint needed. Not parallelized against other test classes that might read the same
-/// process-global env var; restores it immediately after each test to minimize the exposure window.</summary>
+/// alone used to 400 with "no checkpoint found" even when the file was genuinely present. Points
+/// <c>RepoPaths.ModelsRoot()</c> at a hermetic fixture through the <c>paths.modelsRoot</c> setting — no real
+/// multi-GB checkpoint needed. The override is process-global, so it is cleared immediately after each test to
+/// minimize the exposure window for other classes reading the same setting.</summary>
 public sealed class ModelResolverTests : IDisposable
 {
     private readonly string _tempModelsRoot = Path.Combine(Path.GetTempPath(), "hartsy-modelresolver-tests-" + Path.GetRandomFileName());
-    private readonly string? _previousOverride = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS");
 
     public ModelResolverTests()
     {
         Directory.CreateDirectory(_tempModelsRoot);
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_MODELS", _tempModelsRoot);
+        KnobStore.Set(EngineKnobs.ModelsRoot, _tempModelsRoot);
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_MODELS", _previousOverride);
+        KnobStore.Clear(EngineKnobs.ModelsRoot);
         if (Directory.Exists(_tempModelsRoot))
             Directory.Delete(_tempModelsRoot, recursive: true);
     }

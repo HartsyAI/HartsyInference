@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -8,7 +9,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 namespace HartsyInference.ModelAssets.MiniMaxH3;
 
 /// <summary>Locally rebases the official full-width H3 Fun control AdaLN projections onto a specified pruned base.</summary>
-public static unsafe class MiniMaxH3ControlNetPrunedConverter
+internal static unsafe class MiniMaxH3ControlNetPrunedConverter
 {
     /// <summary>Writes a self-contained converted branch after an F64 fit with relative residual at most 1e-4.</summary>
     public static MiniMaxH3ControlNetConversionSummary Convert(string controlPath, string fullBasePath,
@@ -206,10 +207,7 @@ public static unsafe class MiniMaxH3ControlNetPrunedConverter
                 throw new FileNotFoundException("MiniMax-H3 ControlNet conversion input not found.", input);
             }
         }
-        string output = Path.GetFullPath(outputPath);
-        StringComparison comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        if (inputs.Any(input => string.Equals(Path.GetFullPath(input), output, comparison)))
+        if (inputs.Any(input => FileSystemPathIdentity.SamePath(input, outputPath)))
         {
             throw new ArgumentException("ControlNet conversion output must not overwrite an input file.", nameof(outputPath));
         }

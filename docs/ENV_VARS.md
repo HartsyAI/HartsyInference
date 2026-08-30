@@ -131,24 +131,6 @@ override that decides something. `VideoRequest` and `MusicRequest` carry the ide
 | `HARTSY_AUDIO_EVICT_BELOW_GB` | **14** | Free-VRAM threshold for audio eviction | **DOCUMENT** — a hard-coded GB threshold that silently changes behavior near it |
 | `HARTSY_STREAM_PIN` | **ON** | Pinned host staging for streaming | **DOCUMENT** |
 
-### Temporary MiniMax-H3 VSA release gate
-
-`HARTSY_EXPERIMENTAL_H3_VSA=1` is a deliberate temporary exception to the retired environment-variable
-configuration layer. Without that exact value, every detected H3 VSA profile returns the typed planning error
-`video.vsa.experimental_disabled` before model construction or SSE begins. The equivalent declared process
-setting is `numerics.h3VsaExperimental`; both default off.
-
-This switch is for controlled validation only. It does not certify release readiness: operator-provided
-real-weight parity, the 12k/29k/66k/80k/113k benchmark matrix, the ≥1.5× complete-step speed target, and the
-no-greater-peak-scratch requirement remain unmet. Remove the gate only after those checks pass on the published
-checkpoint profiles.
-
-`HARTSY_EXPERIMENTAL_H3_EXPANSION=1` is the parallel exact-value gate for the non-VSA expansion paths
-whose operator-provided canaries are still unavailable: Turbo/Hybrid, PDD, Fun ControlNet, and the int8
-video VAE. Its declared process setting is `numerics.h3ExpansionExperimental`; both default off. Dense
-base H3 plus ordinary guides and masks do not require this switch. Like the VSA gate, it is a controlled-
-validation mechanism, not a compatibility or release-readiness claim.
-
 ## 4. CUDA numerics — the largest undocumented surface
 
 Every one of these changes output bits or kernel selection. **All are default-ON and none are documented.**

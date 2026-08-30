@@ -70,9 +70,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
-    /// <summary>Validates the checkpoint-bound production VSA contract before any denoise work begins. The two
+    /// <summary>Shape-checks the checkpoint-bound, validation-pending VSA contract before any denoise work begins. The two
     /// token-refiner blocks intentionally have no gate and remain on exact dense attention.</summary>
-    public void ValidateVideoSparseAttentionWeights()
+    internal void ValidateVideoSparseAttentionWeights()
     {
         if (_config.NumLayers != 50 || _config.HiddenSize != 5376 || _config.NumAttentionHeads != 56
             || _config.AttentionHeadDim != 128)
@@ -100,7 +100,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     /// <summary>Builds the immutable segment-pure / 4x4x4 source layout shared by every block and denoise
     /// evaluation throughout one generation.</summary>
-    public VideoSparseAttentionPlan CreateVideoSparseAttentionPlan(MiniMaxH3PackedLayout layout,
+    internal VideoSparseAttentionPlan CreateVideoSparseAttentionPlan(MiniMaxH3PackedLayout layout,
         VideoSparseAttentionProfileKind profile)
     {
         ValidateVideoSparseAttentionWeights();
@@ -108,7 +108,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Registers one deduplicated Fun branch and transfers its lifetime to this transformer.</summary>
-    public int RegisterFunControlNet(MiniMaxH3FunControlNet controlNet)
+    internal int RegisterFunControlNet(MiniMaxH3FunControlNet controlNet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(controlNet);
@@ -200,10 +200,23 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return _weights.TryGetValue(key, out Tensor? tensor) ? tensor : null;
     }
 
+    /// <summary>Runs the released dense path through the token refiner, all blocks, and the dual output heads.
+    /// Profile-bound PDD, Fun ControlNet, and VSA inputs are available only to first-party service assemblies.</summary>
+    public (Tensor Video, Tensor Audio) Forward(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
+        Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
+        IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null) =>
+        ForwardPlanned(backend, layout, videoRows, audioRows, textStates, cos, sin, uniqueTimesteps,
+            timestepRowOf, textTagRuns, pddHeads: null, controls: null,
+            videoTimestepRows: videoTimestepRows, audioTimestepRows: audioTimestepRows,
+            sparseAttention: null);
+
     /// <summary>Runs the packed sequence through the token refiner, all blocks, and the dual output heads.
     /// <paramref name="videoRows"/>/<paramref name="audioRows"/> are the patchified latent rows in segment order;
     /// <paramref name="textStates"/> is the Qwen3-VL hidden state <c>[textLen, textDim]</c>.</summary>
-    public (Tensor Video, Tensor Audio) Forward(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
+    internal (Tensor Video, Tensor Audio) ForwardPlanned(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
         Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
         IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
@@ -270,6 +283,18 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
     }
 
+    /// <summary>Released dense DiT-sharded forward. Profile-bound acceleration inputs are internal.</summary>
+    public (Tensor Video, Tensor Audio) ForwardSharded(IBackend backendA, IBackend backendB,
+        MiniMaxH3PackedLayout layout, Tensor videoRows, Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin,
+        float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf, int splitBlock,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        int[]? videoTimestepRows = null,
+        int[]? audioTimestepRows = null) =>
+        ForwardShardedPlanned(backendA, backendB, layout, videoRows, audioRows, textStates, cos, sin,
+            uniqueTimesteps, timestepRowOf, splitBlock, textTagRuns, pddHeads: null, controls: null,
+            videoTimestepRows: videoTimestepRows, audioTimestepRows: audioTimestepRows,
+            sparseAttentionA: null, sparseAttentionB: null);
+
     /// <summary>DiT-sharded forward: blocks <c>[0, splitBlock)</c> on <paramref name="backendA"/> (which also owns
     /// every shared weight — embeds, token refiner, final layer), <c>[splitBlock, NumLayers)</c> on
     /// <paramref name="backendB"/>. The residual stream <c>h</c> and the tiny time embedding cross via
@@ -278,7 +303,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// not latency: this is what makes the ~19.5 GB fp8 build fully resident across a 24+12 GB pair instead of
     /// streaming ~19 GB of weights per step. H3 has no step-graph/step-cache/block-streaming, so there are no
     /// exclusions to gate — the fp8-build-only constraint lives in the recipe's existing &lt;40 GB check.</summary>
-    public (Tensor Video, Tensor Audio) ForwardSharded(IBackend backendA, IBackend backendB,
+    internal (Tensor Video, Tensor Audio) ForwardShardedPlanned(IBackend backendA, IBackend backendB,
         MiniMaxH3PackedLayout layout, Tensor videoRows, Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin,
         float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf, int splitBlock,
         IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,

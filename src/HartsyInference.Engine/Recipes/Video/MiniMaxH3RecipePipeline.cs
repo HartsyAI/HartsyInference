@@ -53,17 +53,14 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     public MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
         MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
         MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null, MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null,
-        MergedLoraStack? loraStack = null, IBackend? textEncoderBackend = null, IBackend? vaeBackend = null,
-        MergedLoraStack? pddLoraStack = null,
-        IReadOnlyDictionary<string, int>? funControlModelIndices = null)
+        MergedLoraStack? loraStack = null, IBackend? textEncoderBackend = null, IBackend? vaeBackend = null)
         : this(backend, pipeline, config, textEncoder, tokenizer, loaders, false,
-            videoVaeEncoder, audioVaeEncoder, loraStack, textEncoderBackend, vaeBackend, pddLoraStack,
-            funControlModelIndices)
+            videoVaeEncoder, audioVaeEncoder, loraStack, textEncoderBackend, vaeBackend, null, null)
     {
     }
 
     /// <summary>Takes ownership of all model components while explicitly binding whether their detected profile can combine guide and reference conditioning.</summary>
-    public MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
+    internal MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
         MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
         bool supportsHybridConditioning, MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null,
         MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null, MergedLoraStack? loraStack = null,

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -8,7 +9,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 namespace HartsyInference.ModelAssets.MiniMaxH3;
 
 /// <summary>Local-only converter that rebases an official dense PDD adapter onto an operator-supplied pruned H3 base.</summary>
-public static class MiniMaxH3PddPrunedConverter
+internal static class MiniMaxH3PddPrunedConverter
 {
     /// <summary>Converts and writes one hash-provenanced adapter without downloading or embedding any basis asset.</summary>
     public static MiniMaxH3PddConversionSummary Convert(string adapterPath, string fullBasePath,
@@ -124,9 +125,7 @@ public static class MiniMaxH3PddPrunedConverter
         {
             if (!File.Exists(input)) throw new FileNotFoundException("PDD conversion input not found.", input);
         }
-        string output = Path.GetFullPath(outputPath);
-        if (inputs.Any(input => string.Equals(Path.GetFullPath(input), output,
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
+        if (inputs.Any(input => FileSystemPathIdentity.SamePath(input, outputPath)))
         {
             throw new ArgumentException("PDD conversion output must not overwrite an input file.", nameof(outputPath));
         }

@@ -12,10 +12,13 @@
 > themselves. Still-live findings kept here: the NVFP4-AWQ text-encoder conventions, and the
 > SageAttention F16-V measurement in "Bring-up notes".
 >
-> **Expansion boundary, 2026-08-29:** the real-weight claim above does not cover the new checkpoint-
-> profile, Turbo/Hybrid, PDD, VSA, arbitrary-guide/mask, Fun ControlNet, or int8-video-VAE paths. Those
-> paths have focused structural validation only. Operator-provided checkpoint canaries, numerical parity,
-> performance gates, package-consumer validation, and a live Swarm generation remain release blockers.
+> **Expansion boundary, updated 2026-08-30:** the original claim above now has one narrow extension: an
+> exact-hash dense FL2VA friend-test canary generated and directly inspected two 39-frame clips with a visual
+> guide plus continuous video/audio denoise masks. The public plan remains release-blocked; Turbo/Hybrid, PDD,
+> VSA, Fun ControlNet, the int8 video VAE, and
+> the remaining guide/mask matrix still lack their required operator-provided canaries. Numerical parity,
+> performance gates, package-consumer validation, and live Swarm generation remain release blockers where
+> specified by the current checklists.
 
 ## What H3 is
 
@@ -363,8 +366,9 @@ writing a single line of forward pass.
 
 This section records upstream facts that are easy to lose when the implementations move. ComfyUI is an
 oracle for formats and expected behavior only; Hartsy adds no Comfy backend, node, workflow, or runtime
-dependency. The native paths present in the worktree are not promoted by this document: no new artifact was
-downloaded for validation, no expansion profile has an operator-provided real-weight canary recorded here,
+dependency. The native paths present in the worktree are not promoted by this document. The 2026-08-30 internal
+guide/AV-mask canary used operator-provided base artifacts and is recorded in the current status/parity
+checklists; no Turbo/Hybrid, PDD, VSA, Fun ControlNet, or int8-video-VAE artifact was available for validation,
 and no VSA or int8-VAE performance target has been measured.
 
 **Upstream snapshot (verified against the GitHub pull-request records on 2026-08-29):**
@@ -372,7 +376,7 @@ and no VSA or int8-VAE performance target has been measured.
 | Surface | Upstream state at the snapshot | Provenance consequence |
 |---|---|---|
 | PDD | ComfyUI [#15908](https://github.com/Comfy-Org/ComfyUI/pull/15908) merged 2026-08-28 | The official Alibaba PAI adapters, not filenames or generic LoRA heuristics, define the projection-bank and NFE contracts. |
-| VSA | ComfyUI [#15958](https://github.com/Comfy-Org/ComfyUI/pull/15958) is an open draft; sparse CUDA remains separate and [comfy-kitchen #117](https://github.com/Comfy-Org/comfy-kitchen/pull/117) is open | Gate detection alone is not execution evidence. Hartsy keeps VSA behind `HARTSY_EXPERIMENTAL_H3_VSA=1` until real-weight parity and the full benchmark matrix pass. |
+| VSA | ComfyUI [#15958](https://github.com/Comfy-Org/ComfyUI/pull/15958) is an open draft; sparse CUDA remains separate and [comfy-kitchen #117](https://github.com/Comfy-Org/comfy-kitchen/pull/117) is open | Gate detection alone is not execution evidence. Hartsy's published Engine blocks VSA without an operator bypass until real-weight parity and the full benchmark matrix pass. |
 | Fun ControlNet-Union | ComfyUI [#15860](https://github.com/Comfy-Org/ComfyUI/pull/15860) is open | Treat that branch and the published Alibaba PAI checkpoint as an oracle, not as a merged compatibility guarantee. |
 | Arbitrary guides / AV masks / int8 video VAE | ComfyUI [#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439), [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375), and [#15334](https://github.com/Comfy-Org/ComfyUI/pull/15334) are merged | These establish the published data contracts, but do not validate Hartsy's independent execution. |
 | Conditioning padding / VAE tile advance | ComfyUI [#15769](https://github.com/Comfy-Org/ComfyUI/pull/15769) and [#15901](https://github.com/Comfy-Org/ComfyUI/pull/15901) are open | Preserve the odd-latent padding and minimum tile-advance guards locally; an open upstream fix is not a release gate substitute. |
@@ -405,7 +409,7 @@ and no VSA or int8-VAE performance target has been measured.
   Engine settings profile; it is intentionally unrelated to `--model-profile`.
 - An unknown but structurally valid community checkpoint may be accompanied by either
   `MODEL.safetensors.hartsy-video-profile.json` or `MODEL.hartsy-video-profile.json`. The sidecar must bind
-  the exact full-file `sha256` and provide `profileId`, `task`, `steps`, plus any certified acceleration,
+  the exact full-file `sha256` and provide `profileId`, `task`, `steps`, plus any declared acceleration,
   attention, shifts, sampler, scheduler, locked geometry, reference sizing, provenance, and license. String
   enums are case-insensitive. A stale hash fails planning; a filename never enables acceleration.
 - Guide manifests accept either a bare JSON array or `{ "guides": [...] }`. Each entry has signed `frame`
@@ -415,8 +419,9 @@ and no VSA or int8-VAE performance target has been measured.
   `maskedSource`. Paths inside a manifest resolve relative to that manifest; direct CLI paths resolve from
   the process working directory. The simple control flags deliberately exclude inpaint because they cannot
   express its two extra payloads.
-- `hartsy convert h3-pdd` and `hartsy convert h3-controlnet` write local, source-hash-recorded pruned-base
-  conversions. They never overwrite an input and do not download or redistribute a basis or model weight.
+- PDD and ControlNet pruned-base conversion code remains internal and validation-pending. The public CLI exposes
+  no writer until official real-weight conversion and generation gates pass. Hartsy does not download or
+  redistribute a basis or model weight.
 - `POST /v1/native/video/plan` and `/v1/native/video/stream` accept the same `NativeVideoRequest`. Invalid
   profiles and combinations return `NativeVideoPlanProblem` with machine-readable `issues` and an optional
   resolved `plan` at HTTP 422 before SSE headers. A valid stream emits `progress`, `frame`, optional `audio`,

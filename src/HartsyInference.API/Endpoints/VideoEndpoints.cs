@@ -41,7 +41,7 @@ public static class VideoEndpoints
             NativeVideoPlanResponse response = NativeVideoPlanResponse.Create(plan);
             return plan.IsValid
                 ? Results.Ok(response)
-                : Results.Json(new NativeVideoPlanProblem { Issues = plan.Issues, Plan = response },
+                : Results.Json(new NativeVideoPlanProblem { Issues = response.Issues, Plan = response },
                     statusCode: StatusCodes.Status422UnprocessableEntity);
         })
             .Produces<NativeVideoPlanResponse>(StatusCodes.Status200OK)
@@ -74,10 +74,11 @@ public static class VideoEndpoints
             }
             if (!plan.IsValid)
             {
+                NativeVideoPlanResponse response = NativeVideoPlanResponse.Create(plan);
                 return Results.Json(new NativeVideoPlanProblem
                 {
-                    Issues = plan.Issues,
-                    Plan = NativeVideoPlanResponse.Create(plan),
+                    Issues = response.Issues,
+                    Plan = response,
                 },
                     statusCode: StatusCodes.Status422UnprocessableEntity);
             }
@@ -204,19 +205,17 @@ public static class VideoEndpoints
         FileNotFoundException or DirectoryNotFoundException or ArgumentException or InvalidDataException;
 
     /// <summary>Creates the same typed 422 envelope used by ordinary plan diagnostics without inventing a plan.</summary>
-    private static NativeVideoPlanProblem PlanningFailure(Exception exception) => new()
+    private static NativeVideoPlanProblem PlanningFailure(Exception exception)
     {
-        Issues =
-        [
-            new VideoPlanIssue
-            {
-                Code = "video.plan.model_unresolvable",
-                Severity = VideoPlanIssueSeverity.Error,
-                Message = exception.Message,
-                Field = nameof(NativeVideoRequest.Model),
-            },
-        ],
-    };
+        VideoPlanIssue issue = NativeVideoPlanResponse.SanitizeIssue(new VideoPlanIssue
+        {
+            Code = "video.plan.model_unresolvable",
+            Severity = VideoPlanIssueSeverity.Error,
+            Message = exception.Message,
+            Field = nameof(NativeVideoRequest.Model),
+        });
+        return new NativeVideoPlanProblem { Issues = [issue] };
+    }
 
     /// <summary>Resolves the model location and carries the additive checkpoint-profile hint into planning.</summary>
     private static ModelSpec ResolveSpec(NativeVideoRequest request)

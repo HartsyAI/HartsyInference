@@ -15,7 +15,7 @@ internal sealed record VideoKnownArtifact
     /// <summary>Composition role.</summary>
     public required VideoProfileArtifactRole Role { get; init; }
 
-    /// <summary>Conditioning task certified by the artifact.</summary>
+    /// <summary>Conditioning task declared for the artifact.</summary>
     public required VideoTaskFamily Task { get; init; }
 
     /// <summary>Acceleration semantics introduced by the artifact.</summary>
@@ -24,19 +24,19 @@ internal sealed record VideoKnownArtifact
     /// <summary>Attention semantics introduced by the artifact.</summary>
     public VideoAttentionKind Attention { get; init; } = VideoAttentionKind.Dense;
 
-    /// <summary>Validated evaluation count, or null when the base recipe supplies it.</summary>
+    /// <summary>Declared evaluation count, or null when the base recipe supplies it.</summary>
     public int? Steps { get; init; }
 
-    /// <summary>Validated video flow shift, or null when the base recipe supplies it.</summary>
+    /// <summary>Declared video flow shift, or null when the base recipe supplies it.</summary>
     public float? FlowShift { get; init; }
 
-    /// <summary>Validated audio flow shift, or null when the base recipe supplies it.</summary>
+    /// <summary>Declared audio flow shift, or null when the base recipe supplies it.</summary>
     public float? AudioFlowShift { get; init; }
 
-    /// <summary>Validated target width, or null when request geometry remains free.</summary>
+    /// <summary>Declared target width, or null when request geometry remains free.</summary>
     public int? Width { get; init; }
 
-    /// <summary>Validated target height, or null when request geometry remains free.</summary>
+    /// <summary>Declared target height, or null when request geometry remains free.</summary>
     public int? Height { get; init; }
 
     /// <summary>Reference-media sizing policy associated with the artifact.</summary>

@@ -45,8 +45,13 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(body.TryGetProperty("effectiveSettings", out JsonElement settings));
         Assert.Equal(2.75, settings.GetProperty("audioFlowShift").GetDouble(), 3);
-        Assert.Equal("Unknown", body.GetProperty("profile").GetProperty("task").GetString());
-        Assert.Equal("Dense", body.GetProperty("profile").GetProperty("attention").GetString());
+        JsonElement profile = body.GetProperty("profile");
+        Assert.Equal("Unknown", profile.GetProperty("task").GetString());
+        Assert.Equal("Dense", profile.GetProperty("attention").GetString());
+        string features = Assert.IsType<string>(profile.GetProperty("features").GetString());
+        Assert.DoesNotContain("Guides", features, StringComparison.Ordinal);
+        Assert.DoesNotContain("VideoDenoiseMask", features, StringComparison.Ordinal);
+        Assert.DoesNotContain("AudioDenoiseMask", features, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -74,6 +79,109 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
     [Theory]
     [InlineData("/v1/native/video/plan")]
     [InlineData("/v1/native/video/stream")]
+    public async Task InvalidPlan_DoesNotExposePathsEmbeddedInIssueMessages(string route)
+    {
+        string checkpoint = WriteH3Folder();
+        string videoVae = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(checkpoint)!)!,
+            "video_vae", "model.safetensors");
+        File.Delete(videoVae);
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync(route, new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new { prompt = "safe failure projection" },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        string json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(_tempDirectory, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(checkpoint, json, StringComparison.Ordinal);
+        Assert.Contains("video.component.missing", json, StringComparison.Ordinal);
+        Assert.Contains("Local artifact details were omitted", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidProfile_DoesNotExposeExactArtifactHashesInIssueMessages()
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            modelProfile = "minimax-h3-fl2va-base-int8-convrot",
+            request = new { prompt = "safe hash projection" },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        string json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotMatch("[0-9a-fA-F]{64}", json);
+        Assert.Contains("<redacted-sha256>", json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
+    public async Task InvalidPlan_DoesNotExposeUncOrFileUriPaths(string route)
+    {
+        FakeVideoService fakeVideo = new()
+        {
+            PlanIssues =
+            [
+                Issue("video.test.unc", @"Could not load \\private-server\models\h3.safetensors."),
+                Issue("video.test.file_uri", "Could not load file:///srv/private/h3.safetensors."),
+            ],
+        };
+        using WebApplicationFactory<Program> fakeFactory = WithFakeVideo(fakeVideo);
+        using HttpClient client = fakeFactory.CreateClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync(route, new
+        {
+            model = "fake-video",
+            request = new { prompt = "redact cross-platform paths" },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        string json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("private-server", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("/srv/private", json, StringComparison.Ordinal);
+        // The typed problem intentionally repeats diagnostics at the top level and inside its optional plan.
+        Assert.Equal(4, json.Split("Local artifact details were omitted", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public async Task Plan_DoesNotExposeOperatorSidecarUrls()
+    {
+        FakeVideoService fakeVideo = new()
+        {
+            ProfileOverride = FakeVideoService.DefaultProfile with
+            {
+                Id = "operator-sidecar",
+                IsSidecar = true,
+                ProvenanceUrl = "https://private.example.invalid/model?token=operator-secret",
+                LicenseUrl = "file:///srv/private/LICENSE",
+            },
+        };
+        using WebApplicationFactory<Program> fakeFactory = WithFakeVideo(fakeVideo);
+        using HttpClient client = fakeFactory.CreateClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "fake-video",
+            request = new { prompt = "redact sidecar policy" },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        string json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("private.example.invalid", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-secret", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("/srv/private", json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
     public async Task InvalidProfile_ReturnsTyped422BeforeStreaming(string route)
     {
         string checkpoint = WriteH3Folder();
@@ -93,6 +201,39 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         Assert.Equal("https://hartsy.ai/problems/video-plan-invalid", body.GetProperty("type").GetString());
         JsonElement issue = body.GetProperty("issues").EnumerateArray()
             .First(item => item.GetProperty("code").GetString() == "video.profile.mismatch");
+        Assert.Equal("Error", issue.GetProperty("severity").GetString());
+    }
+
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
+    public async Task ValidationPendingGuides_ReturnTyped422BeforeStreaming(string route)
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        using HttpResponseMessage response = await client.PostAsJsonAsync(route, new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new
+            {
+                prompt = "release boundary",
+                guides = new[]
+                {
+                    new
+                    {
+                        frameIndex = 0,
+                        image = new { width = 1, height = 1, rgb = new byte[] { 0, 0, 0 } },
+                    },
+                },
+            },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.DoesNotContain("text/event-stream", response.Content.Headers.ContentType?.MediaType ?? "");
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement issue = body.GetProperty("issues").EnumerateArray()
+            .Single(item => item.GetProperty("code").GetString() == "video.h3_expansion.release_blocked");
         Assert.Equal("Error", issue.GetProperty("severity").GetString());
     }
 
@@ -438,6 +579,20 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         stream.Write(json);
     }
 
+    private WebApplicationFactory<Program> WithFakeVideo(FakeVideoService video) =>
+        _factory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IInferenceEngine>();
+            services.AddSingleton<IInferenceEngine>(new FakeVideoEngine(video));
+        }));
+
+    private static VideoPlanIssue Issue(string code, string message) => new()
+    {
+        Code = code,
+        Severity = VideoPlanIssueSeverity.Error,
+        Message = message,
+    };
+
     public void Dispose()
     {
         if (Directory.Exists(_tempDirectory))
@@ -494,7 +649,7 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
             LockedFields = VideoLockedFields.None,
         };
 
-        private static readonly VideoModelProfile Profile = new()
+        internal static readonly VideoModelProfile DefaultProfile = new()
         {
             Id = "fake-h3",
             DisplayName = "Fake H3",
@@ -518,6 +673,8 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         public VideoPlan? LastPlan => _lastPlan;
         public VideoPlan? LastExecutedPlan => _lastExecutedPlan;
         public bool ThrowOnGenerate { get; init; }
+        public VideoModelProfile? ProfileOverride { get; init; }
+        public IReadOnlyList<VideoPlanIssue> PlanIssues { get; init; } = [];
 
         public Task<VideoPlan> PlanAsync(ModelSpec spec, VideoRequest request, CancellationToken cancel = default)
         {
@@ -525,9 +682,9 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
             _lastPlan = new VideoPlan
             {
                 Model = spec,
-                Profile = Profile,
+                Profile = ProfileOverride ?? DefaultProfile,
                 EffectiveSettings = Effective,
-                Issues = [],
+                Issues = PlanIssues,
                 CacheIdentity = "fake",
             };
             return Task.FromResult(_lastPlan);

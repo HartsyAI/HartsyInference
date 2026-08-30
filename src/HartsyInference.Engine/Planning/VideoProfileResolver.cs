@@ -58,7 +58,7 @@ internal static class VideoProfileResolver
         if (request.SparseAttentionPolicy == SparseAttentionPolicy.Require)
         {
             issues.Add(Error("video.vsa.profile_required",
-                $"Video model family '{familyId}' has no validated sparse-attention profile.",
+                $"Video model family '{familyId}' has no declared sparse-attention profile.",
                 nameof(VideoRequest.SparseAttentionPolicy)));
         }
         VideoModelProfile profile = new VideoModelProfile
@@ -204,7 +204,7 @@ internal static class VideoProfileResolver
         if (string.Equals(profile.Id, "minimax-h3-ref2va-zs05-int8", StringComparison.OrdinalIgnoreCase))
         {
             issues.Add(Error("video.profile.composition_required",
-                "The Joey ZS05 checkpoint is certified only in the exact composition with the LightX FL8-768p adapter.",
+                "The Joey ZS05 checkpoint is declared only in the exact composition with the LightX FL8-768p adapter.",
                 nameof(VideoRequest.Loras)));
         }
         await ResolveControlComponentsAsync(request, mainHash, header, profile, artifactHashes, componentPaths,
@@ -225,6 +225,9 @@ internal static class VideoProfileResolver
                 componentFormats, artifactHashes, issues, cancel).ConfigureAwait(false);
         }
 
+        // A profile describes artifact semantics, while the registered recipe is the release authority. Their
+        // intersection prevents a hash-bound profile from advertising a structurally present but gated feature.
+        profile = profile with { Features = profile.Features & familyFeatures };
         ValidateProfileHint(spec.ProfileId, profile, mainHash, issues);
         ValidateRequestedFeatures(request, profile, issues);
         VideoEffectiveSettings settings = ResolveEffectiveSettings(request, profile, issues);
@@ -378,8 +381,7 @@ internal static class VideoProfileResolver
     {
         VideoTaskFamily.T2Va => VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask | VideoFeatures.Lora,
         VideoTaskFamily.Fl2Va => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Guides
-            | VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask | VideoFeatures.VideoControlNet
-            | VideoFeatures.VideoInpaint | VideoFeatures.Lora,
+            | VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask | VideoFeatures.Lora,
         VideoTaskFamily.Ref2Va => VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos
             | VideoFeatures.ReferenceAudios | VideoFeatures.VideoDenoiseMask
             | VideoFeatures.AudioDenoiseMask | VideoFeatures.Lora,
@@ -513,7 +515,7 @@ internal static class VideoProfileResolver
 
         bool joeyComposition = string.Equals(profile.Id, "minimax-h3-ref2va-zs05-int8", StringComparison.OrdinalIgnoreCase)
             && string.Equals(distillation.Id, "minimax-h3-lightx-fl8-768p", StringComparison.OrdinalIgnoreCase);
-        // Joey ZS05 was validated only as this cross-task pair, so the composed profile is an explicit manifest
+        // Joey ZS05 is published only as this cross-task pair, so the composed profile is an explicit manifest
         // exception rather than a general license to attach FL adapters to Ref2VA bases.
         if (!joeyComposition && profile.Task == VideoTaskFamily.Unknown && !distillationBindsUnknownTask)
         {
@@ -534,7 +536,7 @@ internal static class VideoProfileResolver
             && !joeyComposition)
         {
             issues.Add(Error("video.profile.composition_unverified",
-                "The Joey ZS05 base is certified only with the LightX FL8-768p adapter.", nameof(VideoRequest.Loras)));
+                "The Joey ZS05 base is declared only with the LightX FL8-768p adapter.", nameof(VideoRequest.Loras)));
             return;
         }
 
@@ -564,14 +566,15 @@ internal static class VideoProfileResolver
         if (convertedPdd && !prunedBase)
         {
             issues.Add(Error("video.pdd.converted_base_not_pruned",
-                "A locally rebased PDD adapter is certified only for its pruned adaln_t_table target base.",
+                "A locally rebased PDD adapter is hash-bound only to its pruned adaln_t_table target base.",
                 nameof(VideoRequest.Loras)));
         }
         else if (!convertedPdd && prunedBase)
         {
             issues.Add(Error("video.pdd.rebase_required",
-                "Official PDD adapters target a full-width H3 base. Run 'hartsy convert h3-pdd' before using one "
-                + "with a pruned adaln_t_table checkpoint.", nameof(VideoRequest.Loras)));
+                "Official PDD adapters target a full-width H3 base. Pruned-base conversion remains unavailable "
+                + "in published builds until its real-weight conversion and generation gates pass.",
+                nameof(VideoRequest.Loras)));
         }
         if (!convertedPdd && baseTask == VideoTaskFamily.Unknown)
         {
@@ -632,13 +635,13 @@ internal static class VideoProfileResolver
         if (profile.Attention != VideoAttentionKind.Dense && request.SparseAttentionPolicy == SparseAttentionPolicy.Disable)
         {
             issues.Add(Error("video.vsa.disable_unsupported",
-                $"Profile '{profile.Id}' requires sparse attention and does not certify dense equivalence.",
+                $"Profile '{profile.Id}' requires sparse attention and does not declare dense equivalence.",
                 nameof(VideoRequest.SparseAttentionPolicy)));
         }
         if (profile.Attention == VideoAttentionKind.Dense && request.SparseAttentionPolicy == SparseAttentionPolicy.Require)
         {
             issues.Add(Error("video.vsa.profile_required",
-                $"Profile '{profile.Id}' carries no validated VSA gates.", nameof(VideoRequest.SparseAttentionPolicy)));
+                $"Profile '{profile.Id}' carries no shape-checked VSA gates.", nameof(VideoRequest.SparseAttentionPolicy)));
         }
 
         if (profile.Acceleration == VideoAccelerationKind.Pdd
@@ -1072,8 +1075,9 @@ internal static class VideoProfileResolver
                 if (!official && !rebased)
                 {
                     issues.Add(Error("video.control.unrecognized_artifact",
-                        "Fun ControlNet accepts only the official branch hash or a local h3-controlnet conversion "
-                        + "whose metadata binds the exact selected base.", nameof(VideoRequest.Controls)));
+                        "Fun ControlNet recognizes only the official branch hash or a previously produced local "
+                        + "rebase whose metadata binds the exact selected base. The public converter remains "
+                        + "unavailable until its validation gates pass.", nameof(VideoRequest.Controls)));
                 }
                 if (profile.Task != VideoTaskFamily.Fl2Va)
                 {
@@ -1085,7 +1089,8 @@ internal static class VideoProfileResolver
                 {
                     issues.Add(Error("video.control.rebase_required",
                         "The official Fun branch uses full-width AdaLN and cannot attach directly to this pruned "
-                        + "base. Run the local h3-controlnet converter against this exact target base.",
+                        + "base. Pruned-base conversion remains unavailable in published builds until its "
+                        + "real-weight conversion and generation gates pass.",
                         nameof(VideoRequest.Controls)));
                 }
                 if (rebased && !prunedBase)
@@ -2215,7 +2220,7 @@ internal static class VideoProfileResolver
         if (!Enum.IsDefined(sidecar.Acceleration) || sidecar.Acceleration == VideoAccelerationKind.Pdd)
         {
             issues.Add(Error("video.profile.sidecar_acceleration_invalid",
-                "A main-checkpoint sidecar may certify None, Turbo, or VSA; PDD is selected only by a validated adapter.",
+                "A main-checkpoint sidecar may declare None, Turbo, or VSA; PDD is selected only by a known adapter.",
                 nameof(ModelSpec.ProfileId)));
         }
         if (!Enum.IsDefined(sidecar.Attention) || !Enum.IsDefined(sidecar.ReferenceSizing))
@@ -2234,7 +2239,13 @@ internal static class VideoProfileResolver
             || !string.Equals(sidecar.Scheduler, "normal", StringComparison.OrdinalIgnoreCase))
         {
             issues.Add(Error("video.profile.sidecar_sampler_invalid",
-                "H3 sidecars may certify only the Euler sampler with the normal scheduler.",
+                "H3 sidecars may declare only the Euler sampler with the normal scheduler.",
+                nameof(ModelSpec.ProfileId)));
+        }
+        if (!IsAllowedSidecarUrl(sidecar.ProvenanceUrl) || !IsAllowedSidecarUrl(sidecar.LicenseUrl))
+        {
+            issues.Add(Error("video.profile.sidecar_url_invalid",
+                "Sidecar provenanceUrl and licenseUrl values must be absolute HTTP(S) URLs without credentials.",
                 nameof(ModelSpec.ProfileId)));
         }
 
@@ -2276,7 +2287,7 @@ internal static class VideoProfileResolver
         if (sidecar.Task == VideoTaskFamily.Hybrid && sparseAttention)
         {
             issues.Add(Error("video.profile.sidecar_hybrid_invalid",
-                "Hybrid conditioning is certified only with dense attention.", nameof(ModelSpec.ProfileId)));
+                "Hybrid conditioning is declared only with dense attention.", nameof(ModelSpec.ProfileId)));
         }
 
         Dictionary<string, SafeTensorDescriptor> normalized = NormalizeDescriptors(descriptors);
@@ -2285,10 +2296,21 @@ internal static class VideoProfileResolver
         if (sidecar.Acceleration == VideoAccelerationKind.Vsa && !hasAllGates)
         {
             issues.Add(Error("video.profile.sidecar_vsa_gates_missing",
-                "A VSA sidecar cannot certify a checkpoint without all 50 learned gate projections.",
+                "A VSA sidecar cannot declare a sparse checkpoint without all 50 learned gate projections.",
                 nameof(ModelSpec.ProfileId)));
         }
         return issues.Skip(issueCount).All(issue => issue.Severity != VideoPlanIssueSeverity.Error);
+    }
+
+    private static bool IsAllowedSidecarUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+        return Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+            && uri.Scheme is "http" or "https"
+            && string.IsNullOrEmpty(uri.UserInfo);
     }
 
     private static void AddFilenameHintIssues(string path, VideoModelProfile profile, bool hasSidecar,
@@ -2544,7 +2566,7 @@ internal static class VideoProfileResolver
         if (descriptors.Values.Any(descriptor => descriptor.DType == DType.I8 || descriptor.DType == DType.U8))
         {
             issues.Add(Error("video.component.quant_unsupported",
-                "No quantized MiniMax-H3 audio VAE artifact has been published or certified.", role));
+                "No quantized MiniMax-H3 audio VAE artifact has been published or declared.", role));
         }
     }
 

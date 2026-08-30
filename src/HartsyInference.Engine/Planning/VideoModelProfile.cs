@@ -2,7 +2,7 @@ using HartsyInference.Engine.Recipes;
 
 namespace HartsyInference.Engine.Planning;
 
-/// <summary>A hash- and header-validated video checkpoint recipe, independent of its filename.</summary>
+/// <summary>A hash- and header-resolved video checkpoint contract, independent of its filename.</summary>
 public sealed record VideoModelProfile
 {
     /// <summary>Stable identifier accepted by <c>ModelSpec.ProfileId</c>.</summary>
@@ -14,7 +14,7 @@ public sealed record VideoModelProfile
     /// <summary>Engine recipe family that constructs the model.</summary>
     public required string FamilyId { get; init; }
 
-    /// <summary>Conditioning family certified by this artifact or composition.</summary>
+    /// <summary>Conditioning family declared by this hash-bound artifact or composition.</summary>
     public required VideoTaskFamily Task { get; init; }
 
     /// <summary>Checkpoint-bound acceleration semantics.</summary>
@@ -23,7 +23,7 @@ public sealed record VideoModelProfile
     /// <summary>Attention implementation the profile requires.</summary>
     public required VideoAttentionKind Attention { get; init; }
 
-    /// <summary>Validated sampling defaults and field locks.</summary>
+    /// <summary>Hash-bound sampling defaults and field locks.</summary>
     public required VideoDefaults Defaults { get; init; }
 
     /// <summary>Conditioning inputs the profile can consume without silently discarding them.</summary>

@@ -9,7 +9,7 @@ Concise status for every video-generation (T2V / I2V) model. Open work is in the
 
 | Model | Notes |
 |---|---|
-| **MiniMax-H3** ("Hailuo 03", omni: text/image/video/audio -> video + jointly generated stereo audio) | **Original dense/base path: real-weight coherent video AND audio confirmed 2026-08-03, on a 12 GB RTX 3060.** The 2026-08-29 Turbo/Hybrid, PDD, VSA, arbitrary-guide/mask, Fun ControlNet, and int8-video-VAE expansion is not covered by that claim and remains validation-pending below. ([details](#minimax-h3)) |
+| **MiniMax-H3** ("Hailuo 03", omni: text/image/video/audio -> video + jointly generated stereo audio) | **Original dense/base path: real-weight coherent video AND audio confirmed 2026-08-03, on a 12 GB RTX 3060. Validation-pending visual-guide plus AV-mask execution was additionally canaried internally 2026-08-30 on an RTX 4090.** The guide/mask surface and all other expansion paths remain unadvertised and release-blocked below. ([details](#minimax-h3)) |
 | **SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)** | **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 … ([details](#seedvr2-3b-videoimage-restoration--modalityrestore-not-t2v)) |
 | **SeedVR2-7B (restoration)** | **✅ v1 NaDiT ported + real-weight smoke (2026-08-02).** The smoke run of 2026-08-01 had surfaced that `configs_7b/main.yaml` builds `models.dit.nadit` (**v1**), NOT the `models/dit_v2` tree the 3B uses — key names coincide, so it loaded and silently produced mud (GT SSIM 0.71; `Detect` then threw on the plain-MLP+no-tail signature). ([details](#seedvr2-7b-restoration)) |
 | **Wan 2.1/2.2 mainstream family** (TI2V-5B, T2V-1.3B fp16, T2V-14B fp8, I2V-14B CLIP fp8, I2V-A14B MoE, T2V-A14B MoE, FLF2V) | **All validated e2e on real weights (2026-07-01/02, 4090): coherent output.** The backbone is numerically de-risked: a Python layer-diff (faithful `comfy/ldm/wan/model.py` port, fp8-dequantized weights) proved the C# transformer matches end-to-end — patch_embed exact, all 40 blocks ~1e-3 (teacher-forced), autoregressive output relL2 4e-3 = the fp8 noise floor (memory `wan-14b-fp8-divergence`). ([details](#wan-2122-mainstream-family)) |
@@ -208,9 +208,23 @@ plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail
 - [x] **Catalog `Assets` + sha256 DONE 2026-08-05** — CLI-drivable with zero `--model-path`. One provenance
       trap: the audio VAE hardlinks to the vendor repack, which is byte-different (same weights) from the
       Comfy-Org one, so that hash is the published oid, not locally-verified; the other three match byte-for-byte.
+- [x] **Dense guide + AV-mask internal validation canary passed and was visually inspected 2026-08-30 on RTX 4090.**
+      `MiniMaxH3GuideMaskRealWeightTests` generated a 39-frame 512x288 source clip at 30 steps/seed 424242,
+      then a second 30-step clip at seed 424247 with a frame-17 visual guide, a continuous video denoise mask,
+      and a rate-bound audio denoise mask. Both outputs were coherent golden-retriever stream sequences with
+      continuous motion; frame 18 showed no visible mask seam, and the stereo spectrogram showed the expected
+      H3 onset ramp. Final-tree metrics: guide SSIM 0.82688, preserved-left SSIM 0.86641 versus generated-right
+      0.61862, seam jump 3.066, early/late audio delta -53.96/-32.69 dBFS, post-onset RMS 0.02117. Output SHA-256:
+      source MP4 `6795e82c...f83a0eab`, source WAV `34cd87fc...85430f83`, guided/masked MP4
+      `f2bba9ab...2108dcdf`, guided/masked WAV `74440cdc...8228d2c2`. The test bound exact operator-provided
+      transformer/text/video-VAE/audio-VAE hashes and persisted the full hashes plus both execution summaries
+      in `real-weight-evidence.json`; it requires both `HARTSY_RUN_H3_GUIDE_MASK_REAL=1` and
+      `HARTSY_REQUIRE_REAL_WEIGHTS=1`. The friend-test seam first asserts that the public plan is release-blocked,
+      then binds a test-only execution plan unavailable to shipped callers. This proves only the underlying dense
+      implementation and does not advertise or release the guide/mask surface.
 - [ ] Block streaming (`IStreamingBlock`) is not wired for H3's 50 blocks.
 - [ ] Sampling with very few steps is pathological at shift 12 (a 4-step schedule puts ~80% of denoising in
-      the final jump). The known Turbo/PDD profiles lock their proven schedules; decide whether the ordinary
+      the final jump). The known Turbo/PDD profiles lock their published schedules; decide whether the ordinary
       dense base should clamp the shift for arbitrary low-step requests or merely document a floor.
 - [ ] **Linked-profile canaries:** run operator-provided PulpCut FL/Ref, LightX FL/Ref, DaSiWa Hybrid, and the
       exact Joey-ZS05 + LightX composition. Include one FL/T2VA and one Ref/Hybrid clip long enough to clear
@@ -220,14 +234,16 @@ plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail
       banks, and validate video/audio head fusion against an upstream eager fixture. Exercise both a full base
       and a locally rebased pruned base, including the mandatory DC-bias diff and the ≤1e-4 affine residual.
       Confirm no D2H synchronization occurs inside the 50-block denoise loop.
-- [ ] **Native VSA remains experimental:** operator-provided Kijai/ComfySol64 and FastVideo fixtures must clear
+- [ ] **Native VSA remains validation-pending:** operator-provided Kijai/ComfySol64 and FastVideo fixtures must clear
       routing/fine+coarse parity, SM86 and SM89 CUDA runs, cancellation/guard-region checks, and sharded parity.
       Benchmark 12k/29k/66k/80k/113k tokens including first-step bootstrap; at ~80k and 10% keep require ≥1.5x
-      complete-step speedup over native dense/chunked H3 with no greater peak scratch. Keep
-      `HARTSY_EXPERIMENTAL_H3_VSA` default-off until all gates pass.
-- [ ] **Guides and AV masks:** run mixed positive/negative anchors, reference audio, short and `17n+5` clips,
-      continuous black/white masks, fixed-noise preservation, and legacy init/end parity on real weights. Include
-      direct Engine, CLI manifest, HTTP plan/stream, and Swarm mappings; all-white masks must be exact no-ops.
+      complete-step speedup over native dense/chunked H3 with no greater peak scratch. Keep the
+      non-bypassable Engine release gate in place until all checks pass.
+- [ ] **Remaining guides and AV-mask matrix:** run mixed positive/negative anchors, reference audio, short and
+      `17n+5` clips, black/white edge masks, fixed-noise preservation, and legacy init/end parity on real weights.
+      The dense continuous-mask internal canary above is complete; CLI manifest, HTTP live stream, and Swarm live
+      generation remain pending. All-white masks must be exact no-ops. Keep the non-bypassable public release gate
+      and capability suppression in place until the whole slice passes.
 - [ ] **Fun ControlNet-Union:** run the official full FL2VA branch and a locally rebased pruned branch with pure,
       multi-control/windowed, zero-strength, and inpaint streams. Verify control residuals enter layers
       0/10/20/30/40, target-audio rows remain zero, and sampler masks plus ControlNet inpaint fail explicitly.

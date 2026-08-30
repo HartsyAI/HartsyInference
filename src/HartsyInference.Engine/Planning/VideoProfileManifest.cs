@@ -1,6 +1,6 @@
 namespace HartsyInference.Engine.Planning;
 
-/// <summary>Hash-only identities for the H3 artifacts whose sampling and tensor contracts have been verified.</summary>
+/// <summary>Hash-only identities and published contracts for known H3 artifacts.</summary>
 internal static class VideoProfileManifest
 {
     private const string LightXUrl = "https://github.com/ModelTC/Minimax-H3-Turbo#model-specs";

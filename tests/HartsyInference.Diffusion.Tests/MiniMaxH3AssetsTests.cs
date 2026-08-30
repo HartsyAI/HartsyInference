@@ -115,6 +115,22 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.Contains("nvfp4", MiniMaxH3Assets.Resolve(dit).TextEncoder);
     }
 
+    /// <summary>The int8 video VAE remains behind a real-weight parity gate. Merely staging it next to the proven
+    /// FP16 file must not make every ordinary dense H3 request select a component that planning then rejects.</summary>
+    [Fact]
+    public void FlatLayout_DoesNotAutoSelectValidationPendingInt8VideoVae()
+    {
+        string dit = BuildFlatLayout();
+        string dir = Path.Combine(_root, "Models", "vae", "MiniMaxH3");
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae_int8_convrot.safetensors"), []);
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae_fp16.safetensors"), new byte[64]);
+
+        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(dit);
+
+        Assert.Contains("fp16", assets.VideoVae);
+        Assert.DoesNotContain("int8", assets.VideoVae);
+    }
+
     /// <summary>SwarmUI's model root has a real <c>Video/</c> folder for video assets. Searching it for VAEs would
     /// let an unrelated file with a colliding name resolve as the VAE.</summary>
     [Fact]

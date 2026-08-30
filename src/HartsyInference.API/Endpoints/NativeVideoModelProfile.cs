@@ -15,7 +15,7 @@ public sealed class NativeVideoModelProfile
     /// <summary>Engine recipe family that executes this profile.</summary>
     public required string FamilyId { get; init; }
 
-    /// <summary>Conditioning family certified by the resolved artifacts.</summary>
+    /// <summary>Conditioning family declared by the resolved artifacts.</summary>
     public required VideoTaskFamily Task { get; init; }
 
     /// <summary>Checkpoint-bound acceleration semantics.</summary>
@@ -24,7 +24,7 @@ public sealed class NativeVideoModelProfile
     /// <summary>Attention implementation required by the checkpoint.</summary>
     public required VideoAttentionKind Attention { get; init; }
 
-    /// <summary>Validated sampling defaults and locked fields.</summary>
+    /// <summary>Hash-bound sampling defaults and locked fields.</summary>
     public required VideoDefaults Defaults { get; init; }
 
     /// <summary>Conditioning inputs the profile can consume.</summary>
@@ -62,8 +62,21 @@ public sealed class NativeVideoModelProfile
             Quantization = profile.Quantization,
             IsBuiltIn = profile.IsBuiltIn,
             IsSidecar = profile.IsSidecar,
-            ProvenanceUrl = profile.ProvenanceUrl,
-            LicenseUrl = profile.LicenseUrl,
+            // Sidecars are operator-local policy documents. Their free-form URLs can contain private hosts,
+            // filesystem URIs, or signed query credentials, so they never cross the remote API boundary.
+            ProvenanceUrl = profile.IsSidecar ? null : ManifestHttpUrl(profile.ProvenanceUrl),
+            LicenseUrl = profile.IsSidecar ? null : ManifestHttpUrl(profile.LicenseUrl),
         };
+    }
+
+    private static string? ManifestHttpUrl(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+            || uri.Scheme is not ("http" or "https")
+            || !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return null;
+        }
+        return uri.AbsoluteUri;
     }
 }

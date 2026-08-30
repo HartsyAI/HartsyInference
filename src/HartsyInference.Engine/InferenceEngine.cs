@@ -466,6 +466,7 @@ public sealed class InferenceEngine : IInferenceEngine
             ModelArchitecture.Flux2 => "flux2",
             ModelArchitecture.AuraFlow => "auraflow",
             ModelArchitecture.Chroma => "chroma",
+            ModelArchitecture.MiniMaxH3 => "minimax-h3",
             _ => arch.ToString().ToLowerInvariant(),
         };
     }

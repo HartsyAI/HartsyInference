@@ -40,7 +40,7 @@ public sealed class MiniMaxH3PddAdapter : IDisposable
     /// <summary>Adapter path supplied by the operator.</summary>
     public required string FilePath { get; init; }
 
-    /// <summary>Task family proven by adapter metadata or a built-in hash manifest.</summary>
+    /// <summary>Task family declared by adapter metadata or a built-in hash manifest.</summary>
     public required MiniMaxH3PddTask Task { get; init; }
 
     /// <summary>Published fine-grid interval count.</summary>
@@ -58,7 +58,7 @@ public sealed class MiniMaxH3PddAdapter : IDisposable
     /// <summary>Unmodified safetensors metadata used by planning, notices, and provenance.</summary>
     public IReadOnlyDictionary<string, string>? Metadata { get; init; }
 
-    /// <summary>Validated parallel video/audio projection bank.</summary>
+    /// <summary>Shape-checked parallel video/audio projection bank.</summary>
     public required PddHeadBank HeadBank { get; init; }
 
     /// <summary>Canonical trunk updates with no skipped source tensors.</summary>

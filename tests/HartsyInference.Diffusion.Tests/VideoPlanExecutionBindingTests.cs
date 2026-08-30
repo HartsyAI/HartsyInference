@@ -197,6 +197,22 @@ public sealed class VideoPlanExecutionBindingTests
         Assert.Equal(0, recipe.Pipeline.GenerateCalls);
     }
 
+    [Fact]
+    public async Task VerifiedPlanCanBeReverifiedAtRecipeConstructionBoundary()
+    {
+        TrackingRecipe recipe = RegisterRecipe();
+        VideoRequest request = Request(new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 });
+        using TempCheckpoint checkpoint = new TempCheckpoint();
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
+
+        VideoPlan serviceVerified = VideoRequestExecutionBinding.RequirePlannedState(plan);
+        VideoPlan recipeVerified = VideoRequestExecutionBinding.RequirePlannedState(serviceVerified);
+
+        Assert.Same(plan, serviceVerified);
+        Assert.Same(plan, recipeVerified);
+    }
+
     private static TrackingRecipe RegisterRecipe()
     {
         TrackingRecipe recipe = new TrackingRecipe("binding-test-" + Guid.NewGuid().ToString("N"));

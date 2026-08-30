@@ -12,7 +12,7 @@ internal sealed record VideoProfileSidecar
     /// <summary>Operator-facing variant name.</summary>
     public string? DisplayName { get; init; }
 
-    /// <summary>Conditioning task certified by the sidecar author.</summary>
+    /// <summary>Conditioning task declared by the sidecar author.</summary>
     public required VideoTaskFamily Task { get; init; }
 
     /// <summary>Acceleration semantics baked into the checkpoint.</summary>
@@ -21,22 +21,22 @@ internal sealed record VideoProfileSidecar
     /// <summary>Attention semantics required by the checkpoint.</summary>
     public VideoAttentionKind Attention { get; init; }
 
-    /// <summary>Validated denoising evaluation count.</summary>
+    /// <summary>Sidecar-declared denoising evaluation count.</summary>
     public required int Steps { get; init; }
 
-    /// <summary>Validated guidance scale.</summary>
+    /// <summary>Sidecar-declared guidance scale.</summary>
     public float CfgScale { get; init; } = 1f;
 
-    /// <summary>Validated video flow shift.</summary>
+    /// <summary>Sidecar-declared video flow shift.</summary>
     public float FlowShift { get; init; } = 12f;
 
-    /// <summary>Validated audio flow shift.</summary>
+    /// <summary>Sidecar-declared audio flow shift.</summary>
     public float AudioFlowShift { get; init; } = 3f;
 
-    /// <summary>Validated sampler.</summary>
+    /// <summary>Sidecar-declared sampler.</summary>
     public string Sampler { get; init; } = "euler";
 
-    /// <summary>Validated scheduler.</summary>
+    /// <summary>Sidecar-declared scheduler.</summary>
     public string Scheduler { get; init; } = "normal";
 
     /// <summary>Optional locked target width.</summary>
