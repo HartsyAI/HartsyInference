@@ -65,7 +65,9 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         if (spec.LocalPath is null)
         {
-            throw new FileNotFoundException("No 3D model found. Pass the model directory (or checkpoint) as the spec's local path.");
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Supply its model directory or checkpoint "
+                + "as the local path.");
         }
         lock (_gate)
         {

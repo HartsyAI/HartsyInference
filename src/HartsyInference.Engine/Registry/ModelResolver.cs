@@ -57,6 +57,12 @@ public static class ModelResolver
 
         string subdir = ModalitySubdir.TryGetValue(modality, out string? s) ? s : "";
         string id = catalog?.Id ?? modelArg;
+        // Path.Combine(root, "Vision", "") is the Vision FOLDER, which exists — so a blank id used to resolve to a
+        // whole modality directory and only fail much later, inside a loader, naming a path the caller never sent.
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return null;
+        }
         string candidate = Path.Combine(RepoPaths.ModelsRoot(), subdir, id);
         if (File.Exists(candidate))
             return Path.GetFullPath(candidate);

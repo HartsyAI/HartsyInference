@@ -31,7 +31,11 @@ public sealed class NativeGenerationEndpointsTests : IClassFixture<WebApplicatio
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Contains("checkpoint", body.GetProperty("error").GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
+        string message = body.GetProperty("error").GetProperty("message").GetString()!;
+        Assert.Contains("checkpoint", message, StringComparison.OrdinalIgnoreCase);
+        // Naming the selection is the point: this regressed to a bare "Model path not found: " — an empty path and
+        // no model id — because family resolution reached the layout resolver before any guard could run.
+        Assert.Contains("not-a-real-model-id", message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -56,6 +60,10 @@ public sealed class NativeGenerationEndpointsTests : IClassFixture<WebApplicatio
             request = new { messages = new[] { new { role = "User", content = "hi" } } },
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        // Same contract as the image route: the caller is told which selection failed, not just that one did.
+        Assert.Contains("not-a-real-model-id", body.GetProperty("error").GetProperty("message").GetString()!,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -93,6 +101,7 @@ public sealed class NativeGenerationEndpointsTests : IClassFixture<WebApplicatio
         string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("event: error", body);
         Assert.Contains("checkpoint", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not-a-real-model-id", body, StringComparison.Ordinal);
     }
 
     [Fact]
