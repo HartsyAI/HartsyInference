@@ -234,9 +234,10 @@ plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail
 - [ ] **int8 ConvRot video VAE:** compare encode and decode against the BF16 VAE across target, guide, reference,
       mask, and control inputs. Require decoded-frame SSIM ≥0.995, no tile seam/hang, and ≥1.2x encode/decode
       speed with lower peak memory at 768p on the RTX 4090. No quantized-audio-VAE claim is permitted.
-- [ ] **Package and Swarm release:** `2.0.0-alpha.42` is already immutable on NuGet, while the extension remains
-      pinned to stale `2.0.0-alpha.15`; do not publish this worktree under `.42` or pin an unpublished successor.
-      After the gates above pass, assign and publish a fresh Engine version, verify `h3_vsa.ptx` in the CUDA
+- [ ] **Package and Swarm release:** `2.0.0-alpha.43` is reserved by this PR but remains unpublished;
+      `2.0.0-alpha.42` is the immutable live NuGet version, while the extension remains pinned to stale
+      `2.0.0-alpha.15`. Do not pin `.43` while it exists only on the draft branch. After the gates above pass,
+      merge the release-ready PR so the main-branch workflow publishes `.43`, verify `h3_vsa.ptx` in the CUDA
       package and a clean consumer output, then update the extension to that exact live version and complete CLI,
       API plan/stream, and live Swarm generations with execution metadata.
 

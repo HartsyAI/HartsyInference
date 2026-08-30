@@ -5,6 +5,9 @@ using HartsyInference.Engine.Planning;
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native, transport-agnostic text/image-to-video request. Carries the common generation props plus the video-specific model selections, framing, trimming, and audio-track inputs the backend reads.</summary>
+/// <remarks>Planning snapshots mutable collection membership but deliberately keeps media byte arrays zero-copy.
+/// Callers must not modify their contents from the start of planning until generation completes; media is bound by
+/// DTO and buffer reference plus length, not by a content hash.</remarks>
 public sealed record VideoRequest
 {
     /// <summary>The positive prompt.</summary>

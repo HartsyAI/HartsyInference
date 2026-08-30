@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -135,7 +136,7 @@ public static class MiniMaxH3Conditioning
         for (int i = 0; i < values.Count; i++)
         {
             float value = values[i];
-            if (!float.IsFinite(value) || value < 0f || value > 1f)
+            if (!UnitInterval.Contains(value))
             {
                 throw new ArgumentOutOfRangeException(parameterName, value,
                     $"MiniMax-H3 mask values must be finite and in [0,1]; row {i} was {value}.");

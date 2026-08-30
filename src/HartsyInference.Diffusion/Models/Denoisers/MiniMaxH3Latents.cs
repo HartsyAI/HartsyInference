@@ -68,7 +68,9 @@ public static unsafe class MiniMaxH3Latents
             throw new ArgumentException(
                 $"MiniMax-H3 latent must have {c} channels and positive T/H/W; got {latent.Shape}.", nameof(latent));
         }
-        int latentT = DivideRoundUp(sourceT, pt), th = DivideRoundUp(sourceH, ph), tw = DivideRoundUp(sourceW, pw);
+        int latentT = MiniMaxH3Geometry.DivideRoundUp(sourceT, pt);
+        int th = MiniMaxH3Geometry.DivideRoundUp(sourceH, ph);
+        int tw = MiniMaxH3Geometry.DivideRoundUp(sourceW, pw);
         int rowStride = c * pt * ph * pw;
         Tensor rows = new Tensor(new TensorShape((long)latentT * th * tw, rowStride), DType.F32);
         float* src = (float*)latent.DataPointer;
@@ -102,15 +104,6 @@ public static unsafe class MiniMaxH3Latents
             }
         }
         return rows;
-    }
-
-    private static int DivideRoundUp(int value, int divisor)
-    {
-        if (divisor <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(divisor), divisor, "Patch dimensions must be positive.");
-        }
-        return checked((value + divisor - 1) / divisor);
     }
 
     /// <summary>The audio VAE latent <c>[1, C, ch, T]</c> to packed channel-major rows <c>[ch*T, C]</c> — the inverse

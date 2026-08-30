@@ -36,9 +36,7 @@ internal static class VideoArtifactFileBinding
             }
 
             VideoArtifactFileStamp current = CaptureFile(requestedPath);
-            StringComparison comparison = OperatingSystem.IsWindows()
-                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            if (!string.Equals(current.CanonicalPath, expected.CanonicalPath, comparison)
+            if (!string.Equals(current.CanonicalPath, expected.CanonicalPath, VideoArtifactPath.Comparison)
                 || current.Length != expected.Length || current.LastWriteUtcTicks != expected.LastWriteUtcTicks)
             {
                 throw Changed(role, expected.CanonicalPath);
@@ -48,7 +46,7 @@ internal static class VideoArtifactFileBinding
 
     private static VideoArtifactFileStamp CaptureFile(string path)
     {
-        string canonical = VideoCheckpointHashCache.CanonicalPath(path);
+        string canonical = VideoArtifactPath.Canonicalize(path);
         FileInfo info = new FileInfo(canonical);
         if (!info.Exists)
         {

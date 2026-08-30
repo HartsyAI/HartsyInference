@@ -57,17 +57,16 @@ public sealed class VideoWorldEndpointsTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
-    public async Task WorldOpen_MissingInitImage_Returns500()
+    public async Task WorldOpen_MissingInitImage_Returns400()
     {
-        // ArgumentException from WorldService.Open's own validation isn't in GenerationErrors' map, same as
-        // Speech's empty-text case — documenting the real current behavior, not an aspirational 400.
+        // WorldService validates InitImage with ArgumentException, which GenerationErrors maps to a caller error.
         using HttpClient client = _factory.CreateClient();
         HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/world/sessions", new
         {
             model = "whatever",
             request = new { prompt = "a small room" },
         });
-        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
     [Fact]

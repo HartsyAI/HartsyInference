@@ -36,9 +36,9 @@ public static unsafe class MiniMaxH3FunControlInputBuilder
         int sourceT = checked((int)control.Shape[2]);
         int sourceH = checked((int)control.Shape[3]);
         int sourceW = checked((int)control.Shape[4]);
-        int targetT = DivideRoundUp(sourceT, patchT);
-        int targetH = DivideRoundUp(sourceH, patchH);
-        int targetW = DivideRoundUp(sourceW, patchW);
+        int targetT = MiniMaxH3Geometry.DivideRoundUp(sourceT, patchT);
+        int targetH = MiniMaxH3Geometry.DivideRoundUp(sourceH, patchH);
+        int targetW = MiniMaxH3Geometry.DivideRoundUp(sourceW, patchW);
         int rowWidth = ControlChannels * patchT * patchH * patchW;
         Tensor rows = new Tensor(new TensorShape((long)targetT * targetH * targetW, rowWidth), DType.F32);
         float* controlPointer = (float*)control.DataPointer;
@@ -115,6 +115,4 @@ public static unsafe class MiniMaxH3FunControlInputBuilder
                 $"MiniMax-H3 Fun {label} geometry {other.Shape} does not match control {control.Shape}.");
         }
     }
-
-    private static int DivideRoundUp(int value, int divisor) => checked((value + divisor - 1) / divisor);
 }

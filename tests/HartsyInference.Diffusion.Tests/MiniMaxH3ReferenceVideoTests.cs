@@ -122,15 +122,15 @@ public sealed class MiniMaxH3ReferenceVideoTests
         Assert.Throws<ArgumentException>(() => proc.Preprocess([a, b]));
     }
 
-    /// <summary>A reference smaller than the adapted canvas must keep its own size — upscaling a small clip into a
-    /// 768-short-edge canvas would spend tokens inventing detail that is not there.</summary>
+    /// <summary>A reference smaller than the adapted canvas stays near its source dimensions, with only the native
+    /// patch-grid rounding that the verified Ref2VA path requires.</summary>
     [Fact]
-    public void SmallClipIsNeverUpscaledOntoTheCanvas()
+    public void SmallClipUsesNearestNativePatchGrid()
     {
         Assert.Equal((768, 768), MiniMaxH3Geometry.AdaptCanvas(256, 256));
         Assert.Equal((256, 256), MiniMaxH3Geometry.RefVideoCanvas(256, 256));
-        Assert.Equal((32, 32), MiniMaxH3Geometry.RefVideoCanvas(48, 48));
-        Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3Geometry.RefVideoCanvas(16, 48));
+        Assert.Equal((64, 64), MiniMaxH3Geometry.RefVideoCanvas(49, 49));
+        Assert.Equal((32, 64), MiniMaxH3Geometry.RefVideoCanvas(16, 48));
     }
 
     /// <summary>The only branch where the shrink guard stays out of the way: a clip larger than the canvas takes the

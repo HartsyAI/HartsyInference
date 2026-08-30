@@ -10,11 +10,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
-  <!-- SINGLE SOURCE OF TRUTH for the published version. CI (publish-nuget.yml) reads VersionSuffix
-       from here and publishes VersionPrefix plus this suffix. Bump it ONCE before each push (pushing this file
-       is what triggers the publish), then pin the SAME version in the SwarmUI extension csproj.
-       Pushing without bumping is harmless: the NuGet push uses skip-duplicate, so it just re-publishes
-       nothing. A manual "Run workflow" with a version_suffix input still overrides this.
+  <!-- SINGLE SOURCE OF TRUTH for the package version. Every Engine PR reserves its next version here, but the
+       draft branch does not auto-publish it: publish-nuget.yml's automatic trigger runs only after merge or another
+       push to main that touches source or packaging. Pin the SwarmUI extension only after that exact version is live
+       on NuGet. A push with an already-published version is harmless because NuGet push uses skip-duplicate. A manual
+       "Run workflow" is an explicit operator release and its version_suffix input still overrides this.
        (Note: never put a double-hyphen in this XML comment; it makes MSBuild fail to parse this file,
        which blanks TargetFrameworks and breaks restore with "Invalid framework identifier".) -->
   <PropertyGroup>

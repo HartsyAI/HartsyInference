@@ -10,13 +10,9 @@ public sealed record VideoPlan
     /// serialized: executing a deserialized or request-swapped plan would bypass media/control validation.</summary>
     internal VideoRequest? SourceRequest { get; init; }
 
-    /// <summary>Deep-frozen request graph that planning actually validated and execution exclusively consumes.
-    /// Kept internal so callers cannot mutate the copied media buffers through the public plan DTO.</summary>
-    internal VideoRequest? ExecutionRequest { get; init; }
-
-    /// <summary>Structural SHA-256 of the source request at planning time. Execution re-computes it from the
-    /// original instance before using <see cref="ExecutionRequest"/>, rejecting nested list/media mutation.</summary>
-    internal string? SourceRequestFingerprint { get; init; }
+    /// <summary>Inaccessible structural snapshot that isolates collection edits and binds caller-owned media by
+    /// reference and length instead of copying or hashing its contents.</summary>
+    internal VideoRequestExecutionBinding? RequestBinding { get; init; }
 
     /// <summary>Frozen plan state used by execution even when a caller clones the public DTO.</summary>
     internal VideoPlan? ExecutionPlan { get; init; }

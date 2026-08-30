@@ -18,7 +18,7 @@ public sealed class VideoPlanExecutionBindingCollection
 public sealed class VideoPlanExecutionBindingTests
 {
     [Fact]
-    public async Task NestedMediaMutationAfterPlanningRejectsBeforeConstruction()
+    public async Task MediaBuffersRemainZeroCopyInExecutionSnapshot()
     {
         TrackingRecipe recipe = RegisterRecipe();
         ImageData extraImage = new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 };
@@ -28,17 +28,45 @@ public sealed class VideoPlanExecutionBindingTests
         VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
         Assert.True(plan.IsValid);
 
-        extraImage.Rgb[0] = 99;
+        await engine.Video.GenerateAsync(plan, request);
 
-        ArgumentException error = await Assert.ThrowsAsync<ArgumentException>(
-            () => engine.Video.GenerateAsync(plan, request));
-        Assert.Contains("mutated after planning", error.Message, StringComparison.Ordinal);
-        Assert.Equal(0, recipe.ConstructCalls);
-        Assert.Equal(0, recipe.Pipeline.GenerateCalls);
+        ImageData executedImage = Assert.IsType<ImageData>(recipe.Pipeline.LastRequest!.Extra["image"]);
+        Assert.Same(extraImage, executedImage);
+        Assert.Same(extraImage.Rgb, executedImage.Rgb);
+        Assert.Equal([1, 2, 3], executedImage.Rgb);
+        Assert.Equal(1, recipe.ConstructCalls);
+        Assert.Equal(1, recipe.Pipeline.GenerateCalls);
     }
 
     [Fact]
-    public async Task NestedListMutationAfterPlanningRejectsBeforeConstruction()
+    public void CreateSharesTypedMediaBuffersWhileSnapshottingCollections()
+    {
+        ImageData image = new ImageData { Rgb = new byte[12], Width = 2, Height = 2 };
+        VideoClip video = new VideoClip { Data = new byte[32], Format = "mp4" };
+        AudioClip audio = new AudioClip { Data = new byte[16], Format = "wav" };
+        List<ImageData> references = [image];
+        VideoRequest request = new VideoRequest
+        {
+            Prompt = "test",
+            InitImage = image,
+            VideoAudioInput = audio,
+            ReferenceImages = references,
+            DrivingVideo = video,
+        };
+        ModelSpec model = new ModelSpec { Requested = "test", Modality = Modality.Video };
+
+        VideoRequestExecutionBinding binding = VideoRequestExecutionBinding.Create(model, request);
+
+        Assert.NotSame(request, binding.Request);
+        Assert.Same(image.Rgb, binding.Request.InitImage!.Rgb);
+        Assert.Same(audio.Data, binding.Request.VideoAudioInput!.Data);
+        Assert.Same(video.Data, binding.Request.DrivingVideo!.Data);
+        Assert.NotSame(references, binding.Request.ReferenceImages);
+        Assert.Same(image, Assert.Single(binding.Request.ReferenceImages!));
+    }
+
+    [Fact]
+    public async Task NestedListMutationAfterPlanningDoesNotChangeExecutionSnapshot()
     {
         TrackingRecipe recipe = RegisterRecipe();
         List<ImageData> references = [];
@@ -53,13 +81,15 @@ public sealed class VideoPlanExecutionBindingTests
 
         references.Add(new ImageData { Rgb = [4, 5, 6], Width = 1, Height = 1 });
 
-        await Assert.ThrowsAsync<ArgumentException>(() => engine.Video.GenerateAsync(plan, request));
-        Assert.Equal(0, recipe.ConstructCalls);
-        Assert.Equal(0, recipe.Pipeline.GenerateCalls);
+        await engine.Video.GenerateAsync(plan, request);
+
+        Assert.Empty(recipe.Pipeline.LastRequest!.ReferenceImages!);
+        Assert.Equal(1, recipe.ConstructCalls);
+        Assert.Equal(1, recipe.Pipeline.GenerateCalls);
     }
 
     [Fact]
-    public async Task UntouchedRequestExecutesOnlyDeepFrozenSnapshot()
+    public async Task UntouchedRequestExecutesStructuralSnapshotWithSharedMedia()
     {
         TrackingRecipe recipe = RegisterRecipe();
         ImageData extraImage = new ImageData { Rgb = [7, 8, 9], Width = 1, Height = 1 };
@@ -77,9 +107,10 @@ public sealed class VideoPlanExecutionBindingTests
         Assert.Equal(1, recipe.Pipeline.GenerateCalls);
         VideoRequest executed = Assert.IsType<VideoRequest>(recipe.Pipeline.LastRequest);
         Assert.NotSame(request, executed);
+        Assert.NotSame(request.Extra, executed.Extra);
         ImageData executedImage = Assert.IsType<ImageData>(executed.Extra["image"]);
-        Assert.NotSame(extraImage, executedImage);
-        Assert.NotSame(extraImage.Rgb, executedImage.Rgb);
+        Assert.Same(extraImage, executedImage);
+        Assert.Same(extraImage.Rgb, executedImage.Rgb);
         Assert.Equal([7, 8, 9], executedImage.Rgb);
 
         aux["tokenizer"] = "changed-after-plan";
@@ -87,21 +118,27 @@ public sealed class VideoPlanExecutionBindingTests
     }
 
     [Fact]
-    public async Task UnsupportedMutableExtraFailsDuringPlanning()
+    public async Task ArbitraryMutableExtraIsPreserved()
     {
         TrackingRecipe recipe = RegisterRecipe();
+        CustomExtra custom = new CustomExtra();
+        Dictionary<string, object> extra = new Dictionary<string, object> { ["mutable"] = custom };
         VideoRequest request = new VideoRequest
         {
             Prompt = "test",
-            Extra = new Dictionary<string, object> { ["mutable"] = new List<int> { 1, 2, 3 } },
+            Extra = extra,
         };
         using TempCheckpoint checkpoint = new TempCheckpoint();
         using InferenceEngine engine = new InferenceEngine("cpu");
 
-        ArgumentException error = await Assert.ThrowsAsync<ArgumentException>(
-            () => engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request));
-        Assert.Contains("unsupported mutable type", error.Message, StringComparison.Ordinal);
-        Assert.Equal(0, recipe.ConstructCalls);
+        VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
+        extra["mutable"] = new object();
+        await engine.Video.GenerateAsync(plan, request);
+
+        object executed = recipe.Pipeline.LastRequest!.Extra["mutable"];
+        Assert.Same(custom, executed);
+        Assert.Equal(1, recipe.ConstructCalls);
+        Assert.Equal(1, recipe.Pipeline.GenerateCalls);
     }
 
     [Fact]
@@ -204,6 +241,11 @@ public sealed class VideoPlanExecutionBindingTests
             ConstructCalls++;
             return Pipeline;
         }
+    }
+
+    private sealed class CustomExtra
+    {
+        public List<int> Values { get; } = [1, 2, 3];
     }
 
     private sealed class TrackingPipeline : IVideoRecipePipeline

@@ -62,6 +62,13 @@ public static class ModelDownloader
                 return;
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));
             await client.DownloadFileAsync(asset.Repo, asset.RepoPath, target, progress, asset.Sha256, ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(asset.Sha256))
+            {
+                // DownloadFileAsync has already streamed and verified these exact bytes. Persisting that result here
+                // keeps the first profile-aware request from reading a multi-gigabyte checkpoint a second time.
+                await Planning.VideoCheckpointHashCache.RecordVerifiedSha256Async(target, asset.Sha256)
+                    .ConfigureAwait(false);
+            }
         }
         finally
         {

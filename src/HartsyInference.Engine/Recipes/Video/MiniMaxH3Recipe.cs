@@ -3,6 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -311,9 +312,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     private static IReadOnlyDictionary<string, int> LoadFunControlNets(RecipeContext context,
         MiniMaxH3Transformer transformer, List<SafeTensorsLoader> loaders)
     {
-        StringComparer pathComparer = OperatingSystem.IsWindows()
-            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        Dictionary<string, int> modelIndices = new Dictionary<string, int>(pathComparer);
+        Dictionary<string, int> modelIndices = new Dictionary<string, int>(VideoArtifactPath.Comparer);
         if (context.VideoPlan is null)
         {
             return modelIndices;
@@ -324,7 +323,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             .OrderBy(static pair => ControlSlot(pair.Key));
         foreach (KeyValuePair<string, string> component in planned)
         {
-            string path = Path.GetFullPath(component.Value);
+            string path = VideoArtifactPath.Canonicalize(component.Value);
             if (modelIndices.ContainsKey(path))
             {
                 continue;

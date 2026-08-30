@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Dispatch;
@@ -147,6 +148,8 @@ internal static class VideoProfileResolver
         componentFormats["transformer"] = quantization;
         artifactMetadata["transformer"] = header.Metadata;
 
+        // A safetensors header can prove that the payload is loadable, but community repacks commonly preserve
+        // tensor names while changing task or acceleration semantics. Only an exact byte identity may select those.
         string mainHash;
         try
         {
@@ -163,6 +166,8 @@ internal static class VideoProfileResolver
         VideoModelProfile profile;
         if (VideoProfileManifest.TryGetByHash(mainHash, out VideoKnownArtifact? known) && known is not null)
         {
+            // The manifest deliberately indexes every artifact kind together so a user cannot point the primary
+            // model field at a valid adapter/component hash and accidentally construct it under base semantics.
             if (known.Role == VideoProfileArtifactRole.Rejected)
             {
                 issues.Add(Error("video.checkpoint.incompatible_layout", known.RejectionReason!, nameof(ModelSpec.LocalPath)));
@@ -182,6 +187,8 @@ internal static class VideoProfileResolver
         }
         else
         {
+            // Unknown hashes stay on conservative base defaults unless a local sidecar binds the same exact bytes.
+            // Filenames and checkpoint metadata are only hints because both survive many incompatible conversions.
             VideoProfileSidecar? sidecar = await ReadSidecarAsync(checkpointPath, mainHash, header.Descriptors,
                 issues, cancel).ConfigureAwait(false);
             profile = sidecar is null
@@ -434,10 +441,14 @@ internal static class VideoProfileResolver
             {
                 ValidateOrdinaryLoraCompatibility(loraHeader.Descriptors, baseDescriptors, role, issues);
             }
+            // Acceleration artifacts use a LoRA-shaped container, but they also replace the step schedule and output
+            // heads. Exact role lookup separates those contracts from an ordinary merge before construction.
             VideoKnownArtifact? artifact = null;
             bool known = VideoProfileManifest.TryGetByHash(hash, out artifact) && artifact is not null;
             if (!known && isPddHeader && loraHeader is not null)
             {
+                // A local PDD rebase necessarily has a new full-file hash. Its converter metadata is accepted only
+                // because it records the official provenance and binds the exact selected pruned base.
                 artifact = ConvertedPddArtifact(hash, loraHeader.Metadata, profile.ArtifactSha256, issues);
             }
             if (artifact is null || artifact.Role != VideoProfileArtifactRole.Adapter)
@@ -470,6 +481,8 @@ internal static class VideoProfileResolver
             }
             if (distillation is not null)
             {
+                // Two acceleration adapters would each claim the one global sampler schedule and projection-head
+                // bank; choosing either by stack order would make the request's execution contract ambiguous.
                 issues.Add(Error("video.acceleration.multiple",
                     $"Distillation adapters '{distillation.DisplayName}' and '{artifact.DisplayName}' cannot be stacked.",
                     nameof(VideoRequest.Loras)));
@@ -500,6 +513,8 @@ internal static class VideoProfileResolver
 
         bool joeyComposition = string.Equals(profile.Id, "minimax-h3-ref2va-zs05-int8", StringComparison.OrdinalIgnoreCase)
             && string.Equals(distillation.Id, "minimax-h3-lightx-fl8-768p", StringComparison.OrdinalIgnoreCase);
+        // Joey ZS05 was validated only as this cross-task pair, so the composed profile is an explicit manifest
+        // exception rather than a general license to attach FL adapters to Ref2VA bases.
         if (!joeyComposition && profile.Task == VideoTaskFamily.Unknown && !distillationBindsUnknownTask)
         {
             issues.Add(Error("video.profile.task_unbound",
@@ -757,7 +772,7 @@ internal static class VideoProfileResolver
             for (int i = 0; i < audioMask.Values.Count; i++)
             {
                 float value = audioMask.Values[i];
-                if (!float.IsFinite(value) || value < 0f || value > 1f)
+                if (!UnitInterval.Contains(value))
                 {
                     issues.Add(Error("audio.mask.value_invalid",
                         $"Audio mask value {i} must be finite and within [0,1].", nameof(VideoRequest.AudioDenoiseMask)));
@@ -787,13 +802,13 @@ internal static class VideoProfileResolver
                     issues.Add(Error("video.control.video_empty", $"Control {i} has no encoded video bytes.",
                         nameof(VideoRequest.Controls)));
                 }
-                if (!double.IsFinite(control.Strength) || control.Strength < 0.0)
+                if (!VideoControlValidation.IsValidStrength(control.Strength))
                 {
                     issues.Add(Error("video.control.strength_invalid",
-                        $"Control {i} strength must be finite and non-negative.", nameof(VideoRequest.Controls)));
+                        $"Control {i} strength must be finite, non-negative, and representable as F32.",
+                        nameof(VideoRequest.Controls)));
                 }
-                if (!double.IsFinite(control.Start) || !double.IsFinite(control.End) || control.Start < 0.0
-                    || control.End > 1.0 || control.Start > control.End)
+                if (!VideoControlValidation.IsValidWindow(control.Start, control.End))
                 {
                     issues.Add(Error("video.control.window_invalid",
                         $"Control {i} start/end must satisfy 0 <= start <= end <= 1.", nameof(VideoRequest.Controls)));
@@ -1003,9 +1018,7 @@ internal static class VideoProfileResolver
         {
             return;
         }
-        StringComparer pathComparer = OperatingSystem.IsWindows()
-            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        Dictionary<string, int> unique = new Dictionary<string, int>(pathComparer);
+        Dictionary<string, int> unique = new Dictionary<string, int>(VideoArtifactPath.Comparer);
         Dictionary<string, SafeTensorDescriptor> normalizedBase = NormalizeDescriptors(baseHeader.Descriptors);
         bool prunedBase = normalizedBase.ContainsKey("adaln_t_table");
         for (int i = 0; i < request.Controls.Count; i++)
@@ -1020,7 +1033,7 @@ internal static class VideoProfileResolver
                 }
                 continue;
             }
-            string path = Path.GetFullPath(requestedPath);
+            string path = VideoArtifactPath.Canonicalize(requestedPath);
             if (unique.ContainsKey(path))
             {
                 continue;
@@ -1042,6 +1055,8 @@ internal static class VideoProfileResolver
             {
                 string hash = await VideoCheckpointHashCache.GetSha256Async(path, cancel).ConfigureAwait(false);
                 artifactHashes[role] = hash;
+                // The official branch targets full-width AdaLN. A pruned-base conversion gets a different identity,
+                // so converter provenance plus an exact target-base hash is the only safe alternate admission path.
                 bool official = string.Equals(hash, H3FunControlSha256, StringComparison.OrdinalIgnoreCase);
                 bool rebased = IsRebasedFunControl(controlHeader.Metadata, baseHash, issues, role);
                 componentFormats[role] = official
@@ -2323,6 +2338,8 @@ internal static class VideoProfileResolver
         {
             string hash = await VideoCheckpointHashCache.GetSha256Async(path, cancel).ConfigureAwait(false);
             artifactHashes[role] = hash;
+            // Structural VAE validation is necessary but not sufficient: a known hash registered for another role
+            // is a high-signal wiring mistake and must fail before its tensors enter the recipe cache.
             if (VideoProfileManifest.TryGetByHash(hash, out VideoKnownArtifact? artifact) && artifact is not null
                 && artifact.Role != VideoProfileArtifactRole.VideoVae)
             {
@@ -2781,7 +2798,8 @@ internal static class VideoProfileResolver
         }
         foreach (KeyValuePair<string, string> entry in paths.OrderBy(entry => entry.Key, StringComparer.Ordinal))
         {
-            builder.Append("path:").Append(entry.Key).Append('=').Append(Path.GetFullPath(entry.Value)).Append(';');
+            builder.Append("path:").Append(entry.Key).Append('=').Append(VideoArtifactPath.Identity(entry.Value))
+                .Append(';');
         }
         return builder.ToString();
     }

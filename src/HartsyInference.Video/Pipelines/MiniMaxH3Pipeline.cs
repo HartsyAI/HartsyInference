@@ -4,6 +4,7 @@ using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
@@ -492,7 +493,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         for (int i = 0; i < rows.Count; i++)
         {
             float value = rows[i];
-            if (!float.IsFinite(value) || value < 0f || value > 1f)
+            if (!UnitInterval.Contains(value))
             {
                 throw new ArgumentOutOfRangeException(nameof(rows), value,
                     $"MiniMax-H3 {modality} mask row {i} must be finite and in [0,1].");

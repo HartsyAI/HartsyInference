@@ -83,11 +83,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         _loraStack = loraStack;
         _pddLoraStack = pddLoraStack;
         _supportsHybridConditioning = supportsHybridConditioning;
-        StringComparer pathComparer = OperatingSystem.IsWindows()
-            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         _funControlModelIndices = funControlModelIndices is null
-            ? new Dictionary<string, int>(pathComparer)
-            : new Dictionary<string, int>(funControlModelIndices, pathComparer);
+            ? new Dictionary<string, int>(VideoArtifactPath.Comparer)
+            : new Dictionary<string, int>(funControlModelIndices, VideoArtifactPath.Comparer);
     }
 
     /// <summary>Tier 3.8's <c>&lt;refcrop:&gt;</c> backend — a pipeline-owned cache (mirrors <c>ImagesService</c>'s own <c>ClipSegSegmenter</c> instance) so a prompt with no <c>&lt;refcrop:&gt;</c> tags never loads it.</summary>
@@ -1238,7 +1236,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             }
             if (guide.Image is not null)
             {
-                AddVisual(frameIndex, [FitGuideFrame(guide.Image, width, height, guide.FitMode)], false);
+                AddVisual(frameIndex, [VideoRecipeUtils.FitGuideFrame(guide.Image, width, height, guide.FitMode)], false);
             }
             else if (guide.Video is not null)
             {
@@ -1250,7 +1248,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 for (int i = 0; i < keep; i++)
                 {
                     cancel.ThrowIfCancellationRequested();
-                    visual.Add(FitGuideFrame(new ImageData
+                    visual.Add(VideoRecipeUtils.FitGuideFrame(new ImageData
                     {
                         Rgb = decoded.Frames[i],
                         Width = decoded.Width,
@@ -1305,36 +1303,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    private static byte[] FitGuideFrame(
-        ImageData image, int width, int height, VideoGuideFitMode fitMode) => fitMode switch
-    {
-        VideoGuideFitMode.Stretch => VideoRecipeUtils.ResizeRgb24(image, width, height),
-        VideoGuideFitMode.Contain => VideoRecipeUtils.LetterboxRgb24(image, width, height),
-        VideoGuideFitMode.Cover => CoverRgb24(image, width, height),
-        _ => throw new ArgumentOutOfRangeException(nameof(fitMode), fitMode, "Unknown video-guide fit mode."),
-    };
-
     /// <summary>Preserves the original H3 init/end behavior: both legacy anchors were directly resized to the
     /// target, even when their aspect ratio differed. Arbitrary guides use their explicit fit mode instead.</summary>
     internal static byte[] FitLegacyGuideFrame(ImageData image, int width, int height) =>
-        FitGuideFrame(image, width, height, VideoGuideFitMode.Stretch);
-
-    private static byte[] CoverRgb24(ImageData image, int width, int height)
-    {
-        float scale = MathF.Max(width / (float)image.Width, height / (float)image.Height);
-        int resizedWidth = Math.Max(width, (int)MathF.Ceiling(image.Width * scale));
-        int resizedHeight = Math.Max(height, (int)MathF.Ceiling(image.Height * scale));
-        byte[] resized = VideoRecipeUtils.ResizeRgb24(image, resizedWidth, resizedHeight);
-        int offsetX = (resizedWidth - width) / 2;
-        int offsetY = (resizedHeight - height) / 2;
-        byte[] output = new byte[checked(width * height * 3)];
-        for (int y = 0; y < height; y++)
-        {
-            Array.Copy(resized, ((long)(y + offsetY) * resizedWidth + offsetX) * 3,
-                output, (long)y * width * 3, (long)width * 3);
-        }
-        return output;
-    }
+        VideoRecipeUtils.FitGuideFrame(image, width, height, VideoGuideFitMode.Stretch);
 
     private static unsafe Tensor CropChannelMajorRows(Tensor rows, int sourceFrames, int keepFrames)
     {
@@ -1447,7 +1419,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             throw new ArgumentException("A MiniMax-H3 control stream has no model path.", nameof(control));
         }
-        string modelPath = Path.GetFullPath(control.Model);
+        string modelPath = VideoArtifactPath.Canonicalize(control.Model);
         if (!_funControlModelIndices.TryGetValue(modelPath, out int modelIndex))
         {
             throw new InvalidOperationException(
@@ -1458,13 +1430,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             throw new ArgumentException("A MiniMax-H3 control stream has an empty video payload.", nameof(control));
         }
-        if (!double.IsFinite(control.Strength) || control.Strength < 0.0 || control.Strength > float.MaxValue)
+        if (!VideoControlValidation.IsValidStrength(control.Strength))
         {
             throw new ArgumentOutOfRangeException(nameof(control), control.Strength,
                 "MiniMax-H3 control strength must be finite, non-negative, and representable as F32.");
         }
-        if (!double.IsFinite(control.Start) || !double.IsFinite(control.End)
-            || control.Start < 0.0 || control.End > 1.0 || control.Start > control.End)
+        if (!VideoControlValidation.IsValidWindow(control.Start, control.End))
         {
             throw new ArgumentOutOfRangeException(nameof(control),
                 "MiniMax-H3 control windows must satisfy 0 <= start <= end <= 1.");

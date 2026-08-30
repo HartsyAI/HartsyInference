@@ -1,3 +1,5 @@
+using HartsyInference.Core.Numerics;
+
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Pure geometry and resampling helpers shared by H3 guide and continuous AV-mask preparation.</summary>
@@ -99,8 +101,8 @@ public static class MiniMaxH3Masking
         }
         ValidateValues(latentMask, nameof(latentMask));
 
-        int patchRows = DivideRoundUp(latentHeight, patchHeight);
-        int patchColumns = DivideRoundUp(latentWidth, patchWidth);
+        int patchRows = MiniMaxH3Geometry.DivideRoundUp(latentHeight, patchHeight);
+        int patchColumns = MiniMaxH3Geometry.DivideRoundUp(latentWidth, patchWidth);
         float[] rows = new float[checked(latentFrames * patchRows * patchColumns)];
         bool allWhite = true;
         int output = 0;
@@ -180,8 +182,6 @@ public static class MiniMaxH3Masking
         return rows;
     }
 
-    private static int DivideRoundUp(int value, int divisor) => checked((value + divisor - 1) / divisor);
-
     private static void ValidateValues(ReadOnlySpan<float> values, string parameterName)
     {
         for (int i = 0; i < values.Length; i++)
@@ -192,7 +192,7 @@ public static class MiniMaxH3Masking
 
     private static void ValidateValue(float value, string parameterName, int index)
     {
-        if (!float.IsFinite(value) || value < 0f || value > 1f)
+        if (!UnitInterval.Contains(value))
         {
             throw new ArgumentOutOfRangeException(parameterName, value,
                 $"H3 mask values must be finite and in [0,1]; index {index} was {value}.");

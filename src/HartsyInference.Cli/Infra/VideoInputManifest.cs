@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Cli.Infra;
@@ -183,7 +184,7 @@ internal static class VideoInputManifest
         }
         float[] values = json ?? text.Split([',', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .Select(token => float.Parse(token, NumberStyles.Float, CultureInfo.InvariantCulture)).ToArray();
-        if (values.Length == 0 || values.Any(value => !float.IsFinite(value) || value < 0f || value > 1f))
+        if (values.Length == 0 || values.Any(value => !UnitInterval.Contains(value)))
         {
             throw new ArgumentException("Audio denoise mask values must be a non-empty finite sequence in [0,1].");
         }

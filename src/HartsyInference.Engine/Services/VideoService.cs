@@ -1,14 +1,14 @@
-using HartsyInference.Core.Configuration;
-using HartsyInference.Cuda;
-using HartsyInference.Core.Logging;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Cuda;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Core.MemoryManagement;
-using HartsyInference.Engine.Planning;
 
 namespace HartsyInference.Engine.Services;
 
@@ -37,8 +37,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         plan = plan with
         {
             SourceRequest = request,
-            ExecutionRequest = plannedRequest,
-            SourceRequestFingerprint = binding.Fingerprint,
+            RequestBinding = binding,
         };
         plan = ApplyRegisteredVideoFamilyCheck(plan, familyId);
         if (plan.Issues.Any(issue => issue.Code == "video.family.unregistered"))
@@ -63,27 +62,9 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 {
                     sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
                 }
-                catch (CudaException error)
-                {
-                    RecordSparseBackendFailure(error);
-                }
-                catch (DllNotFoundException error)
-                {
-                    RecordSparseBackendFailure(error);
-                }
-                catch (EntryPointNotFoundException error)
-                {
-                    RecordSparseBackendFailure(error);
-                }
-                catch (BadImageFormatException error)
-                {
-                    RecordSparseBackendFailure(error);
-                }
-                catch (PlatformNotSupportedException error)
-                {
-                    RecordSparseBackendFailure(error);
-                }
-                catch (NotSupportedException error)
+                catch (Exception error) when (error is CudaException or DllNotFoundException
+                    or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
+                    or NotSupportedException)
                 {
                     RecordSparseBackendFailure(error);
                 }
@@ -146,7 +127,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     internal static VideoPlan ApplyExperimentalH3VsaGate(VideoPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        if (plan.Profile.Attention == VideoAttentionKind.Dense || ExperimentalH3VsaEnabled())
+        if (plan.Profile.Attention == VideoAttentionKind.Dense || EngineKnobs.IsH3VsaExperimentalEnabled())
         {
             return plan;
         }
@@ -214,10 +195,6 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         };
         return plan with { Issues = issues };
     }
-
-    /// <summary>The exact environment spelling is intentionally supported during experimental validation in
-    /// addition to the declared process setting.</summary>
-    private static bool ExperimentalH3VsaEnabled() => EngineKnobs.IsH3VsaExperimentalEnabled();
 
     /// <summary>The conditioning <paramref name="request"/> asks for, one bit per object actually set.</summary>
     internal static VideoFeatures RequestedFeatures(VideoRequest request)

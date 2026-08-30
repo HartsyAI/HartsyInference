@@ -138,6 +138,111 @@ public sealed class VideoProfilePlanningTests : IDisposable
         File.SetLastWriteTimeUtc(path, stamp.AddSeconds(2));
         string changed = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
         Assert.NotEqual(firstHash, changed);
+        Assert.Equal(1, VideoCheckpointHashCache.StateCountFor(path));
+    }
+
+    [Fact]
+    public async Task HashCache_PersistsExactHashAcrossProcessStateReset()
+    {
+        string path = Path.Combine(_tempDir, "persistent-hash.bin");
+        byte[] data = Encoding.UTF8.GetBytes("one exact immutable checkpoint state");
+        await File.WriteAllBytesAsync(path, data);
+        VideoCheckpointHashCache.RemovePersistent(path);
+        VideoCheckpointHashCache.Clear();
+        int before = VideoCheckpointHashCache.ComputeCountFor(path);
+
+        string first = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
+        int afterFirst = VideoCheckpointHashCache.ComputeCountFor(path);
+        Assert.Equal(before + 1, afterFirst);
+
+        // Dropping the static dictionary models a fresh process while leaving its durable metadata intact.
+        VideoCheckpointHashCache.Clear();
+        string second = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
+
+        Assert.Equal(first, second);
+        Assert.Equal(afterFirst, VideoCheckpointHashCache.ComputeCountFor(path));
+    }
+
+    [Fact]
+    public async Task HashCache_DownloaderSeedIsTrustedOnlyForTheMatchingFileStamp()
+    {
+        string path = Path.Combine(_tempDir, "download-seed.bin");
+        byte[] firstData = Encoding.UTF8.GetBytes("first-payload");
+        byte[] secondData = Encoding.UTF8.GetBytes("other-payload");
+        Assert.Equal(firstData.Length, secondData.Length);
+        await File.WriteAllBytesAsync(path, firstData);
+        DateTime firstStamp = File.GetLastWriteTimeUtc(path);
+        string verified = Convert.ToHexString(SHA256.HashData(firstData)).ToLowerInvariant();
+        await VideoCheckpointHashCache.RecordVerifiedSha256Async(path, verified);
+        VideoCheckpointHashCache.Clear();
+        int before = VideoCheckpointHashCache.ComputeCountFor(path);
+
+        Assert.Equal(verified,
+            await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None));
+        Assert.Equal(before, VideoCheckpointHashCache.ComputeCountFor(path));
+
+        await File.WriteAllBytesAsync(path, secondData);
+        File.SetLastWriteTimeUtc(path, firstStamp.AddSeconds(2));
+        VideoCheckpointHashCache.Clear();
+        string changed = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
+
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(secondData)).ToLowerInvariant(), changed);
+        Assert.NotEqual(verified, changed);
+        Assert.Equal(before + 1, VideoCheckpointHashCache.ComputeCountFor(path));
+    }
+
+    [Fact]
+    public async Task HashCache_DeduplicatesAliasesThroughSymlinkedModelDirectories()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // Windows runners do not consistently grant the symbolic-link privilege required by this test.
+            return;
+        }
+
+        string models = Path.Combine(_tempDir, "models");
+        string firstAlias = Path.Combine(_tempDir, "models-alias-one");
+        string secondAlias = Path.Combine(_tempDir, "models-alias-two");
+        Directory.CreateDirectory(models);
+        string checkpoint = Path.Combine(models, "control.safetensors");
+        await File.WriteAllTextAsync(checkpoint, "shared-control-checkpoint");
+        Directory.CreateSymbolicLink(firstAlias, models);
+        Directory.CreateSymbolicLink(secondAlias, models);
+        string firstPath = Path.Combine(firstAlias, Path.GetFileName(checkpoint));
+        string secondPath = Path.Combine(secondAlias, Path.GetFileName(checkpoint));
+
+        try
+        {
+            VideoCheckpointHashCache.Clear();
+            VideoCheckpointHashCache.RemovePersistent(firstPath);
+
+            string firstHash = await VideoCheckpointHashCache.GetSha256Async(firstPath, CancellationToken.None);
+            string secondHash = await VideoCheckpointHashCache.GetSha256Async(secondPath, CancellationToken.None);
+
+            Assert.Equal(firstHash, secondHash);
+            Assert.Equal(1, VideoCheckpointHashCache.Count);
+            Assert.True(VideoArtifactPath.Comparer.Equals(
+                VideoArtifactPath.Canonicalize(firstPath), VideoArtifactPath.Canonicalize(secondPath)));
+            Assert.Equal(ControlCacheKey(firstPath), ControlCacheKey(secondPath));
+            Assert.Equal(ControlCacheKey(firstPath), ControlCacheKey(firstPath, secondPath));
+        }
+        finally
+        {
+            VideoCheckpointHashCache.Clear();
+            VideoCheckpointHashCache.RemovePersistent(firstPath);
+            Directory.Delete(firstAlias);
+            Directory.Delete(secondAlias);
+        }
+
+        static string ControlCacheKey(params string[] paths) => RecipeCacheKey.Describe(new VideoRequest
+        {
+            Prompt = "test",
+            Controls = paths.Select(path => new VideoControl
+            {
+                Model = path,
+                Video = new VideoClip { Data = [1] },
+            }).ToArray(),
+        });
     }
 
     [Fact]
@@ -407,16 +512,37 @@ public sealed class VideoProfilePlanningTests : IDisposable
             ["hartsy.controlnet.target_base_sha256"] = baseHash,
             ["hartsy.controlnet.affine_residual"] = "1.0E-05",
         };
-        string control = WriteHeaderOnlyFunControl("rebased-fun.safetensors", metadata, timeDim: 8);
+        string controlDirectory = Path.Combine(_tempDir, "control-models");
+        Directory.CreateDirectory(controlDirectory);
+        string control = WriteHeaderOnlyFunControl("control-models/rebased-fun.safetensors", metadata, timeDim: 8);
+        string firstControlPath = control;
+        string secondControlPath = control;
+        string? firstAlias = null;
+        string? secondAlias = null;
+        if (!OperatingSystem.IsWindows())
+        {
+            firstAlias = Path.Combine(_tempDir, "control-models-one");
+            secondAlias = Path.Combine(_tempDir, "control-models-two");
+            Directory.CreateSymbolicLink(firstAlias, controlDirectory);
+            Directory.CreateSymbolicLink(secondAlias, controlDirectory);
+            firstControlPath = Path.Combine(firstAlias, Path.GetFileName(control));
+            secondControlPath = Path.Combine(secondAlias, Path.GetFileName(control));
+        }
         VideoControl first = new VideoControl
         {
-            Model = control,
+            Model = firstControlPath,
             Video = new VideoClip { Data = [1] },
             Strength = 0.75,
             Start = 0.1,
             End = 0.8,
         };
-        VideoControl second = first with { Strength = 0.25, Start = 0.5, End = 1.0 };
+        VideoControl second = first with
+        {
+            Model = secondControlPath,
+            Strength = 0.25,
+            Start = 0.5,
+            End = 1.0,
+        };
         ModelSpec spec = new ModelSpec
         {
             Requested = checkpoint,
@@ -425,13 +551,27 @@ public sealed class VideoProfilePlanningTests : IDisposable
         };
         VideoRequest request = new VideoRequest { Prompt = "test", Controls = [first, second] };
 
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-            VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora,
-            CancellationToken.None);
+        VideoPlan plan;
+        try
+        {
+            plan = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
+                VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora,
+                CancellationToken.None);
+        }
+        finally
+        {
+            if (firstAlias is not null && secondAlias is not null)
+            {
+                Directory.Delete(firstAlias);
+                Directory.Delete(secondAlias);
+            }
+        }
 
         Assert.DoesNotContain(plan.Issues, issue => issue.Code.StartsWith("video.control.", StringComparison.Ordinal));
         Assert.Single(plan.ComponentPaths,
             pair => pair.Key.StartsWith("controlModel:", StringComparison.Ordinal));
+        Assert.True(VideoArtifactPath.Comparer.Equals(
+            VideoArtifactPath.Canonicalize(control), plan.ComponentPaths["controlModel:0"]));
         Assert.Equal("h3-fun-pruned-rebased-fp32", plan.ComponentFormats["controlModel:0"]);
         Assert.Equal(baseHash,
             plan.ArtifactMetadata["controlModel:0"]["hartsy.controlnet.target_base_sha256"]);
@@ -912,6 +1052,10 @@ public sealed class VideoProfilePlanningTests : IDisposable
     {
         if (Directory.Exists(_tempDir))
         {
+            foreach (string path in Directory.EnumerateFiles(_tempDir, "*", SearchOption.AllDirectories))
+            {
+                VideoCheckpointHashCache.RemovePersistent(path);
+            }
             Directory.Delete(_tempDir, recursive: true);
         }
     }

@@ -78,6 +78,24 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - Options: three-tier (flat props / explicit composition / custom injection)
 - JSON: source-generated `[JsonSerializable]` contexts — no reflection
 
+### Video Planning Contract
+- Every video request is planned by `VideoService.PlanAsync` before pipeline construction or weight loading. Recipe
+  declarations supply generic family defaults/features, then the resulting `VideoPlan` becomes the authority for
+  profile defaults, locked settings, supported features, component paths/formats, recipe-cache identity, release
+  gates, and the execution summary.
+- Keep profile and composition decisions in `Engine/Planning`; a video recipe consumes the resolved plan and must not
+  re-infer task, acceleration, attention, or component roles from filenames. Generic video families still receive a
+  plan so validation and execution use one service-layer path.
+- H3 semantics activate only from an exact full-file SHA-256 in the built-in manifest or an exact-hash-bound local
+  profile/converter sidecar. The durable hash cache is keyed by canonical path, byte length, and last-write ticks;
+  its records live under `paths.modelCacheRoot/video-checkpoint-hashes` (or the same subdirectory below
+  `~/.cache/hartsyinference`). Verified catalog downloads seed it immediately from their streamed verification,
+  while an arbitrary local file pays one visible exact-hash pass before the result can survive process restarts. A
+  filename is never profile evidence.
+- Planning errors and temporary experimental gates return before backend probing or model construction. Execution
+  rechecks the planned artifact stamps, so a replaced checkpoint requires a new plan instead of reusing stale cache
+  identity or profile semantics.
+
 ### Streaming
 `IAsyncEnumerable<GenerationProgress>` where `GenerationProgress` is `readonly record struct`.
 
