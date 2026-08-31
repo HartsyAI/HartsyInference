@@ -291,10 +291,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
         NumInferenceSteps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
         GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
-        TwoStage = detected.UseKeyframesAbsPosEmbedding && LtxVideo2Config.V25Distilled.TwoStage,
+        TwoStage = false,
     };
 
-    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration, so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
+    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Two-stage is opt-in because the upsampler is a separate Swarm model, not a required part of the LTX-2.5 checkpoint bundle. <c>HARTSY_LTX2_TWO_STAGE=1</c> enables the local-file probe; <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
