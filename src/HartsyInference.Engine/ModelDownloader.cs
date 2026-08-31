@@ -36,21 +36,28 @@ public static class ModelDownloader
     {
         using HuggingFaceClient client = new HuggingFaceClient();
         foreach (ModelAsset asset in assets)
-            await EnsureAsync(client, asset, onProgress, ct).ConfigureAwait(false);
+            await EnsureAsync(client, asset, allowDownload: true, onProgress, ct).ConfigureAwait(false);
     }
 
     /// <summary>Ensures a single side model is on disk (downloading + verifying under its lock) and returns its local
-    /// path. The one-call helper recipes use to resolve a <see cref="SideModels"/> asset; the SwarmUI-specific
-    /// user-override and model-set refresh stay in the extension adapter.</summary>
+    /// path. The default behavior is strict: if the file is not present, this throws before any network call.
+    /// Extension or caller flows that explicitly opt in can pass <c>downloadIfMissing: true</c>.</summary>
     public static async Task<string> EnsureSideModelAsync(ModelAsset asset, Action<ModelAsset, double>? onProgress, CancellationToken ct)
     {
+        return await EnsureSideModelAsync(asset, downloadIfMissing: false, onProgress, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Ensures a single side model is on disk and returns its local path.
+    /// Set <paramref name="downloadIfMissing"/> to <c>true</c> to download it from HuggingFace when missing.</summary>
+    public static async Task<string> EnsureSideModelAsync(ModelAsset asset, bool downloadIfMissing, Action<ModelAsset, double>? onProgress, CancellationToken ct)
+    {
         using HuggingFaceClient client = new HuggingFaceClient();
-        await EnsureAsync(client, asset, onProgress, ct).ConfigureAwait(false);
+        await EnsureAsync(client, asset, downloadIfMissing, onProgress, ct).ConfigureAwait(false);
         return TargetPath(asset);
     }
 
     /// <summary>Ensures a single <paramref name="asset"/> is present, downloading it if needed under a per-target lock.</summary>
-    public static async Task EnsureAsync(HuggingFaceClient client, ModelAsset asset, Action<ModelAsset, double>? onProgress, CancellationToken ct)
+    public static async Task EnsureAsync(HuggingFaceClient client, ModelAsset asset, bool allowDownload, Action<ModelAsset, double>? onProgress, CancellationToken ct)
     {
         string target = TargetPath(asset);
         SemaphoreSlim gate = _gates.GetOrAdd(target, _ => new SemaphoreSlim(1, 1));
@@ -60,6 +67,14 @@ public static class ModelDownloader
             // Re-check under the lock: a concurrent request may have finished the download while we waited.
             if (File.Exists(target))
                 return;
+
+            if (!allowDownload)
+            {
+                throw new FileNotFoundException(
+                    $"Model asset '{asset.Role}' is missing locally: {target}. Download it first with the catalog pull workflow "
+                    + $"for '{asset.Repo}'.");
+            }
+
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));
             await client.DownloadFileAsync(asset.Repo, asset.RepoPath, target, progress, asset.Sha256, ct).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(asset.Sha256))
