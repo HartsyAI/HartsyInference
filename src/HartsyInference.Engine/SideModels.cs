@@ -487,7 +487,7 @@ public static class SideModels
     /// <summary>LTX-2.5 learned x2 spatial latent upsampler for the distilled two-stage flow (~950 MB BF16).</summary>
     public static readonly ModelAsset Ltx25LatentUpsampler = new ModelAsset
     {
-        Repo = "Lightricks/LTX-2.5",
+        Repo = "comfyicu/LTX-2.5",
         RepoPath = "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
         TargetSubdir = "latent_upscale_models",
         TargetName = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
@@ -543,7 +543,8 @@ public static class SideModels
 
     // ── CLIP-Vision (folder = "ClipVision") ──
 
-    /// <summary>CLIP-ViT-H/14 image encoder used by IP-Adapter SDXL standard + Plus; auto-downloaded when IP-Adapter is enabled without an explicit ClipVisionModel, canonical version from the h94/IP-Adapter repo.</summary>
+    /// <summary>CLIP-ViT-H/14 image encoder used by IP-Adapter SDXL standard + Plus; the canonical version from the
+    /// h94/IP-Adapter repo.</summary>
     public static readonly ModelAsset ClipVisionH14 = new ModelAsset
     {
         Repo = "h94/IP-Adapter",
@@ -554,7 +555,8 @@ public static class SideModels
         Sha256 = "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030"
     };
 
-    /// <summary>SigLIP so400m/14 384 vision tower (Comfy-Org packaging) — the image encoder FLUX.1 Redux consumes (729 × 1152 patch tokens); auto-downloaded when a style model is enabled without an explicit ClipVisionModel.</summary>
+    /// <summary>SigLIP so400m/14 384 vision tower (Comfy-Org packaging) — the image encoder FLUX.1 Redux consumes
+    /// (729 × 1152 patch tokens).</summary>
     public static readonly ModelAsset SigclipVision384 = new ModelAsset
     {
         Repo = "Comfy-Org/sigclip_vision_384",

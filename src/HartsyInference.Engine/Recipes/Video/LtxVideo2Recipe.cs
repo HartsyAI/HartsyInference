@@ -294,7 +294,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         TwoStage = detected.UseKeyframesAbsPosEmbedding && LtxVideo2Config.V25Distilled.TwoStage,
     };
 
-    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration, so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c> (auto-downloaded when absent).</summary>
+    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Default ON for the distilled family (<see cref="LtxVideo2Config.V25Distilled"/> carries <c>TwoStage = true</c>) — <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch, and =1 the opt-in probe elsewhere. Distilled-only either way: the dev checkpoints ship no two-stage reference configuration, so enabling it there would be guesswork. <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
@@ -310,24 +310,15 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         string? named = EngineKnobs.Ltx2Upsampler.Value is { Length: > 0 } n ? n : null;
         string requested = named ?? DefaultLatentUpsamplerFile;
         // The folder scan is DISCOVERY for the default name only. Falling back to it when the caller named a file
-        // would load a different upsampler than the one they asked for, with only an Info line to notice. When
-        // nothing was named and nothing is on disk, fetch the shipped upsampler — two-stage is the distilled
-        // default, so a missing side file must not turn a working install into a throw.
+        // would load a different upsampler than the one they asked for.
         string? path = ModelFileLocator.Find(requested, UpsamplerSubdir)
             ?? (named is null ? FindAnyLatentUpsampler() : null);
-        if (path is null && named is null)
-        {
-            Logs.Info($"[LtxVideo2Recipe] Latent upsampler not on disk — downloading {SideModels.Ltx25LatentUpsampler.Repo}/"
-                + $"{SideModels.Ltx25LatentUpsampler.RepoPath}.");
-            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, onProgress: null, CancellationToken.None)
-                .GetAwaiter().GetResult();
-        }
         if (path is null)
         {
             throw new FileNotFoundException(
                 $"LTX-2.5 two-stage is enabled but the latent upsampler '{requested}' was not found under "
-                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Download it from "
-                + "Lightricks/LTX-2.5 (latent_upscale_models/) or set HARTSY_LTX2_TWO_STAGE=0 for single-pass.");
+                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Ensure the file exists locally before enabling two-stage, or set HARTSY_LTX2_TWO_STAGE=0 for single-pass. "
+                + $"The supported public source in this engine is {SideModels.Ltx25LatentUpsampler.Repo}/{SideModels.Ltx25LatentUpsampler.RepoPath}.");
         }
 
         SafeTensorsLoader loader = new SafeTensorsLoader();
