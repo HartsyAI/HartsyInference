@@ -474,7 +474,7 @@ internal static class VideoProfileResolver
             int validationIssueCount = issues.Count;
             if (artifact.Acceleration == VideoAccelerationKind.Pdd && loraHeader is not null)
             {
-                ValidatePddHeader(loraHeader, artifact, issues);
+                ValidatePddHeader(loraHeader, artifact, known, issues);
             }
             ValidateAdapterBaseBinding(artifact, convertedPdd, prunedBase, profile.Task, issues);
             if (issues.Skip(validationIssueCount).Any(issue => issue.Severity == VideoPlanIssueSeverity.Error))
@@ -1861,7 +1861,7 @@ internal static class VideoProfileResolver
     }
 
     private static void ValidatePddHeader(HeaderSnapshot header, VideoKnownArtifact artifact,
-        List<VideoPlanIssue> issues)
+        bool hashKnown, List<VideoPlanIssue> issues)
     {
         ValidatePddMetadataInt(header.Metadata, "pdd_num_steps", MiniMaxH3PddSchedule.PublishedFineSteps, issues);
         ValidatePddMetadataInt(header.Metadata, "pdd_block_size", MiniMaxH3PddSchedule.PublishedBlockSize, issues);
@@ -1876,13 +1876,19 @@ internal static class VideoProfileResolver
                 break;
             }
         }
-        if (taskText is null)
+        // A manifest-hash-known artifact (VideoProfileManifest.TryGetByHash matched the exact published sha256)
+        // already carries a trustworthy task binding pinned to that hash — the published official adapters
+        // (alibaba-pai/MiniMax-H3-Acc-LoRAs) do not embed a pdd_task/pdd_partition key at all, so requiring one
+        // unconditionally rejected the real files. Self-declared metadata is still mandatory for a locally
+        // converted/rebased adapter (ConvertedPddArtifact), where the hash cannot be pre-trusted and metadata is
+        // the only provenance available.
+        if (taskText is null && !(hashKnown && artifact.Task is VideoTaskFamily.Fl2Va or VideoTaskFamily.Ref2Va))
         {
             issues.Add(Error("video.pdd.task_missing",
                 "PDD metadata must preserve a pdd_task, pdd_partition, or hartsy.pdd.task binding.",
                 nameof(VideoRequest.Loras)));
         }
-        else
+        else if (taskText is not null)
         {
             VideoTaskFamily metadataTask = NormalizePddTask(taskText);
             if (metadataTask is not (VideoTaskFamily.Fl2Va or VideoTaskFamily.Ref2Va))
@@ -1914,10 +1920,15 @@ internal static class VideoProfileResolver
         {
             return;
         }
-        if (new[] { videoWeight, videoBias, audioWeight, audioBias }.Any(descriptor => descriptor.DType != DType.F32))
+        // This is a plan-time header peek, not the load path: no tensor bytes are touched here. F32 and BF16
+        // (every published official adapter's actual on-disk dtype) both pass; MiniMaxH3PddAdapter.Load performs
+        // one explicit, visible promotion to F32 before PddHeadBank ever sees the tensor, so the "no implicit
+        // multi-gigabyte cast" guarantee in PddHeadBank's own constructor still holds at the point that matters.
+        if (new[] { videoWeight, videoBias, audioWeight, audioBias }
+            .Any(descriptor => descriptor.DType != DType.F32 && descriptor.DType != DType.BF16))
         {
             issues.Add(Error("video.pdd.bank_dtype_invalid",
-                "PDD video/audio projection banks must be F32 so runtime fusion never performs an implicit multi-gigabyte cast.",
+                "PDD video/audio projection banks must be F32 or BF16 (promoted to F32 at load time).",
                 nameof(VideoRequest.Loras)));
         }
         bool rankThree = videoWeight.Shape.Rank == 3;

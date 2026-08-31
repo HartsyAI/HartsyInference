@@ -123,11 +123,16 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         return plan with { Issues = issues };
     }
 
-    /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.</summary>
+    /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.
+    /// ComfySol64V1 (Kijai's consolidated FastH3 checkpoint, hash 7221ae65...) cleared a real-weight generation
+    /// against the exact published artifact — 4-step T2VA clip, coherent frames, finite stereo audio, native
+    /// ComfySol64V1 execution path — and is released. Every other sparse profile (FastVideoVsa64V1, any future
+    /// reserved 256-token profile) remains gated until it independently clears the same bar; do not widen this
+    /// check to "any non-Dense attention" without a fresh real-weight run for that specific profile.</summary>
     internal static VideoPlan ApplyH3VsaReleaseGate(VideoPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        if (plan.Profile.Attention == VideoAttentionKind.Dense)
+        if (plan.Profile.Attention is VideoAttentionKind.Dense or VideoAttentionKind.ComfySol64V1)
         {
             return plan;
         }

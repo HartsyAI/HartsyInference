@@ -108,10 +108,14 @@ public sealed class MiniMaxH3PddAdapter : IDisposable
                 videoWeightKey, videoBiasKey, audioWeightKey, audioBiasKey,
             };
 
-            Tensor videoWeight = loader.GetTensor(videoWeightKey);
-            Tensor videoBias = loader.GetTensor(videoBiasKey);
-            Tensor audioWeight = loader.GetTensor(audioWeightKey);
-            Tensor audioBias = loader.GetTensor(audioBiasKey);
+            // The published official adapters (alibaba-pai/MiniMax-H3-Acc-LoRAs) ship these four bank tensors in
+            // BF16, not F32 — PddHeadBank refuses anything but F32 so that a multi-gigabyte cast can never happen
+            // silently mid-fusion. Promote here instead: one explicit, visible, disposed-with-the-adapter cast at
+            // load time, matching MiniMaxH3Recipe's norm/rope F32 promotion of the base DiT.
+            Tensor videoWeight = PromoteToF32(loader.GetTensor(videoWeightKey));
+            Tensor videoBias = PromoteToF32(loader.GetTensor(videoBiasKey));
+            Tensor audioWeight = PromoteToF32(loader.GetTensor(audioWeightKey));
+            Tensor audioBias = PromoteToF32(loader.GetTensor(audioBiasKey));
             MiniMaxH3PddHeadLayout layout = ResolveLayout(videoWeight, loader.Metadata, formatHint);
             PddHeadBank? bank = null;
             MiniMaxH3PddTrunkConversion? trunk = null;
@@ -254,6 +258,11 @@ public sealed class MiniMaxH3PddAdapter : IDisposable
         return parsed;
     }
 
+    /// <summary>Returns an F32 tensor, casting one explicit time when the source is a lower-precision dtype
+    /// (BF16 in every published official adapter). The result is a freshly owned tensor disposed alongside
+    /// <see cref="VideoHeadWeight"/>/<see cref="VideoHeadBias"/>/<see cref="AudioHeadWeight"/>/<see cref="AudioHeadBias"/>.</summary>
+    private static Tensor PromoteToF32(Tensor tensor) => tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
+
     private static string? GetMetadata(IReadOnlyDictionary<string, string>? metadata, string key) =>
         metadata is not null && metadata.TryGetValue(key, out string? value) ? value : null;
 
@@ -279,6 +288,12 @@ public sealed class MiniMaxH3PddAdapter : IDisposable
             return;
         Trunk.Dispose();
         HeadBank.Dispose();
+        // Safe whether each tensor is a loader-borrowed view (Dispose is then a no-op) or a PromoteToF32 cast
+        // that owns its own buffer (Dispose then actually frees it) — Tensor.Dispose only frees an owned buffer.
+        VideoHeadWeight.Dispose();
+        VideoHeadBias.Dispose();
+        AudioHeadWeight.Dispose();
+        AudioHeadBias.Dispose();
         _loader?.Dispose();
         _loader = null;
     }
