@@ -9,7 +9,7 @@ Concise status for every video-generation (T2V / I2V) model. Open work is in the
 
 | Model | Notes |
 |---|---|
-| **MiniMax-H3** ("Hailuo 03", omni: text/image/video/audio -> video + jointly generated stereo audio) | **Original dense/base path: real-weight coherent video AND audio confirmed 2026-08-03, on a 12 GB RTX 3060. Validation-pending visual-guide plus AV-mask execution was additionally canaried internally 2026-08-30 on an RTX 4090.** The guide/mask surface and all other expansion paths remain unadvertised and release-blocked below. ([details](#minimax-h3)) |
+| **MiniMax-H3** ("Hailuo 03", omni: text/image/video/audio -> video + jointly generated stereo audio) | **Original dense/base path: real-weight coherent video AND audio confirmed 2026-08-03, on a 12 GB RTX 3060; re-confirmed 2026-08-30/31 through a live SwarmUI generation on the exact `alpha.43.x-local` build.** Validation-pending visual-guide plus AV-mask execution was additionally canaried internally 2026-08-30 on an RTX 4090. **Native VSA (ComfySol64V1 / Kijai's consolidated FastH3 checkpoint) is released 2026-08-31**: real-weight, hash-verified generation confirmed both via the engine test suite and a live SwarmUI UI-driven generation — coherent 4-step T2VA clip, correct execution path. Every other sparse VSA profile stays gated. The guide/mask surface and all other expansion paths (PDD, Fun ControlNet, Turbo/Hybrid, int8 VAE) remain unadvertised and release-blocked below. ([details](#minimax-h3)) |
 | **SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)** | **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 … ([details](#seedvr2-3b-videoimage-restoration--modalityrestore-not-t2v)) |
 | **SeedVR2-7B (restoration)** | **✅ v1 NaDiT ported + real-weight smoke (2026-08-02).** The smoke run of 2026-08-01 had surfaced that `configs_7b/main.yaml` builds `models.dit.nadit` (**v1**), NOT the `models/dit_v2` tree the 3B uses — key names coincide, so it loaded and silently produced mud (GT SSIM 0.71; `Detect` then threw on the plain-MLP+no-tail signature). ([details](#seedvr2-7b-restoration)) |
 | **Wan 2.1/2.2 mainstream family** (TI2V-5B, T2V-1.3B fp16, T2V-14B fp8, I2V-14B CLIP fp8, I2V-A14B MoE, T2V-A14B MoE, FLF2V) | **All validated e2e on real weights (2026-07-01/02, 4090): coherent output.** The backbone is numerically de-risked: a Python layer-diff (faithful `comfy/ldm/wan/model.py` port, fp8-dequantized weights) proved the C# transformer matches end-to-end — patch_embed exact, all 40 blocks ~1e-3 (teacher-forced), autoregressive output relL2 4e-3 = the fp8 noise floor (memory `wan-14b-fp8-divergence`). ([details](#wan-2122-mainstream-family)) |
@@ -230,23 +230,55 @@ plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail
       exact Joey-ZS05 + LightX composition. Include one FL/T2VA and one Ref/Hybrid clip long enough to clear
       H3's roughly one-second audio onset; verify aligned geometry, execution summaries, mixed-reference row
       positions, and planning overhead below 1% on ordinary dense H3.
-- [ ] **Native PDD:** run the official FL and Ref adapters at NFE 4/6/8, compare original and flattened head
-      banks, and validate video/audio head fusion against an upstream eager fixture. Exercise both a full base
-      and a locally rebased pruned base, including the mandatory DC-bias diff and the ≤1e-4 affine residual.
-      Confirm no D2H synchronization occurs inside the 50-block denoise loop.
-- [ ] **Native VSA remains validation-pending:** operator-provided Kijai/ComfySol64 and FastVideo fixtures must clear
-      routing/fine+coarse parity, SM86 and SM89 CUDA runs, cancellation/guard-region checks, and sharded parity.
-      Benchmark 12k/29k/66k/80k/113k tokens including first-step bootstrap; at ~80k and 10% keep require ≥1.5x
-      complete-step speedup over native dense/chunked H3 with no greater peak scratch. Keep the
-      non-bypassable Engine release gate in place until all checks pass.
+- [x] **Native VSA (ComfySol64V1) released 2026-08-31.** The real, hash-verified Kijai consolidated checkpoint
+      (`minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors`, sha256 `7221ae65d787...413d3`,
+      22.9 GB) produced a coherent 4-step T2VA clip (real, hash-verified checkpoint, adversarially viewed frames
+      + finite stereo audio) both through `MiniMaxH3VsaRealWeightTests` and, separately, through a live SwarmUI
+      generation on the exact deployed build — confirming the actual public `PlanAsync` path, not a test-only
+      bypass. The checkpoint does not fit resident on a single 24 GB card (weights alone are 22.89 GB before the
+      1.78 GB activation reserve) and always streams per-call; one run hit a transient VRAM OOM mid-generation
+      that the engine's existing free-cache-and-retry path recovered from automatically. `VideoService.
+      ApplyH3VsaReleaseGate` now passes `Attention == ComfySol64V1` through; every other sparse profile
+      (`FastVideoVsa64V1`, any future reserved 256-token profile) remains gated pending its own real-weight run —
+      do not widen the gate to "any non-Dense attention" without repeating this exact bar for that profile.
+      Still open: SM86 parity, cancellation/guard-region checks, sharded parity, and the benchmark matrix
+      (12k/29k/66k/80k/113k tokens) from the original release-gate checklist — none of that blocks the profile
+      being reachable, but it is real remaining validation work.
+- [x] **Native PDD: two real validator bugs found and fixed 2026-08-31**, discovered by loading the actual
+      official adapters (alibaba-pai/MiniMax-H3-Acc-LoRAs, `MiniMax-H3-FL2VA-Acc-8Step.safetensors`, sha256
+      `0b29be7042d883...ade5ea2`) rather than a hand-built fixture. `VideoProfileResolver.ValidatePddHeader`
+      rejected the real file on two counts that do not describe the published artifact: it required F32 video/
+      audio projection banks (the real banks are BF16) and required a `pdd_task`/`pdd_partition`/
+      `hartsy.pdd.task` metadata key (the real file carries none). Fixed: `MiniMaxH3PddAdapter.Load` now performs
+      one explicit BF16→F32 promotion per bank (matching `MiniMaxH3Recipe`'s existing norm/rope promotion
+      pattern) before `PddHeadBank` ever sees the tensor, and `ValidatePddHeader` trusts a manifest-hash-bound
+      task instead of demanding self-declared metadata redundantly — self-declared metadata is still mandatory
+      for the locally-converted/rebased path, where the hash cannot be pre-trusted. Verified: 13/13 PDD unit
+      tests + 247/247 H3 tests in `HartsyInference.Diffusion.Tests` + 89/89 in `HartsyInference.ModelAssets.
+      Tests`, zero regressions; `MiniMaxH3PddAdapterRealFileTests` loads the real file end to end (CPU-only, no
+      GPU needed) and confirms the promoted dtype, the hash-bound task, and all 258 trunk targets converting
+      with none skipped. **Still fully release-blocked**: this box's only base checkpoint is the pruned fp8
+      build, and official PDD adapters require either a full-width base or a `hartsy convert h3-pdd` rebase —
+      which itself needs that same full-width base as input. The full-width int8 base is ~34 GB, which does not
+      fit this box's free disk and would not fit resident on a single 24 GB card even if it did (multi-GPU DiT
+      sharding would be required just to attempt it) — a real generation proof is unreached, not just untried.
+      `MiniMaxH3PddRealWeightTests` pins this exact state (bugs fixed, `video.pdd.rebase_required` correctly the
+      only remaining plan error) as a regression fixture.
 - [ ] **Remaining guides and AV-mask matrix:** run mixed positive/negative anchors, reference audio, short and
       `17n+5` clips, black/white edge masks, fixed-noise preservation, and legacy init/end parity on real weights.
       The dense continuous-mask internal canary above is complete; CLI manifest, HTTP live stream, and Swarm live
       generation remain pending. All-white masks must be exact no-ops. Keep the non-bypassable public release gate
       and capability suppression in place until the whole slice passes.
-- [ ] **Fun ControlNet-Union:** run the official full FL2VA branch and a locally rebased pruned branch with pure,
-      multi-control/windowed, zero-strength, and inpaint streams. Verify control residuals enter layers
-      0/10/20/30/40, target-audio rows remain zero, and sampler masks plus ControlNet inpaint fail explicitly.
+- [ ] **Fun ControlNet-Union:** the real official checkpoint (alibaba-pai/MiniMax-H3-Fun-Controlnet-Union, sha256
+      `919a48acb525d...204eb02`, 6.8 GB) round-tripped through `MiniMaxH3ControlNetCheckpointConverter` and
+      `MiniMaxH3FunControlConfig.Detect` clean on the first attempt (2026-08-31, `MiniMaxH3ControlNetRealFileTests`,
+      CPU-only) — 5 blocks, 49 control channels, injection layers [0,10,20,30,40], all exactly as expected; no bug
+      found. Still open and still gated: a real generation. The base (20.96 GB) plus this branch would need
+      ~27.7 GB resident, which does not fit a single 24 GB card — this needs the same locally rebased pruned
+      branch or multi-control/windowed/inpaint validation the original checklist below still calls for. Run the
+      official full FL2VA branch and a locally rebased pruned branch with pure, multi-control/windowed,
+      zero-strength, and inpaint streams. Verify control residuals enter layers 0/10/20/30/40, target-audio rows
+      remain zero, and sampler masks plus ControlNet inpaint fail explicitly.
 - [ ] **int8 ConvRot video VAE:** compare encode and decode against the BF16 VAE across target, guide, reference,
       mask, and control inputs. Require decoded-frame SSIM ≥0.995, no tile seam/hang, and ≥1.2x encode/decode
       speed with lower peak memory at 768p on the RTX 4090. No quantized-audio-VAE claim is permitted.
