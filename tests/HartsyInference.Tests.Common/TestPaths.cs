@@ -372,6 +372,27 @@ public static class TestPaths
         /// <summary>The published step-distillation LoRA (larryvrh/MiniMax-H3-Turbo-Lora) — the only real-world H3
         /// LoRA, and the one that proved the bare-key format was unsupported. Override with MINIMAX_H3_TURBO_LORA.</summary>
         public static string TurboLora => Resolve("MINIMAX_H3_TURBO_LORA", Path.Combine(ModelsDir, "Lora", "minimax_h3_turbo_v4_step600_ema.safetensors"));
+
+        /// <summary>The official PDD FL2VA acceleration adapter (alibaba-pai/MiniMax-H3-Acc-LoRAs,
+        /// MiniMax-H3-FL2VA-Acc-8Step.safetensors, sha256 0b29be7042d88...ade5ea2). Override with
+        /// MINIMAX_H3_PDD_FL2VA.</summary>
+        public static string PddFl2VaAdapter => Resolve("MINIMAX_H3_PDD_FL2VA", Path.Combine(ModelsDir, "Lora", "MiniMaxH3Pdd", "MiniMax-H3-FL2VA-Acc-8Step.safetensors"));
+
+        /// <summary>The official PDD Ref2VA acceleration adapter (alibaba-pai/MiniMax-H3-Acc-LoRAs,
+        /// MiniMax-H3-Ref2VA-Acc-8Step.safetensors, sha256 111c82e669f...c0f55b18c). Override with
+        /// MINIMAX_H3_PDD_REF2VA.</summary>
+        public static string PddRef2VaAdapter => Resolve("MINIMAX_H3_PDD_REF2VA", Path.Combine(ModelsDir, "Lora", "MiniMaxH3Pdd", "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"));
+
+        /// <summary>The official Fun ControlNet-Union control branch (alibaba-pai/MiniMax-H3-Fun-Controlnet-Union,
+        /// sha256 919a48acb525d...204eb02): control_proj_in plus five control_blocks.*. Override with
+        /// MINIMAX_H3_FUN_CONTROLNET.</summary>
+        public static string FunControlNet => Resolve("MINIMAX_H3_FUN_CONTROLNET", Path.Combine(ModelsDir, "controlnet", "MiniMaxH3", "MiniMax-H3-Fun-Controlnet-Union.safetensors"));
+
+        /// <summary>The Kijai consolidated FastH3 VSA checkpoint (Kijai/MiniMax-H3-experimental,
+        /// minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors, sha256
+        /// 7221ae65d787...5101413d3), bound to the ComfySol64V1 sparse-attention profile. Override with
+        /// MINIMAX_H3_VSA_DIT.</summary>
+        public static string VsaDit => Resolve("MINIMAX_H3_VSA_DIT", Path.Combine(ModelsDir, "Stable-Diffusion", "MiniMaxH3", "flat", "diffusion_models", "minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors"));
     }
 
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
