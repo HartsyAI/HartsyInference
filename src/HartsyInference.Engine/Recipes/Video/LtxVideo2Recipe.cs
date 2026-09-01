@@ -157,12 +157,12 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
             if (_distilled)
             {
+                // ApplyDistilledContract always sets TwoStage = false here (two-stage is opt-in, decided later by
+                // LoadLatentUpsampler off the numerics.ltx2TwoStage knob) — so this message no longer branches on
+                // config.TwoStage; that ternary was dead code left over from when two-stage defaulted on.
                 config = ApplyDistilledContract(config);
-                Logs.Info(config.TwoStage
-                    ? "[LtxVideo2Recipe] Distilled variant selected — 8-step baked schedule, guidance 1, "
-                        + "two-stage default-on (HARTSY_LTX2_TWO_STAGE=0 for single-pass)."
-                    : "[LtxVideo2Recipe] Distilled variant selected on a pre-2.5 checkpoint — 8-step baked schedule, "
-                        + "guidance 1, single-pass (the x2 latent upsampler is a 2.5 model; no two-stage here).");
+                Logs.Info("[LtxVideo2Recipe] Distilled variant selected — 8-step baked schedule, guidance 1, "
+                    + "single-pass by default (set numerics.ltx2TwoStage to enable the two-stage latent-upsample refine).");
             }
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -339,10 +339,13 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
     /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is
     /// off. Two-stage is opt-in because the upsampler is a separate Swarm model, not a required part of the LTX-2.5
-    /// checkpoint bundle. <c>HARTSY_LTX2_TWO_STAGE=1</c> enables it; <c>HARTSY_LTX2_UPSAMPLER</c> names a specific
-    /// local file (never auto-downloaded — an explicit name is a request for exactly that file); otherwise the
-    /// default shipped name is resolved under <c>Models/latent_upscale_models/</c> and, if missing, auto-downloaded
-    /// with no confirmation prompt — same "starts, then fetches the refiner" behavior as SwarmUI's ComfyUI backend.</summary>
+    /// checkpoint bundle. Set the <c>numerics.ltx2TwoStage</c> knob (e.g. <c>{"settings": {"numerics.ltx2TwoStage":
+    /// true}}</c> in <c>hartsyinference.settings.json</c>, or a host's <c>KnobStore.Set</c> call) to enable it;
+    /// <c>paths.ltx2Upsampler</c> names a specific local file (never auto-downloaded — an explicit name is a request
+    /// for exactly that file); otherwise the default shipped name is resolved under <c>Models/latent_upscale_models/</c>
+    /// and, if missing, auto-downloaded with no confirmation prompt — same "starts, then fetches the refiner"
+    /// behavior as SwarmUI's ComfyUI backend. (These knobs are NOT environment variables — the engine stopped
+    /// reading its config from the process environment; see <c>KnobStore</c>/<c>KnobFile</c>.)</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
@@ -351,7 +354,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         }
         if (!_distilled)
         {
-            Logs.Warning("[LtxVideo2Recipe] HARTSY_LTX2_TWO_STAGE is set but this is not the distilled family — "
+            Logs.Warning("[LtxVideo2Recipe] numerics.ltx2TwoStage is set but this is not the distilled family — "
                 + "the two-stage sigma schedule and upsample point are only documented for ltx-2.5-distilled. Running single-pass.");
             return null;
         }
@@ -365,8 +368,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         {
             throw new FileNotFoundException(
                 $"LTX-2.5 two-stage is enabled but the named latent upsampler '{requested}' was not found under "
-                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Ensure the file exists locally, or unset "
-                + "HARTSY_LTX2_UPSAMPLER to fall back to the default (auto-downloadable) upsampler.");
+                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Ensure the file exists locally, or clear "
+                + "the paths.ltx2Upsampler setting to fall back to the default (auto-downloadable) upsampler.");
         }
         if (path is null)
         {
