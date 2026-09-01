@@ -495,6 +495,43 @@ public static class SideModels
         Sha256 = "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"
     };
 
+    /// <summary>LTX-2.5 Gemma-4-12B text tower (with projection, comfy int8 convrot) — split out of the DiT file on a
+    /// DiT-only "diffusion_models" LTX-2.5 checkpoint. Sourced from mcmonkey's ungated swarm-models repack rather than
+    /// the gated Lightricks/LTX-2.5 repo (same file SwarmUI core's ComfyUI backend resolves via GetLTX25Gemma4Model()),
+    /// so no HuggingFace auth is required. Ships its own tokenizer_json tensor — see LtxVideo2Recipe.</summary>
+    public static readonly ModelAsset Gemma4Ltx25 = new ModelAsset
+    {
+        Repo = "mcmonkey/swarm-models",
+        RepoPath = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors",
+        TargetSubdir = "text_encoders",
+        TargetName = "LTX-2/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot-v2.safetensors",
+        Role = "text encoder",
+        Sha256 = "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f"
+    };
+
+    /// <summary>LTX-2.5 video VAE (bf16) — split out of the DiT file; path/URL/hash match SwarmUI core's ltx2-5-video-vae,
+    /// auto-resolved when a DiT-only LTX-2.5 checkpoint carries no bundled VAE.</summary>
+    public static readonly ModelAsset Ltx25VideoVae = new ModelAsset
+    {
+        Repo = "mcmonkey/swarm-vaes",
+        RepoPath = "ltx-2.5-video-vae-conv-bf16.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "LTX-2/ltx-2.5-video-vae-conv-bf16.safetensors",
+        Role = "vae",
+        Sha256 = "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d"
+    };
+
+    /// <summary>LTX-2.5 audio VAE (bf16) — split out of the DiT file; path/URL/hash match SwarmUI core's ltx2-5-audio-vae.</summary>
+    public static readonly ModelAsset Ltx25AudioVae = new ModelAsset
+    {
+        Repo = "mcmonkey/swarm-vaes",
+        RepoPath = "ltx-2.5-audio-vae-bf16.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "LTX-2/ltx-2.5-audio-vae-bf16.safetensors",
+        Role = "vae",
+        Sha256 = "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"
+    };
+
     // ── TAESD preview decoders (folder = "VAE", subfolder "Taesd/") ──
 
     /// <summary>TAESD SD 1.5 preview decoder (madebyollin, ~10 MB); hash intentionally empty (upstream publishes no canonical sha256, loader fails loudly on truncation).</summary>
