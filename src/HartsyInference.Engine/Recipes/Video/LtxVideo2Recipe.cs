@@ -16,7 +16,18 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>LTX-2.3 recipe (Lightricks, 22B audiovisual; SwarmUI compat class <c>lightricks-ltx-video-2</c>). The bundled single-file/sharded checkpoint carries the dual-stream DiT, the per-modality text connectors, the video VAE, the audio VAE, the vocoder, and — when present — the Gemma-3-12B text tower; a SPLIT LTX-2.3 model ships the DiT alone and the video VAE (<see cref="SideModels.Ltx23VideoVae"/>), audio VAE (<see cref="SideModels.Ltx23AudioVae"/>), and text projection (<see cref="SideModels.Ltx23TextProjection"/>) are resolved as side models, with the standalone Gemma tower (<see cref="SideModels.GemmaLtx2"/>) when the checkpoint omits it. Lifted from the SwarmUI backend's <c>LtxVideo2Loader</c>.</summary>
+/// <summary>LTX-2.3 / LTX-2.5 recipe (Lightricks, 22B audiovisual; SwarmUI compat class <c>lightricks-ltx-video-2</c>). The
+/// bundled single-file/sharded checkpoint carries the dual-stream DiT, the per-modality text connectors, the video VAE,
+/// the audio VAE, the vocoder, and — when present — the Gemma text tower (Gemma-3 for 2.3, Gemma-4 for 2.5); a SPLIT
+/// "diffusion_models"-only checkpoint ships the DiT alone and the missing pieces are resolved as side models — video
+/// VAE / audio VAE / text projection for 2.3 (<see cref="SideModels.Ltx23VideoVae"/>, <see cref="SideModels.Ltx23AudioVae"/>,
+/// <see cref="SideModels.Ltx23TextProjection"/>) or video VAE / audio VAE for 2.5 (<see cref="SideModels.Ltx25VideoVae"/>,
+/// <see cref="SideModels.Ltx25AudioVae"/>), plus the standalone Gemma tower when the checkpoint omits it
+/// (<see cref="SideModels.GemmaLtx2"/> for Gemma-3, <see cref="SideModels.Gemma4Ltx25"/> for Gemma-4). All resolved
+/// with <c>downloadIfMissing: true</c> — matching SwarmUI's own ComfyUI-backend behavior (<c>RequireClipModel</c> /
+/// <c>DownloadModel</c>): no confirmation prompt, the missing file is fetched automatically the first time it's
+/// needed, sourced from ungated repacks (mcmonkey/Kijai) rather than the gated Lightricks repos. Lifted from the
+/// SwarmUI backend's <c>LtxVideo2Loader</c>.</summary>
 public sealed class LtxVideo2Recipe : IVideoRecipe
 {
     /// <summary>Gemma context length fed to the connectors (padded to a register multiple inside the pipeline).</summary>
@@ -84,15 +95,6 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             AddFile(context.CheckpointPath, loaders, merged);
             LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
 
-            if (conv.Vae.Count == 0)
-            {
-                Logs.Info("[LtxVideo2Recipe] Split LTX-2.3 model (no bundled VAE) — resolving side files: video VAE, audio VAE, text projection.");
-                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
-            }
-
             if (conv.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"LTX-2 checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
@@ -102,17 +104,57 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{context.CheckpointPath}' has no text-connector weights — the bundle must include the per-modality embeddings connectors.");
             }
+
+            // Variant detection runs off transformer-bucket keys alone (metadata + DiT tensor keys), so it is reliable
+            // BEFORE any side model is fetched — that is exactly what tells a split "diffusion_models"-only LTX-2.5
+            // checkpoint apart from a split LTX-2.3 one, so the auto-download below reaches for the right side files
+            // instead of guessing 2.3 (the family this recipe originally shipped for).
+            IReadOnlyDictionary<string, string>? metadata = loaders
+                .FirstOrDefault(l => l.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))?.Metadata;
+            LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
+            bool isV25 = config.UseKeyframesAbsPosEmbedding;
+
+            if (conv.Vae.Count == 0)
+            {
+                // No confirmation prompt — matches SwarmUI's own ComfyUI-backend behavior (RequireClipModel /
+                // DownloadModel): the missing companion is fetched automatically the first time it's needed, from an
+                // ungated repack, not the gated Lightricks repo.
+                if (isV25)
+                {
+                    Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled VAE) — auto-downloading side files: "
+                        + "video VAE, audio VAE (mcmonkey/swarm-vaes ungated repack).");
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                }
+                else
+                {
+                    Logs.Info("[LtxVideo2Recipe] Split LTX-2.3 model (no bundled VAE) — auto-downloading side files: "
+                        + "video VAE, audio VAE, text projection.");
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                }
+                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
+            }
             if (conv.Vae.Count == 0)
             {
                 throw new InvalidOperationException($"LTX-2 checkpoint '{context.CheckpointPath}' has no bundled video VAE weights.");
             }
+
+            if (conv.TextEncoder.Count == 0 && isV25)
+            {
+                // Gemma-3 (LTX-2.3) resolution stays lazy, further down, keyed off the isGemma4 discriminator on
+                // whatever ends up in conv.TextEncoder — but an empty bucket on a 2.5 checkpoint has no keys to
+                // discriminate with, so the DiT-variant signal (isV25) picks the side model here instead.
+                Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled Gemma-4 text tower) — auto-downloading "
+                    + "side file (mcmonkey/swarm-models ungated repack, avoids the gated Lightricks/LTX-2.5 repo).");
+                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
+            }
+
             Logs.Info($"[LtxVideo2Recipe] Converted {conv.Transformer.Count} DiT, {conv.Connectors.Count} connector, {conv.Vae.Count} VAE, "
                 + $"{conv.AudioVae.Count} audio-VAE, {conv.Vocoder.Count} vocoder, {conv.TextEncoder.Count} text-encoder keys.");
 
-            // Metadata from the file that actually carried the DiT; a split bundle's side files have their own.
-            IReadOnlyDictionary<string, string>? metadata = loaders
-                .FirstOrDefault(l => l.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))?.Metadata;
-            LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
             if (_distilled)
             {
                 config = ApplyDistilledContract(config);
@@ -249,7 +291,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 }
                 else
                 {
-                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                    Logs.Info("[LtxVideo2Recipe] No bundled Gemma-3 text tower — auto-downloading side file (Comfy-Org/ltx-2).");
+                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
                     SafeTensorsLoader gemmaLoader = new SafeTensorsLoader();
                     gemmaLoader.Load(gemmaSidePath);
                     loaders.Add(gemmaLoader);
@@ -294,7 +337,12 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         TwoStage = false,
     };
 
-    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is off. Two-stage is opt-in because the upsampler is a separate Swarm model, not a required part of the LTX-2.5 checkpoint bundle. <c>HARTSY_LTX2_TWO_STAGE=1</c> enables the local-file probe; <c>HARTSY_LTX2_UPSAMPLER</c> names the file; otherwise the shipped name is resolved under <c>Models/latent_upscale_models/</c>.</summary>
+    /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is
+    /// off. Two-stage is opt-in because the upsampler is a separate Swarm model, not a required part of the LTX-2.5
+    /// checkpoint bundle. <c>HARTSY_LTX2_TWO_STAGE=1</c> enables it; <c>HARTSY_LTX2_UPSAMPLER</c> names a specific
+    /// local file (never auto-downloaded — an explicit name is a request for exactly that file); otherwise the
+    /// default shipped name is resolved under <c>Models/latent_upscale_models/</c> and, if missing, auto-downloaded
+    /// with no confirmation prompt — same "starts, then fetches the refiner" behavior as SwarmUI's ComfyUI backend.</summary>
     private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
@@ -313,12 +361,18 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         // would load a different upsampler than the one they asked for.
         string? path = ModelFileLocator.Find(requested, UpsamplerSubdir)
             ?? (named is null ? FindAnyLatentUpsampler() : null);
-        if (path is null)
+        if (path is null && named is not null)
         {
             throw new FileNotFoundException(
-                $"LTX-2.5 two-stage is enabled but the latent upsampler '{requested}' was not found under "
-                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Ensure the file exists locally before enabling two-stage, or set HARTSY_LTX2_TWO_STAGE=0 for single-pass. "
-                + $"The supported public source in this engine is {SideModels.Ltx25LatentUpsampler.Repo}/{SideModels.Ltx25LatentUpsampler.RepoPath}.");
+                $"LTX-2.5 two-stage is enabled but the named latent upsampler '{requested}' was not found under "
+                + $"'{Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir)}'. Ensure the file exists locally, or unset "
+                + "HARTSY_LTX2_UPSAMPLER to fall back to the default (auto-downloadable) upsampler.");
+        }
+        if (path is null)
+        {
+            Logs.Info("[LtxVideo2Recipe] Two-stage enabled, latent upsampler not found locally — auto-downloading "
+                + $"{SideModels.Ltx25LatentUpsampler.Repo}/{SideModels.Ltx25LatentUpsampler.RepoPath}.");
+            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         SafeTensorsLoader loader = new SafeTensorsLoader();
