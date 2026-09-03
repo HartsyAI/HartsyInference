@@ -21,6 +21,8 @@ namespace HartsyInference.Engine.Audio.Wake;
 public sealed class WakeWorker : IDisposable
 {
     private const int DrainBufferSamples = 8192;
+    /// <summary>Headroom for the denoiser to emit a frame it had been holding, on top of what was drained.</summary>
+    private const int DenoiseSlackSamples = 1024;
     private const int IdleSleepMs = 10;
 
     private readonly ConcurrentDictionary<string, WakeSession> _sessions;
@@ -50,6 +52,7 @@ public sealed class WakeWorker : IDisposable
     private void Run()
     {
         float[] buffer = new float[DrainBufferSamples];
+        float[] denoised = new float[DrainBufferSamples + DenoiseSlackSamples];
         List<WakeDetection> detections = [];
         // Private to this thread: the shared audio runtime serializes on one generation lock, and an 80 ms
         // cadence would hold it often enough to starve every other request on the engine.
@@ -68,6 +71,7 @@ public sealed class WakeWorker : IDisposable
                     if (session.RequestReset)
                     {
                         session.Pipeline.Reset();
+                        session.Denoiser?.Reset();
                         session.RequestReset = false;
                     }
 
@@ -77,14 +81,29 @@ public sealed class WakeWorker : IDisposable
 
                     try
                     {
-                        session.Pipeline.Push(backend, buffer.AsSpan(0, read), detections);
-                        StepsProcessed += read / WakeDetectionPipeline.ChunkSamples;
+                        // Denoise before scoring, and only for scoring: the session's capture buffer keeps the
+                        // raw audio, so transcription and speaker identification still see what the microphone
+                        // actually heard. The denoiser holds audio back while it fills, so `scored` is not
+                        // `read` and the pipeline must be given the returned count.
+                        ReadOnlySpan<float> toScore;
+                        if (session.Denoiser is null) toScore = buffer.AsSpan(0, read);
+                        else
+                        {
+                            int scored = session.Denoiser.Process(backend, buffer.AsSpan(0, read), denoised);
+                            toScore = denoised.AsSpan(0, scored);
+                        }
+                        if (!toScore.IsEmpty)
+                        {
+                            session.Pipeline.Push(backend, toScore, detections);
+                            StepsProcessed += toScore.Length / WakeDetectionPipeline.ChunkSamples;
+                        }
                     }
                     catch (Exception ex)
                     {
                         // One device's bad state must not take the loop down for every other device.
                         Logs.Error($"[Audio][Wake] Detection failed for device '{session.DeviceId}'; resetting it.", ex);
                         session.Pipeline.Reset();
+                        session.Denoiser?.Reset();
                         continue;
                     }
 
