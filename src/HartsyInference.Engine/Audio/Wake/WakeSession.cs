@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
@@ -24,7 +25,7 @@ public enum WakeSessionState
 /// handoff through <see cref="AudioRingBuffer"/>, which drops oldest on overflow. That is the correct failure
 /// mode for an always-on listener: if inference ever falls behind, losing the oldest audio degrades detection
 /// briefly, whereas blocking the socket would stall the device and cascade into its reconnect logic.</para></summary>
-public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline) : IDisposable
+public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline, RnnoiseStream? denoiser = null) : IDisposable
 {
     /// <summary>Audio buffered between the socket and the worker (2 s). Sized to absorb scheduling jitter and short inference stalls without becoming a latency reservoir.</summary>
     public const int RingCapacitySamples = 32_000;
@@ -44,6 +45,11 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline)
 
     /// <summary>The device's detection pipeline. Touched only by the wake worker thread.</summary>
     public WakeDetectionPipeline Pipeline { get; } = pipeline;
+
+    /// <summary>This device's noise suppressor, or null when suppression is off. Carries per-stream state (GRU
+    /// hidden vectors, resampler and overlap-add tails) over shared weights, so it is per-session and, like
+    /// <see cref="Pipeline"/>, touched only by the wake worker thread.</summary>
+    public RnnoiseStream? Denoiser { get; } = denoiser;
 
     /// <summary>Frame codec for this connection, replaced when the device reconnects.</summary>
     public WakeFrameCodec? Codec { get; set; }
@@ -128,5 +134,6 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline)
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         Pipeline.Dispose();
+        Denoiser?.Dispose();
     }
 }

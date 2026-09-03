@@ -39,6 +39,13 @@ public sealed record WakeServiceOptions
     /// <summary>Whether to identify who spoke and enforce per-word speaker restrictions. Requires CAM++ weights; when they are missing the service logs and runs ungated.</summary>
     public bool IdentifySpeakers { get; init; } = true;
 
+    /// <summary>Whether to run RNNoise over each satellite's audio before scoring it. Requires denoiser weights under <c>{ModelRoot}/denoise</c>; when they are missing the service logs and runs without suppression rather than refusing to listen.
+    ///
+    /// <para>This is a property of the microphone and the room, not of a wake word, so it is deliberately global rather than per-word: one pipeline scores every head against one audio stream, and "which word's setting applies" would have no answer.</para>
+    ///
+    /// <para>Off by default. It costs real compute per stream and changes the audio every head sees, so it is an opt-in rather than something that silently starts happening on upgrade.</para></summary>
+    public bool NoiseSuppression { get; init; }
+
     /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to one engine's wake events without being in-process — the same detection can drive several agents.</summary>
     public IReadOnlyList<string> Webhooks { get; init; } = [];
 

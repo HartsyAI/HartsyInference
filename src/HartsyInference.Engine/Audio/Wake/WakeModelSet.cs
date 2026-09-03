@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Exceptions;
@@ -21,6 +22,7 @@ public sealed class WakeModelSet : IDisposable
     private readonly object _lock = new();
     private WakeMelFrontend? _mel;
     private SpeechEmbeddingModel? _embedding;
+    private RnnoiseWeights? _denoiseWeights;
     private int _disposed;
 
     /// <summary>The wake assets directory this set was loaded from.</summary>
@@ -131,6 +133,47 @@ public sealed class WakeModelSet : IDisposable
         }
     }
 
+    /// <summary>Whether noise suppression is available, i.e. <see cref="LoadDenoiser"/> found weights.</summary>
+    public bool DenoiseAvailable => _denoiseWeights?.IsLoaded == true;
+
+    /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c>. Returns false and logs when they are
+    /// absent — a missing optional model must not stop the listener from hearing anything, so the caller runs
+    /// without suppression rather than failing to start.</summary>
+    public bool LoadDenoiser()
+    {
+        string path = Path.Combine(ModelRoot, "denoise", "rnnoise.safetensors");
+        if (!File.Exists(path))
+        {
+            Logs.Warning($"[Audio][Wake] Noise suppression is enabled but no denoiser was found at '{path}'. Listening without it.");
+            return false;
+        }
+        try
+        {
+            RnnoiseWeights weights = new();
+            using (SafeTensorsLoader loader = new())
+            {
+                loader.Load(path);
+                weights.Load(loader.GetAllTensors());
+            }
+            _denoiseWeights = weights;
+            Logs.Info($"[Audio][Wake] Noise suppression enabled (weights from '{path}').");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}'; listening without it.", ex);
+            return false;
+        }
+    }
+
+    /// <summary>A per-device denoiser over the shared weights, or null when suppression is off or unavailable.
+    /// The weights are shared; only the stream state is per-device.</summary>
+    public RnnoiseStream? CreateDenoiser() =>
+        _denoiseWeights is null ? null : new RnnoiseStream(_denoiseWeights, WakeAudioRate);
+
+    /// <summary>The rate satellites stream at, and the rate the detection pipeline expects.</summary>
+    private const int WakeAudioRate = 16_000;
+
     /// <summary>Builds a fresh per-device pipeline wired to the shared models and every loaded word.</summary>
     public WakeDetectionPipeline CreatePipeline()
     {
@@ -178,5 +221,8 @@ public sealed class WakeModelSet : IDisposable
         }
         _mel?.Dispose();
         _embedding?.Dispose();
+        // Safe only because every RnnoiseStream borrowing these belongs to a session, and sessions are disposed
+        // before the model set is.
+        _denoiseWeights?.Dispose();
     }
 }

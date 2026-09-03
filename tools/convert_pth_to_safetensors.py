@@ -10,6 +10,10 @@ Several audio models in our research scope ship only .pth pickles:
   - StyleTTS 2  (epochs_2nd_00020.pth — dict of state_dicts)
   - ChatTTS     (gpt.pt, dvae.pt, decoder.pt — flat state_dicts)
   - Moonshine   (also has safetensors on HF, but the original .pt was the canonical drop)
+  - RNNoise     (rnnoise10Ga_*.pth — training checkpoint wrapping state_dict alongside
+                 model_kwargs/loss/epoch. Prefer this over the shipped rnnoise_data.c /
+                 weights_blob.bin, which carry int8-quantized copies of some layers;
+                 the .pth is the unquantized float source.)
 
 HartsyInference reads only safetensors at runtime (project rule: pure C#, no python
 pickle parsing). This is the offline one-shot tool that produces the artifact our
@@ -17,9 +21,10 @@ ModelHandler.SafeTensors loader consumes.
 
 Usage
 -----
-  python tools/convert_pth_to_safetensors.py kokoro-v1_0.pth -o kokoro.safetensors
-  python tools/convert_pth_to_safetensors.py styletts2.pth   -o styletts2.safetensors --flatten
-  python tools/convert_pth_to_safetensors.py chat_gpt.pt     -o chat_gpt.safetensors
+  python tools/convert_pth_to_safetensors.py kokoro-v1_0.pth   -o kokoro.safetensors
+  python tools/convert_pth_to_safetensors.py styletts2.pth     -o styletts2.safetensors
+  python tools/convert_pth_to_safetensors.py chat_gpt.pt       -o chat_gpt.safetensors
+  python tools/convert_pth_to_safetensors.py rnnoise10Ga_12.pth --list-only
 
 The script:
 
@@ -29,10 +34,13 @@ The script:
      the tensor leaves.
   2. Recursively walks the loaded object — handles plain Tensor, dict of Tensor,
      and dict of {section_name: state_dict} (the StyleTTS2 / Kokoro pattern).
-  3. With --flatten, prefixes nested keys with their section name so the final
-     safetensors file has flat keys like "bert.embeddings.word_embeddings.weight"
-     instead of nested groupings.
-  4. Writes to safetensors using safetensors.torch.save_file().
+  3. Unwraps a training-checkpoint envelope (a 'state_dict' / 'model' / 'net' /
+     'module' key) so keys come out as "conv1.weight", not "state_dict.conv1.weight".
+  4. Nested keys are always flattened to a dotted path, so the final safetensors
+     file has flat keys like "bert.embeddings.word_embeddings.weight" rather than
+     nested groupings. (There is no --flatten switch; earlier revisions of this
+     docstring advertised one that was never implemented.)
+  5. Writes to safetensors using safetensors.torch.save_file().
 
 Requires
 --------
@@ -74,10 +82,18 @@ def collect_tensors(obj: Any, prefix: str = "", out: dict[str, torch.Tensor] | N
         return out
 
     if isinstance(obj, dict):
-        # Unwrap common wrapper keys before recursing.
+        # Unwrap a training-checkpoint envelope before recursing. The test is "no sibling
+        # holds a tensor", not a key-count limit: a real state_dict has tensors at the top
+        # level, whereas an envelope's siblings are scalars/config (RNNoise ships
+        # model_args/model_kwargs/state_dict/loss/epoch — five keys, so the old `len <= 3`
+        # guard silently left a "state_dict." prefix on every tensor name).
         for wrapper in ("state_dict", "model", "net", "module"):
-            if wrapper in obj and isinstance(obj[wrapper], (dict, torch.Tensor)) and len(obj) <= 3:
-                return collect_tensors(obj[wrapper], prefix, out)
+            if wrapper in obj and isinstance(obj[wrapper], (dict, torch.Tensor)):
+                siblings_are_metadata = not any(
+                    isinstance(v, torch.Tensor) for k, v in obj.items() if k != wrapper
+                )
+                if siblings_are_metadata:
+                    return collect_tensors(obj[wrapper], prefix, out)
 
         for k, v in obj.items():
             # Strip DataParallel "module." prefixes that some training pipelines bake in.
@@ -127,7 +143,8 @@ def cast_dtype(tensors: dict[str, torch.Tensor], target: str | None) -> dict[str
 def main() -> int:
     parser = argparse.ArgumentParser(description="Convert .pth / .pt to .safetensors for HartsyInference.")
     parser.add_argument("input", help="Path to the .pth / .pt file.")
-    parser.add_argument("-o", "--output", required=True, help="Output .safetensors path.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output .safetensors path. Required unless --list-only.")
     parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default=None,
                         help="Optional dtype cast for all floating-point tensors.")
     parser.add_argument("--list-only", action="store_true",
@@ -138,6 +155,10 @@ def main() -> int:
 
     if not os.path.exists(args.input):
         print(f"input not found: {args.input}", file=sys.stderr)
+        return 1
+
+    if args.output is None and not args.list_only:
+        print("-o/--output is required unless --list-only is given.", file=sys.stderr)
         return 1
 
     print(f"loading {args.input} ...")

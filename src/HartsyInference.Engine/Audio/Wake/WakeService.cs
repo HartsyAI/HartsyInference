@@ -80,6 +80,8 @@ public sealed class WakeService : IDisposable
         _models = new WakeModelSet(root);
         _models.Load(words);
 
+        if (_options.NoiseSuppression) _models.LoadDenoiser();
+
         if (_options.IdentifySpeakers && SpeakerVerifier.IsAvailable)
         {
             try
@@ -112,7 +114,7 @@ public sealed class WakeService : IDisposable
         }
     }
 
-    private WakeSession CreateSession(string deviceId) => new(deviceId, _models!.CreatePipeline());
+    private WakeSession CreateSession(string deviceId) => new(deviceId, _models!.CreatePipeline(), _models.CreateDenoiser());
 
     private async Task OnDetectionAsync(WakeSession session, WakeDetection detection)
     {
