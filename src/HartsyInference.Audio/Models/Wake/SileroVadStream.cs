@@ -59,6 +59,14 @@ public sealed class SileroVadStream
     /// <summary>True while a speech segment is open and has not yet been closed by silence.</summary>
     public bool InSpeech => _triggered;
 
+    /// <summary>Whether the most recently pushed chunk was itself speech, hysteresis applied.
+    ///
+    /// <para>Distinct from <see cref="InSpeech"/>, which stays true for <c>minSilenceMs</c> after the speaker
+    /// stops because it describes a segment rather than a moment. A caller timing silence wants the moment:
+    /// keying a silence clock off <see cref="InSpeech"/> adds this stream's minimum-silence window to the
+    /// caller's own, and the speaker waits for the sum of the two.</para></summary>
+    public bool LastChunkWasSpeech => LastProbability >= (_triggered ? _exitThreshold : _enterThreshold);
+
     /// <summary>Padded start of the open segment, or -1 when not in speech.</summary>
     public long SpeechStartSample => _triggered ? _speechStart : -1;
 

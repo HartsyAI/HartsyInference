@@ -96,7 +96,9 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
             if (_vadFilled < SileroVad.WindowSamples) return;
             _vadFilled = 0;
             Vad.Push(backend, _vadWindow, out _);
-            if (Vad.InSpeech)
+            // The chunk's own verdict, not the segment's: a segment stays open for the stream's minimum-silence
+            // window after the last speech, and counting that window here would add it to the caller's.
+            if (Vad.LastChunkWasSpeech)
             {
                 LastSpeechTicks = Environment.TickCount64;
             }
