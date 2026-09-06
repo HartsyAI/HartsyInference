@@ -30,15 +30,17 @@ stable release will require. Dates are UTC.
 
   | Benchmark | Before | After |
   |---|---|---|
-  | `Bench_Piper` (3.2 s utterance) | 9.872 s, RTF 3.115 | 0.541 s, RTF 0.171 |
-  | `Bench_WhisperBase` (3 s clip) | 7.240 s, RTF 2.413 | 1.968 s, RTF 0.656 |
+  | `Bench_Piper` (3.2 s utterance) | 9.872 s, RTF 3.115 | 0.658 s, RTF 0.208 |
+  | `Bench_WhisperBase` (3 s clip) | 7.240 s, RTF 2.413 | 2.112 s, RTF 0.704 |
 
   Small calls still run serially: dispatch costs more than the work below `CpuParallel.MinWorkForParallel`.
 
 ### Added
 - **`HARTSY_CPU_THREADS`** (`numerics.cpuThreads`) caps the workers those kernels use; 0, the default, means one
   per logical core. It exists because the CPU device gate is a no-op, so an LLM decode and a TTS synthesis
-  genuinely overlap on the same box and would otherwise each claim every core.
+  genuinely overlap on the same box and would otherwise each claim every core. The cap is enforced through a
+  shared task scheduler rather than `MaxDegreeOfParallelism` alone, which bounds only one call at a time and
+  would let two concurrent generations oversubscribe between them.
 - **`SttBenchTests.Bench_WhisperBase`**, the transcription counterpart to the existing TTS benchmarks. Speech
   recognition sits on the critical path of a voice turn and had no benchmark at all, so kernel work could speed
   up synthesis and leave it untouched unnoticed.

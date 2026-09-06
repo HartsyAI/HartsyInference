@@ -11,7 +11,9 @@ namespace HartsyInference.Core.Numerics;
 ///
 /// <para>One ceiling matters because the CPU device gate is a no-op: an LLM decode and a TTS synthesis can be in
 /// flight at the same moment on the same box, and two independent <see cref="Parallel.For"/> calls would each
-/// claim every core. <see cref="EngineKnobs.CpuThreads"/> is what a host turns down to leave room.</para>
+/// claim every core. The cap is therefore enforced by a shared scheduler rather than by
+/// <see cref="ParallelOptions.MaxDegreeOfParallelism"/> alone, which only bounds one call at a time.
+/// <see cref="EngineKnobs.CpuThreads"/> is what a host turns down to leave room.</para>
 ///
 /// <para>The work threshold is not optional. Dispatch was measured at ~22 µs for 16 chunks on a 16-core box (see
 /// <c>CheckpointConvertUtils</c>'s fp8 passes, which pay the same cost), so a small convolution finishes sooner
@@ -31,6 +33,31 @@ public static class CpuParallel
         {
             int configured = EngineKnobs.CpuThreads.Value;
             return configured > 0 ? Math.Min(configured, Environment.ProcessorCount) : Environment.ProcessorCount;
+        }
+    }
+
+    // The ceiling has to hold across calls, not just within one. MaxDegreeOfParallelism alone is per-invocation,
+    // so a decode and a synthesis running at the same moment would each be allowed the full count and together
+    // oversubscribe the machine — which is the exact situation this exists to prevent, since the CPU device gate
+    // is a no-op and those two really do overlap. A shared scheduler caps their combined concurrency.
+    //
+    // Rebuilt when the knob changes, because the limit is fixed at construction. Nesting note: no kernel here
+    // calls into another one's parallel region (Conv2D reaches MatMul through a serial batch loop), and
+    // Parallel.For can inline work on the calling thread, so a capped scheduler does not deadlock this code.
+    private static readonly object _schedulerLock = new();
+    private static ConcurrentExclusiveSchedulerPair? _schedulerPair;
+    private static int _schedulerLimit;
+
+    private static TaskScheduler SharedScheduler(int limit)
+    {
+        lock (_schedulerLock)
+        {
+            if (_schedulerPair is null || _schedulerLimit != limit)
+            {
+                _schedulerPair = new ConcurrentExclusiveSchedulerPair(TaskScheduler.Default, limit);
+                _schedulerLimit = limit;
+            }
+            return _schedulerPair.ConcurrentScheduler;
         }
     }
 
@@ -58,7 +85,11 @@ public static class CpuParallel
         }
         try
         {
-            Parallel.For(0, count, new ParallelOptions { MaxDegreeOfParallelism = threads }, body);
+            Parallel.For(0, count, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = threads,
+                TaskScheduler = SharedScheduler(threads),
+            }, body);
         }
         catch (AggregateException ex) when (ex.InnerException is not null)
         {

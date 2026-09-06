@@ -77,14 +77,19 @@ public sealed class SttBenchTests
     [Fact]
     public async Task Bench_WhisperBase()
     {
-        string dir = Path.Combine(AudioModelCache.CacheRoot, "stt", "openai--whisper-base");
-        if (!Directory.Exists(dir) || Directory.GetFiles(dir, "*.safetensors").Length == 0)
+        // Ask the cache where it would put this repo, and check for the exact artifact the loader needs,
+        // rather than globbing for any .safetensors in a hand-built path — the cache creates the directory
+        // unconditionally, so its existence proves nothing, and a stray file would let this fall through to
+        // the load path and start a multi-hundred-megabyte download inside a benchmark.
+        const string repo = "openai/whisper-base";
+        string weights = Path.Combine(AudioModelCache.GetRepoDirectory(repo, "stt"), "model.safetensors");
+        if (!File.Exists(weights))
         {
-            _out.WriteLine($"SKIP Bench_WhisperBase: no cached weights at {dir}");
+            _out.WriteLine($"SKIP Bench_WhisperBase: no cached weights at {weights}");
             return;
         }
         using IBackend backend = MakeBackend(out string device);
-        using WhisperPipeline pipeline = await WhisperPipeline.LoadAsync("openai/whisper-base");
+        using WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo);
         float[] audio = SpokenCommandClip(out double seconds);
 
         (double best, double rtf) = Time(
