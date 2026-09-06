@@ -21,8 +21,24 @@ public sealed record WakeServiceOptions
     /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the check, which is the sane default on a trusted LAN; set it before this endpoint is reachable from anywhere less trusted, because without it any device that can open the port can stream audio in and receive every detection — including the transcripts of what was said.</summary>
     public string? AuthToken { get; init; }
 
-    /// <summary>Audio captured around a detection and handed to transcription.</summary>
+    /// <summary>Longest utterance captured around a detection, and the cap on how long end-of-speech will wait.</summary>
     public double UtteranceSeconds { get; init; } = 8.0;
+
+    /// <summary>Silence, in milliseconds, that ends an utterance once <see cref="UseEndOfSpeech"/> is on and VAD
+    /// weights are installed. 500 ms is about the shortest a person can pause mid-sentence without it reading as
+    /// the end of one.</summary>
+    public int EndOfSpeechSilenceMs { get; init; } = 500;
+
+    /// <summary>Whether to end an utterance when the speaker stops rather than after a fixed wait.
+    ///
+    /// <para>Off, or with no VAD weights installed, transcription starts a fixed three seconds after the word
+    /// fires and captures the preceding <see cref="UtteranceSeconds"/> — which truncates anyone whose question
+    /// runs past that, and makes everyone else wait the full three seconds for a two-word command.</para></summary>
+    public bool UseEndOfSpeech { get; init; } = true;
+
+    /// <summary>Audio kept from before the detection, so the snapshot starts ahead of the wake word rather than
+    /// clipping its first syllable.</summary>
+    public double LeadInSeconds { get; init; } = 1.5;
 
     /// <summary>Directory holding wake assets (<c>vad/</c>, <c>backbone/</c>, <c>heads/</c>). Defaults to <c>{models}/audio/wake</c>.</summary>
     public string? ModelRoot { get; init; }

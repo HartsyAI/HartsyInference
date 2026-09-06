@@ -72,6 +72,7 @@ public sealed class WakeWorker : IDisposable
                     {
                         session.Pipeline.Reset();
                         session.Denoiser?.Reset();
+                        session.ResetVad();
                         session.RequestReset = false;
                     }
 
@@ -96,6 +97,10 @@ public sealed class WakeWorker : IDisposable
                         {
                             session.Pipeline.Push(backend, toScore, detections);
                             StepsProcessed += toScore.Length / WakeDetectionPipeline.ChunkSamples;
+                            // End-of-speech runs on the denoised audio for the same reason scoring does: it is
+                            // deciding whether a person is talking, and room noise is exactly what would keep
+                            // it from ever hearing the pause.
+                            session.PushVad(backend, toScore);
                         }
                     }
                     catch (Exception ex)
@@ -104,6 +109,7 @@ public sealed class WakeWorker : IDisposable
                         Logs.Error($"[Audio][Wake] Detection failed for device '{session.DeviceId}'; resetting it.", ex);
                         session.Pipeline.Reset();
                         session.Denoiser?.Reset();
+                        session.ResetVad();
                         continue;
                     }
 

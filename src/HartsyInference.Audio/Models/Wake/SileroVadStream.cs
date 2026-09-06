@@ -49,6 +49,10 @@ public sealed class SileroVadStream
         _speechPadSamples = speechPadMs * SampleRate / 1000;
     }
 
+    /// <summary>The model this stream drives. Exposed because the stream does not own it — whoever constructed
+    /// the pair has to dispose it, and when the stream is the only handle that has been kept, this is it.</summary>
+    public SileroVad Model => _vad;
+
     /// <summary>Probability of the most recently pushed chunk.</summary>
     public float LastProbability { get; private set; }
 

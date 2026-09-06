@@ -65,6 +65,45 @@ public sealed unsafe class OnnxWeightLoader : IDisposable
         return OnnxWeightNameResolver.Resolve(Model, _tensors);
     }
 
+    /// <summary>Materializes the float <c>Constant</c> values of one nested subgraph, in graph order.</summary>
+    /// <param name="attributeName">Which branch: <c>then_branch</c>, <c>else_branch</c>, <c>body</c>.</param>
+    /// <remarks>For exports that keep their weights inside an <c>If</c> rather than as top-level initializers.
+    /// The tensors are unnamed in the wire format, so the caller binds them by order and shape — see
+    /// <c>WakeModelSet</c>'s Silero loader, which is the reason this exists.
+    ///
+    /// <para>The returned tensors are owned by this loader and freed with it, exactly like
+    /// <see cref="GetAllTensors"/>'s.</para></remarks>
+    public IReadOnlyList<Tensor> SubgraphConstants(string attributeName)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (Model is null) throw new InvalidOperationException("Call Load before SubgraphConstants.");
+
+        List<Tensor> result = [];
+        byte[] buffer = File.ReadAllBytes(FilePath);
+        fixed (byte* basePtr = buffer)
+        {
+            foreach (OnnxSubgraph sub in Model.Subgraphs)
+            {
+                if (!string.Equals(sub.AttributeName, attributeName, StringComparison.Ordinal)) continue;
+                foreach (OnnxTensor t in sub.Constants)
+                {
+                    if (t.DataType != DtFloat && t.DataType != DtFloat16) continue;
+                    if (t.RawLength == 0) continue;
+                    DType dtype = t.DataType == DtFloat ? DType.F32 : DType.F16;
+                    TensorShape shape = ToShape(t.Dims);
+                    if (shape.ElementCount * dtype.SizeInBytes != t.RawLength) continue;
+                    Tensor tensor = new(shape, dtype);
+                    Buffer.MemoryCopy(basePtr + t.RawOffset, (void*)tensor.DataPointer, t.RawLength, t.RawLength);
+                    _subgraphTensors.Add(tensor);
+                    result.Add(tensor);
+                }
+            }
+        }
+        return result;
+    }
+
+    private readonly List<Tensor> _subgraphTensors = [];
+
     private static TensorShape ToShape(long[] dims)
         => dims.Length == 0 ? new TensorShape(1) : new TensorShape(dims);     // 0-d scalar → [1]
 
@@ -73,5 +112,7 @@ public sealed unsafe class OnnxWeightLoader : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Tensor t in _tensors.Values) t.Dispose();
         _tensors.Clear();
+        foreach (Tensor t in _subgraphTensors) t.Dispose();
+        _subgraphTensors.Clear();
     }
 }
