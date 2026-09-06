@@ -24,6 +24,11 @@ public sealed record WakeEvent
     public required float Score { get; init; }
     public string? Route { get; init; }
     public string? Transcript { get; init; }
+
+    /// <summary>The transcript with the wake phrase removed — what the user actually asked. Null when there was
+    /// no transcript. See <see cref="WakePhrase"/> for why both are reported.</summary>
+    public string? Command { get; init; }
+
     public string? Speaker { get; init; }
     public DateTimeOffset DetectedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -81,6 +86,7 @@ public sealed class WakeService : IDisposable
         _models.Load(words);
 
         if (_options.NoiseSuppression) _models.LoadDenoiser();
+        if (_options.UseEndOfSpeech) _models.LoadVad();
 
         if (_options.IdentifySpeakers && SpeakerVerifier.IsAvailable)
         {
@@ -114,7 +120,9 @@ public sealed class WakeService : IDisposable
         }
     }
 
-    private WakeSession CreateSession(string deviceId) => new(deviceId, _models!.CreatePipeline(), _models.CreateDenoiser());
+    private WakeSession CreateSession(string deviceId) =>
+        new(deviceId, _models!.CreatePipeline(), _models.CreateDenoiser(),
+            _options.UseEndOfSpeech ? _models.CreateVad(_options.EndOfSpeechSilenceMs) : null);
 
     private async Task OnDetectionAsync(WakeSession session, WakeDetection detection)
     {
@@ -172,6 +180,7 @@ public sealed class WakeService : IDisposable
             Score = detection.Score,
             Route = config?.Route,
             Transcript = transcript,
+            Command = transcript is null ? null : WakePhrase.Strip(transcript, detection.Word),
             Speaker = speaker,
         };
 
@@ -186,11 +195,12 @@ public sealed class WakeService : IDisposable
     /// <summary>Captures the utterance around a detection and transcribes it.</summary>
     private async Task<string?> TranscribeUtteranceAsync(WakeSession session)
     {
-        // Wait for the command that follows the wake word before transcribing; the detection fires as the
-        // word ends, so the useful audio is still arriving.
-        await Task.Delay(TimeSpan.FromSeconds(Math.Min(3.0, _options.UtteranceSeconds))).ConfigureAwait(false);
+        // Wait for the command that follows the wake word before transcribing; the detection fires as the word
+        // ends, so the useful audio is still arriving. How long to wait is the whole question: too short and a
+        // long question is cut off mid-word, too long and every short command pays for it.
+        double captureSeconds = await WaitForUtteranceEndAsync(session).ConfigureAwait(false);
 
-        float[] pcm = session.SnapshotRecent(_options.UtteranceSeconds);
+        float[] pcm = session.SnapshotRecent(captureSeconds);
         if (pcm.Length == 0) return null;
 
         // The wake path carries int16-scaled audio; the WAV writer wants ±1.
@@ -207,6 +217,56 @@ public sealed class WakeService : IDisposable
         }).ConfigureAwait(false);
         return result.Text;
     }
+
+    /// <summary>Waits for the speaker to finish, and returns how many seconds of history to transcribe.
+    ///
+    /// <para>With an end-of-speech detector, this returns as soon as the room has been quiet for
+    /// <see cref="WakeServiceOptions.EndOfSpeechSilenceMs"/> — so a two-word command is transcribed almost
+    /// immediately and a long question is allowed to finish. Without one it falls back to the fixed three-second
+    /// wait, which is what shipped before and which truncates anything longer than that.</para>
+    ///
+    /// <para>The returned span covers the wait plus <see cref="WakeServiceOptions.LeadInSeconds"/> of audio from
+    /// before the word fired, because the detection lands as the phrase ends and transcription of a command
+    /// missing its opening syllable is worse than transcription of a little extra silence. It is capped at
+    /// <see cref="WakeServiceOptions.UtteranceSeconds"/>, which is also the cap on the wait itself: someone who
+    /// never stops talking still gets an answer.</para></summary>
+    private async Task<double> WaitForUtteranceEndAsync(WakeSession session)
+    {
+        double cap = _options.UtteranceSeconds;
+        if (session.Vad is null)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(Math.Min(3.0, cap))).ConfigureAwait(false);
+            return cap;
+        }
+
+        // The wake phrase itself is speech, so the detector has just seen some; starting the silence clock now
+        // rather than trusting a stale value keeps a device that was already quiet from ending instantly.
+        session.LastSpeechTicks = Environment.TickCount64;
+
+        long start = Environment.TickCount64;
+        long maxWaitMs = (long)(Math.Max(0, cap - _options.LeadInSeconds) * 1000);
+        int silenceMs = Math.Max(0, _options.EndOfSpeechSilenceMs);
+        while (true)
+        {
+            await Task.Delay(PollIntervalMs).ConfigureAwait(false);
+            long now = Environment.TickCount64;
+            long waited = now - start;
+            if (now - session.LastSpeechTicks >= silenceMs)
+            {
+                double spoken = (waited + silenceMs) / 1000.0;
+                return Math.Min(cap, spoken + _options.LeadInSeconds);
+            }
+            if (waited >= maxWaitMs)
+            {
+                Logs.Verbose($"[Audio][Wake] '{session.DeviceId}' still speaking after {cap:F1}s; transcribing what there is.");
+                return cap;
+            }
+        }
+    }
+
+    /// <summary>How often the end-of-speech wait re-checks. Below the VAD's own 32 ms window there is nothing
+    /// new to see, and above ~100 ms the poll itself would show up in the latency it is measuring.</summary>
+    private const int PollIntervalMs = 50;
 
     /// <summary>Runs the satellite protocol over a caller-supplied stream, joining the same session machinery the
     /// TCP listener uses.
@@ -305,6 +365,7 @@ public sealed class WakeService : IDisposable
                 $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
                 (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
                 (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
+                (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
                 (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") + "}";
             await codec.WriteAsync(type, data, CancellationToken.None).ConfigureAwait(false);
         }

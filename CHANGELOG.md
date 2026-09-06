@@ -8,6 +8,33 @@ stable release will require. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **End-of-speech detection on the wake path.** After a wake word fired, the service waited a fixed three
+  seconds and then transcribed the preceding eight — so a question longer than three seconds was cut off
+  mid-word, and a two-word command still cost the full three seconds. Measured on a real satellite before this
+  change: "Hey Jarvis, can you tell me what the weather is going to be like this afternoon and whether I should
+  bring an umbrella…" came back as "…like this after".
+
+  `SileroVadStream` has been implemented and parity-tested since it was written but was wired to nothing. It
+  now runs per session on the wake worker's own thread and backend, alongside the detection pipeline and the
+  denoiser, and `WakeService` ends the utterance on `EndOfSpeechSilenceMs` (500 ms) of silence instead of a
+  fixed wait — capped at `UtteranceSeconds`, so someone who never stops talking still gets an answer.
+  `UseEndOfSpeech` turns it off; without VAD weights installed the old fixed wait is still the fallback.
+- **`WakeEvent.Command`, and `command` on the device frame.** Transcription covers the wake word and the
+  command together, so the transcript begins with the words that woke the device — "Hey Jarvis, what time is
+  it?" — and a small model will answer the greeting instead of the question. The engine knows which head fired,
+  so it now reports the command separately. The full transcript is still sent; nothing is silently edited.
+- **`OnnxWeightLoader.SubgraphConstants`** reads the float `Constant` values of a nested graph, and the ONNX
+  parser now walks node attributes for subgraphs. Silero VAD keeps its weights this way — inside the
+  `then_branch` of an `If` on sample rate rather than as graph initializers — so an initializer-only reader
+  finds nothing in the file at all. `WakeModelSet` can therefore load `vad/silero_vad.onnx` straight from its
+  canonical MIT source with no conversion step and nobody hosting a repacked copy; `vad/silero_vad_16k.safetensors`
+  is still read when present. Verified by scoring both formats through the service's own loader and requiring
+  identical probabilities.
+- **`tools/convert_silero_onnx.py`** emits the safetensors form and, with `--verify`, checks the export against
+  onnxruntime end to end (1.25e-6 max abs over 343 chunks).
+
+
 ### Changed
 - **The CPU kernels now use every core.** `HartsyInference.Cpu` contained no threading of any kind, so a
   synthesis or a transcription ran on one core of whatever machine it was given. Four kernels now fan out

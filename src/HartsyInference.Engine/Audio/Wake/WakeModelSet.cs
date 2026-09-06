@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.ModelAssets.Onnx;
@@ -23,6 +24,7 @@ public sealed class WakeModelSet : IDisposable
     private WakeMelFrontend? _mel;
     private SpeechEmbeddingModel? _embedding;
     private RnnoiseWeights? _denoiseWeights;
+    private string? _vadWeightsPath;
     private int _disposed;
 
     /// <summary>The wake assets directory this set was loaded from.</summary>
@@ -163,6 +165,147 @@ public sealed class WakeModelSet : IDisposable
         {
             Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}'; listening without it.", ex);
             return false;
+        }
+    }
+
+    /// <summary>Whether an end-of-speech detector is available, i.e. <see cref="LoadVad"/> found weights.</summary>
+    public bool VadAvailable => _vadWeightsPath is not null;
+
+    /// <summary>Locates the Silero VAD weights under <c>{ModelRoot}/vad</c>.
+    ///
+    /// <para>Optional, like the denoiser: without it the service falls back to a fixed post-detection wait,
+    /// which works but cuts off anyone who asks a long question. A missing file must not stop the listener
+    /// from hearing anything, so this logs and returns false rather than throwing.</para>
+    ///
+    /// <para>Only the path is checked here. Unlike the denoiser's weights, which are shared across devices,
+    /// each device needs its own <see cref="SileroVad"/>: the model carries LSTM state for one stream, so a
+    /// shared instance would have two people's speech interleaved into one hidden vector.</para></summary>
+    public bool LoadVad()
+    {
+        string dir = Path.Combine(ModelRoot, "vad");
+        string safetensors = Path.Combine(dir, "silero_vad_16k.safetensors");
+        string onnx = Path.Combine(dir, "silero_vad.onnx");
+        string path = File.Exists(safetensors) ? safetensors : onnx;
+        if (!File.Exists(path))
+        {
+            Logs.Warning($"[Audio][Wake] No end-of-speech model in '{dir}' (looked for silero_vad_16k.safetensors and silero_vad.onnx); falling back to a fixed post-detection wait, which truncates long questions. Install it from the Wake Word tab.");
+            return false;
+        }
+        try
+        {
+            // Load once here to fail loudly at startup rather than on the first person who speaks.
+            using (SileroVad probe = LoadVadFrom(path)) { }
+            _vadWeightsPath = path;
+            Logs.Info($"[Audio][Wake] End-of-speech detection enabled (weights from '{path}').");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Audio][Wake] Failed to load the end-of-speech model from '{path}'; using the fixed wait instead.", ex);
+            return false;
+        }
+    }
+
+    private static SileroVad LoadVadFrom(string path)
+    {
+        SileroVad vad = new();
+        try
+        {
+            // The loader stays alive across LoadWeights: the tensors it hands out are its own, and
+            // WakeWeights.Own copies them into the model precisely because the loader is transient.
+            if (path.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                using OnnxWeightLoader onnx = new();
+                onnx.Load(path);
+                vad.LoadWeights(SileroTensorsFromOnnx(onnx, path));
+            }
+            else
+            {
+                using SafeTensorsLoader safe = new();
+                safe.Load(path);
+                vad.LoadWeights(safe.GetAllTensors());
+            }
+            return vad;
+        }
+        catch
+        {
+            vad.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The fifteen weights SileroVad needs, in the order their shapes appear in the ONNX's 16 kHz branch.</summary>
+    /// <remarks>Shapes are from docs/Research/WAKE_WORD_DETECTION.md and double as the check that this really is
+    /// Silero v6 rather than something else with the same file name.</remarks>
+    private static readonly (string Name, int[] Shape)[] SileroLayout =
+    [
+        ("stft_conv.weight", [258, 1, 256]),
+        ("conv1.weight", [128, 129, 3]), ("conv1.bias", [128]),
+        ("conv2.weight", [64, 128, 3]), ("conv2.bias", [64]),
+        ("conv3.weight", [64, 64, 3]), ("conv3.bias", [64]),
+        ("conv4.weight", [128, 64, 3]), ("conv4.bias", [128]),
+        ("lstm_cell.weight_ih", [512, 128]), ("lstm_cell.weight_hh", [512, 128]),
+        ("lstm_cell.bias_ih", [512]), ("lstm_cell.bias_hh", [512]),
+        ("final_conv.weight", [1, 128, 1]), ("final_conv.bias", [1]),
+    ];
+
+    /// <summary>Reads Silero's weights straight out of the upstream <c>silero_vad.onnx</c>.
+    ///
+    /// <para>This exists so the model can be installed from its canonical MIT source with no conversion step and
+    /// nobody having to host a repacked copy. It is an awkward file to read: the network is wrapped in an
+    /// <c>If</c> on sample rate, and the weights are anonymous <c>Constant</c> nodes inside each branch rather
+    /// than graph initializers, so there are no names to bind by.</para>
+    ///
+    /// <para>They are recovered by shape from the 16 kHz branch. Thirteen of the fifteen shapes are unique, which
+    /// pins those outright; the two <c>[512, 128]</c> LSTM matrices and the two <c>[512]</c> biases go in graph
+    /// order, which is PyTorch's — input-hidden before hidden-hidden. That ordering is confirmed against
+    /// onnxruntime by <c>tools/convert_silero_onnx.py --verify</c>, and getting it wrong does not fail quietly:
+    /// the probabilities come out obviously wrong rather than subtly off.</para></summary>
+    private static Dictionary<string, Tensor> SileroTensorsFromOnnx(OnnxWeightLoader loader, string path)
+    {
+        // then_branch is the 16 kHz path; else_branch holds the same architecture trained for 8 kHz.
+        IReadOnlyList<Tensor> constants = loader.SubgraphConstants("then_branch");
+        Dictionary<string, Tensor> weights = [];
+        List<Tensor> pool = [.. constants];
+        foreach ((string name, int[] shape) in SileroLayout)
+        {
+            int index = pool.FindIndex(t => MatchesShape(t, shape));
+            if (index < 0)
+            {
+                throw new HartsyInferenceException(
+                    $"'{path}' has no {string.Join("x", shape)} tensor left for '{name}'. This does not look " +
+                    $"like Silero VAD v6 — source it from github.com/snakers4/silero-vad, not from an " +
+                    $"openWakeWord release (which pins an older revision).");
+            }
+            weights[name] = pool[index];
+            pool.RemoveAt(index);
+        }
+        return weights;
+    }
+
+    private static bool MatchesShape(Tensor tensor, int[] shape)
+    {
+        if (tensor.DType != DType.F32 || tensor.Shape.Rank != shape.Length) return false;
+        for (int i = 0; i < shape.Length; i++)
+        {
+            if (tensor.Shape[i] != shape[i]) return false;
+        }
+        return true;
+    }
+
+    /// <summary>A per-device end-of-speech detector, or null when none is available. Each carries its own LSTM
+    /// state, so one per stream.</summary>
+    public SileroVadStream? CreateVad(int minSilenceMs)
+    {
+        if (_vadWeightsPath is null) return null;
+        try
+        {
+            return new SileroVadStream(LoadVadFrom(_vadWeightsPath), minSilenceMs: minSilenceMs);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[Audio][Wake] Could not create an end-of-speech detector for a device; it will use the fixed wait.", ex);
+            return null;
         }
     }
 

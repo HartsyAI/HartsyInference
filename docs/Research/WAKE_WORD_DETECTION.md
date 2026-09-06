@@ -114,6 +114,15 @@ stream discontinuity. Streaming defaults: enter ≥0.5, exit below 0.35 (hystere
 `min_silence_duration_ms=100`, `speech_pad_ms=30`. Quality (vendor benchmark, 17h multi-domain ROC-AUC):
 Silero v6 0.97 vs WebRTC VAD 0.73.
 
+The engine reads either `vad/silero_vad_16k.safetensors` or the upstream `vad/silero_vad.onnx` directly. The
+ONNX needs no conversion step, which is why it is the shape the installer fetches: nobody has to host a
+repacked copy. It is an awkward file to read, though — the network is wrapped in an `If` on sample rate and the
+fifteen tensors are anonymous `Constant` nodes inside each branch, so `OnnxWeightLoader.SubgraphConstants`
+walks node attributes for them and `WakeModelSet` binds them by shape from the `then_branch` (16 kHz). Thirteen
+shapes are unique; the two `[512, 128]` LSTM matrices and the two `[512]` biases go in graph order, which is
+PyTorch's. `tools/convert_silero_onnx.py --verify` checks that ordering against onnxruntime (measured 1.25e-6
+max abs over 343 chunks of jfk.wav) and can also emit the safetensors form.
+
 ⚠️ **Upstream ships two different revisions of this model** — `silero_vad_16k.safetensors` and
 `silero_vad.onnx` share architecture and DFT basis, but every learned tensor differs (correlations 0.90–0.99,
 max abs up to 18). This port derives from the **ONNX**, since that's what silero's own `utils_vad.py` runs
