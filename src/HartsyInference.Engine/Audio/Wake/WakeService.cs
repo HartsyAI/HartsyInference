@@ -24,6 +24,11 @@ public sealed record WakeEvent
     public required float Score { get; init; }
     public string? Route { get; init; }
     public string? Transcript { get; init; }
+
+    /// <summary>The transcript with the wake phrase removed — what the user actually asked. Null when there was
+    /// no transcript. See <see cref="WakePhrase"/> for why both are reported.</summary>
+    public string? Command { get; init; }
+
     public string? Speaker { get; init; }
     public DateTimeOffset DetectedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -172,6 +177,7 @@ public sealed class WakeService : IDisposable
             Score = detection.Score,
             Route = config?.Route,
             Transcript = transcript,
+            Command = transcript is null ? null : WakePhrase.Strip(transcript, detection.Word),
             Speaker = speaker,
         };
 
@@ -305,6 +311,7 @@ public sealed class WakeService : IDisposable
                 $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
                 (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
                 (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
+                (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
                 (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") + "}";
             await codec.WriteAsync(type, data, CancellationToken.None).ConfigureAwait(false);
         }
