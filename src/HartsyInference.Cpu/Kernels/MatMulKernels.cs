@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cpu.Kernels;
@@ -35,19 +36,24 @@ public static class MatMulKernels
 
         NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
 
-        // Tiled GEMM: iterate over tiles to improve cache locality
-        for (int ii = 0; ii < M; ii += TileSize)
+        // Tiled GEMM, fanned out over (row tile x column tile). Every (i, j) belongs to exactly one such pair,
+        // so the split is race-free; the K tiles stay inside a task because they accumulate into the same
+        // element. Splitting on both axes rather than on rows alone is what keeps a single-row call — an LLM
+        // decoding one token, or a 1x1 convolution routed here by Conv2D — from running on one core.
+        int iTiles = (M + TileSize - 1) / TileSize;
+        int jTiles = (N + TileSize - 1) / TileSize;
+        CpuParallel.For(iTiles * jTiles, (long)M * N * K, tile =>
         {
+            int ii = tile / jTiles * TileSize;
             int iEnd = Math.Min(ii + TileSize, M);
+            int jj = tile % jTiles * TileSize;
+            int jEnd = Math.Min(jj + TileSize, N);
 
             for (int kk = 0; kk < K; kk += TileSize)
             {
                 int kEnd = Math.Min(kk + TileSize, K);
 
-                for (int jj = 0; jj < N; jj += TileSize)
                 {
-                    int jEnd = Math.Min(jj + TileSize, N);
-
                     for (int i = ii; i < iEnd; i++)
                     {
                         float* rowA = pA + i * K;
@@ -96,7 +102,7 @@ public static class MatMulKernels
                     }
                 }
             }
-        }
+        });
     }
 
     /// <summary>Linear layer: output[M,N] = input[M,K] × weight^T[K,N] + bias[N]. Weight is [N, K] row-major (PyTorch convention). Uses tiled GEMM with AVX2 for the matmul, then adds bias.</summary>
@@ -130,14 +136,20 @@ public static class MatMulKernels
 
         // Tiled GEMM: C[M,N] = A[M,K] × B^T[K,N] where B is stored as [N, K]
         // Access pattern: for each (i, j), sum_k A[i,k] * B[j,k]
-        for (int ii = 0; ii < M; ii += TileSize)
+        //
+        // Fanned out over (row tile x column tile) for the reason spelled out in MatMul: token-by-token decode
+        // calls this with M = 1, so a row-only split would leave every projection and the vocabulary
+        // projection running on a single core.
+        int iTiles = (M + TileSize - 1) / TileSize;
+        int jTiles = (N + TileSize - 1) / TileSize;
+        CpuParallel.For(iTiles * jTiles, (long)M * N * K, tile =>
         {
+            int ii = tile / jTiles * TileSize;
             int iEnd = Math.Min(ii + TileSize, M);
+            int jj = tile % jTiles * TileSize;
+            int jEnd = Math.Min(jj + TileSize, N);
 
-            for (int jj = 0; jj < N; jj += TileSize)
             {
-                int jEnd = Math.Min(jj + TileSize, N);
-
                 for (int kk = 0; kk < K; kk += TileSize)
                 {
                     int kEnd = Math.Min(kk + TileSize, K);
@@ -183,7 +195,7 @@ public static class MatMulKernels
                     }
                 }
             }
-        }
+        });
 
         if (bias is not null)
         {
