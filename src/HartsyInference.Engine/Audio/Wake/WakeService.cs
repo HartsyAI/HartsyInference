@@ -384,6 +384,77 @@ public sealed class WakeService : IDisposable
         await SendStatusAsync(session, state, detail).ConfigureAwait(false);
     }
 
+    /// <summary>Sends spoken audio to a satellite over the socket it already has open, paced so it arrives at
+    /// about the rate the device plays it.
+    ///
+    /// <para>Speech reaches the device over HTTP today, which means a second connection and a second protocol
+    /// per turn. This carries it on the wake socket instead, in the same header-plus-payload frames the device
+    /// already sends audio in.</para>
+    ///
+    /// <para>Pacing is the part that is not obvious. The device has a small ring and paces an HTTP body by
+    /// withholding TCP acknowledgements, but it cannot do that here without also stalling the <c>ping</c> and
+    /// <c>detection</c> frames queued behind the audio on the same connection — and a satellite that stops
+    /// answering pings is dropped after twenty seconds. So the server paces instead, writing a little faster
+    /// than real time so the device's buffer fills rather than drains, and never faster than that.</para></summary>
+    /// <param name="deviceId">The satellite to speak to. Unknown ids are ignored.</param>
+    /// <param name="pcm">16-bit little-endian mono at <paramref name="sampleRate"/>.</param>
+    /// <param name="sampleRate">Rate of the samples, for pacing.</param>
+    /// <param name="cancel">Cancels mid-reply — which is what a barge-in looks like from here.</param>
+    /// <returns>Bytes actually delivered.</returns>
+    public async Task<int> SendAudioAsync(string deviceId, ReadOnlyMemory<byte> pcm, int sampleRate,
+        CancellationToken cancel = default)
+    {
+        if (string.IsNullOrEmpty(deviceId) || !_sessions.TryGetValue(deviceId, out WakeSession? session))
+        {
+            return 0;
+        }
+        WakeFrameCodec? codec = session.Codec;
+        if (codec is null || pcm.Length == 0)
+        {
+            return 0;
+        }
+
+        // 40 ms a frame: two of the device's own 20 ms audio frames, and comfortably under the 1280-byte
+        // payloads its receive buffer is sized for.
+        int frameBytes = Math.Max(2, sampleRate / 25 * 2);
+        long sent = 0;
+        long started = Environment.TickCount64;
+        for (int offset = 0; offset < pcm.Length; offset += frameBytes)
+        {
+            cancel.ThrowIfCancellationRequested();
+            int take = Math.Min(frameBytes, pcm.Length - offset);
+            bool final = offset + take >= pcm.Length;
+            string data = $"{{\"seq\":{offset / frameBytes},\"final\":{(final ? "true" : "false")}}}";
+            try
+            {
+                await codec.WriteAsync("audio", data, pcm.Slice(offset, take), cancel).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The device hung up mid-reply. Everything before this point was already played.
+                Logs.Verbose($"[Audio][Wake] Audio to '{deviceId}' stopped after {sent} bytes: {ex.Message}");
+                return (int)sent;
+            }
+            sent += take;
+
+            // Stay a little ahead of playback and no further. Sending at full speed would overrun the device's
+            // ring; sending at exactly real time leaves it one late packet away from an underrun.
+            double playedMs = sent / 2.0 / sampleRate * 1000.0;
+            long elapsed = Environment.TickCount64 - started;
+            int ahead = (int)(playedMs - elapsed) - AudioLeadMs;
+            if (ahead > 0)
+            {
+                await Task.Delay(ahead, cancel).ConfigureAwait(false);
+            }
+        }
+        return (int)sent;
+    }
+
+    /// <summary>How far ahead of real time the server is allowed to run when pushing audio, in milliseconds.
+    /// Enough to absorb a late packet and a scheduling hiccup, small enough to fit any satellite ring worth
+    /// having.</summary>
+    private const int AudioLeadMs = 400;
+
     /// <summary>Sends a status frame on a session whose codec is already in hand.</summary>
     private static async Task SendStatusAsync(WakeSession session, string state, string? detail = null)
     {

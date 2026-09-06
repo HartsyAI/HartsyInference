@@ -9,6 +9,22 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Spoken audio can travel on the wake socket.** `WakeFrameCodec.WriteAsync` gained an overload that writes a
+  header plus raw bytes — the same header-then-payload shape a satellite has always used to send audio, now in
+  the other direction — and `WakeService.SendAudioAsync` pushes a reply through it in 40 ms frames.
+
+  Speech reaches a device over HTTP today, which costs it a second connection and a second protocol per turn.
+  The socket it is already holding open can carry it.
+
+  The server does the pacing, which is the part that is not obvious. A device paces an HTTP body by withholding
+  TCP acknowledgements, but doing that here would also stall the `ping` and `detection` frames queued behind
+  the audio on the same connection, and a satellite that stops answering pings is dropped after twenty seconds.
+  So the server writes a little ahead of real time — 400 ms — and never further.
+
+  Header and payload go out under one lock and in one pair of writes. A header promising bytes that never
+  arrive desynchronizes the stream permanently, because the reader then takes the next frame's header as
+  payload; that exact failure has been seen on this protocol in the other direction and it cost a night to
+  find. The round trip is tested, not just the bytes.
 - **`BackendFactory.ProbeCuda`** runs a real matmul on the GPU and checks the answer, instead of asking whether
   a GPU exists. `CudaContext.IsAvailable` answers the second question, and everything between it and a working
   backend is untested by it: kernels built for another architecture, a PTX directory that did not ship, a card

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
@@ -174,6 +175,43 @@ public sealed class WakeFrameCodec(Stream stream, int maxPayloadBytes = 1 << 20)
         try
         {
             await _stream.WriteAsync(bytes, cancel).ConfigureAwait(false);
+            await _stream.FlushAsync(cancel).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>Writes a frame carrying raw bytes after its header — the same shape a satellite already sends
+    /// audio in, now in the other direction.
+    ///
+    /// <para>Speech reaches the device over HTTP today, which costs it a second connection per turn and a
+    /// second protocol to keep working. The socket the device is already holding open can carry it, and the
+    /// wire format needs nothing new: a header line with <c>payload_length</c>, then that many bytes. The
+    /// reader on the far side has parsed exactly this since the beginning.</para>
+    ///
+    /// <para>Header and payload go out under one lock and in one pair of writes, because a header promising
+    /// bytes that never arrive desynchronizes the stream permanently — the reader takes the next frame's header
+    /// as payload and every frame after it is garbage. That failure has been seen on this protocol in the other
+    /// direction and it cost a night to find.</para></summary>
+    public async Task WriteAsync(string type, string? dataJson, ReadOnlyMemory<byte> payload, CancellationToken cancel)
+    {
+        StringBuilder sb = new();
+        sb.Append("{\"type\":\"").Append(type).Append('"');
+        if (dataJson is not null) sb.Append(",\"data\":").Append(dataJson);
+        sb.Append(",\"payload_length\":").Append(payload.Length.ToString(CultureInfo.InvariantCulture));
+        sb.Append("}\n");
+        byte[] header = Encoding.UTF8.GetBytes(sb.ToString());
+
+        await _writeLock.WaitAsync(cancel).ConfigureAwait(false);
+        try
+        {
+            await _stream.WriteAsync(header, cancel).ConfigureAwait(false);
+            if (payload.Length > 0)
+            {
+                await _stream.WriteAsync(payload, cancel).ConfigureAwait(false);
+            }
             await _stream.FlushAsync(cancel).ConfigureAwait(false);
         }
         finally
