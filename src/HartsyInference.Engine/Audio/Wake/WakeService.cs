@@ -65,10 +65,18 @@ public sealed class WakeService : IDisposable
     /// <summary>The bound listener port; 0 before <see cref="Start"/>.</summary>
     public int Port => _listener?.Port ?? 0;
 
+    /// <summary>Whether the host answers turns itself — see <see cref="WakeServiceOptions.HostHandlesTurns"/>.
+    ///
+    /// <para>Settable rather than read-only because this is a host setting a user toggles in a UI, and the
+    /// alternative to changing it in place is tearing down the listener and every satellite's session to change
+    /// one boolean.</para></summary>
+    public bool HostHandlesTurns { get; set; }
+
     public WakeService(IInferenceEngine engine, WakeServiceOptions? options = null)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _options = options ?? new WakeServiceOptions();
+        HostHandlesTurns = _options.HostHandlesTurns;
     }
 
     /// <summary>Loads the models, starts the detection worker, then opens the listener. In that order, so a satellite is never accepted into a service that cannot yet score its audio.</summary>
@@ -404,50 +412,35 @@ public sealed class WakeService : IDisposable
     public async Task<int> SendAudioAsync(string deviceId, ReadOnlyMemory<byte> pcm, int sampleRate,
         CancellationToken cancel = default)
     {
+        WakeAudioStream? stream = BeginAudio(deviceId, sampleRate);
+        if (stream is null)
+        {
+            return 0;
+        }
+        await using (stream.ConfigureAwait(false))
+        {
+            await stream.WriteAsync(pcm, cancel).ConfigureAwait(false);
+            await stream.CompleteAsync(cancel).ConfigureAwait(false);
+            return stream.BytesSent;
+        }
+    }
+
+    /// <summary>Opens one spoken reply to a device, to be written in as many pieces as it arrives in.
+    ///
+    /// <para>A reply that is synthesized sentence by sentence arrives here in several pieces, and they are one
+    /// reply, not several. <see cref="SendAudioAsync"/> cannot express that: it numbers its frames from zero
+    /// and marks its last one final, so a second call looks to the device exactly like a new reply arriving —
+    /// which resets the playback ring and throws away whatever of the first sentence had not been heard yet.
+    /// Only the caller knows where a reply ends, so only the caller can say.</para></summary>
+    /// <returns>Null when the device has no session or no live connection.</returns>
+    public WakeAudioStream? BeginAudio(string deviceId, int sampleRate)
+    {
         if (string.IsNullOrEmpty(deviceId) || !_sessions.TryGetValue(deviceId, out WakeSession? session))
         {
-            return 0;
+            return null;
         }
         WakeFrameCodec? codec = session.Codec;
-        if (codec is null || pcm.Length == 0)
-        {
-            return 0;
-        }
-
-        // 40 ms a frame: two of the device's own 20 ms audio frames, and comfortably under the 1280-byte
-        // payloads its receive buffer is sized for.
-        int frameBytes = Math.Max(2, sampleRate / 25 * 2);
-        long sent = 0;
-        long started = Environment.TickCount64;
-        for (int offset = 0; offset < pcm.Length; offset += frameBytes)
-        {
-            cancel.ThrowIfCancellationRequested();
-            int take = Math.Min(frameBytes, pcm.Length - offset);
-            bool final = offset + take >= pcm.Length;
-            string data = $"{{\"seq\":{offset / frameBytes},\"final\":{(final ? "true" : "false")}}}";
-            try
-            {
-                await codec.WriteAsync("audio", data, pcm.Slice(offset, take), cancel).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // The device hung up mid-reply. Everything before this point was already played.
-                Logs.Verbose($"[Audio][Wake] Audio to '{deviceId}' stopped after {sent} bytes: {ex.Message}");
-                return (int)sent;
-            }
-            sent += take;
-
-            // Stay a little ahead of playback and no further. Sending at full speed would overrun the device's
-            // ring; sending at exactly real time leaves it one late packet away from an underrun.
-            double playedMs = sent / 2.0 / sampleRate * 1000.0;
-            long elapsed = Environment.TickCount64 - started;
-            int ahead = (int)(playedMs - elapsed) - AudioLeadMs;
-            if (ahead > 0)
-            {
-                await Task.Delay(ahead, cancel).ConfigureAwait(false);
-            }
-        }
-        return (int)sent;
+        return codec is null ? null : new WakeAudioStream(codec, deviceId, sampleRate, AudioLeadMs);
     }
 
     /// <summary>How far ahead of real time the server is allowed to run when pushing audio, in milliseconds.
@@ -471,18 +464,28 @@ public sealed class WakeService : IDisposable
         }
     }
 
-    private static async Task NotifyDeviceAsync(WakeSession session, string type, WakeEvent evt)
+    /// <summary>The <c>data</c> object of a detection, rejection or transcript frame.
+    ///
+    /// <para>Separate from the send so the exact bytes can be pinned by a test: this is the wire contract a
+    /// satellite parses, and the satellite is in another repository and another language.</para></summary>
+    public static string EventData(WakeEvent evt, bool handled)
+        => $"{{\"name\":{WakeFrameCodec.Escape(evt.Word)}," +
+            $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
+            (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
+            (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
+            (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
+            (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") +
+            (handled ? ",\"handled\":true" : "") + "}";
+
+    private async Task NotifyDeviceAsync(WakeSession session, string type, WakeEvent evt)
     {
         WakeFrameCodec? codec = session.Codec;
         if (codec is null) return;
         try
         {
-            string data = $"{{\"name\":{WakeFrameCodec.Escape(evt.Word)}," +
-                $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
-                (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
-                (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
-                (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
-                (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") + "}";
+            // Only the transcript is claimable. A `detection` is feedback the device acts on either way, and a
+            // rejection is nobody's turn to answer.
+            string data = EventData(evt, HostHandlesTurns && type == "transcript");
             await codec.WriteAsync(type, data, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
