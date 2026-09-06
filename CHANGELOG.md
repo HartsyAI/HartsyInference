@@ -41,8 +41,8 @@ stable release will require. Dates are UTC.
   own `minSilenceMs` after the speaker stops. `WakeService` then waited its own `EndOfSpeechSilenceMs` on top,
   so with both set to 500 ms every command paid a full second of silence before transcription even started.
   The stream now exposes `LastChunkWasSpeech`, the per-chunk verdict with hysteresis applied, and the session
-  times silence from that. Measured on a real satellite before this change: detection to transcript 3.95 s on a
-  three-word command, of which a second was this double wait.
+  times silence from that. Measured on a real satellite before this change: detection to transcript 3.95 s on
+  "what time is it?", of which a second was this double wait.
 - **A question longer than 6.5 s was still truncated.** The end-of-speech wait was capped at
   `UtteranceSeconds - LeadInSeconds`, which quietly spent the lead-in allowance out of the speaker's time
   rather than out of the buffer it actually comes from. The cap is now the whole of `UtteranceSeconds`, and
