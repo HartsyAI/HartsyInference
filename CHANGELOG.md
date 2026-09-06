@@ -9,6 +9,19 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **`status` frames on the wake socket.** A voice turn is several seconds spread across transcription,
+  generation and synthesis, and from a satellite's side all of it looks the same: it sent audio and nothing has
+  come back. So its light stayed on one colour for the whole wait, and a user with no screen could not tell
+  "still working" from "did not hear you" — and would repeat themselves into the middle of a reply.
+
+  `WakeService` now emits `captured` (the speaker can stop talking) and `transcribing` as it reaches them, plus
+  `error` and `done`, and `SendStatusAsync` is public so whoever owns the turn after the transcript leaves can
+  send `thinking` and `speaking` too. `WakeStatus` names the states and builds the frame's data object, so the
+  wire contract a C++ satellite parses is one function with a test on its exact bytes rather than an
+  interpolation at four call sites.
+
+  Advisory throughout: a device that does not know a state ignores it, an unreachable device is not an error,
+  and no turn fails because a light could not be updated.
 - **Piper streams a sentence at a time.** Piper is a whole-utterance model — nothing comes out until every
   phoneme of the text has been through the decoder — so a spoken reply used to begin only once all of it had
   been synthesized. It now implements `IStreamingTtsRunner` by splitting on sentence boundaries and yielding
