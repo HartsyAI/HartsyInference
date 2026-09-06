@@ -21,8 +21,13 @@ public sealed record WakeServiceOptions
     /// <summary>Shared secret a satellite must present in its <c>hello</c> frame. Null or empty disables the check, which is the sane default on a trusted LAN; set it before this endpoint is reachable from anywhere less trusted, because without it any device that can open the port can stream audio in and receive every detection — including the transcripts of what was said.</summary>
     public string? AuthToken { get; init; }
 
-    /// <summary>Longest utterance captured around a detection, and the cap on how long end-of-speech will wait.</summary>
-    public double UtteranceSeconds { get; init; } = 8.0;
+    /// <summary>Longest utterance captured around a detection, and the cap on how long end-of-speech will wait.
+    ///
+    /// <para>Twelve seconds because a spoken question runs longer than it reads: the six-second question this
+    /// path was built for took 6.7 s of wall clock, and anything at all conversational goes past eight. The
+    /// ceiling is the capture buffer's fifteen seconds; end-of-speech means an ordinary command never pays for
+    /// the headroom, because it returns as soon as the speaker stops.</para></summary>
+    public double UtteranceSeconds { get; init; } = 12.0;
 
     /// <summary>Silence, in milliseconds, that ends an utterance once <see cref="UseEndOfSpeech"/> is on and VAD
     /// weights are installed. 500 ms is about the shortest a person can pause mid-sentence without it reading as

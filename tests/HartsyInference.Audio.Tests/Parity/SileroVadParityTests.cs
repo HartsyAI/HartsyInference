@@ -103,6 +103,44 @@ public sealed class SileroVadParityTests
         Assert.False(stream.InSpeech);
     }
 
+    /// <summary>The per-chunk verdict has to drop as soon as the speaker stops, even though the segment stays
+    /// open for the stream's whole minimum-silence window.
+    ///
+    /// <para>A caller timing end-of-speech reads one of these two, and reading the wrong one costs it the
+    /// stream's minimum silence on top of its own — the speaker waits for the sum. Both numbers are 500 ms in
+    /// the wake path, so the bug is a doubling and it looks exactly like a slow transcriber.</para></summary>
+    [Fact]
+    public void LastChunkWasSpeech_DropsImmediately_WhileTheSegmentStaysOpen()
+    {
+        if (!TryPaths(out string refDir, out string modelsDir)) return;
+
+        float[] audio = ReadF32(Path.Combine(refDir, "silero_input.bin"));
+        using CpuBackend backend = new();
+        using SileroVad vad = Load(modelsDir);
+        SileroVadStream stream = new(vad, minSilenceMs: 500);
+
+        int offset = 0;
+        while (!stream.InSpeech && offset + SileroVad.WindowSamples <= audio.Length)
+        {
+            stream.Push(backend, audio.AsSpan(offset, SileroVad.WindowSamples), out _);
+            offset += SileroVad.WindowSamples;
+        }
+        Assert.True(stream.InSpeech, "never entered speech on continuous speech");
+        Assert.True(stream.LastChunkWasSpeech, "in speech, but the chunk that opened the segment was not speech");
+
+        // 500 ms of silence at 512 samples a chunk is ~15 chunks; the segment must still be open at three.
+        float[] silence = new float[SileroVad.WindowSamples];
+        int quietAfter = -1;
+        for (int i = 0; i < 3; i++)
+        {
+            stream.Push(backend, silence, out _);
+            if (quietAfter < 0 && !stream.LastChunkWasSpeech) quietAfter = i + 1;
+        }
+        Assert.True(quietAfter > 0, "the per-chunk verdict never dropped over three chunks of digital silence");
+        Assert.True(stream.InSpeech,
+            "the segment closed within three chunks, so this test no longer distinguishes the two signals");
+    }
+
     private static SileroVad Load(string modelsDir)
     {
         using SafeTensorsLoader loader = new();

@@ -35,6 +35,21 @@ stable release will require. Dates are UTC.
   onnxruntime end to end (1.25e-6 max abs over 343 chunks).
 
 
+### Fixed
+- **End-of-speech waited for the silence window twice.** The utterance clock was driven by
+  `SileroVadStream.InSpeech`, which describes a segment rather than a moment: it stays true for the stream's
+  own `minSilenceMs` after the speaker stops. `WakeService` then waited its own `EndOfSpeechSilenceMs` on top,
+  so with both set to 500 ms every command paid a full second of silence before transcription even started.
+  The stream now exposes `LastChunkWasSpeech`, the per-chunk verdict with hysteresis applied, and the session
+  times silence from that. Measured on a real satellite before this change: detection to transcript 3.95 s on a
+  three-word command, of which a second was this double wait.
+- **A question longer than 6.5 s was still truncated.** The end-of-speech wait was capped at
+  `UtteranceSeconds - LeadInSeconds`, which quietly spent the lead-in allowance out of the speaker's time
+  rather than out of the buffer it actually comes from. The cap is now the whole of `UtteranceSeconds`, and
+  that default moves from 8 s to 12 s — a spoken question runs longer than it reads, and the capture buffer
+  holds fifteen. Measured before: an 8.6 s clip came back as "…tomorrow afternoon and", losing its last four
+  words. After: transcribed whole.
+
 ### Changed
 - **The CPU kernels now use every core.** `HartsyInference.Cpu` contained no threading of any kind, so a
   synthesis or a transcription ran on one core of whatever machine it was given. Four kernels now fan out

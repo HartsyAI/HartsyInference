@@ -244,7 +244,10 @@ public sealed class WakeService : IDisposable
         session.LastSpeechTicks = Environment.TickCount64;
 
         long start = Environment.TickCount64;
-        long maxWaitMs = (long)(Math.Max(0, cap - _options.LeadInSeconds) * 1000);
+        // The cap is on how long someone may keep talking after the word fires, not on that plus the lead-in
+        // already sitting in the buffer: subtracting the lead-in here would silently shorten the longest
+        // question the device accepts, which is the truncation this whole path exists to remove.
+        long maxWaitMs = (long)(cap * 1000);
         int silenceMs = Math.Max(0, _options.EndOfSpeechSilenceMs);
         while (true)
         {
