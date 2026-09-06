@@ -145,6 +145,8 @@ public sealed class WakeService : IDisposable
         {
             try
             {
+                // Two states, not one, because they are two different waits and the device should show them
+                // differently: the first ends when the speaker stops talking, the second when a model finishes.
                 transcript = _options.TranscribeGate is null
                     ? await TranscribeUtteranceAsync(session).ConfigureAwait(false)
                     : await _options.TranscribeGate(() => TranscribeUtteranceAsync(session)).ConfigureAwait(false);
@@ -154,6 +156,7 @@ public sealed class WakeService : IDisposable
                 // A transcription failure must not swallow the detection itself — the caller still wants to
                 // know the word fired.
                 Logs.Error($"[Audio][Wake] Transcription failed after '{detection.Word}' on '{session.DeviceId}'.", ex);
+                await SendStatusAsync(session, WakeStatus.Error, "transcription failed").ConfigureAwait(false);
             }
         }
 
@@ -170,6 +173,7 @@ public sealed class WakeService : IDisposable
                 Score = detection.Score,
                 Speaker = speaker,
             }).ConfigureAwait(false);
+            await SendStatusAsync(session, WakeStatus.Done).ConfigureAwait(false);
             return;
         }
 
@@ -199,6 +203,9 @@ public sealed class WakeService : IDisposable
         // ends, so the useful audio is still arriving. How long to wait is the whole question: too short and a
         // long question is cut off mid-word, too long and every short command pays for it.
         double captureSeconds = await WaitForUtteranceEndAsync(session).ConfigureAwait(false);
+        // The speaker can stop now, and on a device with a light that is worth saying: end-of-speech means
+        // the useful audio is already in hand, and everything after this is the server's problem.
+        await SendStatusAsync(session, WakeStatus.Captured).ConfigureAwait(false);
 
         float[] pcm = session.SnapshotRecent(captureSeconds);
         if (pcm.Length == 0) return null;
@@ -210,6 +217,7 @@ public sealed class WakeService : IDisposable
         using MemoryStream ms = new();
         WavFile.WriteMono16(ms, normalized, 16_000);
 
+        await SendStatusAsync(session, WakeStatus.Transcribing).ConfigureAwait(false);
         ModelSpec spec = Registry.ModelResolver.Resolve(_options.TranscribeModel, null, Modality.Transcribe);
         TranscriptResult result = await _engine.Transcribe.RunAsync(spec, new AudioRequest
         {
@@ -355,6 +363,40 @@ public sealed class WakeService : IDisposable
                 // One unreachable subscriber must not stop the others or the detection itself.
                 Logs.Warning($"[Audio][Wake] Webhook {url} failed: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>Tells one satellite what is happening, so its light can say so.
+    ///
+    /// <para>Public because the states that matter most — <see cref="WakeStatus.Thinking"/> and
+    /// <see cref="WakeStatus.Speaking"/> — belong to whoever owns the turn after the transcript leaves here,
+    /// and that is not this class. A device that is not connected, or that never existed, is not an error:
+    /// this is advisory, and a turn must not fail because a light could not be updated.</para></summary>
+    /// <param name="deviceId">The satellite to tell. Unknown ids are ignored.</param>
+    /// <param name="state">One of the <see cref="WakeStatus"/> constants.</param>
+    /// <param name="detail">Optional free text, for an error worth logging on the device.</param>
+    public async Task SendStatusAsync(string deviceId, string state, string? detail = null)
+    {
+        if (string.IsNullOrEmpty(deviceId) || !_sessions.TryGetValue(deviceId, out WakeSession? session))
+        {
+            return;
+        }
+        await SendStatusAsync(session, state, detail).ConfigureAwait(false);
+    }
+
+    /// <summary>Sends a status frame on a session whose codec is already in hand.</summary>
+    private static async Task SendStatusAsync(WakeSession session, string state, string? detail = null)
+    {
+        WakeFrameCodec? codec = session.Codec;
+        if (codec is null) return;
+        try
+        {
+            await codec.WriteAsync("status", WakeStatus.Data(state, detail), CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Advisory only. A device that dropped mid-turn will reconnect and get the next one.
+            Logs.Verbose($"[Audio][Wake] Could not deliver status '{state}' to '{session.DeviceId}': {ex.Message}");
         }
     }
 
