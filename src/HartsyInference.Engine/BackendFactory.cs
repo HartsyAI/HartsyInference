@@ -1,5 +1,6 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
@@ -82,6 +83,129 @@ public static class BackendFactory
     /// <summary>Why <see cref="Resolve"/> last fell back to CPU instead of CUDA; <c>null</c> when CUDA was usable.
     /// Only meaningful after a Resolve/IsAvailable call.</summary>
     public static string? CudaUnavailableReason => CudaContext.LastUnavailableReason;
+
+    private static readonly object _probeLock = new();
+    private static bool? _probeResult;
+    private static string? _probeReason;
+
+    /// <summary>Why <see cref="ProbeCuda"/> last failed; <c>null</c> when it passed or has not run.</summary>
+    public static string? CudaProbeFailureReason => _probeReason;
+
+    /// <summary>Actually runs something on the GPU and checks the answer, rather than asking whether one exists.
+    ///
+    /// <para><see cref="CudaContext.IsAvailable"/> answers a different question: can the libraries be loaded and
+    /// does the driver see a device. Everything between that and a working backend is untested by it — kernels
+    /// compiled for another architecture, a PTX directory that did not ship, a card with no free memory, a
+    /// driver and toolkit that disagree. Each of those says yes to availability and then throws on the first
+    /// real operation, which is somewhere in the middle of a user's request rather than at startup.</para>
+    ///
+    /// <para>So this constructs the backend, multiplies two small matrices on it, and compares the result to the
+    /// CPU's. A wrong answer counts as a failure: a GPU that computes is worse than one that throws, because
+    /// nothing downstream will notice.</para>
+    ///
+    /// <para>Cached after the first call — it costs a context creation and a kernel load, which is a few hundred
+    /// milliseconds, and the answer cannot change without a restart. Opt-in: <see cref="Resolve"/> is unchanged
+    /// and stays cheap, and a host that wants the stronger check calls <see cref="ResolveProbed"/>.</para></summary>
+    /// <param name="ordinal">Device to probe.</param>
+    /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
+    public static bool ProbeCuda(int ordinal = 0)
+    {
+        lock (_probeLock)
+        {
+            if (_probeResult is bool cached)
+            {
+                return cached;
+            }
+            _probeResult = RunCudaProbe(ordinal, out _probeReason);
+            return _probeResult.Value;
+        }
+    }
+
+    private static bool RunCudaProbe(int ordinal, out string? reason)
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            reason = CudaContext.LastUnavailableReason ?? "CUDA is not available.";
+            return false;
+        }
+        // Small enough to cost nothing, large enough that a broken kernel cannot accidentally agree: 32x32x32
+        // is 32768 multiply-adds against values that are not all the same.
+        const int n = 32;
+        Tensor a = new(new TensorShape(n, n), DType.F32);
+        Tensor b = new(new TensorShape(n, n), DType.F32);
+        Tensor gpu = new(new TensorShape(n, n), DType.F32);
+        Tensor cpu = new(new TensorShape(n, n), DType.F32);
+        IBackend? cuda = null;
+        try
+        {
+            unsafe
+            {
+                float* ap = (float*)a.DataPointer;
+                float* bp = (float*)b.DataPointer;
+                for (int i = 0; i < n * n; i++)
+                {
+                    ap[i] = MathF.Sin(i * 0.37f);
+                    bp[i] = MathF.Cos(i * 0.11f);
+                }
+            }
+            using (CpuBackend reference = new())
+            {
+                reference.MatMul(cpu, a, b);
+            }
+            cuda = CreateCuda(ordinal);
+            cuda.MatMul(gpu, a, b);
+            cuda.Sync();
+
+            float worst = 0f;
+            unsafe
+            {
+                float* g = (float*)gpu.DataPointer;
+                float* c = (float*)cpu.DataPointer;
+                for (int i = 0; i < n * n; i++)
+                {
+                    worst = MathF.Max(worst, MathF.Abs(g[i] - c[i]));
+                }
+            }
+            // Loose: cuBLAS accumulates in a different order and may use tensor cores. A real failure here is
+            // not a last-place difference, it is a zeroed or garbage buffer.
+            if (worst > 1e-2f)
+            {
+                reason = $"the GPU computed a 32x32 matmul that differs from the CPU by {worst:E2} — kernels are "
+                    + "loading but producing wrong answers.";
+                return false;
+            }
+            reason = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            reason = $"a test matmul on the GPU failed: {ex.GetType().Name}: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            cuda?.Dispose();
+            a.Dispose();
+            b.Dispose();
+            gpu.Dispose();
+            cpu.Dispose();
+        }
+    }
+
+    /// <summary>Like <see cref="Resolve"/>, but <c>auto</c> only picks CUDA if <see cref="ProbeCuda"/> passes.
+    ///
+    /// <para>For a host deciding once at startup what device to build its engine on. Costs the probe the first
+    /// time and nothing after; the payoff is that a machine which would have failed on its first request fails
+    /// here instead, with a reason, and runs on the CPU rather than not at all.</para></summary>
+    public static string ResolveProbed(string selector)
+    {
+        string s = Kind(selector);
+        if (s != "auto")
+        {
+            return s;
+        }
+        return ProbeCuda(ParseOrdinal(selector)) ? "cuda" : "cpu";
+    }
 
     /// <summary>The bare backend kind of <paramref name="selector"/> with any <c>:{ordinal}</c> suffix removed; <c>auto</c> stays <c>auto</c>.</summary>
     public static string Kind(string? selector)
