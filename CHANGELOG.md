@@ -9,6 +9,22 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Piper streams a sentence at a time.** Piper is a whole-utterance model — nothing comes out until every
+  phoneme of the text has been through the decoder — so a spoken reply used to begin only once all of it had
+  been synthesized. It now implements `IStreamingTtsRunner` by splitting on sentence boundaries and yielding
+  one `AudioChunk` per sentence, so the first one can be played while the rest is still being made.
+
+  Measured on the four-sentence passage from the latency audit, 8-core CPU: **8.315 s** to synthesize whole,
+  **1.797 s** to the first sentence, 22% of the wait. Total synthesis also fell to 4.058 s, because VITS cost
+  grows faster than linearly in sequence length — so this is a throughput win as well as a latency one, which
+  was not the point but is not unwelcome.
+
+  The audio is not sample-identical to the whole-text call: each sentence gets its own prosody contour. The
+  non-streaming `Synthesize` path is unchanged and still passes the text through in one piece.
+- **`SentenceSplitter`** (Audio, `Frontends`) cuts a passage into sentences for exactly that. Cutting where a
+  sentence does not end is the expensive mistake — the halves are voiced separately and the seam is audible —
+  so it declines to cut on abbreviations, initials, decimal points, and anything not followed by something that
+  looks like a new sentence, and it merges a fragment shorter than 24 characters into what follows it.
 - **End-of-speech detection on the wake path.** After a wake word fired, the service waited a fixed three
   seconds and then transcribed the preceding eight — so a question longer than three seconds was cut off
   mid-word, and a two-word command still cost the full three seconds. Measured on a real satellite before this
