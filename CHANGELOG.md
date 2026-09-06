@@ -14,6 +14,12 @@ stable release will require. Dates are UTC.
   the transcript frame is written, so by the time a subscriber could send anything the device has already
   started its own assistant call, and two replies end up sharing one audio ring. Off by default; the frame is
   byte-identical to before when it is off.
+- Wake: `WakeService.BeginAudio` returns a `WakeAudioStream` — one spoken reply, written in as many pieces as
+  it arrives in. A reply synthesized sentence by sentence used to go out as one `SendAudioAsync` call per
+  sentence, and each call numbered its frames from zero and marked its last one final, so the device read every
+  sentence after the first as a new reply, reset its playback ring and cut off the one before it. The stream
+  also holds back a piece's ragged tail rather than sending a frame with an odd number of bytes, and closes
+  itself on the way out of an abandoned turn. `SendAudioAsync` still works, and is now one of these.
 
 ## [Unreleased]
 
