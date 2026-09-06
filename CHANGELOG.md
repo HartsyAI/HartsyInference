@@ -9,6 +9,19 @@ stable release will require. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **`BackendFactory.ProbeCuda`** runs a real matmul on the GPU and checks the answer, instead of asking whether
+  a GPU exists. `CudaContext.IsAvailable` answers the second question, and everything between it and a working
+  backend is untested by it: kernels built for another architecture, a PTX directory that did not ship, a card
+  with no free memory, a driver and toolkit that disagree. Each of those says available and then throws on the
+  first real operation, in the middle of somebody's request.
+
+  Found on the first run, on the machine it was written on: `IsAvailable` returns true, `Resolve("auto")`
+  returns `cuda`, and the shipped kernels target sm_80 against an sm_75 card, so the driver's JIT refuses every
+  one of them. `ResolveProbed("auto")` returns `cpu` there, with the reason.
+
+  A wrong answer counts as a failure too, not just a throw — a GPU that computes the wrong thing is worse than
+  one that stops, because nothing downstream notices. Cached after the first call, and opt-in: `Resolve` is
+  unchanged and stays cheap.
 - **`status` frames on the wake socket.** A voice turn is several seconds spread across transcription,
   generation and synthesis, and from a satellite's side all of it looks the same: it sent audio and nothing has
   come back. So its light stayed on one colour for the whole wait, and a user with no screen could not tell
