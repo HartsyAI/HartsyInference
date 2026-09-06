@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.54
+
+- Wake: `WakeServiceOptions.HostHandlesTurns`, and a settable `WakeService.HostHandlesTurns` to match, put
+  `"handled":true` on every `transcript` frame. A satellite reads it as "do not answer this yourself". Without
+  it a host that answers turns has no way to tell a device to stand down in time: `Detected` is raised after
+  the transcript frame is written, so by the time a subscriber could send anything the device has already
+  started its own assistant call, and two replies end up sharing one audio ring. Off by default; the frame is
+  byte-identical to before when it is off.
+
 ## [Unreleased]
 
 ### Added

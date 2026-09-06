@@ -70,6 +70,19 @@ public sealed record WakeServiceOptions
     /// <summary>URLs that receive a JSON POST for every detection. This is how other services subscribe to one engine's wake events without being in-process — the same detection can drive several agents.</summary>
     public IReadOnlyList<string> Webhooks { get; init; } = [];
 
+    /// <summary>Whether something in the host process answers the turn itself, so a satellite must not.
+    ///
+    /// <para>When this is on, every <c>transcript</c> frame carries <c>"handled":true</c>, and that is the only
+    /// signal a device can act on safely. The obvious alternative — the host sending its own frame once it picks
+    /// the turn up — loses a race it cannot win: the transcript frame is written before <see cref="WakeService.Detected"/>
+    /// is raised, so the device has already started calling an assistant of its own by the time anything the
+    /// subscriber sends arrives. Two replies then play over each other out of one audio ring, which is worse
+    /// than either alone.</para>
+    ///
+    /// <para>The engine does nothing else with this. It does not stop the transcript being delivered, and it
+    /// does not make the host handle anything; it only states, on the wire, who is expected to.</para></summary>
+    public bool HostHandlesTurns { get; init; }
+
     /// <summary>Wraps the post-detection transcription call so the host can put it behind its own admission gate. The engine is not safely re-entrant per backend, so in the API server this routes through the same <c>InferenceQueue</c> every HTTP route uses — otherwise a detection could run Whisper on the shared backend while an image or video job is mid-generation. Null runs it directly, which is correct for a host that has no other traffic.</summary>
     public Func<Func<Task<string?>>, Task<string?>>? TranscribeGate { get; init; }
 }

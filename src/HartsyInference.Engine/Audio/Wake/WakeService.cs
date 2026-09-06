@@ -65,10 +65,18 @@ public sealed class WakeService : IDisposable
     /// <summary>The bound listener port; 0 before <see cref="Start"/>.</summary>
     public int Port => _listener?.Port ?? 0;
 
+    /// <summary>Whether the host answers turns itself — see <see cref="WakeServiceOptions.HostHandlesTurns"/>.
+    ///
+    /// <para>Settable rather than read-only because this is a host setting a user toggles in a UI, and the
+    /// alternative to changing it in place is tearing down the listener and every satellite's session to change
+    /// one boolean.</para></summary>
+    public bool HostHandlesTurns { get; set; }
+
     public WakeService(IInferenceEngine engine, WakeServiceOptions? options = null)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _options = options ?? new WakeServiceOptions();
+        HostHandlesTurns = _options.HostHandlesTurns;
     }
 
     /// <summary>Loads the models, starts the detection worker, then opens the listener. In that order, so a satellite is never accepted into a service that cannot yet score its audio.</summary>
@@ -471,18 +479,28 @@ public sealed class WakeService : IDisposable
         }
     }
 
-    private static async Task NotifyDeviceAsync(WakeSession session, string type, WakeEvent evt)
+    /// <summary>The <c>data</c> object of a detection, rejection or transcript frame.
+    ///
+    /// <para>Separate from the send so the exact bytes can be pinned by a test: this is the wire contract a
+    /// satellite parses, and the satellite is in another repository and another language.</para></summary>
+    public static string EventData(WakeEvent evt, bool handled)
+        => $"{{\"name\":{WakeFrameCodec.Escape(evt.Word)}," +
+            $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
+            (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
+            (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
+            (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
+            (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") +
+            (handled ? ",\"handled\":true" : "") + "}";
+
+    private async Task NotifyDeviceAsync(WakeSession session, string type, WakeEvent evt)
     {
         WakeFrameCodec? codec = session.Codec;
         if (codec is null) return;
         try
         {
-            string data = $"{{\"name\":{WakeFrameCodec.Escape(evt.Word)}," +
-                $"\"score\":{evt.Score.ToString("F4", CultureInfo.InvariantCulture)}" +
-                (evt.Route is null ? "" : $",\"route\":{WakeFrameCodec.Escape(evt.Route)}") +
-                (evt.Transcript is null ? "" : $",\"transcript\":{WakeFrameCodec.Escape(evt.Transcript)}") +
-                (evt.Command is null ? "" : $",\"command\":{WakeFrameCodec.Escape(evt.Command)}") +
-                (evt.Speaker is null ? "" : $",\"speaker\":{WakeFrameCodec.Escape(evt.Speaker)}") + "}";
+            // Only the transcript is claimable. A `detection` is feedback the device acts on either way, and a
+            // rejection is nobody's turn to answer.
+            string data = EventData(evt, HostHandlesTurns && type == "transcript");
             await codec.WriteAsync(type, data, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
