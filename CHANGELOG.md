@@ -8,6 +8,47 @@ stable release will require. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **The CPU kernels now use every core.** `HartsyInference.Cpu` contained no threading of any kind, so a
+  synthesis or a transcription ran on one core of whatever machine it was given. Four kernels now fan out
+  through a new `CpuParallel` helper in `HartsyInference.Core.Numerics`, and `Conv1d` gained a vectorized
+  stride-1 path:
+  - `Conv1dKernels.Conv1d` splits over (batch, output channel) and, when a layer has too few output channels
+    to fill the machine, over the time axis as well. A vocoder's last convolution has a single output channel
+    and tens of thousands of samples, so splitting on channels alone would have left exactly the widest layer
+    serial. With unit stride — every 1x1 projection and every dilated k3 residual in a VITS graph — the loops
+    are also restructured from a per-element gather into a contiguous vector accumulate.
+  - `Conv1dKernels.ConvTranspose1d` is re-expressed output-channel-first. The arithmetic and the accumulation
+    order are unchanged, but with the input channel outermost every channel in a group accumulated into shared
+    output rows, which no work split could have been made safe.
+  - `MatMulKernels.MatMul` and `LinearTransB` split over (row tile x column tile) rather than rows alone,
+    because an LLM decoding one token at a time calls them with M = 1.
+  - `AttentionKernels.ScaledDotProductAttention` splits over (batch, head, query slice); its one shared scratch
+    row, the only thing preventing this, is now allocated per worker.
+
+  Measured on an 8-core dev box, Release, same commands before and after:
+
+  | Benchmark | Before | After |
+  |---|---|---|
+  | `Bench_Piper` (3.2 s utterance) | 9.872 s, RTF 3.115 | 0.658 s, RTF 0.208 |
+  | `Bench_WhisperBase` (3 s clip) | 7.240 s, RTF 2.413 | 2.112 s, RTF 0.704 |
+
+  Small calls still run serially: dispatch costs more than the work below `CpuParallel.MinWorkForParallel`.
+
+### Added
+- **`HARTSY_CPU_THREADS`** (`numerics.cpuThreads`) caps the workers those kernels use; 0, the default, means one
+  per logical core. It exists because the CPU device gate is a no-op, so an LLM decode and a TTS synthesis
+  genuinely overlap on the same box and would otherwise each claim every core. The cap is enforced through a
+  shared task scheduler rather than `MaxDegreeOfParallelism` alone, which bounds only one call at a time and
+  would let two concurrent generations oversubscribe between them.
+- **`SttBenchTests.Bench_WhisperBase`**, the transcription counterpart to the existing TTS benchmarks. Speech
+  recognition sits on the critical path of a voice turn and had no benchmark at all, so kernel work could speed
+  up synthesis and leave it untouched unnoticed.
+- Above-threshold correctness tests for all four kernels (`Conv1dParallelKernelTests`,
+  `MatMulParallelKernelTests`). Every pre-existing kernel test runs at 32x32 or smaller, which is below the
+  parallel threshold — the whole suite exercised only the serial branch and would have passed regardless of
+  what the parallel one did.
+
 ### Fixed
 - **A missing checkpoint is now one contract: HTTP 400, naming the model the caller asked for.** Selecting a
   model that is neither in the catalog nor on disk reported `Model path not found: ` — an empty path, and no

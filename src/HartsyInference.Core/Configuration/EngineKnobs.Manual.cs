@@ -120,6 +120,15 @@ public static partial class EngineKnobs
 
     // ── Constant defaults that live in a hand-written parsing expression ──
 
+    /// <summary>Worker cap for CPU kernels that fan out across cores. 0 (the default) means every core.</summary>
+    /// <remarks>Turn it down when something else on the box needs headroom. It matters more than it looks: the
+    /// CPU device gate is a no-op, so an LLM decode and a TTS synthesis genuinely overlap, and without one shared
+    /// ceiling each would claim the whole machine and spend the difference in context switches.</remarks>
+    public static readonly Knob<int> CpuThreads =
+        Int("numerics.cpuThreads", "HARTSY_CPU_THREADS", 0, KnobScope.Runtime, KnobDomain.Numerics,
+            "Worker cap for parallel CPU kernels; 0 means one worker per logical core.",
+            v => v < 0 ? 0 : v);
+
     /// <summary>Host-RAM floor in GB below which the audio cache evicts a prior model before loading the next.</summary>
     public static readonly Knob<long> AudioEvictBelowGb =
         Long("vram.audioEvictBelowGb", "HARTSY_AUDIO_EVICT_BELOW_GB", 14L, KnobScope.Runtime, KnobDomain.Vram,

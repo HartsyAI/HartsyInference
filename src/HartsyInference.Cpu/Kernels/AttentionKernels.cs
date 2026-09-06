@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 
@@ -39,14 +40,32 @@ public static class AttentionKernels
         long qBatchStride = H * qHeadStride;
         long kvBatchStride = H * kvHeadStride;
 
-        // Allocate a single row of attention scores: [Skv] floats
-        float* attnRow = (float*)NativeMemory.Alloc((nuint)(Skv * sizeof(float)));
+        // Fanned out over (batch, head, query slice). Each task owns a disjoint block of output rows, and the
+        // scratch score row is allocated per task rather than shared — one buffer across workers was the only
+        // thing stopping this from parallelising, and it is a few kilobytes per worker.
+        //
+        // This is Whisper's dominant cost, not its matmuls: the encoder always sees a 30 s window, so every
+        // layer attends 1500 queries over 1500 keys whatever the utterance actually was.
+        long headCount = B * H;
+        int qChunks = CpuParallel.TargetChunks((int)headCount);
+        int qChunkLen = CpuParallel.ChunkSize((int)Sq, qChunks);
+        qChunks = qChunkLen > 0 ? (int)((Sq + qChunkLen - 1) / qChunkLen) : 1;
+        if (qChunks < 1) qChunks = 1;
+        long attnWork = B * H * Sq * Skv * D;
 
-        try
         {
-            for (long b = 0; b < B; b++)
+            CpuParallel.For((int)headCount * qChunks, attnWork, task =>
             {
-                for (long h = 0; h < H; h++)
+                long bh = task / qChunks;
+                long chunk = task - bh * qChunks;
+                long b = bh / H;
+                long h = bh - b * H;
+                long qFrom = chunk * qChunkLen;
+                long qTo = Math.Min(Sq, qFrom + qChunkLen);
+                if (qFrom >= qTo) return;
+
+                float* attnRow = (float*)NativeMemory.Alloc((nuint)(Skv * sizeof(float)));
+                try
                 {
                     float* qHead = pQ + b * qBatchStride + h * qHeadStride;
                     float* kHead = pK + b * kvBatchStride + h * kvHeadStride;
@@ -84,7 +103,7 @@ public static class AttentionKernels
                         }
                     }
 
-                    for (long qi = 0; qi < Sq; qi++)
+                    for (long qi = qFrom; qi < qTo; qi++)
                     {
                         float* qRow = qHead + qi * D;
 
@@ -156,11 +175,11 @@ public static class AttentionKernels
                         }
                     }
                 }
-            }
-        }
-        finally
-        {
-            NativeMemory.Free(attnRow);
+                finally
+                {
+                    NativeMemory.Free(attnRow);
+                }
+            });
         }
     }
 
