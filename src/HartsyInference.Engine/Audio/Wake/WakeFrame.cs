@@ -23,10 +23,22 @@ namespace HartsyInference.Engine.Audio.Wake;
 /// are ignored rather than rejected.</para></summary>
 public readonly record struct WakeFrame(string Type, WakeFrameData Data, byte[]? Payload, int PayloadLength)
 {
-    /// <summary>Payload interpreted as 16-bit PCM samples, widened to the int16-scaled floats the wake models expect (±32768, NOT normalized to ±1 — normalizing silently mis-scores).</summary>
-    public int ReadPcm(Span<float> destination)
+    /// <summary>Payload interpreted as audio, widened to the int16-scaled floats the wake models expect
+    /// (±32768, NOT normalized to ±1 — normalizing silently mis-scores).
+    ///
+    /// <para><paramref name="width"/> is bytes per sample, as the satellite declared in its <c>hello</c>. Two
+    /// is signed 16-bit little-endian. One is G.711 µ-law, not 8-bit linear: a satellite's microphone can sit
+    /// at a few hundred counts out of 32768, and linear truncation to a byte would quantize that to two or
+    /// three levels. µ-law spends its resolution where the signal is and carries roughly 13 bits of range in
+    /// the byte, which is why telephony has used it for fifty years.</para>
+    ///
+    /// <para>Halving the bytes is not about a link's average throughput. It doubles how long a fixed send
+    /// buffer can cover a stall, and a satellite on a marginal link loses audio in stalls — a lost packet costs
+    /// a retransmission timeout, roughly a second, during which everything queued behind it is dropped.</para></summary>
+    public int ReadPcm(Span<float> destination, int width = 2)
     {
         if (Payload is null || PayloadLength == 0) return 0;
+        if (width == 1) return ReadUlaw(destination);
         int samples = PayloadLength / 2;
         if (destination.Length < samples)
             throw new ArgumentException($"PCM destination holds {destination.Length} samples, frame carries {samples}.", nameof(destination));
@@ -34,6 +46,28 @@ public readonly record struct WakeFrame(string Type, WakeFrameData Data, byte[]?
         for (int i = 0; i < samples; i++)
             destination[i] = (short)(bytes[i * 2] | (bytes[i * 2 + 1] << 8));
         return samples;
+    }
+
+    private int ReadUlaw(Span<float> destination)
+    {
+        if (destination.Length < PayloadLength)
+            throw new ArgumentException($"PCM destination holds {destination.Length} samples, frame carries {PayloadLength}.", nameof(destination));
+        ReadOnlySpan<byte> bytes = Payload.AsSpan(0, PayloadLength);
+        for (int i = 0; i < bytes.Length; i++)
+            destination[i] = UlawToPcm(bytes[i]);
+        return bytes.Length;
+    }
+
+    /// <summary>One G.711 µ-law byte to a signed 16-bit value. The standard decode: the byte arrives
+    /// complemented, the low nibble is the mantissa and bits 4-6 the exponent.</summary>
+    public static short UlawToPcm(byte value)
+    {
+        value = (byte)~value;
+        int mantissa = value & 0x0F;
+        int exponent = (value >> 4) & 0x07;
+        int magnitude = ((mantissa << 3) + 0x84) << exponent;
+        magnitude -= 0x84;
+        return (short)((value & 0x80) != 0 ? -magnitude : magnitude);
     }
 }
 

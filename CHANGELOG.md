@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.55
+
+- Wake: a satellite may declare `"width": 1` in its `hello` and send G.711 µ-law, one byte a sample instead of
+  two. Not about a link's average throughput — a device on a marginal link loses audio in stalls, where one
+  dropped packet costs a retransmission timeout of about a second and everything queued behind it is dropped.
+  A send buffer covers a fixed number of bytes, so halving the bytes doubles the seconds it covers. µ-law
+  rather than 8-bit linear because a satellite microphone can sit at a few hundred counts out of 32768, which
+  linear truncation would quantize to two or three levels. Width 2 remains the default and is unchanged.
+
 ## alpha.54
 
 - Wake: `WakeServiceOptions.HostHandlesTurns`, and a settable `WakeService.HostHandlesTurns` to match, put

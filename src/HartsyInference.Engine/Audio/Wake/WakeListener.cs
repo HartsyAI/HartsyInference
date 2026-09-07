@@ -93,6 +93,9 @@ public sealed class WakeListener : IDisposable
     public async Task ServeStreamAsync(Stream stream, string remote, CancellationToken cancel)
     {
         WakeSession? session = null;
+        // Bytes per sample this connection is sending, from its hello. Two until told otherwise, so a
+        // satellite that predates the µ-law option is read exactly as it always was.
+        int width = 2;
         try
         {
             WakeFrameCodec codec = new(stream, _options.MaxPayloadBytes);
@@ -123,6 +126,9 @@ public sealed class WakeListener : IDisposable
                             return;
                         }
                         ValidateFormat(frame.Data, remote);
+                        // Per connection, not per session: a satellite that reconnects may have been reflashed
+                        // with a different build, and the format it declares now is the one it is sending now.
+                        width = frame.Data.Width == 0 ? 2 : frame.Data.Width;
                         session = _sessions.GetOrAdd(deviceId, _sessionFactory);
                         if (session.Codec is not null)
                         {
@@ -139,7 +145,7 @@ public sealed class WakeListener : IDisposable
                     }
                     case "audio-chunk":
                     {
-                        int count = frame.ReadPcm(samples);
+                        int count = frame.ReadPcm(samples, width);
                         session!.Enqueue(samples.AsSpan(0, count), frame.Data.Sequence);
                         session.LastActivityUtc = DateTimeOffset.UtcNow;
                         break;
@@ -188,8 +194,9 @@ public sealed class WakeListener : IDisposable
         // would be a silent CPU cost and a silent accuracy change.
         if (data.Rate != 0 && data.Rate != 16_000)
             throw new InvalidOperationException($"{remote} offered {data.Rate} Hz; this endpoint requires 16000.");
-        if (data.Width != 0 && data.Width != 2)
-            throw new InvalidOperationException($"{remote} offered {data.Width}-byte samples; this endpoint requires 2 (signed 16-bit).");
+        // One byte per sample means µ-law, which halves what a satellite has to push. See WakeFrame.ReadPcm.
+        if (data.Width != 0 && data.Width != 2 && data.Width != 1)
+            throw new InvalidOperationException($"{remote} offered {data.Width}-byte samples; this endpoint accepts 2 (signed 16-bit) or 1 (G.711 µ-law).");
         if (data.Channels != 0 && data.Channels != 1)
             throw new InvalidOperationException($"{remote} offered {data.Channels} channels; this endpoint requires mono.");
     }
