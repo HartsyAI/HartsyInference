@@ -1,15 +1,11 @@
 # Matrix-Game 2.0 — Research Notes
 
-> Status: Complete (HF model card + GitHub source + paper + per-task configs captured; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (Matrix-Game 2.0 pipeline, Phase 10)
+> Source snapshot: 2026-05-24. This date does not establish current build or verification status.
 > Source of truth: [SkyworkAI/Matrix-Game GitHub](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-2), [HF `Skywork/Matrix-Game-2.0`](https://huggingface.co/Skywork/Matrix-Game-2.0), [arXiv 2508.13009](https://arxiv.org/abs/2508.13009)
 > License: **MIT** (confirmed on HF model card and on the Matrix-Game-2 GitHub README)
 > Related: future `MATRIX_GAME_3_ARCHITECTURE.md` (the 5B sibling), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (flow-matching scheduler background), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md), [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (AdaLN modulation lineage)
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

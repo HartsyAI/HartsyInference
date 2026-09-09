@@ -1,6 +1,6 @@
 # Multi-GPU Parallelism & Distributed Serving — Research Notes
 
-> Status: Complete | Last Updated: 2026-06-28 | Needed Before: `HartsyInference.LLM` multi-GPU sharding (run Kimi-K2 1T / DeepSeek-V3 671B / large MoE across 2-N GPUs and across nodes)
+> Source snapshot: 2026-06-28. This date does not establish current build or verification status.
 
 ## Summary
 
@@ -174,7 +174,7 @@ This bandwidth hierarchy is **why** TP stays in a node (tiny latency-bound all-r
 
 NCCL (NVIDIA Collective Communications Library) is the collective library every framework above uses. It is a native shared library (`libnccl.so.2` / `nccl64_*.dll`), but it is **the same category as cuBLAS/cuBLASLt, which the engine already depends on and P/Invokes** — a well-maintained, BSD-3-Clause NVIDIA library. The library policy permits such exceptions, so **NCCL is the collective backend.** Concrete facts that make it fit both hardware tiers:
 
-- **Minimum GPU: compute capability 3.5+** (NCCL's own floor). So Maxwell (5.x), **Pascal incl. GTX 1080 Ti (6.1)**, and everything newer is supported. Requires CUDA 10.0+; for Pascal specifically, **pin the CUDA 12.x toolchain** (offline Pascal codegen was removed in CUDA 13.0; PTX-JIT of `sm_61` still works on a ≤580-series driver).
+- NCCL compatibility is version-specific and does not establish the engine floor. Shipped CUDA kernels baseline sm_80; older-device support needs a separate implementation and verification campaign.
 - **No InfiniBand, no NVLink, no MPI required.** NCCL auto-selects transports, fastest→fallback: NVLink GPUDirect → **PCIe P2P** → **SHM (shared host memory)** intra-node; IB/RoCE RDMA → **TCP sockets** (`NCCL_IB_DISABLE=1`, `NCCL_SOCKET_IFNAME=…`) inter-node. A pair of 1080 Tis in one box uses PCIe P2P/SHM; cross-box uses TCP. Knobs: `NCCL_P2P_DISABLE`, `NCCL_SHM_DISABLE`, `NCCL_IB_DISABLE`, `NCCL_NET_*`.
 - **Bootstrap needs only a 128-byte `ncclUniqueId` broadcast** from rank 0 to all ranks by *any* CPU channel — MPI is the convenient option, but **a small built-in C# TCP rendezvous (broadcast the ID + assign ranks) fully replaces MPI**, keeping the engine self-contained.
 - **No off-the-shelf .NET binding** (ManagedCuda covers cuFFT/cuRAND/cuSPARSE/cuBLAS/cuSOLVER/NPP/NVRTC but **not** NCCL) → we hand-roll the P/Invoke. It is a clean C ABI (opaque comm pointers, device pointers + a CUDA stream).
@@ -189,11 +189,11 @@ For the layer-split boundary copy (milestone 1) and any future hand-rolled tiny-
 **Multi-device context management (have the building blocks):**
 - `cuDeviceGetCount` ✅ (already bound), `cuDeviceGet` ✅, `cuDevicePrimaryCtxRetain` ✅, `cuCtxSetCurrent` ✅ — our `CudaContext` already wraps one primary context per device. Multi-GPU = **one `CudaContext` per device**, made current per-thread via `cuCtxSetCurrent` before issuing that device's work.
 
-**Peer access — NOT yet bound (must add):**
+**Peer-access API reference (query/enable/async copy are already bound):**
 - `cuDeviceCanAccessPeer(out int, dev, peerDev)` — query P2P capability.
 - `cuCtxEnablePeerAccess(peerCtx, flags)` — open direct peer addressing between two contexts.
 - `cuMemcpyPeerAsync(dstPtr, dstCtx, srcPtr, srcCtx, bytes, stream)` — the direct GPU→GPU copy (the layer-split boundary primitive, and the building block of a P2P all-reduce). Falls back to staging through host if P2P unavailable.
-- `cuMemcpyPeer` (sync variant).
+- The synchronous cuMemcpyPeer binding was retired; use the implemented async/lifetime path.
 
 **Multi-process IPC (only if we use a process-per-GPU model like vLLM's `mp`):**
 - `cuIpcGetMemHandle` / `cuIpcOpenMemHandle` / `cuIpcCloseMemHandle` (legacy), or the VMM path `cuMemExportToShareableHandle` / `cuMemImportFromShareableHandle`.
@@ -221,7 +221,7 @@ For the layer-split boundary copy (milestone 1) and any future hand-rolled tiny-
 ## 5.2 Minimum GPU spec (the two hardware tiers)
 
 The feature targets **both** ends of the spectrum with one codebase:
-- **Consumer "string together cheap GPUs":** e.g. several GTX 1080 Tis. Floor = **compute capability 6.1 (Pascal)** — NCCL's real floor is CC 3.5, so Maxwell works too, but Pascal is the sane minimum to officially support (Maxwell is end-of-driver-life). Pascal = no tensor cores, no bf16, no FP8 → **F32/F16 inference only** (dequantize quantized weights to F16, which we already do). PCIe-only, **no NVLink**; P2P works on clean bare-metal but is BIOS/IOMMU/topology-fragile → **always probe `cuDeviceCanAccessPeer` and fall back to SHM/host-staged**. Pin **CUDA 12.x + ≤580-series driver** for Pascal. These rigs realistically run **layer split only** (TP's tiny all-reduces are PCIe-latency-bound and lose without NVLink).
+- **Consumer PCIe topology:** probe peer access and retain host-staged fallback. The former Pascal support proposal is not implemented by the shipped sm_80 kernel baseline.
 - **Enterprise "a building of H200s":** NVLink/NVSwitch intra-node + IB/RoCE inter-node. Full TP×PP×EP×DP, NCCL auto-uses NVLink + RDMA, and disaggregated prefill/decode pays off. Ampere (8.0) / Hopper (9.0) bring bf16/FP8/tensor cores the consumer floor lacks.
 - **One abstraction, capability-gated:** detect per-GPU compute capability + interconnect (`cuDeviceCanAccessPeer`, NVLink query) at startup and pick the parallel plan — layer split when there's no fast link, add TP/EP when NVLink/RDMA is present. Never assume; measure the topology.
 
@@ -309,7 +309,7 @@ all_reduce(local[r], bytes):
 
 ## Open Questions
 
-- **~~Hardware target~~ (RESOLVED):** support **both** tiers with one capability-gated codebase — consumer "string together cheap GPUs" (1080 Ti class, CC 6.1 floor, PCIe, layer-split) *and* enterprise H200 buildings (NVLink + RDMA, full TP/EP/PP/DP + disaggregation). See §5.2.
+- **Hardware validation:** see the current roadmap; research sizing/topology targets are not verified support.
 - **~~Collective library~~ (RESOLVED):** **NCCL** (BSD-3, same category as the cuBLAS we already use). RCCL for AMD via lib swap. No NVSHMEM (proprietary). See §4.3.
 - **~~Multi-node transport~~ (RESOLVED):** NCCL itself carries inter-node traffic over **TCP sockets** when there's no IB (`NCCL_IB_DISABLE=1`), and over IB/RoCE RDMA when present — no separate transport lib, no MPI. Bootstrap via a small built-in **C# TCP rendezvous** that broadcasts the 128-byte `ncclUniqueId` and assigns ranks.
 - **Process-per-GPU vs thread-per-GPU:** NCCL's common model is one process/rank per GPU (`ncclCommInitRank` after the ID broadcast); a single-process/multi-thread model via `ncclCommInitAll` is simpler for single-node and .NET has no GIL. Decide per tier (threads single-node, processes multi-node). Confirm no Driver-API context-thread-affinity gotcha.
@@ -318,71 +318,6 @@ all_reduce(local[r], bytes):
 - **Optional custom-AR win window:** if we later add a hand-rolled one-shot AR for tiny decode messages, how close to / better than NCCL on our hardware? Narrow window (≤8 MB, ≤8 GPUs, full NVLink). Microbenchmark before investing. Not on the critical path.
 - **Exact MLA + EP interplay** when wiring DeepSeek-V3 routing (slice-verified, Phase 8a) onto real multi-GPU EP — node-limited-routing all-to-all dispatch is non-trivial.
 
-## Implementation Notes for HartsyInference
+## Engine implementation
 
-**Backend:** **NCCL** (library-policy exception, same category as the cuBLAS/cuBLASLt the engine already P/Invokes) for all collectives; RCCL for AMD via lib swap. The layer-split boundary can use NCCL `ncclSend`/`ncclRecv` or a direct `cuMemcpyPeerAsync` (no NCCL needed for pure point-to-point).
-
-**Current state (updated 2026-08-02 — milestone 1 below has shipped, see `ROADMAP.md` §1 for the live
-tracker; this section now describes what's built vs what NCCL/TP still needs):** `CudaContext` wraps
-**one primary context per device** (`cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent`), `GetDeviceCount`
-exists, `cuMemcpyDtoD` is bound, and the engine already has `CublasApi`/`CublasLtApi` native-lib bindings
-+ a `CudaLibraryResolver` for runtime lib-name resolution (the pattern an `NcclApi` binding follows).
-`cuDeviceCanAccessPeer`, `cuCtxEnablePeerAccess`, and `cuMemcpyPeer`/`cuMemcpyPeerAsync` are now bound
-(`CudaDriverApi.cs`) and wired into `IBackend.CopyFromPeer` (P2P path + host-staged fallback, per-pair
-probe/enable memo in `CudaPeerAccess`) — layer-split (milestone 1) uses this and topology probing is
-`CudaTopology.Probe()`. **Still missing:** a new `NcclApi` (resolve `nccl`→`libnccl.so.2`/`nccl64_*.dll`
-via `CudaLibraryResolver`) for milestone 2+ (tensor/expert parallel need real collectives; layer-split
-needed only point-to-point copy, which is why it shipped first). The streaming weight cache already has
-the `cuEvent`/`cuStreamWaitEvent` sync milestone 2 would reuse cross-device.
-
-**Diffusion-side status (2026-08-05, hardware-verified on the 4090+3060 box):** the diffusion multi-GPU
-surface built on the milestone-1 machinery is now live in three shapes. (1) **TE/VAE component placement**
-(`PlacementConfig.TextEncoderDevice`/`VaeDevice`, extension `TextEncoderGpuId`/`VaeGpuId`, CLI
-`--te-gpu`/`--vae-gpu`) is wired fleet-wide — verified end-to-end for Wan TE (`WanComponentPlacementEngineTests`,
-SSIM 0.7665), Wan VAE (`WanVaeComponentPlacementEngineTests`, SSIM 0.9999 — **Wan had zero VAE placement**
-until this pass wired `WanVideoPipeline.VaeBackend`, which the base class already exposed but no call site
-used), Flux (`FluxComponentPlacementEngineTests`, SSIM 0.8126 from fp8-T5 cross-SM drift on the mismatched
-pair; matched cards are expected bit-identical), SDXL (`SdxlComponentPlacementEngineTests`, SSIM 0.9998),
-and LTX-1 (`LtxVideoComponentPlacementEngineTests`, TE **and** VAE, 16.4 s → 10.2 s, SSIM 0.9943 — TE was
-already wired via `LtxVideoRecipePipeline._textBackend`, but **VAE was not**; both are wired and verified
-now). LTX-2's code was already fully wired (both `TextEncoderBackend` and `VaeBackend`, including the
-separate audio-VAE+vocoder path) before this pass — `LtxVideo2ComponentPlacementEngineTests` now exists but
-has not run for real on this box (the ~22 GB checkpoint split isn't downloaded here; disk-constrained, not a
-code gap). Qwen-Image, Chroma, and HunyuanImage are wired but **UNVERIFIED** — no
-`ComponentPlacementEngineTests` class exists for any of these three as of 2026-08-05; do not cite them as
-verified until a matching engine test lands (tracked in the multi-GPU finish-out plan, Phase 3.4).
-(2) **DiT block-range sharding** (`DitShardGpuId` / `--dit-shard-gpu` — VRAM
-pooling, not latency, i.e. milestone 1's memory-scales contract applied to DiTs) is verified for six
-models: Krea2 (e2e SSIM 0.8787), Qwen-Image 20B (`QwenImageDitSharding{,Vram,Engine}Tests`: 19.6 GB
-pooled 13.4+6.2 at the live 41/60 split, SSIM 0.9734, drift 0.00 GB), MiniMax-H3 fp8
-(`MiniMaxH3DitSharding{,Vram}Tests`: 19.76 GB pooled at 34/50, finite video+audio; the 66 GB bf16 build
-is excluded — it exceeds any 2-consumer-card pool), Flux.1 plain path (same-device split bit-exact over
-262k values, cross-device 30/57 pooling 7.7+3.7 GB, engine SSIM 0.9075; ControlNet/Kontext/inpaint/
-regional fall back unsharded with a log), Chroma (bit-exact both regimes; real fp8 e2e SSIM 0.8797), and
-HunyuanImage (synthetic bit-exact; engine e2e written, awaiting checkpoint). Sharding is mutually
-exclusive with step-graph/step-cache/streaming by design. (3) **CFG-parallel** decisions are observable
-(`DiffusionPipelineBase.LastCfgParallelDecision` + the `[CfgParallel]` log line: active /
-fell-back(reason) / inapplicable(no-true-cfg)), with `FluxCfgParallelFallbackTests` green and Wan's
-preload-OOM→sequential fallback in place. Verification runs through `tests/run-multigpu-campaign.sh`
-(per-class isolation + `HARTSY_REQUIRE_REAL_WEIGHTS=1`; conventions in `PROFILING_METHODOLOGY.md` §15).
-The live tracker stays `ROADMAP.md` §1; the placement pattern's detailed authority is
-`MULTI_GPU_COMPONENT_PLACEMENT.md`.
-
-**Recommended build order (each independently shippable):**
-
-| # | Milestone | What it enables | Collective | Effort | Hardware to verify |
-|---|---|---|---|---|---|
-| 1 | **Layer split (pipeline)** — one `CudaContext` per device, contiguous layer ranges sized by free VRAM/ratios, KV co-located, `cuMemcpyPeerAsync` (host-staged fallback) at stage boundaries — **✅ shipped 2026-08-02**, verified on 4090+3060 (Llama-3.2-1B, exact token parity, VRAM genuinely pooled) | Run a model 2-N× too big for one GPU; **memory scales** (not latency) | **none** (P2P copy) | Medium | 2-N cheap GPUs (1080 Ti class), PCIe — verifiable without NVLink |
-| 2 | **NCCL binding + tensor parallel** — `NcclApi` P/Invoke + TCP rendezvous bootstrap; column/row-parallel linear loaders; 2 `ncclAllReduce`/layer | **Latency** speedup for a single request; the real "fast" mode | NCCL all-reduce | High | needs NVLink/NVSwitch to pay off; PCIe-only >2 GPUs ≈ no benefit |
-| 3 | **Expert parallel** — distribute experts across devices, all-to-all dispatch/combine via grouped `ncclSend`/`ncclRecv` (reuse `SplitStackedExperts`) | Scale MoE expert weight (Kimi-K2/DeepSeek/Mixtral) past one GPU | NCCL grouped send/recv | High | multi-GPU node |
-| 4 | **DP-attention + EP hybrid** — replicate MLA attention per DP rank, `ncclAllGather` before MoE, EP the experts | The efficient DeepSeek/Kimi serving recipe (no MLA KV duplication) | all-gather + all-to-all | High | datacenter |
-| 5 | **Disaggregated prefill/decode** + `KVConnector` abstraction + KV transfer | Datacenter throughput/SLO at many concurrent requests | KV transfer (NCCL/TCP first; RDMA later) | Very high | multi-node cluster |
-| — | **Sequence/context parallel** | >32k-context TTFT | ring/all-to-all | High | low priority |
-
-**Design recommendations:**
-- **Build the parallelism plan as config, not new model classes** — mirror `MODEL_STATUS_LLM.md`'s "preset + knob" philosophy. A `ParallelConfig { TpSize, PpSize, EpSize, DpSize }` consumed by `GenericTransformer`, with the layer loop dispatching to the right device(s). TP is column/row loader variants of the existing Linear; EP is a device assignment over the existing expert split; PP is a stage-partition over the existing layer loop.
-- **Start single-node, thread-per-GPU, in-process.** No IPC handles, no MPI, no Ray; one host thread owns each device's context. Defer multi-node (and its native-transport question) entirely.
-- **Layer split first and possibly forever for consumer hardware** — without NVLink, TP's small all-reduces are PCIe-latency-bound and lose (the 3× P40 data: layer ≥ row except on token-gen). On a 2-GPU consumer rig, layer split is the only mode that reliably wins.
-- **Reuse the existing P2P/event machinery** from `CudaStreamingWeightCache` (pinned staging, `cuMemcpyHtoDAsync`, `cuEventRecord`/`cuStreamWaitEvent`); the layer-split boundary is structurally identical to the block-swap transfer, just device→device instead of host→device.
-- **Stack with block-swap:** layer split across GPUs + block-swap on each GPU = run a model larger than the *sum* of GPU VRAM. The two are orthogonal and compose.
-- **Gate verification by hardware honestly** (per the Build-defer policy): layer split is verifiable on any 2-GPU box; TP/EP speedups are only meaningful (and only honestly claimable) on NVLink hardware. Slice-test the loaders/collectives against a CPU reference (as Phase 8a did for MLA), defer e2e throughput claims to real multi-GPU access.
+NCCL, peer access, topology probing, sharding and initial tensor/context parallelism already exist. Current configuration and evidence: [MULTI_GPU](../MULTI_GPU.md); remaining expansion: [ROADMAP](../Checklists/ROADMAP.md). The research designs above do not establish multi-node, RCCL or older-GPU support.

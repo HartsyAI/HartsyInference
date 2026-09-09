@@ -123,6 +123,21 @@ first layer with `avg_err > 1e-3` is fixed. Step-by-step unblock recipes per mod
 
 ## Remaining work
 
+### SDXL 8 GB Auto-policy failure (reported 2026-09-06)
+
+RTX 3070 Laptop (7842 MiB usable), fresh SwarmUI 0.9.8.3, official SDXL base, 1024²,
+20 steps, CFG 7, LowVram=Auto: both initial request and retry failed during PreloadWeights
+after 1133 weights (10 MiB requested, 3.1 MiB free). Before preload and after rollback,
+7649 MiB was free. Those measurements occur at different lifecycle points and do not prove
+allocator-accounting disagreement. Exact engine/extension revisions were not captured.
+
+- [ ] Reproduce on 8 GB hardware; inspect residency estimates and component/cast lifetime at preload.
+- [ ] Compare explicit low-memory policy where the recipe supports it; do not assume SDXL supports streaming.
+- [ ] Verify whether Auto/retry adapts after capacity failure instead of repeating an infeasible placement.
+
+The original cloud instance is gone. No root cause or fixed verification is established by this report.
+
+
 Distilled from the retired PHASE_4_MODEL_BREADTH / PHASE_3_DEVIATIONS plans. Models already ✅ above
 (Ideogram 4, Lens, ERNIE-Image, Chroma, AuraFlow, Hunyuan Image 2.1, Flux.2 Dev 32B, Lance) are omitted.
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).

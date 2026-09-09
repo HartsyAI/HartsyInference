@@ -1,15 +1,11 @@
 # Oasis-500m — Research Notes
 
-> Status: Complete (full inference code + all configs captured from `etched-ai/open-oasis`; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (`OasisPipeline`, Phase 10 — world models)
+> Source snapshot: 2026-05-24. This date does not establish current build or verification status.
 > Source of truth: [etched-ai/open-oasis (GitHub)](https://github.com/etched-ai/open-oasis), [HF `Etched/oasis-500m`](https://huggingface.co/Etched/oasis-500m), [Oasis blog](https://oasis-model.github.io/), [Decart publication](https://decart.ai/publications/oasis-interactive-ai-video-game-model)
 > License: **MIT** (both code and weights)
 > Related: [`DIFFUSION_SCHEDULERS.md`](DIFFUSION_SCHEDULERS.md), [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (DiT lineage), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md), [`CONV2D_CUDA.md`](CONV2D_CUDA.md). Net-new module-class introduced by this doc: **continuous ViT-VAE** (not VQ — see § 6).
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

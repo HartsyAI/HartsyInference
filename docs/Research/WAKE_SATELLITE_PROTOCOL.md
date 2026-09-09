@@ -1,6 +1,6 @@
 # Wake Satellite Protocol
 
-> Status: Complete | Last Updated: 2026-08-16 | Implemented by: `HartsyInference.Engine/Audio/Wake/`
+> Source snapshot: 2026-08-16. This date does not establish current build or verification status.
 
 ## Summary
 

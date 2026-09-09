@@ -1,6 +1,6 @@
 # G2P / Phonemization — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (any phoneme-input TTS — Kokoro, StyleTTS2, MeloTTS)
+> Source snapshot: 2026-05-17. This date does not establish current build or verification status.
 
 ## Summary
 
@@ -356,48 +356,7 @@ ByT5 is convenient because it's **byte-level** — no tokenizer to ship, the inp
 | **CosyVoice 1/2/3** | OPTIONAL | Raw text by default; can take pinyin or CMU phonemes for "pronunciation inpainting" | Default = no G2P. Optional pinyin/CMU pass for control |
 | **IndexTTS-2** | OPTIONAL | Hybrid: characters + pinyin (Chinese), characters (English) for controllability | Optional pinyin via jieba.NET pipeline |
 
-**Conclusion**: G2P is only strictly required for Kokoro, StyleTTS 2, MeloTTS, and GPT-SoVITS (which uniquely wants ARPABET, not IPA). The shiny new wave (F5-TTS, XTTS-v2, Bark, CosyVoice, IndexTTS-2) needs none. If we ship those first, we can defer G2P entirely.
-
-### 10. Recommendation — "If We Had to Ship This Monday"
-
-**Phase 1 — Minimal, no G2P at all** (≤ 1 week):
-
-Ship F5-TTS and/or XTTS-v2 as our first TTS models. Both are character-level. They cover the most common user request ("read this sentence in this voice") with reference quality, and require zero phonemization work.
-
-**Phase 2 — English G2P (for Kokoro)** (~2 weeks):
-
-1. Pack CMUDict (134k entries) into a compact binary lookup (`HartsyInference.Audio.Phonemes.CmuDict`).
-2. Hard-code the ARPABET → IPA table (single switch statement, ~40 cases).
-3. Port misaki's English heteronym table (~1000 entries, Apache-licensed) into a `(word, POS) → IPA` lookup.
-4. Port a pure-C# averaged-perceptron POS tagger (model ~3 MB).
-5. Implement English number expansion (port `num2words.en`, ~600 LOC).
-6. Convert PhonoGlyphe checkpoint to `.safetensors`, wire it as the OOV fallback through HartsyInference's existing transformer runtime.
-7. Wire up to Kokoro and StyleTTS 2's expected vocabularies.
-
-Acceptance test: phonemize 10,000 sentences from LibriTTS, compare to misaki+espeak output, target ≥98 % phoneme-level agreement (excluding heteronym corner cases).
-
-**Phase 3 — Mandarin** (~1 week):
-
-1. Take jieba.NET from NuGet.
-2. Pack a CC-CEDICT char→pinyin map.
-3. Hard-code pinyin → IPA table (~400 syllables).
-4. Tone-3 sandhi rule.
-5. Wire to GPT-SoVITS, CosyVoice, IndexTTS-2.
-
-**Phase 4 — Korean** (~3 days):
-
-Pure rule-based jamo decomposition + 12 phonological rules. Trivial.
-
-**Phase 5 — Romance + Germanic** (~2-3 weeks):
-
-Port epitran's `spa-Latn`, `ita-Latn`, `por-Latn`, `fra-Latn`, `deu-Latn` rule tables to a C# rule engine. Add gruut's lexicon overrides.
-
-**Punt-list** (acknowledge we can't ship these on day one):
-
-- **Japanese** — needs MeCab + UniDic port; deferred to its own multi-week project. Until then, users get F5-TTS / XTTS-v2 for Japanese.
-- **Russian** — needs stress dictionary curation; defer.
-- **Arabic, Persian, Thai, Vietnamese, Hebrew** — defer; route through character-level models if possible.
-- **Hindi** and other Devanāgarī scripts — easy but lower demand; defer to Phase 6.
+**Conclusion**: G2P is only strictly required for Kokoro, StyleTTS 2, MeloTTS, and GPT-SoVITS (which uniquely wants ARPABET, not IPA). The shiny new wave (F5-TTS, XTTS-v2, Bark, CosyVoice, IndexTTS-2) needs none. This historical prioritization does not describe current coverage; the phonemizer and these TTS families now have implementations.
 
 ## Key Numbers / Constants
 
@@ -622,37 +581,6 @@ function phonemize_zh(text):
 
 ## Implementation Notes for HartsyInference
 
-### Package layout
-
-Per the file structure rules (CLAUDE.md), this belongs in its own assembly inside the audio package:
-
-```
-src/HartsyInference.Audio.Phonemes/
-    CmuDictionary.cs              # public CMUDict loader/lookup
-    ArpabetToIpa.cs               # 39-row static conversion table
-    Heteronyms.cs                 # (word, POS) -> IPA table
-    PosTagger.cs                  # averaged-perceptron POS tagger
-    EnglishPhonemizer.cs          # full English pipeline (entry point)
-    MandarinPhonemizer.cs         # entry point; uses jieba.NET + CC-CEDICT
-    KoreanPhonemizer.cs           # entry point; pure rule-based
-    RulePhonemizer.cs             # generic epitran-style rule engine
-    Rules/                        # per-language TSV resources
-        spa-Latn.tsv
-        ita-Latn.tsv
-        deu-Latn.tsv
-        fra-Latn.tsv
-        ...
-    Data/                         # embedded resources (packed binaries)
-        cmudict.bin               # ~1.2 MB
-        heteronyms.bin
-        pos_tagger.bin            # ~3 MB
-        cc_cedict.bin             # ~3 MB
-    OovFallback/
-        IOovFallback.cs           # interface so users can plug in
-        PhonoGlypheFallback.cs    # default: runs PhonoGlyphe through HartsyInference
-        CharsiuG2PFallback.cs     # alternative: multilingual ByT5
-```
-
 ### Hot-path discipline (per CLAUDE.md)
 
 - CMUDict and heteronym lookups: pre-loaded into `NativeMemory.AlignedAlloc` blobs; use `Span<byte>` + binary search. No string allocation per lookup.
@@ -669,43 +597,3 @@ For each language, hold out a 10k-sentence reference set, phonemize with the gol
 - Always emit IPA as **NFC-normalized UTF-16 strings** (C# `string` default). Some IPA characters have composed and decomposed forms — pick NFC consistently to avoid token-lookup misses.
 - Be explicit about U+0261 (`ɡ`) vs U+0067 (ASCII `g`). Kokoro's vocab uses U+0261; ARPABET converters that emit ASCII `g` will silently fail.
 - Stress marks `ˈ`/`ˌ` and length `ː` are all single Unicode code points (not combining); no surrogate pair issues.
-
-### Day-one minimum viable subset
-
-To ship Kokoro with English voices on Monday:
-
-1. `HartsyInference.Audio.Phonemes.CmuDictionary` (loader + lookup) — 1 day
-2. `ArpabetToIpa` static table + converter — 0.5 day
-3. `Heteronyms` table (port misaki's gold heteronyms) — 0.5 day
-4. `PosTagger` (averaged perceptron, port from existing C# implementations) — 1 day
-5. `EnglishPhonemizer` (orchestrator) — 0.5 day
-6. `KokoroVocabMapper` (IPA string → 178-token int sequence) — 0.5 day
-7. Tests against 100 hand-picked sentences — 1 day
-
-That's ~5 days of focused work for production-quality English. OOV neural fallback is a nice-to-have that can ship in v1.1.
-
-Sources:
-- [hexgrad/misaki](https://github.com/hexgrad/misaki)
-- [misaki EN_PHONES.md](https://github.com/hexgrad/misaki/blob/main/EN_PHONES.md)
-- [espeak-ng dictionary docs](https://github.com/espeak-ng/espeak-ng/blob/master/docs/dictionary.md)
-- [CMU Pronouncing Dictionary](https://github.com/cmusphinx/cmudict)
-- [ARPABET Wikipedia](https://en.wikipedia.org/wiki/ARPABET)
-- [rhasspy/gruut](https://github.com/rhasspy/gruut)
-- [rhasspy/gruut-ipa](https://github.com/rhasspy/gruut-ipa)
-- [Kyubyong/g2p (g2p-en)](https://github.com/Kyubyong/g2p)
-- [Picus303/PhonoGlyphe](https://github.com/Picus303/PhonoGlyphe)
-- [lingjzhu/CharsiuG2P](https://github.com/lingjzhu/CharsiuG2P)
-- [NeuralVox/OpenPhonemizer](https://github.com/NeuralVox/OpenPhonemizer)
-- [thewh1teagle/phonikud](https://github.com/thewh1teagle/phonikud)
-- [dmort27/epitran](https://github.com/dmort27/epitran)
-- [r9y9/pyopenjtalk](https://github.com/r9y9/pyopenjtalk)
-- [komutan/NMeCab](https://github.com/komutan/NMeCab)
-- [anderscui/jieba.NET](https://github.com/anderscui/jieba.NET)
-- [SWivid/F5-TTS](https://github.com/SWivid/F5-TTS)
-- [FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice)
-- [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
-- [myshell-ai/MeloTTS](https://github.com/myshell-ai/MeloTTS)
-- [yl4579/StyleTTS2](https://github.com/yl4579/StyleTTS2)
-- [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
-- [ByT5 G2P paper](https://arxiv.org/abs/2204.03067)
-- [Phonikud paper](https://arxiv.org/abs/2506.12311)

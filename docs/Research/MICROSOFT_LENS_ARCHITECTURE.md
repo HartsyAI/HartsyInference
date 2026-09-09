@@ -1,6 +1,6 @@
 # Microsoft Lens Architecture — Research Notes
 
-> **Status:** Complete (read-only from upstream code; no checkpoint inspected on disk yet) | **Last Updated:** 2026-05-27 | **Needed Before:** `LensTransformer`, `LensGptOssEncoder`, `LensPipeline` implementation
+> Historical research note (not current engine status): Complete (read-only from upstream code; no checkpoint inspected on disk yet) | **Last Updated:** 2026-05-27 | **Needed Before:** `LensTransformer`, `LensGptOssEncoder`, `LensPipeline` implementation
 >
 > **Sources of truth:**
 > - GitHub: [microsoft/Lens](https://github.com/microsoft/Lens) — `lens/transformer.py` (LensTransformer2DModel, ~700 lines), `lens/pipeline.py` (LensPipeline, ~580 lines), `lens/text_encoder.py` (LensGptOssEncoder, ~130 lines), `lens/resolution.py`, `lens/reasoner.py`
@@ -9,11 +9,7 @@
 >
 > **License:** MIT (for both DiT weights and the inference code). The GPT-OSS text encoder it depends on is licensed separately as Apache-2.0 by OpenAI under `openai/gpt-oss-20b` upstream — Microsoft re-publishes a Lens-trimmed copy alongside Lens.
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

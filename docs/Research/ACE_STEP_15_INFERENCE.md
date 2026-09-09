@@ -1,6 +1,6 @@
 # ACE-Step 1.5 (turbo) — Inference Architecture, From Source
 
-> Status: Complete | Last Updated: 2026-06-10 | Needed Before: HartsyInference.Audio (ACE-Step 1.5 pipeline)
+> Source snapshot: 2026-06-10. This date does not establish current build or verification status.
 >
 > Supersedes the v1.5 sections of [ACE_STEP_ARCHITECTURE.md](ACE_STEP_ARCHITECTURE.md) (§2.5, §8) which were
 > written from configs only. This doc is extracted from the **actual shipped reference code** —

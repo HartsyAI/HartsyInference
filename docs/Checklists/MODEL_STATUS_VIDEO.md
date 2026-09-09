@@ -282,16 +282,11 @@ plus a ComfyUI/diffusers disagreement on stage-1 clamping) — a numerics detail
 - [ ] **int8 ConvRot video VAE:** compare encode and decode against the BF16 VAE across target, guide, reference,
       mask, and control inputs. Require decoded-frame SSIM ≥0.995, no tile seam/hang, and ≥1.2x encode/decode
       speed with lower peak memory at 768p on the RTX 4090. No quantized-audio-VAE claim is permitted.
-- [ ] **Package and Swarm release:** `2.0.0-alpha.43` is reserved by this PR but remains unpublished;
-      `2.0.0-alpha.42` is the immutable live NuGet version, while the extension remains pinned to stale
-      `2.0.0-alpha.15`. Do not pin `.43` while it exists only on the draft branch. After the gates above pass,
-      merge the release-ready PR so the main-branch workflow publishes `.43`, verify `h3_vsa.ptx` in the CUDA
-      package and a clean consumer output, then update the extension to that exact live version and complete CLI,
-      API plan/stream, and live Swarm generations with execution metadata.
+- [ ] **Release packaging verification:** inspect the current published engine version and extension pin; old alpha.42/.43 draft claims are obsolete. For each release verify h3_vsa.ptx in the CUDA package and clean consumer output, then complete CLI, API plan/stream and live Swarm checks with exact version and execution metadata.
 
 ### CLI catalog
 - [ ] `cosmos-predict1-5b` / `cosmos-predict1-13b`: `IVideoRecipe` wrappers (also blocked on the DV pixel-decoder port, not just plumbing).
-- [ ] LTX-2 CLI split-VAE decode: root-cause the transformer-only-split checkpoint's decode magnitude blow-up (bundled-ckpt path is ✅; split path outputs noise, Sha256 left null).
+- [ ] LTX-2 CLI split-VAE decode: rerun the exact July 21 failing split checkpoint after the subsequent VAE residual/padding fixes; component layer-diff evidence alone does not close this consumer gap.
 - [ ] Assets / sha256 wiring + verification runs for the remaining catalog entries.
 
 ## Details
@@ -398,3 +393,20 @@ The earlier 19B dev checkpoint is architecturally divergent from the code (2.3) 
 ### Cosmos-Predict1 V2W (5B / 13B)
 
 =2.86e-5**, FSQ tokens **31/32 bit-exact** (the 1 flip is a provable F32 half-integer rounding tie). `CosmosArTransformer` (3D RoPE T/H/W + per-layer non-causal T5 cross-attn + additive 3D abs-pos), `CosmosV2WPipeline` (prefill→KV AR loop→detokenize→DV-decode→ffmpeg), `T5_11B` preset, `.pt` `CosmosArCheckpointConverter`, CLI catalog — all BUILT; structural CPU tests pass; runs e2e on synthetic weights. **OPEN:** DV **decoder** (pixel render) arch recovered but not yet ported; AR-backbone real-weight layer-diff + full V2W e2e **blocked on disk** (5B 9 GB + T5-11B ~22 GB ≈ 31 GB, local box full); 6 arch assumptions (`rope_theta`, `fuse_qkv`, cross-attn dims, abs-pos name, RoPE split, FSQ convention) flagged in code pending the AR `.pt` key dump. **CLI catalog wiring explicitly DEFERRED (2026-07-21, video catalog pass):** no `IVideoRecipe` wrapper is registered for either `cosmos-predict1-5b-v2w` or `cosmos-predict1-13b-v2w` — even a perfect wrapper couldn't produce pixels today because the DV decoder isn't ported, so `hartsy video -m cosmos-predict1-*` would need a decoder-port implementation, not catalog plumbing. Out of scope for a catalog-wiring pass; do not attempt a decoder port to "complete" this — track it as its own bringup task. The two catalog entries stay short-form/`ValidationPending`/not-CLI-drivable until the decoder lands.
+
+### Wan-Animate-2
+
+The reported length-dependent divergence was a base/distill sampling mismatch (closed August 2026):
+base uses 40 steps/CFG 3/log_scale 0; distill uses 6 steps/CFG 1/log_scale -1.3. At 77 frames,
+384×640, both were sharp with correct sampling; dancing/static driver motion means were 19.12/1.55.
+PoseStrength 1.0 matched the reference; the earlier 1.2 recommendation was retracted.
+
+2026-08-22, RTX 4090, distill, seed 424650, ref_dany_portrait.png + drive_half.mp4:
+480×800×61 completed with inspected sharp frames 2/30/58. Transient fused-attention OOM must not
+permanently disable that path and force a larger materialized score matrix. Key-only bias is broadcast
+from one row; query-tiled fallback supports it. Driving-cache dtype is selected once per generation
+(auto/on/off) with feasibility preflight. DiT sharding is not wired and emits a warning.
+
+- [ ] int8-convrot LoRA dequantize/add/requantize and full-weight diff/diff_b handling.
+- [ ] Reproduce continue_motion chunk colour washout and validate a reference-anchor correction.
+- [ ] Larger geometry: driving-cache memory remains the scaling limit; verify before claiming support.

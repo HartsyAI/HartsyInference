@@ -1,12 +1,6 @@
 # LTX 2.5 — Research Notes
 
-> **Stub.** This model is built and verified end-to-end (prompt-faithful video+audio confirmed 2026-08-12,
-> quality parity with ComfyUI reached 2026-08-15 — see `docs/Checklists/MODEL_STATUS_VIDEO.md`), so the C# is
-> the source of truth for *how it works*. What remains is what the code cannot tell you: upstream provenance,
-> reference constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> **Note on staleness:** the diffusion video decoder section below predates 2026-08-13/14 CUDA kernel work — it
-> now has a CUDA `Na3d` kernel, decodes in ~9.8s (not "~32s, managed-only"), and its output is correctness-verified
-> against ComfyUI. Current status: `MODEL_STATUS_VIDEO.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 `hartsy video -m ltx-2.5` generates prompt-faithful 704×480×25f clips with a soundtrack on the official
 `int8_lean_convrot` DiT + Gemma-4-12B pair. The whole text path is verified against ComfyUI 0.32 on the real

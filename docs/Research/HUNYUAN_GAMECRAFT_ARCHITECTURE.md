@@ -14,11 +14,7 @@
 > License: **Tencent Hunyuan Community License — RESTRICTED** (see warning below)
 > Related: [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (dual-stream / single-stream MM-DiT lineage shared with HunyuanVideo), [`DIFFUSION_SCHEDULERS.md`](DIFFUSION_SCHEDULERS.md) (FlowMatchDiscrete shift formula), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (3D causal VAE patterns shared with HunyuanVideo), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (Llava-Llama-3-8B + CLIP-L dual encoder), [`CFG_AND_GUIDANCE.md`](CFG_AND_GUIDANCE.md) (CFG distillation), [`SAFETENSORS_FORMAT.md`](SAFETENSORS_FORMAT.md) (this model does **not** ship safetensors — see warning).
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ---
 

@@ -4,11 +4,7 @@
 > **License:** CreativeML OpenRAIL-M (Apache-compatible for inference).
 > **Variants:** F-Lite (10B), F-Lite-7B (distilled), F-Lite-Texture.
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## TL;DR
 

@@ -1,6 +1,6 @@
 # MeloTTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-06-27 | Needed Before: HartsyInference.Audio (MeloTTS pipeline, also stage 1 of OpenVoice)
+> Source snapshot: 2026-06-27. This date does not establish current build or verification status.
 >
 > **2026-06-27 implementation corrections (verified against the real English-v3 checkpoint + melo source):**
 > (1) the text-encoder embedding scale multiplies the WHOLE sum incl. both BERT projections by sqrt(hidden), not just the id embeddings;
@@ -8,11 +8,7 @@
 > (3) English-v3 uses a TRANSFORMER coupling flow (TransformerCouplingBlock), not WaveNet residual coupling;
 > (4) the C# text encoder is validated BIT-EXACT (m_p/logs_p corr 1.000000) vs the reference with these corrections. See [[melotts-build]] memory.
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

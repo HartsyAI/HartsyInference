@@ -1,52 +1,9 @@
-# Python Reference Scripts
+# Reference tools
 
-Scripts that generate reference tensors and statistics from the Python (diffusers/PyTorch) SD1.5 pipeline. These are used by the C# cross-runtime validation tests to verify numerical correctness.
+Offline Python oracles cover multiple model families and operations. They are validation tooling, not runtime dependencies. Find the matching script/test pair with rg; each script defines its dependencies, checkpoint paths, dump layout and options.
 
-## Setup
+Create an isolated virtual environment for the relevant reference implementation. Do not install one universal dependency set for this heterogeneous corpus. Unix environments use bin/python; Windows environments use Scripts/python.exe.
 
-```bash
-python -m venv tests/python-reference/.venv
-tests/python-reference/.venv/Scripts/pip install torch --index-url https://download.pytorch.org/whl/cpu
-tests/python-reference/.venv/Scripts/pip install diffusers transformers safetensors
-```
+Preserve checkpoint/reference revisions, input hashes, shape/dtype/layout metadata and resolved settings with dumps. Raw tensors are not universally F32; read the writer and consuming test. Share actual noise/embeddings between runtimes rather than only matching seeds.
 
-## Scripts
-
-| Script | What it does | Output |
-|---|---|---|
-| `dump_reference_stats.py` | Runs full pipeline (noise, CLIP, 20 UNet steps, VAE), saves key tensors | `reference_tensors/*.bin` |
-| `dump_layer_outputs.py` | Hooks every UNet layer, saves per-layer output tensors | `reference_tensors/layers/*.bin` + `index.json` |
-| `dump_attn_sublayers.py` | Manually steps through first CrossAttentionBlock sub-operations | `reference_tensors/attn0_sublayers/*.bin` |
-
-## Running
-
-```bash
-"tests/python-reference/.venv/Scripts/python" "tests/python-reference/<script>.py"
-```
-
-## Output Structure
-
-```
-reference_tensors/
-├── initial_noise.bin                    # Gaussian noise [1,4,32,32] float32
-├── text_embeddings.bin                  # CLIP output [2,77,768] float32
-├── unet_step0_input.bin                 # Scaled input to first UNet call
-├── unet_step0_output_uncond.bin         # UNet unconditional output
-├── unet_step0_text_emb.bin             # Text embeddings for first call
-├── step0_scaled_input.bin              # Pipeline-level step 0 input
-├── step0_noise_pred_cond.bin           # Conditional noise prediction
-├── step0_noise_pred_uncond.bin         # Unconditional noise prediction
-├── final_latents.bin                    # Final denoised latent
-├── layers/                              # Per-layer UNet outputs
-│   ├── index.json                       # Layer name → file mapping
-│   ├── conv_in.bin
-│   ├── down_blocks_0_resnets_0.bin
-│   └── ...
-└── attn0_sublayers/                     # CrossAttentionBlock breakdown
-    ├── 01_groupnorm.bin
-    ├── 03_proj_in.bin
-    ├── 05_self_q.bin
-    └── ...
-```
-
-All binary files are raw float32 tensors in C-contiguous (row-major) layout.
+Reference artifacts can be large or machine-local. A missing fixture or skipped comparison does not establish parity. Record verified results in [PARITY_VERIFICATION](../../docs/Checklists/PARITY_VERIFICATION.md) and the relevant modality status; keep detailed diagnostics only when they preserve a reusable finding.

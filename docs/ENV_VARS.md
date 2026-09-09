@@ -7,12 +7,12 @@
 > doc. That judgement is the point of this file; the table is the scaffolding it hangs on.
 
 > ⚠️ **Superseded in part, 2026-08-26.** `EngineKnobs` (`src/HartsyInference.Core/Configuration/`) is now the
-> declared registry: **212 knobs**, each with an id, type, default, scope, domain and its legacy environment
+> declared registry: knobs, each with an id, type, default, scope, domain and its legacy environment
 > name. `KnobRegistryTests` ties that surface to a source scan, so the registry — not this file — is the
 > authority on *what exists*. This doc remains the authority on **disposition**, and on the history below.
 >
 > **How to set something now.** Environment variables still work — every knob records its legacy name and
-> `KnobStore` honours it — but they are the lowest-precedence layer and will be retired in C7. Prefer:
+> `KnobStore` honours it — but they are the lowest-precedence layer ; retirement requires a compatibility plan. Prefer:
 >
 > | Where | How |
 > |---|---|
@@ -20,7 +20,7 @@
 > | API | `{"settings": {"profile": "reference", "set": {"numerics.ditF16": "0"}}}` |
 > | Precedence | scoped profile → process override → legacy env var → declared default |
 >
-> `--profile reference` pins 49 knobs to their most numerically faithful setting for parity work.
+> `--profile reference` pins registered knobs to their most numerically faithful setting for parity work.
 >
 > ⚠️ **Per-request settings reach per-call knobs only.** Anything bound while the engine, backend or pipeline is
 > built is already fixed when a request arrives on a long-lived server — including the backend's TF32, F16-GEMM
@@ -28,19 +28,7 @@
 > setting is rejected with 400 rather than silently ignored. The CLI does not have this limit, because it applies
 > settings before the engine is constructed.
 
-**Scale.** The original estimate of "~45 real knobs" and the first inventory's "146" were both wrong. A
-literal scan for `GetEnvironmentVariable("HARTSY_…")` has **five** blind spots, each found the hard way:
-
-| Blind spot | Example | Count |
-|---|---|---|
-| Named after the model, not the engine | `WAN_SOLVER_ORDER`, `LTX_DIAG`, `QWEN3_DEBUG` | 18 |
-| Reached only through a helper | `EnvFlag("HARTSY_NO_TF32")` — the GEMM/SDPA family | 13 |
-| Held in a `const`, passed by reference | `HARTSY_AUDIO_LM_QUANT`, `HARTSY_ANIMATE2_BF16_DRIVING_CACHE` | 4 |
-| A helper **constructor** argument | `new DebugDumpSink("WAN_DEBUG_DIR")` | 19 |
-| Only ever a **default parameter value** | `FromEnvironment(string v = "HARTSY_CFG_INTERVAL")` | 1 |
-
-The real engine surface is **~210 knobs**. A further ~150 names are test-fixture paths read by test code, not
-the engine, and are out of scope.
+**Inventory caveat.** Literal environment-read searches miss helper calls, constants, debug-sink constructors and default parameters. Use EngineKnobs/KnobRegistryTests for the current surface, not historical counts below.
 
 **Three boolean grammars are live and they genuinely disagree** — this is why the migration preserves each
 rather than unifying them:

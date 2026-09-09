@@ -1,6 +1,6 @@
 # Wan2.2-S2V CFG-darkening parity harness
 
-Localizes the S2V-14B fp8 CFG bug (output darkens ~linearly in `cfg−1`; even text-only CFG at cfg 5
+Historical diagnostic harness for the S2V-14B fp8 CFG bug (output darkens ~linearly in `cfg−1`; even text-only CFG at cfg 5
 collapses to black while cfg=1 is healthy ⇒ the cond−uncond velocity difference is mis-scaled vs
 ComfyUI). The C# transformer/pipeline dump per-stage tensors when `WAN_DEBUG_DIR` is set
 (zero-cost off); `dump_s2v_reference.py` replays the SAME inputs through a faithful CPU-fp32 port of
@@ -18,7 +18,8 @@ Instrumented files (all dumps gated on `WAN_DEBUG_DIR`, tag per CFG branch set b
 Tiny config, ONE step (multi-step runs overwrite the per-step .bin files):
 
 ```bash
-cd /home/hartsy/Desktop/HartsyInference
+: "${HARTSY_REPO:?Set HARTSY_REPO to the repository root}"
+cd "$HARTSY_REPO"
 dotnet build tests/HartsyInference.Video.Tests --framework net10.0   # once, if not already built
 rm -rf /tmp/s2v_dbg && mkdir -p /tmp/s2v_dbg
 LD_LIBRARY_PATH=$HOME/.local/lib/cuda13 CUDA_VISIBLE_DEVICES=0 \
@@ -38,7 +39,7 @@ Notes:
 ## Reference + diff (step 2: CPU, ~2-5 min per branch)
 
 ```bash
-cd /home/hartsy/Desktop/HartsyInference/tests/python-reference/s2v_reference
+cd "$HARTSY_REPO/tests/python-reference/s2v_reference"
 venv/bin/python dump_s2v_reference.py --dump-dir /tmp/s2v_dbg --tag cond
 venv/bin/python dump_s2v_reference.py --dump-dir /tmp/s2v_dbg --tag uncond
 venv/bin/python diff_s2v_layers.py /tmp/s2v_dbg --tag cond
@@ -91,5 +92,4 @@ EOF
   transformer) is NOT caught here — only transformer-internal math is.
 - venv: CPU torch 2.12.1 + safetensors + numpy (`python3 -m venv venv && venv/bin/pip install
   --index-url https://download.pytorch.org/whl/cpu torch && venv/bin/pip install safetensors numpy`).
-  Fallback if recreating offline: the ComfyUI venv at
-  `/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI/venv` has torch 2.11 + safetensors.
+  Use a compatible, pinned reference environment and record its actual versions.

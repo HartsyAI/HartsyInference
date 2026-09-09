@@ -1,6 +1,6 @@
 # Ideogram 4 Architecture — Research Notes
 
-> **Status:** Complete (read-only from upstream code; no checkpoint inspected on disk yet) | **Last Updated:** 2026-06-07 | **Needed Before:** `Ideogram4Transformer`, `Ideogram4Pipeline`, `Ideogram4CheckpointConverter`, and the structured-prompt builder ([STRUCTURED_PROMPT_BUILDER.md](STRUCTURED_PROMPT_BUILDER.md))
+> Historical research note (not current engine status): Complete (read-only from upstream code; no checkpoint inspected on disk yet) | **Last Updated:** 2026-06-07 | **Needed Before:** `Ideogram4Transformer`, `Ideogram4Pipeline`, `Ideogram4CheckpointConverter`, and the structured-prompt builder ([STRUCTURED_PROMPT_BUILDER.md](STRUCTURED_PROMPT_BUILDER.md))
 >
 > **Sources of truth:**
 > - GitHub: [ideogram-oss/ideogram4](https://github.com/ideogram-oss/ideogram4) — `src/ideogram4/modeling_ideogram4.py`, `pipeline_ideogram4.py`, `scheduler.py`, `sampler_configs.py`, `latent_norm.py`, `constants.py`, `autoencoder.py`, `magic_prompt.py`, `quantized_loading.py`
@@ -12,11 +12,7 @@
 >
 > **License:** "Ideogram 4 Non-Commercial" (gated on HuggingFace). The DiT weights and inference code are non-commercial. The ComfyUI repackage (`Comfy-Org/Ideogram-4`) mirrors the same weights. **This is a non-commercial license — flag for the package/legal boundary; HartsyInference itself stays MIT/permissive, the model weights carry their own terms (same handling as the existing GameCraft license-acceptance gate).**
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

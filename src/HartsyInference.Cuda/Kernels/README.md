@@ -31,13 +31,12 @@ src/HartsyInference.Cuda/Kernels/dequant/build.sh        # compile + install int
 src/HartsyInference.Cuda/Kernels/dequant/build.sh --no-install   # compile only
 
 # No nvcc on the box — use the committed nvrtc helper (dlopens libnvrtc.so):
-cc -O2 -o Kernels/nvrtc_compile Kernels/nvrtc_compile.c -ldl        # build the helper once
-LD_LIBRARY_PATH=~/.local/lib/cuda13 Kernels/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
+cc -O2 -o src/HartsyInference.Cuda/Kernels/nvrtc_compile src/HartsyInference.Cuda/Kernels/nvrtc_compile.c -ldl        # build the helper once
+LD_LIBRARY_PATH=~/.local/lib/cuda13 src/HartsyInference.Cuda/Kernels/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
 cp out.ptx src/HartsyInference.Cuda/Ptx/
 ```
 
-Target `sm_80` minimum (forward-JIT-compatible). Verify every emitted PTX starts `.version 9.0` — the driver
-JIT caps there (see `docs/Checklists/TROUBLESHOOTING.md` § CUDA toolchain). Validate a new/changed kernel
+Target `sm_80` minimum (forward-JIT-compatible). Verify emitted PTX ISA compatibility with the deployment driver (see the dated toolchain notes in TROUBLESHOOTING). The ISA ceiling is driver-dependent. Validate a new/changed kernel
 against the CPU reference within tolerance before shipping (`docs/Agents/KERNEL.md`).
 
 ### The shipped PTX must reproduce from source — check it

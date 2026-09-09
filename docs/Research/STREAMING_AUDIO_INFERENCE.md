@@ -1,6 +1,6 @@
 # Streaming Audio Inference — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (streaming pipelines), HartsyInference.API (Phase 7)
+> Source snapshot: 2026-05-17. This date does not establish current build or verification status.
 
 ## Summary
 

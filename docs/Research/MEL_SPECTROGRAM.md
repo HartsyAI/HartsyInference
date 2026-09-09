@@ -1,6 +1,6 @@
 # Mel Spectrogram (Audio Preprocessing) — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (any speech model)
+> Source snapshot: 2026-05-17. This date does not establish current build or verification status.
 
 ## Summary
 

@@ -5,11 +5,7 @@
 > `CalamitousFelicitousness/Krea-2-Base-Diffusers`) and the canonical diffusers source
 > (`Krea2Transformer2DModel` / `Krea2Pipeline` in `huggingface/diffusers`, plus the Krea 2 technical report).
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## 1. Transformer (`Krea2Transformer2DModel`)
 
