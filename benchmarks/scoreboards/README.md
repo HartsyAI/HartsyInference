@@ -12,19 +12,15 @@ you're looking for a performance number, start here — not in the README, not i
 | [`VIDEO.md`](VIDEO.md) | Video generation (T2V) | ComfyUI (via SwarmUI API) | RTX 4090 |
 | [`AUDIO.md`](AUDIO.md) | TTS / STT / Music / VC / Fx | Model-specific Python reference (`moshi`, `qwen_tts`, etc.) or self-comparison — no shared engine exists for audio | RTX 3060, RTX 4090, some CPU |
 | [`LLM.md`](LLM.md) | LLM decode throughput | `llama.cpp` / `llama-cpp-python`, same GGUF quant both sides | RTX 3060 |
+| [`VULKAN.md`](VULKAN.md) | Backend comparisons | CUDA / reference, per row | See dated measurements |
 | [`THREED.md`](THREED.md) | Image → 3D mesh | Python reference (`tsr` for TripoSR, `hy3dgen` for Hunyuan3D-2) | RTX 4090 |
 
-**Not yet benchmarked:** Vision and World-model modalities have no measured end-to-end performance data
-yet (see `docs/Checklists/MODEL_STATUS_VISION.md` / `MODEL_STATUS_WORLD.md` for their build/parity
-status instead — those docs track correctness, not speed).
+**Coverage.** Vision and World have no dedicated scoreboard here; some world-model placement measurements live in [Multi-GPU](../../docs/MULTI_GPU.md). Absence of a scoreboard row is not absence of implementation or evidence.
 
-**GPUs.** Only RTX 3060 (12 GB) and RTX 4090 (24 GB) have actual measured results anywhere in this repo.
-A100/H100/L40S appear only in `../CLOUD_GPU_RUNBOOK.md` as a rental-pricing plan for a future baseline
-pass — no data exists for them yet; don't cite them as "supported hardware" until a scoreboard row backs
-it up.
+**Hardware coverage.** Treat each row’s dated GPU and workload as its evidence boundary; no inference about unmeasured hardware.
 
 **Methodology, the standard performance profile (which optimizations are on by default), and how to
-reproduce a number** all live in [`README.md`](README.md) — these
+reproduce a number** all live in [`benchmark guide`](../README.md) — these
 scoreboard files hold the results, that file holds the how/why.
 
 **Model list.** For "what models exist and what's their build/verification status" (as opposed to "how

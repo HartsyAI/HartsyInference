@@ -1,144 +1,23 @@
-# HartsyInference Benchmarks
+# Benchmarks
 
-This directory holds the benchmarking **infrastructure**: the harness, the C# microbenchmarks, the pinned
-PyTorch baselines, and the statistical analysis. Read
-[`docs/Research/PROFILING_METHODOLOGY.md`](../docs/Research/PROFILING_METHODOLOGY.md) before adding a new
-benchmark — the methodology is not obvious.
+Use [scoreboards](scoreboards/README.md) for measurements and [profiling methodology](../docs/Research/PROFILING_METHODOLOGY.md) before adding a benchmark. Model correctness belongs in the status/parity docs.
 
-## Where the numbers live
-
-**Results are not in this file.** Each modality has one canonical scoreboard under
-[`scoreboards/`](scoreboards/) — that is where the numbers, the GPU, the date, the baseline, and the
-source for every measurement live:
-
-| Scoreboard | Covers |
-|---|---|
-| [`IMAGE.md`](scoreboards/IMAGE.md) | T2I and image-edit vs ComfyUI on the same GPU |
-| [`VIDEO.md`](scoreboards/VIDEO.md) | T2V / I2V vs ComfyUI, plus SeedVR2 restoration |
-| [`LLM.md`](scoreboards/LLM.md) | Decode throughput vs llama.cpp at matched GGUF/quant |
-| [`AUDIO.md`](scoreboards/AUDIO.md) | TTS / STT / music / voice-conversion / effects |
-| [`THREED.md`](scoreboards/THREED.md) | Image → mesh vs the Python reference |
-| [`VULKAN.md`](scoreboards/VULKAN.md) | Vulkan backend vs CUDA |
-
-Per-modality result tables used to be duplicated in this README as well. They were removed on 2026-08-06
-because they had drifted: this file still reported Llama-3.2-1B at ~111.5 tok/s (1.94× *behind*
-llama.cpp) months after `scoreboards/LLM.md` had it at 213.7 tok/s (1.11× *ahead*). **One number, one
-home** — put new results in the scoreboard, and link to it from here if it needs narrative.
-
-Multi-GPU speed tables are in
-[`results/2026-08-05_multigpu_speeds.md`](results/2026-08-05_multigpu_speeds.md).
-
-## Quick start
+From the repository root:
 
 ```bash
-# 1. Set up Python venv (one time; see requirements.txt for pinned versions)
 python3 -m venv benchmarks/python-baseline/.venv
-source benchmarks/python-baseline/.venv/bin/activate
-pip install -r benchmarks/python-baseline/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
-deactivate
-
-# 2. Run the full harness (~20-40 min depending on GPU + e2e flag)
-bash benchmarks/run_benchmarks.sh --py-venv benchmarks/python-baseline/.venv
-
-# 3. Smoke test (faster, 1 trial of MatMul only) for harness debugging
+benchmarks/python-baseline/.venv/bin/pip install -r benchmarks/python-baseline/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
 bash benchmarks/run_benchmarks.sh --smoke --py-venv benchmarks/python-baseline/.venv
 ```
 
-Result lands in `benchmarks/results/run_<utc>_<gpu>/`. See [`results/README.md`](results/README.md) for what's in there.
+The pinned requirements describe this baseline environment, not the minimum supported runtime. Review them before installing on a different CUDA platform. Remove --smoke for the full workload; --skip-python permits C# iteration. Inspect script options before composing new runs.
 
-## Directory layout
+- run_benchmarks.sh fingerprints hardware/software/digests, runs C# and Python workloads, and analyzes results.
+- analyze.py joins comparable operation/shape/dtype rows and emits comparison CSV/Markdown.
+- profile.sh wraps Nsight Systems; choose a current test filter from source.
+- HartsyInference.GpuBenchmarks contains GPU microbenchmarks; HartsyInference.Benchmarks contains CPU benchmarks.
+- python-baseline contains reference timing scripts and pinned dependencies; tests/python-reference contains correctness oracles.
 
-```
-benchmarks/
-├── README.md                                 ← this file
-├── run_benchmarks.sh                         ← end-to-end harness
-├── profile.sh                                ← Nsight Systems wrapper
-├── analyze.py                                ← Welch's t-test joiner; emits comparison.{csv,md}
-├── results/                                  ← committed result directories (raw data for the paper)
-│   ├── README.md
-│   └── run_*/
-├── HartsyInference.Benchmarks/                ← legacy CPU benchmarks (existing; not Phase B)
-├── HartsyInference.GpuBenchmarks/             ← C# GPU microbenchmarks via BenchmarkDotNet
-│   ├── HartsyInference.GpuBenchmarks.csproj
-│   ├── BenchmarkConfig.cs                    ← shared BDN config (1 warmup, 5 trials)
-│   ├── BenchmarkFixture.cs                   ← CudaBackend + tensor allocation helpers
-│   ├── Program.cs
-│   ├── MatMulGpuBenchmarks.cs
-│   ├── Conv2DGpuBenchmarks.cs
-│   ├── NormGpuBenchmarks.cs
-│   ├── SdpaGpuBenchmarks.cs
-│   ├── ElementwiseGpuBenchmarks.cs
-│   └── MemoryAllocFreeBenchmarks.cs
-└── python-baseline/                          ← pinned PyTorch + diffusers parity scripts
-    ├── README.md (TBD)
-    ├── requirements.txt                      ← PyTorch 2.5.1 + cu124 etc., pinned
-    ├── _common.py                            ← timing, fingerprints, CSV writer
-    ├── run_all.sh
-    ├── bench_pytorch_matmul.py
-    ├── bench_pytorch_conv2d.py
-    ├── bench_pytorch_norms.py
-    ├── bench_pytorch_sdpa.py
-    ├── bench_pytorch_elementwise.py
-    └── bench_pytorch_e2e.py
-```
+Outputs under benchmarks/results are local/ignored artifacts, not a guaranteed committed archive. Preserve the exact run directory in an explicit durable artifact location and link it from the relevant scoreboard. Older missing local result links do not establish reproducibility.
 
-## Statistical rigor
-
-Every measurement reported in the paper is grounded in a `benchmarks/results/run_*/` directory.
-Methodology:
-
-- **Warmup**: 1 invocation discarded.
-- **Trials**: N=5 per benchmark.
-- **Confidence interval**: 95 % via Student-t (df=4).
-- **Significance gate**: a "speedup" is reported only when (a) the new mean is outside the old 95 % CI AND (b) Welch's t-test rejects μ_new = μ_old at α = 0.01.
-- **Fingerprinting**: every run captures hardware, software, and PTX/checkpoint digests — see [`results/README.md`](results/README.md).
-
-See [`docs/Research/PROFILING_METHODOLOGY.md`](../docs/Research/PROFILING_METHODOLOGY.md) for the full procedure.
-
-## What lives in each script
-
-| Script | What it does |
-|---|---|
-| `run_benchmarks.sh` | Top-level harness: fingerprints → dotnet build → C# microbench → Python baselines → analyze.py → atomic move into `results/` |
-| `profile.sh` | Wraps Nsight Systems (`nsys profile`) around a single end-to-end test; emits `.qdrep` + `nsys stats` summary |
-| `analyze.py` | Joins C# and PyTorch microbench CSVs by (op, shape, dtype); runs Welch's t-test; emits comparison.{md,csv} |
-| `python-baseline/run_all.sh` | Runs every PyTorch baseline script in sequence, appending to a single CSV |
-
-## Common operations
-
-```bash
-# Smoke test the harness (1 trial each, MatMul only, no e2e)
-bash benchmarks/run_benchmarks.sh --smoke
-
-# Skip Python (e.g. to iterate on C# benches without re-running PyTorch)
-bash benchmarks/run_benchmarks.sh --skip-python
-
-# Profile a single SDXL run with Nsight Systems
-bash benchmarks/profile.sh --test "FullyQualifiedName~Sdxl_GenerateImage_Gpu"
-
-# Run only one C# benchmark class
-dotnet run --no-build -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- \
-    --filter '*Sdpa*' --warmupCount 1 --iterationCount 5
-
-# Run only one Python baseline (for debugging schema issues)
-python3 benchmarks/python-baseline/bench_pytorch_matmul.py --output /tmp/test.csv --trials 1
-```
-
-## What does NOT belong here
-
-- **Functional tests** (numerical correctness): those live under `tests/`. Benchmarks measure speed; tests measure math.
-- **Per-checkpoint reference dumps**: those live under `tests/python-reference/`.
-- **CPU benchmarks**: keep using `benchmarks/HartsyInference.Benchmarks/` (existing, BDN-based).
-
-## When to add a new benchmark
-
-Add a new `*GpuBenchmarks.cs` class when:
-1. A new `IBackend` op is introduced
-2. A model uses a shape combination not covered by the current grid
-3. An optimization phase (B4.x) targets a workload pattern that needs its own microbench
-
-When you add one, also add the matching Python script to `python-baseline/` so the comparison stays apples-to-apples.
-
-## License + reproducibility
-
-All result CSVs in `benchmarks/results/` are checked into the repository. They form the public reproducibility trail for the paper. The harness scripts (this directory) are part of the HartsyInference MIT-licensed source distribution — re-run them on any compatible CUDA box to reproduce or refute our numbers.
+Record cold/warm state, trials/dispersion, checkpoint/input hashes, GPU/driver/runtime, resolved settings, memory and a quality gate. Match saved inputs and execution precision with the reference; report skipped/failed workloads separately. Repeated trials and confidence intervals matter; a successful harness exit alone does not establish numerical parity or a speedup.

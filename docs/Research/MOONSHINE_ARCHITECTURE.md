@@ -1,10 +1,8 @@
 # Moonshine — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Moonshine pipeline)
+> Source snapshot: 2026-05-17. This date does not establish current build or verification status.
 
-> **Stub.** The narrative walkthrough and restated pseudocode were removed on 2026-08-06 — this model
-> is built and verified, so the C# is the source of truth for *how it works*. What remains is what the
-> code cannot tell you: upstream provenance, reference constants, and bring-up traps. History is in git.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 Moonshine (Useful Sensors, 2024) is a tiny encoder-decoder ASR family explicitly designed for edge devices and live transcription. Unlike Whisper, it operates **directly on the raw 16 kHz waveform** (no mel spectrogram), uses **RoPE** instead of learned absolute positional embeddings, and processes **variable-length** audio without zero-padding to 30 s.
 

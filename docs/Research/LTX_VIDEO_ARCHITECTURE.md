@@ -1,14 +1,10 @@
 # LTX-Video Architecture — Research Notes
 
-> **Status:** Transformer + handoff complete (ported from diffusers); VAE + pipeline scoped | **Last Updated:** 2026-06-09 | **Needed Before:** `LtxVideoTransformer`, `LtxVideoVaeDecoder`, `LtxVideoPipeline`
+> Historical research note (not current engine status): Transformer + handoff complete (ported from diffusers); VAE + pipeline scoped | **Last Updated:** 2026-06-09 | **Needed Before:** `LtxVideoTransformer`, `LtxVideoVaeDecoder`, `LtxVideoPipeline`
 >
 > **Sources (verbatim, pulled raw):** diffusers `src/diffusers/models/transformers/transformer_ltx.py` (601 L), `models/autoencoders/autoencoder_kl_ltx.py` (1552 L), `pipelines/ltx/pipeline_ltx.py`. Weights: [`Lightricks/LTX-Video`](https://huggingface.co/Lightricks/LTX-Video). License: Apache-2.0 (OpenRAIL-M variant on some checkpoints — verify per weight).
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

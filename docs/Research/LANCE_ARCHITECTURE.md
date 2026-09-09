@@ -1,6 +1,6 @@
 # Lance — Research Notes
 
-> Status: Complete — **image T2I + video T2V IMPLEMENTED 2026-06-08** (both structurally verified end-to-end on CPU; numeric validation vs checkpoint pending). Last Updated: 2026-07-16 | Video: `LanceVideoPipeline` + Wan2.2 VAE streaming decode (`feat_cache`) + frame-streaming/encoders all built — see PHASE_9 § 6.
+> Source snapshot: 2026-07-16. This date does not establish current build or verification status.
 >
 > **REAL-CHECKPOINT RECONCILIATION (2026-07-16, first released `Lance_3B/model.safetensors`, 11.8 GB BF16 — NOT the 24.7 GB from the pre-release table).** Facts that override guesses below (source: real key dump + `inference_lance.sh` + the released GitHub code):
 > - **Latent patch is `(1,1,1)`**, NOT (1,2,2): `vae2llm = Linear(48→2048)`, `llm2vae = Linear(2048→48)` — one token per 48-channel latent pixel; total spatial downscale is **16×** (not 32×). Head keys are `vae2llm.*` / `llm2vae.*` (not `vae_in`/`vae_out`).
@@ -22,11 +22,7 @@
 > License: Apache 2.0
 > Related: [`Z_IMAGE_ARCHITECTURE.md`](Z_IMAGE_ARCHITECTURE.md) (M-RoPE / NextDiT lineage of the LLM backbone), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (rectified-flow background), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md)
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

@@ -1,15 +1,11 @@
 # Cosmos-Predict1 Video2World — Research Notes
 
-> Status: Complete (code + configs + tokenizer captured; HF tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Video (Phase 9, AR video continuation pipeline). Discrete tokenizer (Cosmos DV) + AR transformer infra reused by HartsyInference.World (Phase 10) for action-conditioned world models.
+> Source snapshot: 2026-05-24. This date does not establish current build or verification status.
 > License: NVIDIA Open Model License (commercial OK — see § License)
 > Source of truth: [nvidia-cosmos/cosmos-predict1 GitHub](https://github.com/nvidia-cosmos/cosmos-predict1), [arXiv 2501.03575 "Cosmos World Foundation Model Platform for Physical AI"](https://arxiv.org/abs/2501.03575), [HF nvidia/Cosmos-Predict1-5B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-5B-Video2World), [HF nvidia/Cosmos-Predict1-13B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-13B-Video2World), [HF nvidia/Cosmos-Tokenizer-DV8x16x16](https://huggingface.co/nvidia/Cosmos-Tokenizer-DV8x16x16)
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (joint image+video unified pipeline lineage), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (T5-11B is used here), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (continuous side of Cosmos Tokenizer family for diffusion decoder), and the forthcoming `WORLD_MODELS_AR_ACTION.md` (Phase 10, action-conditioned world models built on the same DV-token primitives)
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

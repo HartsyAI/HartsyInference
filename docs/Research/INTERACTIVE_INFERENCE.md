@@ -1,6 +1,6 @@
 # Interactive Inference — Research Notes
 
-> Status: Foundational design doc for Phase 9 (shared infra) and Phase 10 (world models). | Last Updated: 2026-05-24 | Needed Before: any world-model pipeline lands.
+> Historical interactive-design proposal (2026-05-24). Current implementation and open work are in MODEL_STATUS_WORLD.md; proposed types/phases below are not current API contracts.
 > Related: [`MATRIX_GAME_3_ARCHITECTURE.md`](MATRIX_GAME_3_ARCHITECTURE.md), [`MATRIX_GAME_2_ARCHITECTURE.md`](MATRIX_GAME_2_ARCHITECTURE.md), [`OASIS_ARCHITECTURE.md`](OASIS_ARCHITECTURE.md), [`HUNYUAN_GAMECRAFT_ARCHITECTURE.md`](HUNYUAN_GAMECRAFT_ARCHITECTURE.md), [`COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md`](COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md), [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md).
 
 ## Summary

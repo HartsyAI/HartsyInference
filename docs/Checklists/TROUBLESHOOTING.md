@@ -955,11 +955,10 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   — the process dies before any handler (incl. exception middleware) runs. Requires external process
   supervision (`Restart=always`), not a code fix. Verified live: a CPU-backend MoE kernel bug killed the
   whole process.
-- **Decode-round fault isolation:** an exception escaping `DynamicBatchScheduler`'s decode round previously
+- **Scheduler integration lesson (not current API wiring):** an exception escaping `DynamicBatchScheduler`'s decode round previously
   killed the model's background loop silently — no crash, no log, every future request to that model hung
   forever. Wrap the round to fail only that round's sequences.
-- **`/ready` must check real state** (`ModelManager.UnhealthyChatModels`/`IsLoopAlive`) — an unconditional
-  200 made a dead scheduler loop look healthy. Keep `/health` cheap/dependency-free (k8s split).
+- **Readiness gap:** the current API /ready resolves Engine.BackendDescription; it does not inspect worker/model liveness. The old ModelManager.UnhealthyChatModels/IsLoopAlive prescription described a different serving path. When integrating background scheduling, expose actual health and fail queued/active requests on worker death. Keep /health cheap and use external process supervision.
 - **`PagedKvCache.Gather` scratch realloc bug:** the size check was "changed at all" instead of "too
   small," reallocating a full GPU tensor every decode round for every sequence → grow-only, page-rounded
   fix.

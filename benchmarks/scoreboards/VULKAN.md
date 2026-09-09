@@ -1,5 +1,7 @@
 # Vulkan vs CUDA GPU-kernel scoreboard
 
+> Dated measurements and diagnostic record. Earlier phase hypotheses may be superseded by later entries; current work is in ROADMAP and current defaults in EngineKnobs. Do not treat historical settings or GPU comparisons as universal guarantees.
+
 Canonical, single-source-of-truth scoreboard for the Vulkan backend's raw GPU-kernel throughput
 against the CUDA backend. This is the first dated benchmark artifact for Vulkan in this repo —
 `docs/Checklists/ROADMAP.md` previously cited an unbacked "~6.5× CUDA" figure with no run behind it;

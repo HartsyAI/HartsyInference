@@ -1,8 +1,6 @@
 # Stable Diffusion Architectures — Research Notes
 
-> **Stub.** The narrative walkthrough and restated pseudocode were removed on 2026-08-06 — this model
-> is built and verified, so the C# is the source of truth for *how it works*. What remains is what the
-> code cannot tell you: upstream provenance, reference constants, and bring-up traps. History is in git.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## SD 1.5
 

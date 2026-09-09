@@ -10,7 +10,7 @@ inspection of the same code found none of them, so reach for this before re-read
 ## Running it
 
 ```bash
-COMFY="/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI"
+: "${COMFY:?Set COMFY to your matching ComfyUI checkout}"
 cd "$COMFY"
 ./venv/bin/python <repo>/benchmarks/ltx25_layerdiff/ref_dump.py /tmp/refdump
 

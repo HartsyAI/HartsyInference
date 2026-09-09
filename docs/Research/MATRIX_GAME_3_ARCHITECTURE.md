@@ -1,15 +1,11 @@
 # Matrix-Game 3.0 — Research Notes
 
-> Status: Complete (model card + arXiv v2 paper + GitHub source code + Wan2.2 base config captured; only safetensors tensor-key dump remains as a local follow-up) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.World (Matrix-Game 3.0 pipeline, Phase 10)
+> Source snapshot: 2026-05-24. This date does not establish current build or verification status.
 > Source of truth: [HF `Skywork/Matrix-Game-3.0`](https://huggingface.co/Skywork/Matrix-Game-3.0), [GitHub `SkyworkAI/Matrix-Game`](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-3), [arXiv 2604.08995 v2](https://arxiv.org/abs/2604.08995v2), [project page](https://matrix-game-v3.github.io/), [base `Wan-AI/Wan2.2-TI2V-5B`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 > License: Apache-2.0 (Matrix-Game 3.0 code + weights), Apache-2.0 (Wan2.2-TI2V-5B base), Apache-2.0 (UMT5-XXL encoder). No model-card-imposed use restrictions beyond standard Apache-2.0 terms.
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (Wan2.2 3D causal VAE — exact same `Wan2.2_VAE.pth`, same 48-channel latent, same mean/std), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (UMT5-XXL is also used by AuraFlow / Pile-T5-XL), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (rectified-flow background; Matrix-Game uses FlowUniPC).
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

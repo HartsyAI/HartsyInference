@@ -1,12 +1,10 @@
 # Z-Image Architecture
 
-> **Status:** built and verified — Z-Image Turbo and Base are both verified end-to-end (see
+> Historical research note (not current engine status): built and verified — Z-Image Turbo and Base are both verified end-to-end (see
 > `docs/Checklists/MODEL_STATUS_IMAGE.md`). Apache 2.0. By Tongyi Lab (Alibaba).
 > **Related:** [FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md), [TEXT_ENCODERS.md](TEXT_ENCODERS.md), [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md), [VAE_ARCHITECTURE.md](VAE_ARCHITECTURE.md).
 
-> **Stub.** The narrative walkthrough and restated pseudocode were removed on 2026-08-06 — this model
-> is built and verified, so the C# is the source of truth for *how it works*. What remains is what the
-> code cannot tell you: upstream provenance, reference constants, and bring-up traps. History is in git.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Important correction up front
 

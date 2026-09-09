@@ -1,25 +1,10 @@
-# Agent Core — Shared Context & Routing
+# Shared architecture and task routing
 
-> **Every agent conversation starts here.** Read this file first, then load the specialized agent file for your task.
-
-## Before Any Task
-
-1. Read `docs/CODE_STYLE.md` — mandatory, no exceptions
-2. Read the **Shared Design Rules** + **Core Engine Patterns** below — the architecture single source of
-   truth (they replace the old `docs/Design/` overview; the design folder was retired)
-3. Check `docs/Checklists/` — cross-cutting open work is in `ROADMAP.md`; per-model open work is in the
-   `Remaining work` section of the matching `MODEL_STATUS_*` doc; `TROUBLESHOOTING.md` is the model
-   bring-up debugging reference (read it first when a model is wrong, crashes, or is slow)
-4. For model coverage, read the per-modality status docs indexed in `docs/Checklists/MODEL_STATUS.md`
-   (Image / Audio / Video / World / 3D / Vision / LLM); `docs/Checklists/PARITY_VERIFICATION.md` is the
-   real-weight parity authority
+Read with [code style](../CODE_STYLE.md); load only relevant linked sections.
 
 ## Task Routing
 
-Pick the specialized agent file that matches your task. Read it before starting work. Each file is
-example-driven (✅ good / ❌ bad) and assumes you have already read this core + `docs/CODE_STYLE.md`.
-
-| Task | Agent File |
+Pick the specialized agent file that matches your task. Read it before starting work. | Task | Agent File |
 |---|---|
 | Add a new model (any modality) | `ADD_MODEL.md` |
 | Build a new non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |
@@ -34,9 +19,9 @@ If your task spans two agents (e.g. add a model *and* write its kernel), load bo
 
 These apply to ALL agents. Specialized files only add task-specific rules.
 
-**Pure C# only** — no native shared libraries, no Python, no C++ wrappers, no ONNX Runtime, no managed GPU wrappers (ILGPU, ManagedCuda, ComputeSharp, Vortice).
+**Pure C# runtime/model implementation** — no Python/C++ inference wrappers, ONNX Runtime, or managed GPU frameworks. Vendor driver/compute-library P/Invoke, CUDA kernel sources compiled to PTX, and offline Python reference tools are existing boundaries.
 
-**Eager execution** — no computation graphs; ops execute immediately.
+**Eager model execution** — backend CUDA graph capture/replay is an existing optimization, not a model computation graph.
 
 **Zero GC on hot paths** — no managed allocations during inference. Use `NativeMemory.AlignedAlloc(byteCount, 64)` and `ArrayPool<T>.Shared` only for managed metadata. (`TensorPool` exists for pooled temporaries but has no production call site yet — adopt it or retire it, see ROADMAP; don't cite it as established practice.)
 
@@ -58,7 +43,7 @@ These are the engine's own established patterns for tensors, CUDA launches, conf
 | `TensorView` | No | No-op | Borrowed refs, mmap slices |
 | `TensorRef` | No | N/A (value type) | Kernel hot paths |
 
-**Rules:** Creator disposes `Tensor`. `TensorView` never outlives backing memory. `TensorRef` is stack-only.
+**Rules:** Creator disposes `Tensor`. `TensorView` never outlives backing memory. `TensorRef` is a non-owning readonly record struct, not a stack-only `ref struct`; its lifetime must also remain within the storage lifetime.
 
 ### CUDA Launch Pattern
 ```csharp
@@ -101,8 +86,8 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 
 ### Error Handling
 - Shape mismatches: fail fast with `HartsyInferenceException`
-- CUDA/Vulkan: `.ThrowOnError()` on every call
-- Compute threads: `Environment.FailFast` for unrecoverable errors
+- CUDA/Vulkan: check every native status result; preserve void/handle-returning ABI signatures
+- Reserve `Environment.FailFast` for unrecoverable process corruption, not ordinary request failures
 - Custom exceptions: `HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException`
 
 ### Performance Attributes
@@ -114,11 +99,11 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 
 ### GPU Weight Management
 - Weights preloaded to GPU via `backend.PreloadWeights(model.EnumerateWeights())`
-- After preload, CPU weight tensors can be `Dispose()`d to free RAM
+- Dispose CPU weight tensors after preload only when the residency policy guarantees they will not be needed for streaming, recaching, or fallback
 - `GpuTransferHelper.CopyToDevice` checks cache by `Tensor` reference equality BEFORE accessing `DataPointer` — works on disposed CPU tensors
 - Model code must NEVER access `weight.DataPointer` directly — always route through `IBackend` ops
 - At pipeline stage transitions (e.g., UNet → VAE), call `backend.Sync()` + `backend.FreeWeights(model.EnumerateWeights())` to reclaim VRAM
-- **Pair `PreloadWeights` with `FreeWeights` symmetrically.** If you `FreeWeights` a component at the end of a phase, also `PreloadWeights` it before the first heavy use — otherwise the first kernel pays a per-op cache-miss H2D transfer that defeats the bulk-upload optimization. Every diffusion pipeline follows this pattern; see `FluxPipeline` or `Sd3Pipeline` for the canonical placement (preload before text-encode, then again before the denoise loop). No-op on backends without a weight cache (CPU, Vulkan).
+- **Pair `PreloadWeights` with `FreeWeights` symmetrically.** If you `FreeWeights` a component at the end of a phase, also `PreloadWeights` it before the first heavy use — otherwise the first kernel pays a per-op cache-miss H2D transfer that defeats the bulk-upload optimization. Every diffusion pipeline follows this pattern; see `FluxPipeline` or `Sd3Pipeline` for the canonical placement (preload before text-encode, then again before the denoise loop). Check each backend’s cache and ownership implementation; do not assume Vulkan has no weight cache.
 - Open kernel/perf work is `docs/Checklists/ROADMAP.md` §2; `docs/Research/CUDA_PERFORMANCE.md` and
   `CUDA_PERFORMANCE_PLAN.md` are the historical optimization record and technique reference
 
@@ -140,17 +125,3 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - **In-place ops**: When modifying a tensor's GPU buffer in-place (BroadcastAdd, etc.), clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` BEFORE calling `CacheActivation`. Old callbacks close over the GPU pointer and will free it.
 - **OOM retry**: `CudaMemory.Allocate` syncs the stream on `CUDA_ERROR_OUT_OF_MEMORY` to flush pending `FreeAsync` ops, then retries
 - **Gated activations (GEGLU/SwiGLU)**: Split along last dimension, NOT at flat midpoint. See `TROUBLESHOOTING.md` #16.
-
-### What NOT to Do
-- No Python/C++ wrappers, ONNX Runtime, managed GPU wrappers
-- No computation graphs — eager only
-- No managed arrays for tensor data
-- No `CuResult` enum, no `[DllImport]` (use `[LibraryImport]`)
-- No `Dictionary<string, nint>` for CUDA handles
-- No embedded PTX/SPIR-V resources — load from disk
-- No reflection JSON — use source-gen contexts
-- No direct `weight.DataPointer` access in model code — use `IBackend` ops (GPU cache bypass causes crashes after preload + CPU disposal)
-- No flat-midpoint tensor splits in GPU kernels — always decompose index to logical coordinates for dimension-aware splitting
-- No `cuMemFree` on the hot path — use `cuMemFreeAsync` (stream-ordered). Synchronous free after removing per-op Sync can cause use-after-free.
-- No `CacheActivation` on in-place-modified tensors without clearing old `_gpuSyncCallback`/`_gpuDisposeCallback` first
-- No per-model copy of logic that exists as a shared helper or `IBackend` op (layout transpose = `backend.Transpose2D`, not a hand-rolled loop; NSF source / STFT / iSTFT = `NsfVocoderDsp`; seeded noise = `DeterministicRng`). Check first, then hoist a parameterized shared helper.

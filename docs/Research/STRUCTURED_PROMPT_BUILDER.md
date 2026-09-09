@@ -1,6 +1,6 @@
 # Structured Prompt Builder — Research & Design Notes
 
-> **Status:** built — the design below shipped as `src/HartsyInference.Diffusion/Prompting/`
+> Historical research note (not current engine status): built — the design below shipped as `src/HartsyInference.Diffusion/Prompting/`
 > (`StructuredPrompt`, `StructuredPromptBuilder`, `IPromptDialect` + `Dialects/`, `MagicPrompt/`, plus
 > regional-conditioning and prompt-scheduling types). Kept as the design rationale. | Designed 2026-06-07
 >
@@ -11,11 +11,7 @@
 > - [IDEOGRAM4_ARCHITECTURE.md](IDEOGRAM4_ARCHITECTURE.md) (the consumer)
 > - Existing regional-prompting conventions (attention-coupled region masks) used by SD/Flux community tooling — relevant to the non-JSON dialects.
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Summary
 

@@ -12,7 +12,7 @@ choices in the source — they are only wrong against the config the checkpoint 
 ## Running it
 
 ```bash
-COMFY="/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI"
+: "${COMFY:?Set COMFY to your matching ComfyUI checkout}"
 cd "$COMFY"
 ./venv/bin/python <repo>/benchmarks/ltx2_conv_layerdiff/ref_dump.py /tmp/refA
 

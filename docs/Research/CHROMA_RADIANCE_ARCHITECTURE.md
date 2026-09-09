@@ -1,6 +1,6 @@
 # Chroma Radiance & Zeta-Chroma (Pixel-Space) Architecture — Research Notes
 
-> **Status:** Web-verified vs ComfyUI implementation; bracketed/⚠ items are **validation-gated** (no checkpoint diffed locally yet) | **Last Updated:** 2026-06-11 | **Needed Before:** `ChromaRadianceTransformer`, `ChromaRadiancePipeline`, `ZetaChromaTransformer`, `ZetaChromaPipeline`, converter/key-mapper support
+> Historical research note (not current engine status): Web-verified vs ComfyUI implementation; bracketed/⚠ items are **validation-gated** (no checkpoint diffed locally yet) | **Last Updated:** 2026-06-11 | **Needed Before:** `ChromaRadianceTransformer`, `ChromaRadiancePipeline`, `ZetaChromaTransformer`, `ZetaChromaPipeline`, converter/key-mapper support
 >
 > **Sources of truth:**
 > - HuggingFace: [`lodestones/Chroma1-Radiance`](https://huggingface.co/lodestones/Chroma1-Radiance) (pixel-space Chroma), [`lodestones/Zeta-Chroma`](https://huggingface.co/lodestones/Zeta-Chroma) (pixel-proto checkpoints, ~13 GB, mid-pretraining)
@@ -73,7 +73,7 @@ Chroma family (`distilled_guidance_layer.norms.0.scale`) **plus** `nerf_blocks.0
 
 ---
 
-## Zeta-Chroma (`lodestones/Zeta-Chroma`, pixel-proto, ⚠ all validation-gated)
+## Zeta-Chroma (`lodestones/Zeta-Chroma`, pixel-proto source snapshot)
 
 ### Backbone = Z-Image S3-DiT (NOT Chroma)
 
@@ -103,7 +103,7 @@ Keys follow Z-Image single-file naming: `x_embedder.*`, `layers.{0..29}.*`, `t_e
 
 ---
 
-## Uncertainty table (validation-gated items)
+## Historical uncertainty table (June source snapshot)
 
 | # | Item | Assumption in our implementation | How to validate |
 |---|---|---|---|
@@ -112,13 +112,13 @@ Keys follow Z-Image single-file naming: `x_embedder.*`, `layers.{0..29}.*`, `t_e
 | 3 | Final-norm before NeRF head | Skipped (head replaces `final_layer` and the mod-table's last 2 rows go unused) | Compare against ComfyUI `ChromaRadiance.forward_orig` |
 | 4 | `nerf_final_layer_conv` sub-key names | `nerf_final_layer_conv.{norm.scale, conv.weight [3,64,3,3], conv.bias}` | Key dump of the safetensors |
 | 5 | Radiance scheduler shift | Static 1.0 | ComfyUI model_sampling for `chroma_radiance` |
-| 6 | Zeta decoder head | Not implemented; plain Z-Image `final_layer` path only, hard error on unknown `decoder*` keys | Key dump of a Zeta pixel-proto checkpoint |
+| 6 | Zeta decoder head | Subsequently implemented and consumer-verified; see image status for decoder-head BF16 fix | Key dump of a Zeta pixel-proto checkpoint |
 | 7 | Zeta timestep convention | `(1 − sigma)` like Z-Image, ×1000 internally | ComfyUI `NextDiTPixelSpace` |
 | 8 | Zeta CFG formula | Standard CFG on velocity | ComfyUI sampling path |
 | 9 | Zeta scheduler shift | Static 3.0 (Z-Image Turbo default) | ComfyUI model config |
 | 10 | Zeta pad tokens / SeqMultiOf in pixel mode | Same as Z-Image (32, learned pad tokens if present) | Checkpoint key dump |
 
-## Implementation Notes (HartsyInference)
+## Historical implementation notes (superseded by current code/status)
 
 - `ChromaTransformer` gained an internal `ForwardCore` (blocks only, no img embed / final norm / proj_out) so `ChromaRadianceTransformer` reuses the backbone without duplication. Classic `Forward` is unchanged.
 - `ChromaRadianceImagePatchifier` (conv patchify) and `ChromaRadianceNerfHead` live under `Models/Denoisers/DiTBlocks/`.

@@ -1,14 +1,10 @@
 # Wan-Video Architecture — Research Notes
 
-> **Status:** Transformer + reuse mapped (ported from diffusers); pipeline scoped. TI2V-5B/T2V/I2V/A14B/VACE/Animate built. **Wan2.2-S2V researched (not built) — see the S2V section below.** | **Last Updated:** 2026-06-19 | **Target:** Wan2.2 **TI2V-5B** (the variant whose VAE we already built)
+> Historical research note (not current engine status): Transformer + reuse mapped (ported from diffusers); pipeline scoped. TI2V-5B/T2V/I2V/A14B/VACE/Animate built. **Wan2.2-S2V researched (not built) — see the S2V section below.** | **Last Updated:** 2026-06-19 | **Target:** Wan2.2 **TI2V-5B** (the variant whose VAE we already built)
 >
 > **Sources (verbatim):** diffusers `models/transformers/transformer_wan.py`, `pipelines/wan/pipeline_wan.py`. Config: [`Wan-AI/Wan2.2-TI2V-5B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers). License: Apache-2.0.
 
-> **Stub.** The narrative walkthrough, restated pseudocode and resolved open questions were
-> removed on 2026-08-06 — this model is built and verified, so the C# is the source of truth for
-> *how it works*. What remains is what the code cannot tell you: upstream provenance, reference
-> constants to diff a suspect port against, where implementations disagree, and bring-up traps.
-> Full history is in git. Parity evidence: `docs/Checklists/PARITY_VERIFICATION.md`.
+> Reference notes. Current implementation and verification status: [model index](../Checklists/MODEL_STATUS.md).
 
 ## Why TI2V-5B = maximum reuse
 

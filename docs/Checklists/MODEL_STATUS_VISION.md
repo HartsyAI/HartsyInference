@@ -50,7 +50,7 @@ Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.
 ## Deferred (❌)
 
 **DINOv3** (needs encoder RoPE support — preset added but dimensionally-only), **EVA-CLIP** (EVA-02 vision
-tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), MetaCLIP / AM-RADIO.
+tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), AM-RADIO.
 *(Done 2026-07-17, moved out of deferred: YOLO-seg head validated; SigLIP 2 + MetaCLIP presets are drop-ins;
 GPU-native MaxPool2D + depthwise-Conv kernels shipped with CUDA PTX + GPU-parity gate.)*
 See the [Remaining work](#remaining-work) section for the stretch list. **Segmentation ControlNet
@@ -73,15 +73,14 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Deferred stretch models
 - [ ] DINOv3 (encoder RoPE support).
 - [ ] EVA-CLIP / EVA-02 vision tower (RoPE + SwiGLU + sub-LN).
-- [ ] MetaCLIP, AM-RADIO.
+- [ ] AM-RADIO; MetaCLIP presets already exist (recorded above).
 
 ### Decoders
 - [ ] JPEG / WebP decoders.
 
 ### Testing gaps
 - [ ] CLIP bit-exact Python parity.
-- [ ] All YOLO validation tests.
-- [ ] CI.
+- [ ] Additional YOLO variants beyond the recorded validated paths.
 
 ## Details
 

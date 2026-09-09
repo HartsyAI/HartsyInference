@@ -19,7 +19,7 @@
          Directory.Build.props) into the nuspec's dependency list as literal text. -->
     <NuspecFile>HartsyInference.nuspec</NuspecFile>
     <NuspecBasePath>$(MSBuildThisFileDirectory)</NuspecBasePath>
-    <Description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for non-LLM modalities (diffusion image generation, speech-to-text, text-to-speech, vision, video, interactive world models). Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</Description>
+    <Description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for text, diffusion images, speech, music, vision, video, 3D, and interactive world models. Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</Description>
   </PropertyGroup>
 
   <!-- NuspecFile mode does NOT auto-fill $token$ placeholders from MSBuild properties (that's
