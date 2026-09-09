@@ -31,11 +31,14 @@ public static class RealEsrganConverter
         return result;
     }
 
-    /// <summary>Infers the RRDBNet config from a converted weight set: scale from the presence of
-    /// <c>conv_up2</c>, block count from the highest <c>body.{i}</c> index.</summary>
+    /// <summary>Infers the RRDBNet config from a converted weight set: scale from <c>conv_first</c>'s input channels
+    /// (12 means BasicSR's 2× pixel-unshuffle front end, i.e. an x2plus checkpoint; 3 means 4× — every Real-ESRGAN
+    /// checkpoint carries both <c>conv_up</c> stages, so their presence says nothing about the factor), block count
+    /// from the highest <c>body.{i}</c> index.</summary>
     public static RealEsrganConfig InferConfig(IReadOnlyDictionary<string, Tensor> weights)
     {
-        int scale = weights.ContainsKey("conv_up2.weight") ? 4 : 2;
+        int inputChannels = weights.TryGetValue("conv_first.weight", out Tensor? first) ? (int)first.Shape[1] : 3;
+        int scale = inputChannels == 12 ? 2 : 4;
 
         int maxBlock = -1;
         foreach (string key in weights.Keys)
