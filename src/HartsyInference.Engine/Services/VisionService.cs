@@ -16,6 +16,7 @@ using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Embeddings;
 using HartsyInference.Vision.Rmbg;
 using HartsyInference.Vision.Siglip;
+using HartsyInference.Vision.Upscale;
 
 namespace HartsyInference.Engine.Services;
 
@@ -24,6 +25,11 @@ public sealed class VisionService : IVisionService, IDisposable
 {
     /// <summary>Aux key a caller may set on <see cref="ModelSpec"/> to point at a specific SAM 2 checkpoint.</summary>
     public const string Sam2AuxKey = "sam2-path";
+
+    /// <summary>Input-space tile edge for Real-ESRGAN. 256 px in → 1024 px out per tile on x4: the 64-channel
+    /// activations of one tile stay near a quarter gigabyte, and a 1024² source is 25 tiles rather than the 121 the
+    /// pipeline's 128 px default would cut.</summary>
+    private const int UpscaleTileSize = 256;
 
     private readonly InferenceEngine _engine;
     private readonly RtDetrObjectDetector _rtDetr = new();
@@ -47,6 +53,7 @@ public sealed class VisionService : IVisionService, IDisposable
     private readonly Dictionary<string, NormalBaeModel> _normalBaeCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UperNetSegModel> _upernetCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, BriaRmbg> _rmbgCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, UpscalePipeline> _upscaleCache = new(StringComparer.Ordinal);
     // All five load via PytorchPickleLoader (raw .pth/.pt), whose Dispose() also disposes its tensors — the
     // loader must stay open for as long as the cached model is used, same as _embedLoaders above.
     private readonly List<PytorchPickleLoader> _annotatorLoaders = new();
@@ -74,6 +81,7 @@ public sealed class VisionService : IVisionService, IDisposable
                     VisionMode.Normal => Normal(spec, request),
                     VisionMode.SegMap => SegMap(spec, request),
                     VisionMode.BackgroundRemoval => BackgroundRemoval(spec, request),
+                    VisionMode.Upscale => Upscale(spec, request, cancel),
                     _ => throw new NotSupportedException($"Unknown vision mode '{request.Mode}'."),
                 };
             },
@@ -299,7 +307,10 @@ public sealed class VisionService : IVisionService, IDisposable
         }
     }
 
-    /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5, matching what the image→3D pipelines (TripoSR / Hunyuan3D) expect from their background-removal step.</summary>
+    /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5 in <see cref="ImageData.Rgb"/> (what the
+    /// image→3D pipelines — TripoSR / Hunyuan3D — expect from their background-removal step) plus the same matte as an
+    /// 8-bit <see cref="ImageData.Alpha"/> plane, so a caller that wants a real cutout composites it against whatever
+    /// it likes. One forward pass feeds both.</summary>
     private VisionResult BackgroundRemoval(ModelSpec spec, VisionRequest request)
     {
         string path = RequirePath(spec, "rmbg");
@@ -314,8 +325,67 @@ public sealed class VisionService : IVisionService, IDisposable
         });
         RmbgBackgroundRemover remover = new RmbgBackgroundRemover(model);
         ImageData image = request.Image;
-        byte[] cutout = remover.CompositeOnGray(Backend, image.Rgb, image.Width, image.Height);
-        return new VisionResult { Image = new ImageData { Rgb = cutout, Width = image.Width, Height = image.Height } };
+        float[] alpha = remover.Alpha(Backend, image.Rgb, image.Width, image.Height);
+        byte[] cutout = RmbgBackgroundRemover.CompositeOnGray(alpha, image.Rgb, image.Width, image.Height);
+        return new VisionResult
+        {
+            Image = new ImageData
+            {
+                Rgb = cutout,
+                Width = image.Width,
+                Height = image.Height,
+                Alpha = RmbgBackgroundRemover.AlphaToBytes(alpha),
+            },
+        };
+    }
+
+    /// <summary>Real-ESRGAN: pixel-space super-resolution by the checkpoint's own factor (4 for x4plus / anime6b,
+    /// 2 for x2plus). A target size runs as many passes as <see cref="UpscalePlan"/> asks for and then resizes down
+    /// (bicubic, antialiased) — never a stretch past the last pass. Tiled at <see cref="UpscaleTileSize"/> input
+    /// pixels so a 4 K request stays inside a fixed activation budget.</summary>
+    private VisionResult Upscale(ModelSpec spec, VisionRequest request, CancellationToken cancel)
+    {
+        string path = RequirePath(spec, "real-esrgan-x4plus");
+        UpscalePipeline pipeline = GetOrLoad(_upscaleCache, path, () => LoadRealEsrgan(path));
+        ImageData image = request.Image;
+        UpscalePlan plan = UpscalePlan.Create(
+            image.Width, image.Height, pipeline.ScaleFactor, request.TargetWidth, request.TargetHeight);
+        byte[] rgb = image.Rgb;
+        int width = image.Width, height = image.Height;
+        for (int pass = 0; pass < plan.Passes; pass++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            (rgb, width, height) = pipeline.Upscale(rgb, width, height);
+        }
+        if (width != plan.Width || height != plan.Height)
+        {
+            rgb = ResizeRgb(new ImageData { Rgb = rgb, Width = width, Height = height }, plan.Width, plan.Height);
+        }
+        return new VisionResult { Image = new ImageData { Rgb = rgb, Width = plan.Width, Height = plan.Height } };
+    }
+
+    /// <summary>Loads a Real-ESRGAN checkpoint — the official BasicSR <c>.pth</c> (a <c>params_ema</c> envelope the
+    /// pickle loader unwraps) or a flat safetensors export — and infers the RRDBNet geometry from its keys.</summary>
+    private UpscalePipeline LoadRealEsrgan(string path)
+    {
+        Dictionary<string, Tensor> raw;
+        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            raw = loader.GetAllTensors();
+        }
+        else
+        {
+            raw = LoadPickle(path);
+        }
+        Dictionary<string, Tensor> weights = RealEsrganConverter.Convert(raw);
+        RealEsrganConfig config = RealEsrganConverter.InferConfig(weights);
+        RrdbNet net = new RrdbNet(config);
+        net.LoadWeights(weights);
+        Logs.Info($"[Vision] Real-ESRGAN x{config.Scale} loaded ({config.NumBlock} RRDB blocks) from {path}");
+        return new UpscalePipeline(Backend, net, inputTileSize: UpscaleTileSize);
     }
 
     /// <summary>UperNet-Seg: ADE20K semantic-segmentation palette map. The reference pipeline stretch-resizes to a fixed 512×512 detect resolution.</summary>

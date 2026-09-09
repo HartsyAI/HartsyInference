@@ -1,22 +1,36 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine;
 
-/// <summary>Encodes tightly-packed 24-bit RGB pixel data into an in-memory PNG (8-bit truecolor), using the runtime's
-/// built-in zlib so no external image library is pulled in. PNG is preferred over BMP for saved artifacts: it is
-/// universally viewable, lossless, and far smaller.</summary>
+/// <summary>Encodes tightly-packed 24-bit RGB pixel data (plus an optional 8-bit alpha plane) into an in-memory PNG,
+/// using the runtime's built-in zlib so no external image library is pulled in. PNG is preferred over BMP for saved
+/// artifacts: it is universally viewable, lossless, and far smaller.</summary>
 public static class PngEncoder
 {
     private static readonly byte[] Signature = { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };
 
     /// <summary>Encodes <paramref name="rgb"/> (row-major, top-to-bottom, 3 bytes/pixel R,G,B) as a color-type-2 PNG.</summary>
-    public static byte[] Encode(byte[] rgb, int width, int height)
+    public static byte[] Encode(byte[] rgb, int width, int height) => Encode(rgb, null, width, height);
+
+    /// <summary>Encodes an engine image: color-type-6 (RGBA) when it carries a sized alpha plane, else color-type-2.</summary>
+    public static byte[] Encode(ImageData image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        return Encode(image.Rgb, image.HasAlpha ? image.Alpha : null, image.Width, image.Height);
+    }
+
+    /// <summary>Encodes <paramref name="rgb"/> with a straight <paramref name="alpha"/> plane (1 byte/pixel, 255 =
+    /// opaque) as a color-type-6 PNG; a null <paramref name="alpha"/> produces the plain truecolor form.</summary>
+    public static byte[] Encode(byte[] rgb, byte[]? alpha, int width, int height)
     {
         if (width <= 0 || height <= 0)
             throw new ArgumentException($"Invalid image dimensions {width}x{height}.");
         if (rgb.Length < (long)width * height * 3)
             throw new ArgumentException($"RGB buffer too small: {rgb.Length} < {(long)width * height * 3}.");
+        if (alpha is not null && alpha.Length < (long)width * height)
+            throw new ArgumentException($"Alpha buffer too small: {alpha.Length} < {(long)width * height}.");
 
         using MemoryStream png = new MemoryStream();
         png.Write(Signature, 0, Signature.Length);
@@ -25,27 +39,43 @@ public static class PngEncoder
         BinaryPrimitives.WriteInt32BigEndian(ihdr[..4], width);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.Slice(4, 4), height);
         ihdr[8] = 8;  // bit depth
-        ihdr[9] = 2;  // color type: truecolor RGB
+        ihdr[9] = alpha is null ? (byte)2 : (byte)6;  // color type: truecolor RGB, or truecolor with alpha
         ihdr[10] = 0; // deflate
         ihdr[11] = 0; // adaptive filtering
         ihdr[12] = 0; // no interlace
         WriteChunk(png, "IHDR", ihdr);
 
-        WriteChunk(png, "IDAT", Deflate(FilterScanlines(rgb, width, height)));
+        WriteChunk(png, "IDAT", Deflate(FilterScanlines(rgb, alpha, width, height)));
         WriteChunk(png, "IEND", ReadOnlySpan<byte>.Empty);
         return png.ToArray();
     }
 
-    // Prepend the per-scanline filter byte (0 = None) that PNG requires ahead of each row's raw pixels.
-    private static byte[] FilterScanlines(byte[] rgb, int width, int height)
+    // Prepend the per-scanline filter byte (0 = None) that PNG requires ahead of each row's raw pixels, interleaving
+    // the alpha plane into the fourth byte of every pixel when one is present.
+    private static byte[] FilterScanlines(byte[] rgb, byte[]? alpha, int width, int height)
     {
-        int stride = width * 3;
+        int bytesPerPixel = alpha is null ? 3 : 4;
+        int stride = width * bytesPerPixel;
         byte[] raw = new byte[(stride + 1) * height];
         for (int y = 0; y < height; y++)
         {
             int dst = y * (stride + 1);
             raw[dst] = 0;
-            Array.Copy(rgb, y * stride, raw, dst + 1, stride);
+            if (alpha is null)
+            {
+                Array.Copy(rgb, y * stride, raw, dst + 1, stride);
+                continue;
+            }
+            int srcPixel = y * width;
+            for (int x = 0; x < width; x++)
+            {
+                int src = (srcPixel + x) * 3;
+                int o = dst + 1 + x * 4;
+                raw[o] = rgb[src];
+                raw[o + 1] = rgb[src + 1];
+                raw[o + 2] = rgb[src + 2];
+                raw[o + 3] = alpha[srcPixel + x];
+            }
         }
         return raw;
     }

@@ -1510,6 +1510,46 @@ public static class ModelCatalog
                 },
             },
 
+            // Real-ESRGAN pixel-space super-resolution. The official release files live on GitHub, not HuggingFace;
+            // these repos mirror them byte-for-byte — x4plus is the copy the ControlNet annotator bundle carries
+            // (five independent HF uploads share its hash), anime6b's hash agrees across four uploads, x2plus is a
+            // single-file mirror whose size matches the v0.2.1 release (67,061,725 bytes). All three are the
+            // BasicSR .pth form (a params_ema envelope) that the pickle loader unwraps and RealEsrganConverter
+            // normalizes; RrdbNet geometry is inferred from the keys at load.
+            new CatalogEntry
+            {
+                Id = "real-esrgan-x4plus", Modality = vis, DisplayName = "Real-ESRGAN x4plus (general 4× upscaler)",
+                Architecture = "RRDBNet (23 RRDB, 64 feat, 32 growth)", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth",
+                        TargetSubdir = "Vision/Upscale", Role = "transformer",
+                        Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "real-esrgan-x2plus", Modality = vis, DisplayName = "Real-ESRGAN x2plus (general 2× upscaler)",
+                Architecture = "RRDBNet (23 RRDB, 64 feat, 32 growth, one upsample stage)", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ishaansutaria35/RealESRGAN_x2plus", RepoPath = "RealESRGAN_x2plus.pth",
+                        TargetSubdir = "Vision/Upscale", Role = "transformer",
+                        Sha256 = "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "real-esrgan-anime6b", Modality = vis, DisplayName = "Real-ESRGAN x4plus anime 6B (4× upscaler for line art / anime)",
+                Architecture = "RRDBNet (6 RRDB, 64 feat, 32 growth)", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ximso/RealESRGAN_x4plus_anime_6B", RepoPath = "RealESRGAN_x4plus_anime_6B.pth",
+                        TargetSubdir = "Vision/Upscale", Role = "transformer",
+                        Sha256 = "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da" },
+                },
+            },
+
             // Restoration (SeedVR2). numz/SeedVR2_comfyUI ships the original state-dict keys verbatim, so
             // the converter loads its fp16 files directly. The pos/neg embeddings exist upstream only as
             // torch-pickle .pt, hence the Hartsy-hosted converted copy (until published, place it under

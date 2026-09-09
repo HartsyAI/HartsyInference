@@ -39,8 +39,18 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Vision operation; inferred from the model id when omitted.</summary>
         [CommandOption("--mode")]
-        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, segmap, or removebg. Inferred from the model id when omitted.")]
+        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, or upscale. Inferred from the model id when omitted.")]
         public string? Mode { get; init; }
+
+        /// <summary>Upscale only: fit the result to this width (see <see cref="Height"/>).</summary>
+        [CommandOption("--width")]
+        [Description("Upscale only: output width to fit to. Omit both sizes to enlarge by the model's own factor.")]
+        public int? Width { get; init; }
+
+        /// <summary>Upscale only: fit the result to this height.</summary>
+        [CommandOption("--height")]
+        [Description("Upscale only: output height to fit to (derived from --width and the source aspect when omitted).")]
+        public int? Height { get; init; }
 
         /// <summary>Text query for open-vocabulary detect/segment (Grounding DINO, CLIPSeg).</summary>
         [CommandOption("-p|--prompt")]
@@ -73,6 +83,14 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (!string.IsNullOrWhiteSpace(settings.Prompt))
         {
             parameters.Put("query", settings.Prompt);
+        }
+        if (settings.Width is int width)
+        {
+            parameters.Put("width", width.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Height is int height)
+        {
+            parameters.Put("height", height.ToString(CultureInfo.InvariantCulture));
         }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Vision);
@@ -118,6 +136,10 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (id.Contains("rmbg"))
         {
             return "removebg";
+        }
+        if (id.Contains("esrgan") || id.Contains("upscale"))
+        {
+            return "upscale";
         }
         return "embed";
     }

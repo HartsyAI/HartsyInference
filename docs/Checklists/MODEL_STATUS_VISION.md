@@ -47,6 +47,12 @@ the gap is purely that the one-time offline conversion (`convert_arcface_onnx.py
 `-folded.safetensors` step) isn't something the Assets auto-download system can perform; it needs a local
 Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
 
+## Runs end-to-end, parity pending (⚠️)
+
+| Model | Status | Notes |
+|---|---|---|
+| **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ⚠️ | Structural tests only (`UpscaleTests`, `UpscalePlanTests`): the graph runs and tiles correctly on synthetic weights. No numerical parity against the BasicSR reference has been recorded; treat outputs as e2e-coherent, not verified. ([details](#real-esrgan)) |
+
 ## Deferred (❌)
 
 **DINOv3** (needs encoder RoPE support — preset added but dimensionally-only), **EVA-CLIP** (EVA-02 vision
@@ -109,7 +115,17 @@ Real-weight parity vs transformers `UperNetForSemanticSegmentation` (`openmmlab/
 
 ### RMBG-1.4
 
-Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full U²-Net-style nested-U (`conv_in` + 6 encoder + 5 decoder RSU blocks + `side1`) at 1024²; mask **maxAbs 2.9e-6, corr 1.00000000** vs the upstream model (test `RmbgParityTests`, oracle `dump_rmbg.py`). Clean chair segmentation confirmed visually. **BatchNorm folded into the conv at load; dilated convs realized as zero-inflated 3×3 kernels** (no dilation kernel needed); host bilinear-2× upsample (CUDA has no `UpsampleBilinear2D`). `RmbgBackgroundRemover` (preprocess + alpha + gray-0.5 composite) is the pure-C# replacement for the Python `rembg` step the **image→3D pipelines** (TripoSR / Hunyuan3D) need — see PHASE_11 §6. Files: `src/HartsyInference.Vision/Rmbg/`.
+Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full U²-Net-style nested-U (`conv_in` + 6 encoder + 5 decoder RSU blocks + `side1`) at 1024²; mask **maxAbs 2.9e-6, corr 1.00000000** vs the upstream model (test `RmbgParityTests`, oracle `dump_rmbg.py`). Clean chair segmentation confirmed visually. **BatchNorm folded into the conv at load; dilated convs realized as zero-inflated 3×3 kernels** (no dilation kernel needed); host bilinear-2× upsample (CUDA has no `UpsampleBilinear2D`). `RmbgBackgroundRemover` (preprocess + alpha + gray-0.5 composite) is the pure-C# replacement for the Python `rembg` step the **image→3D pipelines** (TripoSR / Hunyuan3D) need — see PHASE_11 §6. Since alpha.56 `VisionMode.BackgroundRemoval` also returns the matte as `ImageData.Alpha` (8-bit, straight), so consumers that want a cutout rather than the gray composite (the SwarmUI extension's Remove Background) get one from the same forward pass. Files: `src/HartsyInference.Vision/Rmbg/`.
+
+### Real-ESRGAN
+
+Reachable since alpha.56 through `VisionMode.Upscale` (`VisionService.Upscale`) and the catalog ids
+`real-esrgan-x4plus` / `real-esrgan-x2plus` / `real-esrgan-anime6b`, which fetch the official BasicSR `.pth`
+files from HuggingFace mirrors (hashes cross-checked across independent uploads; x2plus is a single mirror whose
+size matches the v0.2.1 release). `RealEsrganConverter` strips the `params_ema` envelope and infers the RRDBNet
+geometry from the keys. Tiled at 256 px input (`VisionService.UpscaleTileSize`); a target size runs at most two
+passes then resizes down (`UpscalePlan`). **Open:** a `RealEsrganParityTests` against the Python
+`realesrgan` package on a fixed crop — the structural tests prove shape and tiling, not the numbers.
 
 ### ArcFace IR-50
 
