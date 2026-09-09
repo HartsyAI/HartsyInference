@@ -23,6 +23,13 @@ public static class Validator
             Require(environment.Binaries.Count is> 0 and <= 5000 && environment.Binaries.All(p => Hashes.IsHash(p.Value)),
                 "Missing binary identities.");
             Require(environment.Settings.Count is> 0 and <= 1000 && environment.CpuCount > 0, "Missing runtime settings.");
+            Require(!string.IsNullOrWhiteSpace(environment.OperatingSystem)
+                && !string.IsNullOrWhiteSpace(environment.Runtime) && !string.IsNullOrWhiteSpace(environment.EngineVersion)
+                && !string.IsNullOrWhiteSpace(environment.Architecture)
+                && environment.Settings.All(p => !string.IsNullOrWhiteSpace(p.Key) && p.Value is not null),
+                "Missing runtime provenance.");
+            Require(!environment.Device.Name.Any(char.IsControl) && !environment.Device.Driver.Any(char.IsControl),
+                "Control characters in device provenance.");
             Require(environment.Device.HardwareKind is "gpu" or "cpu", "Missing hardware class.");
             Require(environment.Device.Error is null && environment.Device.Name.Length is> 0 and < 200 && environment.Device.Driver
                 .Length is> 0 and < 100, "Invalid backend provenance.");

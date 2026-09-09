@@ -114,6 +114,11 @@ if (mode === 'validate' || mode === 'promote') {
   bench('publish', '--input', submissions, '--reviews', receipts, '--evidence', path.join(temporary, 'benchmark-extracted'), '--output', 'benchmarks/generated');
 } else if (mode === 'withdraw') {
   const id = process.env.SUBMISSION_ID || ''; if (!hashPattern.test(id)) throw new Error('Invalid submission');
+  if (!/^https:\/\/github\.com\/HartsyAI\/HartsyInference\/pull\/[0-9]+$/.test(process.env.REVIEW_PR || '')) throw new Error('Invalid review PR');
+  const pr = api(`repos/${repository}/pulls/${process.env.REVIEW_PR.split('/').at(-1)}`);
+  if (!matchesMergedHead(pr, {verifiedHead: process.env.REVIEW_HEAD})) throw new Error('Withdrawal must identify the merged reviewed head');
+  const files = JSON.parse(gh('api', `repos/${repository}/pulls/${pr.number}/files`, '--paginate', '--slurp')).flat();
+  if (submissionIdFor(files) !== id) throw new Error('Withdrawal PR does not contain this submission');
   const root = path.resolve('benchmarks/submissions', id), receipt = path.join(temporary, `${id}.${process.env.GITHUB_RUN_ID}${process.env.GITHUB_RUN_ATTEMPT || 1}.review.json`);
   bench('review', '--input', root, '--output', receipt, '--status', 'withdrawn', '--reviewer', process.env.GITHUB_ACTOR,
     '--pr', process.env.REVIEW_PR, '--head', process.env.REVIEW_HEAD, '--reason', process.env.REVIEW_REASON);
