@@ -168,9 +168,9 @@ public sealed class TextService : ITextService, IDisposable
         try
         {
             ImageData? image = LastImage(request);
-            if (image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null))
-                return RunVision(slot, request, image, sink, cancel);
-            GenOutcome outcome = RunText(slot, request, sink, diagnosticId, cancel);
+            GenOutcome outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
+                ? RunVision(slot, request, image, sink, cancel)
+                : RunText(slot, request, sink, diagnosticId, cancel);
             _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted, outcome.CompletionTokens);
             return outcome;
         }
