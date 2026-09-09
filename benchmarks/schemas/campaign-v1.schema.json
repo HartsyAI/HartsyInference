@@ -1,0 +1,329 @@
+{
+  "type": [
+    "object",
+    "null"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer"
+    },
+    "suiteId": {
+      "type": "string"
+    },
+    "suiteSha256": {
+      "type": "string"
+    },
+    "createdUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "machineId": {
+          "type": "string"
+        },
+        "engineRevision": {
+          "type": "string"
+        },
+        "engineVersion": {
+          "type": "string"
+        },
+        "operatingSystem": {
+          "type": "string"
+        },
+        "runtime": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "cpuCount": {
+          "type": "integer"
+        },
+        "device": {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "identity": {
+              "type": "string"
+            },
+            "hardwareKind": {
+              "type": "string"
+            },
+            "memoryBytes": {
+              "type": "integer"
+            },
+            "driver": {
+              "type": "string"
+            },
+            "capabilities": {
+              "type": "string"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "selector",
+            "name",
+            "identity",
+            "driver"
+          ],
+          "additionalProperties": false
+        },
+        "binaries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "nativeLibraries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "powerProfile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machineId",
+        "engineRevision",
+        "engineVersion",
+        "operatingSystem",
+        "runtime",
+        "architecture",
+        "device",
+        "binaries",
+        "settings"
+      ],
+      "additionalProperties": false
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "caseId": {
+            "type": "string"
+          },
+          "session": {
+            "type": "integer"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "startedUtc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "measurements": {
+            "type": "array",
+            "items": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "input": {
+                  "type": "integer"
+                },
+                "lane": {
+                  "type": "string"
+                },
+                "elapsedMs": {
+                  "type": "number"
+                },
+                "stopwatchFrequency": {
+                  "type": "integer"
+                },
+                "startedTicks": {
+                  "type": "integer"
+                },
+                "requestStartedTicks": {
+                  "type": "integer"
+                },
+                "completedTicks": {
+                  "type": "integer"
+                },
+                "prefillTicks": {
+                  "type": "integer"
+                },
+                "tokenTimestamps": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                "firstTokenMs": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "decodeTokensPerSecond": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "promptTokens": {
+                  "type": "integer"
+                },
+                "completionTokens": {
+                  "type": "integer"
+                },
+                "stopReason": {
+                  "type": "string"
+                },
+                "output": {
+                  "type": "string"
+                },
+                "outputSha256": {
+                  "type": "string"
+                },
+                "qualityPassed": {
+                  "type": "boolean"
+                },
+                "qualityDetail": {
+                  "type": "string"
+                },
+                "hostPeakBytes": {
+                  "type": "integer"
+                },
+                "sampledUsedDeviceBytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "memorySource": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "input",
+                "lane",
+                "elapsedMs",
+                "output",
+                "outputSha256",
+                "qualityPassed",
+                "qualityDetail"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "actualDevice": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "selector": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "hardwareKind": {
+                "type": "string"
+              },
+              "memoryBytes": {
+                "type": "integer"
+              },
+              "driver": {
+                "type": "string"
+              },
+              "capabilities": {
+                "type": "string"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "selector",
+              "name",
+              "identity",
+              "driver"
+            ],
+            "additionalProperties": false
+          },
+          "nativeLibraries": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "caseId",
+          "session",
+          "attempt",
+          "status",
+          "startedUtc",
+          "measurements"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "budgetMinutes": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "suiteId",
+    "suiteSha256",
+    "createdUtc",
+    "environment",
+    "sessions"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

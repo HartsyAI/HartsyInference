@@ -1,0 +1,41 @@
+name: Withdraw benchmark evidence
+on:
+  workflow_dispatch:
+    inputs:
+      submission:
+        description: 'Full campaign SHA-256'
+        required: true
+      pr:
+        description: 'Original merged results PR URL'
+        required: true
+      head:
+        description: 'Original reviewed PR head SHA'
+        required: true
+      reason:
+        description: 'Public reason for withdrawal; previous evidence remains archived'
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: benchmark-archive
+  cancel-in-progress: false
+jobs:
+  withdraw:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SUBMISSION_ID: ${{ inputs.submission }}
+          REVIEW_PR: ${{ inputs.pr }}
+          REVIEW_HEAD: ${{ inputs.head }}
+          REVIEW_REASON: ${{ inputs.reason }}
+        run: node benchmarks/automation/control.mjs withdraw

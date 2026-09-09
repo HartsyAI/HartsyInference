@@ -118,3 +118,13 @@ appsettings.*.json
 # CUDA kernel build intermediates — source is *.cu here; the shipped artifacts live in ../Ptx/
 src/HartsyInference.Cuda/Kernels/**/*.ptx
 /benchmarks/results
+
+# Community benchmark local campaigns and self-contained build products
+/benchmark-runs/
+/benchmark-cache/
+/artifacts/
+
+# Pages build products; keep only the honest initial snapshot in Git.
+/benchmarks/generated/*
+!/benchmarks/generated/overview.svg
+!/benchmarks/generated/summary.json

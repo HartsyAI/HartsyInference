@@ -1,0 +1,39 @@
+{
+  "type": [
+    "object",
+    "null"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer"
+    },
+    "id": {
+      "type": "string"
+    },
+    "campaignSha256": {
+      "type": "string"
+    },
+    "bundleSha256": {
+      "type": "string"
+    },
+    "bundleBytes": {
+      "type": "integer"
+    },
+    "stagingUrl": {
+      "type": "string"
+    },
+    "archiveUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "campaignSha256",
+    "bundleSha256",
+    "bundleBytes",
+    "stagingUrl",
+    "archiveUrl"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

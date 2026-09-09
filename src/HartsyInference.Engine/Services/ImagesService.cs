@@ -22,6 +22,7 @@ public sealed class ImagesService : IImagesService
     {
         ArgumentNullException.ThrowIfNull(request);
         RejectUnsupported(spec, request);
+        long diagnosticId = _engine.StartDiagnostics();
         return Task.Run(
             () =>
             {
@@ -37,6 +38,7 @@ public sealed class ImagesService : IImagesService
                 using IDisposable settingsScope = KnobProfileScope.Push(request.Settings?.Resolve());
                 string? keepRefiner = request.Refiner?.Model;
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
                 // Base-prompt tag-leak fix: <segment:>/<clear:> text must not reach the BASE (full-canvas) pass's
@@ -71,6 +73,7 @@ public sealed class ImagesService : IImagesService
                 {
                     result = SegmentRefinement.Apply(result, resolved, pipeline, _engine.Backend, _clipSeg, progress, cancel);
                 }
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
                 return result;
             },
             cancel);

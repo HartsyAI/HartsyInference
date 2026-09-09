@@ -1,0 +1,34 @@
+name: Build benchmark runner
+on:
+  pull_request:
+    paths: ['benchmarks/HartsyInference.BenchmarkRunner/**', 'benchmarks/suites/**', 'benchmarks/automation/**', 'tests/HartsyInference.BenchmarkRunner.Tests/**', 'src/**', '.github/workflows/benchmark-*.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: windows-latest
+            rid: win-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: node --test benchmarks/automation/policy.test.mjs
+      - run: dotnet test tests/HartsyInference.BenchmarkRunner.Tests -c Release
+      - run: dotnet benchmarks/HartsyInference.BenchmarkRunner/bin/Release/net10.0/hartsy-bench.dll schema --output benchmarks/schemas
+      - run: git diff --exit-code -- benchmarks/schemas
+      - run: dotnet publish benchmarks/HartsyInference.BenchmarkRunner -c Release -r ${{ matrix.rid }} --self-contained true -p:BenchmarkRevision=${{ github.event.pull_request.head.sha || github.sha }} -o artifacts/${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hartsy-bench-${{ matrix.rid }}
+          path: artifacts/${{ matrix.rid }}

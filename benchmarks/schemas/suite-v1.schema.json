@@ -1,0 +1,118 @@
+{
+  "type": [
+    "object",
+    "null"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer"
+    },
+    "id": {
+      "type": "string"
+    },
+    "sessions": {
+      "type": "integer"
+    },
+    "warmups": {
+      "type": "integer"
+    },
+    "publishable": {
+      "type": "boolean"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "adapter": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "object",
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "repository",
+              "revision",
+              "file",
+              "sha256",
+              "bytes"
+            ],
+            "additionalProperties": false
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "inputPrefix": {
+            "type": "string"
+          },
+          "prefixRepeats": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "steps": {
+            "type": "integer"
+          },
+          "maxTokens": {
+            "type": "integer"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "timeoutSeconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "adapter",
+          "model",
+          "asset",
+          "inputs"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "id",
+    "cases"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

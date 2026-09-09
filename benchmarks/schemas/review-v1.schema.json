@@ -1,0 +1,51 @@
+{
+  "type": [
+    "object",
+    "null"
+  ],
+  "properties": {
+    "createdUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "bundleSha256": {
+      "type": "string"
+    },
+    "submissionId": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "reviewer": {
+      "type": "string"
+    },
+    "pullRequest": {
+      "type": "string"
+    },
+    "verifiedHead": {
+      "type": "string"
+    },
+    "reproduces": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "createdUtc",
+    "bundleSha256",
+    "submissionId",
+    "status",
+    "reviewer",
+    "pullRequest",
+    "verifiedHead",
+    "reason"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

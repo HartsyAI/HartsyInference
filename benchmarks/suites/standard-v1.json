@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "id": "standard-v1",
+  "sessions": 3,
+  "warmups": 2,
+  "publishable": true,
+  "cases": [
+    {
+      "id": "qwen3-4b-q4-short",
+      "adapter": "text",
+      "model": "qwen3-4b",
+      "asset": {
+        "repository": "Qwen/Qwen3-4B-GGUF",
+        "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+        "file": "Qwen3-4B-Q4_K_M.gguf",
+        "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+        "bytes": 2497280256
+      },
+      "inputs": [
+        "Explain why the sky looks blue in plain language.",
+        "Describe the steps needed to plant and grow a tomato.",
+        "Write a short story about a lighthouse keeper finding a letter.",
+        "Compare bicycles and trains for commuting in a city.",
+        "Explain how a library organizes books and helps readers."
+      ],
+      "width": 512,
+      "height": 512,
+      "steps": 20,
+      "maxTokens": 128,
+      "seed": 42,
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "qwen3-4b-q4-long",
+      "adapter": "text",
+      "model": "qwen3-4b",
+      "asset": {
+        "repository": "Qwen/Qwen3-4B-GGUF",
+        "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+        "file": "Qwen3-4B-Q4_K_M.gguf",
+        "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+        "bytes": 2497280256
+      },
+      "inputs": [
+        "Explain why the sky looks blue in plain language.",
+        "Describe the steps needed to plant and grow a tomato.",
+        "Write a short story about a lighthouse keeper finding a letter.",
+        "Compare bicycles and trains for commuting in a city.",
+        "Explain how a library organizes books and helps readers."
+      ],
+      "width": 512,
+      "height": 512,
+      "steps": 20,
+      "maxTokens": 128,
+      "seed": 42,
+      "timeoutSeconds": 600,
+      "inputPrefix": "The village has a library, a railway station, a market and a quiet river. Every morning the residents meet in the market to discuss the weather and share news. ",
+      "prefixRepeats": 96
+    },
+    {
+      "id": "sd15-f16-512",
+      "adapter": "image",
+      "model": "sd15",
+      "asset": {
+        "repository": "Comfy-Org/stable-diffusion-v1-5-archive",
+        "revision": "9cfd069101959ca3828bf9c04a4419870832b74f",
+        "file": "v1-5-pruned-emaonly-fp16.safetensors",
+        "sha256": "e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916",
+        "bytes": 2132696762
+      },
+      "inputs": [
+        "A red sailboat on a calm blue lake, photograph",
+        "A ceramic teapot on a wooden table, studio photograph",
+        "A mountain village at sunset, watercolor painting",
+        "A golden retriever sitting in a green garden, photograph",
+        "A futuristic train station, architectural illustration"
+      ],
+      "width": 512,
+      "height": 512,
+      "steps": 20,
+      "maxTokens": 128,
+      "seed": 42,
+      "timeoutSeconds": 600
+    }
+  ]
+}

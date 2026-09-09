@@ -1,0 +1,26 @@
+name: Benchmark submission validation
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths: ['benchmarks/submissions/**']
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
+      - name: Validate data using trusted base code only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node benchmarks/automation/control.mjs validate
