@@ -105,8 +105,8 @@ First-request latency, TTFT, decode rate and all attempts remain in the download
 5. **Withdraw benchmark evidence** appends a receipt; it never edits the original submission or artifact.
    Run the publication workflow afterward to update Pages immediately. A replacement is a new campaign/PR.
 
-Repository setup: enable Pages using GitHub Actions and require `benchmark-evidence-reviewed` for result PRs
-(using the repository's review/ruleset policy). The archive Release is created by the first trusted review.
+Repository setup: enable Pages using GitHub Actions and require the `benchmark-evidence-reviewed` commit status
+for main-branch PRs. Code-only PRs receive this status automatically; result changes require the trusted review workflow. The archive Release is created by the first trusted review.
 These settings require repository administration and are not changed by building this branch. Generated
 Pages artifacts are the live source; `generated/overview.svg` is only the initial checked-in empty snapshot.
 

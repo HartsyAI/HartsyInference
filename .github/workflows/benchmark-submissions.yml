@@ -1,11 +1,12 @@
 name: Benchmark submission validation
 on:
   pull_request_target:
+    branches: [main]
     types: [opened, synchronize, reopened]
-    paths: ['benchmarks/submissions/**']
 permissions:
   contents: read
   pull-requests: read
+  statuses: write
 jobs:
   evidence:
     runs-on: ubuntu-latest
@@ -15,11 +16,20 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+      - name: Set the benchmark merge status for this PR head
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node benchmarks/automation/control.mjs scope
       - uses: actions/setup-dotnet@v4
+        if: steps.scope.outputs.has_submissions == 'true'
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
+      - if: steps.scope.outputs.has_submissions == 'true'
+        run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
       - name: Validate data using trusted base code only
+        if: steps.scope.outputs.has_submissions == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {submissionIdFor, matchesMergedHead} from './policy.mjs';
+import {submissionIdFor, matchesMergedHead, hasSubmissionChanges} from './policy.mjs';
 const repository = 'HartsyAI/HartsyInference';
 const temporary = process.env.RUNNER_TEMP || '/tmp';
 const runner = path.resolve('benchmarks/HartsyInference.BenchmarkRunner/bin/Release/net10.0/hartsy-bench.dll');
@@ -16,6 +16,10 @@ const api = endpoint => JSON.parse(gh('api', endpoint));
 const bench = (...args) => execute('dotnet', [runner, ...args]);
 const hashPattern = /^[0-9a-f]{64}$/;
 function rootFor(id) { if (!hashPattern.test(id)) throw new Error('Invalid submission id'); return path.join(temporary, 'benchmark-review', id); }
+function reviewStatus(sha, state, description) {
+  const status = {context: 'benchmark-evidence-reviewed', state, description};
+  execute('gh', ['api', `repos/${repository}/statuses/${sha}`, '--method', 'POST', '--input', '-'], {input: JSON.stringify(status)});
+}
 async function pullData(number) {
   if (!/^[0-9]+$/.test(number)) throw new Error('Invalid PR number');
   const pr = api(`repos/${repository}/pulls/${number}`);
@@ -63,11 +67,19 @@ function archiveAsset(file) {
   } else gh('release', 'upload', 'benchmark-evidence', file, '--repo', repository);
 }
 const mode = process.argv[2];
-if (mode === 'validate' || mode === 'promote') {
+if (mode === 'scope') {
+  const number = process.env.PR_NUMBER || '';
+  if (!/^[0-9]+$/.test(number)) throw new Error('Invalid PR number');
+  const pr = api(`repos/${repository}/pulls/${number}`);
+  const files = JSON.parse(gh('api', `repos/${repository}/pulls/${number}/files`, '--paginate', '--slurp')).flat();
+  const changed = hasSubmissionChanges(files);
+  reviewStatus(pr.head.sha, changed ? 'pending' : 'success', changed ? 'Awaiting benchmark evidence review' : 'No benchmark results changed');
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_submissions=${changed}\n`);
+} else if (mode === 'validate' || mode === 'promote') {
   const {pr, id, root} = await pullData(process.env.PR_NUMBER || '');
   const {zip, report} = validateEvidence(root, id, 'staging');
   if (mode === 'promote') {
-    if (pr.state !== 'open') throw new Error('Promotion requires an open PR');
+    if (pr.state !== 'open' || pr.base.ref !== 'main') throw new Error('Promotion requires an open PR targeting main');
     if (process.env.OUTPUTS_REVIEWED !== 'true') throw new Error('Maintainer must explicitly confirm output review');
     const revision = JSON.parse(fs.readFileSync(path.join(root, 'campaign.json'))).environment.engineRevision;
     if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error('Unversioned build cannot be promoted');
@@ -81,9 +93,7 @@ if (mode === 'validate' || mode === 'promote') {
     // Re-read head immediately before publishing an acceptance check. A later push has a different check identity.
     if (api(`repos/${repository}/pulls/${pr.number}`).head.sha !== pr.head.sha) throw new Error('PR changed during review');
     archiveAsset(receipt);
-    const check = {name: 'benchmark-evidence-reviewed', head_sha: pr.head.sha, status: 'completed', conclusion: 'success',
-      output: {title: 'Evidence mirrored and outputs reviewed', summary: `Campaign ${id}; headline eligible: ${report.headlineEligible}.`}};
-    execute('gh', ['api', `repos/${repository}/check-runs`, '--method', 'POST', '--input', '-'], {input: JSON.stringify(check)});
+    reviewStatus(pr.head.sha, 'success', 'Benchmark evidence archived and outputs reviewed');
   }
   console.log(JSON.stringify({id, valid: report.valid, headlineEligible: report.headlineEligible}));
 } else if (mode === 'publish') {

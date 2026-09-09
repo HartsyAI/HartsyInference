@@ -11,3 +11,7 @@ export function submissionIdFor(files) {
 export function matchesMergedHead(pr, review) {
   return pr.merged === true && /^[0-9a-f]{40}$/.test(review.verifiedHead) && pr.head.sha === review.verifiedHead;
 }
+
+export function hasSubmissionChanges(files) {
+  return files.some(file => file.filename.startsWith('benchmarks/submissions/'));
+}

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {submissionIdFor, matchesMergedHead} from './policy.mjs';
+import {submissionIdFor, matchesMergedHead, hasSubmissionChanges} from './policy.mjs';
 const id = 'a'.repeat(64);
 const files = ['campaign', 'submission'].map(name => ({status: 'added', filename: `benchmarks/submissions/${id}/${name}.json`}));
 test('accepts one data-only campaign', () => assert.equal(submissionIdFor(files), id));
@@ -19,4 +19,10 @@ test('approval is valid only for the exact merged PR head', () => {
   assert.equal(matchesMergedHead({merged:true,head:{sha:review.verifiedHead}},review),true);
   assert.equal(matchesMergedHead({merged:false,head:{sha:review.verifiedHead}},review),false);
   assert.equal(matchesMergedHead({merged:true,head:{sha:'b'.repeat(40)}},review),false);
+});
+
+test('merge gate distinguishes code-only PRs from any result mutation', () => {
+  assert.equal(hasSubmissionChanges([{filename:'src/engine.cs'}]),false);
+  assert.equal(hasSubmissionChanges(files),true);
+  assert.equal(hasSubmissionChanges([{filename:files[0].filename,status:'removed'}]),true);
 });
