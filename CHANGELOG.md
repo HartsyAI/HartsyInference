@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.57
+
+- Vision: Real-ESRGAN x2plus produced 4× output. BasicSR's 2× RRDBNet is the same ×4 network fed a 2× pixel-unshuffled
+  12-channel input, and `RealEsrganConverter.InferConfig` read the factor from the presence of `conv_up2`, which every
+  checkpoint has. The factor now comes from `conv_first`'s input channels, `UpscalePipeline` unshuffles on the host
+  before tiling (odd edges replicated and cropped back), and the network always runs both upsample stages.
+- Restore: the SeedVR2 catalog's positive embedding is now the upstream `ByteDance-Seed/SeedVR2-3B/pos_emb.pt` (public,
+  hash-pinned) instead of a private Hartsy-hosted safetensors that answered 401, so a fresh install's first-use download
+  completes. `RestoreService` reads that bare-tensor pickle directly; a `*emb*.safetensors` sibling still works.
+- Catalog: `briaai/RMBG-1.4` is no longer gated on HuggingFace; the entry's comment says so and names a byte-identical
+  ungated mirror in case that changes.
+
 ## alpha.56
 
 - Vision: `VisionMode.Upscale` runs the Real-ESRGAN generator that `HartsyInference.Vision/Upscale` has carried

@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Encoding;
 using HartsyInference.Video.Pipelines;
@@ -118,9 +119,6 @@ public sealed class RestoreService : IRestoreService
             SafeTensorsLoader vaeLoader = new();
             vaeLoader.Load(vaePath);
             _loaders.Add(vaeLoader);
-            SafeTensorsLoader embLoader = new();
-            embLoader.Load(embPath);
-            _loaders.Add(embLoader);
 
             SeedVr2Config config = SeedVr2Config.Detect(ditWeights);
             SeedVr2Dit dit = new(config);
@@ -140,12 +138,37 @@ public sealed class RestoreService : IRestoreService
             encoder.LoadWeights(vaeWeights);
             SeedVr2VaeDecoder decoder = new(vaeConfig);
             decoder.LoadWeights(vaeWeights);
-            _posEmb = embLoader.GetTensor("pos_emb").CastTo(DType.F32);
+            _posEmb = LoadPositiveEmbedding(embPath);
 
             _pipeline = new SeedVr2RestorePipeline(_engine.Backend, dit, encoder, decoder, _posEmb);
             _loadedPath = ditPath;
             return _pipeline;
         }
+    }
+
+    /// <summary>The frozen positive text embedding as an owned F32 tensor, from either form it ships in: the upstream
+    /// <c>pos_emb.pt</c> (a bare BF16 tensor pickled by <c>torch.save</c>, which the pickle loader surfaces under the
+    /// key <c>data</c>) or a safetensors export carrying <c>pos_emb</c>. The pickle loader is disposed once the cast
+    /// copy exists; a safetensors loader stays open for the pipeline's lifetime like the others.</summary>
+    internal Tensor LoadPositiveEmbedding(string embPath)
+    {
+        if (embPath.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            SafeTensorsLoader embLoader = new();
+            embLoader.Load(embPath);
+            _loaders.Add(embLoader);
+            return embLoader.GetTensor("pos_emb").CastTo(DType.F32);
+        }
+        using PytorchPickleLoader pickle = new();
+        pickle.Load(embPath);
+        Dictionary<string, Tensor> tensors = pickle.GetAllTensors();
+        Tensor raw = tensors.TryGetValue("pos_emb", out Tensor? named) ? named
+            : tensors.TryGetValue("data", out Tensor? bare) ? bare
+            : throw new InvalidOperationException(
+                $"'{embPath}' holds no positive embedding (expected a bare tensor or a 'pos_emb' entry; found: {string.Join(", ", tensors.Keys)}).");
+        if (raw.Shape.Rank != 2)
+            throw new InvalidOperationException($"SeedVR2 positive embedding must be [tokens, dim]; '{embPath}' is rank {raw.Shape.Rank}.");
+        return raw.CastTo(DType.F32);
     }
 
     private static (string Vae, string Emb) ResolveSideAssets(ModelSpec spec, string ditPath)
@@ -161,12 +184,13 @@ public sealed class RestoreService : IRestoreService
         // Ordered: EnumerateFiles order is filesystem-dependent.
         string? vaeSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
             .FirstOrDefault(f => Path.GetFileName(f).Contains("vae", StringComparison.OrdinalIgnoreCase));
-        string? embSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
-            .FirstOrDefault(f => Path.GetFileName(f).Contains("emb", StringComparison.OrdinalIgnoreCase));
+        string? embSibling = Directory.EnumerateFiles(dir).Order()
+            .FirstOrDefault(f => (f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".pt", StringComparison.OrdinalIgnoreCase))
+                && Path.GetFileName(f).Contains("emb", StringComparison.OrdinalIgnoreCase));
         if (vaeSibling is null || embSibling is null)
             throw new InvalidOperationException(
-                $"SeedVR2 needs VAE and embeddings safetensors beside the DiT checkpoint in '{dir}' " +
-                "(names containing 'vae' and 'emb'), or a catalog entry with vae/embeddings asset roles.");
+                $"SeedVR2 needs a VAE safetensors and a positive embedding (pos_emb.pt or *emb*.safetensors) beside the DiT " +
+                $"checkpoint in '{dir}', or a catalog entry with vae/embeddings asset roles.");
         return (vaeSibling, embSibling);
     }
 

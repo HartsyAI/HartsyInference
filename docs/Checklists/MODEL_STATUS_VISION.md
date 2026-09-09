@@ -51,7 +51,7 @@ Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.
 
 | Model | Status | Notes |
 |---|---|---|
-| **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ⚠️ | Structural tests only (`UpscaleTests`, `UpscalePlanTests`): the graph runs and tiles correctly on synthetic weights. No numerical parity against the BasicSR reference has been recorded; treat outputs as e2e-coherent, not verified. ([details](#real-esrgan)) |
+| **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ⚠️ | Structural tests only (`UpscaleTests`, `UpscalePlanTests`): the graph runs and tiles correctly on synthetic weights; real-weight CPU smoke of all three checkpoints (2026-09-09) gives the expected sizes and visibly sharper-than-bilinear output. No numerical parity against the BasicSR reference has been recorded. ([details](#real-esrgan)) |
 
 ## Deferred (❌)
 
@@ -123,7 +123,10 @@ Reachable since alpha.56 through `VisionMode.Upscale` (`VisionService.Upscale`) 
 `real-esrgan-x4plus` / `real-esrgan-x2plus` / `real-esrgan-anime6b`, which fetch the official BasicSR `.pth`
 files from HuggingFace mirrors (hashes cross-checked across independent uploads; x2plus is a single mirror whose
 size matches the v0.2.1 release). `RealEsrganConverter` strips the `params_ema` envelope and infers the RRDBNet
-geometry from the keys. Tiled at 256 px input (`VisionService.UpscaleTileSize`); a target size runs at most two
+geometry from the keys. **Format trap (alpha.57):** BasicSR's 2× model is the ×4 network with a 2× `pixel_unshuffle`
+in front (`conv_first` takes 12 channels) — every checkpoint has both `conv_up` stages, so the factor must be read
+from `conv_first`'s input width, not from the presence of `conv_up2`. `UpscalePipeline` unshuffles on the host
+(torch channel order `c·r² + i·r + j`) before tiling. Tiled at 256 px input (`VisionService.UpscaleTileSize`); a target size runs at most two
 passes then resizes down (`UpscalePlan`). **Open:** a `RealEsrganParityTests` against the Python
 `realesrgan` package on a fixed crop — the structural tests prove shape and tiling, not the numbers.
 

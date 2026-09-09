@@ -15,8 +15,16 @@ public sealed record RealEsrganConfig
     /// <summary>Dense growth channels inside each residual-dense block (Real-ESRGAN x4plus: 32).</summary>
     public int NumGrowCh { get; init; } = 32;
 
-    /// <summary>Output upscale factor. 4 → two nearest-neighbour upsample stages; 2 → one.</summary>
+    /// <summary>Overall output upscale factor, 4 or 2. The network itself always upsamples 4× (two nearest-neighbour
+    /// stages, <c>conv_up1</c> / <c>conv_up2</c>); BasicSR reaches 2× by pixel-unshuffling the input 2× first
+    /// (3 → 12 channels at half resolution, <c>conv_first</c> takes 12), which is what the x2plus checkpoint expects.</summary>
     public int Scale { get; init; } = 4;
+
+    /// <summary>Pixel-unshuffle factor applied to the input before <c>conv_first</c>: 2 for a 2× model, else 1.</summary>
+    public int UnshuffleFactor => Scale == 2 ? 2 : 1;
+
+    /// <summary>Channels <c>conv_first</c> consumes: 3, or 12 after the 2× unshuffle.</summary>
+    public int InputChannels => 3 * UnshuffleFactor * UnshuffleFactor;
 
     /// <summary>Real-ESRGAN x4plus (and the anime 6B variant uses NumBlock=6).</summary>
     public static RealEsrganConfig X4Plus => new() { NumFeat = 64, NumBlock = 23, NumGrowCh = 32, Scale = 4 };
@@ -24,7 +32,7 @@ public sealed record RealEsrganConfig
     /// <summary>Real-ESRGAN x4plus anime 6B.</summary>
     public static RealEsrganConfig X4PlusAnime6B => new() { NumFeat = 64, NumBlock = 6, NumGrowCh = 32, Scale = 4 };
 
-    /// <summary>Real-ESRGAN x2plus.</summary>
+    /// <summary>Real-ESRGAN x2plus: the same 23-block trunk and two upsample stages, fed a 2× pixel-unshuffled input.</summary>
     public static RealEsrganConfig X2Plus => new() { NumFeat = 64, NumBlock = 23, NumGrowCh = 32, Scale = 2 };
 }
 
@@ -224,7 +232,9 @@ public sealed class Rrdb
 }
 
 /// <summary>RRDBNet generator (ESRGAN / Real-ESRGAN). Conv-first → RRDB trunk → conv-body global
-/// residual → nearest-neighbour upsample stages → HR convs → conv-last. Input/output are RGB in [0,1].</summary>
+/// residual → two nearest-neighbour upsample stages → HR convs → conv-last. Output is RGB in [0,1]; the input is
+/// RGB in [0,1] for a 4× model and the 2× pixel-unshuffled 12-channel form for a 2× one (the caller unshuffles —
+/// see <see cref="RealEsrganConfig.UnshuffleFactor"/>), so the network body is identical for both.</summary>
 public sealed class RrdbNet
 {
     private readonly RealEsrganConfig _config;
@@ -232,7 +242,7 @@ public sealed class RrdbNet
     private readonly Rrdb[] _body;
     private readonly Conv2dLayer _convBody;
     private readonly Conv2dLayer _convUp1;
-    private readonly Conv2dLayer? _convUp2;
+    private readonly Conv2dLayer _convUp2;
     private readonly Conv2dLayer _convHr;
     private readonly Conv2dLayer _convLast;
     private const float LeakySlope = 0.2f;
@@ -252,7 +262,7 @@ public sealed class RrdbNet
         for (int i = 0; i < config.NumBlock; i++) _body[i] = new Rrdb(config.NumFeat, config.NumGrowCh);
         _convBody = new Conv2dLayer(config.NumFeat);
         _convUp1 = new Conv2dLayer(config.NumFeat);
-        _convUp2 = config.Scale == 4 ? new Conv2dLayer(config.NumFeat) : null;
+        _convUp2 = new Conv2dLayer(config.NumFeat);
         _convHr = new Conv2dLayer(config.NumFeat);
         _convLast = new Conv2dLayer(3);
     }
@@ -265,7 +275,7 @@ public sealed class RrdbNet
         for (int i = 0; i < _body.Length; i++) _body[i].LoadWeights(weights, $"body.{i}");
         _convBody.LoadWeights(weights, "conv_body");
         _convUp1.LoadWeights(weights, "conv_up1");
-        _convUp2?.LoadWeights(weights, "conv_up2");
+        _convUp2.LoadWeights(weights, "conv_up2");
         _convHr.LoadWeights(weights, "conv_hr");
         _convLast.LoadWeights(weights, "conv_last");
     }
@@ -277,14 +287,14 @@ public sealed class RrdbNet
         foreach (Rrdb b in _body) all = all.Concat(b.EnumerateWeights());
         all = all.Concat(_convBody.EnumerateWeights())
                  .Concat(_convUp1.EnumerateWeights())
+                 .Concat(_convUp2.EnumerateWeights())
                  .Concat(_convHr.EnumerateWeights())
                  .Concat(_convLast.EnumerateWeights());
-        if (_convUp2 is not null) all = all.Concat(_convUp2.EnumerateWeights());
         return all;
     }
 
-    /// <summary>Runs the network. Input [1, 3, H, W] in [0,1]; output [1, 3, H*scale, W*scale] in [0,1]
-    /// (not clamped — the pipeline clamps on byte conversion). Owns the returned tensor.</summary>
+    /// <summary>Runs the network. Input [1, <see cref="RealEsrganConfig.InputChannels"/>, H, W] in [0,1]; output
+    /// [1, 3, H*4, W*4] in [0,1] (not clamped — the pipeline clamps on byte conversion). Owns the returned tensor.</summary>
     public Tensor Forward(IBackend backend, Tensor input)
     {
         Tensor feat = _convFirst.Forward(backend, input);
@@ -310,10 +320,9 @@ public sealed class RrdbNet
         bodyOut.Dispose();
         feat = merged;
 
-        // Upsample stage 1.
+        // Two upsample stages, always: a 2× model reaches its factor through the input unshuffle, not by dropping one.
         feat = UpsampleConv(backend, _convUp1, feat);
-        // Upsample stage 2 (scale 4 only).
-        if (_convUp2 is not null) feat = UpsampleConv(backend, _convUp2, feat);
+        feat = UpsampleConv(backend, _convUp2, feat);
 
         // HR convs.
         Tensor hr = _convHr.Forward(backend, feat);
