@@ -11,7 +11,7 @@ using NativeImageData = HartsyInference.Engine.Requests.ImageData;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>Native vision route: embed/detect/segment/depth/edge/lineart/normal/segmap/background-removal, one call for all nine modes (<see cref="VisionRequest.Mode"/> selects which). One-shot, no progress/streaming.</summary>
+/// <summary>Native vision route: embed/detect/segment/depth/edge/lineart/normal/segmap/background-removal/upscale, one call for all ten modes (<see cref="VisionRequest.Mode"/> selects which). One-shot, no progress/streaming.</summary>
 public static class VisionEndpoints
 {
     /// <summary>Maps <c>/v1/native/vision</c>.</summary>
@@ -33,7 +33,8 @@ public static class VisionEndpoints
     }
 
     // Only Embedding/Detections travel as-is; Masks/Image carry raw RGB24 (ImageData) like ImageResult does, so
-    // they get the same PNG-encode-for-transport treatment as ImageEndpoints.ToResponse.
+    // they get the same PNG-encode-for-transport treatment as ImageEndpoints.ToResponse. An image that carries an
+    // alpha plane (background removal) encodes as RGBA so the matte survives transport.
     private static object ToResponse(VisionResult result) => new
     {
         embedding = result.Embedding,
@@ -42,5 +43,5 @@ public static class VisionEndpoints
         image = result.Image is { } img ? EncodePng(img) : null,
     };
 
-    private static string EncodePng(NativeImageData image) => Convert.ToBase64String(PngEncoder.Encode(image.Rgb, image.Width, image.Height));
+    private static string EncodePng(NativeImageData image) => Convert.ToBase64String(PngEncoder.Encode(image));
 }

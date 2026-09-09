@@ -29,13 +29,22 @@ public sealed unsafe class RmbgBackgroundRemover
 
     /// <summary>Removes the background and composites the subject onto gray 0.5: <c>out = rgb·α + (1−α)·127.5</c>.
     /// Returns interleaved-RGB24 bytes at the source resolution — ready for the image→3D preprocessors.</summary>
-    public byte[] CompositeOnGray(IBackend backend, ReadOnlySpan<byte> rgb, int srcWidth, int srcHeight)
+    public byte[] CompositeOnGray(IBackend backend, ReadOnlySpan<byte> rgb, int srcWidth, int srcHeight) =>
+        CompositeOnGray(Alpha(backend, rgb, srcWidth, srcHeight), rgb, srcWidth, srcHeight);
+
+    /// <summary>The gray-0.5 composite for an alpha the caller already computed with <see cref="Alpha"/>, so one
+    /// forward pass can feed both the composite and the matte.</summary>
+    public static byte[] CompositeOnGray(ReadOnlySpan<float> alpha, ReadOnlySpan<byte> rgb, int srcWidth, int srcHeight)
     {
-        float[] alpha = Alpha(backend, rgb, srcWidth, srcHeight);
-        byte[] outRgb = new byte[(long)srcWidth * srcHeight * 3];
-        for (long p = 0; p < (long)srcWidth * srcHeight; p++)
+        long pixels = (long)srcWidth * srcHeight;
+        if (alpha.Length != pixels)
+            throw new ArgumentException($"Alpha has {alpha.Length} entries for a {srcWidth}x{srcHeight} image.", nameof(alpha));
+        if (rgb.Length < pixels * 3)
+            throw new ArgumentException($"RGB buffer too small: {rgb.Length} < {pixels * 3}.", nameof(rgb));
+        byte[] outRgb = new byte[pixels * 3];
+        for (long p = 0; p < pixels; p++)
         {
-            float a = alpha[p];
+            float a = alpha[(int)p];
             for (int c = 0; c < 3; c++)
             {
                 float v = rgb[(int)(p * 3 + c)] * a + (1f - a) * 127.5f;
@@ -43,6 +52,18 @@ public sealed unsafe class RmbgBackgroundRemover
             }
         }
         return outRgb;
+    }
+
+    /// <summary>Quantizes a [0,1] matte to 8-bit straight coverage (255 = fully foreground), the form a PNG alpha
+    /// channel or an RGBA compositor wants.</summary>
+    public static byte[] AlphaToBytes(ReadOnlySpan<float> alpha)
+    {
+        byte[] bytes = new byte[alpha.Length];
+        for (int i = 0; i < alpha.Length; i++)
+        {
+            bytes[i] = (byte)Math.Clamp(MathF.Round(alpha[i] * 255f), 0f, 255f);
+        }
+        return bytes;
     }
 
     /// <summary>Resize (bilinear) to 1024², quantize to uint8, then <c>(x/255 − 0.5)</c> → <c>[1,3,1024,1024]</c>,

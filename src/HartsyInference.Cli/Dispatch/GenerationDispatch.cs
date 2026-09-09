@@ -327,11 +327,14 @@ public static class GenerationDispatch
                 "normal" => VisionMode.Normal,
                 "segmap" => VisionMode.SegMap,
                 "removebg" => VisionMode.BackgroundRemoval,
+                "upscale" => VisionMode.Upscale,
                 _ => throw new ArgumentException(
-                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, or removebg."),
+                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, or upscale."),
             },
             Prompt = parameters.Get("query"),
             Threshold = parameters.GetFloat("confidence", 0.25f),
+            TargetWidth = parameters.GetIntOrNull("width"),
+            TargetHeight = parameters.GetIntOrNull("height"),
         };
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
 
@@ -362,9 +365,10 @@ public static class GenerationDispatch
             GeneratedArtifact imageArtifact = new GeneratedArtifact
             {
                 Kind = ArtifactKind.Image,
-                FileBytes = PngEncoder.Encode(single.Rgb, single.Width, single.Height),
+                // Alpha-aware: a background-removal result writes an RGBA PNG, everything else stays RGB.
+                FileBytes = PngEncoder.Encode(single),
                 Extension = "png",
-                Text = $"{single.Width}x{single.Height} image",
+                Text = $"{single.Width}x{single.Height} image{(single.HasAlpha ? " with alpha" : "")}",
                 PreviewRgb = single.Rgb,
                 PreviewWidth = single.Width,
                 PreviewHeight = single.Height,

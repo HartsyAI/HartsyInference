@@ -6,6 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.56
+
+- Vision: `VisionMode.Upscale` runs the Real-ESRGAN generator that `HartsyInference.Vision/Upscale` has carried
+  without a caller. Three catalog ids fetch the official BasicSR checkpoints on first use — `real-esrgan-x4plus`,
+  `real-esrgan-x2plus`, `real-esrgan-anime6b` (`Models/Vision/Upscale/`) — and the request's new
+  `TargetWidth`/`TargetHeight` fit the result: enough passes to cover the target (at most two), then a bicubic
+  downsize, never a stretch past what the last pass produced (`UpscalePlan`). Tiled at 256 px input.
+- Vision: `ImageData.Alpha`, an optional 8-bit straight coverage plane. `VisionMode.BackgroundRemoval` now fills
+  it with the RMBG-1.4 matte beside the gray composite the image→3D preprocessors keep reading, so a caller can
+  build a real cutout. `PngEncoder.Encode(ImageData)` writes colour type 6 when the plane is present; the
+  `/v1/native/vision` route and `hartsy vision --mode removebg` both return RGBA for it.
+- CLI: `hartsy vision --mode upscale --width/--height`; the mode is inferred from an `esrgan`/`upscale` model id.
+
 ## alpha.55
 
 - Wake: a satellite may declare `"width": 1` in its `hello` and send G.711 µ-law, one byte a sample instead of
