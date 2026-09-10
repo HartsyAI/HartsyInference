@@ -1495,9 +1495,10 @@ public static class ModelCatalog
                         Sha256 = "76c163aa531ab7edfb3a77bbcc039e340645aa0ffe2b0ffcfc68755f550c76ea" },
                 },
             },
-            // Gated on HF (requires accepting terms); the user's account already has access (used real-weight
-            // parity-verified 2026-07-01, corr 1.00000000 vs upstream — see MODEL_STATUS_VISION.md), so the
-            // existing HF token downloads it directly, no ungated repack needed.
+            // Was gated on HF when first added (real-weight parity-verified 2026-07-01, corr 1.00000000 vs upstream —
+            // see MODEL_STATUS_VISION.md); as of 2026-09-09 briaai/RMBG-1.4 reports gated=false and this file pulls
+            // without a token (hash-verified). Byte-identical ungated mirrors exist (camenduru/RMBG-1.4 among many)
+            // should it be gated again.
             new CatalogEntry
             {
                 Id = "rmbg", Modality = vis, DisplayName = "RMBG-1.4 (BriaRMBG / ISNet background removal)", Architecture = "U²-Net-style nested-U RSU encoder/decoder", Status = ok,
@@ -1551,9 +1552,9 @@ public static class ModelCatalog
             },
 
             // Restoration (SeedVR2). numz/SeedVR2_comfyUI ships the original state-dict keys verbatim, so
-            // the converter loads its fp16 files directly. The pos/neg embeddings exist upstream only as
-            // torch-pickle .pt, hence the Hartsy-hosted converted copy (until published, place it under
-            // Models/Video/SeedVr2/).
+            // the converter loads its fp16 files directly. The frozen positive embedding is the upstream
+            // ByteDance-Seed/SeedVR2-3B pos_emb.pt (a bare BF16 [58,5120] tensor, public, shared by 3B and 7B);
+            // RestoreService reads that pickle directly, so no converted copy needs hosting.
             new CatalogEntry
             {
                 Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
@@ -1567,8 +1568,9 @@ public static class ModelCatalog
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "vae",
                         Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
+                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
+                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
+                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
                 },
             },
             new CatalogEntry
@@ -1583,8 +1585,9 @@ public static class ModelCatalog
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "vae",
                         Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "HartsyAI/SeedVR2-safetensors", RepoPath = "seedvr2_embeddings.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings" },
+                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
+                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
+                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
                 },
             },
 

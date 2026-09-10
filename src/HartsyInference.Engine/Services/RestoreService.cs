@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Encoding;
 using HartsyInference.Video.Pipelines;
@@ -22,6 +23,8 @@ public sealed class RestoreService : IRestoreService
     private SeedVr2RestorePipeline? _pipeline;
     private SeedVr2Dit? _dit;
     private readonly List<SafeTensorsLoader> _loaders = new();
+    // F32 copies of half-precision checkpoint tensors, made only for the CPU backend (see GetOrLoadPipeline).
+    private readonly List<Tensor> _castCopies = new();
     private Tensor? _posEmb;
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -118,15 +121,22 @@ public sealed class RestoreService : IRestoreService
             SafeTensorsLoader vaeLoader = new();
             vaeLoader.Load(vaePath);
             _loaders.Add(vaeLoader);
-            SafeTensorsLoader embLoader = new();
-            embLoader.Load(embPath);
-            _loaders.Add(embLoader);
 
+            Dictionary<string, Tensor> vaeWeights = vaeLoader.GetAllTensors();
+            // The CPU backend's kernels are F32-only: its Linear casts a half-precision weight on the fly but not the
+            // bias, and the VAE's 3-D convs do not cast at all, so the fp16 checkpoints stop at the first GEMM. On CPU
+            // the whole set becomes F32 once at load instead (about 13.5 GB for the 3B DiT); CUDA keeps the half
+            // weights its kernels consume directly.
+            if (_engine.Backend.Device.IsCpu)
+            {
+                ditWeights = CastAllToF32(ditWeights, _castCopies);
+                vaeWeights = CastAllToF32(vaeWeights, _castCopies);
+                Logs.Info("SeedVR2 on the CPU backend: checkpoint tensors cast to F32 at load.");
+            }
             SeedVr2Config config = SeedVr2Config.Detect(ditWeights);
             SeedVr2Dit dit = new(config);
             dit.LoadWeights(ditWeights);
             _dit = dit;
-            Dictionary<string, Tensor> vaeWeights = vaeLoader.GetAllTensors();
             // BF16 VAE activations on CUDA (reference precision): halves the fp32 activation peak that
             // OOMs 24 GB at 720p-area. HARTSY_SEEDVR2_VAE_F32=1 is the kill-switch back to full precision.
             bool vaeBf16 = _engine.Backend.Device.IsCuda
@@ -140,12 +150,55 @@ public sealed class RestoreService : IRestoreService
             encoder.LoadWeights(vaeWeights);
             SeedVr2VaeDecoder decoder = new(vaeConfig);
             decoder.LoadWeights(vaeWeights);
-            _posEmb = embLoader.GetTensor("pos_emb").CastTo(DType.F32);
+            _posEmb = LoadPositiveEmbedding(embPath);
 
             _pipeline = new SeedVr2RestorePipeline(_engine.Backend, dit, encoder, decoder, _posEmb);
             _loadedPath = ditPath;
             return _pipeline;
         }
+    }
+
+    /// <summary>Replaces every non-F32 tensor with an owned F32 copy, appended to <paramref name="owned"/> so the caller
+    /// can release it; F32 entries pass through as the loader-owned views they are.</summary>
+    internal static Dictionary<string, Tensor> CastAllToF32(IReadOnlyDictionary<string, Tensor> weights, List<Tensor> owned)
+    {
+        Dictionary<string, Tensor> result = new(weights.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Tensor> kvp in weights)
+        {
+            Tensor t = kvp.Value;
+            if (t.DType != DType.F32)
+            {
+                t = t.CastTo(DType.F32);
+                owned.Add(t);
+            }
+            result[kvp.Key] = t;
+        }
+        return result;
+    }
+
+    /// <summary>The frozen positive text embedding as an owned F32 tensor, from either form it ships in: the upstream
+    /// <c>pos_emb.pt</c> (a bare BF16 tensor pickled by <c>torch.save</c>, which the pickle loader surfaces under the
+    /// key <c>data</c>) or a safetensors export carrying <c>pos_emb</c>. The pickle loader is disposed once the cast
+    /// copy exists; a safetensors loader stays open for the pipeline's lifetime like the others.</summary>
+    internal Tensor LoadPositiveEmbedding(string embPath)
+    {
+        if (embPath.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            SafeTensorsLoader embLoader = new();
+            embLoader.Load(embPath);
+            _loaders.Add(embLoader);
+            return embLoader.GetTensor("pos_emb").CastTo(DType.F32);
+        }
+        using PytorchPickleLoader pickle = new();
+        pickle.Load(embPath);
+        Dictionary<string, Tensor> tensors = pickle.GetAllTensors();
+        Tensor raw = tensors.TryGetValue("pos_emb", out Tensor? named) ? named
+            : tensors.TryGetValue("data", out Tensor? bare) ? bare
+            : throw new InvalidOperationException(
+                $"'{embPath}' holds no positive embedding (expected a bare tensor or a 'pos_emb' entry; found: {string.Join(", ", tensors.Keys)}).");
+        if (raw.Shape.Rank != 2)
+            throw new InvalidOperationException($"SeedVR2 positive embedding must be [tokens, dim]; '{embPath}' is rank {raw.Shape.Rank}.");
+        return raw.CastTo(DType.F32);
     }
 
     private static (string Vae, string Emb) ResolveSideAssets(ModelSpec spec, string ditPath)
@@ -161,12 +214,13 @@ public sealed class RestoreService : IRestoreService
         // Ordered: EnumerateFiles order is filesystem-dependent.
         string? vaeSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
             .FirstOrDefault(f => Path.GetFileName(f).Contains("vae", StringComparison.OrdinalIgnoreCase));
-        string? embSibling = Directory.EnumerateFiles(dir, "*.safetensors").Order()
-            .FirstOrDefault(f => Path.GetFileName(f).Contains("emb", StringComparison.OrdinalIgnoreCase));
+        string? embSibling = Directory.EnumerateFiles(dir).Order()
+            .FirstOrDefault(f => (f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".pt", StringComparison.OrdinalIgnoreCase))
+                && Path.GetFileName(f).Contains("emb", StringComparison.OrdinalIgnoreCase));
         if (vaeSibling is null || embSibling is null)
             throw new InvalidOperationException(
-                $"SeedVR2 needs VAE and embeddings safetensors beside the DiT checkpoint in '{dir}' " +
-                "(names containing 'vae' and 'emb'), or a catalog entry with vae/embeddings asset roles.");
+                $"SeedVR2 needs a VAE safetensors and a positive embedding (pos_emb.pt or *emb*.safetensors) beside the DiT " +
+                $"checkpoint in '{dir}', or a catalog entry with vae/embeddings asset roles.");
         return (vaeSibling, embSibling);
     }
 
@@ -181,6 +235,9 @@ public sealed class RestoreService : IRestoreService
             _dit = null;
             _posEmb?.Dispose();
             _posEmb = null;
+            foreach (Tensor copy in _castCopies)
+                copy.Dispose();
+            _castCopies.Clear();
             foreach (SafeTensorsLoader loader in _loaders)
                 loader.Dispose();
             _loaders.Clear();

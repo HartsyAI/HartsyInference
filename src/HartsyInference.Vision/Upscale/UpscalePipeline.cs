@@ -28,26 +28,37 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
     /// <inheritdoc/>
     public int ScaleFactor => _net.Config.Scale;
 
+    /// <summary>The network's own spatial factor over whatever it is fed: always 4 (see <see cref="RrdbNet"/>).</summary>
+    private const int NetScale = 4;
+
     /// <inheritdoc/>
     public (byte[] rgbData, int width, int height) Upscale(ReadOnlySpan<byte> rgbData, int width, int height)
     {
-        Tensor input = ImageTensor.RgbToTensor01(rgbData, width, height);
-        Tensor output = _inputTileSize <= 0 ? _net.Forward(_backend, input) : TiledForward(input, width, height);
+        int r = _net.Config.UnshuffleFactor;
+        // A 2× model consumes the image pixel-unshuffled by 2, so odd edges are replicated out to even first and the
+        // surplus is cropped off the output (Real-ESRGAN pads to a multiple of the factor the same way).
+        int padW = (r - width % r) % r, padH = (r - height % r) % r;
+        Tensor input = r == 1
+            ? ImageTensor.RgbToTensor01(rgbData, width, height)
+            : UnshuffledInput(rgbData, width, height, r, padW, padH);
+        int inW = (width + padW) / r, inH = (height + padH) / r;
+        Tensor output = _inputTileSize <= 0
+            ? _net.Forward(_backend, input)
+            : TiledForward(input, inW, inH, _net.Config.InputChannels, Math.Max(8, _inputTileSize / r));
         input.Dispose();
 
-        byte[] bytes = Tensor01ToRgb(output);
         int outW = width * ScaleFactor;
         int outH = height * ScaleFactor;
+        byte[] bytes = Tensor01ToRgb(output, outW, outH);
         output.Dispose();
         return (bytes, outW, outH);
     }
 
-    /// <summary>Overlapping-tile forward. Mirrors <see cref="VaeTiledDecoder"/>: tile in input space,
-    /// upscale each tile, blend in output space with a linear ramp.</summary>
-    private Tensor TiledForward(Tensor input, int width, int height)
+    /// <summary>Overlapping-tile forward. Mirrors <see cref="VaeTiledDecoder"/>: tile in (possibly unshuffled) input
+    /// space, upscale each tile by <see cref="NetScale"/>, blend in output space with a linear ramp.</summary>
+    private Tensor TiledForward(Tensor input, int width, int height, int channels, int tile)
     {
-        int scale = ScaleFactor;
-        int tile = _inputTileSize;
+        const int scale = NetScale;
 
         if (width <= tile && height <= tile)
         {
@@ -78,8 +89,8 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
                 int tileH = Math.Min(tile, height - i);
                 int tileW = Math.Min(tile, width - j);
 
-                Tensor t = VaeTiling.ExtractTile(input, 1, 3, i, j, tileH, tileW);
-                Tensor padded = tileH < tile || tileW < tile ? VaeTiling.PadTile(_backend, t, 1, 3, tile, tile) : t;
+                Tensor t = VaeTiling.ExtractTile(input, 1, channels, i, j, tileH, tileW);
+                Tensor padded = tileH < tile || tileW < tile ? VaeTiling.PadTile(_backend, t, 1, channels, tile, tile) : t;
                 if (!ReferenceEquals(padded, t)) t.Dispose();
 
                 Tensor up = _net.Forward(_backend, padded);
@@ -125,20 +136,54 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
         return result;
     }
 
-    /// <summary>NCHW F32 [1,3,H,W] in [0,1] → HWC bytes [0,255] (clamped).</summary>
-    private static unsafe byte[] Tensor01ToRgb(Tensor t)
+    /// <summary>RGB bytes → the 2× (or r×) pixel-unshuffled NCHW F32 tensor BasicSR's 2× RRDBNet expects:
+    /// <c>out[c·r² + i·r + j, y, x] = in[c, y·r + i, x·r + j]</c> (torch <c>pixel_unshuffle</c> channel order), with
+    /// the right/bottom edge replicated by <paramref name="padW"/> / <paramref name="padH"/> pixels so the source
+    /// divides evenly.</summary>
+    internal static unsafe Tensor UnshuffledInput(ReadOnlySpan<byte> rgb, int width, int height, int r, int padW, int padH)
+    {
+        int fullW = width + padW, fullH = height + padH;
+        int outW = fullW / r, outH = fullH / r;
+        int channels = 3 * r * r;
+        Tensor t = new Tensor(new TensorShape(1, channels, outH, outW), DType.F32);
+        float* d = (float*)t.DataPointer;
+        long plane = (long)outW * outH;
+        for (int y = 0; y < fullH; y++)
+        {
+            int sy = Math.Min(y, height - 1);
+            for (int x = 0; x < fullW; x++)
+            {
+                int sx = Math.Min(x, width - 1);
+                int src = (sy * width + sx) * 3;
+                int oy = y / r, ox = x / r, i = y % r, j = x % r;
+                long dst = (long)oy * outW + ox;
+                for (int c = 0; c < 3; c++)
+                {
+                    int channel = c * r * r + i * r + j;
+                    d[channel * plane + dst] = rgb[src + c] / 255f;
+                }
+            }
+        }
+        return t;
+    }
+
+    /// <summary>NCHW F32 [1,3,H,W] in [0,1] → HWC bytes [0,255] (clamped), reading only the top-left
+    /// <paramref name="cropW"/> × <paramref name="cropH"/> window (the rest is edge padding from an odd-sized source).</summary>
+    private static unsafe byte[] Tensor01ToRgb(Tensor t, int cropW, int cropH)
     {
         int height = (int)t.Shape[2];
         int width = (int)t.Shape[3];
+        if (cropW > width || cropH > height)
+            throw new ArgumentException($"Crop {cropW}x{cropH} exceeds the network output {width}x{height}.");
         int plane = width * height;
-        byte[] rgb = new byte[plane * 3];
+        byte[] rgb = new byte[cropW * cropH * 3];
         float* s = (float*)t.DataPointer;
-        for (int y = 0; y < height; y++)
+        for (int y = 0; y < cropH; y++)
         {
-            for (int x = 0; x < width; x++)
+            for (int x = 0; x < cropW; x++)
             {
                 int src = y * width + x;
-                int px = (y * width + x) * 3;
+                int px = (y * cropW + x) * 3;
                 rgb[px] = ToByte(s[src]);
                 rgb[px + 1] = ToByte(s[plane + src]);
                 rgb[px + 2] = ToByte(s[2 * plane + src]);
