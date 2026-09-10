@@ -4,7 +4,9 @@ Read with [code style](../CODE_STYLE.md); load only relevant linked sections.
 
 ## Task Routing
 
-Pick the specialized agent file that matches your task. Read it before starting work. | Task | Agent File |
+Pick the specialized agent file that matches your task. Read it before starting work.
+
+| Task | Agent File |
 |---|---|
 | Add a new model (any modality) | `ADD_MODEL.md` |
 | Build a new non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |

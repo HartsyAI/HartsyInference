@@ -5,6 +5,12 @@ namespace HartsyInference.Vulkan;
 /// tile-size limits).</remarks>
 public sealed class VulkanCapabilities
 {
+    /// <summary>Vulkan physical-device UUID (not the pipeline-cache UUID).</summary>
+    public string DeviceUuid { get; init; } = "";
+
+    /// <summary>Vendor-encoded driver version; compare only within one vendor.</summary>
+    public uint DriverVersion { get; init; }
+
     /// <summary>Human-readable device name from VkPhysicalDeviceProperties.deviceName.</summary>
     public required string DeviceName { get; init; }
 

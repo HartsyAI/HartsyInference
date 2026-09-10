@@ -127,7 +127,7 @@ public sealed class HuggingFaceClient : IDisposable
     }
 
     /// <summary>Downloads a single file from a model repository to the specified local path, reporting progress as a fraction from 0.0 to 1.0. Stages to a <c>.tmp</c> file, optionally verifies its SHA-256 against <paramref name="sha256"/> (a corrupt mid-flight download is deleted and the call fails), then atomically moves it into place.</summary>
-    public async Task DownloadFileAsync(
+    public Task DownloadFileAsync(
         string repoId,
         string fileName,
         string destinationPath,
@@ -135,9 +135,17 @@ public sealed class HuggingFaceClient : IDisposable
         string? sha256,
         CancellationToken ct)
     {
-        ThrowIfDisposed();
+        return DownloadRevisionAsync(repoId, fileName, "main", destinationPath, progress, sha256, ct);
+    }
 
-        string url = $"{BaseUrl}/{repoId}/resolve/main/{fileName}";
+    /// <summary>Downloads an explicitly pinned repository revision using the normal verified atomic download path.</summary>
+    public async Task DownloadRevisionAsync(string repoId, string fileName, string revision, string destinationPath,
+        IProgress<double>? progress, string? sha256, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrEmpty(revision) || revision.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_' or '.')))
+            throw new ArgumentException("Invalid repository revision.", nameof(revision));
+        string url = $"{BaseUrl}/{repoId}/resolve/{revision}/{fileName}";
         Logs.Info($"HuggingFace: downloading \"{repoId}/{fileName}\" -> \"{destinationPath}\"");
 
         using HttpResponseMessage response = await _httpClient

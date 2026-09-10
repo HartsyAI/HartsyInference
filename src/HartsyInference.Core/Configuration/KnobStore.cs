@@ -36,9 +36,13 @@ public static class KnobStore
         // library and never gets a Main to call a loader from.
         KnobFile.EnsureLoaded();
         if (KnobProfileScope.Current is { } profile
-            && profile.Values.TryGetValue(knob.Id, out object? scoped) && scoped is T scopedTyped)
+            && profile.Values.TryGetValue(knob.Id, out object? scoped))
         {
-            return Coerce(knob, scopedTyped);
+            // A pinned null means retain the caller's contextual default, not inherit a machine override.
+            if (scoped is null && default(T) is null)
+                return default!;
+            if (scoped is T scopedTyped)
+                return Coerce(knob, scopedTyped);
         }
         if (_overrides.TryGetValue(knob.Id, out object? o) && o is T typed)
         {

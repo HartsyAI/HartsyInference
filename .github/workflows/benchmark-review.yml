@@ -1,0 +1,38 @@
+name: Review benchmark evidence
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Open results PR number'
+        required: true
+      outputs_reviewed:
+        description: 'I inspected all saved outputs for plausible correctness and checked the hardware/configuration claims'
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: write
+  pull-requests: read
+  statuses: write
+concurrency:
+  group: benchmark-archive
+  cancel-in-progress: false
+jobs:
+  mirror:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
+      - name: Mirror immutable evidence and attest exact PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr }}
+          OUTPUTS_REVIEWED: ${{ inputs.outputs_reviewed }}
+        run: node benchmarks/automation/control.mjs promote

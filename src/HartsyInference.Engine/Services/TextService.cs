@@ -139,12 +139,13 @@ public sealed class TextService : ITextService, IDisposable
 
     private async Task<GenOutcome> RunAsync(ModelSpec spec, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
+        long diagnosticId = _engine.StartDiagnostics();
         string deviceKey = NormalizeDeviceKey(request.Device);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
         await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
         try
         {
-            return await Task.Run(() => RunCore(slot, deviceKey, spec, request, sink, cancel), cancel).ConfigureAwait(false);
+            return await Task.Run(() => RunCore(slot, deviceKey, spec, request, sink, diagnosticId, cancel), cancel).ConfigureAwait(false);
         }
         finally
         {
@@ -153,7 +154,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     private GenOutcome RunCore(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request,
-        Action<TextChunk>? sink, CancellationToken cancel)
+        Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         // Gate BY ORDINAL, before the load: the weight upload must not run concurrently with a same-device
@@ -163,12 +164,15 @@ public sealed class TextService : ITextService, IDisposable
         // same GPU are two backends on one device — state-isolated, but not yet audited for concurrent execution.
         using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
         LoadInto(slot, deviceKey, spec, request);
+        _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: slot.Backend);
         try
         {
             ImageData? image = LastImage(request);
-            if (image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null))
-                return RunVision(slot, request, image, sink, cancel);
-            return RunText(slot, request, sink, cancel);
+            GenOutcome outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
+                ? RunVision(slot, request, image, sink, cancel)
+                : RunText(slot, request, sink, diagnosticId, cancel);
+            _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted, outcome.CompletionTokens);
+            return outcome;
         }
         finally
         {
@@ -177,7 +181,7 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    private static GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
+    private GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
     {
         ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Tokenizer : slot.Model!.Tokenizer;
@@ -186,7 +190,15 @@ public sealed class TextService : ITextService, IDisposable
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
 
+        if (diagnosticId != 0)
+            genRequest = genRequest with { OnPrefillCompleted = count =>
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.PrefillCompleted, count) };
         Action<int>? onToken = null;
+        if (sink is null && diagnosticId != 0)
+        {
+            int count = 0;
+            onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
+        }
         if (sink is not null)
         {
             List<int> acc = [];
@@ -195,6 +207,7 @@ public sealed class TextService : ITextService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 acc.Add(id);
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, acc.Count);
                 string full = tokenizer.Decode(acc);
                 if (full.Length > emitted)
                 {

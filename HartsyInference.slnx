@@ -18,6 +18,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/HartsyInference.Tests.Common/HartsyInference.Tests.Common.csproj" />
     <Project Path="tests/HartsyInference.Core.Tests/HartsyInference.Core.Tests.csproj" />
+    <Project Path="tests/HartsyInference.BenchmarkRunner.Tests/HartsyInference.BenchmarkRunner.Tests.csproj" />
     <Project Path="tests/HartsyInference.Cli.Tests/HartsyInference.Cli.Tests.csproj" />
     <Project Path="tests/HartsyInference.ModelAssets.Tests/HartsyInference.ModelAssets.Tests.csproj" />
     <Project Path="tests/HartsyInference.Cpu.Tests/HartsyInference.Cpu.Tests.csproj" />
@@ -32,6 +33,7 @@
   </Folder>
 
   <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/HartsyInference.BenchmarkRunner/HartsyInference.BenchmarkRunner.csproj" />
     <Project Path="benchmarks/HartsyInference.Benchmarks/HartsyInference.Benchmarks.csproj" />
     <Project Path="benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj" />
   </Folder>

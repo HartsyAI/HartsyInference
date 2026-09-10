@@ -122,7 +122,8 @@ public static class PngEncoder
         return table;
     }
 
-    private static uint Crc32(ReadOnlySpan<byte> data)
+    /// <summary>IEEE CRC-32 used by PNG chunks; shared with bounded evidence validation.</summary>
+    public static uint Crc32(ReadOnlySpan<byte> data)
     {
         uint c = 0xFFFFFFFFu;
         foreach (byte b in data)

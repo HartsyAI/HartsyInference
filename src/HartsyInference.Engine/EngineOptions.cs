@@ -7,6 +7,9 @@ namespace HartsyInference.Engine;
 /// server maps its own options onto this; the CLI constructs it directly.</summary>
 public sealed class EngineOptions
 {
+    /// <summary>Optional generation diagnostics; null preserves the ordinary execution path.</summary>
+    public Diagnostics.IInferenceDiagnostics? Diagnostics { get; set; }
+
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
 

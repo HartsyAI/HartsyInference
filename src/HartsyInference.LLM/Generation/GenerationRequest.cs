@@ -6,6 +6,9 @@ namespace HartsyInference.LLM.Generation;
 /// <summary>Provide either <see cref="Messages"/> (multi-turn chat, wins if both are set) or <see cref="Prompt"/> (single user turn wrapped with the chat template + <see cref="SystemPrompt"/>); <see cref="RawTokenIds"/> bypasses templating entirely.</summary>
 public sealed record GenerationRequest
 {
+    /// <summary>Optional observer after prompt evaluation and first sampling, before decode; count is actual prompt tokens.</summary>
+    public Action<int>? OnPrefillCompleted { get; init; }
+
     /// <summary>Single user prompt (templated as one user turn). Ignored when <see cref="Messages"/> is set.</summary>
     public string? Prompt { get; init; }
 

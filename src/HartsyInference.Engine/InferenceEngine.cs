@@ -28,6 +28,38 @@ public sealed class InferenceEngine : IInferenceEngine
     private string _backendSelector;
     private IBackend? _backend;
     private readonly EngineOptions? _options;
+    private long _diagnosticSequence;
+    private int _diagnosticsFailed;
+
+    /// <summary>False after an observer failure or when diagnostics were not requested.</summary>
+    internal bool DiagnosticsEnabled => _options?.Diagnostics is not null && _diagnosticsFailed == 0;
+
+    /// <summary>Begins a correlated request only when an observer is active.</summary>
+    internal long StartDiagnostics()
+    {
+        if (!DiagnosticsEnabled) return 0;
+        long id = Interlocked.Increment(ref _diagnosticSequence);
+        ReportDiagnostic(id, Diagnostics.InferenceDiagnosticKind.RequestStarted);
+        return id;
+    }
+
+    /// <summary>Reports optional diagnostics without allowing observer failures to alter inference.</summary>
+    internal void ReportDiagnostic(long id, Diagnostics.InferenceDiagnosticKind kind, int count = 0, IBackend? backend = null)
+    {
+        if (id == 0 || !DiagnosticsEnabled) return;
+        try
+        {
+            if (backend is not null) _options!.Diagnostics!.OnBackendReady(id, backend);
+            Diagnostics.InferenceDiagnosticEvent diagnostic = new(id, kind, System.Diagnostics.Stopwatch.GetTimestamp(), count);
+            _options!.Diagnostics!.OnEvent(in diagnostic);
+        }
+        catch (Exception ex)
+        {
+            if (Interlocked.Exchange(ref _diagnosticsFailed, 1) == 0)
+                Logs.Warning($"Generation diagnostics disabled: {ex.GetType().Name}.");
+        }
+    }
+
     private Audio.AudioRuntime? _audioRuntime;
     private PlacementConfig _placement = PlacementConfig.Single;
 

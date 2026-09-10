@@ -63,12 +63,22 @@ C# model code routes math through IBackend. CUDA uses disk-loaded PTX, Vulkan us
 SIMD with scalar fallbacks. CUDA kernels include compiled CUDA sources and legacy handwritten PTX.
 Vendor-library P/Invoke is used in GPU backends; this is not a ban on native driver/math libraries.
 
+## Community benchmarks
+
+[![Reviewed community benchmark results](https://hartsyai.github.io/HartsyInference/overview.svg)](https://hartsyai.github.io/HartsyInference/)
+
+Run the same frozen workloads on your GPU and submit the complete evidence by PR.
+The [benchmark guide](benchmarks/README.md) covers setup, methodology and review;
+the [explorer](https://hartsyai.github.io/HartsyInference/) compares accepted runs on matching workloads.
+No historical scores are presented as verified community results. The explorer requires Pages activation;
+see the [initial dataset snapshot](benchmarks/generated/overview.svg) until it is available.
+
 ## Documentation
 
 - [Documentation map](docs/README.md), [contributing](CONTRIBUTING.md), [agent instructions](AGENTS.md).
 - [Model support](docs/Checklists/MODEL_STATUS.md) and [numerical evidence](docs/Checklists/PARITY_VERIFICATION.md).
 - [Open work](docs/Checklists/ROADMAP.md), [troubleshooting](docs/Checklists/TROUBLESHOOTING.md).
-- [Performance scoreboards](benchmarks/scoreboards/) — hardware, settings, dates, and external baselines.
+- [Historical performance scoreboards](benchmarks/scoreboards/) — hardware, settings, dates, and external baselines.
 - [Multi-GPU configuration](docs/MULTI_GPU.md) and [environment controls](docs/ENV_VARS.md).
 
 Code and packages are [MIT licensed](LICENSE). Model weights retain their publishers' licenses;

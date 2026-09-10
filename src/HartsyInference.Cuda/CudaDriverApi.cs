@@ -16,6 +16,9 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuDriverGetVersion(out int driverVersion);
 
+    [LibraryImport(LibName)]
+    internal static partial int cuDeviceGetUuid_v2(nint uuid, int device);
+
     // ── Device Management ───────────────────────────────────────────────
 
     [LibraryImport(LibName)]

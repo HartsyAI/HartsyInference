@@ -127,10 +127,15 @@ public sealed class VulkanDevice : IDisposable
             sType = VkStructureType.PhysicalDeviceSubgroupSizeControlProperties,
             pNext = (nint)(&subgroupProps),
         };
+        VkPhysicalDeviceIdProperties identity = new()
+        {
+            SType = (VkStructureType)1000071004,
+            Next = (nint)(&sgsControlProps),
+        };
         VkPhysicalDeviceProperties2 props2 = new()
         {
             sType = VkStructureType.PhysicalDeviceProperties2,
-            pNext = (nint)(&sgsControlProps),
+            pNext = (nint)(&identity),
         };
         VulkanApi.vkGetPhysicalDeviceProperties2(pd, ref props2);
 
@@ -233,6 +238,8 @@ public sealed class VulkanDevice : IDisposable
         VulkanCapabilities caps = new()
         {
             DeviceName = ReadFixedString(props2.properties.deviceName, 256),
+            DeviceUuid = Convert.ToHexString(new ReadOnlySpan<byte>(identity.DeviceUuid, 16)).ToLowerInvariant(),
+            DriverVersion = props2.properties.driverVersion,
             VendorId = props2.properties.vendorID,
             DeviceId = props2.properties.deviceID,
             ApiVersion = props2.properties.apiVersion,

@@ -164,6 +164,8 @@ public sealed class TextGenerationPipeline
             if (!ReferenceEquals(lastHidden, hidden)) lastHidden.Dispose();
         }
 
+        request.OnPrefillCompleted?.Invoke(promptIds.Length);
+
         // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
         // cuGraphLaunch/step, removing the CPU launch-issuance bottleneck the perf grind identified as the
         // biggest remaining gap to llama.cpp (docs/Checklists/LLM_DECODE_PERF_GRIND.md Phase 6). Opt-in
@@ -238,6 +240,7 @@ public sealed class TextGenerationPipeline
                 Span<float> lastRow = LastRow(logits, promptIds.Length, cfg.VocabSize);
                 next = sampler.Next(lastRow, generated);
             }
+            request.OnPrefillCompleted?.Invoke(promptIds.Length);
             for (int step = 0; step < request.MaxTokens; step++)
             {
                 ct.ThrowIfCancellationRequested();

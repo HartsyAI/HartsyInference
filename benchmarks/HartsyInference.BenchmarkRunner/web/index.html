@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'">
+<title>HartsyInference community benchmarks</title><style>
+body{font:16px system-ui;background:#101827;color:#e5edf5;max-width:1200px;margin:40px auto;padding:0 24px}a{color:#7dd3fc}select{padding:8px;margin:8px;background:#1e293b;color:white}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:14px 8px;border-bottom:1px solid #334155}small{color:#a8b7c9}svg{width:100%;height:auto}#empty{padding:30px;background:#1e293b}summary{cursor:pointer}
+</style></head><body><h1>Community benchmarks</h1><p>Reviewed runs on real hardware. Compare identical workloads and engine revisions.</p>
+<p><a href="https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/README.md">Run and contribute</a> · <a href="summary.json">Download dataset</a> · <a href="excluded.txt">Excluded records</a></p>
+<label>Workload <select id="case"></select></label><label>Engine <select id="revision"></select></label><label>Backend <select id="backend"></select></label>
+<div id="empty" hidden>No accepted reproducible campaigns yet. Run the standard suite and contribute your results.</div><div id="results"></div>
+<details><summary>How to read these results</summary><p>Warm request latency is measured after two unmeasured warmups (the first request is retained separately). Each case uses five fixed inputs in three independent worker processes. We take each session's median, then each machine's median, then the median across machines.</p>
+<p>Repeated submissions from the same physical GPU and host do not receive additional weight. The interval is a deterministic 95% percentile bootstrap across machines; a single-machine result has no population interval. This is community evidence, not proof against fabricated measurements. Output review and independent reproduction are separate steps.</p>
+<p>Driver, operating system, runtime, binary hashes, and settings form separate cohorts. CUDA and Vulkan are distinct. Raw first-token timing, decode throughput, first-request latency, all outputs, attempts and failures are retained in each evidence bundle. GPU memory measurements and reference-engine speed ratios are not currently reported.</p></details>
+<script src="explorer.js"></script></body></html>

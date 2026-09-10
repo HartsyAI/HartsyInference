@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "quick-v1",
+  "sessions": 1,
+  "warmups": 2,
+  "publishable": false,
+  "cases": [
+    {
+      "id": "qwen3-4b-q4-short",
+      "adapter": "text",
+      "model": "qwen3-4b",
+      "asset": {
+        "repository": "Qwen/Qwen3-4B-GGUF",
+        "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+        "file": "Qwen3-4B-Q4_K_M.gguf",
+        "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+        "bytes": 2497280256
+      },
+      "inputs": [
+        "Explain why the sky looks blue in plain language.",
+        "Describe the steps needed to plant and grow a tomato.",
+        "Write a short story about a lighthouse keeper finding a letter.",
+        "Compare bicycles and trains for commuting in a city.",
+        "Explain how a library organizes books and helps readers."
+      ],
+      "width": 512,
+      "height": 512,
+      "steps": 20,
+      "maxTokens": 128,
+      "seed": 42,
+      "timeoutSeconds": 600
+    }
+  ]
+}

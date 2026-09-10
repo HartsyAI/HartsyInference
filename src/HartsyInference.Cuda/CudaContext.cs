@@ -48,6 +48,21 @@ public sealed class CudaContext : IDisposable
     /// <summary>Device name.</summary>
     public string DeviceName { get; }
 
+    /// <summary>Queries the driver API version without caching a guessed runtime version.</summary>
+    public int QueryDriverVersion()
+    {
+        CudaDriverApi.cuDriverGetVersion(out int version).ThrowOnError();
+        return version;
+    }
+
+    /// <summary>Queries the physical device or MIG instance UUID for evidence collection.</summary>
+    public unsafe string QueryDeviceUuid()
+    {
+        byte* uuid = stackalloc byte[16];
+        CudaDriverApi.cuDeviceGetUuid_v2((nint)uuid, _deviceHandle).ThrowOnError();
+        return Convert.ToHexString(new ReadOnlySpan<byte>(uuid, 16)).ToLowerInvariant();
+    }
+
     /// <summary>Creates a CUDA context for the specified device ordinal. Retains the device's primary context (refcounted; safe to call from multiple <see cref="CudaContext"/> instances pointing at the same device) and binds it to the calling thread.</summary>
     public CudaContext(int deviceOrdinal = 0)
     {
