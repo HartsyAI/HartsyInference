@@ -23,6 +23,12 @@ dotnet publish benchmarks/HartsyInference.BenchmarkRunner -c Release -r linux-x6
 ./artifacts/linux-x64/hartsy-bench export --input benchmark-runs/run-1 --bundle benchmark-runs/run-1.zip
 ```
 
+`--cache` holds the pinned checkpoints, keyed by SHA-256 as `<cache>/<sha256>/<file>`. Because the layout is
+content-addressed it can live on any volume; set `HARTSY_BENCH_CACHE` once to keep large downloads off the
+system disk and omit `--cache` thereafter. An explicit `--cache` still wins, and the default is
+`~/.cache/hartsy-bench`. A checkpoint you already store elsewhere can be hard-linked into that layout under
+its pinned hash instead of downloaded again; `fetch` verifies size and hash either way.
+
 Replace `<commit-sha>` with the full hash from `git rev-parse HEAD`; an unversioned development build is
 ineligible for public comparisons. On Windows publish with `-r win-x64` and run `hartsy-bench.exe`.
 Use `vulkan:0` for Vulkan, or `cpu` for local diagnostics. Software Vulkan devices are excluded from GPU comparisons. Run `list` to see suites. A second GPU uses an

@@ -35,8 +35,8 @@ public static class Program
                     hartsy-bench — reproducible community evidence
                       list
                       doctor --device cuda:0
-                      fetch --suite standard-v1 --cache <directory>
-                      run|resume --suite standard-v1 --device cuda:0 --cache <directory> --output <campaign> [--minutes 30]
+                      fetch --suite standard-v1 [--cache <directory>]
+                      run|resume --suite standard-v1 --device cuda:0 [--cache <directory>] --output <campaign> [--minutes 30]
                       validate --input <campaign-or-extracted-bundle>
                       export --input <campaign> --bundle <new.zip>
                       extract --bundle <zip> --output <empty-directory>
@@ -48,6 +48,7 @@ public static class Program
                              --reviewer <github-login> --pr <url> --head <sha> --reason <text>
                       publish --input <submissions-root> --reviews <trusted-receipts> --evidence <extracted-root> --output <site>
                     All model downloads happen in fetch. run never silently changes device, model, or workload.
+                    --cache defaults to $HARTSY_BENCH_CACHE, else ~/.cache/hartsy-bench.
                     """);
                 return 0;
             }
@@ -55,6 +56,19 @@ public static class Program
             Dictionary<string, string> options = Parse(args);
             string Need(string key) => options.Remove(key, out string? value) ? value : throw new ArgumentException("Missing --" + key);
             string Get(string key, string fallback) => options.Remove(key, out string? value) ? value : fallback;
+            // Model cache location: --cache, else $HARTSY_BENCH_CACHE, else the per-user default. A machine that
+            // already stores large checkpoints on a separate volume sets the variable once instead of repeating the
+            // path on every command; the layout stays content-addressed (<cache>/<sha256>/<file>) so any volume works.
+            string Cache()
+            {
+                if (options.Remove("cache", out string? supplied))
+                    return Path.GetFullPath(supplied);
+                string? configured = Environment.GetEnvironmentVariable("HARTSY_BENCH_CACHE");
+                return Path.GetFullPath(string.IsNullOrWhiteSpace(configured)
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "hartsy-bench")
+                    : configured);
+            }
+
             void End()
             {
                 if (options.Count != 0)
@@ -92,7 +106,7 @@ public static class Program
 
                 case "fetch":
                 {
-                    string suite = Get("suite", "standard-v1"), cache = Path.GetFullPath(Need("cache"));
+                    string suite = Get("suite", "standard-v1"), cache = Cache();
                     End();
                     await Assets.FetchAsync(Suites.Load(suite), cache, cancellation.Token);
                     return 0;
@@ -101,7 +115,7 @@ public static class Program
                 case "run":
                 case "resume":
                 {
-                    string suite = Get("suite", "standard-v1"), device = Need("device"), cache = Path.GetFullPath(Need("cache"));
+                    string suite = Get("suite", "standard-v1"), device = Need("device"), cache = Cache();
                     string output = Path.GetFullPath(Need("output"));
                     int minutes = int.Parse(Get("minutes", suite == "extended-v1" ? "120" : "30"), CultureInfo.InvariantCulture);
                     End();
