@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.59
+
+- Benchmarks: a standalone `hartsy-bench` runner produces reproducible community evidence from frozen,
+  hash-pinned text and image workloads. Each session runs in its own process with immutable attempts and a
+  resumable journal, and every trial retains its raw timings, native token trace and saved output. `validate`
+  checks protocol and evidence rather than trusting submitted numbers, `export`/`extract` move data-only
+  bundles carrying a full hash inventory, and `publish` builds the static explorer from reviewed evidence
+  only. Trusted workflows validate results PRs without executing contributor code. `--cache` resolves as
+  `--cache`, then `$HARTSY_BENCH_CACHE`, then `~/.cache/hartsy-bench`; the content-addressed
+  `<cache>/<sha256>/<file>` layout lets a checkpoint already stored elsewhere be hard-linked in under its
+  pinned hash instead of downloaded again.
+- Engine: optional generation diagnostics. `EngineOptions.Diagnostics` is null by default, so
+  `StartDiagnostics` returns 0 and `ReportDiagnostic` returns on its first comparison, and the per-token hook
+  is only built when an observer is active. An observer that throws is disabled once rather than being allowed
+  to alter inference.
+- Core: a knob profile that pins a nullable knob to `null` now keeps that null instead of falling through to
+  the machine's `HARTSY_*` override. This also corrects `--profile reference`, which pins
+  `numerics.cfgInterval` and `numerics.sagePv` to null and until now silently inherited either variable from
+  the environment, defeating the profile's stated purpose. Value-type knobs are unaffected.
+
 ## alpha.58
 
 - Restore: SeedVR2 runs on the CPU backend. Its kernels are F32-only (`Linear` casts a half weight on the fly but
