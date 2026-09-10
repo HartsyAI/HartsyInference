@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.58
+
+- Restore: SeedVR2 runs on the CPU backend. Its kernels are F32-only (`Linear` casts a half weight on the fly but
+  not the bias, and the VAE's 3-D convs do not cast at all), so the fp16 checkpoints stopped at the first GEMM.
+  `RestoreService` now casts the DiT and VAE tensors to F32 once at load when the backend is CPU (about 13.5 GB for
+  the 3B model) and releases the copies with the pipeline; CUDA still consumes the half weights directly.
+
 ## alpha.57
 
 - Vision: Real-ESRGAN x2plus produced 4× output. BasicSR's 2× RRDBNet is the same ×4 network fed a 2× pixel-unshuffled
