@@ -25,4 +25,6 @@ test('merge gate distinguishes code-only PRs from any result mutation', () => {
   assert.equal(hasSubmissionChanges([{filename:'src/engine.cs'}]),false);
   assert.equal(hasSubmissionChanges(files),true);
   assert.equal(hasSubmissionChanges([{filename:files[0].filename,status:'removed'}]),true);
+  assert.equal(hasSubmissionChanges([{filename:'archived/campaign.json',
+    previous_filename:files[0].filename,status:'renamed'}]),true);
 });

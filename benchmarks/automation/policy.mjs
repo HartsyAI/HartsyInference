@@ -13,5 +13,6 @@ export function matchesMergedHead(pr, review) {
 }
 
 export function hasSubmissionChanges(files) {
-  return files.some(file => file.filename.startsWith('benchmarks/submissions/'));
+  return files.some(file => file.filename.startsWith('benchmarks/submissions/')
+    || file.previous_filename?.startsWith('benchmarks/submissions/'));
 }

@@ -83,6 +83,10 @@ public static class Hardware
                 Knob<int> k => profile.With(k, k.Default),
                 Knob<long> k => profile.With(k, k.Default),
                 Knob<float> k => profile.With(k, k.Default),
+                Knob<bool?> k => profile.With(k, k.Default),
+                Knob<int?> k => profile.With(k, k.Default),
+                Knob<long?> k => profile.With(k, k.Default),
+                Knob<float?> k => profile.With(k, k.Default),
                 Knob<string> k => profile.With(k, k.Default),
                 _ => throw new InvalidDataException("Unsupported knob type: " + type),
             };

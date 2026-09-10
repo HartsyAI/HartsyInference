@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 using HartsyInference.Core.Configuration;
@@ -120,6 +121,7 @@ public static class Worker
         }
         catch (Exception error)
         {
+            Logs.Error("Benchmark worker failed; details are retained only in the local worker log.", error);
             // The process boundary owns failures. Store types, never exception text containing private paths or tokens.
             record = record with
             {

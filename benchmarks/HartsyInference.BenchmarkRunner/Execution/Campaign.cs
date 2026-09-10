@@ -6,6 +6,17 @@ namespace HartsyInference.BenchmarkRunner.Execution;
 /// <summary>Serial campaign scheduler with immutable attempts and explicit incomplete outcomes.</summary>
 public static class Campaign
 {
+    /// <summary>Compares provenance values independently of JSON dictionary enumeration order.</summary>
+    public static bool SameEnvironment(EnvironmentRecord recorded, EnvironmentRecord current) =>
+        recorded.MachineId == current.MachineId && recorded.OperatingSystem == current.OperatingSystem
+        && recorded.Runtime == current.Runtime && recorded.Architecture == current.Architecture
+        && recorded.CpuCount == current.CpuCount && recorded.Device == current.Device
+        && recorded.EngineRevision == current.EngineRevision
+        && recorded.Binaries.OrderBy(p => p.Key, StringComparer.Ordinal)
+            .SequenceEqual(current.Binaries.OrderBy(p => p.Key, StringComparer.Ordinal))
+        && recorded.Settings.OrderBy(p => p.Key, StringComparer.Ordinal)
+            .SequenceEqual(current.Settings.OrderBy(p => p.Key, StringComparer.Ordinal));
+
     public static async Task<int> RunAsync(string root, string cache, string suiteId, string selector, int budgetMinutes, bool resume,
         CancellationToken cancel)
     {
@@ -32,14 +43,8 @@ public static class Campaign
             Sessions = [],
             BudgetMinutes = budgetMinutes
         };
-        if (campaign.Environment.MachineId != environment.MachineId
-            || campaign.Environment.OperatingSystem != environment.OperatingSystem
-            || campaign.Environment.Runtime != environment.Runtime
-            || campaign.Environment.Architecture != environment.Architecture
-            || campaign.Environment.CpuCount != environment.CpuCount
-            || campaign.SuiteId != suiteId || campaign.SuiteSha256 != Hashes.FileHash(Suites.PathFor(suiteId)) || campaign.Environment
-            .Device != device || campaign.Environment.EngineRevision != environment.EngineRevision || !campaign.Environment.Binaries
-            .SequenceEqual(environment.Binaries) || !campaign.Environment.Settings.SequenceEqual(environment.Settings))
+        if (!SameEnvironment(campaign.Environment, environment) || campaign.SuiteId != suiteId
+            || campaign.SuiteSha256 != Hashes.FileHash(Suites.PathFor(suiteId)))
             throw new InvalidDataException("Resume requires the same suite, binary hashes, device, settings, and engine revision.");
         foreach (AssetDefinition asset in suite.Cases.Select(c => c.Asset).DistinctBy(a => a.Sha256))
             Assets.Verify(cache, asset);
