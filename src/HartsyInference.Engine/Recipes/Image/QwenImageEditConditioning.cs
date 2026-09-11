@@ -1,3 +1,4 @@
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Engine.Features;
@@ -62,8 +63,10 @@ public static class QwenImageEditConditioning
         {
             ordered.Add(initImage);
         }
+        int offered = ordered.Count;
         if (extraReferences is not null)
         {
+            offered += extraReferences.Count;
             foreach (ImageData reference in extraReferences)
             {
                 if (reference is not null && ordered.Count < MaxReferences)
@@ -71,6 +74,11 @@ public static class QwenImageEditConditioning
                     ordered.Add(reference);
                 }
             }
+        }
+        if (offered > ordered.Count)
+        {
+            Logs.Warning($"[QwenImageEdit] {offered} reference images supplied; the edit template addresses "
+                + $"{MaxReferences}, so the last {offered - ordered.Count} were dropped.");
         }
         if (ordered.Count == 0)
         {
