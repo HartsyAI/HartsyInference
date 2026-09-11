@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.64
+
+- Audio: MiniMax Music 3's one-time GGUF quant caches (language model and depth decoder) are written beside the
+  weights they derive from, under `AudioModelCache.CacheRoot`, instead of a hardcoded `~/.cache/hartsyinference/`.
+  They are multi-gigabyte files and were landing on the boot drive regardless of how the cache was relocated;
+  they now follow the same root resolution the weights themselves use (`paths.modelCacheRoot`, else
+  `paths.modelsRoot/audio`, else the user cache directory). An existing cache re-quantizes once on the next
+  `:q8`/`:q4` run, after which the old directory can be deleted.
+
 ## alpha.63
 
 - Krea 2: the recipe honors the `ImageRequest.Components` Qwen text-encoder and VAE picks instead of always
