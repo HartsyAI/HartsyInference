@@ -92,6 +92,16 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("How much of the init image to overwrite, 0..1 (0 keeps it, 1 ignores it). Requires --init-image.")]
         public double? Creativity { get; init; }
 
+        /// <summary>How the family should consume the init image; unset lets the family decide.</summary>
+        [CommandOption("--init-image-mode")]
+        [Description("How to consume --init-image: denoise (strength-based img2img), reference (in-context edit), or auto.")]
+        public string? InitImageMode { get; init; }
+
+        /// <summary>Extra reference images for an edit family, in the order the prompt refers to them.</summary>
+        [CommandOption("--reference-image")]
+        [Description("Path to an extra reference image for an edit family; repeatable. The init image is the first reference.")]
+        public string[]? ReferenceImages { get; init; }
+
         /// <summary>Image-guidance (InstructPix2Pix) scale for dual-CFG edit models; unset uses the family default.</summary>
         [CommandOption("--ip2p-cfg")]
         [Description("Image-guidance scale for dual-CFG edit models (OmniGen2 default 2.0, Boogu default 1.0). Requires --init-image on an edit family.")]
@@ -186,6 +196,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("vram-mode", settings.VramMode);
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("creativity", settings.Creativity);
+        parameters.PutIfSet("init-image-mode", settings.InitImageMode);
+        if (settings.ReferenceImages is { Length: > 0 })
+        {
+            parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
+        }
         parameters.PutIfSet("ip2p-cfg", settings.Ip2pCfg);
         parameters.PutIfSet("mask", settings.Mask);
         parameters.PutIfSet("mask-grow", settings.MaskGrow);

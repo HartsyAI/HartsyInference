@@ -78,6 +78,9 @@ public sealed record ImageRequest
     /// <summary>Image-to-image init; null for pure text-to-image.</summary>
     public Img2Img? Img2Img { get; init; }
 
+    /// <summary>Extra reference images for a reference-edit family, in presentation order after <see cref="Img2Img"/>'s init image; null/empty for none. Distinct from <see cref="IpAdapter"/>: these are VAE-encoded in-context references the denoiser attends to directly, not cross-attention image-prompt conditioning, and a prompt that says "the first image" / "the second image" is addressing this order.</summary>
+    public IReadOnlyList<ImageData>? ReferenceImages { get; init; }
+
     /// <summary>Inpaint mask; null for none.</summary>
     public Inpaint? Inpaint { get; init; }
 

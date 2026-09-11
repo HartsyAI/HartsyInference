@@ -137,6 +137,10 @@ public sealed class ImagesService : IImagesService
         {
             features |= Img2ImgBit(request.Img2Img, supported);
         }
+        if (request.ReferenceImages is { Count: > 0 })
+        {
+            features |= ImageFeatures.RefEdit;
+        }
         if (request.Inpaint is not null)
         {
             features |= ImageFeatures.Inpaint;

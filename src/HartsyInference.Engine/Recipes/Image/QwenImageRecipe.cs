@@ -25,9 +25,9 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>The only family offering both init-image modes: classic strength-based img2img/inpaint through the
-    /// packed-latent masked path, and Qwen-Image-Edit reference conditioning. <c>Img2Img.Mode</c> selects; Auto prefers
-    /// classic. Edit fidelity is below the reference implementation until <c>editRefVisionImages</c> is wired — the VL
-    /// branch cannot see the image without it.</remarks>
+    /// packed-latent masked path, and Qwen-Image-Edit reference conditioning over up to
+    /// <see cref="QwenImageEditConditioning.MaxReferences"/> images. <c>Img2Img.Mode</c> selects; Auto prefers classic
+    /// unless <c>ImageRequest.ReferenceImages</c> is set, which only edit conditioning can consume.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora | ImageFeatures.ControlNet;
 
     /// <inheritdoc/>
@@ -45,9 +45,6 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
 
     public IRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): Qwen-Image-Edit (2509 / 2511) is deferred — the SwarmUI loader additionally built the
-        // Qwen2.5-VL vision tower + Qwen25VlMultimodalEncoder from the TE file's `visual.*` weights and passed the
-        // init/prompt images as edit references. Text-to-image only here, so no vision tower is constructed.
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the loader read
         // T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the canonical SideModels entry.
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
@@ -168,9 +165,10 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             }
 
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
+            IReadOnlyDictionary<string, Tensor> encoderWeights;
             if (converted.TextEncoder.Count > 0)
             {
-                textEncoder.LoadWeights(converted.TextEncoder);
+                encoderWeights = converted.TextEncoder;
             }
             else
             {
@@ -178,8 +176,22 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 SafeTensorsLoader encoderLoader = new SafeTensorsLoader();
                 encoderLoader.Load(encoderPath);
                 loaders.Add(encoderLoader);
-                textEncoder.LoadWeights(encoderLoader.GetAllTensors());
+                encoderWeights = encoderLoader.GetAllTensors();
                 Logs.Info("[QwenImageRecipe] Qwen2.5-VL-7B resolved as side model.");
+            }
+            textEncoder.LoadWeights(encoderWeights);
+
+            // Edit conditioning routes the instruction through the text encoder's own vision tower. Built whenever the
+            // file carries one, because nothing in a Qwen-Image checkpoint distinguishes an edit model from the base.
+            Qwen25VlVisionEncoder? visionEncoder = null;
+            Qwen25VlMultimodalEncoder? multimodalEncoder = null;
+            if (encoderWeights.ContainsKey("visual.patch_embed.proj.weight"))
+            {
+                Qwen25VlVisionConfig visionConfig = Qwen25VlVisionConfig.Qwen2_5_VL_7B;
+                visionEncoder = new Qwen25VlVisionEncoder(visionConfig);
+                visionEncoder.LoadWeights(encoderWeights);
+                multimodalEncoder = new Qwen25VlMultimodalEncoder(textEncoder, visionEncoder, new Qwen25VlImageProcessor(visionConfig));
+                Logs.Info("[QwenImageRecipe] Qwen2.5-VL vision tower loaded: reference-edit conditioning available.");
             }
 
             // Both VAE halves: the decoder for output, the encoder because it is what img2img / edit needs. A
@@ -203,7 +215,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             vae.LoadWeights(vaeWeights);
             QwenImageVaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildQwenEncoder(VaeConfig.QwenImage, vaeWeights, "QwenImageRecipe");
 
-            QwenImagePipeline pipeline = new QwenImagePipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, config)
+            QwenImagePipeline pipeline = new QwenImagePipeline(context.Backend, textEncoder, transformer, vae, vaeEncoder, multimodalEncoder, config)
             {
                 TextEncoderBackend = context.TextEncoderBackendOrDefault,
                 VaeBackend = context.VaeBackendOrDefault,
@@ -211,8 +223,11 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
                 CpBackends = context.CpBackends,
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
+            // 2511's ref method (ComfyUI model_detection: the bare `__index_timestep_zero__` marker tensor).
+            bool refTimestepZero = converted.Transformer.ContainsKey("__index_timestep_zero__");
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
-            return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, loaders, ggufHandle, loraStack);
+            return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder,
+                multimodalEncoder, visionEncoder, refTimestepZero, loaders, ggufHandle, loraStack);
         }
         catch (Exception ex)
         {

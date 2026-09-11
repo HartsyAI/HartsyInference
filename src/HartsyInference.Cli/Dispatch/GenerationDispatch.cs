@@ -72,6 +72,8 @@ public static class GenerationDispatch
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
                 ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] } : null,
+            ReferenceImages = SplitPaths(parameters.GetStringOrNull("reference-images")) is { Length: > 0 } refPaths
+                ? [.. refPaths.Select(LoadImage)] : null,
             Extra = BuildImageExtra(parameters),
         };
 
@@ -807,7 +809,7 @@ public static class GenerationDispatch
         }
     }
 
-    /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c>, or null for text-to-image.</summary>
+    /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c> / <c>--init-image-mode</c>, or null for text-to-image.</summary>
     private static Img2Img? BuildImg2Img(ParamState parameters)
     {
         string? initPath = parameters.GetStringOrNull("init-image");
@@ -817,7 +819,17 @@ public static class GenerationDispatch
         }
         Img2Img img2img = new Img2Img { InitImage = LoadImage(initPath) };
         double? creativity = parameters.GetDoubleOrNull("creativity");
-        return creativity is null ? img2img : img2img with { Creativity = creativity.Value };
+        if (creativity is not null)
+        {
+            img2img = img2img with { Creativity = creativity.Value };
+        }
+        return parameters.GetStringOrNull("init-image-mode") switch
+        {
+            "denoise" => img2img with { Mode = Img2ImgMode.Denoise },
+            "reference" => img2img with { Mode = Img2ImgMode.Reference },
+            null or "auto" => img2img,
+            string mode => throw new ArgumentException($"Unknown --init-image-mode '{mode}'; expected denoise, reference or auto."),
+        };
     }
 
     /// <summary>The Redux Extra keys from <c>--style-model</c> and its strength knobs; empty when Redux is off.</summary>

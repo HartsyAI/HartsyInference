@@ -15,11 +15,12 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed Qwen-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="QwenImagePipeline"/> owns the text-encoder forward, so this only builds the templated Qwen token ids plus the prefix-drop indices and calls <see cref="QwenImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>QwenImageLoader.Generate</c> text-to-image drive path. Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
+/// <summary>A constructed Qwen-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="QwenImagePipeline"/> owns the text-encoder forward, so this only builds the templated Qwen token ids plus the prefix-drop indices and calls <see cref="QwenImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>QwenImageLoader.Generate</c> drive path for both text-to-image and the Qwen-Image-Edit reference path (see <see cref="QwenImageEditConditioning"/>). Wraps the constructed Qwen-Image pipeline plus its components, taking ownership of every disposable.</summary>
 public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer,
     LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae,
-    QwenImageVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, IDisposable? ggufHandle,
-    MergedLoraStack? loraStack = null) : IRecipePipeline
+    QwenImageVaeEncoder? vaeEncoder, Qwen25VlMultimodalEncoder? multimodalEncoder,
+    Qwen25VlVisionEncoder? visionEncoder, bool refTimestepZero, List<SafeTensorsLoader> loaders,
+    IDisposable? ggufHandle, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers <c>QwenImagePipeline.prompt_template_encode</c>); its hidden states are dropped by the prefix-drop index.</summary>
     private const string QwenImageSystemPrompt =
@@ -36,6 +37,9 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     private readonly QwenImageTransformer _transformer = transformer;
     private readonly QwenImageVaeDecoder _vae = vae;
     private readonly QwenImageVaeEncoder? _vaeEncoder = vaeEncoder;
+    private readonly Qwen25VlMultimodalEncoder? _multimodalEncoder = multimodalEncoder;
+    private readonly Qwen25VlVisionEncoder? _visionEncoder = visionEncoder;
+    private readonly bool _refTimestepZero = refTimestepZero;
     private readonly List<SafeTensorsLoader> _loaders = loaders;
     private readonly IDisposable? _ggufHandle = ggufHandle;
 
@@ -50,19 +54,32 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         int steps = request.Steps ?? QwenImageRecipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? QwenImageRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4/5): Qwen-Image-Edit reference images (editRefImages / editRefVisionImages /
-        // editRefTimestepZero) and regional prompting are deferred — the SwarmUI loader resolved those from
-        // T2IParamInput too. Classic strength-based img2img/inpaint is wired below; the edit path is a distinct
-        // conditioning mode and stays deferred.
-        (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
-        (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
-
-        // Qwen-Image is the only family offering BOTH modes, so the choice is explicit rather than inferred:
-        // Reference routes the init image to the in-context edit tokens, anything else to the classic noised start.
-        bool refEdit = request.Img2Img?.Mode == Img2ImgMode.Reference;
+        // TODO(E-IMG-5): regional prompting is deferred — the SwarmUI loader resolved it from T2IParamInput too.
+        // Qwen-Image is the only family offering BOTH init-image modes, so the choice is explicit rather than inferred:
+        // Reference routes the images to the in-context edit tokens, anything else to the classic noised start. Extra
+        // references force the edit path — nothing else can consume more than one image — so an explicit denoise mode
+        // is refused rather than silently dropping them.
+        bool hasExtraReferences = request.ReferenceImages is { Count: > 0 };
+        if (hasExtraReferences && request.Img2Img?.Mode == Img2ImgMode.Denoise)
+        {
+            throw new InvalidOperationException("Reference images are consumed by Qwen-Image-Edit conditioning, which has "
+                + "no denoise-strength path. Set Img2Img.Mode to Reference or Auto, or drop the reference images.");
+        }
+        bool refEdit = hasExtraReferences || request.Img2Img?.Mode == Img2ImgMode.Reference;
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
-        using Img2ImgResolver.Img2ImgSpec? initImage = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
-        Img2ImgResolver.Img2ImgSpec? img2img = refEdit ? null : initImage;
+        using Img2ImgResolver.Img2ImgSpec? img2img = refEdit
+            ? null : RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        // References carry their own aspect-preserving rescales (~1 MP for the VAE, ~384² for the vision tower), so they
+        // deliberately bypass the img2img resolver's resize-to-output-size.
+        using QwenImageEditConditioning.References? references = refEdit
+            ? QwenImageEditConditioning.Resolve(request.Img2Img?.InitImage, request.ReferenceImages) : null;
+        bool editVision = references is not null && _multimodalEncoder is not null;
+        (int[] promptTokens, int promptDrop) = editVision
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, prompt, CountVisionTokens(references!))
+            : EncodeWithTemplate(_tokenizer, prompt);
+        (int[] negTokens, int negDrop) = editVision
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, negative, CountVisionTokens(references!))
+            : EncodeWithTemplate(_tokenizer, negative);
 
         using QwenImageControlNetResolver.ResolvedSpec? controlNets = QwenImageControlNetResolver.Resolve(
             request.ControlNets, reqWidth, reqHeight,
@@ -91,7 +108,9 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             promptTokens, negTokens, inner, bridge,
             promptDropIndex: promptDrop, negativeDropIndex: negDrop,
-            editRefImages: refEdit && initImage is not null ? [initImage.SourceTensor] : null,
+            editRefImages: references?.Latent,
+            editRefTimestepZero: references is not null && _refTimestepZero,
+            editRefVisionImages: editVision ? references!.Vision : null,
             controlNets: controlNets?.Conditionings);
 
         return new ImageResult
@@ -109,6 +128,17 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
                 ["cfg"] = cfg.ToString(CultureInfo.InvariantCulture),
             },
         };
+    }
+
+    /// <summary>Merged vision-token counts per reference, so the template can size its <c>&lt;|image_pad|&gt;</c> runs to what the tower will actually emit.</summary>
+    private int[] CountVisionTokens(QwenImageEditConditioning.References references)
+    {
+        int[] counts = new int[references.Vision.Count];
+        for (int i = 0; i < counts.Length; i++)
+        {
+            counts[i] = _multimodalEncoder!.CountImageTokens(references.Vision[i]);
+        }
+        return counts;
     }
 
     /// <summary>Builds the Qwen-Image templated token sequence (real length, no padding — the pipeline has no attention mask) plus the prefix-drop index: the count of leading system-block + user-header tokens whose hidden states the pipeline discards (diffusers' <c>prompt_template_encode_start_idx</c>). Special tokens are inserted by id; the text between them is BPE'd per segment.</summary>
@@ -143,6 +173,7 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         _transformer.Dispose();
         _vae.Dispose();
         _vaeEncoder?.Dispose();
+        _visionEncoder?.Dispose();
         foreach (SafeTensorsLoader loader in _loaders)
         {
             loader.Dispose();
