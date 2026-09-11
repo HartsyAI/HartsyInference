@@ -67,9 +67,9 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         Krea2Config config = isTurbo ? Krea2Config.Turbo : Krea2Config.Base;
         Logs.Info($"[Krea2Recipe] Loading Krea 2 ({(isTurbo ? "Turbo/TDM" : "Base")}): {fileName}.");
 
-        string encoderPath = ResolveComponent(context.Components?.Qwen, SideModels.Qwen3VL_4B,
+        string encoderPath = ResolveComponent(context.Components?.Qwen, SideModels.Qwen3VL_4B, context.Cancel,
             "Qwen3-VL-4B text encoder", "text_encoders", "clip");
-        string vaePath = ResolveComponent(context.Components?.Vae, SideModels.QwenImageVae,
+        string vaePath = ResolveComponent(context.Components?.Vae, SideModels.QwenImageVae, context.Cancel,
             "Qwen-Image VAE", "VAE", "vae");
 
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
@@ -157,14 +157,16 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         return lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
     }
 
-    /// <summary>Uses an override when supplied; otherwise ensures the Comfy-compatible side model exists.</summary>
-    private static string ResolveComponent(string? requested, ModelAsset asset, string role, params string[] folders)
+    /// <summary>Uses an override when supplied; otherwise ensures the Comfy-compatible side model exists. The
+    /// request's token is honored because the fallback may transfer several gigabytes.</summary>
+    private static string ResolveComponent(string? requested, ModelAsset asset, CancellationToken cancel,
+        string role, params string[] folders)
     {
         if (!string.IsNullOrWhiteSpace(requested))
         {
             return ModelFileLocator.Require(requested, role, folders);
         }
-        return ModelDownloader.EnsureSideModelAsync(asset, downloadIfMissing: true, onProgress: null,
-            CancellationToken.None).GetAwaiter().GetResult();
+        return ModelDownloader.EnsureSideModelAsync(asset, downloadIfMissing: true, onProgress: null, cancel)
+            .GetAwaiter().GetResult();
     }
 }

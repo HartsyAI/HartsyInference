@@ -15,6 +15,9 @@ stable release will require. Dates are UTC.
 - Models: `SideModels.Qwen3VL_4B` moves to the flat `text_encoders/qwen3vl_4b.safetensors` that SwarmUI's Comfy
   backend downloads under the identical SHA-256, so the two share one file instead of fetching 5 GB twice. The
   `Krea2/` subdir it previously used matched nothing on either side.
+- Engine: `RecipeContext.Cancel` carries the originating request's cancellation token into recipe construction, and
+  Krea 2 honors it when acquiring a side model. The fallback download it newly enables can transfer several
+  gigabytes, so an HTTP client disconnect would otherwise have left it running with the request already gone.
 - Models: `ModelAsset.LegacyTargetNames` records the names an asset was saved under before its canonical name
   changed, and `ModelDownloader.TargetPath` resolves to an existing legacy file when the canonical one is absent.
   Without it, renaming a shared asset costs every upgrading install a multi-gigabyte re-download and makes the

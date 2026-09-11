@@ -37,7 +37,7 @@ public sealed class ImagesService : IImagesService
                 // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
                 using IDisposable settingsScope = KnobProfileScope.Push(request.Settings?.Resolve());
                 string? keepRefiner = request.Refiner?.Model;
-                IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
+                IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
