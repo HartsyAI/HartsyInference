@@ -13,6 +13,11 @@ public sealed record RecipeContext
     /// <summary>Local path to the primary checkpoint (the transformer/UNet file or its directory).</summary>
     public required string CheckpointPath { get; init; }
 
+    /// <summary>The originating request's cancellation token, so a recipe that acquires a side model can abandon a
+    /// multi-gigabyte download when the caller goes away (an HTTP client disconnect included). Defaults to
+    /// <see cref="CancellationToken.None"/> for the construction paths that have no request behind them.</summary>
+    public CancellationToken Cancel { get; init; }
+
     /// <summary>Compute backend the constructed pipeline runs on.</summary>
     public required IBackend Backend { get; init; }
 
