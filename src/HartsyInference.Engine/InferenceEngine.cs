@@ -164,6 +164,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IVisionService Vision => _vision.Value;
 
+    /// <summary>The same vision service as <see cref="Vision"/>, concretely typed: the image post steps call its
+    /// synchronous helpers directly, which keeps the annotator weight caches single-copy across modalities.</summary>
+    internal Services.VisionService VisionInternal => _vision.Value;
+
     /// <summary>Video/image restoration (SeedVR2).</summary>
     public IRestoreService Restore => _restore.Value;
 
@@ -216,7 +220,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Detects the checkpoint architecture for <paramref name="spec"/>, resolves its recipe, and constructs
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
-    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null)
+    internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null, CancellationToken cancel = default)
     {
         if (string.IsNullOrEmpty(spec.LocalPath))
         {
@@ -246,6 +250,7 @@ public sealed class InferenceEngine : IInferenceEngine
             DitShardBackend = EnsureDitShardBackend(),
             DitShardBackends = EnsureDitShardBackends(),
             CpBackends = EnsureCpBackends(),
+            Cancel = cancel,
             Components = request?.Components,
             Loras = request?.Loras,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),

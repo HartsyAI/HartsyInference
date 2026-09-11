@@ -153,6 +153,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         public double? ReduxApplyStart { get; init; }
 
         /// <summary>Directory to save the image to.</summary>
+        /// <summary>Cut the subject out of the finished image with RMBG-1.4, saving a PNG with a real alpha channel.</summary>
+        [CommandOption("--remove-background")]
+        [Description("Cut the subject out with RMBG-1.4 after generation; the saved PNG carries a real alpha channel.")]
+        public bool RemoveBackground { get; init; }
+
         [CommandOption("-o|--output")]
         [Description("Directory to save the image (defaults to the output root).")]
         public string? Output { get; init; }
@@ -210,6 +215,10 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("redux-merge", settings.ReduxMerge);
         parameters.PutIfSet("redux-apply-start", settings.ReduxApplyStart);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
+        if (settings.RemoveBackground)
+        {
+            parameters.Put("remove-background", "true");
+        }
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Image);

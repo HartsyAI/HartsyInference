@@ -20,6 +20,54 @@ stable release will require. Dates are UTC.
 - CLI: `hartsy image --init-image-mode denoise|reference|auto` selects how an init image is consumed, and a
   repeatable `--reference-image` adds the extra edit references.
 
+## alpha.65
+
+- Engine: `ImageRequest.RemoveBackground` cuts the subject out of a finished generation. RMBG-1.4's matte lands
+  in the new `ImageResult.Alpha` plane and the generated RGB is left byte-for-byte untouched, so a consumer
+  composites the partial-coverage edge exactly once instead of receiving pixels already blended toward a
+  background. The stage runs last — after the refiner and segment-refinement passes, over the pixels the caller
+  actually receives — and is family-independent, so no recipe has to declare it. It shares `VisionService`'s
+  weight cache rather than loading a second copy of the net, and it is not gated on denoise strength: a
+  strength-0 img2img request still gets its cutout.
+- CLI/API: `hartsy image --remove-background`, and `removeBackground` on `/v1/native/images`. Both encode
+  color-type-6 (RGBA) PNGs when a matte is present and color-type-2 otherwise.
+
+## alpha.64
+
+- Audio: MiniMax Music 3's one-time GGUF quant caches (language model and depth decoder) are written beside the
+  weights they derive from, under `AudioModelCache.CacheRoot`, instead of a hardcoded `~/.cache/hartsyinference/`.
+  They are multi-gigabyte files and were landing on the boot drive regardless of how the cache was relocated;
+  they now follow the same root resolution the weights themselves use (`paths.modelCacheRoot`, else
+  `paths.modelsRoot/audio`, else the user cache directory). An existing cache re-quantizes once on the next
+  `:q8`/`:q4` run, after which the old directory can be deleted.
+
+## alpha.63
+
+- Krea 2: the recipe honors the `ImageRequest.Components` Qwen text-encoder and VAE picks instead of always
+  loading its own pinned side models, resolving them through `ModelFileLocator.Require` so an unresolvable pick
+  is refused by name. The pinned fallbacks auto-download when absent, the contract `LtxVideo2Recipe` already
+  uses and what SwarmUI's own `RequireClipModel`/`DoVaeLoader` do. First of the `TODO(E-IMG-4)` recipes closed.
+- Models: `SideModels.Qwen3VL_4B` moves to the flat `text_encoders/qwen3vl_4b.safetensors` that SwarmUI's Comfy
+  backend downloads under the identical SHA-256, so the two share one file instead of fetching 5 GB twice. The
+  `Krea2/` subdir it previously used matched nothing on either side.
+- Engine: `RecipeContext.Cancel` carries the originating request's cancellation token into recipe construction, and
+  Krea 2 honors it when acquiring a side model. The fallback download it newly enables can transfer several
+  gigabytes, so an HTTP client disconnect would otherwise have left it running with the request already gone.
+- Models: `ModelAsset.LegacyTargetNames` records the names an asset was saved under before its canonical name
+  changed, and `ModelDownloader.TargetPath` resolves to an existing legacy file when the canonical one is absent.
+  Without it, renaming a shared asset costs every upgrading install a multi-gigabyte re-download and makes the
+  recipes that resolve it through the strict non-downloading overload (Mage-Flow shares Krea 2's encoder) fail as
+  though the file were missing. A fresh install still downloads to the canonical name.
+
+## alpha.62
+
+- Diffusion: Z-Image generates again. Since alpha.42 every generation threw a `NullReferenceException` on its
+  first denoise step: the new per-step preview snapshotted the transformer's fixed CUDA-graph latent, which
+  only exists on the step-graph route, and that route is default-off for Z-Image. The preview now unpatchifies
+  the loop's own packed tokens through the backend op, so it works on both routes and keeps the tokens
+  device-resident instead of draining them to the host every step. `SnapshotGraphLatent` now names the unmet
+  precondition instead of dereferencing null.
+
 ## alpha.61
 
 - Prompting: SwarmUI's 2026-09-01 parser update hands every backend Swarm tags in place of Comfy-native prompt

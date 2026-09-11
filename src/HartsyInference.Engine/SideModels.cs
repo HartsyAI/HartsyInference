@@ -173,13 +173,14 @@ public static class SideModels
         Sha256 = "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd"
     };
 
-    /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's text encoder (taps 12 decoder layers, rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use, saved under Krea2/ to sit apart.</summary>
+    /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's and Mage-Flow's text encoder (taps 12 decoder layers, rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
     public static readonly ModelAsset Qwen3VL_4B = new ModelAsset
     {
         Repo = "Comfy-Org/Krea-2",
         RepoPath = "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
         TargetSubdir = "text_encoders",
-        TargetName = "Krea2/qwen3vl_4b_fp8_scaled.safetensors",
+        TargetName = "qwen3vl_4b.safetensors",
+        LegacyTargetNames = ["Krea2/qwen3vl_4b_fp8_scaled.safetensors"],
         Role = "text encoder",
         Sha256 = "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094"
     };
@@ -317,7 +318,7 @@ public static class SideModels
         Sha256 = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
     };
 
-    /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima and Qwen Image; hash matches SwarmUI's qwen-image-vae for file reuse.</summary>
+    /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
     public static readonly ModelAsset QwenImageVae = new ModelAsset
     {
         Repo = "Comfy-Org/Qwen-Image_ComfyUI",
