@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -40,6 +41,27 @@ public sealed class ImagesService : IImagesService
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
+
+                // SwarmUI's 2026-09-01 prompt-parser update now resolves <weight[N]:text>/<alternate:...>/
+                // <fromto[N]:...> as literal tags in the final prompt text handed to every backend, in place of
+                // the Comfy-native (word:1.5)/[a|b]/[a:b:N] syntax it used to emit for the same constructs. Flatten
+                // them here, upstream of every recipe pipeline and of segment/region tag parsing below, so no
+                // pipeline ever sees literal tag garbage. <weight[N]:...> converts back to the (text:N) parens
+                // grammar WeightedConditioning/PromptWeighting already implement (restoring SD1.5/SDXL weighting to
+                // parity with pre-update behavior) for the recipes that declare ImageFeatures.PromptWeighting; for
+                // everything else it collapses to its inner text, because an LLM-conditioned DiT has no token-weight
+                // machinery and would read the parens and digits as prose. <alternate:>/<fromto[N]:> flatten to
+                // their first ("step 0") value as a safety net for every architecture that doesn't declare
+                // ImageFeatures.PromptScheduling — those two recipes (SDXL/SD1.5 today) get the raw tags preserved
+                // instead, so PromptTagScheduling can build a real per-step ConditioningSchedule further down.
+                ImageFeatures promptFeatures = _engine.SupportedFeatures(spec);
+                bool schedulingSupported = (promptFeatures & ImageFeatures.PromptScheduling) != 0;
+                bool weightingSupported = (promptFeatures & ImageFeatures.PromptWeighting) != 0;
+                resolved = resolved with
+                {
+                    Prompt = PromptTagFlattening.Flatten(resolved.Prompt, !schedulingSupported, weightingSupported),
+                    NegativePrompt = PromptTagFlattening.Flatten(resolved.NegativePrompt, !schedulingSupported, weightingSupported),
+                };
 
                 // Base-prompt tag-leak fix: <segment:>/<clear:> text must not reach the BASE (full-canvas) pass's
                 // text encoder — a segment's own sub-prompt is meant for its own later masked denoise only. Gated

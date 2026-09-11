@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
@@ -55,6 +56,11 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
         string negative = request.NegativePrompt ?? "";
+        // Hoisted above UnetCompositionPlan.Build (was computed later, at the GenerateFromTokens call) so the
+        // lazy conditioningFactory below can pass it to WeightedConditioning.BuildDualClipScheduled — real
+        // <alternate:>/<fromto[N]:> scheduling needs the actual step count to resolve which variant is live
+        // at each step, not just "some default".
+        int totalSteps = request.Steps ?? SdxlRecipe.FamilyDefaults.Steps;
 
         // Textual-inversion embed markers (\0swarmembed:NAME\0end — SwarmUI core's own rewrite of <embed:name>,
         // arriving on request.Prompt/NegativePrompt before this recipe ever sees them) resolve to a token plan with
@@ -71,10 +77,20 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         using EmbeddingResolver.Plan? embedPlan = EmbeddingResolver.Resolve(request.Prompt, _tokenizer, [768, 1280]);
         using EmbeddingResolver.Plan? negEmbedPlan = EmbeddingResolver.Resolve(negative, _tokenizer, [768, 1280], startPlaceholderId: ClipTokenizer.VocabSize + 1_000_000);
 
-        int[] tokensL = _tokenizer.Encode(strippedPrompt);
-        int[] negL = _tokenizer.Encode(strippedNegative);
-        int[] tokensG = _tokenizer.Encode(strippedPrompt);
-        int[] negG = _tokenizer.Encode(strippedNegative);
+        // ImagesService leaves <alternate:>/<fromto[N]:> RAW for this recipe (it declares ImageFeatures.Prompt-
+        // Scheduling) so BuildDualClipScheduled below can turn them into a real per-step ConditioningSchedule.
+        // Everything outside that one factory needs them collapsed to their step-0 value instead, or the literal
+        // tag text is BPE-tokenized as prose: the tokensL/tokensG here feed SdxlPipeline's POOLED vector, which it
+        // computes internally whether or not a conditioningSchedule overrides the hidden states, and the refiner's
+        // own re-encode reads the same strings. Idempotent when no scheduling tag is present, and a no-op on the
+        // weight tags ImagesService already converted to parens.
+        string flatPrompt = PromptTagFlattening.Flatten(strippedPrompt);
+        string flatNegative = PromptTagFlattening.Flatten(strippedNegative);
+
+        int[] tokensL = _tokenizer.Encode(flatPrompt);
+        int[] negL = _tokenizer.Encode(flatNegative);
+        int[] tokensG = _tokenizer.Encode(flatPrompt);
+        int[] negG = _tokenizer.Encode(flatNegative);
         int eosG = ClipTokenizer.FindEosPosition(tokensG);
         int negEosG = ClipTokenizer.FindEosPosition(negG);
 
@@ -86,9 +102,11 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
             embedPlan is not null || negEmbedPlan is not null
                 // Embeds and weighted-prompt syntax ((word:1.2)) both build the same dual-CLIP conditioning
                 // schedule slot; combining them would need weight parsing to skip over embed placeholder runs,
-                // which WeightedConditioning doesn't do — an embed-bearing prompt wins outright for now.
-                ? () => EmbeddingResolver.BuildDualClipSchedule(_textBackend, _clipL, _clipG, _tokenizer, embedPlan, strippedPrompt, strippedNegative, SdxlLayersFromEnd, negEmbedPlan)
-                : () => WeightedConditioning.BuildDualClip(_textBackend, _clipL, _clipG, _tokenizer, strippedPrompt, negative, SdxlLayersFromEnd),
+                // which WeightedConditioning doesn't do — an embed-bearing prompt wins outright for now. It takes
+                // the FLATTENED strings for the same reason: this path has no per-step variant slot, so a preserved
+                // scheduling tag would otherwise reach the tokenizer verbatim.
+                ? () => EmbeddingResolver.BuildDualClipSchedule(_textBackend, _clipL, _clipG, _tokenizer, embedPlan, flatPrompt, flatNegative, SdxlLayersFromEnd, negEmbedPlan)
+                : () => WeightedConditioning.BuildDualClipScheduled(_textBackend, _clipL, _clipG, _tokenizer, strippedPrompt, negative, SdxlLayersFromEnd, totalSteps),
             _ipAdapterCache.Lookup,
             _ipAdapterCache.Cache,
             cancel);
@@ -109,7 +127,6 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         RefinerSwapConfig? stepSwapRefiner = postApply ? null : BuildStepSwapConfig(refinerSpec);
         TextToImageRequest inner = BuildInner(request, negative, plan);
 
-        int totalSteps = request.Steps ?? SdxlRecipe.FamilyDefaults.Steps;
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             tokensL, negL, tokensG, negG, eosG, negEosG, inner,
             RecipeProgressAdapter.Create(progress, cancel, totalSteps: totalSteps),
@@ -128,7 +145,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
 
         if (postApply && refinerSpec is not null)
         {
-            (rgb, width, height) = ApplyPostRefiner(refinerSpec, rgb, width, height, strippedPrompt, strippedNegative, tokensG, negG, eosG, negEosG, usedSeed, request.SeamlessTiling);
+            (rgb, width, height) = ApplyPostRefiner(refinerSpec, rgb, width, height, flatPrompt, flatNegative, tokensG, negG, eosG, negEosG, usedSeed, request.SeamlessTiling);
             meta["refiner_post_apply"] = refinerSpec.Model;
             meta["size"] = $"{width}x{height}";
         }
