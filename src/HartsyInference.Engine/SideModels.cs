@@ -180,6 +180,7 @@ public static class SideModels
         RepoPath = "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
         TargetSubdir = "text_encoders",
         TargetName = "qwen3vl_4b.safetensors",
+        LegacyTargetNames = ["Krea2/qwen3vl_4b_fp8_scaled.safetensors"],
         Role = "text encoder",
         Sha256 = "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094"
     };

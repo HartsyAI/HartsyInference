@@ -15,6 +15,11 @@ stable release will require. Dates are UTC.
 - Models: `SideModels.Qwen3VL_4B` moves to the flat `text_encoders/qwen3vl_4b.safetensors` that SwarmUI's Comfy
   backend downloads under the identical SHA-256, so the two share one file instead of fetching 5 GB twice. The
   `Krea2/` subdir it previously used matched nothing on either side.
+- Models: `ModelAsset.LegacyTargetNames` records the names an asset was saved under before its canonical name
+  changed, and `ModelDownloader.TargetPath` resolves to an existing legacy file when the canonical one is absent.
+  Without it, renaming a shared asset costs every upgrading install a multi-gigabyte re-download and makes the
+  recipes that resolve it through the strict non-downloading overload (Mage-Flow shares Krea 2's encoder) fail as
+  though the file were missing. A fresh install still downloads to the canonical name.
 
 ## alpha.59
 
