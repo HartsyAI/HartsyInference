@@ -164,6 +164,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IVisionService Vision => _vision.Value;
 
+    /// <summary>The same vision service as <see cref="Vision"/>, concretely typed: the image post steps call its
+    /// synchronous helpers directly, which keeps the annotator weight caches single-copy across modalities.</summary>
+    internal Services.VisionService VisionInternal => _vision.Value;
+
     /// <summary>Video/image restoration (SeedVR2).</summary>
     public IRestoreService Restore => _restore.Value;
 

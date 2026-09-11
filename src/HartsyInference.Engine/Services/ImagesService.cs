@@ -95,6 +95,8 @@ public sealed class ImagesService : IImagesService
                 {
                     result = SegmentRefinement.Apply(result, resolved, pipeline, _engine.Backend, _clipSeg, progress, cancel);
                 }
+                // Last, over the final pixels, so the matte matches what the caller actually receives.
+                result = BackgroundRemovalStage.Apply(_engine, resolved, result);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
                 return result;
             },

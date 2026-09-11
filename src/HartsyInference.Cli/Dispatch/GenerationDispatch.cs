@@ -67,6 +67,7 @@ public static class GenerationDispatch
             Vram = ParseVramOverrides(parameters),
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
+            RemoveBackground = parameters.GetBool("remove-background", false) ? true : null,
             Img2Img = BuildImg2Img(parameters),
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
@@ -89,7 +90,7 @@ public static class GenerationDispatch
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Image,
-            FileBytes = PngEncoder.Encode(result.Rgb, result.Width, result.Height),
+            FileBytes = PngEncoder.Encode(result.Rgb, result.HasAlpha ? result.Alpha : null, result.Width, result.Height),
             Extension = "png",
             Text = $"{result.Width}x{result.Height} image (seed {result.Seed})",
             PreviewRgb = result.Rgb,

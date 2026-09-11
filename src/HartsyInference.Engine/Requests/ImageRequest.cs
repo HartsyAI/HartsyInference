@@ -54,6 +54,9 @@ public sealed record ImageRequest
     /// <summary>InstructPix2Pix image-guidance CFG (second CFG term); null when not an ip2p model.</summary>
     public double? InstructPix2PixCfg { get; init; }
 
+    /// <summary>Cut the subject out of the finished image: RMBG-1.4's matte lands in <see cref="ImageResult.Alpha"/> and the RGB pixels are left untouched, so the caller composites it wherever it likes. Runs after every other stage (refiner, segment refinement) and is family-independent — no recipe has to declare it.</summary>
+    public bool? RemoveBackground { get; init; }
+
     /// <summary>Number of images to generate in one batch.</summary>
     public int Batch { get; init; } = 1;
 

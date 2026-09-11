@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.65
+
+- Engine: `ImageRequest.RemoveBackground` cuts the subject out of a finished generation. RMBG-1.4's matte lands
+  in the new `ImageResult.Alpha` plane and the generated RGB is left byte-for-byte untouched, so a consumer
+  composites the partial-coverage edge exactly once instead of receiving pixels already blended toward a
+  background. The stage runs last — after the refiner and segment-refinement passes, over the pixels the caller
+  actually receives — and is family-independent, so no recipe has to declare it. It shares `VisionService`'s
+  weight cache rather than loading a second copy of the net, and it is not gated on denoise strength: a
+  strength-0 img2img request still gets its cutout.
+- CLI/API: `hartsy image --remove-background`, and `removeBackground` on `/v1/native/images`. Both encode
+  color-type-6 (RGBA) PNGs when a matte is present and color-type-2 otherwise.
+
 ## alpha.64
 
 - Audio: MiniMax Music 3's one-time GGUF quant caches (language model and depth decoder) are written beside the
