@@ -536,9 +536,17 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             UNet activeUnet = inRefinerPhase ? refiner!.RefinerUnet : _unet;
             // Per-step conditioning selection (alternation/scheduling) applies only to the base
             // phase; the refiner phase uses its own CLIP-G-only conditioning.
-            Tensor baseTextEmb = conditioningSchedule is null ? textEmbeddings
-                : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
+            int scheduleIndex = conditioningSchedule is null ? -1 : conditioningSchedule.Resolve(i, totalSteps);
+            Tensor baseTextEmb = scheduleIndex < 0 ? textEmbeddings : conditioningSchedule!.Variants[scheduleIndex];
             Tensor activeTextEmb = inRefinerPhase ? clipGForRefiner! : baseTextEmb;
+            // The pooled/ADM vector follows the same schedule as the hidden states. Without this a scheduled
+            // prompt pairs (say) a later step's "dog" hidden states with variant 0's "cat" ADM conditioning.
+            // Null PooledVariants keeps the single pooled encode, which is the unscheduled path. The refiner
+            // phase is excluded for the same reason it gets its own conditioning: it carries its own ADM.
+            Tensor activePooled = !inRefinerPhase && scheduleIndex >= 0
+                && conditioningSchedule!.PooledVariants is { } scheduledPooled
+                    ? scheduledPooled[scheduleIndex]
+                    : pooledOutput;
             float[] activeSizeCond = inRefinerPhase ? refinerSizeConditionPos! : sizeCondition;
             float[]? activeSizeCondUncond = inRefinerPhase ? refinerSizeConditionNeg : null;
             bool activeUseF16 = inRefinerPhase ? refinerUseF16 : useF16;
@@ -572,9 +580,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             {
                 int seqLenCN = (int)textEmbeddings.Shape[1];
                 int hiddenSizeCN = (int)textEmbeddings.Shape[2];
-                int pooledDimCN = (int)pooledOutput.Shape[1];
+                int pooledDimCN = (int)activePooled.Shape[1];
                 Tensor condEmbForCN = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLenCN, hiddenSizeCN);
-                Tensor condPooledForCN = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDimCN);
+                Tensor condPooledForCN = CfgHelper.SliceBatchElement1D(activePooled, 1, pooledDimCN);
                 (cnDownRes, cnMidRes) = ControlNet.ForwardStacked(Backend, activeControlNets, unetInput, t, condEmbForCN, condPooledForCN, sizeCondition);
                 condEmbForCN.Dispose();
                 condPooledForCN.Dispose();
@@ -614,7 +622,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(unetInput, t, activeTextEmb, pooledOutput, activeSizeCond, cfgScale, cfgRescale, tcfg, cnDownRes, cnMidRes,
+                noisePred = ClassifierFreeGuidanceStep(unetInput, t, activeTextEmb, activePooled, activeSizeCond, cfgScale, cfgRescale, tcfg, cnDownRes, cnMidRes,
                     overrideUnet: inRefinerPhase ? activeUnet : null,
                     sizeConditionUncond: activeSizeCondUncond,
                     ipaImageTokens: activeIpaTokens, ipaToKIpAll: activeIpaK, ipaToVIpAll: activeIpaV, ipaScalePerLayer: activeIpaScales);
@@ -624,8 +632,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                 int seqLen = (int)activeTextEmb.Shape[1];
                 int hiddenSize = (int)activeTextEmb.Shape[2];
                 Tensor condEmb = CfgHelper.SliceBatchElement(activeTextEmb, 1, seqLen, hiddenSize);
-                int pooledDim = (int)pooledOutput.Shape[1];
-                Tensor condPooled = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDim);
+                int pooledDim = (int)activePooled.Shape[1];
+                Tensor condPooled = CfgHelper.SliceBatchElement1D(activePooled, 1, pooledDim);
                 noisePred = activeUnet.Forward(Backend, unetInput, t, condEmb, condPooled, activeSizeCond, cnDownRes, cnMidRes,
                     activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
                 condEmb.Dispose();

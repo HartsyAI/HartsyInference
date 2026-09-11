@@ -66,7 +66,8 @@ public static class SegmentRefinement
                 result.Append('<').Append(piece); // preserve verbatim, including any //cid= suffix
                 continue;
             }
-            // Unrecognized tag (weighting, <break>, <embed:...>): belongs to whichever section is active.
+            // Unrecognized tag (<break>, <embed:...>, and by this point weighting is already plain (text:N)
+            // parens — PromptTagFlattening runs upstream in ImagesService): belongs to whichever section is active.
             if (!skip)
             {
                 result.Append('<').Append(piece);
