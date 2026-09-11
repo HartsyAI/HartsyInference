@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.64
+
+- Images: Qwen-Image-Edit accepts more than one reference image. `ImageRequest.ReferenceImages` carries the extra
+  references, presented after `Img2Img.InitImage`, so a prompt that says "the first image" / "the second image" is
+  addressing that order; up to three are consumed, matching the slots the edit-plus template was trained with. The
+  Qwen-Image recipe now also builds the text encoder's Qwen2.5-VL vision tower and conditions on the full
+  `Picture N: <|vision_start|>…<|vision_end|>` edit template, and a 2511 checkpoint's `index_timestep_zero`
+  reference method is honoured instead of being left off. References keep their own aspect-preserving rescales
+  (~1 MP to the VAE, ~384² to the vision tower) rather than being squashed to the output size, which changes the
+  single-reference path too. Reference images with an explicit denoise mode are refused by name instead of being
+  silently dropped.
+- CLI: `hartsy image --init-image-mode denoise|reference|auto` selects how an init image is consumed, and a
+  repeatable `--reference-image` adds the extra edit references.
+
 ## alpha.59
 
 - Benchmarks: a standalone `hartsy-bench` runner produces reproducible community evidence from frozen,
