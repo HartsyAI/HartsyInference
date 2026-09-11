@@ -77,7 +77,7 @@ public static class ImageEndpoints
     /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no codec of its own), and reports where it was saved.</summary>
     internal static object ToResponse(ImageResult result, string? savedPath = null) => new
     {
-        png = Convert.ToBase64String(PngEncoder.Encode(result.Rgb, result.Width, result.Height)),
+        png = Convert.ToBase64String(EncodePng(result)),
         result.Width,
         result.Height,
         result.Seed,
@@ -87,5 +87,9 @@ public static class ImageEndpoints
 
     /// <summary>Persists the PNG unless the request opted out; null when nothing was written.</summary>
     internal static string? Persist(NativeArtifactRequest req, ImageResult result, string slugSource) =>
-        ArtifactPersistence.Save(req, PngEncoder.Encode(result.Rgb, result.Width, result.Height), slugSource, "png");
+        ArtifactPersistence.Save(req, EncodePng(result), slugSource, "png");
+
+    /// <summary>Color-type-6 PNG when a background-removal pass left a matte behind, color-type-2 otherwise.</summary>
+    private static byte[] EncodePng(ImageResult result) =>
+        PngEncoder.Encode(result.Rgb, result.HasAlpha ? result.Alpha : null, result.Width, result.Height);
 }

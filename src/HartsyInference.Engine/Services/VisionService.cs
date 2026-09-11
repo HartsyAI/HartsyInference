@@ -313,19 +313,8 @@ public sealed class VisionService : IVisionService, IDisposable
     /// it likes. One forward pass feeds both.</summary>
     private VisionResult BackgroundRemoval(ModelSpec spec, VisionRequest request)
     {
-        string path = RequirePath(spec, "rmbg");
-        BriaRmbg model = GetOrLoad(_rmbgCache, path, () =>
-        {
-            SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            _embedLoaders.Add(loader);
-            BriaRmbg m = new BriaRmbg();
-            m.LoadWeights(loader.GetAllTensors());
-            return m;
-        });
-        RmbgBackgroundRemover remover = new RmbgBackgroundRemover(model);
         ImageData image = request.Image;
-        float[] alpha = remover.Alpha(Backend, image.Rgb, image.Width, image.Height);
+        float[] alpha = RmbgAlpha(spec, image);
         byte[] cutout = RmbgBackgroundRemover.CompositeOnGray(alpha, image.Rgb, image.Width, image.Height);
         return new VisionResult
         {
@@ -337,6 +326,32 @@ public sealed class VisionService : IVisionService, IDisposable
                 Alpha = RmbgBackgroundRemover.AlphaToBytes(alpha),
             },
         };
+    }
+
+    /// <summary>The RMBG-1.4 matte alone, quantized to 8-bit straight coverage — what an image post step needs when it
+    /// keeps the generated RGB and only wants an alpha channel, rather than the gray composite
+    /// <see cref="VisionMode.BackgroundRemoval"/> returns. Shares this service's weight cache, so a generation that
+    /// cuts out its result does not load a second copy of the net.</summary>
+    internal byte[] Matte(ModelSpec spec, ImageData image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        return RmbgBackgroundRemover.AlphaToBytes(RmbgAlpha(spec, image));
+    }
+
+    /// <summary>Loads (or reuses) the RMBG net for <paramref name="spec"/> and runs it, yielding the [0,1] foreground matte at the image's own resolution.</summary>
+    private float[] RmbgAlpha(ModelSpec spec, ImageData image)
+    {
+        string path = RequirePath(spec, "rmbg");
+        BriaRmbg model = GetOrLoad(_rmbgCache, path, () =>
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            BriaRmbg m = new BriaRmbg();
+            m.LoadWeights(loader.GetAllTensors());
+            return m;
+        });
+        return new RmbgBackgroundRemover(model).Alpha(Backend, image.Rgb, image.Width, image.Height);
     }
 
     /// <summary>Real-ESRGAN: pixel-space super-resolution by the checkpoint's own factor (4 for x4plus / anime6b,
