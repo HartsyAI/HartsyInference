@@ -24,6 +24,15 @@ stable release will require. Dates are UTC.
   recipes that resolve it through the strict non-downloading overload (Mage-Flow shares Krea 2's encoder) fail as
   though the file were missing. A fresh install still downloads to the canonical name.
 
+## alpha.62
+
+- Diffusion: Z-Image generates again. Since alpha.42 every generation threw a `NullReferenceException` on its
+  first denoise step: the new per-step preview snapshotted the transformer's fixed CUDA-graph latent, which
+  only exists on the step-graph route, and that route is default-off for Z-Image. The preview now unpatchifies
+  the loop's own packed tokens through the backend op, so it works on both routes and keeps the tokens
+  device-resident instead of draining them to the host every step. `SnapshotGraphLatent` now names the unmet
+  precondition instead of dereferencing null.
+
 ## alpha.61
 
 - Prompting: SwarmUI's 2026-09-01 parser update hands every backend Swarm tags in place of Comfy-native prompt
