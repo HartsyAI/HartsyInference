@@ -14,8 +14,26 @@ public static class ModelDownloader
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The on-disk path an asset resolves to under the models root.</summary>
-    public static string TargetPath(ModelAsset asset) =>
-        Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, asset.FileName);
+    public static string TargetPath(ModelAsset asset)
+    {
+        string canonical = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, asset.FileName);
+        if (File.Exists(canonical) || asset.LegacyTargetNames.Count == 0)
+        {
+            return canonical;
+        }
+        // The canonical name moved (usually to match what SwarmUI downloads) and this install still holds the
+        // file under the old one. Resolving to it beats re-fetching multi-gigabyte bytes we already have, and
+        // keeps the strict no-download callers (MageFlowRecipe and friends) from reporting it missing.
+        foreach (string legacy in asset.LegacyTargetNames)
+        {
+            string candidate = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, legacy);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return canonical;
+    }
 
     /// <summary>The subset of <paramref name="entry"/>'s assets not already present on disk.</summary>
     public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry) =>
