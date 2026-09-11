@@ -8,10 +8,12 @@ stable release will require. Dates are UTC.
 
 ## alpha.63
 
-- Audio: MiniMax Music 3's one-time GGUF quant caches (language model and depth decoder) are written under
-  `ModelsRoot()/audio/music/_gguf-cache/` instead of `~/.cache/hartsyinference/`. They are multi-gigabyte files
-  and were landing on the boot drive regardless of where `paths.modelsRoot` pointed. An existing cache
-  re-quantizes once on the next `:q8`/`:q4` run, after which the old directory can be deleted.
+- Audio: MiniMax Music 3's one-time GGUF quant caches (language model and depth decoder) are written beside the
+  weights they derive from, under `AudioModelCache.CacheRoot`, instead of a hardcoded `~/.cache/hartsyinference/`.
+  They are multi-gigabyte files and were landing on the boot drive regardless of how the cache was relocated;
+  they now follow the same root resolution the weights themselves use (`paths.modelCacheRoot`, else
+  `paths.modelsRoot/audio`, else the user cache directory). An existing cache re-quantizes once on the next
+  `:q8`/`:q4` run, after which the old directory can be deleted.
 
 ## alpha.59
 
