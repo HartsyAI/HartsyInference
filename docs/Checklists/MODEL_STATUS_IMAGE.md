@@ -174,6 +174,36 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   recipe/pipeline API shares a base-prompt embedding tensor or an arbitrary-text-encode delegate across that
   boundary. Needs a design decision on the restructure before this is wiring work rather than architecture work.
 
+- [x] **SwarmUI prompt-tag parity + real per-step prompt scheduling — DONE 2026-09-10.** SwarmUI's 2026-09-01
+  parser change (`LegacyPromptParser.Convert`, run from `T2IParamInput.PreparsePromptLikes`) stopped handing
+  backends Comfy-native prompt syntax and started handing them Swarm tags instead: `(word:1.5)` arrives as
+  `<weight[1.5]:word>`, `[a|b]` as `<alternate:a,b>`, `[a:b:N]` as `<fromto[N]:a,b>`. Every engine prompt
+  consumer was parsing those as prose, so **SD1.5/SDXL prompt weighting was silently inert** and the tag text
+  was BPE-tokenized into the conditioning. `PromptTagFlattening` now converts `<weight[N]:>` back to the
+  `(text:N)` grammar `PromptWeighting` already implements and collapses `alt`/`fromto` to their step-0 value,
+  running in `ImagesService`/`VideoService`/`MusicService` upstream of every pipeline and of region/segment tag
+  parsing. `PromptTagScheduling` + `WeightedConditioning.Build{Single,Dual}ClipScheduled` additionally give
+  SD1.5/SDXL (the two recipes that declare `ImageFeatures.PromptScheduling`) a real multi-variant
+  `ConditioningSchedule`, one encode per distinct (positive, negative) variant pair rather than the full cross
+  product. `fromto` thresholds are a 1:1 port of `SwarmText.py`'s `when < 1 ? when * steps : when` float
+  comparison — rounding to an int first moves the boundary a step on odd step counts, and a `when` above 1 is an
+  absolute step index even when it has a decimal point. The old `PromptScheduling` (Comfy `[a|b]` bracket
+  grammar, never wired into a live pipeline) is deleted, and `WeightedConditioning.HasWeightingSyntax` no longer
+  counts a bare `[`: brackets carry no grammar now, and counting them dragged bracket-bearing prose onto the
+  schedule path, which on SD1.5 forfeits the fused Euler loop and makes a non-default sampler selection throw.
+  Real-weight verified on SD1.5 (512², 8 steps, seed 1234): `<weight[1.5]:orange>` is byte-identical to
+  `(orange:1.5)`, and `<weight[0.5]:orange>` differs, so the weight is applied rather than ignored;
+  `<fromto[99]:cat,dog>` lands 0.15 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` 0.07
+  from the plain `dog` baseline, against a 22.51 baseline-to-baseline separation, while `<fromto[0.5]:>` and
+  `<alternate:>` are distinct from both and from each other. The flatten-only path was verified on Anima, which
+  declares no `PromptScheduling`: `<alternate:a photo of a cat, a photo of a dog>` is byte-identical to the
+  plain `a photo of a cat`. SDXL's dual-CLIP scheduled path is unit-tested but **not** real-weight verified — no
+  SDXL checkpoint on the dev box.
+- [ ] **Embeds still beat prompt scheduling on SDXL.** A prompt carrying both a textual-inversion embed and an
+  `<alternate:>`/`<fromto[N]:>` tag takes `EmbeddingResolver.BuildDualClipSchedule`, which has no per-step
+  variant slot, so the tag collapses to its step-0 value. Same precedent as weighted-prompt syntax, which an
+  embed-bearing prompt has always won outright; giving `EmbeddingResolver` real per-step resolution is the fix.
+
 ### SDXL — open items found during the tiled-VAE-encoder / textual-inversion work (2026-08-09)
 - [ ] **F16 VAE "black output" bug also affects SDXL**, not just Flux Schnell as previously documented —
   confirmed via A/B (identical failure with and without an unrelated in-flight code change) at 1536x1536

@@ -4,6 +4,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Cuda;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
@@ -19,6 +20,19 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal VideoService(InferenceEngine engine) => _engine = engine;
+
+    /// <summary>SwarmUI's 2026-09-01 prompt-parser update now resolves <c>&lt;weight[N]:text&gt;</c>/
+    /// <c>&lt;alternate:...&gt;</c>/<c>&lt;fromto[N]:...&gt;</c> as literal tags in the final prompt text handed to
+    /// every backend, in place of the Comfy-native <c>(word:1.5)</c>/<c>[a|b]</c>/<c>[a:b:N]</c> syntax it used to
+    /// emit. Flatten them here, upstream of every video recipe pipeline, so no pipeline ever sees literal tag
+    /// garbage — same treatment as <c>ImagesService</c>. No video model reaches a per-token CLIP conditioning
+    /// sequence (confirmed: <c>WeightedConditioning</c> has no video callers, and HunyuanVideo/Kandinsky5's CLIP
+    /// usage is pooled-only), so this is purely a tag-leak cleanup, not real weighting.</summary>
+    private static VideoRequest NormalizePromptTags(VideoRequest request) => request with
+    {
+        Prompt = PromptTagFlattening.Flatten(request.Prompt),
+        NegativePrompt = PromptTagFlattening.Flatten(request.NegativePrompt),
+    };
 
     /// <inheritdoc/>
     public async Task<VideoPlan> PlanAsync(ModelSpec spec, VideoRequest request, CancellationToken cancel = default)
@@ -281,7 +295,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequest executionRequest = VideoRequestExecutionBinding.RequireUnchanged(executionPlan, request);
         LogPlanWarnings(executionPlan);
         executionPlan.ThrowIfInvalid();
-        VideoRequest effectiveRequest = executionPlan.EffectiveSettings.Apply(executionRequest);
+        VideoRequest effectiveRequest = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest));
 
         return await Task.Run(
             () =>
@@ -318,7 +332,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequest executionRequest = VideoRequestExecutionBinding.RequireUnchanged(executionPlan, request);
         LogPlanWarnings(executionPlan);
         executionPlan.ThrowIfInvalid();
-        VideoRequest resolved = executionPlan.EffectiveSettings.Apply(executionRequest);
+        VideoRequest resolved = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest));
         VideoArtifactFileBinding.RequireUnchanged(executionPlan);
         IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
             executionPlan.Model, resolved, executionPlan);

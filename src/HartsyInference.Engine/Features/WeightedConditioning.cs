@@ -10,7 +10,13 @@ namespace HartsyInference.Engine.Features;
 /// <summary>Builds a <see cref="ConditioningSchedule"/> for ComfyUI-style prompt weighting and <c>&lt;break&gt;</c> chunking on CLIP pipelines whose denoise loop consumes a batched <c>[2, seqLen, hidden]</c> (negative, positive) tensor. Returns null when neither prompt uses weighting syntax, so ordinary prompts keep the byte-identical plain-encode path at zero cost.</summary>
 public static class WeightedConditioning
 {
-    /// <summary>Cheap pre-check for weighting <c>( )</c>, alternation/scheduling <c>[ ]</c>, or <c>&lt;break&gt;</c>.</summary>
+    /// <summary>Cheap pre-check for weighting <c>( )</c> or <c>&lt;break&gt;</c> — the only two things the weighted
+    /// path handles differently from a plain encode. A bare <c>[</c> is deliberately NOT a trigger: brackets no
+    /// longer carry alternation/scheduling (SwarmUI's 2026-09-01 parser emits <c>&lt;alternate:&gt;</c>/
+    /// <c>&lt;fromto[N]:&gt;</c> tags instead, which <c>BuildSingleClipScheduled</c>/<c>BuildDualClipScheduled</c> test
+    /// for separately) and <see cref="Diffusion.Prompting.PromptWeighting"/> leaves them untouched, so counting
+    /// them here only dragged bracket-bearing prose onto the schedule path — which on SD1.5 forfeits the fused
+    /// Euler loop and makes a non-default sampler selection throw.</summary>
     public static bool HasWeightingSyntax(params string?[] prompts)
     {
         ArgumentNullException.ThrowIfNull(prompts);
@@ -20,8 +26,7 @@ public static class WeightedConditioning
             {
                 continue;
             }
-            if (p.Contains('(', StringComparison.Ordinal) || p.Contains('[', StringComparison.Ordinal)
-                || p.Contains("<break>", StringComparison.OrdinalIgnoreCase))
+            if (p.Contains('(', StringComparison.Ordinal) || p.Contains("<break>", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -40,26 +45,47 @@ public static class WeightedConditioning
         {
             return null;
         }
-        (IReadOnlyList<int[]> posIds, IReadOnlyList<float[]> posW) = WeightedPromptTokenizer.Tokenize(tokenizer, positive ?? "");
-        (IReadOnlyList<int[]> negIds, IReadOnlyList<float[]> negW) = WeightedPromptTokenizer.Tokenize(tokenizer, negative ?? "");
-        EqualizeChunkCount(tokenizer, ref posIds, ref posW, ref negIds, ref negW);
-
-        Tensor posCond = encoder.EncodeWeighted(backend, posIds, posW, layersFromEnd);
-        Tensor negCond = encoder.EncodeWeighted(backend, negIds, negW, layersFromEnd);
-        Tensor batched;
-        try
-        {
-            batched = StackBatch2(negCond, posCond);
-        }
-        finally
-        {
-            posCond.Dispose();
-            negCond.Dispose();
-        }
+        Tensor batched = EncodeSingleClipPair(backend, encoder, tokenizer, positive ?? "", negative ?? "", layersFromEnd);
         return new ConditioningSchedule
         {
             Variants = [batched],
             IndexForStep = static (_, _) => 0,
+        };
+    }
+
+    /// <summary>Single-CLIP (SD 1.5) weighted + scheduled conditioning: like <see cref="BuildSingleClip"/>, but
+    /// when <paramref name="positive"/> or <paramref name="negative"/> carries an <c>&lt;alternate:&gt;</c>/
+    /// <c>&lt;fromto[N]:&gt;</c> tag (see <see cref="PromptTagScheduling"/>), the returned schedule has one
+    /// encoded variant per distinct (positive-variant, negative-variant) pair that actually occurs across
+    /// <paramref name="totalSteps"/> — the common case (no scheduling tags) is byte-identical to
+    /// <see cref="BuildSingleClip"/>, since it just delegates there.</summary>
+    public static ConditioningSchedule? BuildSingleClipScheduled(
+        IBackend backend, ClipTextEncoder encoder, ClipTokenizer tokenizer,
+        string? positive, string? negative, int layersFromEnd, int totalSteps)
+    {
+        ArgumentNullException.ThrowIfNull(encoder);
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        string pos = positive ?? "";
+        string neg = negative ?? "";
+        bool posScheduled = PromptTagScheduling.HasScheduling(pos);
+        bool negScheduled = PromptTagScheduling.HasScheduling(neg);
+        if (!posScheduled && !negScheduled)
+        {
+            return BuildSingleClip(backend, encoder, tokenizer, positive, negative, layersFromEnd);
+        }
+        PromptSchedule posSchedule = posScheduled ? PromptTagScheduling.Resolve(pos, totalSteps) : SingleVariantSchedule(pos, totalSteps);
+        PromptSchedule negSchedule = negScheduled ? PromptTagScheduling.Resolve(neg, totalSteps) : SingleVariantSchedule(neg, totalSteps);
+        (IReadOnlyList<(int PosIdx, int NegIdx)> pairs, int[] stepToVariant) = PairSchedules(posSchedule, negSchedule, totalSteps);
+        Tensor[] variants = new Tensor[pairs.Count];
+        for (int k = 0; k < pairs.Count; k++)
+        {
+            variants[k] = EncodeSingleClipPair(
+                backend, encoder, tokenizer, posSchedule.Variants[pairs[k].PosIdx], negSchedule.Variants[pairs[k].NegIdx], layersFromEnd);
+        }
+        return new ConditioningSchedule
+        {
+            Variants = variants,
+            IndexForStep = (step, total) => stepToVariant[Math.Clamp(step, 0, stepToVariant.Length - 1)],
         };
     }
 
@@ -75,8 +101,60 @@ public static class WeightedConditioning
         {
             return null;
         }
-        (IReadOnlyList<int[]> posIds, IReadOnlyList<float[]> posW) = WeightedPromptTokenizer.Tokenize(tokenizer, positive ?? "");
-        (IReadOnlyList<int[]> negIds, IReadOnlyList<float[]> negW) = WeightedPromptTokenizer.Tokenize(tokenizer, negative ?? "");
+        Tensor batched = EncodeDualClipPair(backend, clipL, clipG, tokenizer, positive ?? "", negative ?? "", layersFromEnd);
+        return new ConditioningSchedule
+        {
+            Variants = [batched],
+            IndexForStep = static (_, _) => 0,
+        };
+    }
+
+    /// <summary>Dual-CLIP (SDXL) weighted + scheduled conditioning: like <see cref="BuildDualClip"/>, but when
+    /// <paramref name="positive"/> or <paramref name="negative"/> carries an <c>&lt;alternate:&gt;</c>/
+    /// <c>&lt;fromto[N]:&gt;</c> tag (see <see cref="PromptTagScheduling"/>), the returned schedule has one
+    /// encoded variant per distinct (positive-variant, negative-variant) pair that actually occurs across
+    /// <paramref name="totalSteps"/> — the common case (no scheduling tags) is byte-identical to
+    /// <see cref="BuildDualClip"/>, since it just delegates there.</summary>
+    public static ConditioningSchedule? BuildDualClipScheduled(
+        IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
+        string? positive, string? negative, int layersFromEnd, int totalSteps)
+    {
+        ArgumentNullException.ThrowIfNull(clipL);
+        ArgumentNullException.ThrowIfNull(clipG);
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        string pos = positive ?? "";
+        string neg = negative ?? "";
+        bool posScheduled = PromptTagScheduling.HasScheduling(pos);
+        bool negScheduled = PromptTagScheduling.HasScheduling(neg);
+        if (!posScheduled && !negScheduled)
+        {
+            return BuildDualClip(backend, clipL, clipG, tokenizer, positive, negative, layersFromEnd);
+        }
+        PromptSchedule posSchedule = posScheduled ? PromptTagScheduling.Resolve(pos, totalSteps) : SingleVariantSchedule(pos, totalSteps);
+        PromptSchedule negSchedule = negScheduled ? PromptTagScheduling.Resolve(neg, totalSteps) : SingleVariantSchedule(neg, totalSteps);
+        (IReadOnlyList<(int PosIdx, int NegIdx)> pairs, int[] stepToVariant) = PairSchedules(posSchedule, negSchedule, totalSteps);
+        Tensor[] variants = new Tensor[pairs.Count];
+        for (int k = 0; k < pairs.Count; k++)
+        {
+            variants[k] = EncodeDualClipPair(
+                backend, clipL, clipG, tokenizer, posSchedule.Variants[pairs[k].PosIdx], negSchedule.Variants[pairs[k].NegIdx], layersFromEnd);
+        }
+        return new ConditioningSchedule
+        {
+            Variants = variants,
+            IndexForStep = (step, total) => stepToVariant[Math.Clamp(step, 0, stepToVariant.Length - 1)],
+        };
+    }
+
+    /// <summary>Encodes one (positive, negative) pair into a single <c>[2, S, 2048]</c> dual-CLIP batched
+    /// tensor — the shared per-variant body both <see cref="BuildDualClip"/> and
+    /// <see cref="BuildDualClipScheduled"/> run, once per schedule variant.</summary>
+    private static Tensor EncodeDualClipPair(
+        IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, ClipTokenizer tokenizer,
+        string positive, string negative, int layersFromEnd)
+    {
+        (IReadOnlyList<int[]> posIds, IReadOnlyList<float[]> posW) = WeightedPromptTokenizer.Tokenize(tokenizer, positive);
+        (IReadOnlyList<int[]> negIds, IReadOnlyList<float[]> negW) = WeightedPromptTokenizer.Tokenize(tokenizer, negative);
         EqualizeChunkCount(tokenizer, ref posIds, ref posW, ref negIds, ref negW);
 
         Tensor posL = EncodePenultimateHidden(backend, clipL, posIds, posW, layersFromEnd);
@@ -91,21 +169,67 @@ public static class WeightedConditioning
         posG.Dispose();
         negG.Dispose();
 
-        Tensor batched;
         try
         {
-            batched = StackBatch2(negConcat, posConcat);
+            return StackBatch2(negConcat, posConcat);
         }
         finally
         {
             posConcat.Dispose();
             negConcat.Dispose();
         }
-        return new ConditioningSchedule
+    }
+
+    /// <summary>Encodes one (positive, negative) pair into a single <c>[2, S, hidden]</c> single-CLIP batched
+    /// tensor — the shared per-variant body both <see cref="BuildSingleClip"/> and
+    /// <see cref="BuildSingleClipScheduled"/> run, once per schedule variant.</summary>
+    private static Tensor EncodeSingleClipPair(
+        IBackend backend, ClipTextEncoder encoder, ClipTokenizer tokenizer,
+        string positive, string negative, int layersFromEnd)
+    {
+        (IReadOnlyList<int[]> posIds, IReadOnlyList<float[]> posW) = WeightedPromptTokenizer.Tokenize(tokenizer, positive);
+        (IReadOnlyList<int[]> negIds, IReadOnlyList<float[]> negW) = WeightedPromptTokenizer.Tokenize(tokenizer, negative);
+        EqualizeChunkCount(tokenizer, ref posIds, ref posW, ref negIds, ref negW);
+
+        Tensor posCond = encoder.EncodeWeighted(backend, posIds, posW, layersFromEnd);
+        Tensor negCond = encoder.EncodeWeighted(backend, negIds, negW, layersFromEnd);
+        try
         {
-            Variants = [batched],
-            IndexForStep = static (_, _) => 0,
-        };
+            return StackBatch2(negCond, posCond);
+        }
+        finally
+        {
+            posCond.Dispose();
+            negCond.Dispose();
+        }
+    }
+
+    /// <summary>A degenerate <see cref="PromptSchedule"/> for the side of a pair (positive or negative) that
+    /// carries no scheduling tag of its own: one variant, used at every step.</summary>
+    private static PromptSchedule SingleVariantSchedule(string prompt, int totalSteps) => new PromptSchedule([prompt], new int[totalSteps]);
+
+    /// <summary>Pairs a positive and negative <see cref="PromptSchedule"/> step-for-step into the distinct
+    /// (positive-variant, negative-variant) combinations that actually occur across <paramref name="totalSteps"/>
+    /// — so, for the overwhelmingly common case of only one side varying, the encoded-variant count matches
+    /// that side's variant count exactly rather than the full cross product.</summary>
+    private static (IReadOnlyList<(int PosIdx, int NegIdx)> Pairs, int[] StepToVariant) PairSchedules(
+        PromptSchedule positive, PromptSchedule negative, int totalSteps)
+    {
+        List<(int PosIdx, int NegIdx)> pairs = new List<(int PosIdx, int NegIdx)>();
+        Dictionary<(int, int), int> seen = new Dictionary<(int, int), int>();
+        int[] stepToVariant = new int[totalSteps];
+        for (int s = 0; s < totalSteps; s++)
+        {
+            (int, int) key = (positive.StepToVariant[s], negative.StepToVariant[s]);
+            if (!seen.TryGetValue(key, out int idx))
+            {
+                idx = pairs.Count;
+                pairs.Add(key);
+                seen[key] = idx;
+            }
+            stepToVariant[s] = idx;
+        }
+        return (pairs, stepToVariant);
     }
 
     /// <summary>Weighted penultimate hidden states for one prompt; the pooled output is discarded because the SDXL pipeline sources pooled from its own plain encode.</summary>
