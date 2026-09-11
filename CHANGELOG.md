@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.61
+
+- Prompting: SwarmUI's 2026-09-01 parser update hands every backend Swarm tags in place of Comfy-native prompt
+  syntax — `(word:1.5)` arrives as `<weight[1.5]:word>`, `[a|b]` as `<alternate:a,b>`, `[a:b:N]` as
+  `<fromto[N]:a,b>`. The engine read those as prose, so SD1.5/SDXL prompt weighting was silently inert and the
+  tag text was tokenized into the conditioning. `PromptTagFlattening` converts the weight tag back to the
+  `(text:N)` grammar `PromptWeighting` implements and collapses `alternate`/`fromto` to their step-0 value,
+  running in `ImagesService`/`VideoService`/`MusicService` ahead of every pipeline and of region/segment
+  parsing; every other tag passes through byte-for-byte.
+- Diffusion: real per-step prompt scheduling. SD1.5 and SDXL declare `ImageFeatures.PromptScheduling` and keep
+  the scheduling tags raw, so `PromptTagScheduling` and `WeightedConditioning.Build{Single,Dual}ClipScheduled`
+  build a multi-variant `ConditioningSchedule` — one encode per distinct (positive, negative) variant pair that
+  occurs, not the full cross product. `fromto` thresholds are a 1:1 port of the reference `SwarmText.py` float
+  comparison, so a fraction lands on the same step and a `when` above 1 stays an absolute step index. The old
+  `PromptScheduling` (Comfy bracket grammar, never wired into a pipeline) is removed.
+- Diffusion: `WeightedConditioning.HasWeightingSyntax` no longer treats a bare `[` as weighting syntax.
+  Brackets carry no grammar now, and counting them put bracket-bearing prose on the schedule path — which
+  forfeits SD1.5's fused Euler loop and made any non-default sampler selection fail outright.
+
 ## alpha.59
 
 - Benchmarks: a standalone `hartsy-bench` runner produces reproducible community evidence from frozen,
