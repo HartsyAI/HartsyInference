@@ -115,6 +115,10 @@ public sealed class UnetCompositionPlan : IDisposable
             {
                 variant.Dispose();
             }
+            foreach (Tensor pooled in conditioning.PooledVariants ?? [])
+            {
+                pooled.Dispose();
+            }
         }
     }
 }
