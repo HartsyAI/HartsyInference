@@ -363,16 +363,16 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                     Logs.Verbose($"[zimage-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
                     if (onProgress is not null)
                     {
-                        Tensor previewTokens = _transformer.SnapshotGraphLatent(Backend);
-                        Tensor previewLatent = _transformer.UnpatchifyPacked(
-                            previewTokens, _config.InChannels, fpH, fpW);
-                        previewTokens.Dispose();
+                        // Device unpack: a host read of the loop's tokens would D2H-and-free their device copy.
+                        Tensor previewLatent = tensors.Own(new Tensor(latentShape, DType.F32), "preview latent");
+                        Backend.UnpatchifyTokens(previewLatent, packed!, _config.InChannels, fpH, fpW,
+                            _config.PatchSize, innerChannelFastest: true);
                         onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                         {
                             Latent = previewLatent,
                             LatentArch = LatentArchitecture.ZImage,
                         });
-                        previewLatent.Dispose();
+                        tensors.DisposeOwned(previewLatent);
                     }
                     continue;
                 }
