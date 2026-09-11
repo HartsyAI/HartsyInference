@@ -4,11 +4,21 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Prompting;
 
-/// <summary>Maps a denoise step to one of several pre-encoded conditioning tensors, the runtime form of prompt alternation <c>[a|b]</c> and scheduling <c>[a:b:when]</c>. Pipelines encode each distinct variant once before the loop, then call <see cref="Resolve"/> per step.</summary>
+/// <summary>Maps a denoise step to one of several pre-encoded conditioning tensors, the runtime form of the
+/// <c>&lt;alternate:&gt;</c>/<c>&lt;fromto[N]:&gt;</c> prompt tags. Pipelines encode each distinct variant once before the
+/// loop, then call <see cref="Resolve"/> per step.</summary>
 public sealed record ConditioningSchedule
 {
     /// <summary>The distinct conditioning tensors, one per scheduled variant.</summary>
     public required IReadOnlyList<Tensor> Variants { get; init; }
+
+    /// <summary>Pooled/ADM conditioning for each variant, indexed identically to <see cref="Variants"/>, for the
+    /// architectures that carry one (SDXL's CLIP-G pooled vector). Null means the pipeline keeps using its own
+    /// single pooled encode — correct whenever the schedule has one variant, and the only option for an
+    /// architecture with no pooled conditioning at all (SD 1.5). When a multi-variant schedule leaves this null,
+    /// the hidden states switch per step while the pooled vector stays frozen at variant 0, which pairs (say)
+    /// "dog" hidden states with "cat" ADM conditioning.</summary>
+    public IReadOnlyList<Tensor>? PooledVariants { get; init; }
 
     /// <summary>Selector mapping <c>(step, totalSteps)</c> to an index into <see cref="Variants"/>.</summary>
     public required Func<int, int, int> IndexForStep { get; init; }

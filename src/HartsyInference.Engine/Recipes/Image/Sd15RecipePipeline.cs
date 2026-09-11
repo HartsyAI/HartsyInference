@@ -51,16 +51,22 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
         cancel.ThrowIfCancellationRequested();
         string negative = request.NegativePrompt ?? "";
         int layersFromEnd = RecipeRequestMapper.MapClipSkip(request.ClipSkip) ?? 1;
+        // Real <alternate:>/<fromto[N]:> scheduling needs the actual step count to resolve which variant is
+        // live at each step — see WeightedConditioning.BuildSingleClipScheduled.
+        int totalSteps = request.Steps ?? Sd15Recipe.FamilyDefaults.Steps;
 
-        int[] promptTokens = _tokenizer.Encode(request.Prompt);
-        int[] negativeTokens = _tokenizer.Encode(negative);
+        // ImagesService leaves <alternate:>/<fromto[N]:> raw for this recipe so BuildSingleClipScheduled can build
+        // a real per-step schedule; this plain encode has no per-step slot, so it takes the step-0 value instead of
+        // BPE-tokenizing the tag text as prose.
+        int[] promptTokens = _tokenizer.Encode(PromptTagFlattening.Flatten(request.Prompt));
+        int[] negativeTokens = _tokenizer.Encode(PromptTagFlattening.Flatten(negative));
 
         using UnetCompositionPlan plan = UnetCompositionPlan.Build(
             request,
             _backend,
             UNetConfig.Sd15,
             IpAdapterBaseModel.Sd15,
-            () => WeightedConditioning.BuildSingleClip(_backend, _textEncoder, _tokenizer, request.Prompt, negative, layersFromEnd),
+            () => WeightedConditioning.BuildSingleClipScheduled(_backend, _textEncoder, _tokenizer, request.Prompt, negative, layersFromEnd, totalSteps),
             _ipAdapterCache.Lookup,
             _ipAdapterCache.Cache,
             cancel);
