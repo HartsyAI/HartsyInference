@@ -62,9 +62,10 @@ internal static class MiniMaxMusic3WeightPolicy
             || key.StartsWith("audio_heads.", StringComparison.Ordinal)
             || key.Equals("projection.weight", StringComparison.Ordinal);
 
+    // Under ModelsRoot, not a UserProfile cache dir: these are multi-gigabyte quant caches, and the model root
+    // is where the operator already pointed bulk storage.
     private static string CachePath(string repo, string quant, string component) => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".cache", "hartsyinference", "minimax-music3",
+        RepoPaths.ModelsRoot(), "audio", "music", "_gguf-cache",
         component == "lm" ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
             : $"{repo.Replace('/', '_')}-{component}-{quant.ToLowerInvariant()}.gguf");
 
