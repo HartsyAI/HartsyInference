@@ -21,18 +21,23 @@ public static class PromptTagFlattening
 {
     /// <summary>Flattens the three tag kinds above. <paramref name="flattenScheduling"/> controls only
     /// <c>alt</c>/<c>alternate</c>/<c>fromto</c>: pass <c>false</c> for a caller that wants those tags preserved
-    /// to build a real per-step schedule instead (see <see cref="PromptTagScheduling"/>). Weight-tag conversion
-    /// always happens regardless of this flag — it is universally safe for every recipe.</summary>
-    public static string Flatten(string? prompt, bool flattenScheduling = true)
+    /// to build a real per-step schedule instead (see <see cref="PromptTagScheduling"/>).
+    /// <paramref name="weightsAsParens"/> controls <c>weight</c>: <c>true</c> emits the <c>(text:N)</c> grammar
+    /// for the architectures whose tokenizer applies per-token weights (CLIP, via
+    /// <see cref="PromptWeighting"/>); <c>false</c> emits the inner text alone, which is what SwarmUI's own
+    /// reference does for every encoder it cannot weight (<c>join_text(leaves, False)</c> in <c>SwarmText.py</c>
+    /// — it never round-trips a weight back into prompt text). Leaving parens in the text for a
+    /// Qwen/T5/Gemma-conditioned DiT would feed the literal digits to the encoder as prose.</summary>
+    public static string Flatten(string? prompt, bool flattenScheduling = true, bool weightsAsParens = true)
     {
         if (string.IsNullOrEmpty(prompt) || prompt.IndexOf('<') < 0)
         {
             return prompt ?? "";
         }
-        return FlattenInner(prompt, flattenScheduling);
+        return FlattenInner(prompt, flattenScheduling, weightsAsParens);
     }
 
-    private static string FlattenInner(string text, bool flattenScheduling)
+    private static string FlattenInner(string text, bool flattenScheduling, bool weightsAsParens)
     {
         StringBuilder result = new StringBuilder(text.Length);
         int i = 0;
@@ -63,7 +68,15 @@ public static class PromptTagFlattening
                 // handles naturally (e.g. <weight[1.5]:<weight[1.2]:cat>>> -> ((cat:1.2):1.5), which
                 // PromptWeighting.Parse already resolves to weight 1.2*1.5 via its LastIndexOf(':') strip),
                 // while any parens the user actually typed as prose stay escaped and literal.
-                string inner = FlattenInner(EscapeParens(data), flattenScheduling);
+                if (!weightsAsParens)
+                {
+                    // No token-weight machinery downstream, so the markup is dropped rather than handed to the
+                    // encoder as prose. Data is NOT paren-escaped here: nothing will re-parse it.
+                    result.Append(FlattenInner(data, flattenScheduling, weightsAsParens));
+                    i = close + 1;
+                    continue;
+                }
+                string inner = FlattenInner(EscapeParens(data), flattenScheduling, weightsAsParens);
                 result.Append('(').Append(inner).Append(':')
                     .Append(weight.ToString("0.######", CultureInfo.InvariantCulture)).Append(')');
                 i = close + 1;
@@ -71,13 +84,13 @@ public static class PromptTagFlattening
             }
             if (flattenScheduling && prefix is "alt" or "alternate")
             {
-                result.Append(FirstFlattened(data, flattenScheduling));
+                result.Append(FirstFlattened(data, flattenScheduling, weightsAsParens));
                 i = close + 1;
                 continue;
             }
             if (flattenScheduling && prefix == "fromto" && TryParseWhen(predata, out _))
             {
-                result.Append(FirstFlattened(data, flattenScheduling));
+                result.Append(FirstFlattened(data, flattenScheduling, weightsAsParens));
                 i = close + 1;
                 continue;
             }
@@ -97,7 +110,7 @@ public static class PromptTagFlattening
             else
             {
                 result.Append('<').Append(content, 0, dataColon + 1)
-                    .Append(FlattenInner(content[(dataColon + 1)..], flattenScheduling)).Append('>');
+                    .Append(FlattenInner(content[(dataColon + 1)..], flattenScheduling, weightsAsParens)).Append('>');
             }
             i = close + 1;
         }
@@ -108,10 +121,10 @@ public static class PromptTagFlattening
     /// — correct for step 0 of both <c>alternate</c> (cycles by <c>step % count</c>, so step 0 is entry 0) and
     /// <c>fromto</c> (switches at <c>when</c>, which is virtually always &gt; 0, so step 0 is always the "from"
     /// value, entry 0).</summary>
-    private static string FirstFlattened(string data, bool flattenScheduling)
+    private static string FirstFlattened(string data, bool flattenScheduling, bool weightsAsParens)
     {
         string[] parts = SplitSmart(data);
-        return parts.Length > 0 ? FlattenInner(parts[0], flattenScheduling) : "";
+        return parts.Length > 0 ? FlattenInner(parts[0], flattenScheduling, weightsAsParens) : "";
     }
 
     /// <summary>Parses a <c>&lt;fromto[when]:...&gt;</c> threshold. A non-numeric <paramref name="predata"/> means the

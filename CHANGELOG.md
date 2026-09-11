@@ -21,6 +21,17 @@ stable release will require. Dates are UTC.
   occurs, not the full cross product. `fromto` thresholds are a 1:1 port of the reference `SwarmText.py` float
   comparison, so a fraction lands on the same step and a `when` above 1 stays an absolute step index. The old
   `PromptScheduling` (Comfy bracket grammar, never wired into a pipeline) is removed.
+- Diffusion: SDXL's pooled/ADM conditioning follows the prompt schedule. The denoise loop switched hidden states
+  per step but kept passing the single pooled encode to every UNet and ControlNet call, pairing a later variant's
+  hidden states with variant 0's ADM vector; `ConditioningSchedule.PooledVariants` now carries one pooled tensor
+  per variant. Null keeps the single encode, which is the unscheduled path and the only option for SD1.5.
+- Prompting: `<weight[N]:text>` collapses to its inner text for architectures without per-token weighting rather
+  than becoming `(text:N)`. The parens form is only meaningful where a tokenizer applies the weight; emitting it
+  to an LLM-conditioned DiT handed the literal digits to Qwen/T5/Gemma as prose. `ImageFeatures.PromptWeighting`
+  gates it and only SDXL/SD1.5 declare it; video and music strip unconditionally. The weight itself is still
+  unimplemented for LLM encoders, so it is dropped rather than applied for them.
+- Diffusion: a scheduled conditioning build that fails partway — an OOM on the third variant, say — disposes the
+  tensors it already encoded instead of leaking them, since the schedule that would own them is never returned.
 - Diffusion: `WeightedConditioning.HasWeightingSyntax` no longer treats a bare `[` as weighting syntax.
   Brackets carry no grammar now, and counting them put bracket-bearing prose on the schedule path — which
   forfeits SD1.5's fused Euler loop and made any non-default sampler selection fail outright.

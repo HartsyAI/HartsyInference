@@ -341,6 +341,54 @@ public class PromptEngineeringTests
     }
 
     [Fact]
+    public void Flattening_WithoutTokenWeighting_DropsTheMarkupInsteadOfEmittingParens()
+    {
+        // SwarmUI's reference never round-trips a weight back into prompt text — join_text(leaves, False) emits
+        // the text alone for every encoder it cannot weight. Leaving "(orange:1.5)" in a Krea2/Flux/Z-Image
+        // prompt would feed the parens and digits to a Qwen/T5/Gemma encoder as prose.
+        Assert.Equal("an orange cat",
+            PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat", weightsAsParens: false));
+        Assert.Equal("an (orange:1.5) cat",
+            PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat", weightsAsParens: true));
+    }
+
+    [Fact]
+    public void Flattening_WithoutTokenWeighting_KeepsProseParensAndNesting()
+    {
+        // Parens the user typed as prose survive unescaped (nothing re-parses them), and a nested weight tag
+        // collapses too rather than surviving as markup.
+        Assert.Equal("a (loud) cat", PromptTagFlattening.Flatten("<weight[1.5]:a (loud) cat>", weightsAsParens: false));
+        Assert.Equal("cat", PromptTagFlattening.Flatten("<weight[1.5]:<weight[1.2]:cat>>", weightsAsParens: false));
+        Assert.Equal("<region:0,0,1,1> an orange cat",
+            PromptTagFlattening.Flatten("<region:0,0,1,1> an <weight[1.5]:orange> cat", weightsAsParens: false));
+    }
+
+    [Fact]
+    public void Flattening_WithoutTokenWeighting_StillCollapsesSchedulingTags()
+    {
+        Assert.Equal("a cat", PromptTagFlattening.Flatten("a <alternate:<weight[1.5]:cat>, dog>", weightsAsParens: false));
+        Assert.Equal("a <alternate:cat, dog>",
+            PromptTagFlattening.Flatten("a <alternate:<weight[1.5]:cat>, dog>", flattenScheduling: false, weightsAsParens: false));
+    }
+
+    [Fact]
+    public void PooledSchedule_IsDeclaredOnlyWhereTheLoopCanSelectIt()
+    {
+        // A multi-variant schedule that leaves PooledVariants null would pair a later variant's hidden states
+        // with variant 0's ADM conditioning on SDXL. Null stays legal — SD1.5 has no pooled conditioning.
+        using Tensor v0 = new Tensor(new TensorShape(2, 1, 4), DType.F32);
+        using Tensor v1 = new Tensor(new TensorShape(2, 1, 4), DType.F32);
+        ConditioningSchedule noPooled = new ConditioningSchedule { Variants = [v0, v1], IndexForStep = (s, _) => s };
+        Assert.Null(noPooled.PooledVariants);
+
+        using Tensor p0 = new Tensor(new TensorShape(2, 4), DType.F32);
+        using Tensor p1 = new Tensor(new TensorShape(2, 4), DType.F32);
+        ConditioningSchedule pooled = noPooled with { PooledVariants = [p0, p1] };
+        Assert.Equal(pooled.Variants.Count, pooled.PooledVariants!.Count);
+        Assert.Same(p1, pooled.PooledVariants[pooled.Resolve(1, 2)]);
+    }
+
+    [Fact]
     public void WeightingSyntax_BracketsAlone_DoNotForceTheWeightedPath()
     {
         // Brackets carry no grammar any more, so bracket-bearing prose must keep the plain-encode path — on

@@ -30,8 +30,8 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     /// usage is pooled-only), so this is purely a tag-leak cleanup, not real weighting.</summary>
     private static VideoRequest NormalizePromptTags(VideoRequest request) => request with
     {
-        Prompt = PromptTagFlattening.Flatten(request.Prompt),
-        NegativePrompt = PromptTagFlattening.Flatten(request.NegativePrompt),
+        Prompt = PromptTagFlattening.Flatten(request.Prompt, weightsAsParens: false),
+        NegativePrompt = PromptTagFlattening.Flatten(request.NegativePrompt, weightsAsParens: false),
     };
 
     /// <inheritdoc/>

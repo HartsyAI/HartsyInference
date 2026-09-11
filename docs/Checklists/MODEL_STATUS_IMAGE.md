@@ -197,8 +197,38 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   from the plain `dog` baseline, against a 22.51 baseline-to-baseline separation, while `<fromto[0.5]:>` and
   `<alternate:>` are distinct from both and from each other. The flatten-only path was verified on Anima, which
   declares no `PromptScheduling`: `<alternate:a photo of a cat, a photo of a dog>` is byte-identical to the
-  plain `a photo of a cat`. SDXL's dual-CLIP scheduled path is unit-tested but **not** real-weight verified — no
-  SDXL checkpoint on the dev box.
+  plain `a photo of a cat`. SDXL verified on real `sd_xl_base_1.0` weights (768², 10 steps, seed 4242):
+  `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
+  from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
+  to `(orange:1.5)`.
+- [x] **The SDXL pooled/ADM vector follows the prompt schedule — DONE 2026-09-11.** `SdxlPipeline` switched the
+  hidden-state tensor per step but kept handing every UNet and ControlNet call the one pooled encode, so a
+  scheduled prompt paired (for example) a later step's "dog" hidden states with variant 0's "cat" ADM
+  conditioning. Measured: before the fix `<fromto[0]:cat,dog>` sat **5.26** from the plain `dog` baseline while
+  the mirror-image `<fromto[99]:cat,dog>` sat 0.44 from plain `cat` — an asymmetry that should not exist. After,
+  5.26 → **0.13**, and `<fromto[99]:>` is byte-identical to its pre-fix output, so only the mismatched case
+  moved. `ConditioningSchedule.PooledVariants` carries one pooled tensor per variant, indexed identically to
+  `Variants`; null keeps the single encode (the unscheduled path, and SD1.5, which has no pooled conditioning at
+  all). Each variant's pooled comes from a plain CLIP-G encode — the same call the pipeline already makes — so
+  variant 0 reproduces the unscheduled result exactly rather than substituting a weighted pooled.
+- [x] **`<weight[N]:>` collapses to its inner text on architectures with no token weighting — DONE 2026-09-11.**
+  Converting it to `(text:N)` is only right where a tokenizer applies per-token weights. Emitting those parens to
+  an LLM-conditioned DiT fed the literal digits to Qwen/T5/Gemma as prose: on Krea 2 Turbo (768², 8 steps, seed
+  99) the leftover parens moved the image **40.27** mean-abs-pixel away from the correct prompt. SwarmUI's own
+  reference never round-trips a weight back into text (`join_text(leaves, False)` in `SwarmText.py`; the
+  `weighted: True` branch is dead code there), applying weights at the token level instead. `ImageFeatures.`
+  `PromptWeighting` now gates the parens form and only SDXL/SD1.5 declare it; video and music strip
+  unconditionally. Verified: `a photo of an <weight[1.5]:orange> cat` on Krea 2 is now byte-identical to the
+  plain `a photo of an orange cat`, and `<alternate:cat,dog>` is byte-identical to plain `a photo of a cat`.
+- [ ] **Per-token prompt weighting for LLM-conditioned architectures** (Krea 2, Flux, Z-Image, Qwen-Image, Anima,
+  …). The weight is currently *dropped* for them — correctly, in that nothing leaks into the text, but ComfyUI
+  does honor it: `SwarmText.py`'s `calc_leaf` re-attaches the weight to each token and
+  `apply_comfy_token_weights` applies it per tokenizer key, T5/Qwen included. Matching that means teaching
+  `WeightedConditioning` (or a sibling) to scale LLM-encoder token embeddings, then declaring
+  `ImageFeatures.PromptWeighting` on those recipes. Not a DiT limitation — purely unimplemented here.
+- [ ] **Per-step prompt scheduling for LLM-conditioned architectures.** Only SDXL/SD1.5 declare
+  `ImageFeatures.PromptScheduling`, so `<alternate:>`/`<fromto[N]:>` collapse to their step-0 value everywhere
+  else. Their pipelines would each need to consume a multi-variant `ConditioningSchedule` in their denoise loop.
 - [ ] **Embeds still beat prompt scheduling on SDXL.** A prompt carrying both a textual-inversion embed and an
   `<alternate:>`/`<fromto[N]:>` tag takes `EmbeddingResolver.BuildDualClipSchedule`, which has no per-step
   variant slot, so the tag collapses to its step-0 value. Same precedent as weighted-prompt syntax, which an

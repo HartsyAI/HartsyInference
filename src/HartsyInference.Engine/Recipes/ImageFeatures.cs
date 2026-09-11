@@ -50,4 +50,12 @@ public enum ImageFeatures
     /// before dispatch. Declared only by recipes whose denoise loop actually consumes a multi-variant schedule
     /// (SDXL/SD1.5 today).</summary>
     PromptScheduling = 1024,
+
+    /// <summary>Per-token prompt weighting: the recipe routes conditioning through
+    /// <c>WeightedConditioning</c>, whose tokenizer scales each token's embedding by the weight parsed from the
+    /// <c>(text:N)</c> grammar. Like <see cref="PromptScheduling"/> this is never requested by a composition
+    /// object, so <c>RequestedFeatures</c> does not check it — <c>ImagesService</c> queries it to decide whether
+    /// <c>&lt;weight[N]:&gt;</c> becomes <c>(text:N)</c> or collapses to its inner text. Declared only by the
+    /// CLIP recipes (SDXL/SD1.5); an LLM-conditioned DiT would otherwise get the literal digits as prose.</summary>
+    PromptWeighting = 2048,
 }

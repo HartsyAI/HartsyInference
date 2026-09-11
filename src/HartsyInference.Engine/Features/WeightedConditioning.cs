@@ -76,12 +76,21 @@ public static class WeightedConditioning
         PromptSchedule posSchedule = posScheduled ? PromptTagScheduling.Resolve(pos, totalSteps) : SingleVariantSchedule(pos, totalSteps);
         PromptSchedule negSchedule = negScheduled ? PromptTagScheduling.Resolve(neg, totalSteps) : SingleVariantSchedule(neg, totalSteps);
         (IReadOnlyList<(int PosIdx, int NegIdx)> pairs, int[] stepToVariant) = PairSchedules(posSchedule, negSchedule, totalSteps);
-        Tensor[] variants = new Tensor[pairs.Count];
-        for (int k = 0; k < pairs.Count; k++)
+        List<Tensor> variants = new List<Tensor>(pairs.Count);
+        try
         {
-            variants[k] = EncodeSingleClipPair(
-                backend, encoder, tokenizer, posSchedule.Variants[pairs[k].PosIdx], negSchedule.Variants[pairs[k].NegIdx], layersFromEnd);
+            for (int k = 0; k < pairs.Count; k++)
+            {
+                variants.Add(EncodeSingleClipPair(
+                    backend, encoder, tokenizer, posSchedule.Variants[pairs[k].PosIdx], negSchedule.Variants[pairs[k].NegIdx], layersFromEnd));
+            }
         }
+        catch
+        {
+            DisposeAll(variants);
+            throw;
+        }
+        // No PooledVariants: SD 1.5 carries no pooled/ADM conditioning at all.
         return new ConditioningSchedule
         {
             Variants = variants,
@@ -133,15 +142,33 @@ public static class WeightedConditioning
         PromptSchedule posSchedule = posScheduled ? PromptTagScheduling.Resolve(pos, totalSteps) : SingleVariantSchedule(pos, totalSteps);
         PromptSchedule negSchedule = negScheduled ? PromptTagScheduling.Resolve(neg, totalSteps) : SingleVariantSchedule(neg, totalSteps);
         (IReadOnlyList<(int PosIdx, int NegIdx)> pairs, int[] stepToVariant) = PairSchedules(posSchedule, negSchedule, totalSteps);
-        Tensor[] variants = new Tensor[pairs.Count];
-        for (int k = 0; k < pairs.Count; k++)
+        List<Tensor> variants = new List<Tensor>(pairs.Count);
+        List<Tensor> pooledVariants = new List<Tensor>(pairs.Count);
+        try
         {
-            variants[k] = EncodeDualClipPair(
-                backend, clipL, clipG, tokenizer, posSchedule.Variants[pairs[k].PosIdx], negSchedule.Variants[pairs[k].NegIdx], layersFromEnd);
+            for (int k = 0; k < pairs.Count; k++)
+            {
+                string variantPos = posSchedule.Variants[pairs[k].PosIdx];
+                string variantNeg = negSchedule.Variants[pairs[k].NegIdx];
+                variants.Add(EncodeDualClipPair(backend, clipL, clipG, tokenizer, variantPos, variantNeg, layersFromEnd));
+                // SDXL's pooled/ADM vector has to follow the schedule too: SdxlPipeline switches the hidden
+                // states per step but would otherwise keep handing every UNet and ControlNet call the single
+                // pooled encode, pairing a later variant's hidden states with variant 0's ADM conditioning.
+                pooledVariants.Add(EncodeDualClipPooled(backend, clipG, tokenizer, variantPos, variantNeg, layersFromEnd));
+            }
+        }
+        catch
+        {
+            // The tensors built so far are unreachable once this throws — the schedule that would own them is
+            // never returned, so nothing downstream can free them.
+            DisposeAll(variants);
+            DisposeAll(pooledVariants);
+            throw;
         }
         return new ConditioningSchedule
         {
             Variants = variants,
+            PooledVariants = pooledVariants,
             IndexForStep = (step, total) => stepToVariant[Math.Clamp(step, 0, stepToVariant.Length - 1)],
         };
     }
@@ -232,7 +259,37 @@ public static class WeightedConditioning
         return (pairs, stepToVariant);
     }
 
-    /// <summary>Weighted penultimate hidden states for one prompt; the pooled output is discarded because the SDXL pipeline sources pooled from its own plain encode.</summary>
+    /// <summary>The <c>[2, pooledDim]</c> (negative, positive) CLIP-G pooled vector for one scheduled variant,
+    /// encoded from PLAIN tokens through the same <see cref="ClipTextEncoder.EncodePenultimate"/> call
+    /// <c>SdxlPipeline</c> uses for its own pooled output — so variant 0 reproduces exactly what an unscheduled
+    /// prompt of the same text produces, and only the per-step selection is new. The weighted encode's own pooled
+    /// cannot stand in: it is computed without EOS positions and comes back null.</summary>
+    private static Tensor EncodeDualClipPooled(IBackend backend, ClipTextEncoder clipG, ClipTokenizer tokenizer,
+        string positive, string negative, int layersFromEnd)
+    {
+        int[] posTokens = tokenizer.Encode(positive);
+        int[] negTokens = tokenizer.Encode(negative);
+        (Tensor hidden, Tensor? pooled) = clipG.EncodePenultimate(backend, [negTokens, posTokens],
+            [ClipTokenizer.FindEosPosition(negTokens), ClipTokenizer.FindEosPosition(posTokens)], layersFromEnd);
+        hidden.Dispose();
+        return pooled ?? throw new InvalidOperationException(
+            "CLIP-G returned no pooled output for a scheduled SDXL variant, so the ADM conditioning cannot follow "
+            + "the prompt schedule.");
+    }
+
+    /// <summary>Disposes every tensor built before a failure, leaving the list empty.</summary>
+    private static void DisposeAll(List<Tensor> tensors)
+    {
+        foreach (Tensor tensor in tensors)
+        {
+            tensor.Dispose();
+        }
+        tensors.Clear();
+    }
+
+    /// <summary>Weighted penultimate hidden states for one prompt; the pooled output is discarded because it is
+    /// computed without EOS positions here — <see cref="EncodeDualClipPooled"/> sources pooled from a plain encode
+    /// instead, matching what the SDXL pipeline does.</summary>
     private static Tensor EncodePenultimateHidden(IBackend backend, ClipTextEncoder encoder,
         IReadOnlyList<int[]> ids, IReadOnlyList<float[]> weights, int layersFromEnd)
     {

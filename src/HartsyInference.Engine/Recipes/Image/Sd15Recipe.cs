@@ -20,7 +20,7 @@ public sealed class Sd15Recipe : IArchitectureRecipe
     public ImageFeatures Supports =>
         ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.IpAdapter
         | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.VariationSeed | ImageFeatures.SeamlessTiling | ImageFeatures.Refiner
-        | ImageFeatures.PromptScheduling;
+        | ImageFeatures.PromptScheduling | ImageFeatures.PromptWeighting;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd15", StringComparison.OrdinalIgnoreCase);

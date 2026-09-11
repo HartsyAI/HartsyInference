@@ -35,9 +35,9 @@ public sealed class MusicService : IMusicService
         // sequence, so this is purely a tag-leak cleanup, not real weighting (same as video).
         request = request with
         {
-            Prompt = PromptTagFlattening.Flatten(request.Prompt),
-            Genre = PromptTagFlattening.Flatten(request.Genre),
-            LmNegativePrompt = PromptTagFlattening.Flatten(request.LmNegativePrompt),
+            Prompt = PromptTagFlattening.Flatten(request.Prompt, weightsAsParens: false),
+            Genre = PromptTagFlattening.Flatten(request.Genre, weightsAsParens: false),
+            LmNegativePrompt = PromptTagFlattening.Flatten(request.LmNegativePrompt, weightsAsParens: false),
         };
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         ValidateEditingModes(request, selector.Id);
