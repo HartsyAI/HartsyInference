@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.62
+
+- Krea 2: the recipe honors the `ImageRequest.Components` Qwen text-encoder and VAE picks instead of always
+  loading its own pinned side models, resolving them through `ModelFileLocator.Require` so an unresolvable pick
+  is refused by name. The pinned fallbacks auto-download when absent, the contract `LtxVideo2Recipe` already
+  uses and what SwarmUI's own `RequireClipModel`/`DoVaeLoader` do. First of the `TODO(E-IMG-4)` recipes closed.
+- Models: `SideModels.Qwen3VL_4B` moves to the flat `text_encoders/qwen3vl_4b.safetensors` that SwarmUI's Comfy
+  backend downloads under the identical SHA-256, so the two share one file instead of fetching 5 GB twice. The
+  `Krea2/` subdir it previously used matched nothing on either side.
+
 ## alpha.59
 
 - Benchmarks: a standalone `hartsy-bench` runner produces reproducible community evidence from frozen,
