@@ -27,6 +27,13 @@ public sealed record ModelAsset
     /// size-correct but byte-corrupt file loads as NaN).</summary>
     public string? Sha256 { get; init; }
 
+    /// <summary>Names this asset was saved under before <see cref="TargetName"/> was changed, in the same
+    /// models-root-relative form. An install that already holds the file under one of these keeps using it
+    /// instead of re-downloading gigabytes to the new name — and, just as importantly, recipes that resolve
+    /// this asset through the strict non-downloading overload keep finding it. Empty for an asset whose name
+    /// never moved.</summary>
+    public IReadOnlyList<string> LegacyTargetNames { get; init; } = [];
+
     /// <summary>The on-disk file name (<see cref="TargetName"/> when set, else the basename of <see cref="RepoPath"/>).</summary>
     public string FileName => TargetName ?? Path.GetFileName(RepoPath);
 }

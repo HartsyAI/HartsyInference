@@ -86,6 +86,25 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         Assert.False(ZImagePipeline.CanUseStepCache(packedDenoise: false, isImg2Img: false, useCfg: false));
     }
 
+    /// <summary>The fixed step-graph latent exists only on the default-OFF graph route, so anything that
+    /// snapshots it unconditionally (a step-preview hook did) breaks every ordinary generation.</summary>
+    [Fact]
+    public void GraphLatentSnapshot_DemandsPrepareGraphLatent_ThenCopiesThePreparedTokens()
+    {
+        using CpuBackend cpu = new();
+        ZImageConfig config = ZImageConfig.FromWeights(new Dictionary<string, Tensor>());
+        using ZImageTransformer transformer = new(config);
+        Assert.Throws<InvalidOperationException>(() => transformer.SnapshotGraphLatent(cpu));
+
+        using Tensor tokens = RandomTensor(
+            new TensorShape(1, 6, config.InChannels * config.PatchSize * config.PatchSize), 2027);
+        Tensor fixedLatent = transformer.PrepareGraphLatent(cpu, tokens);
+        using Tensor snapshot = transformer.SnapshotGraphLatent(cpu);
+        Assert.NotSame(fixedLatent, snapshot);
+        Assert.Equal(tokens.Shape, snapshot.Shape);
+        AssertClose(Snapshot(tokens), snapshot, 0f);
+    }
+
     [Theory]
     [InlineData(1.0f, 3.0f, 0.375f, 5)]
     [InlineData(4.0f, 6.0f, 0.625f, 3)]

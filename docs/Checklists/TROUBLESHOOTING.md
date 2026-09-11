@@ -386,6 +386,11 @@ no bug, any more than one bad seed was proof there was one.
   work. Recurring root cause across GEGLU loops, LayerScale, SwiGLU gates, per-step CFG/Euler. Fix: port
   the glue op to device so activations stay resident. Health assert: ~0 mid-decode D2H syncs; any per-token
   sync is a residency bug (MoE routing readback is a current offender at 2193–3225 syncs/rep).
+- **A step preview must not touch the step-graph's fixed buffer, and must not host-read the loop's packed
+  tokens.** `HARTSY_DIT_GRAPH` is default-off for most models, so that buffer usually does not exist — a
+  `SnapshotGraphLatent` preview hook threw `NullReferenceException` on every Z-Image generation from alpha.42
+  to alpha.59. Preview by unpatchifying the loop's tokens with the backend op; a host unpatchify would
+  D2H-and-free the device copy each step.
 - **`CudaBackend.Concat` `dim>0` pathology:** issued one `cuMemcpyDtoDAsync` per outer element → ~280k
   tiny memcpy nodes/forward captured into a CUDA graph (hid ~300ms/fwd; Hunyuan3D DiT-loop 27.7→7.5s,
   bit-identical). Fixed with a single-launch `dit_concat2_f32/_f16` kernel. Shared win for any

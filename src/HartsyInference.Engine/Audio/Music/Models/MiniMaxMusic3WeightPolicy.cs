@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -62,9 +63,12 @@ internal static class MiniMaxMusic3WeightPolicy
             || key.StartsWith("audio_heads.", StringComparison.Ordinal)
             || key.Equals("projection.weight", StringComparison.Ordinal);
 
+    // Beside the weights these are derived from, via the SAME root AudioModelCache resolved them through
+    // (paths.modelCacheRoot, else paths.modelsRoot/audio, else the user cache dir) — resolving against
+    // paths.modelsRoot alone would drop multi-gigabyte quant caches on <repo>/Models for an install that
+    // configured only the cache root, which may be read-only.
     private static string CachePath(string repo, string quant, string component) => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".cache", "hartsyinference", "minimax-music3",
+        AudioModelCache.CacheRoot, "music", "_gguf-cache",
         component == "lm" ? $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf"
             : $"{repo.Replace('/', '_')}-{component}-{quant.ToLowerInvariant()}.gguf");
 

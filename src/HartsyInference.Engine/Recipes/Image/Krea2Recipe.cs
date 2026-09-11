@@ -62,18 +62,15 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 
     public IRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4): honor user text-encoder / VAE overrides from ImageRequest.Components (the SwarmUI loader
-        // read T2IParamTypes.QwenModel / T2IParamTypes.VAE). NOTE: the "krea2" catalog entry lists its text-encoder
-        // asset as text_encoders/qwen3vl_4b_bf16.safetensors while SideModels.Qwen3VL_4B points at the fp8_scaled
-        // file under text_encoders/Krea2/ — same encoder, different quantization/location. The VAE asset
-        // (VAE/QwenImage/qwen_image_vae.safetensors) matches SideModels.QwenImageVae exactly.
         string fileName = Path.GetFileName(context.CheckpointPath);
         bool isTurbo = IsTurbo(fileName);
         Krea2Config config = isTurbo ? Krea2Config.Turbo : Krea2Config.Base;
         Logs.Info($"[Krea2Recipe] Loading Krea 2 ({(isTurbo ? "Turbo/TDM" : "Base")}): {fileName}.");
 
-        string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.QwenImageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string encoderPath = ResolveComponent(context.Components?.Qwen, SideModels.Qwen3VL_4B, context.Cancel,
+            "Qwen3-VL-4B text encoder", "text_encoders", "clip");
+        string vaePath = ResolveComponent(context.Components?.Vae, SideModels.QwenImageVae, context.Cancel,
+            "Qwen-Image VAE", "VAE", "vae");
 
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         try
@@ -158,5 +155,18 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         }
         string lower = name.ToLowerInvariant();
         return lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
+    }
+
+    /// <summary>Uses an override when supplied; otherwise ensures the Comfy-compatible side model exists. The
+    /// request's token is honored because the fallback may transfer several gigabytes.</summary>
+    private static string ResolveComponent(string? requested, ModelAsset asset, CancellationToken cancel,
+        string role, params string[] folders)
+    {
+        if (!string.IsNullOrWhiteSpace(requested))
+        {
+            return ModelFileLocator.Require(requested, role, folders);
+        }
+        return ModelDownloader.EnsureSideModelAsync(asset, downloadIfMissing: true, onProgress: null, cancel)
+            .GetAwaiter().GetResult();
     }
 }
