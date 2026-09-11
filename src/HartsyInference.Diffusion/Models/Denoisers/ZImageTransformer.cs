@@ -555,10 +555,18 @@ public sealed unsafe class ZImageTransformer : IDisposable
     }
 
     /// <summary>Device-copies the fixed latent into a fresh tensor the caller may freely read/dispose (reading
-    /// the fixed tensor's DataPointer directly would D2H-and-FREE the buffer the captured graph points at).</summary>
+    /// the fixed tensor's DataPointer directly would D2H-and-FREE the buffer the captured graph points at).
+    /// Valid only on the graph route: the fixed buffer exists once <see cref="PrepareGraphLatent"/> has routed
+    /// a latent through it.</summary>
     public Tensor SnapshotGraphLatent(IBackend backend)
     {
-        Tensor snap = new Tensor(_latentFixed!.Shape, DType.F32);
+        if (_latentFixed is null)
+        {
+            throw new InvalidOperationException(
+                "Z-Image has no step-graph latent: PrepareGraphLatent runs only in graph mode, so an eager "
+                + "generation must read its own packed latent instead of snapshotting.");
+        }
+        Tensor snap = new Tensor(_latentFixed.Shape, DType.F32);
         backend.CopyInto(snap, _latentFixed);
         return snap;
     }
