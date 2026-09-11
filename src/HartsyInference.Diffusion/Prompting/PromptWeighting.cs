@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 
 namespace HartsyInference.Diffusion.Prompting;
 
-/// <summary>Parses the ComfyUI emphasis grammar into weighted text spans. <c>(x)</c> multiplies weight by 1.1, <c>(x:1.3)</c> sets it to 1.3, nesting compounds, and a backslash before a parenthesis escapes it to a literal. Square brackets are left untouched (they are scheduling/alternation, handled by <see cref="PromptScheduling"/>). This is a faithful port of ComfyUI's <c>parse_parentheses</c>/<c>token_weights</c> so output matches its conditioning.</summary>
+/// <summary>Parses the ComfyUI emphasis grammar into weighted text spans. <c>(x)</c> multiplies weight by 1.1, <c>(x:1.3)</c> sets it to 1.3, nesting compounds, and a backslash before a parenthesis escapes it to a literal. Square brackets are left untouched — bracket-based alternate/fromto scheduling is obsolete (SwarmUI's 2026-09-01 prompt-parser update replaced it with <c>&lt;alternate:&gt;</c>/<c>&lt;fromto[N]:&gt;</c> tags, resolved by <see cref="PromptTagScheduling"/>/<see cref="PromptTagFlattening"/> before this class ever sees the text), so any literal <c>[...]</c> reaching here is just prose. This is a faithful port of ComfyUI's <c>parse_parentheses</c>/<c>token_weights</c> so output matches its conditioning.</summary>
 public static partial class PromptWeighting
 {
     /// <summary>Parses emphasis into weighted spans. Empty-text spans are dropped; whitespace is preserved so adjacent words do not merge.</summary>

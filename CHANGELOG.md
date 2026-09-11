@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.62
+## alpha.63
 
 - Krea 2: the recipe honors the `ImageRequest.Components` Qwen text-encoder and VAE picks instead of always
   loading its own pinned side models, resolving them through `ModelFileLocator.Require` so an unresolvable pick
@@ -23,6 +23,36 @@ stable release will require. Dates are UTC.
   Without it, renaming a shared asset costs every upgrading install a multi-gigabyte re-download and makes the
   recipes that resolve it through the strict non-downloading overload (Mage-Flow shares Krea 2's encoder) fail as
   though the file were missing. A fresh install still downloads to the canonical name.
+
+## alpha.61
+
+- Prompting: SwarmUI's 2026-09-01 parser update hands every backend Swarm tags in place of Comfy-native prompt
+  syntax — `(word:1.5)` arrives as `<weight[1.5]:word>`, `[a|b]` as `<alternate:a,b>`, `[a:b:N]` as
+  `<fromto[N]:a,b>`. The engine read those as prose, so SD1.5/SDXL prompt weighting was silently inert and the
+  tag text was tokenized into the conditioning. `PromptTagFlattening` converts the weight tag back to the
+  `(text:N)` grammar `PromptWeighting` implements and collapses `alternate`/`fromto` to their step-0 value,
+  running in `ImagesService`/`VideoService`/`MusicService` ahead of every pipeline and of region/segment
+  parsing; every other tag passes through byte-for-byte.
+- Diffusion: real per-step prompt scheduling. SD1.5 and SDXL declare `ImageFeatures.PromptScheduling` and keep
+  the scheduling tags raw, so `PromptTagScheduling` and `WeightedConditioning.Build{Single,Dual}ClipScheduled`
+  build a multi-variant `ConditioningSchedule` — one encode per distinct (positive, negative) variant pair that
+  occurs, not the full cross product. `fromto` thresholds are a 1:1 port of the reference `SwarmText.py` float
+  comparison, so a fraction lands on the same step and a `when` above 1 stays an absolute step index. The old
+  `PromptScheduling` (Comfy bracket grammar, never wired into a pipeline) is removed.
+- Diffusion: SDXL's pooled/ADM conditioning follows the prompt schedule. The denoise loop switched hidden states
+  per step but kept passing the single pooled encode to every UNet and ControlNet call, pairing a later variant's
+  hidden states with variant 0's ADM vector; `ConditioningSchedule.PooledVariants` now carries one pooled tensor
+  per variant. Null keeps the single encode, which is the unscheduled path and the only option for SD1.5.
+- Prompting: `<weight[N]:text>` collapses to its inner text for architectures without per-token weighting rather
+  than becoming `(text:N)`. The parens form is only meaningful where a tokenizer applies the weight; emitting it
+  to an LLM-conditioned DiT handed the literal digits to Qwen/T5/Gemma as prose. `ImageFeatures.PromptWeighting`
+  gates it and only SDXL/SD1.5 declare it; video and music strip unconditionally. The weight itself is still
+  unimplemented for LLM encoders, so it is dropped rather than applied for them.
+- Diffusion: a scheduled conditioning build that fails partway — an OOM on the third variant, say — disposes the
+  tensors it already encoded instead of leaking them, since the schedule that would own them is never returned.
+- Diffusion: `WeightedConditioning.HasWeightingSyntax` no longer treats a bare `[` as weighting syntax.
+  Brackets carry no grammar now, and counting them put bracket-bearing prose on the schedule path — which
+  forfeits SD1.5's fused Euler loop and made any non-default sampler selection fail outright.
 
 ## alpha.59
 

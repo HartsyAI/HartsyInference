@@ -1,6 +1,7 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
@@ -24,6 +25,20 @@ public sealed class MusicService : IMusicService
             // ACE-Step puts the style in genre and the (optional) lyrics in prompt, so either alone is enough.
             throw new ArgumentException("No prompt or genre supplied to generate music.", nameof(request));
         }
+        // SwarmUI's 2026-09-01 prompt-parser update now resolves <weight[N]:text>/<alternate:...>/<fromto[N]:...>
+        // as literal tags in the final prompt text handed to every backend, in place of the Comfy-native
+        // (word:1.5)/[a|b]/[a:b:N] syntax it used to emit. Flatten them here — MusicService has no existing
+        // defaults/resolution layer to hook this into, so this is the request's one normalization point before
+        // any model reads it. All three prose fields need it: for ACE-Step/YuE/HeartMuLa/MiniMax Music 3, Genre
+        // is itself a free-text style/caption prompt (not an enum), Prompt carries lyrics, and LmNegativePrompt
+        // is ACE-Step's LM planner negative prompt. No music model reaches a per-token CLIP conditioning
+        // sequence, so this is purely a tag-leak cleanup, not real weighting (same as video).
+        request = request with
+        {
+            Prompt = PromptTagFlattening.Flatten(request.Prompt, weightsAsParens: false),
+            Genre = PromptTagFlattening.Flatten(request.Genre, weightsAsParens: false),
+            LmNegativePrompt = PromptTagFlattening.Flatten(request.LmNegativePrompt, weightsAsParens: false),
+        };
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         ValidateEditingModes(request, selector.Id);
         MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
