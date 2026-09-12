@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.68
+
+- Audio: YuE2's acoustic stack ran its attention through `IBackend.FlashAttention`, whose kernel is tuned for LLM
+  decode — one query row against a long cache. The acoustic pass is the opposite shape: every frame of the song
+  is a query row, attending bidirectionally over the whole AR prefix. Routing it through
+  `ScaledDotProductAttention`, which reaches cuDNN's fused engine, is **26x** on that op (74.6 ms a layer to 2.8 ms
+  at 2308 frames on a 4090), and attention was ~89% of the stack. A full-length song's acoustic pass drops from
+  ~816s to 33s and a 3.9-minute song end to end from **17.8 minutes to 119 seconds**. The fused engine is MHA-only,
+  so the grouped KV is widened to full heads first; that copy costs ~0.2% of what it buys. All six parity gates
+  hold (velocity corr 0.999809, 32-step solve 0.999939 — unchanged to five decimal places), which is expected:
+  F16 attention ingest matches the release, which runs the whole transformer in bfloat16.
+
 ## alpha.67
 
 - Audio: YuE2 — lyrics- and style-conditioned song generation at 48 kHz stereo, up to six minutes. Despite the
