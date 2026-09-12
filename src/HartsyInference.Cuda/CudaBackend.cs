@@ -5005,8 +5005,19 @@ public sealed class CudaBackend : IBackend
     /// <remarks>Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/> would mis-stride K).</remarks>
     public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
-        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new NotSupportedException("CUDA ApplyRopeSingle supports F32 only.");
+        // F16 x against an F32 table, matching ApplyRope's deliberately asymmetric contract: dit_rope_f16 is
+        // indexing-identical to dit_rope_f32 and declares cos/sin as `const float*`, so an F16 TABLE would be
+        // over-read by exactly 2x and fault. Relaxing all three dtypes together is the trap here, not the F16.
+        bool f16 = x.DType == DType.F16;
+        if ((!f16 && x.DType != DType.F32) || cos.DType != DType.F32 || sin.DType != DType.F32)
+        {
+            throw new NotSupportedException(
+                $"CUDA ApplyRopeSingle supports F32, or an F16 x with F32 cos/sin; got x={x.DType}, cos={cos.DType}, sin={sin.DType}.");
+        }
+        // The kernel reads heads from Shape[2] and headDim from Shape[3], so a head-major tensor would silently
+        // rotate the wrong rows and index the table off the end rather than fail.
+        if (x.Shape.Rank != 4)
+            throw new NotSupportedException($"CUDA ApplyRopeSingle expects token-major [B, L, heads, headDim]; got rank {x.Shape.Rank}.");
         using NvtxRange _nvtx = NvtxRange.Push("ApplyRopeSingle");
         EnterOp();
         EnsureKernels();
@@ -5020,7 +5031,8 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRope(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle, rotaryDim);
+            if (f16) _kernels!.LaunchRopeF16(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle, rotaryDim);
+            else _kernels!.LaunchRope(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle, rotaryDim);
 
             // In-place: clear stale callbacks before re-caching (pitfall #17).
             x._gpuSyncCallback = null;

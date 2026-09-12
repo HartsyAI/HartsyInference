@@ -160,32 +160,37 @@ public sealed class Yue2AcousticTransformer : IDisposable
         for (int i = 0; i < _layers.Length; i++)
         {
             Layer layer = _layers[i];
-            using Tensor normed = new(new TensorShape(1, tokens, hidden), DType.F32);
+            // The attention block runs at the same dtype as the chunk's key/value buffers. Its weights are BF16,
+            // so an F32 activation was being cast down on every projection — the inefficiency alpha.69 fixed in
+            // the feed-forward. RmsNorm takes F32-in/F16-out and F16-in/F16-out, ApplyRopeSingle takes an F16 x
+            // against an F32 table, and Permute0213 is a 16-bit byte shuffle, so the chain closes with no
+            // intermediate casts and Q lands on the fused attention entry already at its dtype.
+            using Tensor normed = new(new TensorShape(1, tokens, hidden), kv);
             backend.RmsNorm(normed, x, layer.InputNorm!, eps);
 
             // Projections are written straight into head layout. Never reshape a tensor a device op has written:
             // the backend caches the device-side result against the tensor OBJECT, so a view sharing the host
             // pointer does not see it, and the stale pre-op host bytes are what the next op uploads.
-            using Tensor q = new(new TensorShape(1, tokens, heads, dim), DType.F32);
-            using Tensor k = new(new TensorShape(1, tokens, kvHeads, dim), DType.F32);
-            using Tensor v = new(new TensorShape(1, tokens, kvHeads, dim), DType.F32);
+            using Tensor q = new(new TensorShape(1, tokens, heads, dim), kv);
+            using Tensor k = new(new TensorShape(1, tokens, kvHeads, dim), kv);
+            using Tensor v = new(new TensorShape(1, tokens, kvHeads, dim), kv);
             backend.Linear(q, normed, layer.QWeight!, null);
             backend.Linear(k, normed, layer.KWeight!, null);
             backend.Linear(v, normed, layer.VWeight!, null);
 
             // Qwen3 normalises each head independently, before RoPE. RmsNorm reduces over the input's last dim,
             // which in head layout is exactly one head's channels.
-            using Tensor qNormed = new(new TensorShape(1, tokens, heads, dim), DType.F32);
-            using Tensor kNormed = new(new TensorShape(1, tokens, kvHeads, dim), DType.F32);
+            using Tensor qNormed = new(new TensorShape(1, tokens, heads, dim), kv);
+            using Tensor kNormed = new(new TensorShape(1, tokens, kvHeads, dim), kv);
             backend.RmsNorm(qNormed, q, layer.QNorm!, eps);
             backend.RmsNorm(kNormed, k, layer.KNorm!, eps);
             backend.ApplyRopeSingle(qNormed, cos, sin, dim);
             backend.ApplyRopeSingle(kNormed, cos, sin, dim);
 
             // Head-major, then prepend the AR prefix along the key axis.
-            using Tensor qHeadMajor = new(new TensorShape(1, heads, tokens, dim), DType.F32);
-            using Tensor kHeadMajor = new(new TensorShape(1, kvHeads, tokens, dim), DType.F32);
-            using Tensor vHeadMajor = new(new TensorShape(1, kvHeads, tokens, dim), DType.F32);
+            using Tensor qHeadMajor = new(new TensorShape(1, heads, tokens, dim), kv);
+            using Tensor kHeadMajor = new(new TensorShape(1, kvHeads, tokens, dim), kv);
+            using Tensor vHeadMajor = new(new TensorShape(1, kvHeads, tokens, dim), kv);
             backend.Permute0213(qHeadMajor, qNormed, tokens, heads, dim);
             backend.Permute0213(kHeadMajor, kNormed, tokens, kvHeads, dim);
             backend.Permute0213(vHeadMajor, v, tokens, kvHeads, dim);
@@ -204,19 +209,28 @@ public sealed class Yue2AcousticTransformer : IDisposable
             // buffers were built. The append narrows to the buffer's dtype, so the staging stays F32.
             using Tensor wideKey = new(new TensorShape(1, heads, tokens, dim), DType.F32);
             using Tensor wideValue = new(new TensorShape(1, heads, tokens, dim), DType.F32);
-            backend.RepeatKvHeads(wideKey, kHeadMajor, kvHeads, heads / kvHeads);
-            backend.RepeatKvHeads(wideValue, vHeadMajor, kvHeads, heads / kvHeads);
+            // KvCacheAppend narrows F32 into the buffer's dtype and has no F16-source form, so the grouped K/V
+            // step back up to F32 for this hop only. It is the narrow [kvHeads, tokens] pair, not the widened
+            // one, so the cast is a third of what widening already writes.
+            Tensor kAppendSrc = kHeadMajor, vAppendSrc = vHeadMajor;
+            using Tensor? kHead32 = kv == DType.F32 ? null : new Tensor(kHeadMajor.Shape, DType.F32);
+            using Tensor? vHead32 = kv == DType.F32 ? null : new Tensor(vHeadMajor.Shape, DType.F32);
+            if (kHead32 is not null)
+            {
+                backend.CastToF32(kHead32, kHeadMajor);
+                backend.CastToF32(vHead32!, vHeadMajor);
+                kAppendSrc = kHead32;
+                vAppendSrc = vHead32!;
+            }
+            backend.RepeatKvHeads(wideKey, kAppendSrc, kvHeads, heads / kvHeads);
+            backend.RepeatKvHeads(wideValue, vAppendSrc, kvHeads, heads / kvHeads);
             backend.KvCacheAppend(prefix.Keys(i), wideKey, arLength);
             backend.KvCacheAppend(prefix.Values(i), wideValue, arLength);
 
             // Q, the keys, the values and the output all at the buffers' dtype: at F16 that is cuDNN's native
             // entry, which casts nothing, where the F32 route re-narrows the whole key and value every call.
-            Tensor query = qHeadMajor;
-            using Tensor? queryCast = kv == DType.F32 ? null : new Tensor(new TensorShape(1, heads, tokens, dim), kv);
-            if (queryCast is not null) { backend.CastToF16(queryCast, qHeadMajor); query = queryCast; }
-
             using Tensor attention = new(new TensorShape(1, heads, tokens, dim), kv);
-            backend.ScaledDotProductAttention(attention, query, prefix.Keys(i), prefix.Values(i), null, scale, allowF16: true);
+            backend.ScaledDotProductAttention(attention, qHeadMajor, prefix.Keys(i), prefix.Values(i), null, scale, allowF16: true);
 
             using Tensor tokenMajor = new(new TensorShape(1, tokens, heads * dim), kv);
             backend.Permute0213(tokenMajor, attention, heads, tokens, dim);

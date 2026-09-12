@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.73
+
+- CUDA: `ApplyRopeSingle` accepts an F16 activation against an F32 cos/sin table, matching the asymmetric
+  contract `ApplyRope` already honours. `dit_rope_f16` is indexing-identical to its F32 twin and declares the
+  table as `const float*`, so the earlier crash chasing this was an F16 TABLE being over-read by exactly 2x,
+  not a layout mismatch and not a missing kernel. It also now rejects a non-rank-4 tensor: head count and head
+  dim are read from `Shape[2]`/`Shape[3]`, so a head-major input silently rotated the wrong rows.
+- Audio: YuE2's acoustic attention block runs at the key/value buffers' dtype end to end — the input norm, the
+  q/k/v projections, the per-head qk-norm, RoPE and the permutes. Its weights are BF16, so an F32 activation
+  was cast down on every projection, the same inefficiency alpha.69 fixed in the feed-forward; RoPE was the
+  one stage blocking it. Q now reaches the fused attention entry already at its dtype, removing the per-layer
+  cast alpha.71 added. The grouped K/V step back to F32 only for `KvCacheAppend`, which narrows from F32 and
+  has no F16-source form. The acoustic pass goes 23.5s to 22.4s and a 236-second song 98.2s to 97.1s.
+- Tests: `RopeSingleF16Tests` covers F16-vs-F32 rope at full and partial rotary, and pins both halves of the
+  contract — an F16 table and a non-rank-4 input must both be rejected.
+
 ## alpha.72
 
 - CUDA: causal PREFILL no longer runs on the decode-tuned flash kernel. `GenericTransformer` issues both
