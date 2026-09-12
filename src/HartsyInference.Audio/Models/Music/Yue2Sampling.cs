@@ -58,21 +58,23 @@ public static class Yue2LogitProcessor
 {
     /// <summary>Rewrites <paramref name="scores"/> in place into the distribution to draw from. After this call a
     /// temperature of zero means "take the argmax"; otherwise softmax over the finite entries.</summary>
-    /// <param name="scores">Raw logits over the full vocabulary; overwritten.</param>
-    /// <param name="history">Every id emitted in this pass so far, oldest first.</param>
+    /// <param name="scores">Logits over the phase's <see cref="Yue2Protocol.Window"/>, indexed <c>id - baseId</c>;
+    /// overwritten.</param>
+    /// <param name="history">Every id emitted in this pass so far, oldest first (absolute ids).</param>
     /// <param name="step">Tokens emitted so far, which gates the end token.</param>
     /// <param name="legacyOff">The historical <see cref="Yue2Cot.Off"/> nucleus rule (keep three, not one).</param>
+    /// <param name="baseId">The absolute id that <c>scores[0]</c> stands for.</param>
     public static void Apply(Span<float> scores, Yue2Sampling sampling, ReadOnlySpan<int> history,
-        int step, Yue2Phase phase, bool legacyOff)
+        int step, Yue2Phase phase, bool legacyOff, int baseId)
     {
         ArgumentNullException.ThrowIfNull(sampling);
-        int end = phase == Yue2Phase.Abc ? Yue2Protocol.AbcEnd : Yue2Protocol.MusicEnd;
+        int end = (phase == Yue2Phase.Abc ? Yue2Protocol.AbcEnd : Yue2Protocol.MusicEnd) - baseId;
 
         // 1. Hard vocabulary mask: only the phase's own span, plus its end token, may be drawn. The end token sits
         //    outside its phase's span in both phases, so its logit is carried across the mask rather than re-derived.
         float rawEnd = (uint)end < (uint)scores.Length ? scores[end] : float.NegativeInfinity;
-        int allowedStart = phase == Yue2Phase.Abc ? 0 : Yue2Protocol.CodecOffset;
-        int allowedEnd = phase == Yue2Phase.Abc ? Yue2Protocol.Eod : Yue2Protocol.CodecOffset + Yue2Protocol.CodecSize;
+        int allowedStart = (phase == Yue2Phase.Abc ? 0 : Yue2Protocol.CodecOffset) - baseId;
+        int allowedEnd = (phase == Yue2Phase.Abc ? Yue2Protocol.Eod : Yue2Protocol.CodecOffset + Yue2Protocol.CodecSize) - baseId;
         for (int i = 0; i < scores.Length; i++)
         {
             if (i < allowedStart || i >= allowedEnd) scores[i] = float.NegativeInfinity;
@@ -80,7 +82,7 @@ public static class Yue2LogitProcessor
         if ((uint)end < (uint)scores.Length) scores[end] = step < sampling.MinTokens ? float.NegativeInfinity : rawEnd;
 
         // 2. Windowed repetition penalty: alpha = penalty^count over the last PenaltyWindow ids.
-        ApplyWindowPenalty(scores, history, sampling.PenaltyWindow, sampling.RepetitionPenalty);
+        ApplyWindowPenalty(scores, history, sampling.PenaltyWindow, sampling.RepetitionPenalty, baseId);
 
         if (sampling.Temperature == 0) return;
         if (sampling.Temperature != 1f)
@@ -104,7 +106,8 @@ public static class Yue2LogitProcessor
         ApplyNucleus(scores, sampling.TopP, legacyOff ? 3 : 1);
     }
 
-    private static void ApplyWindowPenalty(Span<float> scores, ReadOnlySpan<int> history, int window, float penalty)
+    private static void ApplyWindowPenalty(Span<float> scores, ReadOnlySpan<int> history, int window, float penalty,
+        int baseId)
     {
         if (penalty == 1f || history.IsEmpty) return;
         ReadOnlySpan<int> recent = history.Length > window ? history[^window..] : history;
@@ -114,7 +117,7 @@ public static class Yue2LogitProcessor
         Dictionary<int, int> counts = new(recent.Length);
         for (int i = 0; i < recent.Length; i++)
         {
-            int id = recent[i];
+            int id = recent[i] - baseId;
             if ((uint)id >= (uint)scores.Length) continue;
             counts[id] = counts.TryGetValue(id, out int c) ? c + 1 : 1;
         }

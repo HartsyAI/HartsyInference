@@ -11,6 +11,9 @@ public sealed class Yue2ArLm : IDisposable
 {
     private readonly GenericTransformer _transformer;
     private readonly Yue2Config _config;
+    private Tensor? _semanticHead;
+    private Tensor? _lastScratch;
+    private Tensor? _semanticLogits;
     private int _disposed;
 
     public Yue2ArLm(Yue2Config config)
@@ -54,6 +57,23 @@ public sealed class Yue2ArLm : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         ThrowIfDisposed();
         _transformer.LoadWeights(weights, "model", "lm_head.weight");
+
+        // The semantic pass can only ever draw from one contiguous 32,769-id run, so it gets its own head: an owned
+        // BF16 row-slice (134 MB) that the per-token GEMM reads instead of the full 756 MB one.
+        (int start, int count) = Yue2Protocol.Window(Yue2Phase.Semantic);
+        if (weights.TryGetValue("lm_head.weight", out Tensor? head) && head.Shape.Rank == 2 && head.Shape[0] >= start + count)
+            _semanticHead = RowSlice(head, start, count);
+    }
+
+    /// <summary>An owned copy of <paramref name="numRows"/> rows of a row-major 2-D weight, keeping its dtype.</summary>
+    private static unsafe Tensor RowSlice(Tensor src, int startRow, int numRows)
+    {
+        long cols = src.ElementCount / src.Shape[0];
+        long rowBytes = cols * src.DType.SizeInBytes;
+        Tensor dst = new(new TensorShape(numRows, cols), src.DType);
+        Buffer.MemoryCopy((byte*)src.DataPointer + startRow * rowBytes, (void*)dst.DataPointer,
+            numRows * rowBytes, numRows * rowBytes);
+        return dst;
     }
 
     /// <summary>A decode cache sized for <paramref name="maxSeqLen"/> tokens. One per CFG branch: the two branches
@@ -66,27 +86,45 @@ public sealed class Yue2ArLm : IDisposable
     /// call.</summary>
     /// <remarks>The caller supplies the buffer because a song is up to 9,000 decode steps and the vocabulary is
     /// 184,704 wide — returning a fresh array per token would churn gigabytes through the GC.</remarks>
-    public void Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache, Span<float> logits)
+    public void Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache, Span<float> logits,
+        Yue2Phase phase)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cache);
         ThrowIfDisposed();
         if (tokenIds.IsEmpty) throw new ArgumentException("YuE2 needs at least one token to run.", nameof(tokenIds));
-        if (logits.Length < Yue2Protocol.VocabSize)
-            throw new ArgumentException($"The logit buffer must hold {Yue2Protocol.VocabSize} entries.", nameof(logits));
+        int width = Yue2Protocol.Window(phase).Count;
+        if (logits.Length < width)
+            throw new ArgumentException($"The logit buffer must hold {width} entries for the {phase} phase.", nameof(logits));
 
         using Tensor hidden = _transformer.Forward(backend, tokenIds, posStart, cache);
 
         // Project only the last position: a whole-prefill projection against a 184,704-wide head would cost more
         // than the prefill it followed.
-        using Tensor last = new(new TensorShape(1, 1, _config.Ar.HiddenSize), DType.F32);
-        backend.GatherRows(last, hidden, [tokenIds.Length - 1]);
-        using Tensor projected = _transformer.ProjectLogits(backend, last, 1);
-        projected.AsReadOnlySpan<float>()[..Yue2Protocol.VocabSize].CopyTo(logits);
+        _lastScratch ??= new Tensor(new TensorShape(1, 1, _config.Ar.HiddenSize), DType.F32);
+        backend.GatherRows(_lastScratch, hidden, [tokenIds.Length - 1]);
+        Project(backend, _lastScratch, logits, phase);
     }
 
-    /// <summary>A logit buffer sized for this model's vocabulary, for <see cref="Forward"/> to write into.</summary>
-    public static float[] AllocateLogits() => new float[Yue2Protocol.VocabSize];
+    /// <summary>Projects one post-final-norm hidden onto the phase's head window.</summary>
+    private void Project(IBackend backend, Tensor last, Span<float> logits, Yue2Phase phase)
+    {
+        (int _, int count) = Yue2Protocol.Window(phase);
+        if (phase == Yue2Phase.Semantic && _semanticHead is not null)
+        {
+            _semanticLogits ??= new Tensor(new TensorShape(1, 1, count), DType.F32);
+            backend.Linear(_semanticLogits, last, _semanticHead, null);
+            _semanticLogits.AsReadOnlySpan<float>()[..count].CopyTo(logits);
+            return;
+        }
+        // The ABC window starts at id 0, so the full projection's leading `count` entries are exactly the window.
+        using Tensor projected = _transformer.ProjectLogits(backend, last, 1);
+        projected.AsReadOnlySpan<float>()[..count].CopyTo(logits);
+    }
+
+    /// <summary>A logit buffer sized for <paramref name="phase"/>'s head window, for <see cref="Forward"/> and
+    /// <see cref="DecodeStep"/> to write into.</summary>
+    public static float[] AllocateLogits(Yue2Phase phase) => new float[Yue2Protocol.Window(phase).Count];
 
     /// <summary>The per-layer post-RoPE K/V the acoustic transformer attends over. Returned as cache-owned views:
     /// the caller must consume them before the cache is reset or disposed.</summary>
@@ -109,6 +147,9 @@ public sealed class Yue2ArLm : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _semanticHead?.Dispose();
+        _lastScratch?.Dispose();
+        _semanticLogits?.Dispose();
         _transformer.Dispose();
     }
 }

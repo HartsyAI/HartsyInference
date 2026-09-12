@@ -148,10 +148,13 @@ public sealed class Yue2ParityTests
         _out.WriteLine($"backend: {backendName}");
         using IKvCache cache = lm.CreateCache(prefix.Length + steps + 1);
 
-        float[] logits = Yue2ArLm.AllocateLogits();
-        lm.Forward(backend, prefix, posStart: 0, cache, logits);
+        // The semantic pass projects only its own head window, so the fixture's full-vocabulary rows are compared
+        // over the matching slice — which is every logit this phase's sampler can reach.
+        (int baseId, int width) = Yue2Protocol.Window(Yue2Phase.Semantic);
+        float[] logits = Yue2ArLm.AllocateLogits(Yue2Phase.Semantic);
+        lm.Forward(backend, prefix, posStart: 0, cache, logits, Yue2Phase.Semantic);
         ReadOnlySpan<float> expected = expectedLogits.AsReadOnlySpan<float>();
-        AssertLogitsAgree(expected[..Yue2Protocol.VocabSize], logits, "prefill");
+        AssertLogitsAgree(expected.Slice(baseId, width), logits, "prefill");
 
         List<int> produced = [];
         for (int step = 0; step < steps; step++)
@@ -159,8 +162,8 @@ public sealed class Yue2ParityTests
             // Greedy over the codec span, mirroring the reference dump's temperature-0 mask.
             int best = ArgMaxCodec(logits);
             produced.Add(best);
-            lm.Forward(backend, [best], posStart: prefix.Length + step, cache, logits);
-            AssertLogitsAgree(expected.Slice((step + 1) * Yue2Protocol.VocabSize, Yue2Protocol.VocabSize), logits, $"step {step}");
+            lm.Forward(backend, [best], posStart: prefix.Length + step, cache, logits, Yue2Phase.Semantic);
+            AssertLogitsAgree(expected.Slice((step + 1) * Yue2Protocol.VocabSize + baseId, width), logits, $"step {step}");
         }
         Assert.Equal(expectedTokens.AsReadOnlySpan<int>().ToArray(), produced);
         _out.WriteLine($"greedy tokens matched: [{string.Join(", ", produced.Take(4))}, …]");
@@ -195,8 +198,8 @@ public sealed class Yue2ParityTests
         using IBackend backend = CreateBackend(out string backendName);
         _out.WriteLine($"backend: {backendName}, prefix={arTokens.Length} tokens");
         using IKvCache cache = lm.CreateCache(arTokens.Length + 1);
-        float[] logits = Yue2ArLm.AllocateLogits();
-        lm.Forward(backend, arTokens, posStart: 0, cache, logits);
+        float[] logits = Yue2ArLm.AllocateLogits(Yue2Phase.Semantic);
+        lm.Forward(backend, arTokens, posStart: 0, cache, logits, Yue2Phase.Semantic);
 
         (Tensor Key, Tensor Value)[] prefix = lm.ExportPrefix(cache);
         Assert.Equal(lm.NumLayers, prefix.Length);
@@ -301,8 +304,8 @@ public sealed class Yue2ParityTests
         using Yue2ArLm lm = new(Yue2Config.V1);
         lm.LoadWeights(weights.Ar);
         using IKvCache cache = lm.CreateCache(arTokens.Length);
-        float[] logits = Yue2ArLm.AllocateLogits();
-        lm.Forward(backend, arTokens, posStart: 0, cache, logits);
+        float[] logits = Yue2ArLm.AllocateLogits(Yue2Phase.Semantic);
+        lm.Forward(backend, arTokens, posStart: 0, cache, logits, Yue2Phase.Semantic);
         (Tensor Key, Tensor Value)[] arPrefix = lm.ExportPrefix(cache);
 
         using Yue2AcousticTransformer acoustic = new(Yue2Config.V1);
@@ -411,7 +414,7 @@ public sealed class Yue2ParityTests
         // The semantic phase may draw only codec ids; everything else is masked out.
         float[] semantic = [.. scores];
         Yue2LogitProcessor.Apply(semantic, Yue2Sampling.Semantic with { MinTokens = 0, TopK = 5, TopP = 1f, RepetitionPenalty = 1f },
-            history: [], step: 0, Yue2Phase.Semantic, legacyOff: false);
+            history: [], step: 0, Yue2Phase.Semantic, legacyOff: false, baseId: 0);
         for (int i = 0; i < Yue2Protocol.CodecOffset; i++)
         {
             if (i != Yue2Protocol.MusicEnd) Assert.True(float.IsNegativeInfinity(semantic[i]), $"id {i} should be masked");
@@ -421,7 +424,7 @@ public sealed class Yue2ParityTests
         // Under min_tokens the end token cannot be drawn.
         float[] gated = [.. scores];
         Yue2LogitProcessor.Apply(gated, Yue2Sampling.Semantic with { MinTokens = 200, TopK = 5, TopP = 1f, RepetitionPenalty = 1f },
-            history: [], step: 3, Yue2Phase.Semantic, legacyOff: false);
+            history: [], step: 3, Yue2Phase.Semantic, legacyOff: false, baseId: 0);
         Assert.True(float.IsNegativeInfinity(gated[Yue2Protocol.MusicEnd]));
 
         // The windowed penalty is penalty^count over the window, and only over the window.
@@ -430,7 +433,7 @@ public sealed class Yue2ParityTests
         int stale = Yue2Protocol.CodecOffset + 6;
         int[] history = [stale, .. Enumerable.Repeat(repeated, 3)];
         Yue2LogitProcessor.Apply(penalised, Yue2Sampling.Semantic with { MinTokens = 0, TopK = int.MaxValue, TopP = 1f, RepetitionPenalty = 2f, PenaltyWindow = 3 },
-            history, step: 4, Yue2Phase.Semantic, legacyOff: false);
+            history, step: 4, Yue2Phase.Semantic, legacyOff: false, baseId: 0);
         float raw = scores[repeated];
         Assert.Equal(raw > 0 ? raw / 8f : raw * 8f, penalised[repeated], 4);
         Assert.Equal(scores[stale], penalised[stale], 4);   // outside the 3-wide window
@@ -438,20 +441,23 @@ public sealed class Yue2ParityTests
         // The historical off path keeps three sorted entries out of the nucleus cut instead of one.
         float[] modern = [.. scores], legacy = [.. scores];
         Yue2Sampling nucleus = Yue2Sampling.Semantic with { MinTokens = 0, TopK = int.MaxValue, TopP = 1e-6f, RepetitionPenalty = 1f, Temperature = 1f };
-        Yue2LogitProcessor.Apply(modern, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: false);
-        Yue2LogitProcessor.Apply(legacy, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: true);
+        Yue2LogitProcessor.Apply(modern, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: false, baseId: 0);
+        Yue2LogitProcessor.Apply(legacy, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: true, baseId: 0);
         Assert.True(legacy.Count(float.IsFinite) > modern.Count(float.IsFinite));
     }
 
-    private static int ArgMaxCodec(ReadOnlySpan<float> logits)
+    /// <summary>Greedy over the codec span of a semantic-window logit buffer; returns the absolute id.</summary>
+    private static int ArgMaxCodec(ReadOnlySpan<float> window)
     {
-        int best = Yue2Protocol.CodecOffset;
+        int baseId = Yue2Protocol.Window(Yue2Phase.Semantic).Base;
+        int start = Yue2Protocol.CodecOffset - baseId;
+        int best = start;
         float bestValue = float.NegativeInfinity;
-        for (int i = Yue2Protocol.CodecOffset; i < Yue2Protocol.CodecOffset + Yue2Protocol.CodecSize; i++)
+        for (int i = start; i < start + Yue2Protocol.CodecSize; i++)
         {
-            if (logits[i] > bestValue) { bestValue = logits[i]; best = i; }
+            if (window[i] > bestValue) { bestValue = window[i]; best = i; }
         }
-        return best;
+        return best + baseId;
     }
 
     /// <summary>The reference runs BF16 weights through torch's kernels and we run our own, so the bar is

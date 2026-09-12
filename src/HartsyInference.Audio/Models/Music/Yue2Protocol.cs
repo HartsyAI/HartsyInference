@@ -59,6 +59,18 @@ public static class Yue2Protocol
     /// <summary>Maximum sequence the checkpoint was trained to attend over. Prefix plus generation budget must fit.</summary>
     public const int Context = 24_576;
 
+    /// <summary>The smallest contiguous id window a phase's sampler can ever draw from, as <c>(first id, count)</c>.
+    /// <see cref="Yue2LogitProcessor"/> masks everything outside the phase's span to -inf before sampling, so the
+    /// semantic pass projects, copies back and scans 184,704 logits to choose among 32,769 — 5.6x the bandwidth it
+    /// can use. Sampling works in window coordinates (<c>id - Base</c>) and the drawn index is offset back.</summary>
+    /// <remarks>The semantic window is exact: <see cref="MusicEnd"/> sits immediately below <see cref="CodecOffset"/>,
+    /// so the end token and the whole codec span are one contiguous run. The ABC window is the smallest contiguous
+    /// run <i>covering</i> its span — <c>[0, Eod)</c> plus the far-away <see cref="AbcEnd"/> — so it still holds ids
+    /// the mask rejects, and only shortens the read-back, not the projection.</remarks>
+    public static (int Base, int Count) Window(Yue2Phase phase) => phase == Yue2Phase.Abc
+        ? (0, AbcEnd + 1)
+        : (MusicEnd, CodecOffset + CodecSize - MusicEnd);
+
     /// <summary>Semantic tokens (and latent frames) per second of audio.</summary>
     public const int FramesPerSecond = 25;
 

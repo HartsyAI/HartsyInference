@@ -6,6 +6,28 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.70
+
+- Audio: YuE2's autoregressive passes project and sample only the contiguous id window their phase can draw from.
+  Every id outside a phase's span is masked to -inf before sampling, so the semantic pass was spending a
+  184,704-wide head GEMM, a 739 KB device-to-host copy and ~8 full-vocabulary host scans per token to choose among
+  32,769 candidates. The semantic head is now an owned BF16 row-slice (134 MB) covering `[MusicEnd, CodecOffset +
+  CodecSize)` and the sampler works in window coordinates, so all three costs shrink 5.6x. Measured on a
+  236-second song: the semantic pass goes 90.1 to 105.3 tok/s (65.5s to 56.1s) and the whole generate 119.0s to
+  108.9s. The ABC phase keeps the full projection — its span is not contiguous — but shortens its read-back.
+- Audio: the six YuE2 parity gates now check the semantic phase over its head window rather than the full
+  vocabulary, which is every logit that phase's sampler can reach; A3's greedy tokens still match the reference.
+
+### Measured and rejected
+
+- CUDA-graph decode for YuE2's AR is a **23% regression** (105.3 to 81.1 tok/s) and was not kept. Capture succeeds,
+  but the win it targets is not there: eager decode's ~500 per-token kernel launches already overlap with GPU
+  execution, so collapsing them buys nothing, while the device-position graph ops are slower than the eager
+  kernels for this geometry. The 6.5 us/launch cost measured from a tiny-kernel loop only bites when the GPU is
+  idle — it is not a per-token tax on a decode step that keeps the device busy.
+- An F16 KV cache for the AR changes the per-token body cost by 0.8% (9.076 to 9.001 ms), so YuE2's attention is
+  not KV-bandwidth-bound at song-length contexts and `KvCaches.F16Enabled` is not a lever here.
+
 ## alpha.69
 
 - Audio: YuE2's acoustic feed-forward runs its activations at F16 where the backend has F16 kernels. Its weights

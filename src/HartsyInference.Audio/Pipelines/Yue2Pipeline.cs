@@ -173,18 +173,18 @@ public sealed class Yue2Pipeline : IDisposable
 
         using IKvCache positiveCache = _ar.CreateCache(prefix.Length + sampling.MaxTokens);
         using IKvCache? negativeCache = negative is null ? null : _ar.CreateCache(negative.Length + sampling.MaxTokens);
-        float[] conditional = Yue2ArLm.AllocateLogits();
-        float[]? unconditional = negative is null ? null : Yue2ArLm.AllocateLogits();
-        float[] scores = Yue2ArLm.AllocateLogits();
+        int baseId = Yue2Protocol.Window(phase).Base;
+        float[] conditional = Yue2ArLm.AllocateLogits(phase);
+        float[]? unconditional = negative is null ? null : Yue2ArLm.AllocateLogits(phase);
+        float[] scores = Yue2ArLm.AllocateLogits(phase);
 
-        _ar.Forward(backend, prefix, posStart: 0, positiveCache, conditional);
-        if (negative is not null) _ar.Forward(backend, negative, posStart: 0, negativeCache!, unconditional!);
+        _ar.Forward(backend, prefix, posStart: 0, positiveCache, conditional, phase);
+        if (negative is not null) _ar.Forward(backend, negative, posStart: 0, negativeCache!, unconditional!, phase);
 
         uint rng = DeterministicRng.Seed(unchecked((int)seed));
         List<int> history = [];
         int end = phase == Yue2Phase.Abc ? Yue2Protocol.AbcEnd : Yue2Protocol.MusicEnd;
         bool truncated = true;
-
         for (int step = 0; step < sampling.MaxTokens; step++)
         {
             cancel.ThrowIfCancellationRequested();
@@ -199,15 +199,15 @@ public sealed class Yue2Pipeline : IDisposable
             }
 
             Yue2LogitProcessor.Apply(scores, sampling, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(history),
-                step, phase, legacyOff);
-            int token = sampling.Temperature == 0 ? ArgMax(scores) : Draw(scores, ref rng);
+                step, phase, legacyOff, baseId);
+            int token = baseId + (sampling.Temperature == 0 ? ArgMax(scores) : Draw(scores, ref rng));
             onProgress?.Invoke(step + 1, sampling.MaxTokens);
             if (token == end) { truncated = false; break; }
             history.Add(token);
 
             if (step + 1 >= sampling.MaxTokens) break;
-            _ar.Forward(backend, [token], prefix.Length + step, positiveCache, conditional);
-            if (negative is not null) _ar.Forward(backend, [token], negative!.Length + step, negativeCache!, unconditional!);
+            _ar.Forward(backend, [token], prefix.Length + step, positiveCache, conditional, phase);
+            if (negative is not null) _ar.Forward(backend, [token], negative!.Length + step, negativeCache!, unconditional!, phase);
         }
         return (history, truncated);
     }
@@ -229,7 +229,7 @@ public sealed class Yue2Pipeline : IDisposable
 
         // The prefill's logits are never read here — only the KV cache it fills is — but Forward needs somewhere to
         // put them, and at 184704 floats that is 739 KB a chunk if it is re-allocated per iteration.
-        float[] logits = Yue2ArLm.AllocateLogits();
+        float[] logits = Yue2ArLm.AllocateLogits(Yue2Phase.Semantic);
         foreach ((int start, int end) in ranges)
         {
             cancel.ThrowIfCancellationRequested();
@@ -243,7 +243,7 @@ public sealed class Yue2Pipeline : IDisposable
             // Sized to EXACTLY the prefix length: the cache hands back its whole capacity buffer, and the acoustic
             // stack concatenates it onto its own keys, so any unpopulated tail would be attended over.
             using IKvCache cache = _ar.CreateCache(arTokens.Length);
-            _ar.Forward(backend, arTokens, posStart: 0, cache, logits);
+            _ar.Forward(backend, arTokens, posStart: 0, cache, logits, Yue2Phase.Semantic);
             (Tensor Key, Tensor Value)[] arPrefix = _ar.ExportPrefix(cache);
 
             int offset = start * latentDim, length = (end - start) * latentDim;
