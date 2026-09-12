@@ -30,13 +30,26 @@ public sealed unsafe class Q8GemvMicroBench
         return t;
     }
 
-    // (N, K) for one projection: backbone attn q/o (3072x3072), kv (1024x3072), mlp gate/up (8192x3072), down (3072x8192).
+    // (N, K) for one projection. CSM/HeartMuLa: attn q/o 3072x3072, kv 1024x3072, mlp up 8192x3072, down 3072x8192.
+    // YuE2's AR is a different aspect ratio (hidden 2048, intermediate 6144) and its `mlp down` — small N, large K —
+    // is the under-occupied shape the K-split note at CudaKernels.LaunchMulMatVec* calls out, so it is measured here
+    // rather than inferred from the 3072-square case.
     private static readonly (int N, int K, string tag)[] Shapes =
     {
-        (3072, 3072, "attn q/o 3072x3072"),
-        (1024, 3072, "attn kv  1024x3072"),
-        (8192, 3072, "mlp up   8192x3072"),
-        (3072, 8192, "mlp down 3072x8192"),
+        (3072, 3072, "csm  attn q/o 3072x3072"),
+        (1024, 3072, "csm  attn kv  1024x3072"),
+        (8192, 3072, "csm  mlp up   8192x3072"),
+        (3072, 8192, "csm  mlp down 3072x8192"),
+        (2048, 2048, "yue2 attn q/o 2048x2048"),
+        (1024, 2048, "yue2 attn kv  1024x2048"),
+        (6144, 2048, "yue2 mlp up   6144x2048"),
+        (2048, 6144, "yue2 mlp down 2048x6144"),
+        // The 4090 has 72 MB of L2, so every shape above is CACHE-RESIDENT when a micro-benchmark re-reads one
+        // weight 200x in a loop — which is why they report 1500-2900 GB/s, well past the card's ~1 TB/s of DRAM.
+        // Real decode streams a 2.82 GB working set, so nothing is resident. These two exceed L2 and are the only
+        // rows here that measure the kernel's actual DRAM bandwidth.
+        (16384, 4096, "DRAM 16384x4096 (128MB)"),
+        (8192, 8192, "DRAM  8192x8192 (128MB)"),
     };
 
     [Fact]
@@ -51,7 +64,7 @@ public sealed unsafe class Q8GemvMicroBench
         IBackend b = cuda;
         const int warmup = 20, iters = 200;
         _output.WriteLine($"M=1 decode GEMV, weight resident (cached), warmup={warmup} iters={iters}");
-        _output.WriteLine($"{"shape",-22}{"bf16 (µs)",12}{"Q8 Linear",12}{"Q8 QMatMul",12}{"Q8/bf16",10}");
+        _output.WriteLine($"{"shape",-24}{"bf16 (µs)",11}{"bf16 GB/s",11}{"Q8 Linear",11}{"Q8 QMatMul",12}{"Q8/bf16",9}");
 
         foreach ((int N, int K, string tag) in Shapes)
         {
@@ -66,7 +79,9 @@ public sealed unsafe class Q8GemvMicroBench
             double q8LinUs = Time(() => b.Linear(outQ8, input, wQ8, null), cuda, warmup, iters);
             double q8QmmUs = Time(() => b.QuantizedMatMul(outQ8, input, wQ8, null), cuda, warmup, iters);
 
-            _output.WriteLine($"{tag,-22}{bf16us,11:F1}{q8LinUs,11:F1}{q8QmmUs,11:F1}{q8LinUs / bf16us,9:F2}x");
+            // At M=1 the BF16 weight read dominates, so bytes/time is the effective bandwidth the kernel achieves.
+            double bf16GBs = (double)N * K * 2 / (bf16us * 1e-6) / 1e9;
+            _output.WriteLine($"{tag,-24}{bf16us,10:F1}{bf16GBs,10:F0}{q8LinUs,10:F1}{q8QmmUs,11:F1}{q8LinUs / bf16us,8:F2}x");
         }
     }
 
