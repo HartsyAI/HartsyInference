@@ -79,6 +79,7 @@ internal static class MusicCatalog
         [AudioWeightsCatalog.YueId] = YueMusicModel.Descriptor,
         ["heartmula"] = HeartMulaMusicModel.Descriptor,
         ["minimaxmusic3"] = MiniMaxMusic3MusicModel.Descriptor,
+            ["yue2"] = Yue2MusicModel.Descriptor,
         ["stableaudio"] = StableAudioMusicModel.Descriptor,
     };
 

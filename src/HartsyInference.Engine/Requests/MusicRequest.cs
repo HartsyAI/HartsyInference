@@ -97,6 +97,39 @@ public sealed record MusicRequest
     public string LmNegativePrompt { get; init; } = "";
 
     /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3 consumes these today.</summary>
+    /// <summary>YuE2's symbolic-planning mode: <c>full</c> (melody and chords), <c>melody</c> (melody only,
+    /// recommended for covers), or <c>off</c> (straight to audio). Empty takes <c>full</c>.</summary>
+    public string Yue2Cot { get; init; } = "";
+
+    /// <summary>YuE2: an externally supplied or edited ABC score. When set, the planning pass is skipped and this
+    /// score is used verbatim. Ignored when <see cref="Yue2Cot"/> is <c>off</c>.</summary>
+    public string Yue2Abc { get; init; } = "";
+
+    /// <summary>YuE2: sampling temperature for the score planner, which runs far cooler than the semantic pass
+    /// (0.7 against 1.0). The shared <see cref="Temperature"/> applies to the semantic pass only.</summary>
+    public double? Yue2AbcTemperature { get; init; }
+
+    /// <summary>YuE2: nucleus threshold for the score planner (release default 0.9).</summary>
+    public double? Yue2AbcTopP { get; init; }
+
+    /// <summary>YuE2: top-k for the score planner (release default 30).</summary>
+    public int? Yue2AbcTopK { get; init; }
+
+    /// <summary>YuE2: repetition penalty for the score planner (release default 1.005 — far gentler than the
+    /// semantic pass's 1.2, because a score repeats by design).</summary>
+    public double? Yue2AbcRepetitionPenalty { get; init; }
+
+    /// <summary>YuE2: token budget for the score planner (release default 4096).</summary>
+    public int? Yue2AbcMaxTokens { get; init; }
+
+    /// <summary>YuE2: how many recently emitted ids the semantic pass's repetition penalty counts over (release
+    /// default 50; the planner uses 100).</summary>
+    public int? Yue2PenaltyWindow { get; init; }
+
+    /// <summary>YuE2: tokens the semantic pass must emit before it may stop (release default 200), which is what
+    /// stops a song ending a fraction of a second in.</summary>
+    public int? Yue2MinTokens { get; init; }
+
     public LoraStack? Loras { get; init; }
 
     /// <summary>Continuation seed audio: extend this clip forward. Null for none.</summary>
