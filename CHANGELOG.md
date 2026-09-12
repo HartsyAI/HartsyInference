@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.71
+
+- Audio: YuE2's acoustic pass holds one chunk's attention keys and values for the whole ODE solve instead of
+  rebuilding them per velocity evaluation. The AR prefix's K/V are the same on all 64 evaluations of a 32-step
+  midpoint solve, but were being re-concatenated and re-widened to full heads every time — ~8,700 identical rows
+  a layer. They are now written once per chunk, each evaluation appends only its own rows at the tail, and the
+  buffers are stored at F16 where the backend has F16 kernels, which lets the attention take cuDNN's native-F16
+  entry and cast nothing (the F32 route re-narrowed the whole key and value on every call).
+- Audio: YuE2's acoustic RoPE tables are built once per chunk rather than per velocity evaluation. They depend
+  only on the chunk's token span, and building them is a host loop over `tokens * head_dim/2` Pow/Cos/Sin triples
+  — 378,000 of them per evaluation, 64 times a chunk, for identical values.
+- Together the acoustic pass goes 32.0s to 29.8s on a 236-second song and the whole generate 108.9s to 107.2s.
+  The six parity gates still pass, including the acoustic velocity and the full 32-step solve against the
+  reference, so the F16 key/value storage is within the gates' bar.
+
 ## alpha.70
 
 - Audio: YuE2's autoregressive passes project and sample only the contiguous id window their phase can draw from.

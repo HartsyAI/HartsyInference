@@ -89,6 +89,32 @@ public sealed class Yue2AcousticTransformer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(arPrefix);
+        int frameCount = state.Length / _config.LatentDim;
+        using Yue2AcousticPrefix prefix = BuildPrefix(backend, arPrefix, arLength, frameCount + 2);
+        Velocity(backend, state, rawTimestep, arPrefix, arLength, velocity, prefix);
+    }
+
+    /// <summary>Latent channels per frame, so a caller holding flat <c>[frames * 64]</c> state can recover the
+    /// frame count this stack will pad to.</summary>
+    internal int LatentDim => _config.LatentDim;
+
+    /// <summary>Allocates one chunk's attention buffers, writing the invariant AR prefix rows once.</summary>
+    internal Yue2AcousticPrefix BuildPrefix(IBackend backend, (Tensor Key, Tensor Value)[] arPrefix, int arLength, int tokens)
+    {
+        int dim = _config.Nar.HeadDim;
+        // RoPE positions continue after the prefix — unlike the learned embedding, which restarts at 0.
+        Tensor cos = new(new TensorShape(tokens, dim), DType.F32);
+        Tensor sin = new(new TensorShape(tokens, dim), DType.F32);
+        BuildRope(cos, sin, tokens, arLength, dim, _config.Nar.RopeTheta);
+        return new Yue2AcousticPrefix(backend, arPrefix, arLength, tokens, _config.Nar.NumAttentionHeads,
+            _config.Nar.NumKeyValueHeads, dim, backend.SupportsF16Activations ? DType.F16 : DType.F32, cos, sin);
+    }
+
+    internal void Velocity(IBackend backend, ReadOnlySpan<float> state, float rawTimestep,
+        (Tensor Key, Tensor Value)[] arPrefix, int arLength, Span<float> velocity, Yue2AcousticPrefix prefix)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(arPrefix);
         ThrowIfDisposed();
         if (_vae2llmWeight is null) throw new InvalidOperationException("YuE2 acoustic weights are not loaded.");
         if (arPrefix.Length != NumLayers)
@@ -126,13 +152,11 @@ public sealed class Yue2AcousticTransformer : IDisposable
         BroadcastAddRow(positions, timeEmbedding, tokens, hidden);
         AddInPlace(backend, x, positions);
 
-        // RoPE positions continue after the prefix — unlike the learned embedding above, which restarts at 0.
-        using Tensor cos = new(new TensorShape(tokens, dim), DType.F32);
-        using Tensor sin = new(new TensorShape(tokens, dim), DType.F32);
-        BuildRope(cos, sin, tokens, arLength, dim, _config.Nar.RopeTheta);
+        Tensor cos = prefix.Cos, sin = prefix.Sin;
 
         float scale = 1f / MathF.Sqrt(dim);
         float eps = _config.Nar.RmsNormEps;
+        DType kv = prefix.Dtype;
         for (int i = 0; i < _layers.Length; i++)
         {
             Layer layer = _layers[i];
@@ -166,11 +190,6 @@ public sealed class Yue2AcousticTransformer : IDisposable
             backend.Permute0213(kHeadMajor, kNormed, tokens, kvHeads, dim);
             backend.Permute0213(vHeadMajor, v, tokens, kvHeads, dim);
 
-            int kvLength = arLength + tokens;
-            using Tensor keys = new(new TensorShape(1, kvHeads, kvLength, dim), DType.F32);
-            using Tensor values = new(new TensorShape(1, kvHeads, kvLength, dim), DType.F32);
-            backend.Concat(keys, [arPrefix[i].Key, kHeadMajor], dim: 2);
-            backend.Concat(values, [arPrefix[i].Value, vHeadMajor], dim: 2);
 
             // Every acoustic query row attends over the whole prefix, so this is prefill-shaped: thousands of
             // query rows, not the single row IBackend.FlashAttention's kernel is tuned for. Measured at 2308
@@ -181,19 +200,35 @@ public sealed class Yue2AcousticTransformer : IDisposable
             // not the ~89% it was, and at 5.3 ms a call it runs near the card's BF16 peak — what is left to win
             // here is the F32 activations in the projections and the per-forward allocation churn, not the
             // attention kernel.
-            using Tensor keysFull = new(new TensorShape(1, heads, kvLength, dim), DType.F32);
-            using Tensor valuesFull = new(new TensorShape(1, heads, kvLength, dim), DType.F32);
-            backend.RepeatKvHeads(keysFull, keys, kvHeads, heads / kvHeads);
-            backend.RepeatKvHeads(valuesFull, values, kvHeads, heads / kvHeads);
+            // Only this evaluation's own rows are new; the prefix rows were written once when the chunk's
+            // buffers were built. The append narrows to the buffer's dtype, so the staging stays F32.
+            using Tensor wideKey = new(new TensorShape(1, heads, tokens, dim), DType.F32);
+            using Tensor wideValue = new(new TensorShape(1, heads, tokens, dim), DType.F32);
+            backend.RepeatKvHeads(wideKey, kHeadMajor, kvHeads, heads / kvHeads);
+            backend.RepeatKvHeads(wideValue, vHeadMajor, kvHeads, heads / kvHeads);
+            backend.KvCacheAppend(prefix.Keys(i), wideKey, arLength);
+            backend.KvCacheAppend(prefix.Values(i), wideValue, arLength);
 
-            using Tensor attention = new(new TensorShape(1, heads, tokens, dim), DType.F32);
-            backend.ScaledDotProductAttention(attention, qHeadMajor, keysFull, valuesFull, null, scale, allowF16: true);
+            // Q, the keys, the values and the output all at the buffers' dtype: at F16 that is cuDNN's native
+            // entry, which casts nothing, where the F32 route re-narrows the whole key and value every call.
+            Tensor query = qHeadMajor;
+            using Tensor? queryCast = kv == DType.F32 ? null : new Tensor(new TensorShape(1, heads, tokens, dim), kv);
+            if (queryCast is not null) { backend.CastToF16(queryCast, qHeadMajor); query = queryCast; }
 
-            using Tensor tokenMajor = new(new TensorShape(1, tokens, heads * dim), DType.F32);
+            using Tensor attention = new(new TensorShape(1, heads, tokens, dim), kv);
+            backend.ScaledDotProductAttention(attention, query, prefix.Keys(i), prefix.Values(i), null, scale, allowF16: true);
+
+            using Tensor tokenMajor = new(new TensorShape(1, tokens, heads * dim), kv);
             backend.Permute0213(tokenMajor, attention, heads, tokens, dim);
-            using Tensor projected = new(new TensorShape(1, tokens, hidden), DType.F32);
+            using Tensor projected = new(new TensorShape(1, tokens, hidden), kv);
             backend.Linear(projected, tokenMajor, layer.OWeight!, null);
-            AddInPlace(backend, x, projected);
+            if (kv == DType.F32) { AddInPlace(backend, x, projected); }
+            else
+            {
+                using Tensor projected32 = new(new TensorShape(1, tokens, hidden), DType.F32);
+                backend.CastToF32(projected32, projected);
+                AddInPlace(backend, x, projected32);
+            }
 
             // The feed-forward is the widest thing here — two [hidden, 6144] projections and a [6144, hidden]
             // — and the weights are already BF16, so running its activations at F16 halves the traffic and lets

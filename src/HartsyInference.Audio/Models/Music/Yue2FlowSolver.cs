@@ -31,17 +31,21 @@ public static class Yue2FlowSolver
         float[] velocity = new float[state.Length];
         float[] midpoint = new float[state.Length];
         double dt = 1.0 / steps;
+        // The AR prefix's keys and values are the same for every evaluation in this solve, so they are widened
+        // and stored once here rather than rebuilt on each of the 2 x steps velocity calls.
+        using Yue2AcousticPrefix prefix = transformer.BuildPrefix(backend, arPrefix, arLength,
+            noise.Length / transformer.LatentDim + 2);
 
         for (int step = 0; step < steps; step++)
         {
             cancel.ThrowIfCancellationRequested();
             double t = 1.0 - step * dt;
 
-            transformer.Velocity(backend, state, LogitTimestep(t), arPrefix, arLength, velocity);
+            transformer.Velocity(backend, state, LogitTimestep(t), arPrefix, arLength, velocity, prefix);
             for (int i = 0; i < state.Length; i++) midpoint[i] = state[i] - velocity[i] * (float)(dt / 2);
 
             cancel.ThrowIfCancellationRequested();
-            transformer.Velocity(backend, midpoint, LogitTimestep(t - dt / 2), arPrefix, arLength, velocity);
+            transformer.Velocity(backend, midpoint, LogitTimestep(t - dt / 2), arPrefix, arLength, velocity, prefix);
             for (int i = 0; i < state.Length; i++) state[i] -= velocity[i] * (float)dt;
 
             onProgress?.Invoke(step + 1, steps);
