@@ -47,4 +47,21 @@ public record OobleckConfig
         DownsamplingRatios = [2, 4, 4, 6, 10],
         SamplingRate = 48000,
     };
+
+    /// <summary>YuE2 — stereo 48 kHz, 64-d latents @ 25 Hz (hop 1920), but over <b>six</b> stages with a narrow
+    /// 64-channel stem instead of the usual five and 128. Derived from the decoder's transposed-conv kernel widths
+    /// in <c>m-a-p/YuE2-Vae</c> (12, 10, 8, 8, 4, 4 = 2·stride).</summary>
+    /// <remarks>The stride-5 stage is the first odd ratio any Oobleck checkpoint in this tree has used. Upstream
+    /// leaves <c>output_padding</c> at zero, so that stage emits <c>5L − 1</c> rather than <c>5L</c> frames and a
+    /// whole decode is slightly shorter than <c>frames × 1920</c> — 8 frames give 15,296 samples, not 15,360. Our
+    /// decoder's existing length rule already computes this; ComfyUI's port adds <c>output_padding = stride % 2</c>
+    /// and does not match the model's own decoder.</remarks>
+    public static OobleckConfig Yue2 => new()
+    {
+        EncoderHiddenSize = 64,
+        DownsamplingRatios = [2, 2, 4, 4, 5, 6],
+        ChannelMultiples = [1, 2, 4, 8, 16, 32],
+        DecoderChannels = 64,
+        SamplingRate = 48000,
+    };
 }

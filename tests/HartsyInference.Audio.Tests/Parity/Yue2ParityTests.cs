@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using HartsyInference.Audio.Models.Codecs.Oobleck;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -265,6 +266,136 @@ public sealed class Yue2ParityTests
         Assert.True(correlation > 0.999, $"{label}: correlation {correlation:F6} below 0.999");
         Assert.True(normalisedRms < 0.05, $"{label}: normalised RMS {normalisedRms:P3} exceeds 5%");
         return correlation;
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void AcousticVelocityAndOde_MatchReference()
+    {
+        if (Gated(out string checkpoint, out string referenceDir)) return;
+        string fixtures = Path.Combine(referenceDir, "yue2_fixtures.safetensors");
+        if (!File.Exists(fixtures)) return;
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(checkpoint);
+        using Yue2Weights weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
+
+        using SafeTensorsLoader reference = new();
+        reference.Load(fixtures);
+        using Tensor arTokensTensor = reference.GetTensor("ar_kv.ar_tokens");
+        using Tensor noiseTensor = reference.GetTensor("nar.noise");
+        using Tensor rawTimestepTensor = reference.GetTensor("nar.raw_t");
+        using Tensor expectedVelocity = reference.GetTensor("nar.velocity");
+        using Tensor expectedLatents = reference.GetTensor("nar.latents");
+        using Tensor odeStepsTensor = reference.GetTensor("nar.ode_steps");
+        int[] arTokens = [.. arTokensTensor.AsReadOnlySpan<int>()];
+        ReadOnlySpan<float> noise = noiseTensor.AsReadOnlySpan<float>();
+        float rawTimestep = rawTimestepTensor.AsReadOnlySpan<float>()[0];
+        int odeSteps = odeStepsTensor.AsReadOnlySpan<int>()[0];
+
+        using IBackend backend = CreateBackend(out string backendName);
+        _out.WriteLine($"backend: {backendName}, ar={arTokens.Length} tokens, {noise.Length / 64} latent frames, {odeSteps} ODE steps");
+
+        // The prefix cache is sized to EXACTLY the AR length so its buffers carry no unpopulated tail — the
+        // acoustic stack concatenates them straight onto its own keys.
+        using Yue2ArLm lm = new(Yue2Config.V1);
+        lm.LoadWeights(weights.Ar);
+        using IKvCache cache = lm.CreateCache(arTokens.Length);
+        float[] logits = Yue2ArLm.AllocateLogits();
+        lm.Forward(backend, arTokens, posStart: 0, cache, logits);
+        (Tensor Key, Tensor Value)[] arPrefix = lm.ExportPrefix(cache);
+
+        using Yue2AcousticTransformer acoustic = new(Yue2Config.V1);
+        acoustic.LoadWeights(weights.Nar);
+
+        // B1: one velocity evaluation on the reference's own state and timestep.
+        float[] velocity = new float[noise.Length];
+        acoustic.Velocity(backend, noise, rawTimestep, arPrefix, arTokens.Length, velocity);
+        AssertAgree(expectedVelocity.AsReadOnlySpan<float>(), velocity, "velocity at t=1");
+
+        // B2: the full 32-step midpoint solve from the same noise.
+        float[] latents = Yue2FlowSolver.Solve(backend, acoustic, noise, arPrefix, arTokens.Length, odeSteps);
+        AssertAgree(expectedLatents.AsReadOnlySpan<float>(), latents, $"{odeSteps}-step midpoint solve");
+    }
+
+    /// <summary>Correlation plus normalised RMS, the same bar the KV gate uses and for the same reason: the
+    /// reference runs BF16 where we run F32.</summary>
+    private void AssertAgree(ReadOnlySpan<float> expected, ReadOnlySpan<float> actual, string label)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        double sumExpected = 0, sumActual = 0;
+        for (int i = 0; i < expected.Length; i++) { sumExpected += expected[i]; sumActual += actual[i]; }
+        double meanExpected = sumExpected / expected.Length, meanActual = sumActual / actual.Length;
+        double cov = 0, varExpected = 0, varActual = 0, squaredError = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double a = expected[i] - meanExpected, b = actual[i] - meanActual;
+            cov += a * b; varExpected += a * a; varActual += b * b;
+            squaredError += (expected[i] - actual[i]) * (expected[i] - actual[i]);
+        }
+        double correlation = cov / Math.Sqrt(varExpected * varActual);
+        double normalisedRms = Math.Sqrt(squaredError / expected.Length) / Math.Sqrt(varExpected / expected.Length);
+        _out.WriteLine($"{label}: corr={correlation:F6} nrms={normalisedRms:P3}");
+        Assert.True(correlation > 0.999, $"{label}: correlation {correlation:F6} below 0.999");
+        Assert.True(normalisedRms < 0.05, $"{label}: normalised RMS {normalisedRms:P3} exceeds 5%");
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void VaeDecode_MatchesReference()
+    {
+        if (Gated(out string checkpoint, out string referenceDir)) return;
+        string fixtures = Path.Combine(referenceDir, "yue2_fixtures.safetensors");
+        if (!File.Exists(fixtures)) return;
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(checkpoint);
+        using Yue2Weights weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
+
+        using SafeTensorsLoader reference = new();
+        reference.Load(fixtures);
+        using Tensor latents = reference.GetTensor("vae.latents");
+        using Tensor expectedAudio = reference.GetTensor("vae.audio");
+        using Tensor sampleRateTensor = reference.GetTensor("vae.sample_rate");
+        int frames = (int)latents.Shape[0], channels = 64;
+
+        OobleckConfig config = OobleckConfig.Yue2;
+        Assert.Equal(1920, config.HopLength);
+        Assert.Equal(sampleRateTensor.AsReadOnlySpan<int>()[0], config.SamplingRate);
+
+        OobleckVae vae = new(config);
+        vae.LoadWeights(weights.Vae);
+        using IBackend backend = CreateBackend(out string backendName);
+
+        // The decoder wants [1, channels, frames]; the fixture is frame-major [frames, channels].
+        using Tensor input = new(new TensorShape(1, channels, frames), DType.F32);
+        ReadOnlySpan<float> source = latents.AsReadOnlySpan<float>();
+        Span<float> destination = input.AsSpan<float>();
+        for (int f = 0; f < frames; f++)
+        {
+            for (int c = 0; c < channels; c++) destination[c * frames + f] = source[f * channels + c];
+        }
+
+        using Tensor audio = vae.Decode(backend, input);
+        int produced = (int)audio.Shape[audio.Shape.Rank - 1];
+        int expectedSamples = (int)expectedAudio.Shape[0];
+        _out.WriteLine($"backend: {backendName}, {frames} frames -> {produced} samples (reference {expectedSamples}, frames*hop would be {frames * config.HopLength})");
+
+        // Upstream leaves output_padding at zero, so the stride-5 stage loses a frame: the decode is SHORTER than
+        // frames * 1920. A port that follows ComfyUI's added output_padding lands on 15360 here instead.
+        Assert.Equal(expectedSamples, produced);
+        Assert.True(produced < frames * config.HopLength, "the odd-stride stage should shorten the decode");
+
+        // The decoder emits [1, channels, samples]; the fixture is [samples, channels].
+        ReadOnlySpan<float> ours = audio.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> theirs = expectedAudio.AsReadOnlySpan<float>();
+        float[] interleaved = new float[produced * 2];
+        for (int sample = 0; sample < produced; sample++)
+        {
+            interleaved[sample * 2] = ours[sample];
+            interleaved[sample * 2 + 1] = ours[produced + sample];
+        }
+        AssertAgree(theirs[..(produced * 2)], interleaved, "VAE decode");
     }
 
     [Fact]
