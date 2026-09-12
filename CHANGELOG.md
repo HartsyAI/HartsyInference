@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.69
+
+- Audio: YuE2's acoustic feed-forward runs its activations at F16 where the backend has F16 kernels. Its weights
+  were already BF16, so an F32 activation was being cast down on every one of the three projections; at F16 the
+  GEMM stays 16-bit end to end. Worth ~1.2s on a full-length song's acoustic pass (33.0s to 31.8s) — less than an
+  isolated op benchmark predicted, which is worth recording: op timings that reuse warm tensors overstate what the
+  same change does in situ. Parity improved rather than degraded (velocity corr 0.999809 to 0.999825, nrms 1.96%
+  to 1.88%), as expected — the release runs the whole transformer in bfloat16, so this moves toward its numerics.
+  The residual stays F32; it accumulates over 28 layers and rejoining it costs one 0.08 ms cast.
+
 ## alpha.68
 
 - Audio: YuE2's acoustic stack ran its attention through `IBackend.FlashAttention`, whose kernel is tuned for LLM
