@@ -227,6 +227,9 @@ public sealed class Yue2Pipeline : IDisposable
         float[] latents = new float[noise.Length];
         int stepsDone = 0, stepsTotal = ranges.Length * request.OdeSteps;
 
+        // The prefill's logits are never read here — only the KV cache it fills is — but Forward needs somewhere to
+        // put them, and at 184704 floats that is 739 KB a chunk if it is re-allocated per iteration.
+        float[] logits = Yue2ArLm.AllocateLogits();
         foreach ((int start, int end) in ranges)
         {
             cancel.ThrowIfCancellationRequested();
@@ -240,7 +243,6 @@ public sealed class Yue2Pipeline : IDisposable
             // Sized to EXACTLY the prefix length: the cache hands back its whole capacity buffer, and the acoustic
             // stack concatenates it onto its own keys, so any unpopulated tail would be attended over.
             using IKvCache cache = _ar.CreateCache(arTokens.Length);
-            float[] logits = Yue2ArLm.AllocateLogits();
             _ar.Forward(backend, arTokens, posStart: 0, cache, logits);
             (Tensor Key, Tensor Value)[] arPrefix = _ar.ExportPrefix(cache);
 

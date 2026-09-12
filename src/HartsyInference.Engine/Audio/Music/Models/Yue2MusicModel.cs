@@ -100,7 +100,15 @@ internal static class Yue2MusicModel
             {
                 Logs.Warning("[YuE2] the song reached its token budget before ending naturally; raise the duration for a complete take.");
             }
-            return MusicAudio.Stereo(result.Left, result.Right);
+            // A caller asking for a duration the token budget cannot cover gets a song that stops mid-phrase, so both
+            // truncation flags travel with the audio rather than only reaching a server-side log.
+            Dictionary<string, string> meta = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["truncated"] = result.SemanticTruncated ? "true" : "false",
+                ["abcTruncated"] = result.AbcTruncated ? "true" : "false",
+            };
+            if (result.Abc is { Length: > 0 } score) meta["abc"] = score;
+            return MusicAudio.Stereo(result.Left, result.Right) with { Meta = meta };
         }
 
         return new MusicRunner(Yue2Config.V1.SampleRate, Synth, pipeline, weights, loader);
@@ -111,12 +119,15 @@ internal static class Yue2MusicModel
     {
         string directory = AudioModelRoot.WeightsDirectory(Category, "yue2");
         if (!Directory.Exists(directory)) return null;
-        foreach (string candidate in Directory.EnumerateFiles(directory, "*.safetensors", SearchOption.TopDirectoryOnly))
-        {
-            // Prefer the BF16 build when several are present; the quant repack is not wired yet.
-            if (!candidate.Contains("int8", StringComparison.OrdinalIgnoreCase)) return candidate;
-        }
-        return null;
+        // The quant repack is not wired yet, so it is never a candidate. Among the rest the canonical release name
+        // wins and anything else is taken in sorted order — enumeration order is the filesystem's, and picking a
+        // different checkpoint run to run would be indistinguishable from the model drifting.
+        List<string> candidates = [.. Directory.EnumerateFiles(directory, "*.safetensors", SearchOption.TopDirectoryOnly)
+            .Where(f => !Path.GetFileName(f).Contains("int8", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => f, StringComparer.Ordinal)];
+        string preferred = Path.GetFileName(Bf16File);
+        return candidates.FirstOrDefault(f => Path.GetFileName(f).Equals(preferred, StringComparison.OrdinalIgnoreCase))
+            ?? candidates.FirstOrDefault();
     }
 
     /// <summary>Maps the engine's generic music request onto YuE2's own knobs.</summary>
