@@ -7,6 +7,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.Cuda;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -40,6 +41,28 @@ public sealed class Yue2ParityTests
         referenceDir = ReferenceDir ?? "";
         return checkpoint.Length == 0 || !File.Exists(checkpoint)
             || referenceDir.Length == 0 || !Directory.Exists(referenceDir);
+    }
+
+    /// <summary>CUDA when a device and PTX are present. The CUDA path is different code — fused QKV GEMV, graph
+    /// decode, a BF16 head GEMM — so a CPU-only parity run proves nothing about the backend that ships.
+    /// <c>YUE2_FORCE_CPU=1</c> pins the host path.</summary>
+    private static IBackend CreateBackend(out string name)
+    {
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (Environment.GetEnvironmentVariable("YUE2_FORCE_CPU") != "1" && Directory.Exists(ptxDir))
+        {
+            try
+            {
+                name = "CUDA";
+                return new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+            }
+            catch (Exception)
+            {
+                // fall through to the host path
+            }
+        }
+        name = "CPU";
+        return new CpuBackend();   // tier-lint: guarded
     }
 
     private static JsonElement Protocol(string referenceDir)
@@ -107,7 +130,7 @@ public sealed class Yue2ParityTests
 
         using SafeTensorsLoader loader = new();
         loader.Load(checkpoint);
-        Yue2Weights weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
+        using Yue2Weights weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
         _out.WriteLine($"converted: ar={weights.Ar.Count} nar={weights.Nar.Count} vae={weights.Vae.Count}");
 
         using SafeTensorsLoader reference = new();
@@ -120,10 +143,12 @@ public sealed class Yue2ParityTests
 
         using Yue2ArLm lm = new(Yue2Config.V1);
         lm.LoadWeights(weights.Ar);
-        IBackend backend = new CpuBackend();
+        using IBackend backend = CreateBackend(out string backendName);
+        _out.WriteLine($"backend: {backendName}");
         using IKvCache cache = lm.CreateCache(prefix.Length + steps + 1);
 
-        float[] logits = lm.Forward(backend, prefix, posStart: 0, cache);
+        float[] logits = Yue2ArLm.AllocateLogits();
+        lm.Forward(backend, prefix, posStart: 0, cache, logits);
         ReadOnlySpan<float> expected = expectedLogits.AsReadOnlySpan<float>();
         AssertLogitsAgree(expected[..Yue2Protocol.VocabSize], logits, "prefill");
 
@@ -133,11 +158,113 @@ public sealed class Yue2ParityTests
             // Greedy over the codec span, mirroring the reference dump's temperature-0 mask.
             int best = ArgMaxCodec(logits);
             produced.Add(best);
-            logits = lm.Forward(backend, [best], posStart: prefix.Length + step, cache);
+            lm.Forward(backend, [best], posStart: prefix.Length + step, cache, logits);
             AssertLogitsAgree(expected.Slice((step + 1) * Yue2Protocol.VocabSize, Yue2Protocol.VocabSize), logits, $"step {step}");
         }
         Assert.Equal(expectedTokens.AsReadOnlySpan<int>().ToArray(), produced);
         _out.WriteLine($"greedy tokens matched: [{string.Join(", ", produced.Take(4))}, …]");
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void ArKvPrefix_MatchesReference()
+    {
+        if (Gated(out string checkpoint, out string referenceDir)) return;
+        string fixtures = Path.Combine(referenceDir, "yue2_fixtures.safetensors");
+        if (!File.Exists(fixtures)) return;
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(checkpoint);
+        using Yue2Weights weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
+
+        using SafeTensorsLoader reference = new();
+        reference.Load(fixtures);
+        using Tensor tokensTensor = reference.GetTensor("ar_kv.ar_tokens");
+        using Tensor expectedKeys = reference.GetTensor("ar_kv.keys");
+        using Tensor expectedValues = reference.GetTensor("ar_kv.values");
+        int[] arTokens = [.. tokensTensor.AsReadOnlySpan<int>()];
+
+        // The reference's chunk is prefix + codec + [MUSIC_END]. The decode loop breaks on the end token BEFORE
+        // feeding it, so the acoustic stage must run one extra forward over MUSIC_END — unconditionally, including
+        // on a run that hit its token budget instead of ending naturally.
+        Assert.Equal(Yue2Protocol.MusicEnd, arTokens[^1]);
+
+        using Yue2ArLm lm = new(Yue2Config.V1);
+        lm.LoadWeights(weights.Ar);
+        using IBackend backend = CreateBackend(out string backendName);
+        _out.WriteLine($"backend: {backendName}, prefix={arTokens.Length} tokens");
+        using IKvCache cache = lm.CreateCache(arTokens.Length + 1);
+        float[] logits = Yue2ArLm.AllocateLogits();
+        lm.Forward(backend, arTokens, posStart: 0, cache, logits);
+
+        (Tensor Key, Tensor Value)[] prefix = lm.ExportPrefix(cache);
+        Assert.Equal(lm.NumLayers, prefix.Length);
+
+        int tokens = arTokens.Length, heads = lm.KvHeads, dim = lm.HeadDim;
+        ReadOnlySpan<float> keys = expectedKeys.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> values = expectedValues.AsReadOnlySpan<float>();
+        double worst = 1.0;
+        for (int layer = 0; layer < prefix.Length; layer++)
+        {
+            // Ours is [1, heads, capacity, dim]; the fixture is [layers, tokens, heads, dim].
+            worst = Math.Min(worst, CompareTransposed(prefix[layer].Key, keys, layer, tokens, heads, dim, $"K L{layer}"));
+            worst = Math.Min(worst, CompareTransposed(prefix[layer].Value, values, layer, tokens, heads, dim, $"V L{layer}"));
+        }
+        _out.WriteLine($"lowest per-layer KV correlation across {prefix.Length} layers: {worst:F6}");
+    }
+
+    /// <summary>Compares a <c>[1, heads, tokens, dim]</c> cache slab against the reference's
+    /// <c>[layers, tokens, heads, dim]</c> dump, returning the largest absolute deviation.</summary>
+    /// <summary>Compares a <c>[1, heads, capacity, dim]</c> cache slab against the reference's
+    /// <c>[layers, tokens, heads, dim]</c> dump, returning the correlation.</summary>
+    /// <remarks>The bar is correlation plus normalised RMS, not worst-element deviation. The reference runs the
+    /// whole forward in BF16 and caches BF16; we run F32 kernels off the same BF16 weights, so the two hidden
+    /// states drift apart layer by layer — by L25 the worst single element differs by ~2% of the tensor scale,
+    /// while the logits those keys produce still agree to correlation 0.99998 with an identical argmax. A layout,
+    /// head-order or RoPE fault destroys correlation outright, which is what this is here to catch.</remarks>
+    private double CompareTransposed(Tensor actual, ReadOnlySpan<float> expected, int layer,
+        int tokens, int heads, int dim, string label)
+    {
+        ReadOnlySpan<float> ours = actual.AsReadOnlySpan<float>();
+        // The cache hands back its WHOLE capacity buffer, not a length-trimmed view, so the token stride is the
+        // capacity rather than the populated length.
+        int capacity = (int)actual.Shape[2];
+        long layerBase = (long)layer * tokens * heads * dim;
+        int count = heads * tokens * dim;
+        double sumA = 0, sumB = 0;
+        for (int h = 0; h < heads; h++)
+        {
+            for (int t = 0; t < tokens; t++)
+            {
+                for (int d = 0; d < dim; d++)
+                {
+                    sumA += ours[(h * capacity + t) * dim + d];
+                    sumB += expected[(int)(layerBase + ((long)t * heads + h) * dim + d)];
+                }
+            }
+        }
+        double meanA = sumA / count, meanB = sumB / count;
+        double cov = 0, varA = 0, varB = 0, sumSquaredError = 0;
+        for (int h = 0; h < heads; h++)
+        {
+            for (int t = 0; t < tokens; t++)
+            {
+                for (int d = 0; d < dim; d++)
+                {
+                    double a = ours[(h * capacity + t) * dim + d];
+                    double b = expected[(int)(layerBase + ((long)t * heads + h) * dim + d)];
+                    cov += (a - meanA) * (b - meanB);
+                    varA += (a - meanA) * (a - meanA);
+                    varB += (b - meanB) * (b - meanB);
+                    sumSquaredError += (a - b) * (a - b);
+                }
+            }
+        }
+        double correlation = cov / Math.Sqrt(varA * varB);
+        double normalisedRms = Math.Sqrt(sumSquaredError / count) / Math.Sqrt(varB / count);
+        Assert.True(correlation > 0.999, $"{label}: correlation {correlation:F6} below 0.999");
+        Assert.True(normalisedRms < 0.05, $"{label}: normalised RMS {normalisedRms:P3} exceeds 5%");
+        return correlation;
     }
 
     [Fact]
@@ -179,7 +306,7 @@ public sealed class Yue2ParityTests
 
         // The historical off path keeps three sorted entries out of the nucleus cut instead of one.
         float[] modern = [.. scores], legacy = [.. scores];
-        Yue2Sampling nucleus = Yue2Sampling.Semantic with { MinTokens = 0, TopK = int.MaxValue, TopP = 0.0001f, RepetitionPenalty = 1f, Temperature = 1f };
+        Yue2Sampling nucleus = Yue2Sampling.Semantic with { MinTokens = 0, TopK = int.MaxValue, TopP = 1e-6f, RepetitionPenalty = 1f, Temperature = 1f };
         Yue2LogitProcessor.Apply(modern, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: false);
         Yue2LogitProcessor.Apply(legacy, nucleus, [], 0, Yue2Phase.Semantic, legacyOff: true);
         Assert.True(legacy.Count(float.IsFinite) > modern.Count(float.IsFinite));

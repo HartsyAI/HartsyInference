@@ -39,12 +39,15 @@ public static class Yue2CheckpointConverter
 
     /// <summary>The three weight sets, in the naming <see cref="GenericTransformer"/> and the Oobleck codec expect.
     /// An unrecognised key throws: a silently dropped weight is a wrong song, not a warning.</summary>
-    public static Yue2Weights Convert(IReadOnlyDictionary<string, Tensor> raw, int layers = 28)
+    public static Yue2Weights Convert(IReadOnlyDictionary<string, Tensor> raw, Yue2Geometry? geometry = null)
     {
         ArgumentNullException.ThrowIfNull(raw);
+        Yue2Geometry shape = geometry ?? Yue2Geometry.Released;
+        int layers = shape.NumHiddenLayers;
         Dictionary<string, Tensor> ar = new(StringComparer.Ordinal);
         Dictionary<string, Tensor> nar = new(StringComparer.Ordinal);
         Dictionary<string, Tensor> vae = new(StringComparer.Ordinal);
+        List<Tensor> owned = [];
         byte[]? tokenizerJson = null;
 
         foreach ((string key, Tensor tensor) in raw)
@@ -54,11 +57,11 @@ public static class Yue2CheckpointConverter
             if (key.StartsWith(VaePrefix, StringComparison.Ordinal))
             {
                 // The Oobleck codec host-reads its weight-norm pairs and Snake alpha/beta as F32 spans.
-                vae[key[VaePrefix.Length..]] = CastToF32IfNeeded(tensor);
+                vae[key[VaePrefix.Length..]] = CastToF32IfNeeded(tensor, owned);
                 continue;
             }
-            if (key.StartsWith(ArPrefix, StringComparison.Ordinal)) { MapBody(key[ArPrefix.Length..], tensor, ar, isAr: true); continue; }
-            if (key.StartsWith(NarPrefix, StringComparison.Ordinal)) { MapNar(key[NarPrefix.Length..], tensor, nar); continue; }
+            if (key.StartsWith(ArPrefix, StringComparison.Ordinal)) { MapBody(key[ArPrefix.Length..], tensor, ar, shape, owned, isAr: true); continue; }
+            if (key.StartsWith(NarPrefix, StringComparison.Ordinal)) { MapNar(key[NarPrefix.Length..], tensor, nar, shape, owned); continue; }
 
             throw new InvalidOperationException($"YuE2 checkpoint carries an unrecognised key '{key}'.");
         }
@@ -79,10 +82,10 @@ public static class Yue2CheckpointConverter
                 throw new InvalidOperationException($"YuE2 acoustic stack is missing '{required}'.");
         }
 
-        return new Yue2Weights(ar, nar, vae, tokenizerJson);
+        return new Yue2Weights(ar, nar, vae, tokenizerJson, owned);
     }
 
-    private static void MapNar(string sub, Tensor tensor, Dictionary<string, Tensor> nar)
+    private static void MapNar(string sub, Tensor tensor, Dictionary<string, Tensor> nar, Yue2Geometry geometry, List<Tensor> owned)
     {
         switch (sub)
         {
@@ -90,16 +93,16 @@ public static class Yue2CheckpointConverter
             case "vae2llm.weight" or "vae2llm.bias" or "llm2vae.weight" or "llm2vae.bias"
                  or "time_embedder.mlp.0.weight" or "time_embedder.mlp.0.bias"
                  or "time_embedder.mlp.2.weight" or "time_embedder.mlp.2.bias":
-                nar[sub] = CastToF32IfNeeded(tensor);
+                nar[sub] = CastToF32IfNeeded(tensor, owned);
                 return;
             case "latent_pos_embed.pe":
-                nar[sub] = CastToF32IfNeeded(tensor);
+                nar[sub] = CastToF32IfNeeded(tensor, owned);
                 return;
         }
-        MapBody(sub, tensor, nar, isAr: false);
+        MapBody(sub, tensor, nar, geometry, owned, isAr: false);
     }
 
-    private static void MapBody(string sub, Tensor tensor, Dictionary<string, Tensor> output, bool isAr)
+    private static void MapBody(string sub, Tensor tensor, Dictionary<string, Tensor> output, Yue2Geometry geometry, List<Tensor> owned, bool isAr)
     {
         if (sub is "model.embed_tokens.weight" or "model.lm_head.weight" or "model.norm.weight")
         {
@@ -119,17 +122,31 @@ public static class Yue2CheckpointConverter
             {
                 // Row blocks are Q ‖ K ‖ V, sized (heads·head_dim, kv_heads·head_dim, kv_heads·head_dim).
                 long rows = tensor.Shape[0];
-                long kv = rows / 4;             // 2048 q + 1024 k + 1024 v for the released 16/8-head geometry
-                output[$"{layer}.self_attn.q_proj.weight"] = RowSlice(tensor, 0, rows - 2 * kv);
-                output[$"{layer}.self_attn.k_proj.weight"] = RowSlice(tensor, rows - 2 * kv, kv);
-                output[$"{layer}.self_attn.v_proj.weight"] = RowSlice(tensor, rows - kv, kv);
+                long q = (long)geometry.NumAttentionHeads * geometry.HeadDim;
+                long kv = (long)geometry.NumKeyValueHeads * geometry.HeadDim;
+                if (rows != q + 2 * kv)
+                {
+                    throw new InvalidOperationException(
+                        $"YuE2 '{layer}.self_attn.qkv_proj.weight' has {rows} rows; the configured "
+                        + $"{geometry.NumAttentionHeads}/{geometry.NumKeyValueHeads}-head, head_dim {geometry.HeadDim} "
+                        + $"geometry expects {q + 2 * kv}.");
+                }
+                output[$"{layer}.self_attn.q_proj.weight"] = RowSlice(tensor, 0, q, owned);
+                output[$"{layer}.self_attn.k_proj.weight"] = RowSlice(tensor, q, kv, owned);
+                output[$"{layer}.self_attn.v_proj.weight"] = RowSlice(tensor, q + kv, kv, owned);
                 return;
             }
             case "mlp.gate_up_proj.weight":
             {
                 long half = tensor.Shape[0] / 2;
-                output[$"{layer}.mlp.gate_proj.weight"] = RowSlice(tensor, 0, half);
-                output[$"{layer}.mlp.up_proj.weight"] = RowSlice(tensor, half, half);
+                if (tensor.Shape[0] != 2L * geometry.IntermediateSize)
+                {
+                    throw new InvalidOperationException(
+                        $"YuE2 '{layer}.mlp.gate_up_proj.weight' has {tensor.Shape[0]} rows; the configured "
+                        + $"intermediate size {geometry.IntermediateSize} expects {2L * geometry.IntermediateSize}.");
+                }
+                output[$"{layer}.mlp.gate_proj.weight"] = RowSlice(tensor, 0, half, owned);
+                output[$"{layer}.mlp.up_proj.weight"] = RowSlice(tensor, half, half, owned);
                 return;
             }
             case "self_attn.o_proj.weight" or "mlp.down_proj.weight"
@@ -137,7 +154,7 @@ public static class Yue2CheckpointConverter
                 output[$"{layer}.{leaf}"] = tensor;
                 return;
             case "self_attn.q_norm.weight" or "self_attn.k_norm.weight":
-                output[$"{layer}.{leaf}"] = CastToF32IfNeeded(tensor);
+                output[$"{layer}.{leaf}"] = CastToF32IfNeeded(tensor, owned);
                 return;
             default:
                 throw new InvalidOperationException($"YuE2 {(isAr ? "AR" : "acoustic")} layer carries an unrecognised leaf '{leaf}'.");
@@ -172,23 +189,50 @@ public static class Yue2CheckpointConverter
     }
 
     /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> into a new owned tensor of the same dtype.</summary>
-    private static unsafe Tensor RowSlice(Tensor src, long startRow, long numRows)
+    private static unsafe Tensor RowSlice(Tensor src, long startRow, long numRows, List<Tensor> owned)
     {
         long cols = src.Shape.Rank == 1 ? 1 : src.ElementCount / src.Shape[0];
         long rowBytes = cols * src.DType.SizeInBytes;
         Tensor dst = new(new TensorShape(numRows, cols), src.DType);
         byte* sp = (byte*)src.DataPointer + startRow * rowBytes;
         Buffer.MemoryCopy(sp, (void*)dst.DataPointer, numRows * rowBytes, numRows * rowBytes);
+        owned.Add(dst);
         return dst;
     }
 
-    private static Tensor CastToF32IfNeeded(Tensor tensor)
-        => tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
+    private static Tensor CastToF32IfNeeded(Tensor tensor, List<Tensor> owned)
+    {
+        if (tensor.DType == DType.F32) return tensor;
+        Tensor cast = tensor.CastTo(DType.F32);
+        owned.Add(cast);
+        return cast;
+    }
+}
+
+/// <summary>The transformer geometry a YuE2 checkpoint is expected to carry. Only used to validate the merged
+/// projections before they are split — a silently mis-sliced <c>qkv_proj</c> is a wrong song with no error.</summary>
+public sealed record Yue2Geometry(int NumHiddenLayers, int NumAttentionHeads, int NumKeyValueHeads, int HeadDim, int IntermediateSize)
+{
+    /// <summary>The released 3B checkpoint: 28 layers, 16/8 heads, head_dim 128, SwiGLU 6144.</summary>
+    public static Yue2Geometry Released => new(28, 16, 8, 128, 6_144);
 }
 
 /// <summary>The three weight sets a YuE2 checkpoint splits into, plus the tokenizer document it embeds.</summary>
+/// <remarks>Splitting the merged projections copies roughly half the checkpoint into new tensors, so disposing this
+/// matters. Only those copies are freed — the tensors passed through untouched are views the <see
+/// cref="SafeTensorsLoader"/> still owns, and freeing them here would double-free.</remarks>
 public sealed record Yue2Weights(
     Dictionary<string, Tensor> Ar,
     Dictionary<string, Tensor> Nar,
     Dictionary<string, Tensor> Vae,
-    byte[] TokenizerJson);
+    byte[] TokenizerJson,
+    IReadOnlyList<Tensor> Owned) : IDisposable
+{
+    private int _disposed;
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (Tensor tensor in Owned) tensor.Dispose();
+    }
+}

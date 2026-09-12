@@ -61,31 +61,38 @@ public sealed class Yue2ArLm : IDisposable
     public IKvCache CreateCache(int maxSeqLen)
         => KvCaches.ForDecode(NumLayers, KvHeads, HeadDim, maxSeqLen);
 
-    /// <summary>Runs <paramref name="tokenIds"/> through the stack and returns the final position's logits over the
-    /// full vocabulary. <paramref name="posStart"/> is the cache length before this call.</summary>
-    public float[] Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
+    /// <summary>Runs <paramref name="tokenIds"/> through the stack and writes the final position's logits over the
+    /// full vocabulary into <paramref name="logits"/>. <paramref name="posStart"/> is the cache length before this
+    /// call.</summary>
+    /// <remarks>The caller supplies the buffer because a song is up to 9,000 decode steps and the vocabulary is
+    /// 184,704 wide — returning a fresh array per token would churn gigabytes through the GC.</remarks>
+    public void Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache, Span<float> logits)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cache);
         ThrowIfDisposed();
         if (tokenIds.IsEmpty) throw new ArgumentException("YuE2 needs at least one token to run.", nameof(tokenIds));
+        if (logits.Length < Yue2Protocol.VocabSize)
+            throw new ArgumentException($"The logit buffer must hold {Yue2Protocol.VocabSize} entries.", nameof(logits));
 
         using Tensor hidden = _transformer.Forward(backend, tokenIds, posStart, cache);
-        return LastRowLogits(backend, hidden, tokenIds.Length);
+
+        // Project only the last position: a whole-prefill projection against a 184,704-wide head would cost more
+        // than the prefill it followed.
+        using Tensor last = new(new TensorShape(1, 1, _config.Ar.HiddenSize), DType.F32);
+        backend.GatherRows(last, hidden, [tokenIds.Length - 1]);
+        using Tensor projected = _transformer.ProjectLogits(backend, last, 1);
+        projected.AsReadOnlySpan<float>()[..Yue2Protocol.VocabSize].CopyTo(logits);
     }
 
-    /// <summary>Projects only the last position — the vocabulary is 184,704 wide, so projecting a whole prefill
-    /// would cost more than the prefill itself.</summary>
-    private float[] LastRowLogits(IBackend backend, Tensor hidden, int t)
-    {
-        using Tensor last = new(new TensorShape(1, 1, _config.Ar.HiddenSize), DType.F32);
-        backend.GatherRows(last, hidden, [t - 1]);
-        using Tensor logits = _transformer.ProjectLogits(backend, last, 1);
-        return [.. logits.AsReadOnlySpan<float>()[..Yue2Protocol.VocabSize]];
-    }
+    /// <summary>A logit buffer sized for this model's vocabulary, for <see cref="Forward"/> to write into.</summary>
+    public static float[] AllocateLogits() => new float[Yue2Protocol.VocabSize];
 
     /// <summary>The per-layer post-RoPE K/V the acoustic transformer attends over. Returned as cache-owned views:
     /// the caller must consume them before the cache is reset or disposed.</summary>
+    /// <remarks>Each tensor is the cache's <b>whole capacity</b> buffer, <c>[1, kv_heads, capacity, head_dim]</c>,
+    /// not a view trimmed to the populated length — so a consumer must slice to <see cref="IKvCache.CurrentLength"/>
+    /// and stride by the capacity, never by the token count.</remarks>
     public (Tensor Key, Tensor Value)[] ExportPrefix(IKvCache cache)
     {
         ArgumentNullException.ThrowIfNull(cache);

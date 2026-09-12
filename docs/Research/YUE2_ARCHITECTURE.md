@@ -164,10 +164,23 @@ encoder strides `[2,2,4,4,5,6]`, product **1920** = one latent frame per 40 ms a
 `in_channels 2` (stereo), SnakeBeta activations (`alpha`/`beta`), weight-norm parameterization,
 F32 throughout.
 
-Two traps against our existing `Audio/Models/Codecs/Oobleck`:
-- **Odd stride.** Stride 5 requires `output_padding = stride % 2 = 1` on the transposed conv —
-  the fix in the Comfy diff. Stable Audio's strides are all even, so our decoder has never
-  exercised this path. Adding it must leave Stable Audio bit-identical.
+**The odd stride — do NOT follow ComfyUI here.** The upstream `modeling_vae.py` builds every
+`WNConvTranspose1d` as `(k=2s, stride=s, padding=ceil(s/2))` with **`output_padding` left at 0**, so a
+layer's output length is `L·s + s − 2·ceil(s/2)`: an exact `L·s` for even strides, but `5L − 1` for the
+stride-5 layer. Decoding 8 latent frames therefore yields
+
+```
+8 →(s6) 48 →(s5) 239 →(s4) 956 →(s4) 3824 →(s2) 7648 →(s2) 15296 samples
+```
+
+— **15,296, not 8 × 1920 = 15,360**, confirmed against the reference dump. The Comfy diff *adds*
+`output_padding = stride % 2`, which forces the clean `L·1920` its latent framework assumes and so
+produces 64 more samples than the model's own decoder. The weights are identical; only the length
+differs (~1.3 ms). We follow the original, which is also what our existing
+`Audio/Models/Codecs/Oobleck/OobleckDecoder` already computes —
+`tUp = (t−1)·stride + 2·stride − 2·pad` with `pad = (stride+1)/2` is the same formula. **No decoder
+change and no backend `output_padding` support is needed.**
+
 - **Encode is mean-only.** YuE2 sets `sample_latent=False`: `encode` returns
   `encoder(x).chunk(2, dim=1)[0]`, not a sampled bottleneck. Only matters for the cover path.
 
