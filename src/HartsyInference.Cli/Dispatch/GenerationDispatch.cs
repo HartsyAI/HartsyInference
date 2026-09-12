@@ -251,12 +251,29 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> MusicAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        // Everything past the first four is optional: a null means "the model applies its own default", so an
+        // unset flag must NOT be materialised into a value here.
         MusicRequest request = new MusicRequest
         {
             Prompt = prompt,
             Genre = parameters.Get("genre") ?? "",
             Duration = parameters.GetInt("duration", 10),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
+            InferSteps = parameters.GetIntOrNull("steps"),
+            CfgScale = parameters.GetDoubleOrNull("cfg-scale"),
+            Temperature = parameters.GetDoubleOrNull("temperature"),
+            TopK = parameters.GetIntOrNull("top-k"),
+            TopP = parameters.GetDoubleOrNull("top-p"),
+            RepetitionPenalty = parameters.GetDoubleOrNull("repetition-penalty"),
+            Yue2Cot = parameters.Get("cot") ?? "",
+            Yue2Abc = parameters.Get("abc") ?? "",
+            Yue2AbcTemperature = parameters.GetDoubleOrNull("abc-temperature"),
+            Yue2AbcTopP = parameters.GetDoubleOrNull("abc-top-p"),
+            Yue2AbcTopK = parameters.GetIntOrNull("abc-top-k"),
+            Yue2AbcRepetitionPenalty = parameters.GetDoubleOrNull("abc-repetition-penalty"),
+            Yue2AbcMaxTokens = parameters.GetIntOrNull("abc-max-tokens"),
+            Yue2PenaltyWindow = parameters.GetIntOrNull("penalty-window"),
+            Yue2MinTokens = parameters.GetIntOrNull("min-tokens"),
         };
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("generate");
         AudioResult result;

@@ -127,6 +127,23 @@ public sealed class ParamState
             case Modality.Music:
                 _values["duration"] = "10";
                 _values["seed"] = "-1";
+                // Empty = "the model decides". TrySet refuses a key that is not already present, so every knob the
+                // REPL should be able to set has to be seeded here even when it has no CLI default.
+                _values["steps"] = "";
+                _values["cfg-scale"] = "";
+                _values["temperature"] = "";
+                _values["top-k"] = "";
+                _values["top-p"] = "";
+                _values["repetition-penalty"] = "";
+                _values["cot"] = "";
+                _values["abc"] = "";
+                _values["abc-temperature"] = "";
+                _values["abc-top-p"] = "";
+                _values["abc-top-k"] = "";
+                _values["abc-repetition-penalty"] = "";
+                _values["abc-max-tokens"] = "";
+                _values["penalty-window"] = "";
+                _values["min-tokens"] = "";
                 break;
             case Modality.Transcribe:
                 _values["language"] = "en";

@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.67
+
+- Audio: YuE2 — lyrics- and style-conditioned song generation at 48 kHz stereo, up to six minutes. Despite the
+  name it shares no architecture with YuE v1: a Qwen3-geometry autoregressive LM plans an editable ABC score and
+  emits one semantic codec token per 25 Hz frame, then a second stack of identical geometry but its own weights
+  flow-matches 64-channel acoustic latents while attending to the first model's per-layer KV cache as a
+  bidirectional prefix, and an Oobleck VAE decodes those to audio. Loads the Comfy-Org single-file repack, which
+  carries both stacks, the VAE and the tokenizer in one checkpoint, so there is no subfolder fetching and no side
+  assets. Weights are CC BY-NC 4.0. The `int8_convrot` repack is refused by name rather than silently falling back
+  to a different precision than the caller asked for.
+- Engine: `MusicRequest` gains YuE2's own knobs — `Yue2Cot` (planning mode), `Yue2Abc` (render a score verbatim,
+  skipping the planning pass), a separate sampler block for the score planner, which samples far cooler than the
+  semantic pass (`Yue2AbcTemperature`/`TopP`/`TopK`/`RepetitionPenalty`/`MaxTokens`), plus `Yue2PenaltyWindow` and
+  `Yue2MinTokens`.
+- CLI: `hartsy music` was building its request from four fields, so `--steps`, `--cfg-scale`, `--temperature`,
+  `--top-k`, `--top-p` and `--repetition-penalty` were unreachable from the command line for *every* music model.
+  All six now reach the engine, alongside the new `--cot`, `--abc` (a file path or inline notation),
+  `--abc-temperature`, `--abc-top-p`, `--abc-top-k`, `--abc-repetition-penalty`, `--abc-max-tokens`,
+  `--penalty-window` and `--min-tokens`.
+- API: the audio endpoints serialise `AudioResult.Meta`, which the response shape already promised to mirror but
+  silently dropped. Music generations carry the model, seed and channel count, and YuE2 adds its planned score and
+  two truncation flags — a request for a duration the token budget cannot cover previously returned a song that
+  stopped mid-phrase with the only warning in a server-side log.
+
 ## alpha.66
 
 - Images: Qwen-Image-Edit accepts more than one reference image. `ImageRequest.ReferenceImages` carries the extra

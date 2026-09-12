@@ -60,18 +60,24 @@ public sealed class MusicService : IMusicService
             double seconds = AudioClipCodec.Seconds(audio.Left.Length, runner.SampleRate);
             Logs.Verbose($"[Audio][Music] Generated {seconds:0.0}s @ {runner.SampleRate} Hz "
                 + $"({(audio.Right is null ? "mono" : "stereo")}) in {Environment.TickCount64 - started}ms.");
+            Dictionary<string, string> meta = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["model"] = key,
+                ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
+                ["channels"] = audio.Right is null ? "1" : "2",
+            };
+            // The model's own notes go in last but never shadow the three facts above.
+            if (audio.Meta is { Count: > 0 } extra)
+            {
+                foreach ((string name, string value) in extra) meta.TryAdd(name, value);
+            }
             return new AudioResult
             {
                 Data = AudioClipCodec.EncodeWav(audio.Left, audio.Right, runner.SampleRate),
                 Format = "wav",
                 DurationSeconds = seconds,
                 SampleRate = runner.SampleRate,
-                Meta = new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["model"] = key,
-                    ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
-                    ["channels"] = audio.Right is null ? "1" : "2",
-                },
+                Meta = meta,
             };
         }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
     }

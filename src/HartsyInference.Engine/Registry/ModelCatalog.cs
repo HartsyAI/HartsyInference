@@ -1279,6 +1279,15 @@ public static class ModelCatalog
                 Id = "minimaxmusic3", Modality = mus, DisplayName = "MiniMax Music 3", Architecture = "Qwen3-8B + RVQ depth decoder + flow-match DiT + DAC vocoder", Status = ok,
                 CliDrivable = true, // `hartsy music -m minimaxmusic3` (bf16, needs 24 GB) or `-m minimaxmusic3:q8`/`:q4` for smaller cards; 44.1 kHz stereo, lyrics in the prompt and the caption in --genre
             },
+            new CatalogEntry
+            {
+                Id = "yue2", Modality = mus, DisplayName = "YuE2", Architecture = "AR-NAR Mixture-of-Transformers (Qwen3 planner + flow-match acoustic stack + Oobleck VAE)", Status = ok,
+                // `hartsy music -m yue2` — 48 kHz stereo, lyrics in the prompt and style tags in --genre. Shares no
+                // architecture with "yue" above; the whole model (both stacks, the VAE and the tokenizer) is one
+                // 7.8 GB Comfy-Org file, so there is no Assets list and no download-confirm step — the loader takes
+                // a placed checkpoint under Models/audio/music/yue2/ before it reaches for the hub.
+                CliDrivable = true,
+            },
 
             // Voice conversion — VcCatalog (src/HartsyInference.Engine/Audio/Vc/**). Via `hartsy convert`.
             new CatalogEntry
