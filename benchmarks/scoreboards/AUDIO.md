@@ -71,6 +71,7 @@ day range. Both numbers are real; they measure different things.
 | ACE-Step xl-sft | Music | 4090 | **1.20×** (16.6s/20.0s) | none | — | 2026-07-26 | Swarm | same |
 | ACE-Step xl-base | Music | 4090 | **1.47×** (13.6s/20.0s) | none | — | 2026-07-26 | Swarm | same — was a hard timeout pre-fix (case-sensitive dir bug) |
 | YuE | Music | 4090 | **0.108×** (92.38s/~10s) | none | — | 2026-07-25 | Swarm (Tier 3) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) — real sung vocals confirmed (Issue #E fixed) |
+| YuE2 | Music | 4090 | **2.43×** (97.1s/236.1s) · Swarm warm **2.45×** (96.5s/236.1s) | `yue2_infer` 0.1.5 (PyTorch), **2.25×** (92.4s/207.6s) — a real external reference, measured same-session on the same GPU with the same lyrics and seed | **1.08×** | 2026-09-12 | Swarm + engine | [`yue2-perf`](#yue2-vs-the-reference-implementation) below |
 | HeartMuLa (3b-base) | Music | 4090 | **0.059×** full Swarm e2e (169.98s/~10s, includes load) | see AR-decode table below for the clean steady-state number | — | 2026-07-25 | Swarm (Tier 3, incl. cold-load) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 | OpenVoice V2 | VC | 4090 | **2.75×** (3.99s/~11s) | none | — | 2026-07-25 | Swarm (legacy `ProcessAudio`) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 | Demucs (stem separation) | Fx | 4090 | n/a (225.3s wall, not a duration ratio) | none | — | 2026-07-25 | Swarm (legacy, CPU-forced backend) | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
@@ -78,6 +79,31 @@ day range. Both numbers are real; they measure different things.
 | Resemble-Enhance | Fx | — | n/a — blocked, weight file 404s / architecture mismatch (Issue #G, open) | — | — | — | — | [`AUDIO_THROUGHPUT_BENCHMARK.md`](../../docs/Checklists/ROADMAP.md) |
 
 ---
+
+
+## YuE2 vs the reference implementation
+
+One of the few audio rows with a **real external Python baseline** rather than self-comparison: `m-a-p`'s
+`yue2_infer` 0.1.5, run on the same 4090, same lyrics, same seed, in the same session (a stale earlier reading of
+the reference at 98.3s was 6% slow — always re-measure the baseline alongside the candidate).
+
+Both sides generate a full-length song from the same prompt; the model picks its own ending, so the two runs
+produce different durations (236.1s vs 207.6s) and the honest comparison is the rate, not the wall clock.
+
+| stage | ours (alpha.73) | reference | per-unit |
+|---|---|---|---|
+| total | 97.1 s → 236.1 s audio | 92.4 s → 207.6 s audio | **2.43× vs 2.25× RTF** (+8.2%; equivalently 7.6% less time per second of audio) |
+| ABC plan | 19.3 s / 2369 tok | ~28.9 s (not separately reported; residual) | ahead |
+| semantic AR | 54.3 s / 5904 tok | 41.0 s / 5192 tok | 9.20 vs 7.90 ms/token — **behind** |
+| acoustic NAR | 22.4 s (incl. the chunk's AR prefill) | 16.3 s | **behind** |
+| VAE | 1.1 s | 6.2 s (incl. 4.4 s decoder load) | ahead |
+
+So the end-to-end lead is real but comes from the score planner and the VAE; **both transformers are still slower
+per unit than the reference's.** Through SwarmUI the warm number matches the engine harness (2.45×); a cold first
+request reads 2.29× (103.1s) because it includes the model load.
+
+Reproduce: `BENCH_SECONDS=360 BENCH_COT=full BENCH_LYRICS=<lyrics> dotnet run -c Release` against the engine, and
+`python ref_bench.py 360` in a `yue2_infer` venv. Run them serially — concurrent GPU work invalidates both.
 
 ## Autoregressive decode models (ms/frame — a different shape, don't compare to the RTF table above)
 

@@ -90,6 +90,7 @@ oracle (medium.en caught failures base.en concealed). Music requires listening, 
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. ([details](#yue)) |
 | **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). ([details](#heartmula)) |
+| **YuE2** (music, 3B AR+NAR) | ✅ | Shares only its name with YuE v1 — different stack, tokenizer, codec and sample rate. All six parity gates pass against `yue2_infer` 0.1.5: AR greedy logits + tokens, the exported KV prefix the acoustic stack consumes, the acoustic velocity, the full 32-step midpoint solve, the Oobleck VAE, and the logit processor. Generates up to six minutes of 48 kHz stereo with intelligible sung lyrics, via CLI, HTTP and the AudioLab extension. **Faster than the reference implementation end to end** ([details](#yue2)) |
 | **MiniMax Music 3** | ✅ | Prompt ids exact; condition encoder, DiT block 0 and the full 36-layer DiT match diffusers (meanAbs < 1e-3); vocoder maxAbs 1e-4 with a distinct stereo fold; window/crop geometry reproduces the reference's 529408-sample stitch. Generates real 44.1 kHz stereo on CUDA. AR parity corr 0.9999989 on CUDA, flow parity corr 0.999996, and end-to-end output confirmed by ear as real music with intelligible sung lyrics. ([details](#minimax-music-3)) |
 | **RVC** (voice conversion) | 🔬 | RMVPE front-end wired as the default F0 estimator (`VcCatalog.ConvertRvc`), corr 1.000000/maxAbs 9.5e-8 vs real `rmvpe.pt` ([details](../Checklists/PARITY_VERIFICATION.md)). YIN remains selectable via `f0_method`. RVC flow/decoder + index/protect/rms_mix_rate still pending. |
 | **Demucs** (separation) | ✅ e2e | Real htdemucs CPU output: four distinct stems; full numerical parity remains pending. See consumer-path evidence above. |
@@ -128,6 +129,35 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Streaming
 - [ ] Extend streaming beyond the implemented paths (including CosyVoice); validate latency/quality per provider.
+
+### YuE2
+
+Lyrics + style tags → an editable ABC score → up to six minutes of 48 kHz stereo. A Qwen3-geometry 3B AR LM plans
+the score and emits one semantic codec token per 25 Hz frame; a second stack of identical geometry but its own
+weights flow-matches 64-channel acoustic latents while attending over the AR's per-layer KV cache; an Oobleck VAE
+decodes them. Despite the name it shares **no** architecture with YuE v1. See `docs/Research/YUE2_ARCHITECTURE.md`.
+
+Duration is a hard token budget, not a setting: 25 tokens/second against the release's own 9,000-token ceiling is
+the six-minute limit. A request beyond it returns `truncated=true` in the result metadata rather than silently
+producing a song that stops mid-phrase.
+
+**Performance** (RTX 4090, full song, same lyrics and seed as the baseline, measured 2026-09-12 at alpha.73):
+
+| | ours | `yue2_infer` 0.1.5 (PyTorch) |
+|---|---|---|
+| wall / audio | 97.1 s → 236.1 s | 92.4 s → 207.6 s |
+| RTF (audio ÷ wall) | **2.43×** | 2.25× |
+
+8% ahead on rate, and the warm SwarmUI path matches the engine harness (2.45×). The lead comes from the score
+planner and the VAE — **per unit both transformers are still slower than the reference's** (9.20 vs 7.90 ms/token
+on the semantic pass). Full breakdown and reproduction steps:
+[`benchmarks/scoreboards/AUDIO.md`](../../benchmarks/scoreboards/AUDIO.md#yue2-vs-the-reference-implementation).
+
+Getting there took four measured wins and four measured rejections; the rejections are recorded in the CHANGELOG
+because they are the more reusable result. Notably **CUDA-graph decode is a 23% regression here** — the AR is
+GPU-bound (CPU issue 3.70 ms/token is fully hidden under a 4.12 ms GPU tail), so removing dispatch cost buys
+nothing while the device-position op variants cost more.
+
 
 ### Music — not built
 - [ ] Stable Audio Open 1.0 / 2 (Small is ✅).
