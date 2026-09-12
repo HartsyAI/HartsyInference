@@ -18,6 +18,58 @@ public sealed unsafe class CudaFlashAttentionTests
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f); }
     private static Tensor Rnd(int a, int b, int c, int d) { Tensor t = new(new TensorShape(a, b, c, d), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
 
+    /// <summary>Real-sized causal prefill against the independent CPU reference. The pre-existing
+    /// <see cref="Flash_MatchesSdpa"/> runs at lk=7 with qOffset=0, which is below any size gate and never
+    /// continues a prefix — so it cannot see the fused-prefill path at all, and its oracle (SDPA + an explicit
+    /// mask) is the very thing that path uses, which would make it circular. This compares against
+    /// <see cref="AttentionReference"/> instead and asserts cuDNN actually engaged, because a gate that silently
+    /// falls back would otherwise pass every assertion without running the new code.</summary>
+    [Theory]
+    [InlineData(512, 8, 2, 64, 0, 0)]      // GQA, fresh prefill
+    [InlineData(512, 8, 8, 64, 0, 0)]      // MHA (no head widening)
+    [InlineData(384, 8, 2, 64, 128, 0)]    // continuation: qOffset > 0, so the mask is [tq, qOffset+tq] with a row offset
+    [InlineData(512, 8, 2, 64, 0, 96)]     // sliding window folded into the mask
+    public void CausalPrefill_MatchesCpuReference(int tq, int hq, int hkv, int d, int qOffset, int window)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        int kvLen = qOffset + tq, group = hq / hkv;
+        float scale = 1f / MathF.Sqrt(d);
+
+        using CudaBackend backend = new(0, ptxDir);
+        IBackend b = backend;
+        using Tensor q = Rnd(1, hq, tq, d);
+        using Tensor k = Rnd(1, hkv, kvLen, d);
+        using Tensor v = Rnd(1, hkv, kvLen, d);
+
+        using Tensor refOut = new(new TensorShape(1, hq, tq, d), DType.F32);
+        AttentionReference.FlashAttention(refOut, q, k, v, kvLen, group, causal: true, qOffset, scale,
+            slidingWindow: window);
+
+        long before = backend.CudnnSdpaExecutionCount;
+        using Tensor gpuOut = new(new TensorShape(1, hq, tq, d), DType.F32);
+        b.FlashAttention(gpuOut, q, k, v, kvLen, group, causal: true, qOffset, scale, softcap: 0f, sink: null,
+            slidingWindow: window);
+        backend.Sync();
+        long engaged = backend.CudnnSdpaExecutionCount - before;
+
+        float* a = (float*)refOut.DataPointer;
+        float* g = (float*)gpuOut.DataPointer;
+        float maxDiff = 0f;
+        for (long i = 0; i < refOut.ElementCount; i++) maxDiff = MathF.Max(maxDiff, MathF.Abs(a[i] - g[i]));
+        _output.WriteLine($"tq={tq} kv={kvLen} hq={hq} hkv={hkv} d={d} qOffset={qOffset} window={window} " +
+            $"maxDiff={maxDiff:E3} cudnnCalls={engaged}");
+
+        // The fused engine executes in fp16, so the bar is fp16 accumulation noise, not F32 equality.
+        Assert.True(maxDiff < 2e-2f, $"causal prefill diverged from the CPU reference: maxDiff={maxDiff:E3}");
+        Assert.True(engaged > 0,
+            "the fused causal-prefill path did not engage, so this assertion proved nothing about it — " +
+            "check the gate in CudaBackend.FlashAttention (size budget, head dim eligibility, tight K/V buffer).");
+    }
+
     [Theory]
     [InlineData(true)]   // prefill
     [InlineData(false)]  // decode

@@ -7300,6 +7300,48 @@ public sealed class CudaBackend : IBackend
         => TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
             query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2], query.Shape[3]);
 
+    /// <summary>Whether the causal bias (and the widened K/V the MHA-only fused engine needs) fit in free VRAM.
+    /// The bias is <c>tq*kvLen</c> F32, which is 286 MB at 8,664 tokens and grows quadratically, so this is a real
+    /// gate rather than a formality. Mirrors the headroom convention the SDPA score-matrix gate already uses —
+    /// cuMemGetInfo counts pool reservations as used, so it under-reports what is reusable.</summary>
+    private bool CausalMaskFits(int tq, int kvLen, int hq, int d, int kvGroup)
+    {
+        ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
+        ulong widenBytes = kvGroup > 1 ? 2UL * (ulong)hq * (ulong)kvLen * (ulong)d * sizeof(float) : 0UL;
+        (nuint freeBytes, _) = _context.GetMemoryInfo();
+        return maskBytes + widenBytes < (ulong)freeBytes / 2;
+    }
+
+    /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
+    /// The bias is built on the device — a host fill is 75M floats at 8,664 tokens (~0.2-0.3 s), more than the
+    /// attention it accelerates — and rebuilt per layer rather than cached: one 286 MB streaming write is ~0.3 ms
+    /// against a prefill this turns from 6.74 s into ~1.3 s, and a per-generation cache would have to outlive
+    /// activation resets to be safe.</summary>
+    private bool TryCausalPrefillSdpa(Tensor output, Tensor query, Tensor key, Tensor value,
+        int hq, int hkv, int tq, int kvLen, int qOffset, int window, int d, float scale)
+    {
+        EnterOp();
+        EnsureKernels();
+        using Tensor mask = new(new TensorShape(1, 1, tq, kvLen), DType.F32);
+        nuint maskBytes = GpuTransferHelper.ByteSize(mask);
+        ulong pMask = GpuTransferHelper.AllocateDevice(maskBytes);
+        _kernels!.LaunchCausalBiasMask(pMask, tq, kvLen, qOffset, window, _stream.Handle);
+        GpuTransferHelper.CacheActivation(mask, pMask, maskBytes);
+
+        if (hq == hkv)
+        {
+            return TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
+                1, hq, tq, kvLen, d);
+        }
+        // The fused engine takes one head count, so grouped K/V are widened first.
+        using Tensor keyWide = new(new TensorShape(1, hq, kvLen, d), key.DType);
+        using Tensor valueWide = new(new TensorShape(1, hq, kvLen, d), value.DType);
+        RepeatKvHeads(keyWide, key, hkv, hq / hkv);
+        RepeatKvHeads(valueWide, value, hkv, hq / hkv);
+        return TryCudnnSdpa(output, query, keyWide, valueWide, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
+            1, hq, tq, kvLen, d);
+    }
+
     /// <summary>Layout-explicit form: the token-major caller's tensors are rank-2, so the dims cannot be read off the shapes.</summary>
     private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
         CudnnSdpa.SdpaLayout layout, long b, long h, long sq, long skv, long d)
@@ -9139,6 +9181,28 @@ public sealed class CudaBackend : IBackend
         if (!kernelOk)
         {
             AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+            return;
+        }
+
+        // PREFILL is a different shape from the decode this kernel is tuned for — thousands of query rows, not one
+        // against a long cache — and the cost of running it here is severe: measured at 4096 tokens (D=128, 16q/8kv,
+        // RTX 4090) 64.8 ms a layer against 9.5 ms through cuDNN's fused engine with an additive causal bias, and on
+        // YuE2's 8,664-token prefill 6.74 s across 28 layers. Route the plain causal prefill there.
+        //
+        // Deliberately narrow, because everything outside the gate has no bias-shaped equivalent: a soft-cap is a
+        // tanh on the scores, an attention sink is an extra softmax denominator term, and ALiBi is per-head while
+        // cuDNN's bias broadcasts over heads. A sliding window IS expressible and is folded into the mask. The
+        // key/value buffer must be tight (a FixedKvCache hands back its whole capacity, whose seq stride is not
+        // kvLen), and cuDNN must be able to take the head dim at all. Any failure inside TryCudnnSdpa returns false
+        // and the call falls through to the general kernel below.
+        if (causal && tq > 1 && b == 1 && lk == kvLen
+            && softcap == 0f && sink is null && alibiSlopes is null
+            && query.DType == DType.F32 && output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
+            && _kernels is not null && _kernels.HasCausalMaskKernel
+            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
+            && CausalMaskFits(tq, kvLen, hq, d, kvGroup)
+            && TryCausalPrefillSdpa(output, query, key, value, hq, hkv, tq, kvLen, qOffset, slidingWindow, d, scale))
+        {
             return;
         }
 

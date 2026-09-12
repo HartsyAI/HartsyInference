@@ -35,6 +35,7 @@ KERNELS=(
     "mul_mat_vec_q4_0_f32"
     "mul_mat_vec_q5k_f32"
     "mul_mat_vec_f16_bf16_f32"
+    "lm_attn_mask"
     "quantize_activation_q8_1_f32"
     "mul_mat_vec_q4k_q8_1"
     "mul_mat_vec_q8_0_q8_1"
@@ -45,9 +46,18 @@ KERNELS=(
 )
 
 INSTALL=true
-if [[ "${1:-}" == "--no-install" ]]; then
-    INSTALL=false
-fi
+INSTALL_TUNED=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-install)    INSTALL=false ;;
+        # lm_f32 and mul_mat_vec_q6k_q8_1 are LLM-decode hot paths whose throughput was tuned against
+        # llama.cpp; their sources are current and only register allocation differs, so a routine rebuild
+        # (say, to add an unrelated kernel to this domain) must NOT overwrite the shipped artifacts. Pass
+        # this only when you are deliberately regenerating them alongside a perf run.
+        --install-tuned) INSTALL_TUNED=true ;;
+    esac
+done
+TUNED=("lm_f32" "mul_mat_vec_q6k_q8_1")
 
 for kernel in "${KERNELS[@]}"; do
     src="${THIS_DIR}/${kernel}.cu"
@@ -72,8 +82,14 @@ for kernel in "${KERNELS[@]}"; do
         exit 1
     fi
     if $INSTALL; then
-        cp "$ptx" "${PTX_OUT}/${kernel}.ptx"
-        echo "  → ${PTX_OUT}/${kernel}.ptx"
+        is_tuned=false
+        for t in "${TUNED[@]}"; do [[ "$kernel" == "$t" ]] && is_tuned=true; done
+        if $is_tuned && ! $INSTALL_TUNED; then
+            echo "  · ${kernel}: compiled but NOT installed (hand-tuned; pass --install-tuned with a perf run)"
+        else
+            cp "$ptx" "${PTX_OUT}/${kernel}.ptx"
+            echo "  → ${PTX_OUT}/${kernel}.ptx"
+        fi
     fi
 done
 

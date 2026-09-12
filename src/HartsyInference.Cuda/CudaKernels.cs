@@ -432,11 +432,17 @@ public sealed class CudaKernels : IDisposable
     // Dense 16-bit-float GEMV (the BF16/F16 counterpart of the quant GEMVs, for checkpoints that ship
     // float16 weights — Orpheus/most audio LMs. cuBLAS GemmEx is inefficient at M=1). Loaded best-effort: a
     // load failure disables this fused path (callers fall back to cuBLAS) rather than breaking the backend.
+    private readonly CudaModule? _causalMaskModule;
+    private readonly nint _causalBiasMaskF32;
     private readonly CudaModule? _mulMatVecF16Bf16Module;
     private readonly nint _mulMatVecBf16F32;
     private readonly nint _mulMatVecF16F32;
     /// <summary>True when the dense BF16/F16 decode-GEMV kernels loaded successfully.</summary>
     public bool HasFloatGemv { get; private set; }
+
+    /// <summary>Whether the device-side causal attention-bias builder is present; absence keeps prefill on the
+    /// general flash kernel rather than falling back to a host fill, which would cost more than it saves.</summary>
+    public bool HasCausalMaskKernel => _causalMaskModule is not null;
     private readonly CudaModule _mulMatVecQ5_0Module;
     private readonly nint _mulMatVecQ5_0F32;
     private readonly CudaModule _mulMatVecQ4_0Module;
@@ -1027,6 +1033,14 @@ public sealed class CudaKernels : IDisposable
                 _mulMatVecBf16F32 = 0; _mulMatVecF16F32 = 0; HasFloatGemv = false;
                 HartsyInference.Core.Logging.Logs.Warning($"[Cuda] dense BF16/F16 decode GEMV kernel unavailable ({ex.Message}); using cuBLAS.");
             }
+        }
+        // Optional module: the additive causal bias the fused cuDNN prefill path needs
+        // (src/HartsyInference.Cuda/Kernels/lm/lm_attn_mask.cu). Absence just means prefill keeps the general kernel.
+        string causalMaskPath = Path.Combine(ptxDir, "lm_attn_mask.ptx");
+        if (File.Exists(causalMaskPath))
+        {
+            _causalMaskModule = LoadOwnedModule(causalMaskPath);
+            _causalBiasMaskF32 = _causalMaskModule.GetFunction("lm_causal_bias_mask_f32");
         }
         _mulMatVecQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
         _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
@@ -4539,6 +4553,22 @@ public sealed class CudaKernels : IDisposable
         => LaunchMulMatVecImpl(_mulMatVecQ8_0F32, output, input, weight, bias, N, K, M, stream);
 
     /// <summary>Dense BF16-weight × F32-activation GEMV (F32 accumulate) for small-M decode.</summary>
+    /// <summary>Fills <paramref name="mask"/> <c>[1,1,rows,cols]</c> F32 with 0 where query row i (absolute
+    /// position <paramref name="qOffset"/>+i) may attend key j, and -1e30 elsewhere. <paramref name="window"/> 0
+    /// means plain causal.</summary>
+    public unsafe void LaunchCausalBiasMask(ulong mask, int rows, int cols, int qOffset, int window, nint stream)
+    {
+        if (_causalMaskModule is null) throw new InvalidOperationException("lm_attn_mask.ptx not present in the Ptx folder.");
+        ulong maskArg = mask;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols, qArg = (uint)qOffset, winArg = (uint)window;
+        ulong total = (ulong)rows * (ulong)cols;
+        void** args = stackalloc void*[6];
+        args[0] = &maskArg; args[1] = &rowsArg; args[2] = &colsArg; args[3] = &qArg; args[4] = &winArg; args[5] = &total;
+        const uint block = 256;
+        ulong blocks = (total + block - 1) / block;
+        CudaDriverApi.cuLaunchKernel(_causalBiasMaskF32, (uint)blocks, 1, 1, block, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public void LaunchMulMatVecBf16F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecFloatImpl(_mulMatVecBf16F32, output, input, weight, bias, N, K, M, stream);
 

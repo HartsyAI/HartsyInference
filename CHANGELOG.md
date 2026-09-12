@@ -6,6 +6,38 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.72
+
+- CUDA: causal PREFILL no longer runs on the decode-tuned flash kernel. `GenericTransformer` issues both
+  shapes through `IBackend.FlashAttention`, but prefill is thousands of query rows rather than one against a
+  long cache, and that kernel is tuned for the latter: measured at 4,096 tokens (D=128, 16q/8kv, RTX 4090)
+  64.8 ms a layer against 9.5 ms through cuDNN's fused engine, and 6.74 s across 28 layers on YuE2's
+  8,664-token prefill. The plain causal prefill now takes the fused engine, carrying the causal rule as an
+  additive bias built on the device by a new `lm_causal_bias_mask_f32` kernel — a host fill is 75M floats at
+  that length (~0.2-0.3 s), more than the attention it accelerates. Sliding windows fold into the mask; a
+  soft-cap, attention sink or ALiBi has no bias-shaped equivalent and keeps the general kernel, as does a
+  non-tight K/V buffer or a head dim cuDNN cannot take, and any cuDNN failure falls through.
+- Audio: a 236-second YuE2 song generates in 98.2s, from 107.2s — 0.416 s per second of audio against the
+  reference implementation's 0.473 on the same lyrics. The acoustic stage drops 29.8s to 23.5s, but that is
+  the per-chunk AR prefill which the progress buckets count there: **the acoustic transformer itself is
+  unchanged**. The semantic pass goes 105.0 to 108.6 tok/s and the ABC planner 20.0s to 19.3s, both from
+  their own prefixes' prefill.
+- Tests: `CudaFlashAttentionTests.CausalPrefill_MatchesCpuReference` checks the fused path against
+  `AttentionReference` at 512 tokens with and without a query offset, GQA and MHA, and with a sliding window
+  — the pre-existing prefill case runs at 7 keys with no offset, which cannot reach the path and whose oracle
+  (SDPA plus an explicit mask) is what the path itself uses. It also asserts cuDNN actually engaged, since a
+  gate that silently fell back would satisfy every numeric assertion without running the new code.
+- Kernels: `Kernels/lm/build.sh` compiles the two hand-tuned kernels but no longer INSTALLS them unless
+  `--install-tuned` is passed. `lm_f32` and `mul_mat_vec_q6k_q8_1` are LLM-decode hot paths held at a tuned
+  register allocation, and a routine rebuild to add an unrelated kernel to that domain silently overwrote
+  both with ~1,550 lines of different codegen — caught here only because the artifacts showed up in
+  `git status`. They still compile, so the drift check still covers them.
+- Tests: `CudaKernelDriftTests` rebuilds all 9 kernel domains from source and compares against the committed
+  PTX. `dotnet build` never compiles a `.cu` — MSBuild only copies the artifacts and there is no nvrtc
+  fallback in the runtime — so an edited kernel whose PTX was not regenerated keeps running the old code
+  silently, which shipped 8 stale kernels once already. Skips rather than fails when the local toolchain
+  cannot reproduce the artifacts.
+
 ## alpha.71
 
 - Audio: YuE2's acoustic pass holds one chunk's attention keys and values for the whole ODE solve instead of
