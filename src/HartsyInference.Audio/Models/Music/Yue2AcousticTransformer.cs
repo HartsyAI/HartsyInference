@@ -175,9 +175,12 @@ public sealed class Yue2AcousticTransformer : IDisposable
             // Every acoustic query row attends over the whole prefix, so this is prefill-shaped: thousands of
             // query rows, not the single row IBackend.FlashAttention's kernel is tuned for. Measured at 2308
             // frames on a 4090, that kernel costs 74.6 ms a layer against 2.8 ms through the general entry,
-            // which reaches cuDNN's fused engine — 26x, and attention is ~89% of this stack's time. The fused
-            // engine is MHA-only, so the grouped KV is widened to full heads first; that copy is ~0.2% of what
-            // it buys. F16 ingest matches the release, which runs the whole transformer in bfloat16.
+            // which reaches cuDNN's fused engine — 26x. The fused engine is MHA-only, so the grouped KV is
+            // widened to full heads first; that copy is ~3% of what it buys. F16 ingest matches the release,
+            // which runs the whole transformer in bfloat16. Since that fix attention is ~43% of this stack,
+            // not the ~89% it was, and at 5.3 ms a call it runs near the card's BF16 peak — what is left to win
+            // here is the F32 activations in the projections and the per-forward allocation churn, not the
+            // attention kernel.
             using Tensor keysFull = new(new TensorShape(1, heads, kvLength, dim), DType.F32);
             using Tensor valuesFull = new(new TensorShape(1, heads, kvLength, dim), DType.F32);
             backend.RepeatKvHeads(keysFull, keys, kvHeads, heads / kvHeads);
