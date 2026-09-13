@@ -6,6 +6,46 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.74
+
+- Audio: YuE2 songs can run to **900 seconds**, up from a hard 360. Nothing in the checkpoint required the old
+  cap — 25 tokens a second against a 24,576-token context holds about 980 s minus the prefix — but three
+  separate constants enforced it, and the duration knob was inert above 360 s regardless because the release's
+  9,000-token sampler preset won every `Math.Min` against it. `Yue2Protocol` now separates the release's
+  default from the ceiling it will accept. Measured at 479.9 s of real music from extended lyrics and 843.1 s
+  against a forced budget. Raising the ceiling does not make the model write longer songs — length is decided
+  by the lyrics and the score — it stops one that wants to be longer from being cut off.
+- Audio: a prompt that leaves less context than the requested duration now **shortens the song and says so**
+  instead of throwing. The old check raised after the score had already been planned, so an over-long lyric
+  cost ~20 s of planning and then failed; the budget is now fitted to whatever the prefix leaves (the longer of
+  the two branches under guidance) and travels back as `Yue2Result.BudgetSeconds` and `meta.budgetSeconds`.
+  This is a deliberate divergence from the release, whose sampler refuses the case outright with "no implicit
+  truncation" — our caller-facing knob is a duration ceiling rather than a token count. A request that already
+  fits is unaffected token for token, which the identical 360 s output confirms.
+- Audio: the Oobleck VAE decodes in **bounded tiles**, as the release does by default and we did not — 1,024
+  frames of core with a 16-frame halo. Every core sample carries its whole input support inside its own tile,
+  so there is no crossfade and the samples are identical to a whole-song decode; what changes is that peak
+  activation memory is set by the tile rather than by the song. Peak VRAM is 18.4 GB at 360 s and flat at
+  ~22.0 GB past 480 s.
+- Audio: **`OobleckConfig.DecodedLength`** — a decode is `frames × HopLength` only when every stride is even.
+  A transpose conv here runs `k = 2s, padding = ceil(s/2)`, which emits `sL` for an even stride but `sL − 1`
+  for an odd one, and YuE2's stride of 5 sits under a further 64× of upsampling: every YuE2 decode is exactly
+  64 samples short of the round multiple. Tiling that assumed the multiple overran its last tile. The older
+  all-even presets (Stable Audio Open, ACE-Step 1.5) are unaffected, which is why an all-even test config could
+  not have caught this — the tiling tests now carry an odd-stride config for that reason.
+- Audio: the score planner's repetition-penalty window is reachable from a request
+  (`MusicRequest.Yue2AbcPenaltyWindow`), matching ComfyUI's PR 16293. Its 1-100 validation is unchanged: that
+  mirrors the release's own bound, which their node does not re-check.
+- Not ported from ComfyUI PR 16293: the `decode_buffer`/`rotary_buffers` work is CUDA-graph capture address
+  stability, and graph decode is a measured 23% regression on YuE2.
+- Perf note: alpha.74 measures 98.7 / 98.8 / 98.9 s on the standard 360 s request against 98.6 / 99.0 s for an
+  unmodified alpha.73 tree in the same session — tiling costs nothing. The 97.1 s recorded for alpha.73 was
+  taken in an earlier session; between-session spread is ~2% and a 1-2 s difference cannot be attributed to
+  code across one.
+- Tests: `Yue2BudgetTests` covers the duration/context arithmetic and the multi-chunk split with no checkpoint
+  or GPU; `OobleckVaeTests` gains tiled-vs-whole-song equality (which is what validates the halo) across even
+  and odd strides, and the exact-length rule.
+
 ## alpha.73
 
 - CUDA: `ApplyRopeSingle` accepts an F16 activation against an F32 cos/sin table, matching the asymmetric

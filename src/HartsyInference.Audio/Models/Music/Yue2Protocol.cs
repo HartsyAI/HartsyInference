@@ -74,8 +74,13 @@ public static class Yue2Protocol
     /// <summary>Semantic tokens (and latent frames) per second of audio.</summary>
     public const int FramesPerSecond = 25;
 
-    /// <summary>Longest song the release budgets for, in seconds.</summary>
-    public const double MaxDurationSeconds = 360.0;
+    /// <summary>Song length a request gets when it does not ask for one: the release's own 9,000-token budget.</summary>
+    public const double DefaultDurationSeconds = 360.0;
+
+    /// <summary>Ceiling a request may ask for. Above the release's own budget because nothing in the checkpoint
+    /// forbids it — 900 seconds is 22,500 semantic tokens inside a 24,576-token context — but the real limit is
+    /// lower and prompt-dependent, which is what <see cref="BudgetForPrefix"/> settles per request.</summary>
+    public const double MaxDurationSeconds = 900.0;
 
     /// <summary>The instruction sentence prepended to every prompt. The model was trained on these exact strings —
     /// rewording them silently changes behaviour.</summary>
@@ -158,6 +163,16 @@ public static class Yue2Protocol
     /// <summary>The semantic budget for a requested duration, in tokens.</summary>
     public static int TokensForSeconds(double seconds)
         => Math.Max(1, (int)Math.Round(Math.Clamp(seconds, 0, MaxDurationSeconds) * FramesPerSecond, MidpointRounding.AwayFromZero));
+
+    /// <summary>How much of <paramref name="requestedTokens"/> still fits the context alongside the prefix. Under
+    /// guidance the negative branch is prefilled into its own cache and has its own length, so the longer of the two
+    /// binds. Zero means the prompt leaves no room for music at all.</summary>
+    /// <remarks>The release refuses this case outright — its sampler raises "no implicit truncation" rather than
+    /// shortening anything. We diverge because the knob we expose is a duration <i>ceiling</i> rather than a token
+    /// count: a prompt that leaves less room than asked for shortens the song instead of failing it after the score
+    /// has already been planned. A request that already fits is unaffected, token for token.</remarks>
+    public static int BudgetForPrefix(int requestedTokens, int prefixTokens, int negativeTokens = 0, int context = Context)
+        => Math.Max(0, Math.Min(requestedTokens, context - Math.Max(prefixTokens, negativeTokens)));
 
     private static void ValidateAbcIds(IReadOnlyList<int> abcIds)
     {

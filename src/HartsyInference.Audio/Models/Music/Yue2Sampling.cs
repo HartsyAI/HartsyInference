@@ -16,8 +16,10 @@ public sealed record Yue2Sampling
     /// <summary>Steps before the phase's end token is allowed, so the pass cannot terminate instantly.</summary>
     public int MinTokens { get; init; } = 200;
 
-    /// <summary>Hard cap on emitted tokens for this pass.</summary>
-    public int MaxTokens { get; init; } = 9_000;
+    /// <summary>Hard cap on emitted tokens for this pass. The release preset is 9,000 — 360 seconds of codec
+    /// tokens — but the semantic pass takes its budget from the request's duration, so this holds the highest
+    /// duration we accept rather than the release's own and lets that knob, not this one, bind.</summary>
+    public int MaxTokens { get; init; } = Yue2Protocol.TokensForSeconds(Yue2Protocol.MaxDurationSeconds);
 
     /// <summary>Score-planning defaults from <c>yue2_generation_config.json</c>.</summary>
     public static Yue2Sampling Abc => new()

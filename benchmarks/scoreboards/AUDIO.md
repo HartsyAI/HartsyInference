@@ -105,6 +105,35 @@ request reads 2.29× (103.1s) because it includes the model load.
 Reproduce: `BENCH_SECONDS=360 BENCH_COT=full BENCH_LYRICS=<lyrics> dotnet run -c Release` against the engine, and
 `python ref_bench.py 360` in a `yue2_infer` venv. Run them serially — concurrent GPU work invalidates both.
 
+**The 97.1 s above was an optimistic reading.** Re-measured on an unmodified alpha.73 tree in a later session the
+same request is **98.6 / 99.0 s**, against 98.7 / 98.8 / 98.9 s for alpha.74 — i.e. run-to-run spread within a
+session is ±0.2 s but between sessions it is ~2%. Compare candidates only against a baseline measured in the same
+session; the cross-session number is not precise enough to attribute a 1-2 s change to code.
+
+### YuE2 long form (alpha.74)
+
+Nothing here has an external baseline — `yue2_infer` exposes no duration knob, only a 9,000-token cap — so these
+are our own numbers for the lengths the 360 s ceiling used to forbid. Same 4090, `cot=full`.
+
+| requested | audio | wall | RTF | semantic AR | peak VRAM |
+|---|---|---|---|---|---|
+| 360 s | 236.1 s | 99.1 s | 2.38× | 106.8 tok/s | 18.4 GB |
+| 900 s (extended lyrics) | 479.9 s | 254.2 s | 1.89× | 75.3 tok/s | 21.9 GB |
+| 900 s (forced to the budget) | 843.1 s | 419.5 s | 2.01× | 70.1 tok/s | 22.1 GB |
+
+RTF falls with length because the semantic AR's decode attention slows over a longer KV cache — 106.8 → 70.1
+tok/s — which is latency over the cache rather than bandwidth (an F16 KV cache moved this 0.8%). The acoustic
+stage and the VAE do **not** degrade: both are chunked, so peak VRAM is flat past ~480 s.
+
+Two traps worth keeping:
+
+- **A long song is not a long-`MaxDuration` song.** Forcing the budget with a high `min_tokens` on lyrics that
+  only support four minutes yields four minutes of music and then silence to the budget. Use lyrics long enough to
+  need the length, or the measurement is of silence.
+- **The VAE decode is not `frames × 1920`.** YuE2's hop includes a stride of 5, whose transpose conv emits
+  `5L − 1`, and the 64× of upsampling above it makes every decode exactly 64 samples short. Tiling that assumes a
+  round multiple overruns the last tile.
+
 ## Autoregressive decode models (ms/frame — a different shape, don't compare to the RTF table above)
 
 HeartMuLa and Zonos decode codec frames one at a time; the meaningful unit is **milliseconds per frame**

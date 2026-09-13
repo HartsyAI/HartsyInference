@@ -96,6 +96,11 @@ internal static class Yue2MusicModel
             Yue2Request yue2 = BuildRequest(request);
             Yue2Result result = pipeline.Generate(backend, yue2,
                 (stage, done, total) => Logs.Debug($"[YuE2] {stage} {done}/{total}"), ct);
+            if (result.BudgetSeconds < yue2.MaxDurationSeconds - 0.001)
+            {
+                Logs.Warning($"[YuE2] the prompt and score left room for only {result.BudgetSeconds:F1}s of the "
+                    + $"{yue2.MaxDurationSeconds:F1}s requested; shorten the lyrics or the score for a longer song.");
+            }
             if (result.SemanticTruncated)
             {
                 Logs.Warning("[YuE2] the song reached its token budget before ending naturally; raise the duration for a complete take.");
@@ -106,6 +111,9 @@ internal static class Yue2MusicModel
             {
                 ["truncated"] = result.SemanticTruncated ? "true" : "false",
                 ["abcTruncated"] = result.AbcTruncated ? "true" : "false",
+                // What the context actually granted. Below the requested duration means the prompt ate the budget,
+                // which is otherwise indistinguishable from the model simply choosing to end early.
+                ["budgetSeconds"] = result.BudgetSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
             };
             if (result.Abc is { Length: > 0 } score) meta["abc"] = score;
             return MusicAudio.Stereo(result.Left, result.Right) with { Meta = meta };
@@ -152,6 +160,7 @@ internal static class Yue2MusicModel
         if (request.Yue2AbcTopK is { } abcTopK and > 0) abc = abc with { TopK = abcTopK };
         if (request.Yue2AbcRepetitionPenalty is { } abcPenalty) abc = abc with { RepetitionPenalty = (float)abcPenalty };
         if (request.Yue2AbcMaxTokens is { } abcMaxTokens and > 0) abc = abc with { MaxTokens = abcMaxTokens };
+        if (request.Yue2AbcPenaltyWindow is { } abcWindow) abc = abc with { PenaltyWindow = abcWindow };
 
         return new Yue2Request
         {
@@ -160,7 +169,7 @@ internal static class Yue2MusicModel
             Cot = ParseCot(request.Yue2Cot),
             Abc = request.Yue2Abc,
             Seed = request.Seed,
-            MaxDurationSeconds = request.Duration > 0 ? request.Duration : Yue2Protocol.MaxDurationSeconds,
+            MaxDurationSeconds = request.Duration > 0 ? request.Duration : Yue2Protocol.DefaultDurationSeconds,
             AbcSampling = abc,
             SemanticSampling = semantic,
             CfgScale = request.CfgScale is { } cfg ? (float)cfg : null,

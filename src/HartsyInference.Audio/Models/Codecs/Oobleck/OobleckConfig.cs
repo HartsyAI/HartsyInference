@@ -27,7 +27,27 @@ public record OobleckConfig
     /// <summary>Waveform sample rate in Hz.</summary>
     public int SamplingRate { get; init; } = 44100;
 
-    /// <summary>Samples per latent frame = product of <see cref="DownsamplingRatios"/>.</summary>
+    /// <summary>Samples a decode of <paramref name="frames"/> latent frames actually produces, which is
+    /// <see cref="HopLength"/> per frame <b>minus a fixed edge loss</b> whenever any ratio is odd.</summary>
+    /// <remarks>A transpose conv here runs <c>k = 2s</c> with <c>padding = ceil(s/2)</c>, so it emits
+    /// <c>sL</c> for an even stride but <c>sL - 1</c> for an odd one, and everything above that stage multiplies the
+    /// shortfall. <see cref="Yue2"/>'s stride of 5 sits under a further 64× of upsampling and costs exactly 64
+    /// samples; every all-even config is exact. The loss is a constant, not a function of length, so it comes off the
+    /// end of a decode once — which is why tiling must ask this rather than multiply by the hop.</remarks>
+    public long DecodedLength(long frames)
+    {
+        long length = frames;
+        // The decoder upsamples with the reversed list.
+        for (int i = DownsamplingRatios.Length - 1; i >= 0; i--)
+        {
+            int stride = DownsamplingRatios[i], kernel = 2 * stride, padding = (stride + 1) / 2;
+            length = (length - 1) * stride - 2L * padding + kernel;
+        }
+        return length;
+    }
+
+    /// <summary>Samples per latent frame = product of <see cref="DownsamplingRatios"/>. This is the tiling and
+    /// alignment ratio; for an exact output length use <see cref="DecodedLength"/>.</summary>
     public int HopLength
     {
         get

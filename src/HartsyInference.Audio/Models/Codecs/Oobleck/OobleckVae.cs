@@ -61,6 +61,88 @@ public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
         return _decoder.Forward(backend, latent, (int)latent.Shape[0], (int)latent.Shape[2]);
     }
 
+    /// <summary>Frames of latent <see cref="DecodeTiled"/> finishes per tile, and the context it keeps either side.
+    /// Both match the release's own <c>decode_core_frames</c> / <c>decode_halo_frames</c>.</summary>
+    public const int DefaultCoreFrames = 1024;
+
+    /// <summary><inheritdoc cref="DefaultCoreFrames" path="/summary"/></summary>
+    public const int DefaultHaloFrames = 16;
+
+    /// <summary>Decodes in bounded tiles — same result as <see cref="Decode"/>, but peak activation memory is set by
+    /// the tile rather than by the song.</summary>
+    /// <remarks><para>The halo is what makes each tile's core <b>exact</b> rather than blended: every output sample
+    /// in a core has its whole input support inside that tile, so there is no crossfade, no boundary smoothing and
+    /// no seam — tiled and whole-song decodes agree sample for sample. That is also why this is safe to make the
+    /// default: it changes memory, never numerics.</para>
+    /// <para>Alignment is exact and independent of padding: a transpose conv maps input <c>i</c> to outputs
+    /// <c>i·s + j − p</c>, so a tile starting at frame <c>left</c> produces output whose sample 0 is the whole
+    /// song's sample <c>left · HopLength</c>, and that composes through the stack. Lengths are <b>not</b> a plain
+    /// multiple though — see <see cref="OobleckConfig.DecodedLength"/>, which YuE2's odd stride makes 64 samples
+    /// short — so the last tile ends where the whole decode ends rather than at a round boundary.</para></remarks>
+    public unsafe Tensor DecodeTiled(IBackend backend, Tensor latent, int coreFrames = DefaultCoreFrames,
+        int haloFrames = DefaultHaloFrames)
+    {
+        if (latent.Shape.Rank != 3 || (int)latent.Shape[1] != _config.DecoderInputChannels)
+            throw new ArgumentException(
+                $"Expected latent [B, {_config.DecoderInputChannels}, T]; got {latent.Shape}.", nameof(latent));
+        if (coreFrames < 1)
+            throw new ArgumentOutOfRangeException(nameof(coreFrames), coreFrames, "A tile core must be at least one frame.");
+        if (haloFrames < 0)
+            throw new ArgumentOutOfRangeException(nameof(haloFrames), haloFrames, "A tile halo cannot be negative.");
+
+        int batch = (int)latent.Shape[0], latentDim = _config.DecoderInputChannels, frames = (int)latent.Shape[2];
+        // A single tile would cover everything; decode straight through rather than paying for two extra copies.
+        if (frames <= coreFrames) return Decode(backend, latent);
+
+        int hop = _config.HopLength, channels = _config.AudioChannels;
+        int total = checked((int)_config.DecodedLength(frames));
+        Tensor audio = new(new TensorShape(batch, channels, total), DType.F32);
+        try
+        {
+            float* destination = (float*)audio.DataPointer;
+            float* source = (float*)latent.DataPointer;
+            for (int start = 0; start < frames; start += coreFrames)
+            {
+                int end = Math.Min(frames, start + coreFrames);
+                int left = Math.Max(0, start - haloFrames), right = Math.Min(frames, end + haloFrames);
+                int span = right - left;
+
+                using Tensor tile = new(new TensorShape(batch, latentDim, span), DType.F32);
+                float* tileData = (float*)tile.DataPointer;
+                for (int row = 0; row < batch * latentDim; row++)
+                {
+                    Buffer.MemoryCopy(source + (long)row * frames + left, tileData + (long)row * span,
+                        (long)span * sizeof(float), (long)span * sizeof(float));
+                }
+
+                using Tensor decoded = Decode(backend, tile);
+                int tileSamples = (int)decoded.Shape[2];
+                // The final core runs to the end of the song, which the stack's edge loss leaves short of end·hop.
+                int outStart = start * hop, outEnd = Math.Min(end * hop, total);
+                int coreSamples = outEnd - outStart, cropStart = (start - left) * hop;
+                if (cropStart + coreSamples > tileSamples)
+                {
+                    throw new InvalidOperationException(
+                        $"An Oobleck tile of {span} frames decoded to {tileSamples} samples, too few to cover its "
+                        + $"{coreSamples}-sample core at offset {cropStart}. Raise the halo.");
+                }
+                float* decodedData = (float*)decoded.DataPointer;
+                for (int row = 0; row < batch * channels; row++)
+                {
+                    Buffer.MemoryCopy(decodedData + (long)row * tileSamples + cropStart,
+                        destination + (long)row * total + outStart,
+                        (long)coreSamples * sizeof(float), (long)coreSamples * sizeof(float));
+                }
+            }
+            return audio;
+        }
+        catch
+        {
+            audio.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>Encodes PCM <c>[B, audio_channels, T]</c> (T a multiple of <see cref="HopLength"/>) to the deterministic latent mean <c>[B, latent_dim, T / hop]</c> — diffusers' <c>latent_dist.mode()</c>, the convention ACE-Step and Stable Audio use for conditioning.</summary>
     public unsafe Tensor EncodeMode(IBackend backend, Tensor pcm)
     {

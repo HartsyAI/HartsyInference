@@ -11,6 +11,11 @@ namespace HartsyInference.Audio.Tests;
 /// are validation-pending (no weights in this environment).</summary>
 public sealed unsafe class OobleckVaeTests
 {
+    /// <summary>Same shape as <see cref="TinyConfig"/> but with an ODD stride, as YuE2 has. That stage emits
+    /// <c>5L − 1</c> instead of <c>5L</c>, so a decode comes out short of <c>frames × hop</c> — the case an
+    /// all-even config cannot exercise, and the one that broke tiling.</summary>
+    private static OobleckConfig OddStrideConfig => TinyConfig with { DownsamplingRatios = [2, 5] };
+
     /// <summary>Tiny config: hop = 2·4 = 8, latent dim 2, stereo.</summary>
     private static OobleckConfig TinyConfig => new()
     {
@@ -73,6 +78,78 @@ public sealed unsafe class OobleckVaeTests
         Tensor pcm = Rand([1, 2, 48], seed: 3);
         Assert.Throws<InvalidOperationException>(() => vae.EncodeMode(backend, pcm));
         pcm.Dispose();
+    }
+
+    /// <summary>Tiling must be a memory decision only: every core sample carries its whole input support inside its
+    /// own tile, so a tiled decode has to agree with a whole-song decode sample for sample — no crossfade, no seam.
+    /// <para>This is what validates the default halo. The decoder's support in latent frames is the stem's ±3 plus
+    /// each block's dilated residual units divided by the strides above them, so a halo that is too small shows up
+    /// here as a mismatch at the tile boundaries rather than as an audible artefact months later.</para></summary>
+    [Theory]
+    [InlineData(200, 16, OobleckVae.DefaultHaloFrames, false)]   // many short cores: every boundary is interior
+    [InlineData(200, 7, OobleckVae.DefaultHaloFrames, false)]    // core that does not divide the length
+    [InlineData(2100, OobleckVae.DefaultCoreFrames, OobleckVae.DefaultHaloFrames, false)]   // the production tiling
+    [InlineData(200, 16, OobleckVae.DefaultHaloFrames, true)]    // odd stride: the last core is short of end·hop
+    [InlineData(200, 7, OobleckVae.DefaultHaloFrames, true)]
+    [InlineData(2100, OobleckVae.DefaultCoreFrames, OobleckVae.DefaultHaloFrames, true)]
+    public void DecodeTiled_MatchesWholeSongDecode(int frames, int coreFrames, int haloFrames, bool oddStride)
+    {
+        OobleckConfig config = oddStride ? OddStrideConfig : TinyConfig;
+        CpuBackend backend = new();
+        OobleckVae vae = new(config);
+        vae.LoadWeights(BuildWeights(config, includeEncoder: false));
+
+        using Tensor latent = Rand([1, 2, frames], seed: 17);
+        using Tensor whole = vae.Decode(backend, latent);
+        using Tensor tiled = vae.DecodeTiled(backend, latent, coreFrames, haloFrames);
+
+        Assert.Equal(whole.Shape.ToString(), tiled.Shape.ToString());
+        float* a = (float*)whole.DataPointer;
+        float* b = (float*)tiled.DataPointer;
+        float scale = 0f, worst = 0f;
+        long worstAt = -1;
+        for (long i = 0; i < whole.Shape.ElementCount; i++)
+        {
+            scale = MathF.Max(scale, MathF.Abs(a[i]));
+            float diff = MathF.Abs(a[i] - b[i]);
+            if (diff > worst) { worst = diff; worstAt = i; }
+        }
+        Assert.True(worst <= 1e-4f * MathF.Max(1f, scale),
+            $"tiled decode diverged at sample {worstAt}: {worst:E3} against a peak of {scale:E3} "
+            + $"(frames={frames}, core={coreFrames}, halo={haloFrames}, odd={oddStride}) — the halo is too small.");
+    }
+
+    /// <summary>A decode is <c>frames × hop</c> only when every stride is even. YuE2's stride of 5 sits under a
+    /// further 64× of upsampling and costs exactly 64 samples, which is what tiling has to budget for.</summary>
+    [Fact]
+    public void DecodedLength_AccountsForOddStrides()
+    {
+        Assert.Equal(15_296L, OobleckConfig.Yue2.DecodedLength(8));        // not 8 × 1920 = 15,360
+        Assert.Equal(800L * 1920 - 64, OobleckConfig.Yue2.DecodedLength(800));   // the loss is constant in length
+
+        // Every all-even config stays exact, including the two older presets.
+        Assert.Equal(200L * TinyConfig.HopLength, TinyConfig.DecodedLength(200));
+        Assert.Equal(200L * OobleckConfig.StableAudioOpen.HopLength, OobleckConfig.StableAudioOpen.DecodedLength(200));
+        Assert.Equal(200L * OobleckConfig.AceStep15.HopLength, OobleckConfig.AceStep15.DecodedLength(200));
+        Assert.Equal(200L * OddStrideConfig.HopLength - 2, OddStrideConfig.DecodedLength(200));
+    }
+
+    /// <summary>A song that fits one core takes the straight-through path, so short clips pay nothing for tiling.</summary>
+    [Fact]
+    public void DecodeTiled_ShorterThanOneCore_MatchesDecode()
+    {
+        CpuBackend backend = new();
+        OobleckVae vae = new(TinyConfig);
+        vae.LoadWeights(BuildWeights(TinyConfig, includeEncoder: false));
+
+        using Tensor latent = Rand([1, 2, 12], seed: 23);
+        using Tensor whole = vae.Decode(backend, latent);
+        using Tensor tiled = vae.DecodeTiled(backend, latent, coreFrames: 64, haloFrames: OobleckVae.DefaultHaloFrames);
+
+        Assert.Equal(12 * 8, (int)tiled.Shape[2]);
+        float* a = (float*)whole.DataPointer;
+        float* b = (float*)tiled.DataPointer;
+        for (long i = 0; i < whole.Shape.ElementCount; i++) Assert.Equal(a[i], b[i]);
     }
 
     /// <summary>Builds a synthetic diffusers-layout weight dict mirroring the real checkpoint's key

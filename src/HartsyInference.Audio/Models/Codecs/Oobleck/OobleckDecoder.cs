@@ -13,8 +13,9 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 ///                    + 3 × ResidualUnit(out, dilation=[1, 3, 9])
 ///   SnakeBeta(channels) + WNConv1d(channels → audio_channels, k=7, padding=3, bias=False)
 /// </code>
-/// All strides published so far are even, so each transpose conv exactly multiplies T by its stride
-/// (T_out = T·s with padLeft = padRight = s/2) and the full stack expands T by the hop length.
+/// A transpose conv with an EVEN stride exactly multiplies T by it (T_out = T·s with padLeft = padRight = s/2);
+/// an odd one pads by ceil(s/2) either side and emits T·s − 1, so the stack expands T by the hop length minus a
+/// constant edge loss. <see cref="OobleckConfig.DecodedLength"/> is the exact rule — YuE2 loses 64 samples this way.
 /// No final tanh — Stable-Audio-family decoders emit unbounded PCM that callers clamp.</remarks>
 internal sealed class OobleckDecoder
 {

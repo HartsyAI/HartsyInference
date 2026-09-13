@@ -122,6 +122,10 @@ public sealed record MusicRequest
     /// <summary>YuE2: token budget for the score planner (release default 4096).</summary>
     public int? Yue2AbcMaxTokens { get; init; }
 
+    /// <summary>YuE2: how many recently emitted ids the score planner's repetition penalty counts over (release
+    /// default 100, against the semantic pass's 50).</summary>
+    public int? Yue2AbcPenaltyWindow { get; init; }
+
     /// <summary>YuE2: how many recently emitted ids the semantic pass's repetition penalty counts over (release
     /// default 50; the planner uses 100).</summary>
     public int? Yue2PenaltyWindow { get; init; }

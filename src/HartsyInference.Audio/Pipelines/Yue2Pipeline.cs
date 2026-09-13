@@ -26,8 +26,10 @@ public sealed record Yue2Request
 
     public long Seed { get; init; } = 831_001;
 
-    /// <summary>Upper bound on song length. The model may stop earlier; it is a budget, not a target.</summary>
-    public double MaxDurationSeconds { get; init; } = Yue2Protocol.MaxDurationSeconds;
+    /// <summary>Upper bound on song length. The model may stop earlier; it is a budget, not a target, and a prompt
+    /// that leaves less context than this asks for shortens it further — see <see cref="Yue2Result.BudgetSeconds"/>.
+    /// Accepted up to <see cref="Yue2Protocol.MaxDurationSeconds"/>.</summary>
+    public double MaxDurationSeconds { get; init; } = Yue2Protocol.DefaultDurationSeconds;
 
     public Yue2Sampling AbcSampling { get; init; } = Yue2Sampling.Abc;
 
@@ -41,7 +43,11 @@ public sealed record Yue2Request
 }
 
 /// <summary>What a YuE2 generation produced, beyond the audio itself.</summary>
-public sealed record Yue2Result(float[] Left, float[] Right, int SampleRate, string? Abc, bool AbcTruncated, bool SemanticTruncated)
+/// <param name="BudgetSeconds">Song length the semantic pass was actually allowed, which is below the requested
+/// duration when the prompt and score left less context than it asked for. The audio can still be shorter than this
+/// — the model ends where it wants to — but it can never be longer.</param>
+public sealed record Yue2Result(float[] Left, float[] Right, int SampleRate, string? Abc, bool AbcTruncated,
+    bool SemanticTruncated, double BudgetSeconds)
 {
     public double DurationSeconds => Left.Length / (double)SampleRate;
 }
@@ -134,11 +140,19 @@ public sealed class Yue2Pipeline : IDisposable
         int[]? negative = cfgScale == 1f ? null
             : Yue2Protocol.NegativePrefix(cot, instructionIds, cot == Yue2Cot.Off ? null : abcIds);
 
-        Yue2Sampling semanticSampling = request.SemanticSampling with
+        // What was asked for, then what the context can actually hold behind this prefix. Both branches of a guided
+        // run are prefilled into their own cache, so the longer of the two is what binds.
+        int requested = Math.Min(request.SemanticSampling.MaxTokens, Yue2Protocol.TokensForSeconds(request.MaxDurationSeconds));
+        int budget = Yue2Protocol.BudgetForPrefix(requested, prefix.Length, negative?.Length ?? 0);
+        if (budget < 1)
         {
-            MaxTokens = Math.Min(request.SemanticSampling.MaxTokens, Yue2Protocol.TokensForSeconds(request.MaxDurationSeconds)),
-        };
-        semanticSampling = semanticSampling with { MinTokens = Math.Min(semanticSampling.MinTokens, semanticSampling.MaxTokens) };
+            throw new InvalidOperationException(
+                $"YuE2's prompt and score fill the {Yue2Protocol.Context}-token context "
+                + $"({Math.Max(prefix.Length, negative?.Length ?? 0)} tokens) and leave no room for music. "
+                + "Shorten the lyrics or the score.");
+        }
+        Yue2Sampling semanticSampling = request.SemanticSampling with { MaxTokens = budget };
+        semanticSampling = semanticSampling with { MinTokens = Math.Min(semanticSampling.MinTokens, budget) };
         (List<int> semantic, bool semanticTruncated) = Sample(backend, prefix, negative, cfgScale, semanticSampling,
             Yue2Phase.Semantic, cot == Yue2Cot.Off, request.Seed,
             onProgress is null ? null : (done, total) => onProgress("semantic", done, total), cancel);
@@ -153,7 +167,8 @@ public sealed class Yue2Pipeline : IDisposable
 
         // ── 4. Waveform ──
         (float[] left, float[] right) = Decode(backend, latents, codec.Length);
-        return new Yue2Result(left, right, SampleRate, abcText, abcTruncated, semanticTruncated);
+        return new Yue2Result(left, right, SampleRate, abcText, abcTruncated, semanticTruncated,
+            budget / (double)Yue2Protocol.FramesPerSecond);
     }
 
     /// <summary>Runs one autoregressive pass, optionally under classifier-free guidance.</summary>
@@ -268,7 +283,9 @@ public sealed class Yue2Pipeline : IDisposable
             for (int c = 0; c < latentDim; c++) destination[c * frames + f] = latents[f * latentDim + c];
         }
 
-        using Tensor audio = _vae.Decode(backend, input);
+        // Tiled, as the release decodes by default: exact cores, so the samples are identical to a whole-song
+        // decode, but the decoder's activations are bounded by a tile instead of growing with the song.
+        using Tensor audio = _vae.DecodeTiled(backend, input);
         int samples = (int)audio.Shape[audio.Shape.Rank - 1];
         ReadOnlySpan<float> decoded = audio.AsReadOnlySpan<float>();
         float[] left = new float[samples], right = new float[samples];

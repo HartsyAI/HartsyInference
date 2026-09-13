@@ -132,14 +132,28 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### YuE2
 
-Lyrics + style tags → an editable ABC score → up to six minutes of 48 kHz stereo. A Qwen3-geometry 3B AR LM plans
+Lyrics + style tags → an editable ABC score → up to fifteen minutes of 48 kHz stereo. A Qwen3-geometry 3B AR LM plans
 the score and emits one semantic codec token per 25 Hz frame; a second stack of identical geometry but its own
 weights flow-matches 64-channel acoustic latents while attending over the AR's per-layer KV cache; an Oobleck VAE
 decodes them. Despite the name it shares **no** architecture with YuE v1. See `docs/Research/YUE2_ARCHITECTURE.md`.
 
-Duration is a hard token budget, not a setting: 25 tokens/second against the release's own 9,000-token ceiling is
-the six-minute limit. A request beyond it returns `truncated=true` in the result metadata rather than silently
-producing a song that stops mid-phrase.
+**Duration is a context budget.** At 25 tokens a second the 24,576-token context holds about 980 seconds minus
+whatever the prompt and score already spent, so the ceiling is 900 s and the *effective* limit is per-request:
+`Max Duration` is trimmed to what actually fits and the granted length comes back as `budgetSeconds` in the result
+metadata. A song that then runs out of that budget also returns `truncated=true`, rather than silently stopping
+mid-phrase. The release's own preset is 9,000 tokens (360 s) and remains the default.
+
+Raising the ceiling does **not** make the model write longer songs — length is decided by the lyrics and the score.
+It stops a song that genuinely wants to be longer from being cut off. Verified at 479.9 s of real music from
+extended lyrics, which is past the point where the acoustic stage splits into more than one chunk (~465 s at a
+typical prefix): energy is continuous across the split and the step at the seam is smaller than 1.09% of the steps
+in the track, because each chunk's AR prefill carries its own full context and the latents are one noise draw
+sliced per chunk.
+
+Long form is bounded but not free: peak VRAM is **~18.4 GB at 360 s and ~22.0 GB past 480 s** on a 4090, flat in
+song length beyond that (the acoustic chunk and the VAE tiling both cap), so these lengths want a 24 GB card. The
+semantic AR also slows over a long cache — 106.8 tok/s at 236 s against 70.1 tok/s at 843 s — which is decode
+attention latency over the cache, not bandwidth.
 
 **Performance** (RTX 4090, full song, same lyrics and seed as the baseline, measured 2026-09-12 at alpha.73):
 
