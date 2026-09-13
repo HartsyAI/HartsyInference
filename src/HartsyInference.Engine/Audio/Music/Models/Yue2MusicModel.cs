@@ -96,10 +96,19 @@ internal static class Yue2MusicModel
             Yue2Request yue2 = BuildRequest(request);
             Yue2Result result = pipeline.Generate(backend, yue2,
                 (stage, done, total) => Logs.Debug($"[YuE2] {stage} {done}/{total}"), ct);
-            if (result.BudgetSeconds < yue2.MaxDurationSeconds - 0.001)
+            // A short budget has two causes that read identically from the number alone, and only one of them is
+            // the caller's to fix: asking past YuE2's own ceiling, or a prompt and score that ate the context.
+            // Telling someone to shorten their lyrics when the ceiling was binding sends them after the wrong thing.
+            double ceiling = Math.Min(yue2.MaxDurationSeconds, Yue2Protocol.MaxDurationSeconds);
+            if (yue2.MaxDurationSeconds > Yue2Protocol.MaxDurationSeconds + 0.001)
+            {
+                Logs.Warning($"[YuE2] {yue2.MaxDurationSeconds:F1}s is past YuE2's {Yue2Protocol.MaxDurationSeconds:F1}s "
+                    + $"ceiling; the song was budgeted for {result.BudgetSeconds:F1}s.");
+            }
+            else if (result.BudgetSeconds < ceiling - 0.001)
             {
                 Logs.Warning($"[YuE2] the prompt and score left room for only {result.BudgetSeconds:F1}s of the "
-                    + $"{yue2.MaxDurationSeconds:F1}s requested; shorten the lyrics or the score for a longer song.");
+                    + $"{ceiling:F1}s requested; shorten the lyrics or the score for a longer song.");
             }
             if (result.SemanticTruncated)
             {
