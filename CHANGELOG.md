@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.75
+
+- Image: **Kohya SD1.5/SDXL LoRAs that use LDM block names now load.** `LoraFormatDetector` recognized only the
+  diffusers spellings (`lora_unet_down_blocks_` / `up_blocks_` / `mid_block_`), so a file whose UNet keys are
+  `lora_unet_input_blocks_` / `output_blocks_` / `middle_block_` — what sd-scripts emits, and what the large
+  majority of community SDXL LoRAs on CivitAI ship — fell through every arm and was refused at load as
+  "Could not detect LoRA format". Detection alone was not enough: the loaded UNet dict is diffusers-named, so
+  those keys are mapped through `SdxlCheckpointConverter`/`Sd15CheckpointConverter.ConvertUNetKey`, the same
+  LDM→diffusers map the checkpoint itself goes through. The text-encoder halves (`lora_te1_`/`lora_te2_`) were
+  already correct and are untouched. Verified against a stock CivitAI SDXL LoRA: all 986 modules (722 UNet,
+  72 CLIP-L, 192 CLIP-G) resolve to keys the converted checkpoint holds.
+
 ## alpha.74
 
 - Audio: YuE2 songs can run to **900 seconds**, up from a hard 360. Nothing in the checkpoint required the old
