@@ -1,6 +1,7 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora.Mappers;
@@ -82,8 +83,24 @@ public static class KohyaSdMapper
         if (root.StartsWith("lora_unet_", StringComparison.Ordinal))
         {
             string body = root["lora_unet_".Length..];
-            canonicalKey = LoraKeyTransformer.UnderscoreToDot(body) + ".weight";
+            string dotted = LoraKeyTransformer.UnderscoreToDot(body) + ".weight";
             target = LoraTarget.UNet;
+            if (IsLdmUNetBody(body))
+            {
+                // The loaded UNet dict is diffusers-named, so LDM-named keys take the same map the checkpoint did.
+                string? mapped = format == LoraFormat.KohyaSdxl
+                    ? SdxlCheckpointConverter.ConvertUNetKey(dotted)
+                    : Sd15CheckpointConverter.ConvertUNetKey(dotted);
+                if (mapped is null)
+                {
+                    canonicalKey = string.Empty;
+                    target = default;
+                    return false;
+                }
+                canonicalKey = mapped;
+                return true;
+            }
+            canonicalKey = dotted;
             return true;
         }
         if (format == LoraFormat.KohyaSdxl)
@@ -114,6 +131,12 @@ public static class KohyaSdMapper
         target = default;
         return false;
     }
+
+    /// <summary>Whether the body after <c>lora_unet_</c> uses LDM/CompVis block names rather than the diffusers spellings.</summary>
+    private static bool IsLdmUNetBody(string body) =>
+        body.StartsWith("input_blocks_", StringComparison.Ordinal)
+        || body.StartsWith("output_blocks_", StringComparison.Ordinal)
+        || body.StartsWith("middle_block_", StringComparison.Ordinal);
 
     internal static unsafe float ReadScalar(Tensor t)
     {

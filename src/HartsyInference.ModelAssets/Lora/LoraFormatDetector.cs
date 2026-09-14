@@ -106,6 +106,13 @@ public static class LoraFormatDetector
             {
                 hasKohyaUnetBlocks = true;
             }
+            // sd-scripts emits these LDM block names for most SD1.5/SDXL LoRAs; the diffusers spellings above are the minority.
+            else if (key.StartsWith("lora_unet_input_blocks_", StringComparison.Ordinal)
+                || key.StartsWith("lora_unet_output_blocks_", StringComparison.Ordinal)
+                || key.StartsWith("lora_unet_middle_block_", StringComparison.Ordinal))
+            {
+                hasKohyaUnetBlocks = true;
+            }
 
             if (key.StartsWith("lora_te2_", StringComparison.Ordinal))
             {

@@ -524,6 +524,9 @@ public static class TestPaths
     public static class Lora
     {
         public static string YearbookFluxSchnell => Resolve("YEARBOOK_LORA_PATH", Path.Combine(ModelsDir, "Lora", "yearbook-photo-flux-schnell-v1.safetensors"));
+
+        /// <summary>A stock CivitAI SDXL LoRA (Harrlogos v2.0) — sd-scripts LDM block naming, the majority spelling.</summary>
+        public static string HarrlogosSdxl => Resolve("HARRLOGOS_SDXL_LORA_PATH", Path.Combine(ModelsDir, "Lora", "SDXL", "harrlogos_v2_0.safetensors"));
     }
 
     /// <summary>Tokenizer asset paths.</summary>
