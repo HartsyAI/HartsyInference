@@ -81,6 +81,32 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
         => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet,
             "lora_te2_text_model_encoder_layers_0_self_attn_q_proj");
 
+    /// <summary>SD1.5's block tables differ from SDXL's — 12 input blocks over 4 levels, with attention at level 0
+    /// where SDXL has none — so the same root maps elsewhere. A UNet-only companion keeps the file out of the SDXL arm.
+    /// A wrong map here is the silent case: <c>lora_te_</c> still merges, so the zero-match refusal never fires.</summary>
+    [Theory]
+    [InlineData("lora_unet_input_blocks_1_1_transformer_blocks_0_attn1_to_q",
+        "down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight")]
+    [InlineData("lora_unet_input_blocks_8_1_transformer_blocks_0_attn2_to_v",
+        "down_blocks.2.attentions.1.transformer_blocks.0.attn2.to_v.weight")]
+    [InlineData("lora_unet_output_blocks_3_1_transformer_blocks_0_ff_net_0_proj",
+        "up_blocks.1.attentions.0.transformer_blocks.0.ff.net.0.proj.weight")]
+    [InlineData("lora_unet_output_blocks_11_1_proj_out", "up_blocks.3.attentions.2.proj_out.weight")]
+    public void Sd15LdmRoot_MergesOntoDiffusersUNetKey(string loraRoot, string canonicalKey)
+        => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet, "lora_unet_middle_block_1_transformer_blocks_0_attn1_to_k");
+
+    /// <summary>LoCon/conv LoRAs reach the resnets, whose LDM sub-keys are compound names the underscore→dot pass
+    /// would otherwise split (<c>in_layers</c> → <c>in.layers</c>) into a key that matches nothing.</summary>
+    [Theory]
+    [InlineData("lora_unet_input_blocks_1_0_in_layers_2", "down_blocks.0.resnets.0.conv1.weight")]
+    [InlineData("lora_unet_input_blocks_1_0_out_layers_3", "down_blocks.0.resnets.0.conv2.weight")]
+    [InlineData("lora_unet_input_blocks_4_0_emb_layers_1", "down_blocks.1.resnets.0.time_emb_proj.weight")]
+    [InlineData("lora_unet_input_blocks_4_0_skip_connection", "down_blocks.1.resnets.0.conv_shortcut.weight")]
+    [InlineData("lora_unet_output_blocks_2_0_in_layers_2", "up_blocks.0.resnets.2.conv1.weight")]
+    public void LoConResnetRoot_MergesOntoDiffusersUNetKey(string loraRoot, string canonicalKey)
+        => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet,
+            "lora_te2_text_model_encoder_layers_0_self_attn_q_proj");
+
     /// <summary>The CLIP-G half of the same file routes unchanged — LDM naming is a UNet-only concern.</summary>
     [Fact]
     public void Te2Root_MergesOntoClipGKey()
@@ -89,8 +115,8 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
             "lora_unet_middle_block_1_proj_in");
 
     /// <summary>Builds a two-layer LoRA and asserts the root under test merges onto exactly the expected key.
-    /// The companion root targets the other component, so it is what makes the file detect as SDXL without
-    /// contributing to the merge count asserted here.</summary>
+    /// The companion root is what decides detection — a <c>lora_te2_</c> root makes the file SDXL, a UNet-only one
+    /// leaves it SD1.5 — and never contributes to the merge count, since only the key under test is in the dict.</summary>
     private void AssertMergesOnto(string loraRoot, string canonicalKey, LoraTarget target, string companionRoot)
     {
         // alpha = rank = 2 and strength 1 make the merged delta exactly down·up = 4 · (0.5 · 0.25) per element.

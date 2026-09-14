@@ -16,7 +16,11 @@ stable release will require. Dates are UTC.
   those keys are mapped through `SdxlCheckpointConverter`/`Sd15CheckpointConverter.ConvertUNetKey`, the same
   LDM→diffusers map the checkpoint itself goes through. The text-encoder halves (`lora_te1_`/`lora_te2_`) were
   already correct and are untouched. Verified against a stock CivitAI SDXL LoRA: all 986 modules (722 UNet,
-  72 CLIP-L, 192 CLIP-G) resolve to keys the converted checkpoint holds.
+  72 CLIP-L, 192 CLIP-G) resolve to keys the converted checkpoint holds, and the merged image is a large
+  visible change from the base (SSIM 0.34) while strength 0 is inert to the pixel (SSIM 1.0).
+- Image: LoCon/conv LoRAs for those families reach the resnets, whose LDM sub-keys (`in_layers`, `out_layers`,
+  `emb_layers`, `skip_connection`) are compound names the underscore→dot pass used to split into keys that match
+  nothing — a partial merge that no error reports, since the attention layers still merge.
 
 ## alpha.74
 
