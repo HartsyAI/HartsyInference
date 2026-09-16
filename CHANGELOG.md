@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.77
+
+- Video: **MiniMax-H3 long-form chaining is released.** Its real-generation gate passed on 2026-09-16 against the
+  fp8 FL2VA base: 3 chained segments at 512x288x141f produced one 345-frame clip whose video and audio both ran
+  exactly 14.375 s, with seams at the 2.0th and 14.5th percentile of the clip's own adjacent-frame SSIM
+  distribution (0.8856 and 0.9202 against a 0.8627 minimum and 0.9492 median) — a busier-than-average step rather
+  than a cut. Verified the same way through the CLI and the native HTTP API. Guides and AV denoise masks stay
+  release-blocked: chaining builds its masks inside the pipeline and never sets those request objects, so it
+  carries its own gate rather than theirs.
+- Each segment VAE-encodes a full-length source clip on top of its own generation, so a chain needs more headroom
+  than a single generation of the same segment length — 23.4 GB peak at 512x288x141f.
+
 ## alpha.76
 
 - Video: **MiniMax-H3 can generate past one denoise, as a chain of segments.** `VideoRequest.ChainTotalFrames`
