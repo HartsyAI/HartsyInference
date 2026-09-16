@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.79
+
+- Audio: **the SheetSage2 port continues** — its event codec, which reads a decoded token stream as musical
+  events and writes events back as tokens. SheetSage2 transcribes audio into a symbolic score, which is what
+  gives YuE2 a melody to cover, so it is the piece that makes editing an existing recording possible rather than
+  only editing scores YuE2 wrote itself. Each event keeps both its raw tokens and their read values: the values
+  are what a serializer wants, the tokens are what a later window replays verbatim as context, and re-encoding
+  from values would not reproduce them.
+- The vocabulary, decode grammar and sliding-window plan landed in alpha.78 without a changelog note, so for the
+  record: the vocabulary is 31,678 tokens whose ranges are laid out in one pass from offset 260, an id's meaning
+  is decided by nothing but which range it falls in, and decoding is greedy argmax over logits masked by the
+  grammar — so the grammar does not guard the result, it decides it. All of it is checked against the released
+  implementation's own output, dumped by `tests/python-reference/dump_sheetsage2_reference.py`, which needs no
+  weights.
+- Nothing in the port is reachable yet: the encoder, decoder and the events-to-ABC serializer are still to come,
+  along with their parity gates, which do need the checkpoint.
+
 ## alpha.78
 
 - Audio: **YuE2 can write its score without rendering it.** The model composes in two passes — an autoregressive

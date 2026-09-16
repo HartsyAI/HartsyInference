@@ -92,6 +92,172 @@ public sealed class SheetSage2GrammarParityTests
         }
     }
 
+    /// <summary>Gate S1b: a token stream read as events, field for field, against the released decode.</summary>
+    [Fact]
+    public void DecodedEvents_MatchTheReference()
+    {
+        JsonElement codec = Reference.GetProperty("codec");
+        int[] stream = [.. codec.GetProperty("stream").EnumerateArray().Select(e => e.GetInt32())];
+        List<ScoreEvent> events = new ScoreEventCodec(Tok).DecodeSequence(stream);
+
+        JsonElement want = codec.GetProperty("events");
+        Assert.Equal(want.GetArrayLength(), events.Count);
+        int i = 0;
+        foreach (JsonElement expected in want.EnumerateArray())
+        {
+            ScoreEvent got = events[i++];
+            Assert.Equal(expected.GetProperty("subbeat").GetInt32(), got.Subbeat);
+            AssertNullableDouble(expected.GetProperty("timestamp"), got.Timestamp);
+            AssertNullableString(expected.GetProperty("structure"), got.Structure);
+            AssertNullableString(expected.GetProperty("key"), got.Key);
+            AssertNullableString(expected.GetProperty("chord"), got.Chord);
+
+            JsonElement meter = expected.GetProperty("meter");
+            if (meter.ValueKind == JsonValueKind.Null) Assert.Null(got.Rhythm?.Meter);
+            else
+            {
+                Assert.Equal(meter[0].GetInt32(), got.Rhythm!.Value.Meter!.Value.Numerator);
+                Assert.Equal(meter[1].GetInt32(), got.Rhythm!.Value.Meter!.Value.Denominator);
+            }
+            JsonElement eighth = expected.GetProperty("eighthPosition");
+            if (eighth.ValueKind == JsonValueKind.Null) Assert.Null(got.Rhythm?.EighthPosition);
+            else Assert.Equal(eighth.GetInt32(), got.Rhythm!.Value.EighthPosition);
+
+            JsonElement melody = expected.GetProperty("melody");
+            Assert.Equal(melody.GetArrayLength(), got.Melody?.Count ?? 0);
+            int n = 0;
+            foreach (JsonElement note in melody.EnumerateArray())
+            {
+                ScoreNote actual = got.Melody![n++];
+                Assert.Equal(note.GetProperty("pitch").GetInt32(), actual.Pitch);
+                Assert.Equal(note.GetProperty("track").GetInt32(), actual.Track);
+                Assert.Equal(note.GetProperty("durationBin").GetInt32(), actual.DurationBin);
+                Assert.Equal(note.GetProperty("durationSteps").GetInt32(), actual.DurationSteps);
+            }
+        }
+    }
+
+    /// <summary>Re-encoding has to spell gaps exactly as the reference spells them, because a later window
+    /// replays its predecessor's events as context. It is canonical rather than byte-exact — see
+    /// <see cref="ShiftRuns_CanonicaliseAsTheReferenceDoes"/> for the runs that do not survive a round trip.</summary>
+    [Fact]
+    public void ReEncodedEvents_MatchTheReference()
+    {
+        JsonElement codec = Reference.GetProperty("codec");
+        int[] stream = [.. codec.GetProperty("stream").EnumerateArray().Select(e => e.GetInt32())];
+        int[] expected = [.. codec.GetProperty("reencoded").EnumerateArray().Select(e => e.GetInt32())];
+        ScoreEventCodec coder = new(Tok);
+        Assert.Equal(expected, coder.EncodeEvents(coder.DecodeSequence(stream)));
+        // The reference drops only the end token, so the round trip is the input minus its EOS.
+        Assert.Equal(stream[..^1], expected);
+    }
+
+    [Fact]
+    public void AStreamWithoutAPromptPrefix_IsRefused()
+        => Assert.Throws<ArgumentException>(() => new ScoreEventCodec(Tok).DecodeSequence([Tok.TimeStart, ScoreTokenizer.EosToken]));
+
+    [Fact]
+    public void AnEventWithoutABeatPosition_IsRefused()
+        => Assert.Throws<ArgumentException>(() => new ScoreEventCodec(Tok)
+            .DecodeSequence([.. ScoreTokenizer.PromptPrefix(), Tok.TimeStart + 5, ScoreTokenizer.EosToken]));
+
+    /// <summary>The shift runs a decode may legally write, and what re-encoding does with each.
+    ///
+    /// <para>Decoding keeps only the running total, so a run's shape is lost and the encoder re-spells every gap
+    /// canonically. That is the reference's own behaviour, not a shortcut: <c>shift(100) shift(100)</c> comes
+    /// back as one <c>shift(200)</c> there too. Pinned because the class documents exactly this limit, and
+    /// because a port that silently canonicalised DIFFERENTLY would still pass every other gate here.</para></summary>
+    [Fact]
+    public void ShiftRuns_CanonicaliseAsTheReferenceDoes()
+    {
+        ScoreEventCodec coder = new(Tok);
+        foreach (JsonProperty entry in Reference.GetProperty("shiftRuns").EnumerateObject())
+        {
+            JsonElement want = entry.Value;
+            List<int> stream = [.. ScoreTokenizer.PromptPrefix()];
+            foreach (JsonElement shift in want.GetProperty("shifts").EnumerateArray())
+            {
+                stream.Add(Tok.SubbeatShiftStart + shift.GetInt32());
+            }
+            stream.Add(Tok.TimeStart + 100);
+            stream.Add(ScoreTokenizer.EosToken);
+
+            List<ScoreEvent> events = coder.DecodeSequence(stream);
+            Assert.Equal(want.GetProperty("subbeat").GetInt32(), Assert.Single(events).Subbeat);
+
+            List<int> reencoded = coder.EncodeEvents(events);
+            int[] shifts = [.. reencoded.Skip(ScoreTokenizer.PromptPrefix().Length).SkipLast(1)
+                .Select(t => t - Tok.SubbeatShiftStart)];
+            int[] expected = [.. want.GetProperty("reencodedShifts").EnumerateArray().Select(e => e.GetInt32())];
+            Assert.Equal(expected, shifts);
+            Assert.Equal(want.GetProperty("byteExact").GetBoolean(), reencoded.SequenceEqual(stream[..^1]));
+        }
+    }
+
+    /// <summary>A gap past the grammar's own four-shift run limit. The encoder writes it anyway — confirmed
+    /// against the reference — because a replayed prefix is context, not something the grammar is masking.</summary>
+    [Fact]
+    public void AGapPastTheGrammarLimit_IsWrittenNotCapped()
+    {
+        JsonElement want = Reference.GetProperty("shiftRuns").GetProperty("pastGrammarLimit");
+        Assert.Equal(5, want.GetProperty("reencodedShifts").GetArrayLength());
+        List<int> tokens = new ScoreEventCodec(Tok).EncodeEvents(
+            [new ScoreEvent { Subbeat = want.GetProperty("subbeat").GetInt32(), TokensByField = [] }]);
+        int[] shifts = [.. tokens.Skip(ScoreTokenizer.PromptPrefix().Length).Select(t => t - Tok.SubbeatShiftStart)];
+        Assert.Equal([.. want.GetProperty("reencodedShifts").EnumerateArray().Select(e => e.GetInt32())], shifts);
+    }
+
+    /// <summary>A window cut at its generation stop ends mid-run. Those trailing shifts are dropped, as in the
+    /// reference — they sit past everything the window is trusted for, and the next window's prefix is selected
+    /// by timestamp, which a bare shift does not carry.</summary>
+    [Fact]
+    public void ATruncatedTail_DropsTheTrailingShiftRun()
+    {
+        JsonElement want = Reference.GetProperty("truncatedTail");
+        int[] stream = [.. want.GetProperty("stream").EnumerateArray().Select(e => e.GetInt32())];
+        Assert.Equal(want.GetProperty("eventCount").GetInt32(), new ScoreEventCodec(Tok).DecodeSequence(stream).Count);
+    }
+
+    /// <summary>Re-basing is the one operation that can drive a position backwards, and the reference turns a
+    /// negative one into a token id outside the shift range without a word. This refuses instead.</summary>
+    [Fact]
+    public void EventsThatMoveBackwards_AreRefused()
+    {
+        ScoreEventCodec coder = new(Tok);
+        Assert.Throws<ArgumentException>(() => coder.EncodeEvents(
+            [new ScoreEvent { Subbeat = -300, TokensByField = [] }]));
+        Assert.Throws<ArgumentException>(() => coder.EncodeEvents([
+            new ScoreEvent { Subbeat = 10, TokensByField = [] },
+            new ScoreEvent { Subbeat = 4, TokensByField = [] },
+        ]));
+    }
+
+    /// <summary>A melody bucket opening with a note length. The reference reads it as pitch 256 — a phantom low
+    /// note on the instrumental line — where silent musical garbage is the worst possible outcome.</summary>
+    [Fact]
+    public void AMelodyWithoutAPitch_IsRefused()
+    {
+        Assert.Throws<ArgumentException>(() => new ScoreEventCodec(Tok).DecodeSequence(
+            [.. ScoreTokenizer.PromptPrefix(), Tok.SubbeatShiftStart + 1, Tok.DurationStart + 3, ScoreTokenizer.EosToken]));
+    }
+
+    [Fact]
+    public void ANullTokenizer_IsRefusedAtConstruction()
+    {
+        Assert.Throws<ArgumentNullException>(() => new ScoreEventCodec(null!));
+        Assert.Throws<ArgumentNullException>(() => new PromptGrammar(null!));
+    }
+
+    /// <summary>A note's length is derived from its bin, so the two cannot disagree on a hand-built note.</summary>
+    [Fact]
+    public void ANotesLength_FollowsItsBin()
+    {
+        for (int bin = 0; bin < ScoreTokenizer.DurationTemplates.Length; bin++)
+        {
+            Assert.Equal(ScoreTokenizer.DurationTemplates[bin], new ScoreNote(60, 0, bin).DurationSteps);
+        }
+    }
+
     /// <summary>Every pinned clip length, window for window. A plan that drifts by a second reads the wrong
     /// audio into every later window, which shows up as a plausible transcription of the wrong part of a song.</summary>
     [Fact]
@@ -158,6 +324,18 @@ public sealed class SheetSage2GrammarParityTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => SlidingWindowPlan.For(0));
         Assert.Throws<ArgumentOutOfRangeException>(() => SlidingWindowPlan.For(double.NaN));
+    }
+
+    private static void AssertNullableDouble(JsonElement expected, double? actual)
+    {
+        if (expected.ValueKind == JsonValueKind.Null) Assert.Null(actual);
+        else Assert.Equal(expected.GetDouble(), actual!.Value, 6);
+    }
+
+    private static void AssertNullableString(JsonElement expected, string? actual)
+    {
+        if (expected.ValueKind == JsonValueKind.Null) Assert.Null(actual);
+        else Assert.Equal(expected.GetString(), actual);
     }
 
     private (string Field, int Start)[] Probes() =>

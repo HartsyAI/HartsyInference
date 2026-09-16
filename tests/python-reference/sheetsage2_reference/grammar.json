@@ -221,6 +221,199 @@
    "duration": false
   }
  },
+ "shiftRuns": {
+  "canonical": {
+   "shifts": [
+    256,
+    14
+   ],
+   "subbeat": 270,
+   "reencodedShifts": [
+    256,
+    14
+   ],
+   "byteExact": true
+  },
+  "twoEqualHalves": {
+   "shifts": [
+    100,
+    100
+   ],
+   "subbeat": 200,
+   "reencodedShifts": [
+    200
+   ],
+   "byteExact": false
+  },
+  "leadingZero": {
+   "shifts": [
+    0,
+    4
+   ],
+   "subbeat": 4,
+   "reencodedShifts": [
+    4
+   ],
+   "byteExact": false
+  },
+  "single": {
+   "shifts": [
+    4
+   ],
+   "subbeat": 4,
+   "reencodedShifts": [
+    4
+   ],
+   "byteExact": true
+  },
+  "threeMaximal": {
+   "shifts": [
+    256,
+    256,
+    256
+   ],
+   "subbeat": 768,
+   "reencodedShifts": [
+    256,
+    256,
+    256
+   ],
+   "byteExact": true
+  },
+  "pastGrammarLimit": {
+   "shifts": [
+    256,
+    256,
+    256,
+    256,
+    1
+   ],
+   "subbeat": 1025,
+   "reencodedShifts": [
+    256,
+    256,
+    256,
+    256,
+    1
+   ],
+   "byteExact": true
+  }
+ },
+ "truncatedTail": {
+  "stream": [
+   1,
+   4,
+   5,
+   6,
+   7,
+   9,
+   11,
+   3,
+   264,
+   617,
+   516,
+   280
+  ],
+  "eventCount": 1
+ },
+ "codec": {
+  "stream": [
+   1,
+   4,
+   5,
+   6,
+   7,
+   9,
+   11,
+   3,
+   264,
+   767,
+   30537,
+   30712,
+   30968,
+   31001,
+   31137,
+   31458,
+   31659,
+   31593,
+   31656,
+   516,
+   270,
+   1417,
+   31470,
+   2
+  ],
+  "reencoded": [
+   1,
+   4,
+   5,
+   6,
+   7,
+   9,
+   11,
+   3,
+   264,
+   767,
+   30537,
+   30712,
+   30968,
+   31001,
+   31137,
+   31458,
+   31659,
+   31593,
+   31656,
+   516,
+   270,
+   1417,
+   31470
+  ],
+  "events": [
+   {
+    "subbeat": 4,
+    "timestamp": 2.5,
+    "meter": [
+     4,
+     4
+    ],
+    "eighthPosition": 3,
+    "structure": "verse",
+    "key": "C#:minor",
+    "chord": "D#:dim",
+    "melody": [
+     {
+      "pitch": 60,
+      "track": 0,
+      "durationBin": 5,
+      "durationSteps": 8
+     },
+     {
+      "pitch": 67,
+      "track": 1,
+      "durationBin": 2,
+      "durationSteps": 3
+     }
+    ]
+   },
+   {
+    "subbeat": 270,
+    "timestamp": 9.0,
+    "meter": null,
+    "eighthPosition": null,
+    "structure": null,
+    "key": null,
+    "chord": null,
+    "melody": [
+     {
+      "pitch": 72,
+      "track": 0,
+      "durationBin": 0,
+      "durationSteps": 1
+     }
+    ]
+   }
+  ]
+ },
  "windows": {
   "30": [
    {
