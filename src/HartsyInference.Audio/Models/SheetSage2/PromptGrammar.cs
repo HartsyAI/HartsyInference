@@ -23,7 +23,7 @@ public sealed class PromptGrammar(ScoreTokenizer tokenizer)
         MelodyAfterPitch,
     }
 
-    private readonly ScoreTokenizer _tokenizer = tokenizer;
+    private readonly ScoreTokenizer _tokenizer = tokenizer ?? throw new ArgumentNullException(nameof(tokenizer));
     private bool _inShift = true;
     private int _shiftRun;
     private int _payloadCount;

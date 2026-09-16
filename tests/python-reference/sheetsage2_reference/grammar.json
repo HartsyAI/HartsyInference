@@ -221,6 +221,101 @@
    "duration": false
   }
  },
+ "shiftRuns": {
+  "canonical": {
+   "shifts": [
+    256,
+    14
+   ],
+   "subbeat": 270,
+   "reencodedShifts": [
+    256,
+    14
+   ],
+   "byteExact": true
+  },
+  "twoEqualHalves": {
+   "shifts": [
+    100,
+    100
+   ],
+   "subbeat": 200,
+   "reencodedShifts": [
+    200
+   ],
+   "byteExact": false
+  },
+  "leadingZero": {
+   "shifts": [
+    0,
+    4
+   ],
+   "subbeat": 4,
+   "reencodedShifts": [
+    4
+   ],
+   "byteExact": false
+  },
+  "single": {
+   "shifts": [
+    4
+   ],
+   "subbeat": 4,
+   "reencodedShifts": [
+    4
+   ],
+   "byteExact": true
+  },
+  "threeMaximal": {
+   "shifts": [
+    256,
+    256,
+    256
+   ],
+   "subbeat": 768,
+   "reencodedShifts": [
+    256,
+    256,
+    256
+   ],
+   "byteExact": true
+  },
+  "pastGrammarLimit": {
+   "shifts": [
+    256,
+    256,
+    256,
+    256,
+    1
+   ],
+   "subbeat": 1025,
+   "reencodedShifts": [
+    256,
+    256,
+    256,
+    256,
+    1
+   ],
+   "byteExact": true
+  }
+ },
+ "truncatedTail": {
+  "stream": [
+   1,
+   4,
+   5,
+   6,
+   7,
+   9,
+   11,
+   3,
+   264,
+   617,
+   516,
+   280
+  ],
+  "eventCount": 1
+ },
  "codec": {
   "stream": [
    1,

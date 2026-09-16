@@ -136,6 +136,39 @@ def main() -> int:
         token("pitch", 72),
         tokenizer.eos_token,
     ]
+    # Shift runs the model can legally write but the encoder does NOT reproduce, plus one it does. Pinned so the
+    # port's canonicalisation is known to match the reference's rather than merely assumed to.
+    def shift_case(shifts):
+        s = tokenizer.prompt_prefix() + [token("subbeat_shift", n) for n in shifts] \
+            + [token("time", 100), tokenizer.eos_token]
+        d = tokenizer.decode_sequence(s)
+        re_encoded = tokenizer.encode_events(d["events"])
+        return {
+            "shifts": list(shifts),
+            "subbeat": d["events"][0]["subbeat"],
+            "reencodedShifts": [t - tokenizer.subbeat_shift_token_start for t in re_encoded[len(tokenizer.prompt_prefix()):-1]],
+            "byteExact": re_encoded == s[:-1],
+        }
+
+    payload["shiftRuns"] = {
+        "canonical": shift_case([256, 14]),
+        "twoEqualHalves": shift_case([100, 100]),
+        "leadingZero": shift_case([0, 4]),
+        "single": shift_case([4]),
+        "threeMaximal": shift_case([256, 256, 256]),
+        "pastGrammarLimit": shift_case([256, 256, 256, 256, 1]),
+    }
+
+    # A window cut mid-stream: a trailing shift run with no fields and no end token.
+    truncated = tokenizer.prompt_prefix() + [
+        token("subbeat_shift", 4), token("time", 100),
+        token("subbeat_shift", 256), token("subbeat_shift", 20),
+    ]
+    payload["truncatedTail"] = {
+        "stream": truncated,
+        "eventCount": len(tokenizer.decode_sequence(truncated)["events"]),
+    }
+
     decoded = tokenizer.decode_sequence(stream)
     payload["codec"] = {
         "stream": stream,

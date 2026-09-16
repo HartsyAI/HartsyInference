@@ -4,8 +4,12 @@ namespace HartsyInference.Audio.Models.SheetSage2;
 /// <param name="Pitch">MIDI pitch, 0-127.</param>
 /// <param name="Track">Which of the two melody lines it belongs to — 0 is the vocal, 1 the instrumental.</param>
 /// <param name="DurationBin">Index into <see cref="ScoreTokenizer.DurationTemplates"/>.</param>
-/// <param name="DurationSteps">That template's length, in subbeats.</param>
-public readonly record struct ScoreNote(int Pitch, int Track, int DurationBin, int DurationSteps);
+public readonly record struct ScoreNote(int Pitch, int Track, int DurationBin)
+{
+    /// <summary>That template's length, in subbeats. Derived rather than stored, so it cannot disagree with
+    /// <see cref="DurationBin"/> on a note built by hand.</summary>
+    public int DurationSteps => ScoreTokenizer.DurationTemplates[DurationBin];
+}
 
 /// <summary>Where in the bar an event sits, and under what time signature.</summary>
 /// <param name="Meter">Time signature, when the event states one.</param>
@@ -42,10 +46,4 @@ public sealed class ScoreEvent
 
     /// <summary>Notes starting at this position, when the event carries any.</summary>
     public IReadOnlyList<ScoreNote>? Melody { get; init; }
-
-    /// <summary>Position in the whole piece, once windows have been stitched together.</summary>
-    public int GlobalSubbeat { get; set; }
-
-    /// <summary>Seconds into the whole piece, once windows have been stitched together.</summary>
-    public double Time { get; set; }
 }
