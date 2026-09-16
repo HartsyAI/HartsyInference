@@ -14,6 +14,7 @@ namespace HartsyInference.API.Tests;
 /// <c>RepoPaths.ModelsRoot()</c> at a hermetic fixture through the <c>paths.modelsRoot</c> setting — no real
 /// multi-GB checkpoint needed. The override is process-global, so it is cleared immediately after each test to
 /// minimize the exposure window for other classes reading the same setting.</summary>
+[Collection("ModelsRootKnob")]
 public sealed class ModelResolverTests : IDisposable
 {
     private readonly string _tempModelsRoot = Path.Combine(Path.GetTempPath(), "hartsy-modelresolver-tests-" + Path.GetRandomFileName());
@@ -88,3 +89,8 @@ public sealed class ModelResolverTests : IDisposable
         Assert.Equal(Path.GetFullPath(overridePath), spec.LocalPath);
     }
 }
+
+/// <summary>Serializes the classes that point <c>EngineKnobs.ModelsRoot</c> at a fixture. The override is
+/// process-global, so two of them running in parallel read each other's root.</summary>
+[CollectionDefinition("ModelsRootKnob", DisableParallelization = true)]
+public sealed class ModelsRootKnobCollection;

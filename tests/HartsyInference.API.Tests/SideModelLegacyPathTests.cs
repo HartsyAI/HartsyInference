@@ -10,6 +10,7 @@ namespace HartsyInference.API.Tests;
 /// resolve shared assets through the strict non-downloading overload (Mage-Flow shares Krea 2's encoder) report
 /// the encoder missing instead. Points <c>RepoPaths.ModelsRoot()</c> at a hermetic fixture; the override is
 /// process-global, so it is cleared after each test.</summary>
+[Collection("ModelsRootKnob")]
 public sealed class SideModelLegacyPathTests : IDisposable
 {
     private readonly string _tempModelsRoot = Path.Combine(Path.GetTempPath(), "hartsy-legacypath-tests-" + Path.GetRandomFileName());
