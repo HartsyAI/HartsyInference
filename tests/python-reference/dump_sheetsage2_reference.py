@@ -38,6 +38,18 @@ STATES = {
 PROBES = ("subbeat_shift", "time", "meter", "eighth_position", "structure", "key",
           "majmin_chord", "full_chord", "pitch", "duration")
 
+# Clip lengths worth pinning: inside one window, exactly one window, one second over (which pulls the second
+# window back so it still reads a full one), and several multi-window cases.
+WINDOW_DURATIONS = (30.0, 120.0, 300.0, 301.0, 450.0, 600.0, 905.0, 1200.0)
+
+
+def load_window_plan(source: Path):
+    """Executes just sliding_window_plan, which depends on nothing."""
+    src = source.read_text()
+    namespace = {}
+    exec(src[src.index("def sliding_window_plan"):src.index("def overlap_prefix")], namespace)
+    return namespace["sliding_window_plan"]
+
 
 def load_reference(source: Path):
     """Executes just the constants, ScoreTokenizer and PromptGrammarState out of the released module."""
@@ -108,10 +120,27 @@ def main() -> int:
         "states": {name: mask_for(updates) for name, updates in STATES.items()},
     }
 
+    plan = load_window_plan(args.source)
+    payload["windows"] = {
+        f"{duration:g}": [
+            {
+                "start": window["start"],
+                "end": window["end"],
+                "acceptStart": window["accept_start"],
+                "acceptEnd": window["accept_end"],
+                "prefixEnd": window["prefix_end"],
+                "generationStop": window["generation_stop"],
+            }
+            for window in plan(duration)
+        ]
+        for duration in WINDOW_DURATIONS
+    }
+
     args.out.mkdir(parents=True, exist_ok=True)
     path = args.out / "grammar.json"
     path.write_text(json.dumps(payload, indent=1) + "\n")
-    print(f"wrote {path} ({payload['tokenCount']} tokens, {len(payload['states'])} grammar states)")
+    print(f"wrote {path} ({payload['tokenCount']} tokens, {len(payload['states'])} grammar states, "
+          f"{len(payload['windows'])} window plans)")
     return 0
 
 

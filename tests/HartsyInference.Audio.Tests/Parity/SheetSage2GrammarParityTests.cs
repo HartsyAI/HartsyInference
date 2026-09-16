@@ -92,6 +92,74 @@ public sealed class SheetSage2GrammarParityTests
         }
     }
 
+    /// <summary>Every pinned clip length, window for window. A plan that drifts by a second reads the wrong
+    /// audio into every later window, which shows up as a plausible transcription of the wrong part of a song.</summary>
+    [Fact]
+    public void WindowPlans_MatchTheReference()
+    {
+        foreach (JsonProperty entry in Reference.GetProperty("windows").EnumerateObject())
+        {
+            double duration = double.Parse(entry.Name);
+            IReadOnlyList<SheetSage2Window> actual = SlidingWindowPlan.For(duration);
+            Assert.Equal(entry.Value.GetArrayLength(), actual.Count);
+            int i = 0;
+            foreach (JsonElement want in entry.Value.EnumerateArray())
+            {
+                SheetSage2Window got = actual[i];
+                Assert.Equal(want.GetProperty("start").GetDouble(), got.Start, 6);
+                Assert.Equal(want.GetProperty("end").GetDouble(), got.End, 6);
+                Assert.Equal(want.GetProperty("acceptStart").GetDouble(), got.AcceptStart, 6);
+                Assert.Equal(want.GetProperty("acceptEnd").GetDouble(), got.AcceptEnd, 6);
+                Assert.Equal(want.GetProperty("prefixEnd").GetDouble(), got.PrefixEnd, 6);
+                JsonElement stop = want.GetProperty("generationStop");
+                if (stop.ValueKind == JsonValueKind.Null) Assert.Null(got.GenerationStop);
+                else Assert.Equal(stop.GetDouble(), got.GenerationStop!.Value, 6);
+                i++;
+            }
+        }
+    }
+
+    /// <summary>Whatever the plan's shape, the accepted spans have to tile the clip exactly once — a gap drops
+    /// a passage from the transcription and an overlap transcribes it twice.</summary>
+    [Theory]
+    [InlineData(30.0)]
+    [InlineData(300.0)]
+    [InlineData(301.0)]
+    [InlineData(450.0)]
+    [InlineData(905.0)]
+    [InlineData(3600.0)]
+    public void AcceptedSpans_TileTheClipExactlyOnce(double duration)
+    {
+        IReadOnlyList<SheetSage2Window> windows = SlidingWindowPlan.For(duration);
+        Assert.Equal(0.0, windows[0].AcceptStart, 6);
+        Assert.Equal(duration, windows[^1].AcceptEnd, 6);
+        for (int i = 0; i < windows.Count; i++)
+        {
+            Assert.True(windows[i].AcceptEnd > windows[i].AcceptStart, $"window {i} accepts nothing");
+            // Everything a window is trusted for has to be inside the audio it actually read.
+            Assert.True(windows[i].AcceptStart >= windows[i].Start - 1e-6, $"window {i} accepts before it starts");
+            Assert.True(windows[i].AcceptEnd <= windows[i].End + 1e-6, $"window {i} accepts past its own audio");
+            if (i > 0) Assert.Equal(windows[i - 1].AcceptEnd, windows[i].AcceptStart, 6);
+        }
+    }
+
+    [Fact]
+    public void ShortClips_AreOneWindowWithNoLookahead()
+    {
+        IReadOnlyList<SheetSage2Window> windows = SlidingWindowPlan.For(120.0);
+        SheetSage2Window only = Assert.Single(windows);
+        Assert.Null(only.GenerationStop);
+        Assert.Equal(0.0, only.Start, 6);
+        Assert.Equal(120.0, only.End, 6);
+    }
+
+    [Fact]
+    public void ADurationThatIsNotPositive_IsRefused()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => SlidingWindowPlan.For(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => SlidingWindowPlan.For(double.NaN));
+    }
+
     private (string Field, int Start)[] Probes() =>
     [
         ("subbeat_shift", Tok.SubbeatShiftStart), ("time", Tok.TimeStart), ("meter", Tok.MeterStart),
