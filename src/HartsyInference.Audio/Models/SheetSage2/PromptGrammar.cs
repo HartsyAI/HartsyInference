@@ -33,33 +33,47 @@ public sealed class PromptGrammar(ScoreTokenizer tokenizer)
     /// <summary>Events completed so far.</summary>
     public int EventCount { get; private set; }
 
-    /// <summary>A mask over the whole vocabulary: true where a token may legally come next.</summary>
-    public bool[] Allowed()
+    /// <summary>Fills <paramref name="mask"/> with the tokens that may legally come next.</summary>
+    /// <remarks>Takes the buffer rather than returning one: this runs once per decoded token over a
+    /// 31,678-wide vocabulary, so allocating here would allocate per step of every transcription.</remarks>
+    public void Allowed(Span<bool> mask)
     {
-        bool[] allowed = new bool[_tokenizer.TokenCount];
+        if (mask.Length < _tokenizer.TokenCount)
+        {
+            throw new ArgumentException(
+                $"The mask holds {mask.Length} tokens; SheetSage2's vocabulary is {_tokenizer.TokenCount}.", nameof(mask));
+        }
+        mask.Clear();
         // Ending is only legal once the current event has written something.
-        if (_payloadCount > 0) allowed[ScoreTokenizer.EosToken] = true;
+        if (_payloadCount > 0) mask[ScoreTokenizer.EosToken] = true;
         if ((_payloadCount > 0 || _inShift) && _shiftRun < 4)
         {
-            Fill(allowed, _tokenizer.SubbeatShiftStart, _tokenizer.SubbeatShiftEnd);
+            Fill(mask, _tokenizer.SubbeatShiftStart, _tokenizer.SubbeatShiftEnd);
         }
         // A half-written field admits only its partner — these short-circuit the ordering rule entirely.
         if (_pending == Pending.RhythmAfterMeter)
         {
-            Fill(allowed, _tokenizer.EighthPositionStart, _tokenizer.EighthPositionEnd);
-            return allowed;
+            Fill(mask, _tokenizer.EighthPositionStart, _tokenizer.EighthPositionEnd);
+            return;
         }
         if (_pending == Pending.MelodyAfterPitch)
         {
-            Fill(allowed, _tokenizer.DurationStart, _tokenizer.DurationEnd);
-            Fill(allowed, _tokenizer.PitchStart, _tokenizer.PitchEnd);
-            return allowed;
+            Fill(mask, _tokenizer.DurationStart, _tokenizer.DurationEnd);
+            Fill(mask, _tokenizer.PitchStart, _tokenizer.PitchEnd);
+            return;
         }
-        AllowFieldStarts(allowed);
-        return allowed;
+        AllowFieldStarts(mask);
     }
 
-    private void AllowFieldStarts(bool[] allowed)
+    /// <summary>Allocating convenience over <see cref="Allowed(Span{bool})"/>, for tests and one-off inspection.</summary>
+    public bool[] Allowed()
+    {
+        bool[] mask = new bool[_tokenizer.TokenCount];
+        Allowed(mask);
+        return mask;
+    }
+
+    private void AllowFieldStarts(Span<bool> allowed)
     {
         if (_lastFieldIndex < ScoreTokenizer.FieldIndex("timestamp"))
         {
@@ -89,10 +103,7 @@ public sealed class PromptGrammar(ScoreTokenizer tokenizer)
         }
     }
 
-    private static void Fill(bool[] mask, int start, int end)
-    {
-        for (int i = start; i < end; i++) mask[i] = true;
-    }
+    private static void Fill(Span<bool> mask, int start, int end) => mask[start..end].Fill(true);
 
     /// <summary>Advances the state by a token that was just emitted.</summary>
     /// <returns>True when that token ended the sequence.</returns>

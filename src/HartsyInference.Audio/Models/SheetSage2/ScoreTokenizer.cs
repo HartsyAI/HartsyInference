@@ -46,42 +46,8 @@ public sealed class ScoreTokenizer
     /// <summary>The six event fields, in the order the grammar requires them.</summary>
     public static readonly string[] EventFields = ["timestamp", "rhythm", "structure", "key", "chord", "melody"];
 
-    /// <summary>Index of a field in <see cref="EventFields"/>; the grammar orders by this.</summary>
-    public static int FieldIndex(string field) => Array.IndexOf(EventFields, field);
-
-    /// <summary>Time-signature pairs, in id order: numerator 1..32 against six denominators.</summary>
-    public IReadOnlyList<(int Numerator, int Denominator)> MeterPairs { get; }
-
-    /// <summary>Chord labels, in id order. "N" is no-chord; the rest are <c>root:quality[/inversion]</c>.</summary>
-    public IReadOnlyList<string> FullChordLabels { get; }
-
-    /// <summary>Total vocabulary size — the decoder's output width.</summary>
-    public int TokenCount { get; }
-
-    /// <summary>Each field's half-open id range, in layout order.</summary>
-    public IReadOnlyList<(string Name, int Start, int End)> Ranges { get; }
-
-    public int SubbeatShiftStart { get; }
-    public int SubbeatShiftEnd { get; }
-    public int TimeStart { get; }
-    public int TimeEnd { get; }
-    public int MeterStart { get; }
-    public int MeterEnd { get; }
-    public int EighthPositionStart { get; }
-    public int EighthPositionEnd { get; }
-    public int StructureStart { get; }
-    public int StructureEnd { get; }
-    public int KeyStart { get; }
-    public int KeyEnd { get; }
-    public int MajMinChordStart { get; }
-    public int MajMinChordEnd { get; }
-    public int FullChordStart { get; }
-    public int FullChordEnd { get; }
-    public int PitchStart { get; }
-    public int PitchEnd { get; }
-    public int DurationStart { get; }
-    public int DurationEnd { get; }
-
+    /// <summary>Builds the vocabulary, laying every field's id range out in one pass from
+    /// <see cref="RangeOffset"/>.</summary>
     public ScoreTokenizer()
     {
         List<(int, int)> meters = new(192);
@@ -155,6 +121,82 @@ public sealed class ScoreTokenizer
         (PitchStart, PitchEnd) = bounds["pitch"];
         (DurationStart, DurationEnd) = bounds["duration"];
     }
+
+    /// <summary>Time-signature pairs, in id order: numerator 1..32 against six denominators.</summary>
+    public IReadOnlyList<(int Numerator, int Denominator)> MeterPairs { get; }
+
+    /// <summary>Chord labels, in id order. "N" is no-chord; the rest are <c>root:quality[/inversion]</c>.</summary>
+    public IReadOnlyList<string> FullChordLabels { get; }
+
+    /// <summary>Total vocabulary size — the decoder's output width.</summary>
+    public int TokenCount { get; }
+
+    /// <summary>Each field's half-open id range, in layout order.</summary>
+    public IReadOnlyList<(string Name, int Start, int End)> Ranges { get; }
+
+    /// <summary>First id of the subbeat-shift range, which separates events.</summary>
+    public int SubbeatShiftStart { get; }
+
+    /// <summary>One past the last subbeat-shift id.</summary>
+    public int SubbeatShiftEnd { get; }
+
+    /// <summary>First id of the timestamp range, counted at <see cref="TimeHz"/>.</summary>
+    public int TimeStart { get; }
+
+    /// <summary>One past the last timestamp id.</summary>
+    public int TimeEnd { get; }
+
+    /// <summary>First id of the time-signature range, indexing <see cref="MeterPairs"/>.</summary>
+    public int MeterStart { get; }
+
+    /// <summary>One past the last time-signature id.</summary>
+    public int MeterEnd { get; }
+
+    /// <summary>First id of the position-in-bar range.</summary>
+    public int EighthPositionStart { get; }
+
+    /// <summary>One past the last position-in-bar id.</summary>
+    public int EighthPositionEnd { get; }
+
+    /// <summary>First id of the section-label range, indexing <see cref="StructureLabels"/>.</summary>
+    public int StructureStart { get; }
+
+    /// <summary>One past the last section-label id.</summary>
+    public int StructureEnd { get; }
+
+    /// <summary>First id of the key range: twelve roots in major and minor.</summary>
+    public int KeyStart { get; }
+
+    /// <summary>One past the last key id.</summary>
+    public int KeyEnd { get; }
+
+    /// <summary>First id of the major/minor chord range. Laid out but never emitted — the released decode
+    /// writes full chords — and kept because removing it would shift every later range.</summary>
+    public int MajMinChordStart { get; }
+
+    /// <summary>One past the last major/minor chord id.</summary>
+    public int MajMinChordEnd { get; }
+
+    /// <summary>First id of the full chord range, indexing <see cref="FullChordLabels"/>.</summary>
+    public int FullChordStart { get; }
+
+    /// <summary>One past the last full chord id.</summary>
+    public int FullChordEnd { get; }
+
+    /// <summary>First id of the pitch range; the low 128 are one track and the high 128 the other.</summary>
+    public int PitchStart { get; }
+
+    /// <summary>One past the last pitch id.</summary>
+    public int PitchEnd { get; }
+
+    /// <summary>First id of the note-length range, indexing <see cref="DurationTemplates"/>.</summary>
+    public int DurationStart { get; }
+
+    /// <summary>One past the last note-length id.</summary>
+    public int DurationEnd { get; }
+
+    /// <summary>Index of a field in <see cref="EventFields"/>; the grammar orders by this.</summary>
+    public static int FieldIndex(string field) => Array.IndexOf(EventFields, field);
 
     /// <summary>The fixed prefix every decode starts from. The literal ids are task-selection tokens the
     /// checkpoint was trained with; they are not derived from anything.</summary>
