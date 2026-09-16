@@ -76,10 +76,21 @@ public class MiniMaxH3ChainPlannerTests
         Assert.All(video.Take(second.ContextLatentFrames), value => Assert.Equal(0f, value));
         Assert.All(video.Skip(second.ContextLatentFrames), value => Assert.Equal(1f, value));
 
+        // The audio mask ramps into the join instead of stepping: a hard edge leaves the latent discontinuous and
+        // the VAE renders that as a pop.
         float[] audio = MiniMaxH3ChainPlanner.AudioMaskValues(second);
         Assert.Equal(MiniMaxH3Geometry.AudioLatentFrames(second.FrameCount), audio.Length);
-        Assert.All(audio.Take(second.ContextAudioLatentFrames), value => Assert.Equal(0f, value));
+        int hard = second.ContextAudioLatentFrames - MiniMaxH3ChainPlanner.AudioFeatherRows;
+        Assert.All(audio.Take(hard), value => Assert.Equal(0f, value));
         Assert.All(audio.Skip(second.ContextAudioLatentFrames), value => Assert.Equal(1f, value));
+        float[] ramp = [.. audio.Skip(hard).Take(MiniMaxH3ChainPlanner.AudioFeatherRows)];
+        Assert.Equal(MiniMaxH3ChainPlanner.AudioFeatherRows, ramp.Length);
+        Assert.Equal(1f, ramp[^1]);
+        for (int i = 1; i < ramp.Length; i++)
+        {
+            Assert.True(ramp[i] > ramp[i - 1], "The feather must rise monotonically into the generated rows.");
+        }
+        Assert.True(ramp[0] > 0f && ramp[0] < 1f, "The feather must start strictly between preserve and generate.");
     }
 
     /// <summary>The first segment is an ordinary generation, so its mask is all-generate.</summary>

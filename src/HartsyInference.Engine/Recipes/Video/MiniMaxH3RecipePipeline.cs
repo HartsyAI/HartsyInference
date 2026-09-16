@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
@@ -1129,9 +1130,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 _vaeBackend.Sync();
                 if (videoSourceRows.Shape[0] != videoMaskRows.Length)
                 {
-                    throw new InvalidOperationException(
-                        $"MiniMax-H3 mask source encoded to {videoSourceRows.Shape[0]} video rows, but the target "
-                        + $"mask has {videoMaskRows.Length} rows.");
+                    // The encoder is a causal CNN, so a short source's rows are bit-identical to the same frames
+                    // encoded as the head of a full-length clip — a caller preserving only a head can hand over
+                    // just that head and skip encoding frames the mask throws away.
+                    videoSourceRows = PadMaskSourceRows(videoSourceRows, videoMaskRows);
                 }
             }
 
@@ -1240,6 +1242,35 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             out featureMaskValues, patchHeight: 2, patchWidth: 2);
     }
 
+    /// <summary>Zero-fills a short mask source out to the target's row count, refusing if the mask actually preserves
+    /// anything past what was supplied — those rows would otherwise be preserved as silence.</summary>
+    private static unsafe Tensor PadMaskSourceRows(Tensor rows, float[] maskRows)
+    {
+        int encoded = (int)rows.Shape[0];
+        if (encoded > maskRows.Length)
+        {
+            rows.Dispose();
+            throw new InvalidOperationException(
+                $"MiniMax-H3 mask source encoded to {encoded} video rows, but the target mask has {maskRows.Length}.");
+        }
+        for (int i = encoded; i < maskRows.Length; i++)
+        {
+            if (maskRows[i] < 1f)
+            {
+                rows.Dispose();
+                throw new InvalidOperationException(
+                    $"MiniMax-H3 mask preserves row {i} but the source only covers {encoded} rows.");
+            }
+        }
+        Tensor padded = new Tensor(new TensorShape(maskRows.Length, rows.Shape[1]), rows.DType);
+        long paddedBytes = padded.DType.ComputeByteCount(padded.ElementCount);
+        long sourceBytes = rows.DType.ComputeByteCount(rows.ElementCount);
+        NativeMemory.Clear((void*)padded.DataPointer, (nuint)paddedBytes);
+        Buffer.MemoryCopy((void*)rows.DataPointer, (void*)padded.DataPointer, paddedBytes, sourceBytes);
+        rows.Dispose();
+        return padded;
+    }
+
     /// <summary>Expands one value per latent frame into the packed rows the image and clip paths produce. Values
     /// stretch onto the latent timeline as <see cref="VideoDenoiseMask.MaskVideo"/> frames do, so one value per
     /// latent frame lands on a hard boundary with no interpolation.</summary>
@@ -1274,13 +1305,14 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             {
                 throw new ArgumentException("MiniMax-H3 video mask sourceFrames is empty.", nameof(mask));
             }
-            byte[][] resized = new byte[frames][];
-            for (int i = 0; i < frames; i++)
+            // Encode only what was supplied. Padding out to the target length would encode frames every one of
+            // whose rows the mask discards, which is what exhausts a small card on a chained generation.
+            int supplied = Math.Min(mask.SourceFrames.Count, frames);
+            byte[][] resized = new byte[supplied][];
+            for (int i = 0; i < supplied; i++)
             {
                 cancel.ThrowIfCancellationRequested();
-                // Past the supplied tail the mask is white, so the held frame is never a preserved row.
-                resized[i] = VideoRecipeUtils.ResizeRgb24(
-                    mask.SourceFrames[Math.Min(i, mask.SourceFrames.Count - 1)], width, height);
+                resized[i] = VideoRecipeUtils.ResizeRgb24(mask.SourceFrames[i], width, height);
             }
             return resized;
         }

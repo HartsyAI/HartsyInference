@@ -102,7 +102,14 @@ public static class MiniMaxH3ChainPlanner
         return values;
     }
 
-    /// <summary>One mask value per 40 Hz audio latent row: zero over the protected head, one after.</summary>
+    /// <summary>Audio latent rows the mask ramps over instead of stepping, at the end of the protected head. A hard
+    /// edge leaves the latent itself discontinuous where preserved rows meet freshly denoised ones, and the audio VAE
+    /// renders that step as an impulse — the pop ComfyUI's <c>audio_feather_ticks</c> exists to remove. Video takes no
+    /// feather: a frame boundary carries no phase, so only the soundtrack hears the edge.</summary>
+    public const int AudioFeatherRows = 3;
+
+    /// <summary>One mask value per 40 Hz audio latent row: zero over the protected head, one after, raised-cosine
+    /// across <see cref="AudioFeatherRows"/> rows at the join.</summary>
     public static float[] AudioMaskValues(in Segment segment)
     {
         int audioT = MiniMaxH3Geometry.AudioLatentFrames(segment.FrameCount);
@@ -113,6 +120,16 @@ public static class MiniMaxH3ChainPlanner
         }
         float[] values = new float[audioT];
         values.AsSpan(segment.ContextAudioLatentFrames).Fill(1f);
+        if (segment.ContextAudioLatentFrames == 0)
+        {
+            return values;
+        }
+        int feather = Math.Min(AudioFeatherRows, segment.ContextAudioLatentFrames);
+        int hard = segment.ContextAudioLatentFrames - feather;
+        for (int i = 1; i <= feather; i++)
+        {
+            values[hard + i - 1] = (float)(0.5 - 0.5 * Math.Cos(Math.PI * i / feather));
+        }
         return values;
     }
 }
