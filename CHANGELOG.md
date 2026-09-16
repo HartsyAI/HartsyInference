@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.76
+
+- Video: **MiniMax-H3 can generate past one denoise, as a chain of segments.** `VideoRequest.ChainTotalFrames`
+  splits a longer target across successive generations; each one after the first copies the previous segment's tail
+  into its leading rows and masks those rows out of denoising, so they carry that segment's motion and soundtrack
+  phase into the new frames' attention context. The protected head is context rather than output — it is dropped at
+  assembly, which leaves one continuous sequence with no duplicated frames and no seam to blend. Lengths stay on
+  H3's `17k+5` grid (`MiniMaxH3ChainPlanner`) so a protected head always covers whole latent tokens; a head ending
+  inside a token would hold part of it fixed while denoising the rest, which the sampler's row masks cannot express.
+  Trim and boomerang apply once, to the whole video. Exposed as `--chain-frames` / `--chain-seconds` /
+  `--chain-context-frames` on the CLI and as `chainTotalFrames` / `chainContextFrames` over the native video API.
+  **Release-gated**: `video.h3_expansion.release_blocked` refuses it in published builds until its
+  operator-provided real-generation and output-inspection gate passes.
+- Video: `VideoDenoiseMask` gained `MaskFrameValues` (one spatially-uniform value per latent frame, the video mirror
+  of `AudioDenoiseMask.Values`) and `SourceFrames` (raw frames instead of an encoded clip). A binary temporal
+  boundary cannot survive `MaskVideo`'s lossy codec — mask values quantize upward, so a smeared black partly
+  denoises rows meant to be preserved — and a caller holding decoded frames no longer pays an encode/decode round
+  trip to hand them back.
+
 ## alpha.75
 
 - Image: **Kohya SD1.5/SDXL LoRAs that use LDM block names now load.** `LoraFormatDetector` recognized only the
