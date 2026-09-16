@@ -2,22 +2,17 @@ using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>Splits a requested duration longer than one MiniMax-H3 generation into a chain of generations, each
-/// re-denoising only its own new frames while holding a copy of the previous segment's tail fixed. Pure geometry:
-/// every length it emits is on H3's <c>17k+5</c> grid, so a segment's protected head covers whole latent tokens and
-/// the seam lands on a token boundary rather than inside one.</summary>
+/// <summary>Splits a duration longer than one MiniMax-H3 generation into chained generations that each re-denoise
+/// only their own new frames. Every length lands on H3's <c>17k+5</c> grid, so a protected head always covers whole
+/// latent tokens rather than ending inside one.</summary>
 public static class MiniMaxH3ChainPlanner
 {
-    /// <summary>Default frames of the previous segment carried into the next as fixed context. The smallest grid run
-    /// that is more than a still, and the length this family's guide/mask canary was verified at.</summary>
+    /// <summary>Default frames carried into the next segment; the smallest grid run that is more than a still.</summary>
     public const int DefaultContextFrames = 39;
 
     /// <summary>One generation in the chain.</summary>
-    /// <param name="Index">Zero-based position in the chain.</param>
     /// <param name="FrameCount">Aligned frames this generation produces, protected head included.</param>
     /// <param name="ContextFrames">Leading frames copied from the previous segment and held fixed; zero for the first.</param>
-    /// <param name="ContextLatentFrames">Video latent tokens those context frames occupy.</param>
-    /// <param name="ContextAudioLatentFrames">Audio latent rows per channel those context frames occupy.</param>
     public readonly record struct Segment(
         int Index, int FrameCount, int ContextFrames, int ContextLatentFrames, int ContextAudioLatentFrames)
     {
@@ -25,11 +20,9 @@ public static class MiniMaxH3ChainPlanner
         public int NewFrames => FrameCount - ContextFrames;
     }
 
-    /// <summary>Splits <paramref name="targetFrames"/> into chained segments. A target that already fits one
-    /// generation returns a single segment and no chaining.</summary>
-    /// <param name="targetFrames">Frames the assembled output should reach, before grid alignment.</param>
+    /// <summary>Splits <paramref name="targetFrames"/> into chained segments; a target that already fits one
+    /// generation returns a single segment.</summary>
     /// <param name="contextFrames">Frames carried between segments; must be on the <c>17k+5</c> grid.</param>
-    /// <param name="maxSegmentFrames">Longest single generation to emit; snapped down onto the grid.</param>
     public static IReadOnlyList<Segment> Plan(int targetFrames,
         int contextFrames = DefaultContextFrames,
         int maxSegmentFrames = MiniMaxH3Geometry.TrainedFrameEnvelope)
@@ -85,7 +78,7 @@ public static class MiniMaxH3ChainPlanner
         return total;
     }
 
-    /// <summary>One spatially-uniform mask value per video latent token: zero over the protected head, one after.</summary>
+    /// <summary>One mask value per video latent token: zero over the protected head, one after.</summary>
     public static float[] VideoMaskFrameValues(in Segment segment)
     {
         int latentT = MiniMaxH3Geometry.VideoLatentFrames(segment.FrameCount);

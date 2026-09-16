@@ -4,9 +4,8 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Geometry gates for long-form MiniMax-H3 chaining. Every segment length must stay on the <c>17k+5</c>
-/// grid and every protected head must cover whole latent tokens — a head that ends inside a token would hold part of
-/// a token fixed while denoising the rest of it, which the sampler's row masks cannot express.</summary>
+/// <summary>Geometry gates for long-form MiniMax-H3 chaining. A protected head that ended inside a latent token
+/// would hold part of it fixed while denoising the rest, which the sampler's row masks cannot express.</summary>
 public class MiniMaxH3ChainPlannerTests
 {
     [Fact]
@@ -50,7 +49,7 @@ public class MiniMaxH3ChainPlannerTests
         Assert.True(MiniMaxH3ChainPlanner.TotalFrames(plan) >= target);
     }
 
-    /// <summary>The protected head must cover exactly the context frames — whole latent tokens, no remainder.</summary>
+    /// <summary>The protected head must cover exactly the context frames, with no partial token.</summary>
     [Theory]
     [InlineData(39)]
     [InlineData(90)]

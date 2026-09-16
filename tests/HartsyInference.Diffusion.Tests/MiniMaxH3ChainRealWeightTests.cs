@@ -15,12 +15,9 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Opt-in real-checkpoint acceptance for long-form chaining: a clip longer than one MiniMax-H3 generation,
-/// assembled from segments that each hold the previous segment's tail fixed. The output and its metrics stay on disk
-/// for the operator inspection the release gate requires.
-/// <para>The seam is the thing under test. Continuity across it is measured against this generation's own
-/// frame-to-frame baseline rather than an absolute threshold — H3 output moves, so "adjacent frames are similar" is
-/// only meaningful relative to how much adjacent frames normally move in the same clip.</para></summary>
+/// <summary>Opt-in real-checkpoint acceptance for long-form chaining; output and metrics stay on disk for the
+/// operator inspection the release gate requires. Seam continuity is measured against the clip's own frame-to-frame
+/// baseline, since H3 output moves and an absolute SSIM threshold would mean nothing.</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
@@ -100,7 +97,7 @@ public sealed class MiniMaxH3ChainRealWeightTests
         Assert.Equal(totalFrames, result.Frames.Count);
         AssertCoherent(result);
 
-        // The protected head is context, not output: it must not appear twice in the assembly.
+        // The protected head is context, not output, so it must not appear twice in the assembly.
         int boundary = plan[0].FrameCount;
         Assert.NotEqual(
             Convert.ToHexString(result.Frames[boundary - 1].Rgb),
@@ -149,8 +146,7 @@ public sealed class MiniMaxH3ChainRealWeightTests
         _output.WriteLine($"Chain output: {written.Directory}");
         Assert.NotNull(written.Mp4Path);
 
-        // A seam that reads as an ordinary frame-to-frame step is the whole objective; a hard cut would sit far
-        // below the clip's own adjacent-frame similarity.
+        // A hard cut would sit far below the clip's own adjacent-frame similarity.
         Assert.True(worstSeam > withinSegment * 0.7d,
             $"Worst seam SSIM {worstSeam:F4} is a discontinuity against the clip's own "
             + $"{withinSegment:F4} adjacent-frame baseline.");

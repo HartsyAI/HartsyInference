@@ -861,11 +861,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             Blocks = [new MiniMaxH3TextEncoding.VisionBlock(visionTokens)],
         };
 
-    /// <summary>Generates past one denoise by chaining segments. Each segment after the first re-generates the tail
-    /// of the one before it as a fully-preserved head — the sampler's mask holds those rows at the source latent, so
-    /// they carry the previous segment's motion and soundtrack phase into the new frames' attention context. The head
-    /// is context, not output: it is dropped at assembly, leaving one continuous sequence with no duplicated frames
-    /// and no seam to blend. Trim and boomerang apply once here, to the whole video.</summary>
+    /// <summary>Generates past one denoise by chaining segments. Each after the first re-denoises the previous
+    /// segment's tail as a fully-preserved head, which carries its motion and soundtrack phase into the new frames'
+    /// attention context; the head is context rather than output and is dropped at assembly, so there is no seam to
+    /// blend. Trim and boomerang apply once, to the whole video.</summary>
     private VideoGenerationResult GenerateChain(VideoRequest request, int totalFrames,
         IProgress<StepPreview>? progress, CancellationToken cancel)
     {
@@ -896,7 +895,6 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             width = result.Frames[0].Width;
             height = result.Frames[0].Height;
 
-            // Drop the protected head; it is a re-generation of frames the previous segment already delivered.
             for (int i = segment.ContextFrames; i < result.Frames.Count; i++)
             {
                 assembled.Add(result.Frames[i].Rgb);
@@ -910,8 +908,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return VideoRecipeUtils.ToResult([.. assembled], width, height, request, audio);
     }
 
-    /// <summary>Derives one segment's request: its own length and seed, the previous segment's tail as preserved
-    /// source, and the masks that pin that tail. Trim and boomerang are cleared so they apply once to the assembly.</summary>
+    /// <summary>Derives one segment's request: its own length and seed, the previous tail as preserved source, and
+    /// the masks that pin it. Trim and boomerang are cleared so they apply once, to the assembly.</summary>
     private static VideoRequest BuildSegmentRequest(VideoRequest request,
         in MiniMaxH3ChainPlanner.Segment segment, int baseSeed, IReadOnlyList<byte[]> assembled,
         int width, int height, int sampleRate, IReadOnlyList<float[]> assembledAudio)
@@ -931,8 +929,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             return segmentRequest;
         }
 
-        // A guide or end frame belongs to the opening shot only; re-applying it would drag every later segment
-        // back toward the first frame and fight the carried tail.
+        // A guide or end frame belongs to the opening shot; re-applying it would fight the carried tail.
         IReadOnlyList<ImageData> tail = TailFrames(assembled, segment.ContextFrames, width, height);
         return segmentRequest with
         {
@@ -970,8 +967,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         return tail;
     }
 
-    /// <summary>The last <paramref name="frameCount"/> frames' worth of assembled audio, as a WAV clip the mask's
-    /// source encoder can read.</summary>
+    /// <summary>The last <paramref name="frameCount"/> frames of assembled audio, as a WAV clip the mask source reads.</summary>
     private static AudioClip TailAudio(IReadOnlyList<float[]> assembledAudio, int sampleRate, int frameCount)
     {
         int wanted = (int)Math.Round(frameCount / (double)MiniMaxH3Geometry.Fps * sampleRate);
@@ -990,8 +986,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         };
     }
 
-    /// <summary>Appends a segment's new audio, trimmed to exactly the frames it contributes so the two streams stay
-    /// locked together across the whole chain.</summary>
+    /// <summary>Appends a segment's new audio, trimmed to the frames it contributes so the streams stay locked.</summary>
     private static void AppendSegmentAudio(List<float[]> assembledAudio, ref int sampleRate,
         AudioBuffer? segmentAudio, in MiniMaxH3ChainPlanner.Segment segment)
     {
@@ -1222,9 +1217,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             out featureMaskValues, patchHeight: 2, patchWidth: 2);
     }
 
-    /// <summary>Expands one spatially-uniform value per latent frame into the same packed rows the image and clip
-    /// paths produce. Values are stretched onto the latent timeline exactly as <see cref="VideoDenoiseMask.MaskVideo"/>
-    /// frames are, so a caller supplying one value per latent frame lands on a hard boundary with no interpolation.</summary>
+    /// <summary>Expands one value per latent frame into the packed rows the image and clip paths produce. Values
+    /// stretch onto the latent timeline as <see cref="VideoDenoiseMask.MaskVideo"/> frames do, so one value per
+    /// latent frame lands on a hard boundary with no interpolation.</summary>
     private static float[]? PackFrameValueMask(IReadOnlyList<float> values, int latentT, int latentH, int latentW,
         out float[]? featureMaskValues)
     {

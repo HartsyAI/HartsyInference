@@ -9,10 +9,9 @@ public sealed record VideoDenoiseMask
     /// <summary>Per-frame mask clip; mutually exclusive with <see cref="MaskImage"/>.</summary>
     public VideoClip? MaskVideo { get; init; }
 
-    /// <summary>One spatially-uniform mask value per latent frame, the video mirror of <see cref="AudioDenoiseMask.Values"/>;
-    /// mutually exclusive with <see cref="MaskImage"/> and <see cref="MaskVideo"/>. A binary boundary cannot survive
-    /// <see cref="MaskVideo"/>'s lossy codec: mask values quantize upward, so a smeared black would partly denoise
-    /// rows meant to be preserved.</summary>
+    /// <summary>One mask value per latent frame, the video mirror of <see cref="AudioDenoiseMask.Values"/>; mutually
+    /// exclusive with the other two. A binary boundary cannot survive <see cref="MaskVideo"/>'s lossy codec — mask
+    /// values quantize upward, so a smeared black partly denoises rows meant to be preserved.</summary>
     public IReadOnlyList<float>? MaskFrameValues { get; init; }
 
     /// <summary>Single source frame to preserve; mutually exclusive with <see cref="SourceVideo"/>.</summary>
@@ -21,7 +20,7 @@ public sealed record VideoDenoiseMask
     /// <summary>Source clip to preserve; mutually exclusive with <see cref="SourceImage"/>.</summary>
     public VideoClip? SourceVideo { get; init; }
 
-    /// <summary>Raw source frames to preserve, in sequence order; mutually exclusive with the other two sources.
-    /// Skips the encode/decode round trip a caller that already holds decoded frames would otherwise pay.</summary>
+    /// <summary>Raw source frames to preserve, in order; mutually exclusive with the other two. Skips the
+    /// encode/decode round trip a caller already holding decoded frames would otherwise pay.</summary>
     public IReadOnlyList<ImageData>? SourceFrames { get; init; }
 }
