@@ -2,7 +2,9 @@ using System.Globalization;
 using System.Text;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Logging;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.MemoryManagement;
@@ -432,6 +434,9 @@ public static class GenerationDispatch
             Sampler = parameters.GetStringOrNull("sampler"),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             Frames = parameters.GetIntOrNull("frames"),
+            ChainTotalFrames = ResolveChainTotalFrames(parameters),
+            ChainContextFrames = parameters.GetIntOrNull("chain-context-frames")
+                ?? MiniMaxH3ChainPlanner.DefaultContextFrames,
             Fps = parameters.GetIntOrNull("fps"),
             Seed = parameters.GetInt("seed", -1),
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
@@ -915,6 +920,18 @@ public static class GenerationDispatch
     }
 
     /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip; a missing entry leaves that clip silent rather than shifting the pairing.</summary>
+    /// <summary>Total chain frames from either the frame or the seconds flag; seconds convert at H3's native rate.</summary>
+    private static int? ResolveChainTotalFrames(ParamState parameters)
+    {
+        if (parameters.GetIntOrNull("chain-frames") is int frames)
+        {
+            return frames;
+        }
+        return parameters.GetDoubleOrNull("chain-seconds") is double seconds
+            ? (int)Math.Round(seconds * MiniMaxH3Geometry.Fps)
+            : null;
+    }
+
     private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)
     {
         string[]? paths = SplitPaths(parameters.GetStringOrNull("ref-videos"));

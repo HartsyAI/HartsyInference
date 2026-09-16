@@ -1,6 +1,7 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Recipes.Video;
 
 namespace HartsyInference.Engine.Requests;
 
@@ -139,6 +140,16 @@ public sealed record VideoRequest
 
     /// <summary>Total frames to generate for text-to-video; null uses the family's native frame count.</summary>
     public int? Frames { get; init; }
+
+    /// <summary>Total output frames for a long-form chain, generated as successive segments that each hold the
+    /// previous segment's tail fixed while denoising only their own new frames. Null (or at or under what one
+    /// generation already covers) generates once. MiniMax-H3 only.</summary>
+    public int? ChainTotalFrames { get; init; }
+
+    /// <summary>Frames of the previous segment carried into the next as fixed context; must be on H3's <c>17k+5</c>
+    /// grid so the protected head covers whole latent tokens. Longer holds continuity better and costs that many
+    /// re-denoised frames per segment.</summary>
+    public int ChainContextFrames { get; init; } = MiniMaxH3ChainPlanner.DefaultContextFrames;
 
     /// <summary>Frames to trim from the start of the generated sequence.</summary>
     public int TrimVideoStartFrames { get; init; }

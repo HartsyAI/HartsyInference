@@ -230,6 +230,7 @@ internal static class VideoProfileResolver
         profile = profile with { Features = profile.Features & familyFeatures };
         ValidateProfileHint(spec.ProfileId, profile, mainHash, issues);
         ValidateRequestedFeatures(request, profile, issues);
+        ValidateChain(request, issues);
         VideoEffectiveSettings settings = ResolveEffectiveSettings(request, profile, issues);
         issues.Add(Warning("minimax.h3.license",
             "MiniMax-H3 use is subject to its community license, including territory restrictions and notice, disclosure, and display obligations."));
@@ -377,7 +378,8 @@ internal static class VideoProfileResolver
             ReferenceSizing = referenceSizing,
         };
 
-    private static VideoFeatures FeaturesForTask(VideoTaskFamily task) => task switch
+    // Chaining rides on the denoise masks every task below already carries, so it is task-independent.
+    private static VideoFeatures FeaturesForTask(VideoTaskFamily task) => VideoFeatures.LongFormChain | task switch
     {
         VideoTaskFamily.T2Va => VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask | VideoFeatures.Lora,
         VideoTaskFamily.Fl2Va => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Guides
@@ -718,25 +720,49 @@ internal static class VideoProfileResolver
         {
             bool hasMaskImage = videoMask.MaskImage is not null;
             bool hasMaskVideo = videoMask.MaskVideo is not null;
-            if (hasMaskImage == hasMaskVideo)
+            bool hasMaskFrameValues = videoMask.MaskFrameValues is not null;
+            if ((hasMaskImage ? 1 : 0) + (hasMaskVideo ? 1 : 0) + (hasMaskFrameValues ? 1 : 0) != 1)
             {
-                issues.Add(Error("video.mask.payload_xor", "VideoDenoiseMask must set maskImage xor maskVideo.",
+                issues.Add(Error("video.mask.payload_xor",
+                    "VideoDenoiseMask must set exactly one of maskImage, maskVideo or maskFrameValues.",
                     nameof(VideoRequest.VideoDenoiseMask)));
             }
             bool hasSourceImage = videoMask.SourceImage is not null;
             bool hasSourceVideo = videoMask.SourceVideo is not null;
-            if (hasSourceImage && hasSourceVideo)
+            bool hasSourceFrames = videoMask.SourceFrames is not null;
+            if ((hasSourceImage ? 1 : 0) + (hasSourceVideo ? 1 : 0) + (hasSourceFrames ? 1 : 0) > 1)
             {
-                issues.Add(Error("video.mask.source_xor", "VideoDenoiseMask may set sourceImage xor sourceVideo, not both.",
+                issues.Add(Error("video.mask.source_xor",
+                    "VideoDenoiseMask may set only one of sourceImage, sourceVideo or sourceFrames.",
                     nameof(VideoRequest.VideoDenoiseMask)));
+            }
+            if (hasMaskFrameValues)
+            {
+                ValidateMaskFrameValues(videoMask.MaskFrameValues!, issues);
+            }
+            if (hasSourceFrames)
+            {
+                if (videoMask.SourceFrames!.Count == 0)
+                {
+                    issues.Add(Error("video.mask.source_frames_empty", "Video mask sourceFrames is empty.",
+                        nameof(VideoRequest.VideoDenoiseMask)));
+                }
+                for (int i = 0; i < videoMask.SourceFrames.Count; i++)
+                {
+                    ValidateImage(videoMask.SourceFrames[i], $"video mask source frame {i}",
+                        nameof(VideoRequest.VideoDenoiseMask), issues);
+                }
             }
             bool allWhiteImage = videoMask.MaskImage is not null
                 && videoMask.MaskImage.Rgb.Length > 0 && videoMask.MaskImage.Rgb.All(value => value == byte.MaxValue);
+            bool allWhiteFrameValues = videoMask.MaskFrameValues is { Count: > 0 }
+                && videoMask.MaskFrameValues.All(value => value == 1f);
             bool sourceFreeMaskVideoPending = deferSourceFreeMaskVideo && videoMask.MaskVideo is not null;
-            if (!allWhiteImage && !sourceFreeMaskVideoPending && !hasSourceImage && !hasSourceVideo)
+            if (!allWhiteImage && !allWhiteFrameValues && !sourceFreeMaskVideoPending
+                && !hasSourceImage && !hasSourceVideo && !hasSourceFrames)
             {
                 issues.Add(Error("video.mask.source_required",
-                    "A video mask that may preserve rows requires an explicit source; only a provably all-white image mask is source-free.",
+                    "A video mask that may preserve rows requires an explicit source; only a provably all-white image or frame-value mask is source-free.",
                     nameof(VideoRequest.VideoDenoiseMask)));
             }
             if (videoMask.MaskImage is not null)
@@ -966,6 +992,54 @@ internal static class VideoProfileResolver
         {
             issues.Add(Error("video.image.payload_invalid",
                 $"{description} must contain width*height*3 RGB24 bytes for positive dimensions.", field));
+        }
+    }
+
+    /// <summary>Refuses a long-form chain whose context length cannot produce whole latent tokens, before any
+    /// weights load. The planner would throw the same way mid-generation; this turns it into a plan issue.</summary>
+    private static void ValidateChain(VideoRequest request, List<VideoPlanIssue> issues)
+    {
+        if (request.ChainTotalFrames is not int total)
+        {
+            return;
+        }
+        if (total < 5)
+        {
+            issues.Add(Error("video.chain.total_too_short",
+                $"chainTotalFrames must be at least 5; got {total}.", nameof(VideoRequest.ChainTotalFrames)));
+        }
+        if (request.ChainContextFrames < 5 || request.ChainContextFrames % 17 != 5)
+        {
+            issues.Add(Error("video.chain.context_off_grid",
+                $"chainContextFrames must be on the 17k+5 grid (39, 56, 73, 90, …); got {request.ChainContextFrames}.",
+                nameof(VideoRequest.ChainContextFrames)));
+        }
+        else if (request.ChainContextFrames >= MiniMaxH3Geometry.TrainedFrameEnvelope)
+        {
+            issues.Add(Error("video.chain.context_too_long",
+                $"chainContextFrames of {request.ChainContextFrames} leaves no new frames inside a segment.",
+                nameof(VideoRequest.ChainContextFrames)));
+        }
+    }
+
+    private static void ValidateMaskFrameValues(IReadOnlyList<float> values, List<VideoPlanIssue> issues)
+    {
+        if (values.Count == 0)
+        {
+            issues.Add(Error("video.mask.frame_values_empty",
+                "VideoDenoiseMask maskFrameValues needs at least one value.",
+                nameof(VideoRequest.VideoDenoiseMask)));
+            return;
+        }
+        for (int i = 0; i < values.Count; i++)
+        {
+            if (!UnitInterval.Contains(values[i]))
+            {
+                issues.Add(Error("video.mask.frame_value_invalid",
+                    $"VideoDenoiseMask maskFrameValues[{i}] must be finite and in [0,1]; got {values[i]}.",
+                    nameof(VideoRequest.VideoDenoiseMask)));
+                return;
+            }
         }
     }
 

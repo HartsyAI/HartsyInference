@@ -197,6 +197,12 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             pending.Add("AV denoise masks");
         }
+        // Chaining drives the same masked continuation from inside the pipeline, so it never sets the request
+        // objects above and needs its own entry rather than inheriting theirs.
+        if (request.ChainTotalFrames is not null)
+        {
+            pending.Add("long-form chaining");
+        }
         if (plan.ComponentFormats.TryGetValue("videoVae", out string? videoVaeFormat)
             && videoVaeFormat.Contains("int8", StringComparison.OrdinalIgnoreCase))
         {
@@ -273,6 +279,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         if (request.DrivingVideo is not null || request.DrivingPoseVideo is not null || request.DrivingFaceVideo is not null)
         {
             features |= VideoFeatures.DrivingVideo;
+        }
+        if (request.ChainTotalFrames is not null)
+        {
+            features |= VideoFeatures.LongFormChain;
         }
         return features;
     }

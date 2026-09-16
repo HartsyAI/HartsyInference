@@ -58,6 +58,21 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Number of frames (default: the model family's recommended count).")]
         public int? Frames { get; init; }
 
+        /// <summary>Total frames for a long-form chain; each segment is <see cref="Frames"/> long.</summary>
+        [CommandOption("--chain-frames")]
+        [Description("Total frames, generated as a chain of --frames-long segments (MiniMax-H3). Longer than one generation.")]
+        public int? ChainFrames { get; init; }
+
+        /// <summary>Total seconds for a long-form chain; converted to frames at the family's native rate.</summary>
+        [CommandOption("--chain-seconds")]
+        [Description("Total seconds for a long-form chain; an alternative to --chain-frames.")]
+        public double? ChainSeconds { get; init; }
+
+        /// <summary>Frames carried between chain segments as fixed context.</summary>
+        [CommandOption("--chain-context-frames")]
+        [Description("Frames carried between chain segments as fixed context; on the 17k+5 grid (default 39).")]
+        public int? ChainContextFrames { get; init; }
+
         /// <summary>Denoising steps; unset uses the family's officially recommended count.</summary>
         [CommandOption("--steps")]
         [Description("Denoising steps (default: the model family's recommended count).")]
@@ -307,6 +322,9 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("width", settings.Width);
         parameters.PutIfSet("height", settings.Height);
         parameters.PutIfSet("frames", settings.Frames);
+        parameters.PutIfSet("chain-frames", settings.ChainFrames);
+        parameters.PutIfSet("chain-seconds", settings.ChainSeconds);
+        parameters.PutIfSet("chain-context-frames", settings.ChainContextFrames);
         parameters.PutIfSet("steps", settings.Steps);
         parameters.PutIfSet("model-profile", settings.ModelProfile);
         parameters.PutIfSet("flow-shift", settings.FlowShift);

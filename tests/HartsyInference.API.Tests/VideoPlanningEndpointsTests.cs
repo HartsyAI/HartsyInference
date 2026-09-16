@@ -237,6 +237,78 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         Assert.Equal("Error", issue.GetProperty("severity").GetString());
     }
 
+    /// <summary>Long-form chaining sets no mask object on the request, so it has to trip the release gate on its
+    /// own entry rather than inheriting the masks'.</summary>
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
+    public async Task ChainRequest_IsReleaseBlockedBeforeStreaming(string route)
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        using HttpResponseMessage response = await client.PostAsJsonAsync(route, new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new { prompt = "a long shot", frames = 141, chainTotalFrames = 900 },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.DoesNotContain("text/event-stream", response.Content.Headers.ContentType?.MediaType ?? "");
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement issue = body.GetProperty("issues").EnumerateArray()
+            .Single(item => item.GetProperty("code").GetString() == "video.h3_expansion.release_blocked");
+        Assert.Equal("Error", issue.GetProperty("severity").GetString());
+        Assert.Contains("long-form chaining", issue.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>A context length off the 17k+5 grid cannot cover whole latent tokens, so it is refused at plan time
+    /// rather than inside the sampler.</summary>
+    [Fact]
+    public async Task OffGridChainContext_IsRefusedAtPlanTime()
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new
+            {
+                prompt = "a long shot",
+                frames = 141,
+                chainTotalFrames = 900,
+                chainContextFrames = 40,
+            },
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement issue = body.GetProperty("issues").EnumerateArray()
+            .Single(item => item.GetProperty("code").GetString() == "video.chain.context_off_grid");
+        Assert.Equal("Error", issue.GetProperty("severity").GetString());
+        Assert.Equal("ChainContextFrames", issue.GetProperty("field").GetString());
+    }
+
+    /// <summary>An ordinary request must pick up no chain issue, so the gate cannot creep onto every generation.</summary>
+    [Fact]
+    public async Task OrdinaryRequest_CarriesNoChainIssue()
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new { prompt = "a short shot", frames = 141 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.DoesNotContain(body.GetProperty("issues").EnumerateArray(),
+            item => item.GetProperty("code").GetString()!.StartsWith("video.chain.", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Stream_UnregisteredVideoFamily_ReturnsTyped422BeforeSse()
     {

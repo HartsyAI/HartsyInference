@@ -10,6 +10,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Audio;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
@@ -229,6 +230,18 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + $"{MiniMaxH3Geometry.Fps} — the video generates at {MiniMaxH3Geometry.Fps} fps and is muxed at "
                 + $"{requestedFps} fps (slow/fast motion), not resampled.");
         }
+        if (request.ChainTotalFrames is int chainTotal
+            && chainTotal > MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124))
+        {
+            return GenerateChain(request, chainTotal, progress, cancel);
+        }
+        return GenerateOnce(request, progress, cancel);
+    }
+
+    /// <summary>One segment: the whole single-generation path, from geometry snapping through VAE decode.</summary>
+    private VideoGenerationResult GenerateOnce(VideoRequest request, IProgress<StepPreview>? progress,
+        CancellationToken cancel, int stepOffset = 0, int? totalSteps = null)
+    {
         int requestedFrames = request.Frames ?? 124;
         // H3's grids are coarse and non-obvious: frames snap to 17k+5, latent frames are NOT frames/4, and each pixel
         // axis rounds to 32 (a multiple of 16 alone leaves an odd latent axis and the 2x2 patchifier drops its last
@@ -258,7 +271,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + "— generating anyway; motion coherence and audio sync may drift past that length.");
         }
 
-        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, stepOffset, totalSteps);
 
         List<Keyframe> keyframes = [];
         List<Reference> references = [];
@@ -848,6 +861,177 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             Blocks = [new MiniMaxH3TextEncoding.VisionBlock(visionTokens)],
         };
 
+    /// <summary>Generates past one denoise by chaining segments. Each segment after the first re-generates the tail
+    /// of the one before it as a fully-preserved head — the sampler's mask holds those rows at the source latent, so
+    /// they carry the previous segment's motion and soundtrack phase into the new frames' attention context. The head
+    /// is context, not output: it is dropped at assembly, leaving one continuous sequence with no duplicated frames
+    /// and no seam to blend. Trim and boomerang apply once here, to the whole video.</summary>
+    private VideoGenerationResult GenerateChain(VideoRequest request, int totalFrames,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        int perSegment = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
+        IReadOnlyList<MiniMaxH3ChainPlanner.Segment> plan =
+            MiniMaxH3ChainPlanner.Plan(totalFrames, request.ChainContextFrames, perSegment);
+        int steps = request.Steps ?? 30;
+        Logs.Info($"[MiniMaxH3RecipePipeline] Long-form chain: {MiniMaxH3ChainPlanner.TotalFrames(plan)} frames as "
+            + $"{plan.Count} segment(s) of up to {perSegment}f with a {request.ChainContextFrames}-frame carry.");
+
+        int baseSeed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
+        List<byte[]> assembled = [];
+        List<float[]> assembledAudio = [];
+        int sampleRate = 0, width = 0, height = 0;
+
+        foreach (MiniMaxH3ChainPlanner.Segment segment in plan)
+        {
+            cancel.ThrowIfCancellationRequested();
+            VideoRequest segmentRequest = BuildSegmentRequest(request, segment, baseSeed,
+                assembled, width, height, sampleRate, assembledAudio);
+            VideoGenerationResult result = GenerateOnce(segmentRequest, progress, cancel,
+                stepOffset: segment.Index * steps, totalSteps: plan.Count * steps);
+            if (result.Frames.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"MiniMax-H3 chain segment {segment.Index} produced no frames.");
+            }
+            width = result.Frames[0].Width;
+            height = result.Frames[0].Height;
+
+            // Drop the protected head; it is a re-generation of frames the previous segment already delivered.
+            for (int i = segment.ContextFrames; i < result.Frames.Count; i++)
+            {
+                assembled.Add(result.Frames[i].Rgb);
+            }
+            AppendSegmentAudio(assembledAudio, ref sampleRate, result.Audio, segment);
+        }
+
+        AudioBuffer? audio = BuildChainAudio(assembledAudio, sampleRate);
+        Logs.Info($"[MiniMaxH3RecipePipeline] Long-form chain assembled {assembled.Count} frames"
+            + (audio is null ? " (no soundtrack)." : $" and {audio.Seconds:F2} s of audio."));
+        return VideoRecipeUtils.ToResult([.. assembled], width, height, request, audio);
+    }
+
+    /// <summary>Derives one segment's request: its own length and seed, the previous segment's tail as preserved
+    /// source, and the masks that pin that tail. Trim and boomerang are cleared so they apply once to the assembly.</summary>
+    private static VideoRequest BuildSegmentRequest(VideoRequest request,
+        in MiniMaxH3ChainPlanner.Segment segment, int baseSeed, IReadOnlyList<byte[]> assembled,
+        int width, int height, int sampleRate, IReadOnlyList<float[]> assembledAudio)
+    {
+        // Upstream draws fresh noise per segment; offsetting by the index keeps that independence deterministic.
+        VideoRequest segmentRequest = request with
+        {
+            Frames = segment.FrameCount,
+            ChainTotalFrames = null,
+            Seed = baseSeed + segment.Index,
+            TrimVideoStartFrames = 0,
+            TrimVideoEndFrames = 0,
+            VideoBoomerang = false,
+        };
+        if (segment.Index == 0)
+        {
+            return segmentRequest;
+        }
+
+        // A guide or end frame belongs to the opening shot only; re-applying it would drag every later segment
+        // back toward the first frame and fight the carried tail.
+        IReadOnlyList<ImageData> tail = TailFrames(assembled, segment.ContextFrames, width, height);
+        return segmentRequest with
+        {
+            InitImage = null,
+            VideoEndFrame = null,
+            Guides = null,
+            VideoDenoiseMask = new VideoDenoiseMask
+            {
+                MaskFrameValues = MiniMaxH3ChainPlanner.VideoMaskFrameValues(segment),
+                SourceFrames = tail,
+            },
+            AudioDenoiseMask = sampleRate <= 0 ? null : new AudioDenoiseMask
+            {
+                Values = MiniMaxH3ChainPlanner.AudioMaskValues(segment),
+                Rate = MiniMaxH3Geometry.AudioLatentFps,
+                Source = TailAudio(assembledAudio, sampleRate, segment.ContextFrames),
+            },
+        };
+    }
+
+    /// <summary>The last <paramref name="count"/> assembled frames, in order, as the next segment's preserved head.</summary>
+    private static IReadOnlyList<ImageData> TailFrames(IReadOnlyList<byte[]> assembled, int count,
+        int width, int height)
+    {
+        if (assembled.Count < count)
+        {
+            throw new InvalidOperationException(
+                $"MiniMax-H3 chain needs {count} carried frames but only {assembled.Count} have been generated.");
+        }
+        List<ImageData> tail = new List<ImageData>(count);
+        for (int i = assembled.Count - count; i < assembled.Count; i++)
+        {
+            tail.Add(new ImageData { Rgb = assembled[i], Width = width, Height = height });
+        }
+        return tail;
+    }
+
+    /// <summary>The last <paramref name="frameCount"/> frames' worth of assembled audio, as a WAV clip the mask's
+    /// source encoder can read.</summary>
+    private static AudioClip TailAudio(IReadOnlyList<float[]> assembledAudio, int sampleRate, int frameCount)
+    {
+        int wanted = (int)Math.Round(frameCount / (double)MiniMaxH3Geometry.Fps * sampleRate);
+        int available = assembledAudio.Count == 0 ? 0 : assembledAudio[0].Length;
+        int take = Math.Min(wanted, available);
+        float[][] channels = new float[assembledAudio.Count][];
+        for (int c = 0; c < assembledAudio.Count; c++)
+        {
+            channels[c] = new float[wanted];
+            Array.Copy(assembledAudio[c], available - take, channels[c], 0, take);
+        }
+        return new AudioClip
+        {
+            Data = AudioClipCodec.EncodeWav(new AudioBuffer { Channels = channels, SampleRate = sampleRate }),
+            Format = "wav",
+        };
+    }
+
+    /// <summary>Appends a segment's new audio, trimmed to exactly the frames it contributes so the two streams stay
+    /// locked together across the whole chain.</summary>
+    private static void AppendSegmentAudio(List<float[]> assembledAudio, ref int sampleRate,
+        AudioBuffer? segmentAudio, in MiniMaxH3ChainPlanner.Segment segment)
+    {
+        if (segmentAudio is null || segmentAudio.IsEmpty)
+        {
+            return;
+        }
+        if (assembledAudio.Count == 0)
+        {
+            sampleRate = segmentAudio.SampleRate;
+            for (int c = 0; c < segmentAudio.ChannelCount; c++)
+            {
+                assembledAudio.Add([]);
+            }
+        }
+        double perFrame = sampleRate / (double)MiniMaxH3Geometry.Fps;
+        int start = (int)Math.Round(segment.ContextFrames * perFrame);
+        int end = (int)Math.Round((segment.ContextFrames + segment.NewFrames) * perFrame);
+        for (int c = 0; c < assembledAudio.Count && c < segmentAudio.ChannelCount; c++)
+        {
+            float[] source = segmentAudio.Channels[c];
+            int from = Math.Min(start, source.Length);
+            int to = Math.Min(end, source.Length);
+            float[] slice = new float[end - start];
+            if (to > from)
+            {
+                Array.Copy(source, from, slice, 0, to - from);
+            }
+            float[] grown = new float[assembledAudio[c].Length + slice.Length];
+            assembledAudio[c].CopyTo(grown, 0);
+            slice.CopyTo(grown, assembledAudio[c].Length);
+            assembledAudio[c] = grown;
+        }
+    }
+
+    private static AudioBuffer? BuildChainAudio(List<float[]> assembledAudio, int sampleRate) =>
+        assembledAudio.Count == 0 || sampleRate <= 0 || assembledAudio[0].Length == 0
+            ? null
+            : new AudioBuffer { Channels = [.. assembledAudio], SampleRate = sampleRate };
+
     /// <summary>Resizes request masks into native target-row order and VAE-encodes explicit preservation sources.
     /// White masks return no rows and therefore skip both source encoding and every sampler-loop mask operation.</summary>
     private PreparedDenoiseMasks PrepareDenoiseMasks(
@@ -864,16 +1048,20 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 
         if (request.VideoDenoiseMask is VideoDenoiseMask videoMask)
         {
-            if ((videoMask.MaskImage is null) == (videoMask.MaskVideo is null))
+            int maskInputs = (videoMask.MaskImage is null ? 0 : 1) + (videoMask.MaskVideo is null ? 0 : 1)
+                + (videoMask.MaskFrameValues is null ? 0 : 1);
+            if (maskInputs != 1)
             {
                 throw new ArgumentException(
-                    "MiniMax-H3 VideoDenoiseMask must provide exactly one of maskImage or maskVideo.",
+                    "MiniMax-H3 VideoDenoiseMask must provide exactly one of maskImage, maskVideo or maskFrameValues.",
                     nameof(request));
             }
-            if (videoMask.SourceImage is not null && videoMask.SourceVideo is not null)
+            int sourceInputs = (videoMask.SourceImage is null ? 0 : 1) + (videoMask.SourceVideo is null ? 0 : 1)
+                + (videoMask.SourceFrames is null ? 0 : 1);
+            if (sourceInputs > 1)
             {
                 throw new ArgumentException(
-                    "MiniMax-H3 VideoDenoiseMask sourceImage and sourceVideo are mutually exclusive.",
+                    "MiniMax-H3 VideoDenoiseMask sourceImage, sourceVideo and sourceFrames are mutually exclusive.",
                     nameof(request));
             }
         }
@@ -904,10 +1092,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             if (videoMaskRows is not null)
             {
                 VideoDenoiseMask mask = request.VideoDenoiseMask!;
-                if (mask.SourceImage is null && mask.SourceVideo is null)
+                if (mask.SourceImage is null && mask.SourceVideo is null && mask.SourceFrames is null)
                 {
                     throw new ArgumentException(
-                        "A MiniMax-H3 video mask with preserved rows requires sourceImage or sourceVideo.",
+                        "A MiniMax-H3 video mask with preserved rows requires sourceImage, sourceVideo or sourceFrames.",
                         nameof(request));
                 }
                 if (_videoVaeEncoder is null)
@@ -976,6 +1164,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private static float[]? PrepareVideoMaskRows(VideoDenoiseMask mask, int latentT, int latentH, int latentW,
         CancellationToken cancel, out float[]? featureMaskValues)
     {
+        if (mask.MaskFrameValues is not null)
+        {
+            return PackFrameValueMask(mask.MaskFrameValues, latentT, latentH, latentW, out featureMaskValues);
+        }
         List<byte[]> grayscale;
         if (mask.MaskImage is not null)
         {
@@ -1030,9 +1222,50 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             out featureMaskValues, patchHeight: 2, patchWidth: 2);
     }
 
+    /// <summary>Expands one spatially-uniform value per latent frame into the same packed rows the image and clip
+    /// paths produce. Values are stretched onto the latent timeline exactly as <see cref="VideoDenoiseMask.MaskVideo"/>
+    /// frames are, so a caller supplying one value per latent frame lands on a hard boundary with no interpolation.</summary>
+    private static float[]? PackFrameValueMask(IReadOnlyList<float> values, int latentT, int latentH, int latentW,
+        out float[]? featureMaskValues)
+    {
+        if (values.Count == 0)
+        {
+            throw new ArgumentException("A MiniMax-H3 video mask must carry at least one frame value.", nameof(values));
+        }
+        float[] latentMask = new float[checked(latentT * latentH * latentW)];
+        int plane = checked(latentH * latentW);
+        for (int frame = 0; frame < latentT; frame++)
+        {
+            double position = values.Count == 1 || latentT == 1 ? 0.0
+                : frame * (values.Count - 1.0) / (latentT - 1.0);
+            int left = (int)Math.Floor(position);
+            int right = Math.Min(values.Count - 1, left + 1);
+            float value = values[left] + (values[right] - values[left]) * (float)(position - left);
+            latentMask.AsSpan(frame * plane, plane).Fill(value);
+        }
+        return MiniMaxH3Masking.PackVideoMaskRows(latentMask, latentT, latentH, latentW,
+            out featureMaskValues, patchHeight: 2, patchWidth: 2);
+    }
+
     private static IReadOnlyList<byte[]> PrepareVideoMaskSource(
         VideoDenoiseMask mask, int width, int height, int frames, CancellationToken cancel)
     {
+        if (mask.SourceFrames is not null)
+        {
+            if (mask.SourceFrames.Count == 0)
+            {
+                throw new ArgumentException("MiniMax-H3 video mask sourceFrames is empty.", nameof(mask));
+            }
+            byte[][] resized = new byte[frames][];
+            for (int i = 0; i < frames; i++)
+            {
+                cancel.ThrowIfCancellationRequested();
+                // Past the supplied tail the mask is white, so the held frame is never a preserved row.
+                resized[i] = VideoRecipeUtils.ResizeRgb24(
+                    mask.SourceFrames[Math.Min(i, mask.SourceFrames.Count - 1)], width, height);
+            }
+            return resized;
+        }
         if (mask.SourceImage is not null)
         {
             byte[] still = VideoRecipeUtils.ResizeRgb24(mask.SourceImage, width, height);

@@ -34,7 +34,8 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// video family to merge LoRAs — on either build, since an fp8 target is dequantized, merged and requantized.
     /// Arbitrary guides and AV masks remain implemented but unadvertised behind the Engine release gate.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
-        | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios;
+        | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios
+        | VideoFeatures.LongFormChain;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {

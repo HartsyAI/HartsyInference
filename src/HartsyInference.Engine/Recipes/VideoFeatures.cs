@@ -46,4 +46,8 @@ public enum VideoFeatures
 
     /// <summary>ControlNet-Union inpainting with visibility and masked-source channels.</summary>
     VideoInpaint = 2048,
+
+    /// <summary>Output longer than one generation, produced as chained segments that each hold the previous
+    /// segment's tail fixed (MiniMax-H3 long-form).</summary>
+    LongFormChain = 4096,
 }
