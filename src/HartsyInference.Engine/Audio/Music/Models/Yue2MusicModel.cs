@@ -128,7 +128,49 @@ internal static class Yue2MusicModel
             return MusicAudio.Stereo(result.Left, result.Right) with { Meta = meta };
         }
 
-        return new MusicRunner(Yue2Config.V1.SampleRate, Synth, pipeline, weights, loader);
+        // Planning is the whole song's first pass and costs seconds where the render costs minutes, so it is worth
+        // asking for alone: the score comes back editable and goes in again through MusicRequest.Yue2Abc.
+        ScorePlanResult Plan(IBackend backend, MusicRequest request, CancellationToken ct)
+        {
+            Yue2Request yue2 = BuildRequest(request);
+            (string abc, int[] ids, bool truncated) = pipeline.PlanScore(backend, yue2,
+                (done, total) => Logs.Debug($"[YuE2] plan {done}/{total}"), ct);
+            // Budget the score we just wrote, not the empty one the request came in with.
+            Yue2Budget budget = pipeline.BudgetFor(yue2 with { Abc = abc });
+            if (truncated)
+            {
+                Logs.Warning("[YuE2] the score reached its token budget before ending naturally.");
+            }
+            return new ScorePlanResult
+            {
+                Abc = abc,
+                Truncated = truncated,
+                ScoreTokens = ids.Length,
+                PrefixTokens = budget.PrefixTokens,
+                BudgetTokens = budget.BudgetTokens,
+                BudgetSeconds = budget.BudgetSeconds,
+            };
+        }
+
+        ScorePlanResult Budget(MusicRequest request)
+        {
+            Yue2Request yue2 = BuildRequest(request);
+            Yue2Budget budget = pipeline.BudgetFor(yue2);
+            return new ScorePlanResult
+            {
+                Abc = yue2.Abc,
+                ScoreTokens = budget.ScoreTokens,
+                PrefixTokens = budget.PrefixTokens,
+                BudgetTokens = budget.BudgetTokens,
+                BudgetSeconds = budget.BudgetSeconds,
+            };
+        }
+
+        return new MusicRunner(Yue2Config.V1.SampleRate, Synth, pipeline, weights, loader)
+        {
+            Planner = Plan,
+            Budgeter = Budget,
+        };
     }
 
     /// <summary>The conventional user-placed location, <c>{models}/audio/music/yue2/*.safetensors</c>.</summary>

@@ -42,6 +42,34 @@ public static class AudioEndpoints
             }
         });
 
+        // The score is the editable half of a YuE2 song and costs seconds where the render costs minutes, so it
+        // gets its own routes. They cannot ride /v1/native/music: that path rejects a result with no audio.
+        app.MapPost("/v1/native/music/score", async (NativeMusicScoreRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        {
+            ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Music);
+            try
+            {
+                return Results.Ok(await queue.EnqueueAsync(() => engine.Music.PlanScoreAsync(spec, req.Request, ct), ct));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapPost("/v1/native/music/budget", async (NativeMusicScoreRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        {
+            ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Music);
+            try
+            {
+                return Results.Ok(await queue.EnqueueAsync(() => engine.Music.BudgetAsync(spec, req.Request, ct), ct));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
         app.MapPost("/v1/native/transcribe", async (NativeTranscribeRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
         {
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Transcribe);

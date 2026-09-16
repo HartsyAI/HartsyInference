@@ -277,6 +277,26 @@ public static class GenerationDispatch
             Yue2PenaltyWindow = parameters.GetIntOrNull("penalty-window"),
             Yue2MinTokens = parameters.GetIntOrNull("min-tokens"),
         };
+        // The score is the editable half of the song and costs seconds against minutes for the render, so it is
+        // worth asking for alone: write it out, edit it, feed it back with --abc.
+        if (parameters.GetBool("score-only", false))
+        {
+            ScorePlanResult plan = await engine.Music.PlanScoreAsync(spec, request, cancel).ConfigureAwait(false);
+            GeneratedArtifact score = new GeneratedArtifact
+            {
+                Kind = ArtifactKind.Text,
+                Text = plan.Abc,
+                Extension = "abc",
+            };
+            score.Meta["score tokens"] = plan.ScoreTokens.ToString(CultureInfo.InvariantCulture);
+            score.Meta["prefix tokens"] = plan.PrefixTokens.ToString(CultureInfo.InvariantCulture);
+            score.Meta["audio budget"] = $"{plan.BudgetSeconds:0.0}s";
+            if (plan.Truncated)
+            {
+                score.Meta["truncated"] = "the score hit its token ceiling";
+            }
+            return score;
+        }
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("generate");
         AudioResult result;
         try

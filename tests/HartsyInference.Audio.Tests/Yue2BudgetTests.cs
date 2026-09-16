@@ -61,6 +61,41 @@ public sealed class Yue2BudgetTests
         Assert.Equal(250, Yue2Protocol.BudgetForPrefix(250, 40));
     }
 
+    /// <summary>What a caller editing a score is being told. A score costs song time only once the context binds:
+    /// below that the request is granted in full, so a meter that always counted down would be wrong. This is the
+    /// composition <c>Yue2Pipeline.BudgetFor</c> reports, minus the tokenizer.</summary>
+    [Fact]
+    public void AScoreOnlyCostsSong_OnceTheContextBinds()
+    {
+        int[] prompt = new int[500];
+        int requested = Yue2Protocol.TokensForSeconds(Yue2Protocol.MaxDurationSeconds);
+        int Budget(int abcTokens) => Yue2Protocol.BudgetForPrefix(requested,
+            Yue2Protocol.TokenPrefix(Yue2Cot.Full, prompt, new int[abcTokens]).Length);
+
+        // Short scores leave the 900 s ceiling intact — there is still context to spare.
+        Assert.Equal(requested, Budget(0));
+        Assert.Equal(requested, Budget(200));
+        // Once prompt plus score pass what the context can spare, every further token costs song time.
+        int big = Budget(2_500), bigger = Budget(4_000);
+        Assert.True(big < requested, $"{big} should be below the {requested}-token request");
+        Assert.True(bigger < big, "a longer score should cost more song time");
+        Assert.Equal(big - 1_500, bigger);
+        // A score that fills the context leaves nothing rather than going negative.
+        Assert.Equal(0, Budget(Yue2Protocol.Context));
+    }
+
+    /// <summary>Seconds and tokens are the same fact at 25 frames a second, so the number a caller is shown while
+    /// editing has to be the one the render then budgets.</summary>
+    [Fact]
+    public void BudgetSeconds_RoundTripsThroughTheFrameRate()
+    {
+        foreach (double seconds in new[] { 20.0, 95.5, 360.0, Yue2Protocol.MaxDurationSeconds })
+        {
+            int tokens = Yue2Protocol.TokensForSeconds(seconds);
+            Assert.Equal(seconds, tokens / (double)Yue2Protocol.FramesPerSecond, 1);
+        }
+    }
+
     /// <summary>Past roughly seven and a half minutes the acoustic stage runs more than one chunk. Nothing exercised
     /// that before the ceiling moved — at the release's 360 s a typical prefix always yielded exactly one.</summary>
     [Fact]

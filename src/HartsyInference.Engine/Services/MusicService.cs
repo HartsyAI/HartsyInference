@@ -82,6 +82,47 @@ public sealed class MusicService : IMusicService
         }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
     }
 
+    /// <inheritdoc/>
+    public Task<ScorePlanResult> PlanScoreAsync(ModelSpec spec, MusicRequest request, CancellationToken cancel = default)
+        => RunSymbolicAsync(spec, request, "plan a score",
+            (runner, backend, req, ct) => runner.PlanScore(backend, req, ct), cancel);
+
+    /// <inheritdoc/>
+    public Task<ScorePlanResult> BudgetAsync(ModelSpec spec, MusicRequest request, CancellationToken cancel = default)
+        => RunSymbolicAsync(spec, request, "report a context budget",
+            (runner, _, req, _) => runner.Budget(req), cancel);
+
+    /// <summary>Shared path for the symbolic passes. It deliberately does not go through
+    /// <see cref="GenerateAsync"/>: neither produces audio, and that method rejects a silent result.</summary>
+    private Task<ScorePlanResult> RunSymbolicAsync(ModelSpec spec, MusicRequest request, string what,
+        Func<IMusicRunner, IBackend, MusicRequest, CancellationToken, ScorePlanResult?> run, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request = request with
+        {
+            Prompt = PromptTagFlattening.Flatten(request.Prompt, weightsAsParens: false),
+            Genre = PromptTagFlattening.Flatten(request.Genre, weightsAsParens: false),
+        };
+        AudioModelSelector selector = AudioModelSelector.Parse(spec);
+        MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
+        IBackend backend = _engine.Backend;
+        MusicLoadContext loadContext = BuildLoadContext(backend, request);
+        string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
+
+        return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
+        {
+            IMusicRunner runner = await _engine.AudioRuntime.Music
+                .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            long started = Environment.TickCount64;
+            ScorePlanResult result = run(runner, backend, request, ct)
+                ?? throw new NotSupportedException($"The music model '{selector.Id}' cannot {what}.");
+            Logs.Verbose($"[Audio][Music] {what} for {key} in {Environment.TickCount64 - started}ms "
+                + $"({result.ScoreTokens} score tokens, {result.BudgetSeconds:0.0}s of audio budget).");
+            return result;
+        }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
+    }
+
     /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior) unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the resolved shard backends and default to un-quantized weights pooled across them.</summary>
     private MusicLoadContext BuildLoadContext(IBackend primary, MusicRequest request)
     {

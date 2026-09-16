@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.78
+
+- Audio: **YuE2 can write its score without rendering it.** The model composes in two passes — an autoregressive
+  model writes an ABC score, then a second pass turns that score into sound — and the score is the only editable
+  artifact it exposes. Planning it alone takes seconds where the full render takes minutes, so it is now its own
+  operation: `IMusicService.PlanScoreAsync` returns the score plus what the context left for audio, and the score
+  goes back in through `MusicRequest.Yue2Abc` once edited. `BudgetAsync` answers the budget question on its own,
+  for a score a caller already has. Measured 2026-09-16 on a 4090: a 25 s request planned in 14 s and reported a
+  25.0 s audio budget; rendering that same score back took 13 s and produced 23.9 s of audio, inside its budget.
+- Neither rides `/v1/native/music`, which rejects a result with no audio — they are `POST /v1/native/music/score`
+  and `POST /v1/native/music/budget`, and `hartsy music --score-only` writes the score out as a `.abc` file.
+  `IMusicRunner` grew optional `PlanScore`/`Budget` members, in the shape `SttRunner.Timed` already uses, so a
+  model with nothing symbolic to report simply leaves them null and the service reports it as unsupported.
+- `Yue2Pipeline.Generate` now plans through `PlanScore` instead of a second copy of the same sampling call, so a
+  score asked for on its own and a score planned on the way to audio cannot drift apart.
+- CLI: fixed `hartsy music --help`, which rendered nothing but an error. The `--genre` help text names the
+  `[verse]`/`[chorus]` lyric markers, and Spectre.Console read those as markup tags.
+
 ## alpha.77
 
 - Video: **MiniMax-H3 long-form chaining is released.** Its real-generation gate passed on 2026-09-16 against the

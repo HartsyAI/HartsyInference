@@ -52,6 +52,10 @@ public sealed record Yue2Result(float[] Left, float[] Right, int SampleRate, str
     public double DurationSeconds => Left.Length / (double)SampleRate;
 }
 
+/// <summary>What a prompt and score leave for audio: the score's own token count, the conditioning prefix it sits
+/// in, and the resulting audio budget in tokens and seconds.</summary>
+public readonly record struct Yue2Budget(int ScoreTokens, int PrefixTokens, int BudgetTokens, double BudgetSeconds);
+
 /// <summary>Drives a full YuE2 song: plan a score, write semantic codec tokens under guidance, flow-match those
 /// into acoustic latents, and decode 48 kHz stereo.</summary>
 /// <remarks><para>The acoustic stage re-prefills the AR stack once per chunk over
@@ -97,6 +101,30 @@ public sealed class Yue2Pipeline : IDisposable
         return (_tokenizer.Decode(ids), [.. ids], truncated);
     }
 
+    /// <summary>What the context leaves for audio once the instruction, style, lyrics and score are in place.
+    ///
+    /// <para>Asked separately so a caller editing a score can be told how much song it still leaves room for,
+    /// rather than discovering it from a take that stops mid-phrase. The arithmetic is the same as
+    /// <see cref="Generate"/>'s, and with the same <paramref name="request"/> it reports the same numbers; the
+    /// score is taken from <see cref="Yue2Request.Abc"/>, so an unplanned one counts as empty.</para></summary>
+    public Yue2Budget BudgetFor(Yue2Request request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+        Yue2Cot cot = request.Cot;
+        int[] promptIds = _tokenizer.Encode(Yue2Protocol.PromptText(cot, request.Style, request.Lyrics));
+        int[] abcIds = cot != Yue2Cot.Off && request.Abc.Trim().Length > 0 ? _tokenizer.Encode(request.Abc) : [];
+        int[] prefix = Yue2Protocol.TokenPrefix(cot, promptIds, cot == Yue2Cot.Off ? null : abcIds);
+        float cfgScale = request.CfgScale ?? Yue2Protocol.DefaultCfgScale(cot);
+        int[]? negative = cfgScale == 1f ? null
+            : Yue2Protocol.NegativePrefix(cot, _tokenizer.Encode(Yue2Protocol.Instruction(cot)),
+                cot == Yue2Cot.Off ? null : abcIds);
+        int requested = Math.Min(request.SemanticSampling.MaxTokens, Yue2Protocol.TokensForSeconds(request.MaxDurationSeconds));
+        int budget = Yue2Protocol.BudgetForPrefix(requested, prefix.Length, negative?.Length ?? 0);
+        return new Yue2Budget(abcIds.Length, Math.Max(prefix.Length, negative?.Length ?? 0), budget,
+            budget / (double)Yue2Protocol.FramesPerSecond);
+    }
+
     /// <summary>Generates a complete song.</summary>
     public Yue2Result Generate(IBackend backend, Yue2Request request,
         Action<string, int, int>? onProgress = null, CancellationToken cancel = default)
@@ -124,12 +152,10 @@ public sealed class Yue2Pipeline : IDisposable
             }
             else
             {
-                int[] planningPrefix = Yue2Protocol.TokenPrefix(cot, promptIds, null);
-                (List<int> planned, bool truncated) = Sample(backend, planningPrefix, null, 1f, request.AbcSampling,
-                    Yue2Phase.Abc, legacyOff: false, request.Seed,
+                // Through PlanScore rather than a second copy of it, so a score asked for on its own and a score
+                // planned on the way to audio can never drift apart.
+                (abcText, abcIds, bool truncated) = PlanScore(backend, request,
                     onProgress is null ? null : (done, total) => onProgress("plan", done, total), cancel);
-                abcIds = [.. planned];
-                abcText = _tokenizer.Decode(planned);
                 abcTruncated = truncated;
             }
         }

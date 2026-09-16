@@ -34,7 +34,7 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
 
         /// <summary>Genre/style tags, separate from the prompt (which YuE reads as LYRICS).</summary>
         [CommandOption("-g|--genre")]
-        [Description("Genre/style tags (ACE-Step style prompt; YuE/YuE2 genre tags, e.g. \"uplifting pop female vocal electronic\"). For YuE, YuE2 and MiniMax the PROMPT is the lyrics (use [verse]/[chorus] markers) and this carries the style.")]
+        [Description("Genre/style tags (ACE-Step style prompt; YuE/YuE2 genre tags, e.g. \"uplifting pop female vocal electronic\"). For YuE, YuE2 and MiniMax the PROMPT is the lyrics (use [[verse]]/[[chorus]] markers) and this carries the style.")]
         public string Genre { get; init; } = "";
 
         /// <summary>Duration in seconds.</summary>
@@ -114,6 +114,10 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         [Description("YuE2: tokens the semantic pass must emit before it may stop (default 200).")]
         public int? MinTokens { get; init; }
 
+        [CommandOption("--score-only")]
+        [Description("YuE2: write the ABC score and stop, without rendering audio. Seconds rather than minutes — edit the score, then pass it back with --abc.")]
+        public bool ScoreOnly { get; init; }
+
         /// <summary>Suppress progress output.</summary>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
@@ -149,6 +153,7 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         PutIfSet(parameters, "abc-max-tokens", settings.AbcMaxTokens);
         PutIfSet(parameters, "penalty-window", settings.PenaltyWindow);
         PutIfSet(parameters, "min-tokens", settings.MinTokens);
+        parameters.Put("score-only", settings.ScoreOnly ? "true" : "false");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Music);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);

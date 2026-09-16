@@ -144,6 +144,7 @@ public sealed class ParamState
                 _values["abc-max-tokens"] = "";
                 _values["penalty-window"] = "";
                 _values["min-tokens"] = "";
+                _values["score-only"] = "false";
                 break;
             case Modality.Transcribe:
                 _values["language"] = "en";
