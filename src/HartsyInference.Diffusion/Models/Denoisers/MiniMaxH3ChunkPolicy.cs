@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -24,9 +25,9 @@ public static class MiniMaxH3ChunkPolicy
 
     /// <summary>Returns <see cref="int.MaxValue"/> (never chunk — <see cref="MiniMaxH3Transformer.ForwardBlock"/>'s
     /// <c>seq &gt; chunkRows</c> check then always takes the exact-legacy path) when the unchunked per-block peak
-    /// comfortably fits <paramref name="freeBytes"/>, else <see cref="DefaultChunkRows"/>. <c>HARTSY_H3_CHUNK_ROWS</c>
-    /// overrides the decision outright (any positive integer) — the CPU backend's <c>GetVramInfo</c> always reports
-    /// (0, 0), so this is also how a CPU-only test forces the chunked path to A/B it against the same weights.</summary>
+    /// comfortably fits <paramref name="freeBytes"/>, else a chunk scaled by the VRAM tier. The
+    /// <c>vram.h3ChunkRows</c> setting overrides the decision outright (any positive integer) — the CPU backend's
+    /// <c>GetVramInfo</c> always reports (0, 0), so that is also how a CPU-only test forces the chunked path.</summary>
     public static int ResolveChunkRows(int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes)
     {
         if (EngineKnobs.H3ChunkRows.Value is int forced && forced > 0)
@@ -37,6 +38,10 @@ public static class MiniMaxH3ChunkPolicy
         {
             return int.MaxValue;
         }
+        // The VRAM tier's chunk lever: below 1 it both shrinks the chunk and makes the fit test stricter, so a
+        // constrained card starts chunking at geometries a roomy one still runs whole.
+        float chunkScale = VramPolicyScope.Current?.ChunkScale ?? 1.0f;
+        chunkScale = Math.Clamp(chunkScale, 0.05f, 1.0f);
 
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int ffn = config.FfnHiddenSize;
@@ -53,6 +58,8 @@ public static class MiniMaxH3ChunkPolicy
         // here — this heuristic only distinguishes "clearly fits" from "chunk to be safe", not a tight bound.
         const double safetyFactor = 0.5;
         long unchunkedPeak = seq * peakBytesPerRow;
-        return unchunkedPeak <= (long)(freeBytes * safetyFactor) ? int.MaxValue : DefaultChunkRows;
+        return unchunkedPeak <= (long)(freeBytes * safetyFactor * chunkScale)
+            ? int.MaxValue
+            : Math.Max(512, (int)(DefaultChunkRows * chunkScale));
     }
 }

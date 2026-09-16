@@ -3305,6 +3305,11 @@ public interface IBackend : IDisposable
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache — safe mid-computation.</summary>
     void TrimMemoryPool() { }
 
+    /// <summary>Drops every cached device copy of a model weight, including the ones the lazy per-op streaming path
+    /// uploaded. Only safe at a phase boundary, and only worth paying for when a later phase needs the space more
+    /// than this one needs its weights warm — the next use re-uploads them.</summary>
+    void EvictWeightCaches() { }
+
     /// <summary>Synchronizes pending attention work and discards only backend-library attention execution plans
     /// and their persistent workspaces. Model weights, activation buffers, convolution plans, retry diagnostics,
     /// and cumulative dispatch counters are preserved. Use at a model-phase boundary when a large text encoder

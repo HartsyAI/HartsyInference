@@ -801,7 +801,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
     private static readonly string? DumpDir = EngineKnobs.H3Dump.Value;
 
-    /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
+    /// <summary>Logs min/max/mean/rms under <c>diagnostics.h3Probe</c>; no-op otherwise.</summary>
     private static void Probe(string label, Tensor t)
     {
         if (!ProbeEnabled)
@@ -885,8 +885,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Writes the raw F32 tensor to <c>$HARTSY_H3_DUMP/&lt;name&gt;.bin</c> for reference comparison; no-op
-    /// when the variable is unset.</summary>
+    /// <summary>Writes the raw F32 tensor to <c>&lt;diagnostics.h3Dump&gt;/&lt;name&gt;.bin</c> for reference comparison;
+    /// no-op when the setting is unset.</summary>
     private static void Dump(string name, Tensor t)
     {
         string? dir = DumpDir;

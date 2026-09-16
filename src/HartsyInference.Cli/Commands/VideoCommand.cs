@@ -58,6 +58,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Number of frames (default: the model family's recommended count).")]
         public int? Frames { get; init; }
 
+        /// <summary>Per-run VRAM posture; unset follows the engine's own.</summary>
+        [CommandOption("--vram-mode")]
+        [Description("VRAM posture for THIS run: Performance (never stream, fail instead), Auto, Balanced, Aggressive (always stream) or Maximum. Unset follows the engine default.")]
+        public string? VramMode { get; init; }
+
         /// <summary>Total frames for a long-form chain; each segment is <see cref="Frames"/> long.</summary>
         [CommandOption("--chain-frames")]
         [Description("Total frames, generated as a chain of --frames-long segments (MiniMax-H3). Longer than one generation.")]
@@ -321,6 +326,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.Put("negative", settings.Negative);
         parameters.PutIfSet("width", settings.Width);
         parameters.PutIfSet("height", settings.Height);
+        parameters.PutIfSet("vram-mode", settings.VramMode);
         parameters.PutIfSet("frames", settings.Frames);
         parameters.PutIfSet("chain-frames", settings.ChainFrames);
         parameters.PutIfSet("chain-seconds", settings.ChainSeconds);

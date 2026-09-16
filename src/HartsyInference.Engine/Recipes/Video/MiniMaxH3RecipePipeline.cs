@@ -884,6 +884,10 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         foreach (MiniMaxH3ChainPlanner.Segment segment in plan)
         {
             cancel.ThrowIfCancellationRequested();
+            if (segment.Index > 0)
+            {
+                ReleaseBetweenSegments();
+            }
             VideoRequest segmentRequest = BuildSegmentRequest(request, segment, baseSeed,
                 assembled, width, height, sampleRate, assembledAudio);
             VideoGenerationResult result = GenerateOnce(segmentRequest, progress, cancel,
@@ -907,6 +911,26 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         Logs.Info($"[MiniMaxH3RecipePipeline] Long-form chain assembled {assembled.Count} frames"
             + (audio is null ? " (no soundtrack)." : $" and {audio.Seconds:F2} s of audio."));
         return VideoRecipeUtils.ToResult([.. assembled], width, height, request, audio);
+    }
+
+    /// <summary>Hands a segment's device memory back before the next one's conditioning runs. The encoders load
+    /// ahead of the DiT within a segment, but across a chain the previous segment leaves its weights cached, so the
+    /// next segment's mask-source encode competes with them — which is what exhausts a small card. Gated on the
+    /// tier's own lever: <see cref="VramTier.Auto"/> leaves it alone and stays byte-identical to an unchained run.</summary>
+    private void ReleaseBetweenSegments()
+    {
+        if (VramPolicyScope.Current?.PhaseUnload != LeverState.On)
+        {
+            return;
+        }
+        _backend.FreeActivations(trimPool: true);
+        _backend.EvictWeightCaches();
+        if (!ReferenceEquals(_vaeBackend, _backend))
+        {
+            _vaeBackend.FreeActivations(trimPool: true);
+            _vaeBackend.EvictWeightCaches();
+        }
+        Logs.Info("[MiniMaxH3RecipePipeline] Chain phase unload: released cached weights before the next segment.");
     }
 
     /// <summary>Derives one segment's request: its own length and seed, the previous tail as preserved source, and

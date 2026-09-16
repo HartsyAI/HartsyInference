@@ -682,7 +682,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     private static string FunControlPrefix(int index) => FunControlWeightPrefix + index;
 
-    /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
+    /// <summary>Diagnostic only, off unless <c>diagnostics.h3Vprobe</c> is set: reports <c>max|V|</c> per block against F16's
     /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
     /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
     /// token, no error raised (see the HAZARD note in <c>CudaBackend.ScaledDotProductAttention</c>; this is what bit

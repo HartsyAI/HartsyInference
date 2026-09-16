@@ -10744,7 +10744,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
-    public void EvictGpuCache()
+    public void EvictWeightCaches()
     {
         EnterOp();
         FreeAllWeightCachesCore();
