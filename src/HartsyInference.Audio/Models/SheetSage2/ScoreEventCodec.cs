@@ -1,0 +1,162 @@
+namespace HartsyInference.Audio.Models.SheetSage2;
+
+/// <summary>Reads a decoded token stream as musical events, and writes events back as tokens.
+///
+/// <para>The stream is a run of subbeat shifts followed by that position's fields, repeated. Shifts accumulate,
+/// so a position is the running total rather than an absolute — which is why a window's events have to be
+/// re-based before they can be replayed as context for the next one.</para></summary>
+public sealed class ScoreEventCodec(ScoreTokenizer tokenizer)
+{
+    /// <summary>Which event field each token vocabulary contributes to.</summary>
+    private static readonly Dictionary<string, string> FieldOfTokenType = new(StringComparer.Ordinal)
+    {
+        ["time"] = "timestamp",
+        ["meter"] = "rhythm",
+        ["eighth_position"] = "rhythm",
+        ["structure"] = "structure",
+        ["key"] = "key",
+        ["chord_full"] = "chord",
+        ["pitch"] = "melody",
+        ["duration"] = "melody",
+    };
+
+    private readonly ScoreTokenizer _tokenizer = tokenizer;
+
+    /// <summary>Reads everything after the prompt prefix up to the end token.</summary>
+    /// <exception cref="ArgumentException">The stream has no prompt prefix, or an event has no beat position.</exception>
+    public List<ScoreEvent> DecodeSequence(IReadOnlyList<int> tokens)
+    {
+        ArgumentNullException.ThrowIfNull(tokens);
+        int position = IndexOf(tokens, ScoreTokenizer.OutToken);
+        if (position < 0)
+        {
+            throw new ArgumentException("SheetSage2's token stream has no prompt prefix to read past.", nameof(tokens));
+        }
+        position++;
+        int subbeat = 0;
+        List<ScoreEvent> events = [];
+        while (position < tokens.Count && tokens[position] != ScoreTokenizer.EosToken)
+        {
+            if (_tokenizer.TokenType(tokens[position]) != "subbeat_shift")
+            {
+                throw new ArgumentException("SheetSage2 produced an event without a beat position.", nameof(tokens));
+            }
+            while (position < tokens.Count && _tokenizer.TokenType(tokens[position]) == "subbeat_shift")
+            {
+                subbeat += tokens[position] - _tokenizer.SubbeatShiftStart;
+                position++;
+            }
+            Dictionary<string, List<int>> payload = new(StringComparer.Ordinal);
+            while (position < tokens.Count)
+            {
+                string type = _tokenizer.TokenType(tokens[position]);
+                if (type == "subbeat_shift" || type == "eos") break;
+                if (!FieldOfTokenType.TryGetValue(type, out string? field))
+                {
+                    throw new ArgumentException($"SheetSage2 produced a '{type}' token inside an event.", nameof(tokens));
+                }
+                if (!payload.TryGetValue(field, out List<int>? bucket))
+                {
+                    payload[field] = bucket = [];
+                }
+                bucket.Add(tokens[position]);
+                position++;
+            }
+            if (payload.Count > 0) events.Add(BuildEvent(subbeat, payload));
+        }
+        return events;
+    }
+
+    /// <summary>Writes events back as a token stream, opening with the prompt prefix.</summary>
+    /// <remarks>Field order follows <see cref="ScoreTokenizer.EventFields"/>, and a gap wider than one shift can
+    /// express is written as several — the last shift id is the largest step available.</remarks>
+    public List<int> EncodeEvents(IReadOnlyList<ScoreEvent> events)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+        List<int> tokens = [.. ScoreTokenizer.PromptPrefix()];
+        int previous = 0;
+        foreach (ScoreEvent item in events)
+        {
+            int shift = item.Subbeat - previous;
+            while (shift > 256)
+            {
+                tokens.Add(_tokenizer.SubbeatShiftEnd - 1);
+                shift -= 256;
+            }
+            tokens.Add(_tokenizer.SubbeatShiftStart + shift);
+            previous = item.Subbeat;
+            foreach (string field in ScoreTokenizer.EventFields)
+            {
+                if (item.TokensByField.TryGetValue(field, out List<int>? bucket)) tokens.AddRange(bucket);
+            }
+        }
+        return tokens;
+    }
+
+    private ScoreEvent BuildEvent(int subbeat, Dictionary<string, List<int>> payload)
+    {
+        return new ScoreEvent
+        {
+            Subbeat = subbeat,
+            TokensByField = payload,
+            GlobalSubbeat = subbeat,
+            Timestamp = payload.TryGetValue("timestamp", out List<int>? time) ? _tokenizer.TokenToSeconds(time[0]) : null,
+            Rhythm = payload.TryGetValue("rhythm", out List<int>? rhythm) ? ReadRhythm(rhythm) : null,
+            Structure = payload.TryGetValue("structure", out List<int>? structure)
+                ? ScoreTokenizer.StructureLabels[structure[0] - _tokenizer.StructureStart] : null,
+            Key = payload.TryGetValue("key", out List<int>? key) ? ReadKey(key[0]) : null,
+            Chord = payload.TryGetValue("chord", out List<int>? chord)
+                ? _tokenizer.FullChordLabels[chord[0] - _tokenizer.FullChordStart] : null,
+            Melody = payload.TryGetValue("melody", out List<int>? melody) ? ReadMelody(melody) : null,
+        };
+    }
+
+    private ScoreRhythm ReadRhythm(List<int> tokens)
+    {
+        (int, int)? meter = null;
+        int? eighth = null;
+        foreach (int token in tokens)
+        {
+            if (_tokenizer.TokenType(token) == "meter") meter = _tokenizer.MeterPairs[token - _tokenizer.MeterStart];
+            else eighth = token - _tokenizer.EighthPositionStart;
+        }
+        return new ScoreRhythm(meter, eighth);
+    }
+
+    private string ReadKey(int token)
+    {
+        int index = token - _tokenizer.KeyStart;
+        return $"{ScoreTokenizer.ChromaticSharps[index % 12]}:{(index >= 12 ? "minor" : "major")}";
+    }
+
+    /// <summary>A melody field is a run of pitches, each optionally followed by its length.</summary>
+    private List<ScoreNote> ReadMelody(List<int> tokens)
+    {
+        List<ScoreNote> notes = [];
+        int index = 0;
+        while (index < tokens.Count)
+        {
+            int pitch = tokens[index] - _tokenizer.PitchStart;
+            index++;
+            int durationBin = 0;
+            if (index < tokens.Count && _tokenizer.TokenType(tokens[index]) == "duration")
+            {
+                durationBin = tokens[index] - _tokenizer.DurationStart;
+                index++;
+            }
+            // The pitch range holds both melody lines: the low 128 ids are one track, the high 128 the other.
+            notes.Add(new ScoreNote(pitch % 128, pitch >= 128 ? 1 : 0, durationBin,
+                ScoreTokenizer.DurationTemplates[durationBin]));
+        }
+        return notes;
+    }
+
+    private static int IndexOf(IReadOnlyList<int> tokens, int value)
+    {
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i] == value) return i;
+        }
+        return -1;
+    }
+}

@@ -92,6 +92,86 @@ public sealed class SheetSage2GrammarParityTests
         }
     }
 
+    /// <summary>Gate S1b: a token stream read as events, field for field, against the released decode.</summary>
+    [Fact]
+    public void DecodedEvents_MatchTheReference()
+    {
+        JsonElement codec = Reference.GetProperty("codec");
+        int[] stream = [.. codec.GetProperty("stream").EnumerateArray().Select(e => e.GetInt32())];
+        List<ScoreEvent> events = new ScoreEventCodec(Tok).DecodeSequence(stream);
+
+        JsonElement want = codec.GetProperty("events");
+        Assert.Equal(want.GetArrayLength(), events.Count);
+        int i = 0;
+        foreach (JsonElement expected in want.EnumerateArray())
+        {
+            ScoreEvent got = events[i++];
+            Assert.Equal(expected.GetProperty("subbeat").GetInt32(), got.Subbeat);
+            AssertNullableDouble(expected.GetProperty("timestamp"), got.Timestamp);
+            AssertNullableString(expected.GetProperty("structure"), got.Structure);
+            AssertNullableString(expected.GetProperty("key"), got.Key);
+            AssertNullableString(expected.GetProperty("chord"), got.Chord);
+
+            JsonElement meter = expected.GetProperty("meter");
+            if (meter.ValueKind == JsonValueKind.Null) Assert.Null(got.Rhythm?.Meter);
+            else
+            {
+                Assert.Equal(meter[0].GetInt32(), got.Rhythm!.Value.Meter!.Value.Numerator);
+                Assert.Equal(meter[1].GetInt32(), got.Rhythm!.Value.Meter!.Value.Denominator);
+            }
+            JsonElement eighth = expected.GetProperty("eighthPosition");
+            if (eighth.ValueKind == JsonValueKind.Null) Assert.Null(got.Rhythm?.EighthPosition);
+            else Assert.Equal(eighth.GetInt32(), got.Rhythm!.Value.EighthPosition);
+
+            JsonElement melody = expected.GetProperty("melody");
+            Assert.Equal(melody.GetArrayLength(), got.Melody?.Count ?? 0);
+            int n = 0;
+            foreach (JsonElement note in melody.EnumerateArray())
+            {
+                ScoreNote actual = got.Melody![n++];
+                Assert.Equal(note.GetProperty("pitch").GetInt32(), actual.Pitch);
+                Assert.Equal(note.GetProperty("track").GetInt32(), actual.Track);
+                Assert.Equal(note.GetProperty("durationBin").GetInt32(), actual.DurationBin);
+                Assert.Equal(note.GetProperty("durationSteps").GetInt32(), actual.DurationSteps);
+            }
+        }
+    }
+
+    /// <summary>Re-encoding has to reproduce the stream exactly, because a later window replays its predecessor's
+    /// events as context — a re-encode that merely means the same thing would condition on different tokens.</summary>
+    [Fact]
+    public void ReEncodedEvents_MatchTheReference()
+    {
+        JsonElement codec = Reference.GetProperty("codec");
+        int[] stream = [.. codec.GetProperty("stream").EnumerateArray().Select(e => e.GetInt32())];
+        int[] expected = [.. codec.GetProperty("reencoded").EnumerateArray().Select(e => e.GetInt32())];
+        ScoreEventCodec coder = new(Tok);
+        Assert.Equal(expected, coder.EncodeEvents(coder.DecodeSequence(stream)));
+        // The reference drops only the end token, so the round trip is the input minus its EOS.
+        Assert.Equal(stream[..^1], expected);
+    }
+
+    [Fact]
+    public void AStreamWithoutAPromptPrefix_IsRefused()
+        => Assert.Throws<ArgumentException>(() => new ScoreEventCodec(Tok).DecodeSequence([Tok.TimeStart, 2]));
+
+    [Fact]
+    public void AnEventWithoutABeatPosition_IsRefused()
+        => Assert.Throws<ArgumentException>(() => new ScoreEventCodec(Tok)
+            .DecodeSequence([.. ScoreTokenizer.PromptPrefix(), Tok.TimeStart + 5, ScoreTokenizer.EosToken]));
+
+    private static void AssertNullableDouble(JsonElement expected, double? actual)
+    {
+        if (expected.ValueKind == JsonValueKind.Null) Assert.Null(actual);
+        else Assert.Equal(expected.GetDouble(), actual!.Value, 6);
+    }
+
+    private static void AssertNullableString(JsonElement expected, string? actual)
+    {
+        if (expected.ValueKind == JsonValueKind.Null) Assert.Null(actual);
+        else Assert.Equal(expected.GetString(), actual);
+    }
+
     /// <summary>Every pinned clip length, window for window. A plan that drifts by a second reads the wrong
     /// audio into every later window, which shows up as a plausible transcription of the wrong part of a song.</summary>
     [Fact]

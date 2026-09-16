@@ -120,6 +120,45 @@ def main() -> int:
         "states": {name: mask_for(updates) for name, updates in STATES.items()},
     }
 
+    # A hand-built stream exercising every field, a two-note melody across both tracks, and a gap wider than one
+    # shift token can express (which has to be written as several).
+    stream = tokenizer.prompt_prefix() + [
+        token("subbeat_shift", 4),
+        token("time", 250),
+        token("meter", 20), token("eighth_position", 3),
+        token("structure", 3),
+        token("key", 13),
+        token("full_chord", 100),
+        token("pitch", 60), token("duration", 5),
+        token("pitch", 128 + 67), token("duration", 2),
+        tokenizer.subbeat_shift_token_end - 1, token("subbeat_shift", 10),
+        token("time", 900),
+        token("pitch", 72),
+        tokenizer.eos_token,
+    ]
+    decoded = tokenizer.decode_sequence(stream)
+    payload["codec"] = {
+        "stream": stream,
+        "reencoded": tokenizer.encode_events(decoded["events"]),
+        "events": [
+            {
+                "subbeat": event["subbeat"],
+                "timestamp": event["values"].get("timestamp"),
+                "meter": list(event["values"]["rhythm"]["meter"]) if "meter" in event["values"].get("rhythm", {}) else None,
+                "eighthPosition": event["values"].get("rhythm", {}).get("eighth_position"),
+                "structure": event["values"].get("structure"),
+                "key": event["values"].get("key"),
+                "chord": event["values"].get("chord"),
+                "melody": [
+                    {"pitch": n["pitch"], "track": n["track"],
+                     "durationBin": n["duration_bin"], "durationSteps": n["duration_steps"]}
+                    for n in event["values"].get("melody", [])
+                ],
+            }
+            for event in decoded["events"]
+        ],
+    }
+
     plan = load_window_plan(args.source)
     payload["windows"] = {
         f"{duration:g}": [
