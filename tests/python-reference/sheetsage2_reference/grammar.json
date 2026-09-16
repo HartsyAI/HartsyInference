@@ -1,0 +1,224 @@
+{
+ "tokenCount": 31678,
+ "chordLabels": 361,
+ "meterPairs": 192,
+ "structureLabels": 23,
+ "durationTemplates": 24,
+ "promptPrefix": [
+  1,
+  4,
+  5,
+  6,
+  7,
+  9,
+  11,
+  3
+ ],
+ "ranges": [
+  {
+   "name": "subbeat_shift",
+   "start": 260,
+   "end": 517
+  },
+  {
+   "name": "time",
+   "start": 517,
+   "end": 30517
+  },
+  {
+   "name": "meter",
+   "start": 30517,
+   "end": 30709
+  },
+  {
+   "name": "eighth_position",
+   "start": 30709,
+   "end": 30965
+  },
+  {
+   "name": "structure",
+   "start": 30965,
+   "end": 30988
+  },
+  {
+   "name": "key",
+   "start": 30988,
+   "end": 31012
+  },
+  {
+   "name": "chord_majmin",
+   "start": 31012,
+   "end": 31037
+  },
+  {
+   "name": "chord_full",
+   "start": 31037,
+   "end": 31398
+  },
+  {
+   "name": "pitch",
+   "start": 31398,
+   "end": 31654
+  },
+  {
+   "name": "duration",
+   "start": 31654,
+   "end": 31678
+  }
+ ],
+ "tokenTypes": {
+  "0": "pad",
+  "1": "sos",
+  "2": "eos",
+  "3": "out",
+  "7": "prompt",
+  "260": "subbeat_shift",
+  "517": "time",
+  "30516": "time",
+  "31012": "chord_majmin",
+  "31037": "chord_full",
+  "31677": "duration"
+ },
+ "states": {
+  "fresh": {
+   "allowedCount": 31369,
+   "eos": false,
+   "subbeat_shift": true,
+   "time": true,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "after_time": {
+   "allowedCount": 1370,
+   "eos": true,
+   "subbeat_shift": true,
+   "time": false,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "after_meter": {
+   "allowedCount": 514,
+   "eos": true,
+   "subbeat_shift": true,
+   "time": false,
+   "meter": false,
+   "eighth_position": true,
+   "structure": false,
+   "key": false,
+   "majmin_chord": false,
+   "full_chord": false,
+   "pitch": false,
+   "duration": false
+  },
+  "after_pitch": {
+   "allowedCount": 538,
+   "eos": true,
+   "subbeat_shift": true,
+   "time": false,
+   "meter": false,
+   "eighth_position": false,
+   "structure": false,
+   "key": false,
+   "majmin_chord": false,
+   "full_chord": false,
+   "pitch": true,
+   "duration": true
+  },
+  "after_key": {
+   "allowedCount": 875,
+   "eos": true,
+   "subbeat_shift": true,
+   "time": false,
+   "meter": false,
+   "eighth_position": false,
+   "structure": false,
+   "key": false,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "after_pitch_duration": {
+   "allowedCount": 514,
+   "eos": true,
+   "subbeat_shift": true,
+   "time": false,
+   "meter": false,
+   "eighth_position": false,
+   "structure": false,
+   "key": false,
+   "majmin_chord": false,
+   "full_chord": false,
+   "pitch": true,
+   "duration": false
+  },
+  "shift1": {
+   "allowedCount": 31369,
+   "eos": false,
+   "subbeat_shift": true,
+   "time": true,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "shift4": {
+   "allowedCount": 31112,
+   "eos": false,
+   "subbeat_shift": false,
+   "time": true,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "shift5": {
+   "allowedCount": 31112,
+   "eos": false,
+   "subbeat_shift": false,
+   "time": true,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  },
+  "event_then_shift": {
+   "allowedCount": 31369,
+   "eos": false,
+   "subbeat_shift": true,
+   "time": true,
+   "meter": true,
+   "eighth_position": true,
+   "structure": true,
+   "key": true,
+   "majmin_chord": false,
+   "full_chord": true,
+   "pitch": true,
+   "duration": false
+  }
+ }
+}
