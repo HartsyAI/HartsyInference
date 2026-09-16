@@ -12,13 +12,15 @@
 > themselves. Still-live findings kept here: the NVFP4-AWQ text-encoder conventions, and the
 > SageAttention F16-V measurement in "Bring-up notes".
 >
-> **Expansion boundary, updated 2026-08-30:** the original claim above now has one narrow extension: an
+> **Expansion boundary, updated 2026-09-16:** the original claim above now has two narrow extensions. (1) An
 > exact-hash dense FL2VA friend-test canary generated and directly inspected two 39-frame clips with a visual
-> guide plus continuous video/audio denoise masks. The public plan remains release-blocked; Turbo/Hybrid, PDD,
-> VSA, Fun ControlNet, the int8 video VAE, and
-> the remaining guide/mask matrix still lack their required operator-provided canaries. Numerical parity,
-> performance gates, package-consumer validation, and live Swarm generation remain release blockers where
-> specified by the current checklists.
+> guide plus continuous video/audio denoise masks; that path remains release-blocked. (2) **Long-form chaining is
+> released** — output longer than one denoise, generated as segments that each hold the previous segment's tail
+> fixed (`VideoRequest.ChainTotalFrames`). Guides and AV denoise masks themselves are still blocked: chaining
+> builds its masks inside the pipeline and never sets those request objects. Turbo/Hybrid, PDD, VSA, Fun
+> ControlNet, the int8 video VAE, and the remaining guide/mask matrix still lack their required operator-provided
+> canaries. Numerical parity, performance gates, package-consumer validation, and live Swarm generation remain
+> release blockers where specified by the current checklists.
 
 ## What H3 is
 

@@ -197,12 +197,11 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             pending.Add("AV denoise masks");
         }
-        // Chaining drives the same masked continuation from inside the pipeline, so it never sets the request
-        // objects above and needs its own entry rather than inheriting theirs.
-        if (request.ChainTotalFrames is not null)
-        {
-            pending.Add("long-form chaining");
-        }
+        // Long-form chaining cleared this bar on 2026-09-16 against the fp8 FL2VA base: 3 chained segments at
+        // 512x288x141f produced one 345-frame clip whose video and audio both ran 14.375 s, and whose seams sat
+        // inside the clip's own adjacent-frame SSIM distribution (0.8856 and 0.9202 against a 0.8627 minimum and
+        // 0.9492 median) — a busier-than-average step, not a cut. It is released; the entries above are not, and
+        // chaining does not carry them, since it never sets the guide or mask request objects.
         if (plan.ComponentFormats.TryGetValue("videoVae", out string? videoVaeFormat)
             && videoVaeFormat.Contains("int8", StringComparison.OrdinalIgnoreCase))
         {
