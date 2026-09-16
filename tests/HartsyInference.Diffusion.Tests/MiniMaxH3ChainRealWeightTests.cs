@@ -124,6 +124,11 @@ public sealed class MiniMaxH3ChainRealWeightTests
         Assert.True(Math.Abs(audio.Seconds - expectedSeconds) < 0.5d,
             $"Soundtrack is {audio.Seconds:F2} s against {expectedSeconds:F2} s of video — the streams drifted.");
 
+        // A butt-joined waveform clicks even when both sides are the right content, and duration alone cannot see
+        // it: the join has to be an ordinary sample step, not the largest one in the clip.
+        (double worstJoin, double joinPercentile) = AudioJoinStep(audio, plan);
+        _output.WriteLine($"Worst audio join step {worstJoin:F5} at the {joinPercentile:F2}th percentile.");
+
         string outputRoot = Path.Combine(TestPaths.OutputDir, "h3-chain-real-weight");
         VideoOutputWriter.Written written = Persist(result, outputRoot, "minimax-h3-long-form-chain");
         JsonSerializerOptions json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -141,6 +146,8 @@ public sealed class MiniMaxH3ChainRealWeightTests
                 withinSegmentAdjacentSsim = withinSegment,
                 seamSsims,
                 worstSeam,
+                worstAudioJoinStep = worstJoin,
+                audioJoinPercentile = joinPercentile,
                 execution = result.Execution,
             }, json));
         _output.WriteLine($"Chain output: {written.Directory}");
@@ -150,6 +157,40 @@ public sealed class MiniMaxH3ChainRealWeightTests
         Assert.True(worstSeam > withinSegment * 0.7d,
             $"Worst seam SSIM {worstSeam:F4} is a discontinuity against the clip's own "
             + $"{withinSegment:F4} adjacent-frame baseline.");
+        Assert.True(joinPercentile < 99.9d,
+            $"An audio join is a {joinPercentile:F2}th-percentile sample step — that is a click, not a handover.");
+    }
+
+    /// <summary>The largest sample step at any segment join, and where it falls among every step in the clip.</summary>
+    private static (double Worst, double Percentile) AudioJoinStep(
+        AudioBuffer audio, IReadOnlyList<MiniMaxH3ChainPlanner.Segment> plan)
+    {
+        float[] channel = audio.Channels[0];
+        double[] steps = new double[channel.Length - 1];
+        for (int i = 1; i < channel.Length; i++)
+        {
+            steps[i - 1] = Math.Abs(channel[i] - channel[i - 1]);
+        }
+        double[] sorted = [.. steps];
+        Array.Sort(sorted);
+
+        double worst = 0;
+        int cursor = 0;
+        foreach (MiniMaxH3ChainPlanner.Segment segment in plan)
+        {
+            cursor += segment.NewFrames;
+            int sample = (int)Math.Round(cursor / (double)Fps * audio.SampleRate);
+            if (sample > 0 && sample < channel.Length)
+            {
+                worst = Math.Max(worst, Math.Abs(channel[sample] - channel[sample - 1]));
+            }
+        }
+        int rank = Array.BinarySearch(sorted, worst);
+        if (rank < 0)
+        {
+            rank = ~rank;
+        }
+        return (worst, 100.0 * rank / sorted.Length);
     }
 
     private static IReadOnlyList<MiniMaxH3ChainPlanner.Segment> PlanFor(int segments)

@@ -48,6 +48,16 @@ public static class MiniMaxH3ChainPlanner
             throw new ArgumentOutOfRangeException(nameof(contextFrames), contextFrames,
                 $"MiniMax-H3 chain context of {contextFrames} frames leaves no new frames inside a {capped}-frame segment.");
         }
+        // 40 Hz audio rows against 24 fps video: only a context that is a whole number of BOTH lands the audio join
+        // on a row boundary. Off it, the protected rows span a different stretch of time than the carried frames do
+        // and the two streams hand over out of alignment.
+        if (MiniMaxH3Geometry.AudioLatentFrames(contextFrames) * MiniMaxH3Geometry.Fps
+            != contextFrames * MiniMaxH3Geometry.AudioLatentFps)
+        {
+            throw new ArgumentOutOfRangeException(nameof(contextFrames), contextFrames,
+                $"MiniMax-H3 chain context of {contextFrames} frames does not cover whole audio latent rows; "
+                + "use a grid length that is also a whole number of 40 Hz rows (39, 90, 141, …).");
+        }
 
         List<Segment> segments = [];
         int first = Math.Min(MiniMaxH3Geometry.AlignFrameCount(targetFrames), capped);

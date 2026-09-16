@@ -95,8 +95,23 @@ public class MiniMaxH3ChainPlannerTests
     [InlineData(40)]   // off-grid
     [InlineData(4)]    // below the grid floor
     [InlineData(362)]  // leaves no new frames in a capped segment
+    [InlineData(56)]   // on the video grid but not a whole number of 40 Hz audio rows
+    [InlineData(73)]
     public void OffGridOrOversizedContextIsRefused(int contextFrames)
         => Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3ChainPlanner.Plan(900, contextFrames));
+
+    /// <summary>A usable context covers whole audio rows as well as whole video tokens, so the two streams hand
+    /// over at the same instant.</summary>
+    [Theory]
+    [InlineData(39)]
+    [InlineData(90)]
+    [InlineData(141)]
+    public void AcceptedContextCoversWholeAudioRows(int contextFrames)
+    {
+        MiniMaxH3ChainPlanner.Segment second = MiniMaxH3ChainPlanner.Plan(900, contextFrames)[1];
+        Assert.Equal(second.ContextAudioLatentFrames * MiniMaxH3Geometry.Fps,
+            contextFrames * MiniMaxH3Geometry.AudioLatentFps);
+    }
 
     [Fact]
     public void TooShortATargetIsRefused()

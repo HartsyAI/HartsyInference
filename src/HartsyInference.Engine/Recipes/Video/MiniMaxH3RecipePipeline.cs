@@ -986,7 +986,15 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         };
     }
 
-    /// <summary>Appends a segment's new audio, trimmed to the frames it contributes so the streams stay locked.</summary>
+    /// <summary>Samples blended at an audio join. The two sides are the same content — the incoming segment's
+    /// protected head is a VAE round trip of the assembled tail — so a linear blend holds amplitude where an
+    /// equal-power one would lift correlated signals by 3 dB.</summary>
+    private const double AudioJoinSeconds = 0.03;
+
+    /// <summary>Appends a segment's new audio, trimmed to the frames it contributes so the streams stay locked, and
+    /// hands over across the protected head rather than butt-joining. A hard join puts the previous segment's own
+    /// samples against audio that continues from the round trip of them instead, which is a step the waveform hears
+    /// as a click even though the frames either side are the right content.</summary>
     private static void AppendSegmentAudio(List<float[]> assembledAudio, ref int sampleRate,
         AudioBuffer? segmentAudio, in MiniMaxH3ChainPlanner.Segment segment)
     {
@@ -1005,6 +1013,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         double perFrame = sampleRate / (double)MiniMaxH3Geometry.Fps;
         int start = (int)Math.Round(segment.ContextFrames * perFrame);
         int end = (int)Math.Round((segment.ContextFrames + segment.NewFrames) * perFrame);
+        int join = segment.ContextFrames == 0 ? 0
+            : Math.Min((int)Math.Round(AudioJoinSeconds * sampleRate),
+                Math.Min(start, assembledAudio[0].Length));
         for (int c = 0; c < assembledAudio.Count && c < segmentAudio.ChannelCount; c++)
         {
             float[] source = segmentAudio.Channels[c];
@@ -1015,9 +1026,21 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             {
                 Array.Copy(source, from, slice, 0, to - from);
             }
-            float[] grown = new float[assembledAudio[c].Length + slice.Length];
-            assembledAudio[c].CopyTo(grown, 0);
-            slice.CopyTo(grown, assembledAudio[c].Length);
+            float[] assembled = assembledAudio[c];
+            // The incoming head covers the same span as the assembled tail, so the blend is time-aligned.
+            for (int i = 0; i < join; i++)
+            {
+                float weight = (i + 1f) / (join + 1f);
+                int tail = assembled.Length - join + i;
+                int head = start - join + i;
+                if (tail >= 0 && head >= 0 && head < source.Length)
+                {
+                    assembled[tail] = assembled[tail] * (1f - weight) + source[head] * weight;
+                }
+            }
+            float[] grown = new float[assembled.Length + slice.Length];
+            assembled.CopyTo(grown, 0);
+            slice.CopyTo(grown, assembled.Length);
             assembledAudio[c] = grown;
         }
     }
