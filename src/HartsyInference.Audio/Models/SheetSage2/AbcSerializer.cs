@@ -80,6 +80,13 @@ public static partial class AbcSerializer
     public static RebuiltAbcScore BuildScore(IReadOnlyList<TimedScoreEvent> events, double duration, bool melodyOnly = true)
     {
         ArgumentNullException.ThrowIfNull(events);
+        // The beat grid is extended until it reaches the end of the clip, so a duration that is not a real
+        // number never gets there: the loop would append beats until it exhausted memory.
+        if (!double.IsFinite(duration) || duration <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration), duration,
+                "A clip must have a positive, finite duration to write a score for.");
+        }
         List<BeatEvent> beats = [];
         Dictionary<string, List<NoteSpan>> notes = new(StringComparer.Ordinal);
         foreach (string voice in VoiceIds)

@@ -193,6 +193,7 @@ public static class GenerationDispatch
         double speed = parameters.GetFloat("speed", 1f);
         SpeechRequest request = new SpeechRequest
         {
+            Vram = ParseVramOverrides(parameters),
             Text = prompt,
             Voice = parameters.Get("voice"),
             Speed = speed > 0d ? speed : null,
@@ -257,6 +258,7 @@ public static class GenerationDispatch
         // unset flag must NOT be materialised into a value here.
         MusicRequest request = new MusicRequest
         {
+            Vram = ParseVramOverrides(parameters),
             Prompt = prompt,
             Genre = parameters.Get("genre") ?? "",
             Duration = parameters.GetInt("duration", 10),
@@ -442,6 +444,7 @@ public static class GenerationDispatch
     {
         VideoRequest request = new VideoRequest
         {
+            Vram = ParseVramOverrides(parameters),
             Prompt = prompt,
             NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative ? negative
                 : "blurry, low quality, distorted, watermark",
@@ -502,6 +505,7 @@ public static class GenerationDispatch
             ModelSpec restoreSpec = ModelResolver.Resolve(restoreModel, null, Modality.Restore);
             RestoreRequest restoreRequest = new RestoreRequest
             {
+                Vram = ParseVramOverrides(parameters),
                 Frames = frames.Select(f => new ImageData { Rgb = f.Rgb, Width = f.Width, Height = f.Height }).ToList(),
                 TargetWidth = parameters.GetIntOrNull("restore-width"),
                 TargetHeight = parameters.GetIntOrNull("restore-height"),
@@ -571,6 +575,7 @@ public static class GenerationDispatch
     {
         MeshRequest request = new MeshRequest
         {
+            Vram = ParseVramOverrides(parameters),
             Image = LoadImage(prompt),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
@@ -609,6 +614,7 @@ public static class GenerationDispatch
         int totalFrames = Math.Max(2, parameters.GetInt("frames", 16));
         WorldRequest request = new WorldRequest
         {
+            Vram = ParseVramOverrides(parameters),
             InitImage = LoadImage(prompt),
             Steps = parameters.GetInt("steps", 10),
             Seed = parameters.GetInt("seed", -1),
@@ -667,6 +673,7 @@ public static class GenerationDispatch
         RestoreRequest request;
         RestoreRequest baseRequest = new RestoreRequest
         {
+            Vram = ParseVramOverrides(parameters),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
             ClipFrames = parameters.GetIntOrNull("clip-frames"),

@@ -144,6 +144,25 @@ public sealed class SheetSage2AbcParityTests
             AbcSerializer.EventsToAbc(events, duration, melodyOnly: false));
     }
 
+    /// <summary>A duration that is not a real number is refused rather than serialized.
+    ///
+    /// <para>The beat grid is extended a beat at a time until it reaches the end of the clip, so an infinite or
+    /// negative duration never arrives there — the loop would run until it exhausted memory. This is the same
+    /// check <see cref="SlidingWindowPlan.For"/> already makes of the same quantity.</para></summary>
+    [Theory]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    [InlineData(double.NaN)]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    public void ADurationThatIsNotARealClipLength_IsRefused(double duration)
+    {
+        JsonDocument raw = JsonDocument.Parse(File.ReadAllText(FixturePath("real_piano30", "ref_events.json")));
+        List<TimedScoreEvent> events = ReadRawEvents(raw.RootElement.GetProperty("events"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => AbcSerializer.EventsToAbc(events, duration));
+        Assert.Throws<ArgumentOutOfRangeException>(() => AbcSerializer.BuildScore(events, duration));
+    }
+
     /// <summary>At least one pinned case has to actually diverge, or the gate above proves nothing.</summary>
     [Fact]
     public void AtLeastOneCase_DivergesUnderAChordStrip()

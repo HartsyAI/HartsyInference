@@ -52,7 +52,7 @@ public static class MemorySupportReport
             + $"model supports {(declared == MemoryCapabilities.None ? "nothing" : declared.ToString())}.");
         if (policy is not null)
         {
-            ReportUnimplemented(serviceName, policy);
+            ReportUnimplemented(serviceName, policy, declared);
         }
     }
 
@@ -97,26 +97,28 @@ public static class MemorySupportReport
             Warn(recipeName, "Weight streaming", "this denoiser exposes no streamable blocks, so every weight stays "
                 + "resident and an oversized request will still fail");
         }
-        ReportUnimplemented(recipeName, policy);
+        ReportUnimplemented(recipeName, policy, declared);
     }
 
     /// <summary>Names levers the operator pinned that NO model can honour yet, because the engine does not read them.</summary>
     /// <remarks>Blaming the recipe for these would be a lie in the honesty layer itself: "this family holds its
     /// components for the whole generation" reads as a property of the model when the truth is that nothing consumes
     /// the lever anywhere. Only <see cref="VramPolicy.WeightStreaming"/> (via the planner) and
-    /// <see cref="VramPolicy.KeepResident"/> (via <see cref="VramLevers"/>) are wired today; the rest arrive with the
-    /// per-modality work. Move a lever out of this list the moment something reads it, or the warning becomes the
-    /// stale one.</remarks>
-    private static void ReportUnimplemented(string recipeName, VramPolicy policy)
+    /// <see cref="VramPolicy.KeepResident"/> (via <see cref="VramLevers"/>) are wired engine-wide today; the rest
+    /// arrive with the per-modality work, so a recipe that has wired one declares it and is not named here. Move a
+    /// lever out of this list the moment something reads it, or the warning becomes the stale one.</remarks>
+    private static void ReportUnimplemented(string recipeName, VramPolicy policy, MemoryCapabilities declared)
     {
         List<string> pending = [];
-        if (policy.PhaseUnload == LeverState.On) pending.Add("phase unload");
+        if (policy.PhaseUnload == LeverState.On && !declared.HasFlag(MemoryCapabilities.PhaseUnload))
+            pending.Add("phase unload");
         if (policy.Caches == CachePrecision.Half) pending.Add("half-precision caches");
         if (policy.ActivationOffload == LeverState.On) pending.Add("activation offload");
         if (policy.QuantizedCompute == LeverState.On) pending.Add("quantized compute");
         if (policy.FreeAfterGeneration == LeverState.On) pending.Add("free-after-generation");
         if (policy.MultiGpuSpill == LeverState.On) pending.Add("multi-GPU spill");
-        if (policy.ChunkScale < 1.0f) pending.Add("chunk scaling");
+        if (policy.ChunkScale < 1.0f && !declared.HasFlag(MemoryCapabilities.Chunking))
+            pending.Add("chunk scaling");
         if (pending.Count == 0)
         {
             return;

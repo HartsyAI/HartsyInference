@@ -234,7 +234,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         // the chunk size drift mid-generation as VRAM usage elsewhere changes — non-deterministic and hostile to
         // future CUDA-graph capture of this loop.
         (long freeBytes, _) = backend.GetVramInfo();
-        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes);
+        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
         if (chunkRows != int.MaxValue)
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP: seq={seq} chunkRows={chunkRows} freeBytes={freeBytes}.");
@@ -339,8 +339,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         // comment on why this is resolved once per forward rather than per block.
         (long freeA, _) = backendA.GetVramInfo();
         (long freeB, _) = backendB.GetVramInfo();
-        int chunkRowsA = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeA);
-        int chunkRowsB = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeB);
+        int chunkRowsA = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeA, backendA);
+        int chunkRowsB = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeB, backendB);
         if (chunkRowsA != int.MaxValue || chunkRowsB != int.MaxValue)
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP (sharded): seq={seq} chunkRowsA={chunkRowsA} "
@@ -682,7 +682,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     private static string FunControlPrefix(int index) => FunControlWeightPrefix + index;
 
-    /// <summary>Diagnostic only, off unless <c>HARTSY_H3_VPROBE=1</c>: reports <c>max|V|</c> per block against F16's
+    /// <summary>Diagnostic only, off unless <c>diagnostics.h3Vprobe</c> is set: reports <c>max|V|</c> per block against F16's
     /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
     /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
     /// token, no error raised (see the HAZARD note in <c>CudaBackend.ScaledDotProductAttention</c>; this is what bit
