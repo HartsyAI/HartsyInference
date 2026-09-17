@@ -8,4 +8,8 @@ public interface ITranscribeService
 {
     /// <summary>Transcribes the audio in <paramref name="request"/>.</summary>
     Task<TranscriptResult> RunAsync(ModelSpec spec, AudioRequest request, CancellationToken cancel = default);
+
+    /// <summary>Transcribes music into a symbolic score, returning it both with and without chord symbols.
+    /// Throws <see cref="NotSupportedException"/> for a model that does not write scores.</summary>
+    Task<ScoreTranscriptResult> RunScoreAsync(ModelSpec spec, AudioRequest request, CancellationToken cancel = default);
 }

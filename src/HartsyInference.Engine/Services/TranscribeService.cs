@@ -78,6 +78,36 @@ public sealed class TranscribeService : ITranscribeService
         }, cancel);
     }
 
+    /// <inheritdoc/>
+    public Task<ScoreTranscriptResult> RunScoreAsync(ModelSpec spec, AudioRequest request, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        AudioModelSelector selector = AudioModelSelector.Parse(spec);
+        SttModelDescriptor descriptor = SttCatalog.Resolve(selector.Id);
+        string repo = descriptor.ResolveRepo(selector.Variant);
+        IBackend backend = _engine.Backend;
+
+        return _engine.AudioRuntime.RunAsync(backend, $"stt:{repo}", async ct =>
+        {
+            float[] audio = AudioClipCodec.DecodeMono(request.Audio, descriptor.InputSampleRate);
+            if (audio.Length == 0)
+            {
+                throw new ArgumentException("The audio to transcribe decoded to no samples.", nameof(request));
+            }
+            ct.ThrowIfCancellationRequested();
+
+            ISttRunner runner = await _engine.AudioRuntime.Stt
+                .GetOrLoadAsync(repo, token => descriptor.LoadAsync(repo, token), ct).ConfigureAwait(false);
+            long started = Environment.TickCount64;
+            ScoreTranscriptResult result = runner.TranscribeScore(backend, audio, request)
+                ?? throw new NotSupportedException(
+                    $"'{repo}' transcribes speech, not music, so it cannot write a score. Use 'sheetsage2'.");
+            Logs.Verbose($"[Audio][STT] Scored {AudioClipCodec.Seconds(audio.Length, descriptor.InputSampleRate):0.0}s "
+                + $"via {repo} in {Environment.TickCount64 - started}ms ({result.WindowCount} window(s)).");
+            return result;
+        }, cancel);
+    }
+
     /// <summary>Projects the model's timestamp spans onto <see cref="WordSegment"/>s. <b>These are segment-level, not word-level:</b> Whisper's <c>&lt;|t|&gt;</c> tokens delimit phrases, and true word alignment would need cross-attention DTW, which the decoder does not expose — so <see cref="WordSegment.Word"/> carries the whole span's text. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
     private static IReadOnlyList<WordSegment>? BuildWords(IReadOnlyList<SttSegment>? segments,
         IReadOnlyList<DiarizedSegment>? speakers)
