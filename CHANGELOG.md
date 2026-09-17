@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.80
+## alpha.81
 
 - Audio: **the SheetSage2 port's symbolic half is complete** — the events-to-ABC serializer and the sliding-window
   stitcher. Between them they turn a decoded token stream into a finished two-voice lead sheet, which is the
