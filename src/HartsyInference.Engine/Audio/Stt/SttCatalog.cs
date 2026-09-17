@@ -23,6 +23,7 @@ internal static class SttCatalog
         ["moonshinestreaming"] = MoonshineStreaming,
         ["kyutaistt"] = Kyutai,
         ["whisperstreaming"] = WhisperStreaming,
+        ["sheetsage2"] = SheetSage2,
     };
 
     /// <summary>Resolves a catalog id to its descriptor, or throws naming what is available.</summary>
@@ -36,6 +37,42 @@ internal static class SttCatalog
             $"No transcription model '{id}' is registered. Available: {string.Join(", ", Registry.Keys)} "
             + "(pass a variant as 'id:variant', e.g. 'whisper:large-v3').");
     }
+
+    /// <summary>SheetSage2 — music, not speech. It writes a two-voice lead sheet rather than a sentence, so the
+    /// plain transcribe path returns that score as text and the score path returns both of its renderings.
+    ///
+    /// <para>The weights ship inside the YuE2 repo and are cached under <c>"music"</c> alongside it, so a machine
+    /// that already generates with YuE2 does not fetch a second copy.</para></summary>
+    internal static SttModelDescriptor SheetSage2 { get; } = new SttModelDescriptor
+    {
+        InputSampleRate = SheetSage2Pipeline.SampleRate,
+        ResolveRepo = variant =>
+        {
+            string id = (variant ?? string.Empty).Trim();
+            return id.Contains('/', StringComparison.Ordinal) ? id : "Comfy-Org/YuE2";
+        },
+        ResolveFiles = (_, _) => Task.FromResult(SheetSage2Pipeline.ModelFiles),
+        LoadAsync = async (repo, cancel) =>
+        {
+            SheetSage2Pipeline pipeline = await SheetSage2Pipeline.LoadAsync(repo, cancel).ConfigureAwait(false);
+            return new SttRunner(
+                (backend, audio, _) => pipeline.Transcribe(backend, audio).FullAbc, pipeline)
+            {
+                Scored = (backend, audio, _) =>
+                {
+                    ScoreTranscription score = pipeline.Transcribe(backend, audio);
+                    return new ScoreTranscriptResult
+                    {
+                        FullAbc = score.FullAbc,
+                        MelodyAbc = score.MelodyAbc,
+                        Duration = score.Duration,
+                        WindowCount = score.WindowCount,
+                        Truncated = score.Truncated,
+                    };
+                },
+            };
+        },
+    };
 
     /// <summary>OpenAI Whisper. Honors the request's language and translate task.</summary>
     internal static SttModelDescriptor Whisper { get; } = new SttModelDescriptor
