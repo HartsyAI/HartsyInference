@@ -122,6 +122,28 @@ public sealed class SheetSage2AbcParityTests
         Assert.Equal(want.GetProperty("melodyOnly").GetString(), AbcSerializer.EventsToAbc(events, duration));
     }
 
+    /// <summary>The same check over a whole song rather than a fragment: 1,820 events, 431 seconds, read in
+    /// three overlapping windows and stitched, rendered both ways character for character.
+    ///
+    /// <para>Size is the point. The thirty-second case is one window and ten bars; this one is 65 parallel
+    /// chunks over 234 bars with seventeen section markers, so it reaches the paths a short clip never does —
+    /// sections repeating, the bar grid running for minutes without drifting, and the serializer holding the
+    /// two voices in step across passages that three different decoder windows contributed. It cannot say the
+    /// stitching is right, because the fixture is already-stitched output; what it says is that the serializer
+    /// does not fall over on the length and variety of a real track.</para></summary>
+    [Fact]
+    public void AWholeSong_RendersExactly()
+    {
+        JsonDocument raw = JsonDocument.Parse(File.ReadAllText(FixturePath("real_song431", "ref_events.json")));
+        List<TimedScoreEvent> events = ReadRawEvents(raw.RootElement.GetProperty("events"));
+        double duration = raw.RootElement.GetProperty("duration").GetDouble();
+        Assert.Equal(raw.RootElement.GetProperty("eventCount").GetInt32(), events.Count);
+        Assert.Equal(File.ReadAllText(FixturePath("real_song431", "ref_abc_melody.abc")),
+            AbcSerializer.EventsToAbc(events, duration));
+        Assert.Equal(File.ReadAllText(FixturePath("real_song431", "ref_abc_full.abc")),
+            AbcSerializer.EventsToAbc(events, duration, melodyOnly: false));
+    }
+
     /// <summary>At least one pinned case has to actually diverge, or the gate above proves nothing.</summary>
     [Fact]
     public void AtLeastOneCase_DivergesUnderAChordStrip()
