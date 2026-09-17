@@ -6,6 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.83
+
+- Video: **an unchunked MiniMax-H3 geometry is no longer charged for its own buffers twice.** Below
+  `MinChunkableRows` the forward runs whole, and then `Attention`'s qkv and head-major q/k/v ARE the full-sequence
+  buffers the pass-1 term models — the floor added both, counting one allocation twice (about 257 MB at seq 4700).
+  Chunked they are genuinely distinct, since kFull/vFull outlive each chunk in flight, so the correction applies
+  only when the scratch spans the whole sequence.
+- Sizing that scratch by the real sequence rather than a fixed 4,096 rows (alpha.80) made the over-count reachable:
+  it added 99 MB at seq 4700, turning a 51 MB margin into a 48 MB deficit and refusing a 90-frame 512x288 clip on
+  a 24 GB card that had generated the same geometry minutes earlier. Every calibrated estimate sits above the
+  chunking threshold, so none of them covered this branch; the new test pins an unchunked floor against what the
+  unchunked forward actually allocates.
+
 ## alpha.82
 
 - Audio: **SheetSage2 transcribes a recording into a score.** With the symbolic half from alpha.81, the model is

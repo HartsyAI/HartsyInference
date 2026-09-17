@@ -191,4 +191,27 @@ public sealed class MiniMaxH3ActivationEstimateTests
                 MiniMaxH3ChunkPolicy.ScratchRows(bigSeq, config, DType.F32, plentyFree, backend));
         }
     }
+
+    /// <summary>A geometry below <see cref="MiniMaxH3ChunkPolicy.MinChunkableRows"/> runs whole, and then
+    /// <see cref="MiniMaxH3Transformer.Attention"/>'s qkv and head-major q/k/v ARE the full-sequence buffers the
+    /// pass-1 term models — counting both charges one allocation twice. That over-count refused a 90-frame
+    /// 512x288 clip by 48 MB on a 24 GB card that had just generated the same geometry.</summary>
+    [Fact]
+    public void EstimateFloorBytes_UnchunkedGeometry_DoesNotChargeTheFullSequenceBuffersTwice()
+    {
+        MiniMaxH3Config config = new MiniMaxH3Config();
+        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
+        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
+        long residual = (long)seq * config.HiddenSize * DType.F32.SizeInBytes;
+        // Unchunked attention's live peak: qkv [seq, inner*3] alongside head-major q/k/v of the same total width.
+        long attentionPeak = 2L * seq * inner * 3L * DType.F32.SizeInBytes;
+        long ceiling = residual + attentionPeak + MiniMaxH3ActivationEstimate.FudgeBytes;
+
+        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue));
+
+        Assert.True(floor <= ceiling,
+            $"an unchunked floor ({floor}) must not exceed what the unchunked forward actually allocates "
+            + $"({ceiling}) — charging kFull/vFull on top of a full-sequence scratch term counts them twice");
+    }
 }

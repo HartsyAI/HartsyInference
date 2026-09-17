@@ -54,7 +54,12 @@ public static class MiniMaxH3ActivationEstimate
         // card (at seq=38325 each buffer is 1047.9 MB, exactly the failing allocation). The projection is now split
         // across the passes (k+v here, q re-projected per chunk in pass 2, same total GEMM work), so q never spans
         // the pass boundary and this term is 2x rather than 3x.
-        long passOneBytes = 2L * fullSeqInnerBytes + chunkScratchBytes;
+        // When the scratch spans the whole sequence the forward is not chunking at all, and Attention's qkv and
+        // head-major q/k/v ARE the full-sequence buffers this term models — adding both counts one allocation
+        // twice. Chunked, they are genuinely separate: kFull/vFull outlive each chunk in flight.
+        long passOneBytes = resolvedChunkRows >= seq
+            ? chunkScratchBytes
+            : 2L * fullSeqInnerBytes + chunkScratchBytes;
 
         // Pass 2 still holds kFull + vFull for every SDPA call, alongside the [seq, hidden] result it scatters each
         // chunk into. It used to ALSO hold an outChunks list of the same total size awaiting a final Concat; chunks
