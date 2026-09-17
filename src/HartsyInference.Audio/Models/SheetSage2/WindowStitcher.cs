@@ -72,6 +72,41 @@ public sealed class WindowStitcher(ScoreTokenizer tokenizer)
         return accepted;
     }
 
+    /// <summary>Hands the finished stream on to whatever renders it, as times and values with no tokens left.
+    ///
+    /// <para>Stitching is the last pass that needs the raw tokens — a window replays its predecessor's verbatim,
+    /// and re-encoding from values would not reproduce them — so this is where they are dropped. A field the
+    /// event does not state stays null, which downstream reads as unchanged rather than as absent: key, chord and
+    /// section each run until an event states a new one.</para></summary>
+    /// <param name="stitched">Accepted events, in time order.</param>
+    public List<TimedScoreEvent> ToTimedEvents(IReadOnlyList<StitchedScoreEvent> stitched)
+    {
+        ArgumentNullException.ThrowIfNull(stitched);
+        List<TimedScoreEvent> timed = new(stitched.Count);
+        foreach (StitchedScoreEvent item in stitched)
+        {
+            List<TimedScoreNote>? melody = null;
+            if (item.Melody is { Count: > 0 } notes)
+            {
+                melody = new List<TimedScoreNote>(notes.Count);
+                foreach (StitchedNote note in notes)
+                {
+                    melody.Add(new TimedScoreNote(note.Note.Pitch, note.Note.Track, note.EndSeconds));
+                }
+            }
+            timed.Add(new TimedScoreEvent
+            {
+                Time = item.Seconds,
+                Rhythm = item.Source.Rhythm,
+                Structure = item.Source.Structure,
+                Key = item.Source.Key,
+                Chord = item.Source.Chord,
+                Melody = melody,
+            });
+        }
+        return timed;
+    }
+
     /// <summary>Writes the part of a window that earlier windows already read back as that window's prompt.</summary>
     /// <param name="stitched">Everything accepted so far, in the order it was accepted.</param>
     /// <param name="window">The window about to be decoded; its <see cref="SheetSage2Window.Start"/> sets the

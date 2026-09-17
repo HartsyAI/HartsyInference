@@ -191,6 +191,66 @@ public sealed class SheetSage2StitchParityTests
         Assert.Equal((null, 0), Stitcher.OverlapPrefix([], window));
     }
 
+    /// <summary>Gate S6e: a real transcription carried from the decoder's own tokens through stitching and into
+    /// ABC, character for character.
+    ///
+    /// <para>Each half of that seam is already gated on its own. This one covers the join: the event shapes the
+    /// model actually emits, re-read from their tokens, placed on the clip's timeline by this port, handed over
+    /// as <see cref="TimedScoreEvent"/> and rendered. It catches what neither side can — a field dropped or
+    /// mistranslated on the way across, and a placement that the serializer reads differently than the reference
+    /// did — since a wrong time here is a wrong bar there.</para>
+    ///
+    /// <para>Thirty seconds is one window, so it says nothing about a seam between windows; a longer fixture
+    /// needs its per-window token streams, which this one does not carry, and that is asserted rather than
+    /// assumed.</para></summary>
+    [Theory]
+    [InlineData("real_piano30")]
+    public void ARealTranscription_SurvivesStitchingIntoAbc(string fixture)
+    {
+        JsonDocument raw = JsonDocument.Parse(File.ReadAllText(RealFixture(fixture, "ref_events.json")));
+        JsonElement root = raw.RootElement;
+        double duration = root.GetProperty("duration").GetDouble();
+        List<int> stream = Codec.EncodeEvents(RawEvents(root.GetProperty("events")));
+        stream.Add(ScoreTokenizer.EosToken);
+        List<ScoreEvent> decoded = Codec.DecodeSequence(stream);
+        Assert.Equal(root.GetProperty("eventCount").GetInt32(), decoded.Count);
+
+        SheetSage2Window window = Assert.Single(SlidingWindowPlan.For(duration));
+        (List<int>? prompt, int position) = Stitcher.OverlapPrefix([], window);
+        Assert.Null(prompt);
+        List<StitchedScoreEvent> stitched =
+            Stitcher.WindowEvents(decoded, new SubbeatTimeMap(decoded), window, duration, position);
+
+        // Where the released stitching put every event and every note end, before any of it reaches the score.
+        Assert.Equal(root.GetProperty("eventCount").GetInt32(), stitched.Count);
+        int i = 0;
+        foreach (JsonElement want in root.GetProperty("events").EnumerateArray())
+        {
+            StitchedScoreEvent got = stitched[i];
+            Assert.Equal(want.GetProperty("time").GetDouble(), got.Seconds);
+            Assert.Equal(want.GetProperty("global_subbeat").GetInt32(), got.GlobalSubbeat);
+            if (want.GetProperty("values").TryGetProperty("melody", out JsonElement notes))
+            {
+                Assert.Equal(notes.GetArrayLength(), got.Melody!.Count);
+                int n = 0;
+                foreach (JsonElement note in notes.EnumerateArray())
+                {
+                    Assert.Equal(note.GetProperty("pitch").GetInt32(), got.Melody[n].Note.Pitch);
+                    Assert.Equal(note.GetProperty("track").GetInt32(), got.Melody[n].Note.Track);
+                    Assert.Equal(note.GetProperty("end_time").GetDouble(), got.Melody[n++].EndSeconds);
+                }
+            }
+            else Assert.Null(got.Melody);
+            i++;
+        }
+
+        List<TimedScoreEvent> timed = Stitcher.ToTimedEvents(stitched);
+        Assert.Equal(File.ReadAllText(RealFixture(fixture, "ref_abc_melody.abc")),
+            AbcSerializer.EventsToAbc(timed, duration));
+        Assert.Equal(File.ReadAllText(RealFixture(fixture, "ref_abc_full.abc")),
+            AbcSerializer.EventsToAbc(timed, duration, melodyOnly: false));
+    }
+
     /// <summary>An opening event whose bar position is present but empty inherits no time signature.
     ///
     /// <para>Built by hand rather than dumped, because the released decode cannot write the input: a field only
@@ -311,4 +371,33 @@ public sealed class SheetSage2StitchParityTests
     }
 
     private static int[] Ints(JsonElement array) => [.. array.EnumerateArray().Select(e => e.GetInt32())];
+
+    /// <summary>A real transcription's events, read back out of the raw tokens the model wrote them as.</summary>
+    private static List<ScoreEvent> RawEvents(JsonElement events)
+    {
+        List<ScoreEvent> source = [];
+        foreach (JsonElement item in events.EnumerateArray())
+        {
+            Dictionary<string, List<int>> fields = new(StringComparer.Ordinal);
+            foreach (JsonProperty entry in item.GetProperty("tokens_by_field").EnumerateObject())
+            {
+                fields[entry.Name] = [.. Ints(entry.Value)];
+            }
+            source.Add(new ScoreEvent { Subbeat = item.GetProperty("subbeat").GetInt32(), TokensByField = fields });
+        }
+        return source;
+    }
+
+    private static string RealFixture(string clip, string name)
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "python-reference", "sheetsage2_reference", clip, name);
+        if (File.Exists(path)) return path;
+        // Fall back to the source tree when the fixture was not copied next to the test binary.
+        DirectoryInfo? dir = new(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "tests", "python-reference")))
+        {
+            dir = dir.Parent;
+        }
+        return Path.Combine(dir?.FullName ?? ".", "tests", "python-reference", "sheetsage2_reference", clip, name);
+    }
 }
