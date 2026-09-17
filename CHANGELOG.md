@@ -6,6 +6,33 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.81
+
+- Audio: **the SheetSage2 port's symbolic half is complete** — the events-to-ABC serializer and the sliding-window
+  stitcher. Between them they turn a decoded token stream into a finished two-voice lead sheet, which is the
+  artifact YuE2 edits and re-renders, so this is the half that makes covering an existing recording possible
+  rather than only editing scores YuE2 wrote itself.
+- The serializer infers the beat grid and meter from the decoded timestamps, spells accidentals against the key
+  and the running bar, splits durations that no single ABC token can express, and pads the idle voice so both
+  voices carry the same bar count in every parallel chunk. It is checked string-exact against the released
+  implementation on ten cases and, separately, against a transcription the model itself produced: the port
+  regenerates that score byte for byte from the model's own events.
+- **Writing the score without chords is not the same as deleting the chords from one that has them.** A bar
+  carrying a chord symbol cannot fold into a multi-bar rest, a chord change inside a held note splits it into
+  tied parts, and the two spell rests within a bar differently — four of the ten gated cases differ, six happen
+  to coincide. So the mode is a parameter on the serializer and both renderings are produced from one decode,
+  rather than one being derived from the other after the fact.
+- The stitcher resolves each window's own subbeat and second counts onto the whole clip's timeline and decides
+  which window is trusted for each passage. Its seam tolerance is deliberately asymmetric: symmetrising it
+  duplicates or drops a bar at every seam. The gate covers fourteen seams across seven clip lengths, including
+  events landing exactly on an accept boundary, and was mutation-tested — twenty deliberate breakages, with
+  every surviving mutant either turned into a new case or shown to be mathematically equivalent.
+- Two reference behaviours are reproduced rather than tidied, each with a note saying so: an unclipped interior
+  interpolation in the time map (unreachable in the shipped pipeline, since transcription always asks for the
+  full window), and several guards that the surrounding code makes dead. Two are deliberate divergences that
+  throw instead: a melody track index outside the two voices, which the reference silently routes to the wrong
+  staff, and a beat period below the timestamp resolution, which the reference would expand into millions of
+  synthesized beats.
 ## alpha.80
 
 - Video: **a VRAM posture now reaches video at all.** `--vram-mode` existed only on the image command, so passing
