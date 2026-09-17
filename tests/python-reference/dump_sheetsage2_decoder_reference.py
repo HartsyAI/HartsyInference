@@ -11,9 +11,10 @@ running ComfyUI, and every entry point it offers is a no-op on the eager CPU pat
         --checkpoint /path/to/sheetsage2_bf16.safetensors \
         --audio /path/to/clip.wav --steps 256
 
-Writes sheetsage2_decoder_reference_tensors/: protocol.json, memory.bin and logits.bin. The reference
-runs on CPU in float32 over float32-upcast BF16 weights, which is the dtype the C# decoder runs in — a BF16
-reference would put a dtype gap inside a token-exact gate and hide what the gate is supposed to measure.
+Writes one directory per case under sheetsage2_decoder_reference_tensors/ — audio, prefixed, shuffled and
+synthetic — each holding protocol.json, memory.bin and logits.bin. Everything runs on CPU by construction, in
+float32 over float32-upcast BF16 weights, which is the dtype the C# decoder runs in: a BF16 reference would put
+a dtype gap inside a token-exact gate and hide what the gate is supposed to measure.
 
 Never point --comfy at a running ComfyUI install's live service; a checkout is fine, it is only read.
 """
@@ -109,15 +110,36 @@ def build_model(sheetsage2, checkpoint: Path, with_encoder: bool):
     return model
 
 
+# The released encoder's projected output sits around this per-element deviation over a padded 300-second
+# window (measured: 0.187). The synthetic memory is scaled to it so the case stresses what it is meant to — a
+# decode off the model's manifold, where the grammar mask decides tokens — and not a backend's narrow-dtype
+# range, which a unit-deviation memory would exercise five times harder than anything the encoder can emit.
+ENCODER_MEMORY_SCALE = 0.1875
+
+
 def synthetic_memory(tokens: int, dim: int, seed: int):
-    """A deterministic stand-in for the encoder's output, for a dump run without a clip."""
+    """A deterministic stand-in for the encoder's output, at the scale the encoder actually emits."""
     import torch
 
     generator = torch.Generator().manual_seed(seed)
-    return torch.randn(1, tokens, dim, generator=generator, dtype=torch.float32)
+    return torch.randn(1, tokens, dim, generator=generator, dtype=torch.float32) * ENCODER_MEMORY_SCALE
 
 
-def record_decode(sheetsage2, model, memory, steps: int, stop_seconds: float):
+def shuffled_memory(memory, seed: int):
+    """The clip's own memory with its token rows permuted.
+
+    The same values and the same scale as the encoder really emits, with the temporal structure gone — which is
+    what puts the decode off the model's manifold, where its unmasked argmax stops obeying the grammar. Scaling a
+    random memory up would do that too, but it would also leave the range the backends are tuned for, so a
+    failure there could not be told apart from a narrow-dtype artefact.
+    """
+    import torch
+
+    generator = torch.Generator().manual_seed(seed)
+    return memory[:, torch.randperm(memory.shape[1], generator=generator)].contiguous()
+
+
+def record_decode(sheetsage2, model, memory, steps: int, stop_seconds: float, prefix=None):
     """Runs the released generate_tokens, capturing the logits every step produced.
 
     decode() is shadowed on the instance rather than reimplemented, so the loop, its grammar mask and its stop
@@ -125,7 +147,7 @@ def record_decode(sheetsage2, model, memory, steps: int, stop_seconds: float):
     """
     import torch
 
-    prefix = model.tokenizer.prompt_prefix()
+    prefix = model.tokenizer.prompt_prefix() if prefix is None else list(prefix)
     model.max_tokens = len(prefix) + steps
     captured = []
     released_decode = type(model).decode
@@ -137,7 +159,7 @@ def record_decode(sheetsage2, model, memory, steps: int, stop_seconds: float):
 
     model.decode = capture
     with torch.no_grad():
-        tokens = model.generate_tokens(memory, stop_seconds)
+        tokens = model.generate_tokens(memory, stop_seconds, prefix)
     del model.decode
     return prefix, tokens, torch.stack(captured)
 
@@ -168,6 +190,7 @@ def grammar_trace(sheetsage2, model, prefix, tokens, logits):
             "allowedCount": int(allowed.sum()),
             "top1": float(top.values[0]),
             "top2": float(top.values[1]),
+            "top2Id": int(top.indices[1]),
             "margin": float(top.values[0] - top.values[1]),
             "unmaskedArgmax": int(logits[step].argmax()),
         })
@@ -178,10 +201,11 @@ def grammar_trace(sheetsage2, model, prefix, tokens, logits):
     return trace
 
 
-def dump_case(sheetsage2, model, out: Path, name: str, memory, memory_source: str, steps: int, logit_steps: int):
+def dump_case(sheetsage2, model, out: Path, name: str, memory, memory_source: str, steps: int, logit_steps: int,
+              prefix=None):
     """Decodes one memory and writes its case directory: protocol.json, memory.bin, logits.bin."""
     memory = memory.contiguous()
-    prefix, tokens, logits = record_decode(sheetsage2, model, memory, steps, stop_seconds=300.0)
+    prefix, tokens, logits = record_decode(sheetsage2, model, memory, steps, stop_seconds=300.0, prefix=prefix)
     trace = grammar_trace(sheetsage2, model, prefix, tokens, logits)
 
     case = out / name
@@ -235,15 +259,23 @@ def main():
     torch.manual_seed(args.seed)
     model = build_model(sheetsage2, args.checkpoint, with_encoder=args.audio is not None)
 
-    # Both cases earn their place. A real clip is what the decoder meets in production, but the checkpoint is
-    # good enough there that its unmasked argmax already obeys the grammar, so that case cannot tell a masked
-    # loop from an unmasked one. A synthetic memory puts the model off its manifold, where the mask decides
-    # several tokens — which is the only way gate S4 can fail for its own reason.
+    # Four cases, each failing for something the others cannot see. 'audio' is a real clip run to its own EOS.
+    # 'prefixed' replays a prefix that leaves the grammar owing a partner token, as an overlap prefix does to the
+    # next window. 'synthetic' is a seeded memory at the encoder's scale, which the model never resolves, so it
+    # runs into the token limit. 'shuffled' is the clip's own memory with its rows permuted — the only case
+    # measured to put the checkpoint's unmasked argmax outside the grammar, which is what makes it the gate on
+    # whether the mask is applied inside the loop at all.
     if args.audio is not None:
         waveform = load_waveform(args.audio, 24000)
         with torch.no_grad():
             memory, _ = model.encode(waveform)
         dump_case(sheetsage2, model, args.out, "audio", memory, args.audio.name, args.steps, args.logit_steps)
+        tokenizer = model.tokenizer
+        pending = [*tokenizer.prompt_prefix(), tokenizer.subbeat_shift_token_start, tokenizer.meter_token_start + 3]
+        dump_case(sheetsage2, model, args.out, "prefixed", memory, args.audio.name, args.steps, args.logit_steps,
+                  prefix=pending)
+        dump_case(sheetsage2, model, args.out, "shuffled", shuffled_memory(memory, args.seed),
+                  f"shuffled({args.audio.name}, seed={args.seed})", args.steps, args.logit_steps)
 
     dump_case(sheetsage2, model, args.out, "synthetic", synthetic_memory(7500, 512, args.seed),
               f"synthetic(seed={args.seed})", args.steps, args.logit_steps)
