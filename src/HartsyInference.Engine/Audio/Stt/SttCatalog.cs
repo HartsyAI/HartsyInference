@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Kyutai;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
@@ -56,11 +57,11 @@ internal static class SttCatalog
         {
             SheetSage2Pipeline pipeline = await SheetSage2Pipeline.LoadAsync(repo, cancel).ConfigureAwait(false);
             return new SttRunner(
-                (backend, audio, _) => pipeline.Transcribe(backend, audio).FullAbc, pipeline)
+                (backend, audio, _) => RequireDevice(backend).Transcribe(backend, audio).FullAbc, pipeline)
             {
                 Scored = (backend, audio, _) =>
                 {
-                    ScoreTranscription score = pipeline.Transcribe(backend, audio);
+                    ScoreTranscription score = RequireDevice(backend).Transcribe(backend, audio);
                     return new ScoreTranscriptResult
                     {
                         FullAbc = score.FullAbc,
@@ -71,6 +72,20 @@ internal static class SttCatalog
                     };
                 },
             };
+
+            SheetSage2Pipeline RequireDevice(IBackend backend)
+            {
+                // The encoder attends over a fixed 7,500 tokens in every one of 24 layers. On the host that is
+                // not a slower transcription, it is one that does not come back, so say so rather than start it.
+                if (backend.Device.IsCpu)
+                {
+                    throw new NotSupportedException(
+                        "SheetSage2 needs a GPU: its encoder attends over 7,500 tokens in each of 24 layers, "
+                        + "which the CPU backend cannot finish in a usable time. Transcribe with 'whisper' instead, "
+                        + "or run the engine on a CUDA device.");
+                }
+                return pipeline;
+            }
         },
     };
 

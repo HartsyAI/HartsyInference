@@ -146,11 +146,21 @@ public sealed class Mert2Encoder : IDisposable
     internal Tensor Subsample(IBackend backend, Tensor mel)
     {
         Tensor current = _blocks[0].Forward(backend, mel);
-        for (int i = 1; i < _blocks.Length; i++)
+        try
         {
-            Tensor next = _blocks[i].Forward(backend, current);
+            for (int i = 1; i < _blocks.Length; i++)
+            {
+                Tensor next = _blocks[i].Forward(backend, current);
+                current.Dispose();
+                current = next;
+            }
+        }
+        catch
+        {
+            // The caller owns the return value, but only on the way out; a block that throws leaves the
+            // intermediate owned by nobody.
             current.Dispose();
-            current = next;
+            throw;
         }
         return current;
     }
