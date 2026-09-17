@@ -200,8 +200,7 @@ internal sealed class Mert2ConformerLayer
             stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
         // GLU over the channel axis: the first half gated by a sigmoid of the second.
-        Span<Tensor> halves = [scratch.ConvGateLeft, scratch.ConvGateRight];
-        backend.Split(halves, scratch.ConvGate, dim: 1);
+        backend.Split(scratch.GluHalves, scratch.ConvGate, dim: 1);
         backend.Sigmoid(scratch.ConvGated, scratch.ConvGateRight);
         backend.Mul(scratch.ConvChannels, scratch.ConvGateLeft, scratch.ConvGated);
 
@@ -254,6 +253,9 @@ internal sealed class Mert2ConformerLayer
             ConvGateLeft = new Tensor(channelMajor, DType.F32);
             ConvGateRight = new Tensor(channelMajor, DType.F32);
             ConvGated = new Tensor(channelMajor, DType.F32);
+            // Held rather than built per call: Split takes a span, and a collection expression of a reference type
+            // allocates an array every time it is written out.
+            GluHalves = [ConvGateLeft, ConvGateRight];
             ConvDepthwise = new Tensor(channelMajor, DType.F32);
             ConvTokens = new Tensor(tokenMajor, DType.F32);
 
@@ -282,6 +284,7 @@ internal sealed class Mert2ConformerLayer
         public Tensor ConvGateLeft { get; }
         public Tensor ConvGateRight { get; }
         public Tensor ConvGated { get; }
+        public Tensor[] GluHalves { get; }
         public Tensor ConvDepthwise { get; }
         public Tensor ConvTokens { get; }
         public Tensor RopeCos { get; }
