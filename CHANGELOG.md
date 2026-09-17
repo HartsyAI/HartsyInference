@@ -18,6 +18,17 @@ stable release will require. Dates are UTC.
   a 24 GB card that had generated the same geometry minutes earlier. Every calibrated estimate sits above the
   chunking threshold, so none of them covered this branch; the new test pins an unchunked floor against what the
   unchunked forward actually allocates.
+- The floor now models attention per implementation rather than assuming one shape. `AttentionSparse` keeps a
+  full-sequence gate and the token-major buffer it permutes from alongside qkv and head-major q/k/v, an 8x
+  projection peak against the dense path's 6x — and it holds that at ANY length, because `ForwardNamedBlock`
+  selects it before testing `seq > chunkRows` and there is no chunked sparse path. Charging the released VSA
+  profile a chunk's worth would have approved a near-limit generation that then ran out of VRAM, which is the
+  dangerous direction for a pre-flight. The MLP chunks in both modes and is sized separately. A caller that does
+  not name the mode gets the larger sparse reservation, so an omitted argument cannot under-estimate; the
+  calibrated boundaries name themselves dense, since they measured the fp8 FL2VA path.
+- The activation-accounting tests move out of `SyntheticSmoke` into the unit lane. They are arithmetic only — no
+  model, GPU, checkpoint or network — but the class trait meant the documented CPU command skipped every one of
+  them. This accounting has regressed twice now; quarantining its guards is what let the first one through.
 
 ## alpha.82
 
