@@ -64,11 +64,25 @@ public static class MiniMaxH3ChunkPolicy
             : ScaledChunkRows(backend);
     }
 
-    /// <summary>The chunk width the tier's <see cref="VramPolicy.ChunkScale"/> implies. The pre-flight activation
-    /// estimates call this so a refusal is measured against the chunk the forward will actually use — a scaled-down
-    /// chunk needs less scratch, so the fixed <see cref="DefaultChunkRows"/> would refuse geometries that now run.</summary>
+    /// <summary>The chunk width the tier's <see cref="VramPolicy.ChunkScale"/> implies, or the forced
+    /// <c>vram.h3ChunkRows</c> when it is set — the same two answers <see cref="ResolveChunkRows"/> gives once it
+    /// has decided to chunk at all. Sizes the seq-independent reserve taken at construction.</summary>
     public static int ScaledChunkRows(IBackend? backend = null)
-        => Math.Max(512, (int)(DefaultChunkRows * ClampedScale(backend)));
+        => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0
+            ? forced
+            : Math.Max(512, (int)(DefaultChunkRows * ClampedScale(backend)));
+
+    /// <summary>Rows one block's transient scratch actually spans for <paramref name="seq"/>: the width
+    /// <see cref="ResolveChunkRows"/> resolves, or the whole sequence when this geometry runs unchunked. Pre-flight
+    /// sizes its scratch term with this so an approval matches the branch the forward will take — assuming the
+    /// tier-scaled chunk everywhere under-counts a short sequence (which runs whole, below
+    /// <see cref="MinChunkableRows"/>) and a forced chunk wider than the tier's.</summary>
+    public static int ScratchRows(
+        int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
+    {
+        int rows = ResolveChunkRows(seq, config, bodyDType, freeBytes, backend);
+        return rows == int.MaxValue ? seq : Math.Min(rows, seq);
+    }
 
     /// <summary>Resolves through <see cref="VramPolicyRegistry"/>, not the ambient scope alone: a host that pins a
     /// policy on the engine and leaves the request's overrides null gets no scope pushed, and reading the scope

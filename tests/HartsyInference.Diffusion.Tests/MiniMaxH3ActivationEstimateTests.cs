@@ -1,6 +1,7 @@
 using Xunit;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -145,6 +146,49 @@ public sealed class MiniMaxH3ActivationEstimateTests
         finally
         {
             VramPolicyRegistry.Clear(backend);
+        }
+    }
+
+    /// <summary>Pre-flight has to size its scratch by the branch the forward will take, not by the tier's chunk
+    /// alone. A sequence below <see cref="MiniMaxH3ChunkPolicy.MinChunkableRows"/> runs whole, so its transient
+    /// spans the entire sequence — wider than any scaled chunk — and assuming the chunk there under-counts and can
+    /// approve a generation that then OOMs.</summary>
+    [Fact]
+    public void ScratchRows_SpansTheWholeSequenceWhenTheForwardWillNotChunkIt()
+    {
+        using CpuBackend backend = new();
+        MiniMaxH3Config config = new MiniMaxH3Config();
+        const long plentyFree = 64L * 1024 * 1024 * 1024;
+        int shortSeq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
+
+        Assert.Equal(
+            int.MaxValue,
+            MiniMaxH3ChunkPolicy.ResolveChunkRows(shortSeq, config, DType.F32, plentyFree, backend));
+        int scratch = MiniMaxH3ChunkPolicy.ScratchRows(shortSeq, config, DType.F32, plentyFree, backend);
+        Assert.Equal(shortSeq, scratch);
+        Assert.True(scratch > MiniMaxH3ChunkPolicy.ScaledChunkRows(backend),
+            $"an unchunked sequence spans more rows than the tier's chunk ({scratch} vs "
+            + $"{MiniMaxH3ChunkPolicy.ScaledChunkRows(backend)}), which is what made the estimate optimistic");
+    }
+
+    /// <summary>The forced <c>vram.h3ChunkRows</c> overrides the decision outright, so an override wider than the
+    /// tier-scaled chunk has to widen the estimate with it.</summary>
+    [Fact]
+    public void ScaledChunkRows_FollowsTheForcedOverrideAboveTheTierScale()
+    {
+        using CpuBackend backend = new();
+        const int forced = 16_384;
+        Assert.True(forced > MiniMaxH3ChunkPolicy.ScaledChunkRows(backend));
+
+        using (KnobProfile.Create("forced-chunk").With(EngineKnobs.H3ChunkRows, forced).Push())
+        {
+            Assert.Equal(forced, MiniMaxH3ChunkPolicy.ScaledChunkRows(backend));
+            MiniMaxH3Config config = new MiniMaxH3Config();
+            const long plentyFree = 64L * 1024 * 1024 * 1024;
+            int bigSeq = 40_000;
+            Assert.Equal(
+                forced,
+                MiniMaxH3ChunkPolicy.ScratchRows(bigSeq, config, DType.F32, plentyFree, backend));
         }
     }
 }

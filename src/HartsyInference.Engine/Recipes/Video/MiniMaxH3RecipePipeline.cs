@@ -412,8 +412,6 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private void CheckVramFeasibility(int width, int height, int frames)
     {
         int seq = SequenceLengthFor(width, height, frames);
-        int chunkRows = MiniMaxH3ChunkPolicy.ScaledChunkRows(_backend);
-        long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32, chunkRows);
 
         // Every backend running block ranges needs the same per-block floor, so when sharding is on, BOTH have to
         // clear it. Report whichever is furthest short rather than whichever is checked first: the tightest one is
@@ -425,22 +423,26 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             stages.Add((_pipeline.DitShardBackend, "shard", _pipeline.EstimateShardResidentWeightBytes()));
         }
         OutOfVramException? worst = null;
-        long worstDeficit = 0, worstBudget = 0;
+        long worstDeficit = 0, worstBudget = 0, worstFree = 0;
+        IBackend? worstBackend = null;
         foreach ((IBackend backend, string label, long weights) in stages)
         {
-            if (CheckOneBackend(backend, label, floorBytes, weights, frames, width, height, seq,
-                    out long deficit, out long budget) is OutOfVramException failure && deficit > worstDeficit)
+            if (CheckOneBackend(backend, label, _config, weights, frames, width, height, seq,
+                    out long deficit, out long budget, out long free) is OutOfVramException failure
+                && deficit > worstDeficit)
             {
                 worst = failure;
                 worstDeficit = deficit;
                 worstBudget = budget;
+                worstFree = free;
+                worstBackend = backend;
             }
         }
         if (worst is not null)
         {
             // Name a length that WOULD work. "Lower the frame count" without a number leaves the user bisecting by
             // hand against a check that only answers yes/no.
-            int feasible = LargestFeasibleFrameCount(width, height, frames, worstBudget);
+            int feasible = LargestFeasibleFrameCount(width, height, frames, worstBudget, worstBackend, worstFree);
             string advice = feasible > 0
                 ? $" At {width}x{height} the longest clip that fits is {feasible} frames "
                     + $"({(double)feasible / MiniMaxH3Geometry.Fps:F1} s)."
@@ -450,11 +452,16 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
     }
 
-    private static OutOfVramException? CheckOneBackend(IBackend backend, string label, long floorBytes,
-        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit, out long budget)
+    /// <remarks>The floor is resolved here rather than once for the whole check: the chunk width the forward will
+    /// use depends on this backend's own free VRAM and pinned policy, which is exactly the per-backend split
+    /// <see cref="MiniMaxH3Transformer.ForwardSharded"/> already makes.</remarks>
+    private static OutOfVramException? CheckOneBackend(IBackend backend, string label, MiniMaxH3Config config,
+        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit, out long budget,
+        out long freeForPolicy)
     {
         deficit = 0;
         budget = 0;
+        freeForPolicy = 0;
         // Pooled cuMemFreeAsync reservations don't return to cuMemGetInfo's free count until trimmed — the same
         // staleness VramPlanner.TrimBeforeQuery exists to counteract for other families' checks.
         backend.TrimMemoryPool();
@@ -464,6 +471,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             // GetVramInfo() defaults to (0, 0) on backends that don't report live VRAM (e.g. CPU) — nothing to check.
             return null;
         }
+        freeForPolicy = freeBytes;
+        long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, freeBytes, backend));
         long availableForActivations = freeBytes - residentWeightBytes;
         budget = availableForActivations;
         if (floorBytes <= availableForActivations)
@@ -490,13 +500,18 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>The longest clip that WOULD fit at this resolution, so the refusal can name a length that works instead of only the one that doesn't. Walks the 17k+5 grid down from the request rather than solving: the floor is not linear in frames (video and audio rows advance on different grids) and the search is at most a few dozen arithmetic steps with no allocation. Returns 0 when even the shortest clip doesn't fit, which means the resolution is the problem, not the length.</summary>
-    private int LargestFeasibleFrameCount(int width, int height, int frames, long budgetBytes)
+    private int LargestFeasibleFrameCount(
+        int width, int height, int frames, long budgetBytes, IBackend? backend, long freeBytes)
     {
         for (int candidate = frames - 17; candidate >= 5; candidate -= 17)
         {
+            // Each candidate resolves its own scratch width: a shorter clip can drop below MinChunkableRows and
+            // run whole, so a fixed chunk here would name a length the forward would size differently.
+            int candidateSeq = SequenceLengthFor(width, height, candidate);
             if (MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-                SequenceLengthFor(width, height, candidate), _config, DType.F32,
-                MiniMaxH3ChunkPolicy.ScaledChunkRows(_backend)) <= budgetBytes)
+                candidateSeq, _config, DType.F32,
+                MiniMaxH3ChunkPolicy.ScratchRows(candidateSeq, _config, DType.F32, freeBytes, backend))
+                <= budgetBytes)
             {
                 return candidate;
             }
