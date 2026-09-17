@@ -18,11 +18,11 @@ stable release will require. Dates are UTC.
   hands device memory back between segments. The conditioning encoders load ahead of the DiT *within* a segment,
   but across a chain the previous segment leaves weights cached and the next segment's mask-source encode competes
   with them. Gated on `PhaseUnload`, so `VramTier.Auto` stays byte-identical to an unchained run.
-  `MiniMaxH3Recipe` declares `PhaseUnload | Chunking` only because both are now wired.
-- `IBackend.EvictWeightCaches` — the former `CudaBackend.EvictGpuCache`, lifted onto the interface as a default
-  no-op. Unlike `FreeActivations`, it drops the weight copies the lazy per-op streaming path uploaded.
+  `MiniMaxH3Recipe` declares `PhaseUnload | Chunking` only because both are now wired. The unload frees only the
+  pipeline's own DiT tensors: video takes no device gate, so evicting the backend's shared caches could strand a
+  concurrent generation on the same device.
 - Verified on a 12 GB RTX 3060, which previously ran out of VRAM at the mask-source encode: a 3-segment chain at
-  512x288 producing 192 frames and 8.00 s of audio, the unload firing twice, and colour drift of 0.036 per frame.
+  512x288 producing 192 frames and 8.00 s of audio, the unload firing twice, and colour drift of 0.045 per frame.
 
 ## alpha.79
 
