@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.80
+
+- Video: **a VRAM posture now reaches video at all.** `--vram-mode` existed only on the image command, so passing
+  it to `video` was accepted and ignored rather than rejected; `Vram` was put on the request only in the image
+  dispatch branch, so video, music, world, restore, mesh and speech dropped it even when supplied; and `Program`
+  read `diagnostics.logLevel` before pushing the `--set` profile, so raising the log level from the command line
+  could not work — which is what made the first two hard to see. Every tier request for video was silently
+  becoming `Auto`.
+- Video: with the tier arriving, `MiniMaxH3ChunkPolicy` honours its `ChunkScale` lever, and a long-form chain
+  hands device memory back between segments. The conditioning encoders load ahead of the DiT *within* a segment,
+  but across a chain the previous segment leaves weights cached and the next segment's mask-source encode competes
+  with them. Gated on `PhaseUnload`, so `VramTier.Auto` stays byte-identical to an unchained run.
+  `MiniMaxH3Recipe` declares `PhaseUnload | Chunking` only because both are now wired. The unload frees only the
+  pipeline's own DiT tensors: video takes no device gate, so evicting the backend's shared caches could strand a
+  concurrent generation on the same device.
+- Verified on a 12 GB RTX 3060, which previously ran out of VRAM at the mask-source encode: a 3-segment chain at
+  512x288 producing 192 frames and 8.00 s of audio, the unload firing twice, and colour drift of 0.045 per frame.
+
 ## alpha.79
 
 - Audio: **the SheetSage2 port continues** — its event codec, which reads a decoded token stream as musical

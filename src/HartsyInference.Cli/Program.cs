@@ -12,13 +12,17 @@ namespace HartsyInference.Cli;
 /// <remarks>Launches the interactive REPL when run with no arguments.</remarks>
 public static class Program
 {
+    /// <summary>The configured minimum log level, or Warning when unset or unparsable.</summary>
+    private static LogLevel ResolveLogLevel() =>
+        Enum.TryParse(EngineKnobs.LogLevel.Value, ignoreCase: true, out LogLevel level) ? level : LogLevel.Warning;
+
     /// <summary>Parses <paramref name="args"/> and dispatches to a command; with no args, shows the banner and usage.</summary>
     public static int Main(string[] args)
     {
-        // Warning by default keeps the REPL/one-shot output clean; HARTSY_LOG_LEVEL exposes the engine's
-        // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild.
-        Logs.MinLevel = Enum.TryParse(EngineKnobs.LogLevel.Value, ignoreCase: true, out LogLevel level)
-            ? level : LogLevel.Warning;
+        // Warning by default keeps the REPL/one-shot output clean; diagnostics.logLevel exposes the engine's
+        // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild. Re-read after the
+        // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
+        Logs.MinLevel = ResolveLogLevel();
 
         foreach ((string variable, string setting) in KnobStore.ReportStaleEnvironmentVariables())
         {
@@ -43,6 +47,8 @@ public static class Program
             if (profile is not null)
             {
                 knobScope = profile.Push();
+                // The level was resolved before the profile existed, so a --set that raises it only binds here.
+                Logs.MinLevel = ResolveLogLevel();
                 AnsiConsole.MarkupLine($"[#9aa4af]settings[/] [#2ea5e0]{Markup.Escape(profile.ToString())}[/]");
             }
         }

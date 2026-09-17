@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -24,10 +26,11 @@ public static class MiniMaxH3ChunkPolicy
 
     /// <summary>Returns <see cref="int.MaxValue"/> (never chunk — <see cref="MiniMaxH3Transformer.ForwardBlock"/>'s
     /// <c>seq &gt; chunkRows</c> check then always takes the exact-legacy path) when the unchunked per-block peak
-    /// comfortably fits <paramref name="freeBytes"/>, else <see cref="DefaultChunkRows"/>. <c>HARTSY_H3_CHUNK_ROWS</c>
-    /// overrides the decision outright (any positive integer) — the CPU backend's <c>GetVramInfo</c> always reports
-    /// (0, 0), so this is also how a CPU-only test forces the chunked path to A/B it against the same weights.</summary>
-    public static int ResolveChunkRows(int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes)
+    /// comfortably fits <paramref name="freeBytes"/>, else a chunk scaled by the VRAM tier. The
+    /// <c>vram.h3ChunkRows</c> setting overrides the decision outright (any positive integer) — the CPU backend's
+    /// <c>GetVramInfo</c> always reports (0, 0), so that is also how a CPU-only test forces the chunked path.</summary>
+    public static int ResolveChunkRows(
+        int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
     {
         if (EngineKnobs.H3ChunkRows.Value is int forced && forced > 0)
         {
@@ -37,6 +40,9 @@ public static class MiniMaxH3ChunkPolicy
         {
             return int.MaxValue;
         }
+        // The VRAM tier's chunk lever: below 1 it both shrinks the chunk and makes the fit test stricter, so a
+        // constrained card starts chunking at geometries a roomy one still runs whole.
+        float chunkScale = ClampedScale(backend);
 
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int ffn = config.FfnHiddenSize;
@@ -53,6 +59,34 @@ public static class MiniMaxH3ChunkPolicy
         // here — this heuristic only distinguishes "clearly fits" from "chunk to be safe", not a tight bound.
         const double safetyFactor = 0.5;
         long unchunkedPeak = seq * peakBytesPerRow;
-        return unchunkedPeak <= (long)(freeBytes * safetyFactor) ? int.MaxValue : DefaultChunkRows;
+        return unchunkedPeak <= (long)(freeBytes * safetyFactor * chunkScale)
+            ? int.MaxValue
+            : ScaledChunkRows(backend);
     }
+
+    /// <summary>The chunk width the tier's <see cref="VramPolicy.ChunkScale"/> implies, or the forced
+    /// <c>vram.h3ChunkRows</c> when it is set — the same two answers <see cref="ResolveChunkRows"/> gives once it
+    /// has decided to chunk at all. Sizes the seq-independent reserve taken at construction.</summary>
+    public static int ScaledChunkRows(IBackend? backend = null)
+        => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0
+            ? forced
+            : Math.Max(512, (int)(DefaultChunkRows * ClampedScale(backend)));
+
+    /// <summary>Rows one block's transient scratch actually spans for <paramref name="seq"/>: the width
+    /// <see cref="ResolveChunkRows"/> resolves, or the whole sequence when this geometry runs unchunked. Pre-flight
+    /// sizes its scratch term with this so an approval matches the branch the forward will take — assuming the
+    /// tier-scaled chunk everywhere under-counts a short sequence (which runs whole, below
+    /// <see cref="MinChunkableRows"/>) and a forced chunk wider than the tier's.</summary>
+    public static int ScratchRows(
+        int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
+    {
+        int rows = ResolveChunkRows(seq, config, bodyDType, freeBytes, backend);
+        return rows == int.MaxValue ? seq : Math.Min(rows, seq);
+    }
+
+    /// <summary>Resolves through <see cref="VramPolicyRegistry"/>, not the ambient scope alone: a host that pins a
+    /// policy on the engine and leaves the request's overrides null gets no scope pushed, and reading the scope
+    /// directly would silently ignore the tier it configured.</summary>
+    private static float ClampedScale(IBackend? backend)
+        => Math.Clamp(VramPolicyRegistry.Resolve(backend).ChunkScale, 0.05f, 1.0f);
 }

@@ -801,7 +801,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
     private static readonly string? DumpDir = EngineKnobs.H3Dump.Value;
 
-    /// <summary>Logs min/max/mean/rms under <c>HARTSY_H3_PROBE=1</c>; no-op otherwise.</summary>
+    /// <summary>Logs min/max/mean/rms under <c>diagnostics.h3Probe</c>; no-op otherwise.</summary>
     private static void Probe(string label, Tensor t)
     {
         if (!ProbeEnabled)
@@ -824,6 +824,27 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
         Logs.Warning($"[h3-probe] {label}: min={mn:F4} max={mx:F4} mean={sum / n:F4} rms={Math.Sqrt(sq / n):F4} nonfinite={bad} n={n}");
         if (!ReferenceEquals(f, t)) f.Dispose();
+    }
+
+    /// <summary>Frees this pipeline's own DiT weights from whichever backend holds them, including the copies the
+    /// lazy per-op path cached. Scoped to these tensors on purpose: the backend's caches are shared with whatever
+    /// else is running on the device, and video takes no device gate, so a blanket eviction could free a concurrent
+    /// generation's buffers underneath it. Mirrors the asymmetric free after the denoise loop — a whole-set free
+    /// silently no-ops on the shard backend's range.</summary>
+    public void ReleaseTransformerWeights()
+    {
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+            DitShardBackend.TrimMemoryPool();
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
+        Backend.TrimMemoryPool();
     }
 
     /// <summary>Makes the DiT device-resident when the recipe determined it fits, leaving headroom for activations
@@ -885,8 +906,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Writes the raw F32 tensor to <c>$HARTSY_H3_DUMP/&lt;name&gt;.bin</c> for reference comparison; no-op
-    /// when the variable is unset.</summary>
+    /// <summary>Writes the raw F32 tensor to <c>&lt;diagnostics.h3Dump&gt;/&lt;name&gt;.bin</c> for reference comparison;
+    /// no-op when the setting is unset.</summary>
     private static void Dump(string name, Tensor t)
     {
         string? dir = DumpDir;
