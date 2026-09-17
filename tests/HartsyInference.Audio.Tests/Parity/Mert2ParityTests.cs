@@ -28,28 +28,32 @@ namespace HartsyInference.Audio.Tests.Parity;
 public sealed unsafe class Mert2ParityTests
 {
     /// <summary>Gate S2 — mel frontend, relative L2. Both sides are float32 and share the checkpoint's window,
-    /// filterbank and statistics, so the only sources of difference are FFT and summation order. 1e-5 is roughly
-    /// two orders of magnitude above the ~1e-7 float32 round-off those reorderings produce over 1025 bins, and
-    /// still two orders below what any structural mistake (an off-by-one frame, a magnitude instead of a power
-    /// spectrum, a rebuilt filterbank) would cost.</summary>
-    private const double MelTolerance = 1e-5;
+    /// filterbank and statistics, so the only difference is FFT and summation order; measured 5.5e-8 (maxAbs
+    /// 1.3e-5 against a peak of 9.85). 1e-6 keeps an order of magnitude of headroom over that while staying five
+    /// orders below what a structural mistake — an off-by-one frame, a magnitude instead of a power spectrum, a
+    /// regenerated filterbank — would cost.</summary>
+    private const double MelTolerance = 1e-6;
 
-    /// <summary>Gate S3a — RoPE tables, max absolute difference. cos/sin are bounded by 1, and matching the
-    /// reference's float32 angle rounding should leave only the last-ulp disagreement of <c>pow</c>; 1e-5 catches
-    /// a double-precision angle (which drifts ~5e-4 by token 7499) while tolerating that ulp.</summary>
-    private const double RopeTolerance = 1e-5;
+    /// <summary>Gate S3a — RoPE tables, max absolute difference. cos/sin are bounded by 1, and reproducing the
+    /// reference's float32 angle rounding leaves only the last-ulp disagreement of <c>pow</c>: measured 6.0e-8,
+    /// which is one float32 ulp. 1e-6 tolerates that and still catches a double-precision angle, which drifts
+    /// ~5e-4 by token 7499.</summary>
+    private const double RopeTolerance = 1e-6;
 
     /// <summary>Gate S3b — ConvNeXt subsampler, relative L2. Twelve layers of GEMM on TF32 tensor cores (the
-    /// engine's default on sm_80+) carry ~5e-4 relative per matmul, and the stack's residuals accumulate it, so a
-    /// tolerance below 1e-3 would be testing cuBLAS's compute mode rather than this port. 3e-3 sits above the
-    /// measured deviation and far below the ~1e-1 that a wrong normalization axis or convolution padding gives.</summary>
-    private const double SubsampledTolerance = 3e-3;
+    /// engine's default on sm_80+) carry ~5e-4 relative per matmul, so a tolerance near float32 round-off would be
+    /// testing cuBLAS's compute mode rather than this port. Measured 2.7e-4 (maxAbs 1.4e-2 against a peak of
+    /// 68.3); 1.5e-3 keeps ~5x for kernel-selection variance and stays two orders below the ~1e-1 a wrong
+    /// normalization axis or convolution padding produces.</summary>
+    private const double SubsampledTolerance = 1.5e-3;
 
     /// <summary>Gate S3c — encoder mix and projection, relative L2. Looser than S3b because 24 Conformer layers
-    /// sit on top of it AND attention runs with F16 I/O through cuDNN (~1e-3 relative on the scores), which is the
-    /// configuration that ships. Still one to two orders below the disagreement of any real error: a wrong RoPE
-    /// convention, an unrotated key, or a mixed-up layer weight all land near or above 1e-1.</summary>
-    private const double EncoderTolerance = 1e-2;
+    /// sit on top of it AND attention runs with F16 I/O through cuDNN, which is the configuration that ships.
+    /// Measured 2.8e-4 on the mix and 5.7e-4 after the projection (maxAbs 1.3e-2 against a peak of 2.03) — the
+    /// projection is relatively worse because it contracts 1024 dimensions into 512, not because anything new
+    /// happens there. 3e-3 keeps ~5x of headroom and stays far below any real error: a wrong RoPE convention, an
+    /// unrotated key, or a mixed-up layer weight all land near or above 1e-1.</summary>
+    private const double EncoderTolerance = 3e-3;
 
     private readonly ITestOutputHelper _out;
 
@@ -159,13 +163,15 @@ public sealed unsafe class Mert2ParityTests
         model.LoadWeights(loader.GetAllTensors());
         backend.PreloadWeights(model.EnumerateWeights());
 
-        // The learned mix is a checkpoint fact with no tolerance beyond the softmax itself.
+        // The learned mix is a checkpoint fact, but its softmax is not: the same logits reduce in a different order
+        // here than in torch, so the seventh significant digit is float32 arithmetic, not a property of the port.
         Tensor referenceMix = referenceTensors["layer_weights"];
         Assert.Equal(model.Encoder.MixInputCount, (int)referenceMix.ElementCount);
         ReadOnlySpan<float> expectedMix = referenceMix.AsReadOnlySpan<float>();
         for (int i = 0; i < expectedMix.Length; i++)
         {
-            Assert.Equal(expectedMix[i], model.MixWeights[i], 6);
+            double difference = Math.Abs(expectedMix[i] - model.MixWeights[i]);
+            Assert.True(difference < 1e-6, $"layer weight {i}: {model.MixWeights[i]:R} vs {expectedMix[i]:R}.");
         }
 
         Tensor waveform = referenceTensors["waveform"];
