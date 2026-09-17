@@ -197,6 +197,13 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             pending.Add("AV denoise masks");
         }
+        // Driving audio cleared this bar on 2026-09-17 against the fp8 FL2VA base. It locks every audio row to a
+        // supplied track, so like chaining it builds its mask inside the pipeline and never sets the request
+        // objects gated above. Evidence, same seed and prompt with only the locked track differing: the output
+        // audio correlates 0.9771 (speech) and 0.9804 (a YuE2 song) with the driving track through the VAE
+        // round-trip, against 0.0030 for an undriven run at the same seed; a silence-driven run emits rms 0.00002
+        // rather than inventing a soundtrack; and a 243-frame chained run held 0.9818 overall with no per-segment
+        // sag (0.9872/0.9777/0.9863/0.9801). Operator-inspected: the mouth tracks both speech and sung lyrics.
         // Long-form chaining cleared this bar on 2026-09-16 against the fp8 FL2VA base: 3 chained segments at
         // 512x288x141f produced one 345-frame clip whose video and audio both ran 14.375 s, and whose seams sat
         // inside the clip's own adjacent-frame SSIM distribution (0.8856 and 0.9202 against a 0.8627 minimum and

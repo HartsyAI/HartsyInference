@@ -19,7 +19,10 @@
 > fixed (`VideoRequest.ChainTotalFrames`). Guides and AV denoise masks themselves are still blocked: chaining
 > builds its masks inside the pipeline and never sets those request objects. Turbo/Hybrid, PDD, VSA, Fun
 > ControlNet, the int8 video VAE, and the remaining guide/mask matrix still lack their required operator-provided
-> canaries. Numerical parity, performance gates, package-consumer validation, and live Swarm generation remain
+> canaries. (3) **Driving audio is released** (2026-09-17): a supplied track is locked into every audio row so the
+> video is generated against it, which is how lip-sync works on a model that has no audio-driven mode — reference
+> audio is a labelled exhibit (3 clips, 15 s total, never alone) that the generated soundtrack drifts away from,
+> not a timeline. Like chaining it builds its mask inside the pipeline and never sets the gated request objects. Numerical parity, performance gates, package-consumer validation, and live Swarm generation remain
 > release blockers where specified by the current checklists.
 
 ## What H3 is
