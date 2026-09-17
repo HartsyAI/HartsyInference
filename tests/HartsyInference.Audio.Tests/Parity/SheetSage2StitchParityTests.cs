@@ -244,7 +244,48 @@ public sealed class SheetSage2StitchParityTests
             i++;
         }
 
+        // And the handover itself, field for field, against the released implementation's own event shape — the
+        // rendering below quantizes onto a bar grid, so it would forgive a note end that moved by a hundredth.
         List<TimedScoreEvent> timed = Stitcher.ToTimedEvents(stitched);
+        Assert.Equal(stitched.Count, timed.Count);
+        i = 0;
+        foreach (JsonElement want in root.GetProperty("events").EnumerateArray())
+        {
+            JsonElement values = want.GetProperty("values");
+            TimedScoreEvent got = timed[i++];
+            Assert.Equal(want.GetProperty("time").GetDouble(), got.Time);
+            Assert.Equal(RawText(values, "key"), got.Key);
+            Assert.Equal(RawText(values, "structure"), got.Structure);
+            Assert.Equal(RawText(values, "chord"), got.Chord);
+            if (values.TryGetProperty("rhythm", out JsonElement rhythm))
+            {
+                ScoreRhythm actual = got.Rhythm!.Value;
+                if (rhythm.TryGetProperty("meter", out JsonElement meter))
+                {
+                    Assert.Equal((meter[0].GetInt32(), meter[1].GetInt32()), actual.Meter);
+                }
+                else Assert.Null(actual.Meter);
+                if (rhythm.TryGetProperty("eighth_position", out JsonElement eighth))
+                {
+                    Assert.Equal(eighth.GetInt32(), actual.EighthPosition);
+                }
+                else Assert.Null(actual.EighthPosition);
+            }
+            else Assert.Null(got.Rhythm);
+            if (values.TryGetProperty("melody", out JsonElement notes))
+            {
+                Assert.Equal(notes.GetArrayLength(), got.Melody!.Count);
+                int n = 0;
+                foreach (JsonElement note in notes.EnumerateArray())
+                {
+                    Assert.Equal(note.GetProperty("pitch").GetInt32(), got.Melody[n].Pitch);
+                    Assert.Equal(note.GetProperty("track").GetInt32(), got.Melody[n].Track);
+                    Assert.Equal(note.GetProperty("end_time").GetDouble(), got.Melody[n++].EndTime);
+                }
+            }
+            else Assert.Null(got.Melody);
+        }
+
         Assert.Equal(File.ReadAllText(RealFixture(fixture, "ref_abc_melody.abc")),
             AbcSerializer.EventsToAbc(timed, duration));
         Assert.Equal(File.ReadAllText(RealFixture(fixture, "ref_abc_full.abc")),
@@ -387,6 +428,9 @@ public sealed class SheetSage2StitchParityTests
         }
         return source;
     }
+
+    private static string? RawText(JsonElement values, string name)
+        => values.TryGetProperty(name, out JsonElement value) ? value.GetString() : null;
 
     private static string RealFixture(string clip, string name)
     {

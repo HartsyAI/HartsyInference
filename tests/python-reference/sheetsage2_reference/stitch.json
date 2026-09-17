@@ -2723,6 +2723,66 @@
      ]
     }
    ]
+  },
+  "repeatedPosition": {
+   "stream": [
+    1,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    3,
+    260,
+    517,
+    280,
+    767,
+    260,
+    917,
+    31458,
+    31657,
+    280,
+    1017,
+    2
+   ],
+   "start": 100.0,
+   "acceptStart": 0.0,
+   "acceptEnd": 200.0,
+   "duration": 1200.0,
+   "base": 0,
+   "accepted": [
+    {
+     "subbeat": 0,
+     "seconds": 100.0,
+     "globalSubbeat": 0,
+     "timestamp": 100.0,
+     "noteEnds": []
+    },
+    {
+     "subbeat": 20,
+     "seconds": 104.0,
+     "globalSubbeat": 20,
+     "timestamp": 104.0,
+     "noteEnds": []
+    },
+    {
+     "subbeat": 20,
+     "seconds": 104.0,
+     "globalSubbeat": 20,
+     "timestamp": 104.0,
+     "noteEnds": [
+      104.2
+     ]
+    },
+    {
+     "subbeat": 40,
+     "seconds": 105.0,
+     "globalSubbeat": 40,
+     "timestamp": 105.0,
+     "noteEnds": []
+    }
+   ]
   }
  },
  "clips": {

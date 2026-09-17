@@ -344,6 +344,10 @@ def boundary_cases(script) -> dict:
     # The same five, each carrying a note, for the end-time cases.
     melodic = script.stream([(index * GRID_SUBBEATS, [time + index * 250, pitch, script.token("duration", bin_)])
                              for index, bin_ in enumerate((0, 3, 11, 15, 19))])
+    # Two events at one position with different timestamps. Placement asks the map, not the event, so both land
+    # on the later of the two — which is what makes an event's own timestamp token unusable as its time.
+    repeated = script.stream([(0, [time + 0]), (20, [time + 250]), (20, [time + 400, pitch,
+                              script.token("duration", 3)]), (40, [time + 500])])
     # A tempo of a fortieth of a second per subbeat, where the shortest note maps to less than the floor.
     fast = script.stream([(index * GRID_SUBBEATS, [time + index * 50, pitch, script.token("duration", 0)])
                           for index in range(5)])
@@ -368,6 +372,7 @@ def boundary_cases(script) -> dict:
         "notesClippedByTheClip": dict(stream=melodic, acceptStart=0.0, acceptEnd=200.0, duration=112.0),
         # Notes shorter than the floor, at a tempo fast enough to put them there.
         "notesBelowTheFloor": dict(stream=fast, acceptStart=0.0, acceptEnd=200.0),
+        "repeatedPosition": dict(stream=repeated, acceptStart=0.0, acceptEnd=200.0),
     }
     cases = {}
     for name, spec in specs.items():
