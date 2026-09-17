@@ -14,7 +14,10 @@ stable release will require. Dates are UTC.
   long-form chaining already uses: hold every audio row fixed at the supplied track and let video denoise against
   it, so the model composes a picture around audio it cannot change. The mask is built inside the pipeline, so the
   request-level mask surface keeps its own release gate. A track longer than the clip is trimmed and a shorter one
-  zero-padded, which is what the audio VAE's fixed-length encode already did.
+  zero-padded, which is what the audio VAE's fixed-length encode already did. It is a planned feature
+  (`VideoFeatures.DrivingAudio`), so a family that cannot consume it rejects the request during planning instead of
+  accepting the option and ignoring it, and a sparse VSA profile — which is T2VA-only — is refused there rather
+  than at the execution boundary.
 - Measured on a 90-frame 512x288 pair, same seed and prompt, differing only in the locked track: the output audio
   correlates 0.9771 with the driving track through the VAE round-trip; a silence-driven run emits rms 0.00002
   rather than inventing a soundtrack; the two clips diverge at SSIM 0.556; and motion runs 2.36x higher while

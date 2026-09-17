@@ -262,6 +262,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             features |= VideoFeatures.ReferenceAudios;
         }
+        if (request.VideoAudioReference is not null)
+        {
+            features |= VideoFeatures.DrivingAudio;
+        }
         if (request.Guides is { Count: > 0 })
         {
             features |= VideoFeatures.Guides;

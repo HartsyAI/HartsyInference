@@ -50,4 +50,8 @@ public enum VideoFeatures
     /// <summary>Output longer than one generation, produced as chained segments that each hold the previous
     /// segment's tail fixed (MiniMax-H3 long-form).</summary>
     LongFormChain = 4096,
+
+    /// <summary>A soundtrack the clip is generated against, held fixed while the video denoises (MiniMax-H3
+    /// lip-sync). Distinct from <see cref="ReferenceAudios"/>, which only describes the sound to aim for.</summary>
+    DrivingAudio = 8192,
 }
