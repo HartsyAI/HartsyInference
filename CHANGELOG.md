@@ -26,6 +26,10 @@ stable release will require. Dates are UTC.
   dangerous direction for a pre-flight. The MLP chunks in both modes and is sized separately. A caller that does
   not name the mode gets the larger sparse reservation, so an omitted argument cannot under-estimate; the
   calibrated boundaries name themselves dense, since they measured the fp8 FL2VA path.
+- The unchunked peak also reserves the modulated attention/MLP input. `ForwardNamedBlock` disposes it only after
+  the call returns, so it is a second `[seq, hidden]` buffer live beside the residual — about 168 MB just below the
+  chunking threshold. `Modulate` can emit fp8, but not on a bf16 checkpoint or with `numerics.modulateEmitFp8` off,
+  so the reservation is F32. Chunked, the kFull/vFull term covered it incidentally; unchunked nothing did.
 - The activation-accounting tests move out of `SyntheticSmoke` into the unit lane. They are arithmetic only — no
   model, GPU, checkpoint or network — but the class trait meant the documented CPU command skipped every one of
   them. This accounting has regressed twice now; quarantining its guards is what let the first one through.

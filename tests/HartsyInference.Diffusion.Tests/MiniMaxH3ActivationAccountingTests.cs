@@ -26,9 +26,11 @@ public sealed class MiniMaxH3ActivationAccountingTests
         int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         long residual = (long)seq * config.HiddenSize * DType.F32.SizeInBytes;
-        // Unchunked attention's live peak: qkv [seq, inner*3] alongside head-major q/k/v of the same total width.
+        // Unchunked attention's live peak: qkv [seq, inner*3] alongside head-major q/k/v of the same total width,
+        // plus the modulated input ForwardNamedBlock holds across the call.
         long attentionPeak = 2L * seq * inner * 3L * DType.F32.SizeInBytes;
-        long ceiling = residual + attentionPeak + MiniMaxH3ActivationEstimate.FudgeBytes;
+        long modulated = (long)seq * config.HiddenSize * DType.F32.SizeInBytes;
+        long ceiling = residual + attentionPeak + modulated + MiniMaxH3ActivationEstimate.FudgeBytes;
 
         long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
             seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue),
@@ -96,5 +98,27 @@ public sealed class MiniMaxH3ActivationAccountingTests
         Assert.True(sparse >= sparseAttentionPeak,
             $"a chunking-length sparse request must still reserve its full-sequence peak ({sparseAttentionPeak}), got {sparse}");
         Assert.True(sparse > dense, $"sparse ({sparse}) must exceed chunked dense ({dense})");
+    }
+
+    /// <summary>ForwardNamedBlock disposes the modulated input only after Attention or Mlp returns, so it is live
+    /// beside the residual for the whole call. The chunked formula's kFull/vFull term covered it incidentally;
+    /// unchunked nothing does, and omitting it under-reserved a [seq, hidden] F32 buffer — about 168 MB just below
+    /// the chunking threshold, enough to pass pre-flight and then OOM.</summary>
+    [Fact]
+    public void EstimateFloorBytes_UnchunkedGeometry_ReservesTheLiveModulatedInput()
+    {
+        MiniMaxH3Config config = new MiniMaxH3Config();
+        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
+        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
+        int chunkRows = MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue);
+
+        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, config, DType.F32, chunkRows, sparseAttention: false);
+
+        // h + modulated + qkv + head-major q/k/v, which is what the block actually holds at its attention peak.
+        long live = 2L * seq * config.HiddenSize * DType.F32.SizeInBytes
+            + 6L * seq * inner * DType.F32.SizeInBytes;
+        Assert.True(floor >= live + MiniMaxH3ActivationEstimate.FudgeBytes,
+            $"floor ({floor}) must cover the block's live set ({live}) plus the fixed tail");
     }
 }

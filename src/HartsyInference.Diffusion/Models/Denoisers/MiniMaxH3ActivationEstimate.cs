@@ -48,14 +48,21 @@ public static class MiniMaxH3ActivationEstimate
         // a sparse forward keeps its full-sequence q/k/v/gate alongside qkv and the token-major gate it permutes
         // from (8x) at any length. Dense attention does chunk, and then kFull/vFull outlive each chunk in flight,
         // which is the 2x term; unchunked it holds qkv alongside head-major q/k/v (6x).
+        // ForwardNamedBlock holds the modulated input for the whole call — it is disposed only after Attention or
+        // Mlp returns — so it is a second [seq, hidden] buffer live beside the residual. Modulate can emit fp8, but
+        // not on a bf16 checkpoint or with numerics.modulateEmitFp8 off, so reserve F32. Chunked, the kFull/vFull
+        // term already covers it; unchunked there is nothing else standing in for it.
+        long modulatedBytes = (long)seq * hidden * DType.F32.SizeInBytes;
+
         long attentionBytes = sparseAttention
-            ? 8L * (long)seq * inner * DType.F32.SizeInBytes
+            ? 8L * (long)seq * inner * DType.F32.SizeInBytes + modulatedBytes
             : chunked
                 ? 2L * fullSeqInnerBytes + (long)resolvedChunkRows * inner * 6L * DType.F32.SizeInBytes
-                : 6L * (long)seq * inner * DType.F32.SizeInBytes;
+                : 6L * (long)seq * inner * DType.F32.SizeInBytes + modulatedBytes;
 
         // Mlp chunks in both modes (gateUp + act, 3x its width over whichever row count it runs).
-        long mlpBytes = (long)(chunked ? resolvedChunkRows : seq) * ffn * 3L * DType.F32.SizeInBytes;
+        long mlpBytes = (long)(chunked ? resolvedChunkRows : seq) * ffn * 3L * DType.F32.SizeInBytes
+            + (chunked ? 0L : modulatedBytes);
 
         // The two never run concurrently within a block, so the floor is the worse rather than their sum — summing
         // them false-refused a 39-frame geometry already proven to complete on real hardware (see this class's
