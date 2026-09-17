@@ -744,7 +744,7 @@ public static partial class AbcSerializer
     }
 
     /// <summary>Splits a length into values a strict parser accepts, largest first.</summary>
-    private static List<int> SplitDurationUnits(int duration)
+    internal static List<int> SplitDurationUnits(int duration)
     {
         if (duration <= 0)
         {
@@ -791,7 +791,7 @@ public static partial class AbcSerializer
     }
 
     /// <summary>Whether a rendered bar is nothing but plain rests, so ABC's <c>Z</c> can replace it losslessly.</summary>
-    private static bool IsCompressibleFullRest(string renderedMeasure)
+    internal static bool IsCompressibleFullRest(string renderedMeasure)
     {
         int cursor = 0;
         bool sawNote = false;
