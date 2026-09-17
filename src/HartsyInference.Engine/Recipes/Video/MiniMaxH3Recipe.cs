@@ -35,7 +35,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// Arbitrary guides and AV masks remain implemented but unadvertised behind the Engine release gate.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
         | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios
-        | VideoFeatures.LongFormChain;
+        | VideoFeatures.LongFormChain | VideoFeatures.DrivingAudio;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {

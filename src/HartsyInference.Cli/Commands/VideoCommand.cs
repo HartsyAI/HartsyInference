@@ -163,6 +163,12 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
         public string[]? ReferenceAudios { get; init; }
 
+        /// <summary>Track the video is generated against, rather than one the model invents.</summary>
+        [CommandOption("--driving-audio")]
+        [Description("Audio track (WAV) to lock the soundtrack to so the video is generated against it (lip-sync). "
+            + "Longer tracks are trimmed to the clip, shorter ones zero-padded.")]
+        public string? DrivingAudio { get; init; }
+
         /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
         [CommandOption("--guide-image")]
         [Description("Image guide as FRAME=PATH; repeat. Negative frames resolve from the aligned target end.")]
@@ -369,6 +375,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         {
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
         }
+        parameters.PutIfSet("driving-audio", settings.DrivingAudio);
         if (settings.GuideImages is { Length: > 0 })
         {
             parameters.Put("guide-images", string.Join('\n', settings.GuideImages));
