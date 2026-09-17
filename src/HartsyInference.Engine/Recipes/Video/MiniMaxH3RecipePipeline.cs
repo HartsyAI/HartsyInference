@@ -412,7 +412,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private void CheckVramFeasibility(int width, int height, int frames)
     {
         int seq = SequenceLengthFor(width, height, frames);
-        long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32);
+        int chunkRows = MiniMaxH3ChunkPolicy.ScaledChunkRows(_backend);
+        long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, _config, DType.F32, chunkRows);
 
         // Every backend running block ranges needs the same per-block floor, so when sharding is on, BOTH have to
         // clear it. Report whichever is furthest short rather than whichever is checked first: the tightest one is
@@ -494,7 +495,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         for (int candidate = frames - 17; candidate >= 5; candidate -= 17)
         {
             if (MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-                SequenceLengthFor(width, height, candidate), _config, DType.F32) <= budgetBytes)
+                SequenceLengthFor(width, height, candidate), _config, DType.F32,
+                MiniMaxH3ChunkPolicy.ScaledChunkRows(_backend)) <= budgetBytes)
             {
                 return candidate;
             }
@@ -916,10 +918,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// <summary>Hands a segment's device memory back before the next one's conditioning runs. The encoders load
     /// ahead of the DiT within a segment, but across a chain the previous segment leaves its weights cached, so the
     /// next segment's mask-source encode competes with them — which is what exhausts a small card. Gated on the
-    /// tier's own lever: <see cref="VramTier.Auto"/> leaves it alone and stays byte-identical to an unchained run.</summary>
+    /// tier's own lever: <see cref="VramTier.Auto"/> leaves it alone and stays byte-identical to an unchained run.
+    /// Resolved through <see cref="VramPolicyRegistry"/> so a policy pinned on the engine counts even when the
+    /// request overrode nothing and no scope was pushed.</summary>
     private void ReleaseBetweenSegments()
     {
-        if (VramPolicyScope.Current?.PhaseUnload != LeverState.On)
+        if (VramPolicyRegistry.Resolve(_backend).PhaseUnload != LeverState.On)
         {
             return;
         }

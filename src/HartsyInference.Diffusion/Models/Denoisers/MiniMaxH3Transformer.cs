@@ -234,7 +234,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         // the chunk size drift mid-generation as VRAM usage elsewhere changes — non-deterministic and hostile to
         // future CUDA-graph capture of this loop.
         (long freeBytes, _) = backend.GetVramInfo();
-        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes);
+        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
         if (chunkRows != int.MaxValue)
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP: seq={seq} chunkRows={chunkRows} freeBytes={freeBytes}.");
@@ -339,8 +339,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         // comment on why this is resolved once per forward rather than per block.
         (long freeA, _) = backendA.GetVramInfo();
         (long freeB, _) = backendB.GetVramInfo();
-        int chunkRowsA = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeA);
-        int chunkRowsB = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeB);
+        int chunkRowsA = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeA, backendA);
+        int chunkRowsB = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeB, backendB);
         if (chunkRowsA != int.MaxValue || chunkRowsB != int.MaxValue)
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP (sharded): seq={seq} chunkRowsA={chunkRowsA} "

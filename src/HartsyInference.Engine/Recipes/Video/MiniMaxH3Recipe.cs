@@ -169,7 +169,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 ditWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
             }
             (long primaryFreeBytes, _) = context.Backend.GetVramInfo();
-            long activationReserveBytes = MinimumActivationReserveBytes(config);
+            long activationReserveBytes = MinimumActivationReserveBytes(config, context.Backend);
             bool fitsResidentSingleBackend = !ditIsHugeBf16Build && (primaryFreeBytes <= 0
                 || primaryFreeBytes >= ditWeightBytes + activationReserveBytes);
             // Streaming costs a full re-upload of the DiT every step, so when it is chosen the operator needs the
@@ -261,11 +261,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     }
 
     /// <summary>Conservative reserve any H3 forward needs beyond its resident weights, independent of the actual request's sequence length — the smallest chunk's own transient scratch plus the fixed cuBLAS/RoPE fudge tail (matches <see cref="MiniMaxH3ActivationEstimate"/>'s seq-independent terms). The seq-scaled cost is a separate, per-request question that <c>MiniMaxH3RecipePipeline.CheckVramFeasibility</c> checks against live free VRAM before every generation; this only needs to keep the one-time PRELOAD decision honest.</summary>
-    private static long MinimumActivationReserveBytes(MiniMaxH3Config config)
+    /// <remarks>This one runs at construction and the recipe is cached, so the reserve reflects the policy in force
+    /// when the pipeline was first built — the same binding the per-request levers have (see ImagesService's scope
+    /// comment). Per-request feasibility is re-measured every generation.</remarks>
+    private static long MinimumActivationReserveBytes(MiniMaxH3Config config, IBackend? backend)
     {
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int ffn = config.FfnHiddenSize;
-        int chunkRows = MiniMaxH3ChunkPolicy.DefaultChunkRows;
+        int chunkRows = MiniMaxH3ChunkPolicy.ScaledChunkRows(backend);
         long attnChunkBytes = (long)chunkRows * inner * 6L * DType.F32.SizeInBytes;
         long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
         return Math.Max(attnChunkBytes, mlpChunkBytes) + MiniMaxH3ActivationEstimate.FudgeBytes;

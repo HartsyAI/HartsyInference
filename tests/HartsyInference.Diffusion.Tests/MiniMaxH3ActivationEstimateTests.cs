@@ -1,4 +1,7 @@
 using Xunit;
+using HartsyInference.Cpu;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 
@@ -112,5 +115,36 @@ public sealed class MiniMaxH3ActivationEstimateTests
 
         Assert.True(floorIncident > MeasuredAvailableForActivations,
             "the geometry that actually OOM'd yesterday must still refuse under the corrected floor estimate");
+    }
+
+    /// <summary>The tier reaches the chunk width through <see cref="VramPolicyRegistry"/>, not the ambient scope
+    /// alone. A host that pins a policy on the engine and sends requests that override nothing gets no scope
+    /// pushed, so reading the scope directly left the chunk at its unscaled default and the pre-flight estimate
+    /// measuring a chunk the forward would not use.</summary>
+    [Fact]
+    public void ScaledChunkRows_FollowsAPolicyPinnedOnTheBackendWithNoRequestScope()
+    {
+        using CpuBackend backend = new();
+        Assert.Null(VramPolicyScope.Current);
+        int unpinned = MiniMaxH3ChunkPolicy.ScaledChunkRows(backend);
+        Assert.Equal(MiniMaxH3ChunkPolicy.DefaultChunkRows, unpinned);
+
+        try
+        {
+            VramPolicyRegistry.Set(backend, VramPolicyResolver.Expand(VramTier.Aggressive));
+            int pinned = MiniMaxH3ChunkPolicy.ScaledChunkRows(backend);
+            Assert.True(pinned < unpinned, $"aggressive should shrink the chunk, got {pinned} vs {unpinned}");
+
+            MiniMaxH3Config config = new MiniMaxH3Config();
+            long scaledFloor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+                KnownGoodSeq, config, DType.F32, pinned);
+            long defaultFloor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32);
+            Assert.True(scaledFloor < defaultFloor,
+                $"a smaller chunk needs less scratch, so the floor must drop: {scaledFloor} vs {defaultFloor}");
+        }
+        finally
+        {
+            VramPolicyRegistry.Clear(backend);
+        }
     }
 }

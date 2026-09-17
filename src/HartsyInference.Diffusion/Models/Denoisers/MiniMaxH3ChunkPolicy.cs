@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
@@ -28,7 +29,8 @@ public static class MiniMaxH3ChunkPolicy
     /// comfortably fits <paramref name="freeBytes"/>, else a chunk scaled by the VRAM tier. The
     /// <c>vram.h3ChunkRows</c> setting overrides the decision outright (any positive integer) — the CPU backend's
     /// <c>GetVramInfo</c> always reports (0, 0), so that is also how a CPU-only test forces the chunked path.</summary>
-    public static int ResolveChunkRows(int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes)
+    public static int ResolveChunkRows(
+        int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
     {
         if (EngineKnobs.H3ChunkRows.Value is int forced && forced > 0)
         {
@@ -40,8 +42,7 @@ public static class MiniMaxH3ChunkPolicy
         }
         // The VRAM tier's chunk lever: below 1 it both shrinks the chunk and makes the fit test stricter, so a
         // constrained card starts chunking at geometries a roomy one still runs whole.
-        float chunkScale = VramPolicyScope.Current?.ChunkScale ?? 1.0f;
-        chunkScale = Math.Clamp(chunkScale, 0.05f, 1.0f);
+        float chunkScale = ClampedScale(backend);
 
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int ffn = config.FfnHiddenSize;
@@ -60,6 +61,18 @@ public static class MiniMaxH3ChunkPolicy
         long unchunkedPeak = seq * peakBytesPerRow;
         return unchunkedPeak <= (long)(freeBytes * safetyFactor * chunkScale)
             ? int.MaxValue
-            : Math.Max(512, (int)(DefaultChunkRows * chunkScale));
+            : ScaledChunkRows(backend);
     }
+
+    /// <summary>The chunk width the tier's <see cref="VramPolicy.ChunkScale"/> implies. The pre-flight activation
+    /// estimates call this so a refusal is measured against the chunk the forward will actually use — a scaled-down
+    /// chunk needs less scratch, so the fixed <see cref="DefaultChunkRows"/> would refuse geometries that now run.</summary>
+    public static int ScaledChunkRows(IBackend? backend = null)
+        => Math.Max(512, (int)(DefaultChunkRows * ClampedScale(backend)));
+
+    /// <summary>Resolves through <see cref="VramPolicyRegistry"/>, not the ambient scope alone: a host that pins a
+    /// policy on the engine and leaves the request's overrides null gets no scope pushed, and reading the scope
+    /// directly would silently ignore the tier it configured.</summary>
+    private static float ClampedScale(IBackend? backend)
+        => Math.Clamp(VramPolicyRegistry.Resolve(backend).ChunkScale, 0.05f, 1.0f);
 }
