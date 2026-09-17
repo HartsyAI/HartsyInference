@@ -24,9 +24,6 @@ public static partial class AbcSerializer
     /// it fixes how finely a note onset can be quantized, and every per-subbeat array is sized from it.</summary>
     public const int SubbeatDivision = 4;
 
-    /// <summary>The two voice ids, in the order they are written. Index order is also melody track order.</summary>
-    public static readonly string[] VoiceIds = ["Vocal", "Ins"];
-
     /// <summary>Seconds within which two times count as the same one, used for beat-grid coverage and for
     /// trimming a note that overlaps the next.</summary>
     private const double TimeEpsilon = 1e-6;
@@ -44,6 +41,9 @@ public static partial class AbcSerializer
 
     /// <summary>The reference's own ceiling for a single ABC length token; longer notes are split and tied.</summary>
     private const int LargestSingleDurationUnit = 48;
+
+    /// <summary>The two voice ids, in the order they are written. Index order is also melody track order.</summary>
+    public static readonly string[] VoiceIds = ["Vocal", "Ins"];
 
     /// <summary>Note lengths a strict parser takes as one ABC value. These are the leading
     /// <see cref="ScoreTokenizer.DurationTemplates"/> entries, derived rather than restated so the two cannot

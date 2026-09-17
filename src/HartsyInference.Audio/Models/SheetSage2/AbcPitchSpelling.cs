@@ -11,15 +11,15 @@ namespace HartsyInference.Audio.Models.SheetSage2;
 /// round trip through either parser's own output.</para></summary>
 public static partial class AbcPitchSpelling
 {
-    /// <summary>Chord labels meaning "no chord", which are written as nothing at all.</summary>
-    public static readonly IReadOnlySet<string> NoChords =
-        new HashSet<string>(StringComparer.Ordinal) { "N", "X", "?" };
-
     /// <summary>Note letters in scale order, which is also the index order of a key-accidental vector.</summary>
     public const string Letters = "CDEFGAB";
 
     /// <summary>MIDI note number of middle C, the octave the ABC bare capital letters sit in.</summary>
     private const int MiddleC = 60;
+
+    /// <summary>Chord labels meaning "no chord", which are written as nothing at all.</summary>
+    public static readonly IReadOnlySet<string> NoChords =
+        new HashSet<string>(StringComparer.Ordinal) { "N", "X", "?" };
 
     private static readonly int[] _naturalPitchClass = [0, 2, 4, 5, 7, 9, 11];
 
