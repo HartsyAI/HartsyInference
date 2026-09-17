@@ -6,9 +6,9 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.81
+## alpha.82
 
-- Audio: **SheetSage2 transcribes a recording into a score.** With the symbolic half from alpha.80, the model is
+- Audio: **SheetSage2 transcribes a recording into a score.** With the symbolic half from alpha.81, the model is
   now complete: the MERT2 Conformer encoder, the score decoder, the greedy decode under its grammar, and the
   pass that reads a song longer than the encoder's window in overlapping passes and stitches them onto one
   timeline. `hartsy transcribe -m sheetsage2` returns ABC rather than words.
@@ -33,7 +33,7 @@ stable release will require. Dates are UTC.
 - The weights are cached under the YuE2 repo they ship in, so a machine that already generates with YuE2 does
   not fetch a second copy. They are CC BY-NC 4.0, unlike the engine.
 
-## alpha.80
+## alpha.81
 
 - Audio: **the SheetSage2 port's symbolic half is complete** — the events-to-ABC serializer and the sliding-window
   stitcher. Between them they turn a decoded token stream into a finished two-voice lead sheet, which is the
