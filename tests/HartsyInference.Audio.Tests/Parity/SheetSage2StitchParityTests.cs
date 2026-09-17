@@ -144,7 +144,11 @@ public sealed class SheetSage2StitchParityTests
     }
 
     /// <summary>The property the seams exist to preserve, asserted on the port's own output rather than on the
-    /// fixture: across a whole clip no moment is transcribed twice, and the stream never walks backwards.</summary>
+    /// fixture: across a whole clip no position is transcribed twice and no event lands outside the audio.
+    ///
+    /// <para>These scripted decodes also come out in order, which is asserted because it is cheap — but nothing
+    /// guarantees it in general, since a window's time map need not be monotonic. That is why the released driver
+    /// sorts the finished stream, and a fixture that made a map run backwards would belong there, not here.</para></summary>
     [Fact]
     public void AClipsSeams_TakeEveryMomentExactlyOnce()
     {
