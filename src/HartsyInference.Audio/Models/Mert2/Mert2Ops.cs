@@ -8,12 +8,32 @@ namespace HartsyInference.Audio.Models.Mert2;
 /// load with explicit ownership, ConvNeXt-V2's GlobalResponseNorm, and the split-half RoPE tables.</summary>
 internal static unsafe class Mert2Ops
 {
-    /// <summary>Fetches a weight as F32. A converted tensor is appended to <paramref name="owned"/> because the
-    /// model must free it; an already-F32 tensor still belongs to the checkpoint loader and is not added.</summary>
-    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned)
+    /// <summary>Fetches a weight as F32 and checks its shape. A converted tensor is appended to
+    /// <paramref name="owned"/> because the model must free it; an already-F32 tensor still belongs to the
+    /// checkpoint loader and is not added.
+    ///
+    /// <para>The geometry here is hardcoded from the released constructor defaults rather than inferred from the
+    /// file, which is correct for this checkpoint but only safe if a differently shaped one fails loudly.
+    /// <see cref="IBackend.Linear"/> derives its row count from the element count, so an unchecked weight of the
+    /// wrong width would be silently mis-read instead of rejected.</para></summary>
+    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned, int d0)
+        => Load(weights, key, owned, [d0]);
+
+    /// <inheritdoc cref="Load(IReadOnlyDictionary{string, Tensor}, string, List{Tensor}, int)"/>
+    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned, int d0, int d1)
+        => Load(weights, key, owned, [d0, d1]);
+
+    /// <inheritdoc cref="Load(IReadOnlyDictionary{string, Tensor}, string, List{Tensor}, int)"/>
+    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned,
+        int d0, int d1, int d2)
+        => Load(weights, key, owned, [d0, d1, d2]);
+
+    private static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned,
+        ReadOnlySpan<int> expected)
     {
         if (!weights.TryGetValue(key, out Tensor? source))
             throw new HartsyInferenceException($"MERT2 checkpoint is missing '{key}'.");
+        RequireShape(source, key, expected);
         if (source.DType == DType.F32)
         {
             return source;
@@ -21,6 +41,18 @@ internal static unsafe class Mert2Ops
         Tensor converted = source.CastTo(DType.F32);
         owned.Add(converted);
         return converted;
+    }
+
+    /// <summary>Rejects a tensor whose shape is not exactly what the hardcoded geometry expects.</summary>
+    public static void RequireShape(Tensor tensor, string key, ReadOnlySpan<int> expected)
+    {
+        bool matches = tensor.Shape.Rank == expected.Length;
+        for (int i = 0; matches && i < expected.Length; i++)
+        {
+            matches = (int)tensor.Shape[i] == expected[i];
+        }
+        if (!matches)
+            throw new HartsyInferenceException($"MERT2 '{key}' is {tensor.Shape}, expected [{string.Join(", ", expected.ToArray())}].");
     }
 
     /// <summary>ConvNeXt-V2 GlobalResponseNorm over <c>x [frames, channels]</c>:

@@ -51,49 +51,52 @@ internal sealed class Mert2ConformerLayer
     private Tensor? _finalNormWeight;
     private Tensor? _finalNormBias;
 
+    /// <summary>Builds the layer; call <see cref="LoadWeights"/> before <see cref="Forward"/>.</summary>
     public Mert2ConformerLayer(Mert2Config config)
     {
         _config = config;
         _attentionScale = 1f / MathF.Sqrt(config.HeadDim);
     }
 
+    /// <summary>Loads the layer from <c>encoder.layers.N</c>; converted tensors are appended to
+    /// <paramref name="owned"/> for the encoder to free.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, List<Tensor> owned)
     {
-        _ffn1NormWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1_layer_norm.weight", owned);
-        _ffn1NormBias = Mert2Ops.Load(weights, $"{prefix}.ffn1_layer_norm.bias", owned);
-        _ffn1UpWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_1.weight", owned);
-        _ffn1UpBias = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_1.bias", owned);
-        _ffn1DownWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_2.weight", owned);
-        _ffn1DownBias = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_2.bias", owned);
+        _ffn1NormWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1_layer_norm.weight", owned, _config.Dim);
+        _ffn1NormBias = Mert2Ops.Load(weights, $"{prefix}.ffn1_layer_norm.bias", owned, _config.Dim);
+        _ffn1UpWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_1.weight", owned, _config.Intermediate, _config.Dim);
+        _ffn1UpBias = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_1.bias", owned, _config.Intermediate);
+        _ffn1DownWeight = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_2.weight", owned, _config.Dim, _config.Intermediate);
+        _ffn1DownBias = Mert2Ops.Load(weights, $"{prefix}.ffn1.w_2.bias", owned, _config.Dim);
 
-        _attnNormWeight = Mert2Ops.Load(weights, $"{prefix}.attn_layer_norm.weight", owned);
-        _attnNormBias = Mert2Ops.Load(weights, $"{prefix}.attn_layer_norm.bias", owned);
-        _queryWeight = Mert2Ops.Load(weights, $"{prefix}.attn.query_proj.weight", owned);
-        _queryBias = Mert2Ops.Load(weights, $"{prefix}.attn.query_proj.bias", owned);
-        _keyWeight = Mert2Ops.Load(weights, $"{prefix}.attn.key_proj.weight", owned);
-        _keyBias = Mert2Ops.Load(weights, $"{prefix}.attn.key_proj.bias", owned);
-        _valueWeight = Mert2Ops.Load(weights, $"{prefix}.attn.value_proj.weight", owned);
-        _valueBias = Mert2Ops.Load(weights, $"{prefix}.attn.value_proj.bias", owned);
-        _outWeight = Mert2Ops.Load(weights, $"{prefix}.attn.out_proj.weight", owned);
-        _outBias = Mert2Ops.Load(weights, $"{prefix}.attn.out_proj.bias", owned);
+        _attnNormWeight = Mert2Ops.Load(weights, $"{prefix}.attn_layer_norm.weight", owned, _config.Dim);
+        _attnNormBias = Mert2Ops.Load(weights, $"{prefix}.attn_layer_norm.bias", owned, _config.Dim);
+        _queryWeight = Mert2Ops.Load(weights, $"{prefix}.attn.query_proj.weight", owned, _config.Dim, _config.Dim);
+        _queryBias = Mert2Ops.Load(weights, $"{prefix}.attn.query_proj.bias", owned, _config.Dim);
+        _keyWeight = Mert2Ops.Load(weights, $"{prefix}.attn.key_proj.weight", owned, _config.Dim, _config.Dim);
+        _keyBias = Mert2Ops.Load(weights, $"{prefix}.attn.key_proj.bias", owned, _config.Dim);
+        _valueWeight = Mert2Ops.Load(weights, $"{prefix}.attn.value_proj.weight", owned, _config.Dim, _config.Dim);
+        _valueBias = Mert2Ops.Load(weights, $"{prefix}.attn.value_proj.bias", owned, _config.Dim);
+        _outWeight = Mert2Ops.Load(weights, $"{prefix}.attn.out_proj.weight", owned, _config.Dim, _config.Dim);
+        _outBias = Mert2Ops.Load(weights, $"{prefix}.attn.out_proj.bias", owned, _config.Dim);
 
-        _convNormWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.layer_norm.weight", owned);
-        _convNormBias = Mert2Ops.Load(weights, $"{prefix}.conv_module.layer_norm.bias", owned);
-        _convGateWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.1.weight", owned);
-        _convDepthwiseWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.3.weight", owned);
-        _convInnerNormWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.4.1.weight", owned);
-        _convInnerNormBias = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.4.1.bias", owned);
-        _convOutWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.6.weight", owned);
+        _convNormWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.layer_norm.weight", owned, _config.Dim);
+        _convNormBias = Mert2Ops.Load(weights, $"{prefix}.conv_module.layer_norm.bias", owned, _config.Dim);
+        _convGateWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.1.weight", owned, 2 * _config.Dim, _config.Dim, 1);
+        _convDepthwiseWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.3.weight", owned, _config.Dim, 1, _config.ConformerConvKernel);
+        _convInnerNormWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.4.1.weight", owned, _config.Dim);
+        _convInnerNormBias = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.4.1.bias", owned, _config.Dim);
+        _convOutWeight = Mert2Ops.Load(weights, $"{prefix}.conv_module.conv_block.6.weight", owned, _config.Dim, _config.Dim, 1);
 
-        _ffn2NormWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2_layer_norm.weight", owned);
-        _ffn2NormBias = Mert2Ops.Load(weights, $"{prefix}.ffn2_layer_norm.bias", owned);
-        _ffn2UpWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_1.weight", owned);
-        _ffn2UpBias = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_1.bias", owned);
-        _ffn2DownWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_2.weight", owned);
-        _ffn2DownBias = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_2.bias", owned);
+        _ffn2NormWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2_layer_norm.weight", owned, _config.Dim);
+        _ffn2NormBias = Mert2Ops.Load(weights, $"{prefix}.ffn2_layer_norm.bias", owned, _config.Dim);
+        _ffn2UpWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_1.weight", owned, _config.Intermediate, _config.Dim);
+        _ffn2UpBias = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_1.bias", owned, _config.Intermediate);
+        _ffn2DownWeight = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_2.weight", owned, _config.Dim, _config.Intermediate);
+        _ffn2DownBias = Mert2Ops.Load(weights, $"{prefix}.ffn2.w_2.bias", owned, _config.Dim);
 
-        _finalNormWeight = Mert2Ops.Load(weights, $"{prefix}.final_layer_norm.weight", owned);
-        _finalNormBias = Mert2Ops.Load(weights, $"{prefix}.final_layer_norm.bias", owned);
+        _finalNormWeight = Mert2Ops.Load(weights, $"{prefix}.final_layer_norm.weight", owned, _config.Dim);
+        _finalNormBias = Mert2Ops.Load(weights, $"{prefix}.final_layer_norm.bias", owned, _config.Dim);
     }
 
     /// <summary>Runs the layer from <paramref name="input"/> into <paramref name="output"/>; the two must be
@@ -111,6 +114,7 @@ internal sealed class Mert2ConformerLayer
         backend.LayerNorm(output, scratch.CarrierB, _finalNormWeight!, _finalNormBias!, _config.LayerNormEps);
     }
 
+    /// <summary>Every tensor the backend should preload before a forward.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         yield return _ffn1NormWeight!;

@@ -51,10 +51,12 @@ public sealed class Mert2MelFrontend
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "encoder.feature_extractor")
     {
         ArgumentNullException.ThrowIfNull(weights);
-        CopyF32(weights, $"{prefix}.spectrogram.window", _window);
-        CopyF32(weights, $"{prefix}.mel_scale.fb", _filterbank);
-        CopyF32(weights, $"{prefix}.mel_mean", _mean);
-        CopyF32(weights, $"{prefix}.mel_std", _inverseStd);
+        CopyF32(weights, $"{prefix}.spectrogram.window", _window, [_config.NFft]);
+        // [bins, mels] and [mels, bins] hold the same number of floats, so only the full shape can tell a
+        // transposed filterbank from the right one.
+        CopyF32(weights, $"{prefix}.mel_scale.fb", _filterbank, [_bins, _config.MelBins]);
+        CopyF32(weights, $"{prefix}.mel_mean", _mean, [_config.MelBins]);
+        CopyF32(weights, $"{prefix}.mel_std", _inverseStd, [_config.MelBins]);
         for (int m = 0; m < _inverseStd.Length; m++)
         {
             _inverseStd[m] = 1f / MathF.Max(_inverseStd[m], StdFloor);
@@ -152,10 +154,12 @@ public sealed class Mert2MelFrontend
         return index < clip.Length ? clip[index] : 0f;
     }
 
-    private static void CopyF32(IReadOnlyDictionary<string, Tensor> weights, string key, float[] destination)
+    private static void CopyF32(IReadOnlyDictionary<string, Tensor> weights, string key, float[] destination,
+        ReadOnlySpan<int> expected)
     {
         if (!weights.TryGetValue(key, out Tensor? source))
             throw new HartsyInferenceException($"MERT2 mel frontend is missing '{key}'.");
+        Mert2Ops.RequireShape(source, key, expected);
         // EnsureF32 hands back the caller's own tensor when it is already F32, so only a conversion is ours to free.
         Tensor f32 = TensorCasts.EnsureF32(source);
         try

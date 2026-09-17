@@ -12,15 +12,25 @@ public sealed record Mert2Config
     /// <summary>Hidden width of each Conformer half-step feed-forward.</summary>
     public int Intermediate { get; init; } = 4_096;
 
+    /// <summary>Attention heads per Conformer layer.</summary>
     public int Heads { get; init; } = 16;
+
+    /// <summary>Conformer layers; the learned mix spans these plus the subsampler output.</summary>
     public int Layers { get; init; } = 24;
 
     /// <summary>Width the decoder consumes, after <c>encoder_projection</c>.</summary>
     public int ProjectionDim { get; init; } = 512;
 
+    /// <summary>Input rate the frontend assumes; the caller resamples, this model does not.</summary>
     public int SampleRate { get; init; } = 24_000;
+
+    /// <summary>STFT size, matching the analysis window stored in the checkpoint.</summary>
     public int NFft { get; init; } = 2_048;
+
+    /// <summary>STFT hop, 10 ms at 24 kHz.</summary>
     public int HopLength { get; init; } = 240;
+
+    /// <summary>Mel bins, and the width the subsampling stack starts from.</summary>
     public int MelBins { get; init; } = 128;
 
     /// <summary>Length the waveform is zero-padded to before the frontend runs — the released encoder attends over
@@ -48,12 +58,14 @@ public sealed record Mert2Config
     /// <summary>ConvNeXt LayerNorm epsilon; the Conformer stack uses <see cref="LayerNormEps"/> instead.</summary>
     public float ConvNextNormEps { get; init; } = 1e-6f;
 
+    /// <summary>LayerNorm epsilon everywhere in the Conformer stack.</summary>
     public float LayerNormEps { get; init; } = 1e-5f;
 
     /// <summary>RoPE base. The rotation is the split-half convention: pair <c>k</c> is <c>[k]</c> with
     /// <c>[k + headDim/2]</c>, not adjacent elements.</summary>
     public float RopeTheta { get; init; } = 10_000f;
 
+    /// <summary>Per-head width, and the length of one rotary vector.</summary>
     public int HeadDim => Dim / Heads;
 
     /// <summary>Mel frames the frontend emits for a full window. <c>torch.stft(center=True)</c> yields

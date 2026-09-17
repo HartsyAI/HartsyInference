@@ -20,7 +20,8 @@ What is dumped, and why each stage earns a gate:
 
 The waveform is generated here rather than committed: a fixed sum of sines plus an LCG noise floor, so the dump
 is reproducible from this file alone. It is written into the output directory so the C# side reads bytes instead
-of re-deriving the generator.
+of re-deriving the generator. Pass --wav to substitute a real 24 kHz mono recording; the gates run the same either
+way, and real music is worth a second pass because its spectrum sits nowhere near a sum of sines.
 
 Writes mert2_reference/ (gitignored): tensors.safetensors + meta.json.
 """
@@ -67,6 +68,19 @@ def synthetic_waveform(samples: int, seed: int = 1234) -> np.ndarray:
             state = multiplier * state + increment
             noise[i] = float(state >> np.uint64(40)) / float(1 << 24) * 2.0 - 1.0
     return (tone + 0.05 * noise).astype(np.float32)
+
+
+def read_wav(path: Path) -> np.ndarray:
+    """Reads a 24 kHz mono PCM WAV. Anything else is rejected, because a resample here would be a second
+    implementation of something the model never does."""
+    import wave
+
+    with wave.open(str(path), "rb") as handle:
+        if handle.getnchannels() != 1 or handle.getframerate() != SAMPLE_RATE or handle.getsampwidth() != 2:
+            raise SystemExit(f"{path} must be mono 16-bit {SAMPLE_RATE} Hz; "
+                             f"got {handle.getnchannels()}ch {handle.getsampwidth() * 8}-bit {handle.getframerate()} Hz")
+        frames = handle.readframes(handle.getnframes())
+    return (np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0)
 
 
 def load_released_model(comfyui: Path, checkpoint: Path):
@@ -124,6 +138,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True, type=Path, help="sheetsage2_bf16.safetensors")
     parser.add_argument("--out", type=Path, default=Path(__file__).parent / "mert2_reference")
     parser.add_argument("--seconds", type=float, default=12.0, help="clip length before the 300 s window pad")
+    parser.add_argument("--wav", type=Path, default=None, help="24 kHz mono WAV to use instead of the generator")
     parser.add_argument("--seed", type=int, default=1234)
     options = parser.parse_args()
 
@@ -134,7 +149,7 @@ def main() -> None:
     model, layer_weight, projection_weight, projection_bias = load_released_model(options.comfyui, options.checkpoint)
     import comfy.audio_encoders.mert2 as mert2_module
 
-    clip = synthetic_waveform(int(round(options.seconds * SAMPLE_RATE)), options.seed)
+    clip = read_wav(options.wav) if options.wav else synthetic_waveform(int(round(options.seconds * SAMPLE_RATE)), options.seed)
     waveform = torch.from_numpy(clip)[None]
     padded = torch.nn.functional.pad(waveform, (0, max(0, int(WINDOW_SECONDS * SAMPLE_RATE) - waveform.shape[-1])))
 
@@ -187,7 +202,8 @@ def main() -> None:
     meta = {
         "sampleRate": SAMPLE_RATE,
         "windowSeconds": WINDOW_SECONDS,
-        "clipSeconds": options.seconds,
+        "clipSeconds": len(clip) / SAMPLE_RATE,
+        "source": str(options.wav) if options.wav else f"synthetic_waveform(seed={options.seed})",
         "seed": options.seed,
         "checkpoint": options.checkpoint.name,
         "shapes": {name: list(value.shape) for name, value in tensors.items()},

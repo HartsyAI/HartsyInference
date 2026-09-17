@@ -22,8 +22,11 @@ internal sealed class Mert2ConvNextBlock : IDisposable
     private Tensor? _resampleConvBias;
     private int _disposed;
 
+    /// <summary>Builds the block; <paramref name="depth"/> is how many ConvNeXt layers follow the resampling.</summary>
     public Mert2ConvNextBlock(Mert2Config config, int inChannels, int outChannels, int stride, int depth)
     {
+        // Forward's ping-pong hands back whichever buffer the last layer wrote, so an empty block has no result.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(depth);
         _config = config;
         _inChannels = inChannels;
         _outChannels = outChannels;
@@ -43,14 +46,15 @@ internal sealed class Mert2ConvNextBlock : IDisposable
     public int OutputFrames(int frames)
         => Resamples && _stride > 1 ? (frames - _config.ResampleKernel) / _stride + 1 : frames;
 
+    /// <summary>Loads the block from <c>encoder.subsampling_module.N</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         if (Resamples)
         {
-            _resampleNormWeight = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.0.weight", _owned);
-            _resampleNormBias = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.0.bias", _owned);
-            _resampleConvWeight = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.2.weight", _owned);
-            _resampleConvBias = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.2.bias", _owned);
+            _resampleNormWeight = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.0.weight", _owned, _inChannels);
+            _resampleNormBias = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.0.bias", _owned, _inChannels);
+            _resampleConvWeight = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.2.weight", _owned, _outChannels, _inChannels, _config.ResampleKernel);
+            _resampleConvBias = Mert2Ops.Load(weights, $"{prefix}.resampling_layer.2.bias", _owned, _outChannels);
         }
         for (int i = 0; i < _layers.Length; i++)
         {
@@ -65,11 +69,14 @@ internal sealed class Mert2ConvNextBlock : IDisposable
         int frames = (int)input.Shape[0];
         int outFrames = OutputFrames(frames);
         TensorShape shape = new(outFrames, _outChannels);
-        Tensor first = new(shape, DType.F32);
-        Tensor second = new(shape, DType.F32);
-        using Scratch scratch = new(outFrames, _outChannels);
+        Scratch? scratch = null;
+        Tensor? first = null, second = null;
         try
         {
+            scratch = new Scratch(outFrames, _outChannels);
+            first = new Tensor(shape, DType.F32);
+            second = new Tensor(shape, DType.F32);
+
             Tensor current = input;
             if (Resamples)
             {
@@ -82,19 +89,15 @@ internal sealed class Mert2ConvNextBlock : IDisposable
                 _layers[i].Forward(backend, current, destination, scratch);
                 current = destination;
             }
-            if (ReferenceEquals(current, first))
-            {
-                second.Dispose();
-                return first;
-            }
-            first.Dispose();
-            return second;
+            // Whichever buffer the ping-pong finished in goes to the caller; the other is released below.
+            if (ReferenceEquals(current, first)) first = null; else second = null;
+            return current;
         }
-        catch
+        finally
         {
-            first.Dispose();
-            second.Dispose();
-            throw;
+            scratch?.Dispose();
+            first?.Dispose();
+            second?.Dispose();
         }
     }
 
@@ -125,6 +128,7 @@ internal sealed class Mert2ConvNextBlock : IDisposable
         }
     }
 
+    /// <summary>Frees the F32 copies this block made of the checkpoint's BF16 tensors.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
@@ -201,17 +205,17 @@ internal sealed class Mert2ConvNextBlock : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, List<Tensor> owned)
         {
-            _depthwiseWeight = Mert2Ops.Load(weights, $"{prefix}.depthwise_block.1.weight", owned);
-            _depthwiseBias = Mert2Ops.Load(weights, $"{prefix}.depthwise_block.1.bias", owned);
-            _normWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.0.weight", owned);
-            _normBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.0.bias", owned);
-            _expandWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.1.weight", owned);
-            _expandBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.1.bias", owned);
-            Mert2Ops.Load(weights, $"{prefix}.pointwise_block.3.weight", owned)
+            _depthwiseWeight = Mert2Ops.Load(weights, $"{prefix}.depthwise_block.1.weight", owned, _channels, 1, _config.ConvNextKernel);
+            _depthwiseBias = Mert2Ops.Load(weights, $"{prefix}.depthwise_block.1.bias", owned, _channels);
+            _normWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.0.weight", owned, _channels);
+            _normBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.0.bias", owned, _channels);
+            _expandWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.1.weight", owned, 4 * _channels, _channels);
+            _expandBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.1.bias", owned, 4 * _channels);
+            Mert2Ops.Load(weights, $"{prefix}.pointwise_block.3.weight", owned, 1, 1, 4 * _channels)
                 .AsReadOnlySpan<float>().CopyTo(_responseNormWeight);
-            _responseNormBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.3.bias", owned);
-            _contractWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.4.weight", owned);
-            _contractBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.4.bias", owned);
+            _responseNormBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.3.bias", owned, 1, 1, 4 * _channels);
+            _contractWeight = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.4.weight", owned, _channels, 4 * _channels);
+            _contractBias = Mert2Ops.Load(weights, $"{prefix}.pointwise_block.4.bias", owned, _channels);
         }
 
         public void Forward(IBackend backend, Tensor input, Tensor output, Scratch scratch)

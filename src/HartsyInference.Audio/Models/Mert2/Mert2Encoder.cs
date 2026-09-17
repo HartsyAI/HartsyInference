@@ -42,6 +42,7 @@ public sealed class Mert2Encoder : IDisposable
         }
     }
 
+    /// <summary>The geometry this stack was built for.</summary>
     public Mert2Config Config => _config;
 
     /// <summary>Number of hidden states the mix spans: the subsampler output plus one per Conformer layer.</summary>
@@ -81,13 +82,18 @@ public sealed class Mert2Encoder : IDisposable
         Tensor subsampled = Subsample(backend, mel);
         int tokens = (int)subsampled.Shape[0];
         TensorShape shape = new(tokens, _config.Dim);
-        Tensor mixed = new(shape, DType.F32);
-        Tensor mixedSpare = new(shape, DType.F32);
-        Tensor hidden = new(shape, DType.F32);
-        Tensor hiddenSpare = new(shape, DType.F32);
-        using Mert2ConformerLayer.Scratch scratch = new(_config, tokens);
+        // The scratch is by far the largest allocation, so it goes first: an out-of-memory here frees everything,
+        // and the accumulator that survives the method is nulled out rather than disposed.
+        Mert2ConformerLayer.Scratch? scratch = null;
+        Tensor? mixed = null, mixedSpare = null, hidden = null, hiddenSpare = null;
         try
         {
+            scratch = new Mert2ConformerLayer.Scratch(_config, tokens);
+            mixed = new Tensor(shape, DType.F32);
+            mixedSpare = new Tensor(shape, DType.F32);
+            hidden = new Tensor(shape, DType.F32);
+            hiddenSpare = new Tensor(shape, DType.F32);
+
             backend.Scale(mixed, subsampled, mixWeights[0]);
             Tensor current = subsampled;
             for (int i = 0; i < _layers.Length; i++)
@@ -98,19 +104,18 @@ public sealed class Mert2Encoder : IDisposable
                 (mixed, mixedSpare) = (mixedSpare, mixed);
                 current = next;
             }
-            return mixed;
-        }
-        catch
-        {
-            mixed.Dispose();
-            throw;
+            Tensor result = mixed;
+            mixed = null;
+            return result;
         }
         finally
         {
+            scratch?.Dispose();
             subsampled.Dispose();
-            mixedSpare.Dispose();
-            hidden.Dispose();
-            hiddenSpare.Dispose();
+            mixed?.Dispose();
+            mixedSpare?.Dispose();
+            hidden?.Dispose();
+            hiddenSpare?.Dispose();
         }
     }
 
@@ -127,6 +132,7 @@ public sealed class Mert2Encoder : IDisposable
         }
     }
 
+    /// <summary>Frees the F32 copies this model made of the checkpoint's BF16 tensors.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

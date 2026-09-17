@@ -37,6 +37,7 @@ public sealed class Mert2AudioEncoder : IDisposable
         _mixWeights = new float[config.Layers + 1];
     }
 
+    /// <summary>The geometry this stack was built for.</summary>
     public Mert2Config Config => _config;
 
     /// <summary>The mel frontend, exposed so callers can reuse a computed spectrogram across encodes.</summary>
@@ -52,12 +53,10 @@ public sealed class Mert2AudioEncoder : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         _frontend.LoadWeights(weights);
         _encoder.LoadWeights(weights);
-        _projectionWeight = Mert2Ops.Load(weights, "encoder_projection.weight", _owned);
-        _projectionBias = Mert2Ops.Load(weights, "encoder_projection.bias", _owned);
+        _projectionWeight = Mert2Ops.Load(weights, "encoder_projection.weight", _owned, _config.ProjectionDim, _config.Dim);
+        _projectionBias = Mert2Ops.Load(weights, "encoder_projection.bias", _owned, _config.ProjectionDim);
 
-        Tensor mix = Mert2Ops.Load(weights, "layer_weight", _owned);
-        if (mix.ElementCount != _mixWeights.Length)
-            throw new HartsyInferenceException($"MERT2 layer_weight has {mix.ElementCount} entries, expected {_mixWeights.Length}.");
+        Tensor mix = Mert2Ops.Load(weights, "layer_weight", _owned, _mixWeights.Length);
         Softmax(mix.AsReadOnlySpan<float>(), _mixWeights);
         _loaded = true;
     }
@@ -105,6 +104,7 @@ public sealed class Mert2AudioEncoder : IDisposable
         if (_projectionBias is not null) yield return _projectionBias;
     }
 
+    /// <summary>Frees the F32 copies this model made of the checkpoint's BF16 tensors.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
