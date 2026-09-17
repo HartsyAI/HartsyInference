@@ -504,6 +504,11 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
     }
 
+    /// <summary>True when this pipeline's blocks will take <c>AttentionSparse</c>, whose full-sequence gate makes
+    /// its unchunked projection peak larger than the dense path's. Construction pins the profile, and a sparse
+    /// checkpoint is never retried as dense, so this is settled before any geometry is checked.</summary>
+    public bool UsesSparseAttention => _sparseAttentionProfile is not null;
+
     /// <summary>Performs the execution-boundary VSA preflight and builds the one layout every main block reuses.
     /// Any mismatch is terminal; a sparse checkpoint is never retried as dense after construction or launch.</summary>
     private VideoSparseAttentionPlan? ResolveSparseAttentionPlan(MiniMaxH3PackedLayout layout,

@@ -208,10 +208,46 @@ public sealed class MiniMaxH3ActivationEstimateTests
         long ceiling = residual + attentionPeak + MiniMaxH3ActivationEstimate.FudgeBytes;
 
         long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue));
+            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue),
+            sparseAttention: false);
 
         Assert.True(floor <= ceiling,
             $"an unchunked floor ({floor}) must not exceed what the unchunked forward actually allocates "
             + $"({ceiling}) — charging kFull/vFull on top of a full-sequence scratch term counts them twice");
+    }
+
+    /// <summary>The released VSA profile takes <c>AttentionSparse</c>, which keeps a full-sequence gate and the
+    /// token-major buffer it permutes from alive alongside qkv and head-major q/k/v — an 8x projection peak where
+    /// the dense path needs 6x. Charging the dense peak for a sparse forward would approve a near-limit geometry
+    /// that then OOMs, which is the dangerous direction for a pre-flight.</summary>
+    [Fact]
+    public void EstimateFloorBytes_UnchunkedSparseAttention_KeepsTheLargerProjectionPeak()
+    {
+        MiniMaxH3Config config = new MiniMaxH3Config();
+        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
+        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
+        int chunkRows = MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue);
+
+        long dense = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, config, DType.F32, chunkRows, sparseAttention: false);
+        long sparse = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, config, DType.F32, chunkRows, sparseAttention: true);
+
+        Assert.True(sparse > dense, $"sparse ({sparse}) must reserve more than dense ({dense})");
+        Assert.Equal(2L * seq * inner * DType.F32.SizeInBytes, sparse - dense);
+    }
+
+    /// <summary>A caller that does not say which attention path it will take must get the larger reservation, so
+    /// an omitted argument cannot quietly under-estimate.</summary>
+    [Fact]
+    public void EstimateFloorBytes_DefaultsToTheSparsePeakWhenTheModeIsUnknown()
+    {
+        MiniMaxH3Config config = new MiniMaxH3Config();
+        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
+        int chunkRows = MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue);
+
+        Assert.Equal(
+            MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, config, DType.F32, chunkRows, sparseAttention: true),
+            MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, config, DType.F32, chunkRows));
     }
 }

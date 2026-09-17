@@ -25,8 +25,10 @@ public static class MiniMaxH3ActivationEstimate
     /// <see cref="Core.Exceptions.OutOfVramException"/>-style pre-flight refusals.</summary>
     /// <param name="chunkRows">The chunk width the forward will use, from
     /// <see cref="MiniMaxH3ChunkPolicy.ScaledChunkRows"/>. Null keeps the unscaled default.</param>
+    /// <param name="sparseAttention">Whether the forward will take <c>AttentionSparse</c>. Defaults to true — the
+    /// larger peak — so a caller that does not know the mode cannot under-estimate its way past this check.</param>
     public static long EstimateFloorBytes(
-        int seq, MiniMaxH3Config config, DType bodyDType, int? chunkRows = null)
+        int seq, MiniMaxH3Config config, DType bodyDType, int? chunkRows = null, bool sparseAttention = true)
     {
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int hidden = config.HiddenSize;
@@ -54,11 +56,15 @@ public static class MiniMaxH3ActivationEstimate
         // card (at seq=38325 each buffer is 1047.9 MB, exactly the failing allocation). The projection is now split
         // across the passes (k+v here, q re-projected per chunk in pass 2, same total GEMM work), so q never spans
         // the pass boundary and this term is 2x rather than 3x.
-        // When the scratch spans the whole sequence the forward is not chunking at all, and Attention's qkv and
-        // head-major q/k/v ARE the full-sequence buffers this term models — adding both counts one allocation
-        // twice. Chunked, they are genuinely separate: kFull/vFull outlive each chunk in flight.
+        // When the scratch spans the whole sequence the forward is not chunking, and the projection peak is the
+        // attention implementation's own rather than a chunk plus the kFull/vFull that outlive it. Dense Attention
+        // holds qkv [seq, inner*3] alongside head-major q/k/v (6x); AttentionSparse additionally keeps a
+        // full-sequence gate and the token-major buffer it permutes from (8x). Mlp is unchanged by either.
+        long unchunkedAttentionBytes =
+            (sparseAttention ? 8L : 6L) * (long)seq * inner * DType.F32.SizeInBytes;
+        long unchunkedMlpBytes = 3L * (long)seq * ffn * DType.F32.SizeInBytes;
         long passOneBytes = resolvedChunkRows >= seq
-            ? chunkScratchBytes
+            ? Math.Max(unchunkedAttentionBytes, unchunkedMlpBytes)
             : 2L * fullSeqInnerBytes + chunkScratchBytes;
 
         // Pass 2 still holds kFull + vFull for every SDPA call, alongside the [seq, hidden] result it scatters each

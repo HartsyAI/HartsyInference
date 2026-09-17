@@ -427,7 +427,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         IBackend? worstBackend = null;
         foreach ((IBackend backend, string label, long weights) in stages)
         {
-            if (CheckOneBackend(backend, label, _config, weights, frames, width, height, seq,
+            if (CheckOneBackend(backend, label, _config, _pipeline.UsesSparseAttention, weights,
+                    frames, width, height, seq,
                     out long deficit, out long budget, out long free) is OutOfVramException failure
                 && deficit > worstDeficit)
             {
@@ -456,8 +457,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// use depends on this backend's own free VRAM and pinned policy, which is exactly the per-backend split
     /// <see cref="MiniMaxH3Transformer.ForwardSharded"/> already makes.</remarks>
     private static OutOfVramException? CheckOneBackend(IBackend backend, string label, MiniMaxH3Config config,
-        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit, out long budget,
-        out long freeForPolicy)
+        bool sparseAttention, long residentWeightBytes, int frames, int width, int height, int seq,
+        out long deficit, out long budget, out long freeForPolicy)
     {
         deficit = 0;
         budget = 0;
@@ -473,7 +474,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
         freeForPolicy = freeBytes;
         long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, freeBytes, backend));
+            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, freeBytes, backend),
+            sparseAttention);
         long availableForActivations = freeBytes - residentWeightBytes;
         budget = availableForActivations;
         if (floorBytes <= availableForActivations)
@@ -510,7 +512,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             int candidateSeq = SequenceLengthFor(width, height, candidate);
             if (MiniMaxH3ActivationEstimate.EstimateFloorBytes(
                 candidateSeq, _config, DType.F32,
-                MiniMaxH3ChunkPolicy.ScratchRows(candidateSeq, _config, DType.F32, freeBytes, backend))
+                MiniMaxH3ChunkPolicy.ScratchRows(candidateSeq, _config, DType.F32, freeBytes, backend),
+                _pipeline.UsesSparseAttention)
                 <= budgetBytes)
             {
                 return candidate;
