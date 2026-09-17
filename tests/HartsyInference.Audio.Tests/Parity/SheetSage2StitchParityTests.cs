@@ -187,6 +187,42 @@ public sealed class SheetSage2StitchParityTests
         Assert.Equal((null, 0), Stitcher.OverlapPrefix([], window));
     }
 
+    /// <summary>An opening event whose bar position is present but empty inherits no time signature.
+    ///
+    /// <para>Built by hand rather than dumped, because the released decode cannot write the input: a field only
+    /// exists once a token has landed in it. The reference's guard is written against the field's CONTENTS, not
+    /// against whether it is there, so this is the behaviour it would have — and the only thing keeping a bare
+    /// time signature, claiming a downbeat the window never wrote, out of the prompt.</para></summary>
+    [Fact]
+    public void AnOpeningEventWithAnEmptyBarPosition_InheritsNoMeter()
+    {
+        ScoreEvent earlier = new()
+        {
+            Subbeat = 0,
+            TokensByField = new(StringComparer.Ordinal)
+            {
+                ["rhythm"] = [Tok.MeterStart + 20, Tok.EighthPositionStart + 3],
+            },
+        };
+        ScoreEvent opening = new()
+        {
+            Subbeat = 20,
+            TokensByField = new(StringComparer.Ordinal)
+            {
+                ["timestamp"] = [Tok.TimeStart + 250],
+                ["rhythm"] = [],
+            },
+        };
+        List<StitchedScoreEvent> stitched =
+        [
+            new() { Source = earlier, Seconds = 50.0, GlobalSubbeat = 400 },
+            new() { Source = opening, Seconds = 102.5, GlobalSubbeat = 820 },
+        ];
+        (List<int>? tokens, int position) = Stitcher.OverlapPrefix(stitched, WindowAt(100.0, 200.0));
+        Assert.Equal(820, position);
+        Assert.DoesNotContain(tokens!, token => token >= Tok.MeterStart && token < Tok.MeterEnd);
+    }
+
     /// <summary>A window whose events all sit outside the clip keeps none of them, whatever its span says.</summary>
     [Fact]
     public void EventsPastTheEndOfTheClip_AreNotAccepted()

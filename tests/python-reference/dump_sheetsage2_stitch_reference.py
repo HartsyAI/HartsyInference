@@ -256,6 +256,10 @@ def prefix_cases(script) -> dict:
     # Same position, different times.
     case("duplicatePositionDifferentTime", [(0, [time + 260, chord]), (0, [time + 250, structure]), (20, [time + 500])],
          [102.6, 102.5, 105.0], [820, 820, 840], 100.0, 200.0)
+    # Positions and times that disagree on the order. A window's time map is not guaranteed monotonic, and the
+    # prompt is written in position order, not time order.
+    case("positionsAgainstTimes", [(0, [time + 250, chord]), (20, [time + 750]), (40, [time + 500, structure])],
+         [102.5, 107.5, 105.0], [820, 840, 860], 100.0, 200.0)
     # Handed to the stitcher out of order, as a non-monotonic time map would leave it.
     case("outOfOrderInput", [(0, [time + 500, chord]), (20, [time + 250, structure]), (40, [time + 750])],
          [105.0, 102.5, 107.5], [840, 820, 860], 100.0, 200.0)
@@ -288,7 +292,7 @@ def time_map_cases(script) -> dict:
     """Hand-built time maps, each isolating one branch of the tempo or the interpolation."""
     time = script.token("time", 0)
     chord, pitch, length = script.token("full_chord", 7), script.token("pitch", 60), script.token("duration", 5)
-    probes = [-40, -1, 0, 1, 10, 20, 30, 40, 55, 60, 80, 100, 2000, 100000]
+    probes = [-40, -1, 0, 1, 10, 20, 30, 40, 50, 55, 60, 80, 100, 1000, 2000, 100000]
     specs = {
         # Nothing to anchor on: a fixed tempo, clipped at both ends.
         "noAnchor": [(0, [chord]), (20, [pitch, length]), (40, [script.token("structure", 3)])],
@@ -311,14 +315,20 @@ def time_map_cases(script) -> dict:
         # A single enormous gap, so extrapolation past the last anchor runs well past the window.
         "sparse": [(0, [time + 0]), (2000, [time + 25000])],
     }
+    # The same anchors under a ceiling that sits between them: only the two extrapolations are clipped, so
+    # interpolation is free to report a time the map would otherwise never name.
+    specs["belowTheCeiling"] = specs["uniform"]
+    specs["sparseBelowTheCeiling"] = specs["sparse"]
+    targets = {"belowTheCeiling": 5.0, "sparseBelowTheCeiling": 5.0}
     cases = {}
     for name, events in specs.items():
+        target = targets.get(name, 300.0)
         stream = script.stream(events)
         decoded = script.tokenizer.decode_sequence(stream)
-        lookup = script.namespace["event_time_map"](decoded, 300.0)
+        lookup = script.namespace["event_time_map"](decoded, target)
         closure = closure_of(lookup)
         cases[name] = {
-            "stream": stream, "targetSeconds": 300.0, "period": closure.get("period"),
+            "stream": stream, "targetSeconds": target, "period": closure.get("period"),
             "anchorCount": len(closure.get("steps", ())),
             "probes": [{"step": step, "seconds": lookup(step)} for step in probes],
         }

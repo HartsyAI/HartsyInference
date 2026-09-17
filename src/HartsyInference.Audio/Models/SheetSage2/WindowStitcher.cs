@@ -221,7 +221,8 @@ public sealed class WindowStitcher(ScoreTokenizer tokenizer)
             if (fields.ContainsKey("timestamp"))
             {
                 // Clamped before the cast, not after: an absurd span would otherwise wrap to a valid-looking id.
-                // The clamp cannot bite on a real plan, whose overlap is at most a window's worth of seconds.
+                // Neither end can bite on a real plan — an overlap is at most a window's worth of seconds, and an
+                // event selected into one sits at most a seam tolerance, far under half a tick, before its start.
                 double ticks = Math.Round((item.Seconds - start) * ScoreTokenizer.TimeHz);
                 fields["timestamp"] = [_tokenizer.TimeStart + (int)Math.Clamp(ticks, 0.0, maxTimeId)];
             }

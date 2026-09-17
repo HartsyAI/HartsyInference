@@ -57,6 +57,10 @@
      "seconds": 5.0
     },
     {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
      "step": 55,
      "seconds": 6.875
     },
@@ -71,6 +75,10 @@
     {
      "step": 100,
      "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
     },
     {
      "step": 2000,
@@ -133,6 +141,10 @@
      "seconds": 7.5
     },
     {
+     "step": 50,
+     "seconds": 8.75
+    },
+    {
      "step": 55,
      "seconds": 9.375
     },
@@ -147,6 +159,10 @@
     {
      "step": 100,
      "seconds": 15.0
+    },
+    {
+     "step": 1000,
+     "seconds": 127.5
     },
     {
      "step": 2000,
@@ -215,6 +231,10 @@
      "seconds": 5.0
     },
     {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
      "step": 55,
      "seconds": 6.875
     },
@@ -229,6 +249,10 @@
     {
      "step": 100,
      "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
     },
     {
      "step": 2000,
@@ -297,6 +321,10 @@
      "seconds": 7.0
     },
     {
+     "step": 50,
+     "seconds": 7.25
+    },
+    {
      "step": 55,
      "seconds": 7.375
     },
@@ -311,6 +339,10 @@
     {
      "step": 100,
      "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
     },
     {
      "step": 2000,
@@ -381,6 +413,10 @@
      "seconds": 7.0
     },
     {
+     "step": 50,
+     "seconds": 7.25
+    },
+    {
      "step": 55,
      "seconds": 7.375
     },
@@ -395,6 +431,10 @@
     {
      "step": 100,
      "seconds": 17.5
+    },
+    {
+     "step": 1000,
+     "seconds": 175.0
     },
     {
      "step": 2000,
@@ -463,6 +503,10 @@
      "seconds": 290.0
     },
     {
+     "step": 50,
+     "seconds": 148.75
+    },
+    {
      "step": 55,
      "seconds": 78.125
     },
@@ -477,6 +521,10 @@
     {
      "step": 100,
      "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
     },
     {
      "step": 2000,
@@ -543,6 +591,10 @@
      "seconds": 5.0
     },
     {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
      "step": 55,
      "seconds": 6.875
     },
@@ -557,6 +609,10 @@
     {
      "step": 100,
      "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
     },
     {
      "step": 2000,
@@ -623,6 +679,10 @@
      "seconds": 0.0
     },
     {
+     "step": 50,
+     "seconds": 1.25
+    },
+    {
      "step": 55,
      "seconds": 1.875
     },
@@ -637,6 +697,10 @@
     {
      "step": 100,
      "seconds": 7.5
+    },
+    {
+     "step": 1000,
+     "seconds": 120.0
     },
     {
      "step": 2000,
@@ -705,6 +769,10 @@
      "seconds": 10.0
     },
     {
+     "step": 50,
+     "seconds": 12.5
+    },
+    {
      "step": 55,
      "seconds": 13.75
     },
@@ -719,6 +787,10 @@
     {
      "step": 100,
      "seconds": 25.0
+    },
+    {
+     "step": 1000,
+     "seconds": 250.0
     },
     {
      "step": 2000,
@@ -790,6 +862,10 @@
      "seconds": 5.0
     },
     {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
      "step": 55,
      "seconds": 6.875
     },
@@ -806,12 +882,199 @@
      "seconds": 12.5
     },
     {
+     "step": 1000,
+     "seconds": 125.0
+    },
+    {
      "step": 2000,
      "seconds": 250.0
     },
     {
      "step": 100000,
      "seconds": 300.0
+    }
+   ]
+  },
+  "belowTheCeiling": {
+   "stream": [
+    1,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    3,
+    260,
+    517,
+    280,
+    767,
+    280,
+    1017,
+    280,
+    1267,
+    2
+   ],
+   "targetSeconds": 5.0,
+   "period": 0.125,
+   "anchorCount": 4,
+   "probes": [
+    {
+     "step": -40,
+     "seconds": 0.0
+    },
+    {
+     "step": -1,
+     "seconds": 0.0
+    },
+    {
+     "step": 0,
+     "seconds": 0.0
+    },
+    {
+     "step": 1,
+     "seconds": 0.125
+    },
+    {
+     "step": 10,
+     "seconds": 1.25
+    },
+    {
+     "step": 20,
+     "seconds": 2.5
+    },
+    {
+     "step": 30,
+     "seconds": 3.75
+    },
+    {
+     "step": 40,
+     "seconds": 5.0
+    },
+    {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
+     "step": 55,
+     "seconds": 6.875
+    },
+    {
+     "step": 60,
+     "seconds": 5.0
+    },
+    {
+     "step": 80,
+     "seconds": 5.0
+    },
+    {
+     "step": 100,
+     "seconds": 5.0
+    },
+    {
+     "step": 1000,
+     "seconds": 5.0
+    },
+    {
+     "step": 2000,
+     "seconds": 5.0
+    },
+    {
+     "step": 100000,
+     "seconds": 5.0
+    }
+   ]
+  },
+  "sparseBelowTheCeiling": {
+   "stream": [
+    1,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    3,
+    260,
+    517,
+    516,
+    516,
+    516,
+    516,
+    516,
+    516,
+    516,
+    468,
+    25517,
+    2
+   ],
+   "targetSeconds": 5.0,
+   "period": 0.125,
+   "anchorCount": 2,
+   "probes": [
+    {
+     "step": -40,
+     "seconds": 0.0
+    },
+    {
+     "step": -1,
+     "seconds": 0.0
+    },
+    {
+     "step": 0,
+     "seconds": 0.0
+    },
+    {
+     "step": 1,
+     "seconds": 0.125
+    },
+    {
+     "step": 10,
+     "seconds": 1.25
+    },
+    {
+     "step": 20,
+     "seconds": 2.5
+    },
+    {
+     "step": 30,
+     "seconds": 3.75
+    },
+    {
+     "step": 40,
+     "seconds": 5.0
+    },
+    {
+     "step": 50,
+     "seconds": 6.25
+    },
+    {
+     "step": 55,
+     "seconds": 6.875
+    },
+    {
+     "step": 60,
+     "seconds": 7.5
+    },
+    {
+     "step": 80,
+     "seconds": 10.0
+    },
+    {
+     "step": 100,
+     "seconds": 12.5
+    },
+    {
+     "step": 1000,
+     "seconds": 125.0
+    },
+    {
+     "step": 2000,
+     "seconds": 5.0
+    },
+    {
+     "step": 100000,
+     "seconds": 5.0
     }
    ]
   }
@@ -1213,6 +1476,58 @@
     31044,
     280,
     1017
+   ],
+   "base": 820
+  },
+  "positionsAgainstTimes": {
+   "stream": [
+    1,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    3,
+    260,
+    767,
+    31044,
+    280,
+    1267,
+    280,
+    1017,
+    30968,
+    2
+   ],
+   "seconds": [
+    102.5,
+    107.5,
+    105.0
+   ],
+   "globalSubbeats": [
+    820,
+    840,
+    860
+   ],
+   "start": 100.0,
+   "prefixEnd": 200.0,
+   "tokens": [
+    1,
+    4,
+    5,
+    6,
+    7,
+    9,
+    11,
+    3,
+    260,
+    767,
+    31044,
+    280,
+    1267,
+    280,
+    1017,
+    30968
    ],
    "base": 820
   },
