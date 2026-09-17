@@ -4,7 +4,9 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.PyTorch;
@@ -38,6 +40,12 @@ public sealed class RestoreService : IRestoreService
         int inputs = (request.Video is null ? 0 : 1) + (request.Frames is null ? 0 : 1) + (request.Image is null ? 0 : 1);
         if (inputs != 1)
             throw new ArgumentException("Exactly one of Video, Frames, or Image must be set.", nameof(request));
+
+        // SeedVR2 wires no memory lever, so a posture reaching here cannot change what it does. Say so: `video
+        // --vram-mode ... --restore` carries the video phase's override into this one, and a restore that quietly
+        // ignored it would look like the tier had been applied to the whole command.
+        MemorySupportReport.ReportService(
+            "seedvr2-restore", _engine.Backend, VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
 
         (List<byte[]> frames, int width, int height) = await DecodeInputAsync(request, cancel).ConfigureAwait(false);
 

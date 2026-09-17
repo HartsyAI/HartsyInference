@@ -23,7 +23,10 @@ public static class MiniMaxH3ActivationEstimate
     /// a smaller chunk, so it cannot be rescued by any chunk size or by
     /// weight streaming (weights are not part of this number at all) — the right number for
     /// <see cref="Core.Exceptions.OutOfVramException"/>-style pre-flight refusals.</summary>
-    public static long EstimateFloorBytes(int seq, MiniMaxH3Config config, DType bodyDType)
+    /// <param name="chunkRows">The chunk width the forward will use, from
+    /// <see cref="MiniMaxH3ChunkPolicy.ScaledChunkRows"/>. Null keeps the unscaled default.</param>
+    public static long EstimateFloorBytes(
+        int seq, MiniMaxH3Config config, DType bodyDType, int? chunkRows = null)
     {
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int hidden = config.HiddenSize;
@@ -38,9 +41,9 @@ public static class MiniMaxH3ActivationEstimate
         // One chunk's own transient scratch: either the packed qkv chunk (inner*3 wide) alongside its chunk-sized
         // q/k/v (another inner*3), or the MLP's gateUp+act chunk — the two never run concurrently within a block,
         // and neither scales with seq. Matches MiniMaxH3ChunkPolicy's own per-row rate for the same reason.
-        int chunkRows = MiniMaxH3ChunkPolicy.DefaultChunkRows;
-        long attnChunkBytes = (long)chunkRows * inner * 6L * DType.F32.SizeInBytes;
-        long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
+        int resolvedChunkRows = chunkRows ?? MiniMaxH3ChunkPolicy.DefaultChunkRows;
+        long attnChunkBytes = (long)resolvedChunkRows * inner * 6L * DType.F32.SizeInBytes;
+        long mlpChunkBytes = (long)resolvedChunkRows * ffn * 3L * DType.F32.SizeInBytes;
         long chunkScratchBytes = Math.Max(attnChunkBytes, mlpChunkBytes);
 
         // AttentionChunked's two passes peak at different things and are separated in time, so the floor is the worse
