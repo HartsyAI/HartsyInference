@@ -28,32 +28,34 @@ namespace HartsyInference.Audio.Tests.Parity;
 public sealed unsafe class Mert2ParityTests
 {
     /// <summary>Gate S2 — mel frontend, relative L2. Both sides are float32 and share the checkpoint's window,
-    /// filterbank and statistics, so the only difference is FFT and summation order; measured 5.5e-8 (maxAbs
-    /// 1.3e-5 against a peak of 9.85). 1e-6 keeps an order of magnitude of headroom over that while staying five
-    /// orders below what a structural mistake — an off-by-one frame, a magnitude instead of a power spectrum, a
-    /// regenerated filterbank — would cost.</summary>
-    private const double MelTolerance = 1e-6;
+    /// filterbank and statistics, so the only difference is FFT and summation order. Measured 5.5e-8 on the
+    /// generated signal but 5.4e-7 on a real piano recording: music has far more dynamic range, and a mel bin
+    /// whose power nearly cancels carries that cancellation into the decibel scale. The real recording is what
+    /// sets this bound. 1e-5 keeps ~18x over it; a structural mistake — an off-by-one frame, a magnitude instead
+    /// of a power spectrum, a regenerated filterbank — is four orders of magnitude above that.</summary>
+    private const double MelTolerance = 1e-5;
 
     /// <summary>Gate S3a — RoPE tables, max absolute difference. cos/sin are bounded by 1, and reproducing the
     /// reference's float32 angle rounding leaves only the last-ulp disagreement of <c>pow</c>: measured 6.0e-8,
-    /// which is one float32 ulp. 1e-6 tolerates that and still catches a double-precision angle, which drifts
-    /// ~5e-4 by token 7499.</summary>
+    /// which is one float32 ulp, and the tables do not depend on the audio. 1e-6 tolerates that ulp and still
+    /// catches a double-precision angle, which drifts ~5e-4 by token 7499.</summary>
     private const double RopeTolerance = 1e-6;
 
     /// <summary>Gate S3b — ConvNeXt subsampler, relative L2. Twelve layers of GEMM on TF32 tensor cores (the
     /// engine's default on sm_80+) carry ~5e-4 relative per matmul, so a tolerance near float32 round-off would be
-    /// testing cuBLAS's compute mode rather than this port. Measured 2.7e-4 (maxAbs 1.4e-2 against a peak of
-    /// 68.3); 1.5e-3 keeps ~5x for kernel-selection variance and stays two orders below the ~1e-1 a wrong
-    /// normalization axis or convolution padding produces.</summary>
+    /// testing cuBLAS's compute mode rather than this port. Measured 2.7e-4 on the generated signal and 3.0e-4 on
+    /// a real piano recording (maxAbs 2.2e-2 against a peak of 73.4). 1.5e-3 keeps ~5x over the worse of the two
+    /// and stays two orders below the ~1e-1 a wrong normalization axis or convolution padding produces.</summary>
     private const double SubsampledTolerance = 1.5e-3;
 
     /// <summary>Gate S3c — encoder mix and projection, relative L2. Looser than S3b because 24 Conformer layers
     /// sit on top of it AND attention runs with F16 I/O through cuDNN, which is the configuration that ships.
-    /// Measured 2.8e-4 on the mix and 5.7e-4 after the projection (maxAbs 1.3e-2 against a peak of 2.03) — the
-    /// projection is relatively worse because it contracts 1024 dimensions into 512, not because anything new
-    /// happens there. 3e-3 keeps ~5x of headroom and stays far below any real error: a wrong RoPE convention, an
-    /// unrotated key, or a mixed-up layer weight all land near or above 1e-1.</summary>
-    private const double EncoderTolerance = 3e-3;
+    /// Measured 2.8e-4 (mix) / 5.7e-4 (projection) on the generated signal and 4.4e-4 / 9.0e-4 on a real piano
+    /// recording; the projection is relatively worse because it contracts 1024 dimensions into 512, not because
+    /// anything new happens there. 5e-3 keeps ~5x over the worst of those, which is the margin two fixtures 1.6x
+    /// apart argue for, and stays far below any real error: a wrong RoPE convention, an unrotated key, or a
+    /// mixed-up layer weight all land near or above 1e-1.</summary>
+    private const double EncoderTolerance = 5e-3;
 
     private readonly ITestOutputHelper _out;
 
@@ -153,7 +155,8 @@ public sealed unsafe class Mert2ParityTests
             + $"max |V| {meta.GetProperty("attentionMaxValue").GetDouble():F1} — both far inside F16 range, which is "
             + "why attention runs with allowF16.");
 
-        using IBackend backend = CreateBackend(out string backendName);
+        using IBackend? backend = CreateBackend(out string backendName);
+        if (backend is null) return;   // gated: no CUDA device
         _out.WriteLine($"backend: {backendName}");
 
         using SafeTensorsLoader loader = new();
@@ -190,13 +193,19 @@ public sealed unsafe class Mert2ParityTests
         Report("projected", projected, referenceTensors["projected"], EncoderTolerance);
     }
 
-    /// <summary>CUDA when a device and its PTX are present, because that is the path that ships: the CPU backend
-    /// materializes a 16x7500x7500 score matrix per layer, which is neither what runs in production nor something
-    /// a test machine should be asked for. <c>MERT2_FORCE_CPU=1</c> pins the host path anyway.</summary>
-    private static IBackend CreateBackend(out string name)
+    /// <summary>CUDA, or nothing. This gate is 7500-token encoder attention; the CPU backend would materialize a
+    /// 16x7500x7500 score matrix per layer for 24 layers, so a silent fallback would not be a slower run, it would
+    /// be a hung one. Without a device the gate skips, which is the same thing a missing checkpoint does.
+    /// <c>MERT2_FORCE_CPU=1</c> opts the host path in for anyone who wants to wait for it.</summary>
+    private static IBackend? CreateBackend(out string name)
     {
+        if (Environment.GetEnvironmentVariable("MERT2_FORCE_CPU") == "1")
+        {
+            name = "CPU";
+            return new CpuBackend();   // tier-lint: guarded
+        }
         string ptxDirectory = Path.Combine(AppContext.BaseDirectory, "Ptx");
-        if (Environment.GetEnvironmentVariable("MERT2_FORCE_CPU") != "1" && Directory.Exists(ptxDirectory))
+        if (Directory.Exists(ptxDirectory))
         {
             try
             {
@@ -205,11 +214,11 @@ public sealed unsafe class Mert2ParityTests
             }
             catch (Exception)
             {
-                // fall through to the host path
+                // no usable device — fall through to the skip
             }
         }
-        name = "CPU";
-        return new CpuBackend();   // tier-lint: guarded
+        name = "none";
+        return null;
     }
 
     private static bool Gated(out string checkpoint, out string referenceDir)

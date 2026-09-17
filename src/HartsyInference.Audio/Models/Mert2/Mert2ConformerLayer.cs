@@ -8,8 +8,9 @@ namespace HartsyInference.Audio.Models.Mert2;
 ///
 /// <para>Attention runs through <see cref="IBackend.ScaledDotProductAttention"/> with <c>allowF16</c>, never
 /// <see cref="IBackend.FlashAttention"/>: this is 7500-token encoder attention, which the decode-tuned flash path
-/// is not built for. F16 is safe here and measured, not assumed — against the released weights the score bound is
-/// ~1.4e3 and the largest value element ~22, both far inside F16's range.</para></summary>
+/// is not built for. F16 is safe here and measured, not assumed — against the released weights the score bound
+/// peaks at ~1.4e3 and the largest value element at ~22, on a synthetic signal and on a real piano recording
+/// alike, both far inside F16's range.</para></summary>
 internal sealed class Mert2ConformerLayer
 {
     private readonly Mert2Config _config;

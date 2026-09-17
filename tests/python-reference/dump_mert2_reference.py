@@ -155,7 +155,7 @@ def main() -> None:
 
     started = time.time()
     mel = model.feature_extractor(padded.float())
-    print(f"mel {tuple(mel.shape)} in {time.time() - started:.1f}s")
+    print(f"mel {tuple(mel.shape)} in {time.time() - started:.1f}s", flush=True)
     if mel.shape[-1] != EXPECTED_MEL_BINS:
         raise SystemExit(f"mel has {mel.shape[-1]} bins, expected {EXPECTED_MEL_BINS}")
 
@@ -168,7 +168,7 @@ def main() -> None:
     try:
         started = time.time()
         mixed, _ = model(mel, layer_weight)
-        print(f"encoder {tuple(mixed.shape)} in {time.time() - started:.1f}s")
+        print(f"encoder {tuple(mixed.shape)} in {time.time() - started:.1f}s", flush=True)
     finally:
         mert2_module.optimized_attention_for_device = original
         handle.remove()
