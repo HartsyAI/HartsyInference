@@ -923,13 +923,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             return;
         }
-        _backend.FreeActivations(trimPool: true);
-        _backend.EvictWeightCaches();
-        if (!ReferenceEquals(_vaeBackend, _backend))
-        {
-            _vaeBackend.FreeActivations(trimPool: true);
-            _vaeBackend.EvictWeightCaches();
-        }
+        _pipeline.ReleaseTransformerWeights();
         Logs.Info("[MiniMaxH3RecipePipeline] Chain phase unload: released cached weights before the next segment.");
     }
 

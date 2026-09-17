@@ -826,6 +826,27 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         if (!ReferenceEquals(f, t)) f.Dispose();
     }
 
+    /// <summary>Frees this pipeline's own DiT weights from whichever backend holds them, including the copies the
+    /// lazy per-op path cached. Scoped to these tensors on purpose: the backend's caches are shared with whatever
+    /// else is running on the device, and video takes no device gate, so a blanket eviction could free a concurrent
+    /// generation's buffers underneath it. Mirrors the asymmetric free after the denoise loop — a whole-set free
+    /// silently no-ops on the shard backend's range.</summary>
+    public void ReleaseTransformerWeights()
+    {
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+            DitShardBackend.TrimMemoryPool();
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
+        Backend.TrimMemoryPool();
+    }
+
     /// <summary>Makes the DiT device-resident when the recipe determined it fits, leaving headroom for activations
     /// and the VAE decode. When it does not fit (the 66 GB bf16 build) the per-call streaming path stands.</summary>
     private bool TryPreloadTransformer()

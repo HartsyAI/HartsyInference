@@ -492,7 +492,7 @@ public sealed unsafe class CudaBackendLifecycleTests
 
         PopulateFp8ScaleThroughProducer(backend, consumerWeight);
         AssertFp8Diagnostics(backend, count: 1, baseline.Allocations + 3, baseline.Frees + 2);
-        backend.EvictWeightCaches();
+        backend.EvictGpuCache();
         AssertFp8Diagnostics(backend, count: 0, baseline.Allocations + 3, baseline.Frees + 3);
 
         PopulateFp8ScaleThroughProducer(backend, consumerWeight);
