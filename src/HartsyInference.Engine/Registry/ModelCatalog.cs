@@ -938,6 +938,18 @@ public static class ModelCatalog
             // (see ModelAcquisition.EnsureAudioAssetsPresent) — the real fetch always goes through the engine's own
             // AudioModelCache regardless, so a missed sidecar file just downloads silently during generation.
             E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok, cli: true),
+            new CatalogEntry
+            {
+                Id = "sheetsage2", Modality = stt, DisplayName = "SheetSage2 (audio → score)",
+                Architecture = "Conformer encoder + score decoder", Status = ok,
+                CliDrivable = true, // `hartsy transcribe -m sheetsage2` — writes ABC, not words; SttCatalog "sheetsage2"
+                Assets = new ModelAsset[]
+                {
+                    // Cached under the YuE2 repo it ships in, so a machine that already generates with YuE2
+                    // does not fetch a second copy. CC BY-NC 4.0.
+                    new() { Repo = "Comfy-Org/YuE2", RepoPath = "audio_encoders/sheetsage2_bf16.safetensors", TargetSubdir = "Audio/SheetSage2", Role = "encoder-decoder", AudioCategory = "music" },
+                },
+            },
             E("moonshine", stt, "Moonshine", "encoder-decoder", ok, cli: true),
             new CatalogEntry
             {

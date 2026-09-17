@@ -6,6 +6,33 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.82
+
+- Audio: **SheetSage2 transcribes a recording into a score.** With the symbolic half from alpha.81, the model is
+  now complete: the MERT2 Conformer encoder, the score decoder, the greedy decode under its grammar, and the
+  pass that reads a song longer than the encoder's window in overlapping passes and stitches them onto one
+  timeline. `hartsy transcribe -m sheetsage2` returns ABC rather than words.
+- This is what makes covering an existing recording possible. Until now YuE2 could only edit scores it had
+  written itself, because it has no audio input at all; a transcription gives it a melody it did not compose.
+- **Checked end to end, not only stage by stage.** Each stage is pinned against a dump of that stage — the mel
+  frontend, the encoder and its learned layer mix, the decode, the grammar mask, the window plan, the stitch and
+  the serializer. On top of those, a real recording is run through the whole chain and the resulting score is
+  compared as text against what the released implementation produces from the same file. A single wrong note,
+  bar line or chord symbol fails it, and it is the only check that can catch an error living in a handover
+  rather than in a part.
+- The decode is **token-exact** against the reference on both the host and CUDA: reference and port both run
+  float32 over the same weights, so exactness is a real criterion rather than a coincidence of dtype. The
+  largest logit drift observed consumed an eighth of the margin between the top two candidates.
+- One thing the gate had to be built carefully to prove: the checkpoint has largely internalised its own
+  grammar, and on a real clip the unmasked argmax is already legal at every step — so a port that dropped the
+  mask entirely would still have passed. The mask is therefore pinned on a case constructed to need it, where
+  the model would otherwise write a fifth consecutive subbeat shift and the grammar forces a pitch instead.
+- Both renderings of the score, with chord symbols and without, come from one decode. The decode is the entire
+  cost — the encoder attends over a fixed five-minute window and the token loop is autoregressive — while
+  serializing events already in hand is free, and the two renderings are not a substitution apart.
+- The weights are cached under the YuE2 repo they ship in, so a machine that already generates with YuE2 does
+  not fetch a second copy. They are CC BY-NC 4.0, unlike the engine.
+
 ## alpha.81
 
 - Audio: **the SheetSage2 port's symbolic half is complete** — the events-to-ABC serializer and the sliding-window

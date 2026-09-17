@@ -86,7 +86,8 @@ public static class ModelAcquisition
     internal static bool EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality, bool confirm = true, CancellationToken ct = default)
     {
         string category = AudioCategoryFor(modality);
-        List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a, category))).ToList();
+        // An asset may override the category so prefetch fetches into the same directory the loader reads from.
+        List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a, a.AudioCategory ?? category))).ToList();
         if (missing.Count == 0)
             return true;
 
@@ -107,9 +108,9 @@ public static class ModelAcquisition
                         ProgressTask task = ctx.AddTask(Markup.Escape(a.FileName));
                         string baseDescription = Markup.Escape(a.FileName);
                         IProgress<long> progress = new Progress<long>(bytes => task.Description = $"{baseDescription} ({bytes / (1024 * 1024)} MB)");
-                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, category, progress: progress, ct: ct).GetAwaiter().GetResult();
+                        AudioModelCache.GetAsync(a.Repo, a.RepoPath, a.AudioCategory ?? category, progress: progress, ct: ct).GetAwaiter().GetResult();
                         if (!string.IsNullOrEmpty(a.Sha256))
-                            AudioModelCache.VerifySha256(AudioAssetPath(a, category), a.Sha256);
+                            AudioModelCache.VerifySha256(AudioAssetPath(a, a.AudioCategory ?? category), a.Sha256);
                     }
                 });
         }
