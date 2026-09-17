@@ -21,14 +21,13 @@ namespace HartsyInference.Audio.Tests.Parity;
 /// <para>Four reference cases, each able to fail for something the others cannot see. <c>audio</c> is a real
 /// clip run to its own EOS. <c>prefixed</c> seeds the same clip from a prefix that leaves the grammar owing a
 /// partner token, as an overlap prefix does to the next window. <c>synthetic</c> decodes a seeded memory at the
-/// encoder's own scale, which the model never resolves, so it runs into the token limit. <c>shuffled</c> is the
-/// clip's own memory with its rows permuted — the same values and scale, no temporal structure, and the only
-/// case measured to put the checkpoint's unmasked argmax outside the grammar, which makes it the gate on
-/// whether the mask is applied inside the loop at all.</para>
+/// encoder's own scale, which the model never resolves, so it runs into the token limit. <c>maskgate</c> seeds
+/// a run of four shifts — the longest the grammar tolerates — which is the only arrangement measured to make
+/// the checkpoint want an illegal token.</para>
 ///
-/// <para>The checkpoint has internalised its own grammar: on every realistic input tried here the unmasked
-/// argmax was already legal, so a port that dropped the mask entirely would still pass the first three cases.
-/// That is what <c>shuffled</c> is for, and why its <c>maskChangedTheArgmax</c> count is reported.</para>
+/// <para>That last case earns its place because the checkpoint has internalised its own grammar: on every other
+/// input tried here its unmasked argmax was already legal, so a port that dropped the mask entirely would still
+/// pass the first three. Each case reports how many of its steps the mask actually decided.</para>
 ///
 /// <para>Reference and port both run float32 over the same float32-upcast BF16 weights, so S5's token-exactness
 /// is a real criterion rather than a dtype coincidence. Gated on <c>SHEETSAGE2_CHECKPOINT</c> and
@@ -46,7 +45,7 @@ public sealed class SheetSage2DecoderParityTests
     public SheetSage2DecoderParityTests(ITestOutputHelper output) => _out = output;
 
     /// <summary>The dumped cases, each read from its own subdirectory of the reference dir.</summary>
-    public static TheoryData<string> Cases => new("audio", "prefixed", "synthetic", "shuffled");
+    public static TheoryData<string> Cases => new("audio", "prefixed", "synthetic", "maskgate");
 
     /// <summary>Gate S3: the logits themselves, teacher-forced over the reference's own tokens.</summary>
     [Theory]

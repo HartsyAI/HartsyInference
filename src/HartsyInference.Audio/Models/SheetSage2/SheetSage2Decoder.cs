@@ -401,7 +401,6 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
             if (weight is not null) yield return weight;
         }
     }
-
 }
 
 /// <summary>Reads the decoder's tensors out of a checkpoint, casting once to F32 and checking every shape.</summary>
@@ -409,6 +408,8 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
 /// the element count, so a weight of the wrong width is silently mis-read instead of refused.</remarks>
 internal static class SheetSage2Weights
 {
+    /// <summary>Reads one tensor by key, refuses it unless its shape is exactly <paramref name="shape"/>, and
+    /// returns it as F32 — appending the cast to <paramref name="ownedCasts"/> when one was needed.</summary>
     public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> ownedCasts, params int[] shape)
     {
         if (!weights.TryGetValue(key, out Tensor? raw))

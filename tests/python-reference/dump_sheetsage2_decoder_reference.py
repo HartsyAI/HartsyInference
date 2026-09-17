@@ -11,8 +11,8 @@ running ComfyUI, and every entry point it offers is a no-op on the eager CPU pat
         --checkpoint /path/to/sheetsage2_bf16.safetensors \
         --audio /path/to/clip.wav --steps 256
 
-Writes one directory per case under sheetsage2_decoder_reference_tensors/ — audio, prefixed, shuffled and
-synthetic — each holding protocol.json, memory.bin and logits.bin. Everything runs on CPU by construction, in
+Writes one directory per case under sheetsage2_decoder_reference_tensors/ — audio, prefixed, synthetic and
+maskgate — each holding protocol.json, memory.bin and logits.bin. Everything runs on CPU by construction, in
 float32 over float32-upcast BF16 weights, which is the dtype the C# decoder runs in: a BF16 reference would put
 a dtype gap inside a token-exact gate and hide what the gate is supposed to measure.
 
@@ -123,20 +123,6 @@ def synthetic_memory(tokens: int, dim: int, seed: int):
 
     generator = torch.Generator().manual_seed(seed)
     return torch.randn(1, tokens, dim, generator=generator, dtype=torch.float32) * ENCODER_MEMORY_SCALE
-
-
-def shuffled_memory(memory, seed: int):
-    """The clip's own memory with its token rows permuted.
-
-    The same values and the same scale as the encoder really emits, with the temporal structure gone — which is
-    what puts the decode off the model's manifold, where its unmasked argmax stops obeying the grammar. Scaling a
-    random memory up would do that too, but it would also leave the range the backends are tuned for, so a
-    failure there could not be told apart from a narrow-dtype artefact.
-    """
-    import torch
-
-    generator = torch.Generator().manual_seed(seed)
-    return memory[:, torch.randperm(memory.shape[1], generator=generator)].contiguous()
 
 
 def record_decode(sheetsage2, model, memory, steps: int, stop_seconds: float, prefix=None):
@@ -262,23 +248,31 @@ def main():
     # Four cases, each failing for something the others cannot see. 'audio' is a real clip run to its own EOS.
     # 'prefixed' replays a prefix that leaves the grammar owing a partner token, as an overlap prefix does to the
     # next window. 'synthetic' is a seeded memory at the encoder's scale, which the model never resolves, so it
-    # runs into the token limit. 'shuffled' is the clip's own memory with its rows permuted — the only case
-    # measured to put the checkpoint's unmasked argmax outside the grammar, which is what makes it the gate on
+    # runs into the token limit. 'maskgate' seeds a run of four shifts, the longest the grammar tolerates, and is
+    # the only case measured to make the checkpoint want an illegal token — which is what makes it the gate on
     # whether the mask is applied inside the loop at all.
+    #
+    # Two things that do NOT produce such a case, measured, so they are not worth retrying. Permuting the memory's
+    # token rows changes nothing at all: cross-attention reads keys and values as a set, so permuting both is
+    # exactly identity. And a memory of unit deviation does make the mask decide eleven tokens, but at 5x the
+    # scale the encoder can emit, where a reduced-precision backend drifts far enough to fail for its own reason.
     if args.audio is not None:
         waveform = load_waveform(args.audio, 24000)
         with torch.no_grad():
             memory, _ = model.encode(waveform)
         dump_case(sheetsage2, model, args.out, "audio", memory, args.audio.name, args.steps, args.logit_steps)
-        tokenizer = model.tokenizer
-        pending = [*tokenizer.prompt_prefix(), tokenizer.subbeat_shift_token_start, tokenizer.meter_token_start + 3]
+        pending = [*model.tokenizer.prompt_prefix(), model.tokenizer.subbeat_shift_token_start,
+                   model.tokenizer.meter_token_start + 3]
         dump_case(sheetsage2, model, args.out, "prefixed", memory, args.audio.name, args.steps, args.logit_steps,
                   prefix=pending)
-        dump_case(sheetsage2, model, args.out, "shuffled", shuffled_memory(memory, args.seed),
-                  f"shuffled({args.audio.name}, seed={args.seed})", args.steps, args.logit_steps)
 
-    dump_case(sheetsage2, model, args.out, "synthetic", synthetic_memory(7500, 512, args.seed),
+    tokenizer = model.tokenizer
+    synthetic = synthetic_memory(7500, 512, args.seed)
+    dump_case(sheetsage2, model, args.out, "synthetic", synthetic,
               f"synthetic(seed={args.seed})", args.steps, args.logit_steps)
+    shift_run = [*tokenizer.prompt_prefix(), *([tokenizer.subbeat_shift_token_start + 256] * 4)]
+    dump_case(sheetsage2, model, args.out, "maskgate", synthetic, f"synthetic(seed={args.seed})",
+              args.steps, args.logit_steps, prefix=shift_run)
     return 0
 
 
