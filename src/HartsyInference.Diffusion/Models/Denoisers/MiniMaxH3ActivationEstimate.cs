@@ -40,36 +40,30 @@ public static class MiniMaxH3ActivationEstimate
 
         long fullSeqInnerBytes = (long)seq * inner * DType.F32.SizeInBytes;
 
-        // One chunk's own transient scratch: either the packed qkv chunk (inner*3 wide) alongside its chunk-sized
-        // q/k/v (another inner*3), or the MLP's gateUp+act chunk — the two never run concurrently within a block,
-        // and neither scales with seq. Matches MiniMaxH3ChunkPolicy's own per-row rate for the same reason.
         int resolvedChunkRows = chunkRows ?? MiniMaxH3ChunkPolicy.DefaultChunkRows;
-        long attnChunkBytes = (long)resolvedChunkRows * inner * 6L * DType.F32.SizeInBytes;
-        long mlpChunkBytes = (long)resolvedChunkRows * ffn * 3L * DType.F32.SizeInBytes;
-        long chunkScratchBytes = Math.Max(attnChunkBytes, mlpChunkBytes);
+        bool chunked = resolvedChunkRows < seq;
 
-        // AttentionChunked's two passes peak at different things and are separated in time, so the floor is the worse
-        // of the two rather than their sum — summing them false-refused a 39-frame geometry that had already been
-        // proven to complete on real hardware (see MiniMaxH3ActivationEstimateTests' measured calibration).
-        // Pass 1 holds kFull + vFull, two full [1, H, seq, hd] F32 buffers, plus the chunk in flight. It used to hold
-        // a third — every chunk's q, kept alive for pass 2 — which is what OOMed a 141-frame sharded run on the 12 GB
-        // card (at seq=38325 each buffer is 1047.9 MB, exactly the failing allocation). The projection is now split
-        // across the passes (k+v here, q re-projected per chunk in pass 2, same total GEMM work), so q never spans
-        // the pass boundary and this term is 2x rather than 3x.
-        // When the scratch spans the whole sequence the forward is not chunking, and the projection peak is the
-        // attention implementation's own rather than a chunk plus the kFull/vFull that outlive it. Dense Attention
-        // holds qkv [seq, inner*3] alongside head-major q/k/v (6x); AttentionSparse additionally keeps a
-        // full-sequence gate and the token-major buffer it permutes from (8x). Mlp is unchanged by either.
-        long unchunkedAttentionBytes =
-            (sparseAttention ? 8L : 6L) * (long)seq * inner * DType.F32.SizeInBytes;
-        long unchunkedMlpBytes = 3L * (long)seq * ffn * DType.F32.SizeInBytes;
-        long passOneBytes = resolvedChunkRows >= seq
-            ? Math.Max(unchunkedAttentionBytes, unchunkedMlpBytes)
-            : 2L * fullSeqInnerBytes + chunkScratchBytes;
+        // Attention's peak depends on which implementation ForwardNamedBlock picks, and it picks AttentionSparse
+        // whenever a sparse session exists — BEFORE it tests seq > chunkRows. There is no chunked sparse path, so
+        // a sparse forward keeps its full-sequence q/k/v/gate alongside qkv and the token-major gate it permutes
+        // from (8x) at any length. Dense attention does chunk, and then kFull/vFull outlive each chunk in flight,
+        // which is the 2x term; unchunked it holds qkv alongside head-major q/k/v (6x).
+        long attentionBytes = sparseAttention
+            ? 8L * (long)seq * inner * DType.F32.SizeInBytes
+            : chunked
+                ? 2L * fullSeqInnerBytes + (long)resolvedChunkRows * inner * 6L * DType.F32.SizeInBytes
+                : 6L * (long)seq * inner * DType.F32.SizeInBytes;
 
-        // Pass 2 still holds kFull + vFull for every SDPA call, alongside the [seq, hidden] result it scatters each
-        // chunk into. It used to ALSO hold an outChunks list of the same total size awaiting a final Concat; chunks
-        // now go straight into their rows of the result, so only the one full-size buffer is live.
+        // Mlp chunks in both modes (gateUp + act, 3x its width over whichever row count it runs).
+        long mlpBytes = (long)(chunked ? resolvedChunkRows : seq) * ffn * 3L * DType.F32.SizeInBytes;
+
+        // The two never run concurrently within a block, so the floor is the worse rather than their sum — summing
+        // them false-refused a 39-frame geometry already proven to complete on real hardware (see this class's
+        // measured calibration). AttentionChunked's pass 1 used to hold a third full buffer, every chunk's q kept
+        // alive for pass 2, which OOMed a 141-frame sharded run on the 12 GB card (at seq=38325 each buffer is
+        // 1047.9 MB, exactly the failing allocation); q is now re-projected per chunk, so the term is 2x not 3x.
+        long passOneBytes = Math.Max(attentionBytes, mlpBytes);
+
         long passTwoBytes = 2L * fullSeqInnerBytes + (long)seq * hidden * bodyBytes;
 
         return residualBytes + Math.Max(passOneBytes, passTwoBytes) + FudgeBytes;

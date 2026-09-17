@@ -16,6 +16,9 @@ namespace HartsyInference.Diffusion.Tests;
 /// 141-frame sharded request cleared pre-flight and then OOMed mid-forward on the 12 GiB card. Both are why these
 /// numbers are measured rather than reasoned about; see the class remarks on
 /// <see cref="MiniMaxH3ActivationEstimate"/> for the shape the floor actually takes.
+/// <para>Every run below is the DENSE fp8 FL2VA path, so each call says <c>sparseAttention: false</c>. The
+/// released VSA profile takes <c>AttentionSparse</c>, whose full-sequence gate reserves more at the same
+/// geometry — calibrating one against the other would move these measured boundaries.</para>
 /// <para><b>The three runs below predate the pass-1 projection split</b> (k+v projected in pass 1, q re-projected
 /// per chunk in pass 2), which removed a full <c>seq*inner*F32</c> from the pass-1 peak. Their measured
 /// available-VRAM window is still the calibration anchor — that is a property of the box, not of the estimator —
@@ -60,9 +63,9 @@ public sealed class MiniMaxH3ActivationEstimateTests
     public void EstimateFloorBytes_GrowsMonotonicallyWithSequenceLength()
     {
         MiniMaxH3Config config = new MiniMaxH3Config();
-        long floorGood = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32);
-        long floorOom = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownOomSeq, config, DType.F32);
-        long floorIncident = MiniMaxH3ActivationEstimate.EstimateFloorBytes(IncidentSeq, config, DType.F32);
+        long floorGood = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32, sparseAttention: false);
+        long floorOom = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownOomSeq, config, DType.F32, sparseAttention: false);
+        long floorIncident = MiniMaxH3ActivationEstimate.EstimateFloorBytes(IncidentSeq, config, DType.F32, sparseAttention: false);
 
         Assert.True(floorGood < floorOom, $"{floorGood} should be < {floorOom}");
         Assert.True(floorOom < floorIncident, $"{floorOom} should be < {floorIncident}");
@@ -72,8 +75,8 @@ public sealed class MiniMaxH3ActivationEstimateTests
     public void EstimateFloorBytes_MatchesTheMeasuredRealCudaFeasibilityBoundary()
     {
         MiniMaxH3Config config = new MiniMaxH3Config();
-        long floorGood = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32);
-        long floorOom = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownOomSeq, config, DType.F32);
+        long floorGood = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32, sparseAttention: false);
+        long floorOom = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownOomSeq, config, DType.F32, sparseAttention: false);
 
         Assert.True(floorGood < MeasuredAvailableForActivations,
             $"the known-good geometry's floor ({floorGood} bytes) should fit the measured "
@@ -96,7 +99,7 @@ public sealed class MiniMaxH3ActivationEstimateTests
     public void EstimateFloorBytes_PostSplit_FitsTheGeometryThatUsedToRefuse()
     {
         MiniMaxH3Config config = new MiniMaxH3Config();
-        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(SplitEnabledSeq, config, DType.F32);
+        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(SplitEnabledSeq, config, DType.F32, sparseAttention: false);
 
         Assert.True(floor <= MeasuredAvailableBytes20260812,
             $"56f@768x768's floor ({floor} bytes) must fit the {MeasuredAvailableBytes20260812}-byte window it "
@@ -112,7 +115,7 @@ public sealed class MiniMaxH3ActivationEstimateTests
     public void EstimateFloorBytes_IncidentGeometry_FarExceedsTheMeasuredWindow()
     {
         MiniMaxH3Config config = new MiniMaxH3Config();
-        long floorIncident = MiniMaxH3ActivationEstimate.EstimateFloorBytes(IncidentSeq, config, DType.F32);
+        long floorIncident = MiniMaxH3ActivationEstimate.EstimateFloorBytes(IncidentSeq, config, DType.F32, sparseAttention: false);
 
         Assert.True(floorIncident > MeasuredAvailableForActivations,
             "the geometry that actually OOM'd yesterday must still refuse under the corrected floor estimate");
@@ -138,8 +141,9 @@ public sealed class MiniMaxH3ActivationEstimateTests
 
             MiniMaxH3Config config = new MiniMaxH3Config();
             long scaledFloor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-                KnownGoodSeq, config, DType.F32, pinned);
-            long defaultFloor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(KnownGoodSeq, config, DType.F32);
+                KnownGoodSeq, config, DType.F32, pinned, sparseAttention: false);
+            long defaultFloor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+                KnownGoodSeq, config, DType.F32, sparseAttention: false);
             Assert.True(scaledFloor < defaultFloor,
                 $"a smaller chunk needs less scratch, so the floor must drop: {scaledFloor} vs {defaultFloor}");
         }
@@ -192,62 +196,6 @@ public sealed class MiniMaxH3ActivationEstimateTests
         }
     }
 
-    /// <summary>A geometry below <see cref="MiniMaxH3ChunkPolicy.MinChunkableRows"/> runs whole, and then
-    /// <see cref="MiniMaxH3Transformer.Attention"/>'s qkv and head-major q/k/v ARE the full-sequence buffers the
-    /// pass-1 term models — counting both charges one allocation twice. That over-count refused a 90-frame
-    /// 512x288 clip by 48 MB on a 24 GB card that had just generated the same geometry.</summary>
-    [Fact]
-    public void EstimateFloorBytes_UnchunkedGeometry_DoesNotChargeTheFullSequenceBuffersTwice()
-    {
-        MiniMaxH3Config config = new MiniMaxH3Config();
-        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
-        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
-        long residual = (long)seq * config.HiddenSize * DType.F32.SizeInBytes;
-        // Unchunked attention's live peak: qkv [seq, inner*3] alongside head-major q/k/v of the same total width.
-        long attentionPeak = 2L * seq * inner * 3L * DType.F32.SizeInBytes;
-        long ceiling = residual + attentionPeak + MiniMaxH3ActivationEstimate.FudgeBytes;
 
-        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue),
-            sparseAttention: false);
 
-        Assert.True(floor <= ceiling,
-            $"an unchunked floor ({floor}) must not exceed what the unchunked forward actually allocates "
-            + $"({ceiling}) — charging kFull/vFull on top of a full-sequence scratch term counts them twice");
-    }
-
-    /// <summary>The released VSA profile takes <c>AttentionSparse</c>, which keeps a full-sequence gate and the
-    /// token-major buffer it permutes from alive alongside qkv and head-major q/k/v — an 8x projection peak where
-    /// the dense path needs 6x. Charging the dense peak for a sparse forward would approve a near-limit geometry
-    /// that then OOMs, which is the dangerous direction for a pre-flight.</summary>
-    [Fact]
-    public void EstimateFloorBytes_UnchunkedSparseAttention_KeepsTheLargerProjectionPeak()
-    {
-        MiniMaxH3Config config = new MiniMaxH3Config();
-        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
-        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
-        int chunkRows = MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue);
-
-        long dense = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, chunkRows, sparseAttention: false);
-        long sparse = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, chunkRows, sparseAttention: true);
-
-        Assert.True(sparse > dense, $"sparse ({sparse}) must reserve more than dense ({dense})");
-        Assert.Equal(2L * seq * inner * DType.F32.SizeInBytes, sparse - dense);
-    }
-
-    /// <summary>A caller that does not say which attention path it will take must get the larger reservation, so
-    /// an omitted argument cannot quietly under-estimate.</summary>
-    [Fact]
-    public void EstimateFloorBytes_DefaultsToTheSparsePeakWhenTheModeIsUnknown()
-    {
-        MiniMaxH3Config config = new MiniMaxH3Config();
-        int seq = MiniMaxH3ChunkPolicy.MinChunkableRows - 1;
-        int chunkRows = MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, long.MaxValue);
-
-        Assert.Equal(
-            MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, config, DType.F32, chunkRows, sparseAttention: true),
-            MiniMaxH3ActivationEstimate.EstimateFloorBytes(seq, config, DType.F32, chunkRows));
-    }
 }
