@@ -95,6 +95,26 @@ public sealed class SheetSage2AbcParityTests
         Assert.Equal(want.GetProperty("strippedFullEqualsMelodyOnly").GetBoolean(), stripped == melodyOnly);
     }
 
+    /// <summary>The strongest single statement this gate makes: 55 events the released model really produced
+    /// from thirty seconds of solo piano, rendered both ways, character for character.
+    ///
+    /// <para>Kept as a named test on top of the theory above so that dropping the case from the fixture fails
+    /// loudly instead of quietly shrinking the gate. It is one window, so it says nothing about the stitching
+    /// seam; what it does say is that the port handles the event shapes the model actually emits — events
+    /// carrying a bar position but no meter, a chord track opening on no-chord, a key change, both tracks and
+    /// multi-bar rests — rather than the ones a hand-built stream imagines.</para></summary>
+    [Fact]
+    public void ARealTranscription_RendersExactly()
+    {
+        JsonElement want = Reference.GetProperty("cases").GetProperty("real_piano30");
+        List<TimedScoreEvent> events = ReadEvents(want.GetProperty("events"));
+        double duration = want.GetProperty("duration").GetDouble();
+        Assert.Equal(55, events.Count);
+        Assert.Equal(want.GetProperty("melodyOnly").GetString(), AbcSerializer.EventsToAbc(events, duration));
+        Assert.Equal(want.GetProperty("full").GetString(),
+            AbcSerializer.EventsToAbc(events, duration, melodyOnly: false));
+    }
+
     /// <summary>At least one pinned case has to actually diverge, or the gate above proves nothing.</summary>
     [Fact]
     public void AtLeastOneCase_DivergesUnderAChordStrip()

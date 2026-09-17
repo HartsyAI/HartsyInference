@@ -9,6 +9,11 @@ The module depends only on numpy, so it is imported directly rather than stubbed
 
     python3 dump_sheetsage2_abc_reference.py --source /path/to/ComfyUI/comfy/audio_encoders/sheetsage2_abc.py
 
+Pass --real-events to fold in a transcription the released model actually produced, which pins the event shapes
+it really emits rather than the ones this file guesses at:
+
+    python3 dump_sheetsage2_abc_reference.py --source .../sheetsage2_abc.py --real-events .../ref_events.json
+
 Writes sheetsage2_reference/abc.json. Also pinned per case is the intermediate score, because the inferred
 measure table carries flags (pickup, partial, inferred, pad_before) that never reach the ABC text and so cannot
 be caught by comparing it.
@@ -262,6 +267,19 @@ KEY_FAILURES = ["C:dorian", "H:major", "C#:lydian"]
 NOTE_KEYS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb", "Am", "G#m"]
 
 
+def load_real_case(path):
+    """Reads a transcription the released model actually produced, so the fixture is not limited to the event
+    shapes this file guessed at. Its ABC renderings sit next to it and are checked rather than trusted."""
+    payload = json.loads(path.read_text())
+    events = [{"time": source["time"], "values": source["values"]} for source in payload["events"]]
+    expected = {}
+    for mode in ("melody", "full"):
+        sibling = path.with_name(f"ref_abc_{mode}.abc")
+        if sibling.exists():
+            expected[mode] = sibling.read_text()
+    return events, payload["duration"], expected
+
+
 def strip_chords(text):
     """Removes quoted chord symbols, leaving header and comment lines alone — the voice headers carry quotes of
     their own, so a blanket substitution would mangle them."""
@@ -375,6 +393,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path, help="Path to the released sheetsage2_abc.py")
     parser.add_argument("--out", type=Path, default=Path(__file__).with_name("sheetsage2_reference"))
+    parser.add_argument("--real-events", type=Path, default=None,
+                        help="ref_events.json from a real transcription, added as the real_piano30 case")
     args = parser.parse_args()
 
     module = load_reference(args.source)
@@ -384,6 +404,18 @@ def main() -> int:
     for name, build in CASES.items():
         events, duration = build()
         payload["cases"][name] = run_case(module, events, duration)
+
+    if args.real_events is not None:
+        events, duration, expected = load_real_case(args.real_events)
+        case = run_case(module, events, duration)
+        # The renderings that shipped with the transcription have to come back out of it unchanged, or the case
+        # is pinning this script's reading of the events rather than the model's own output.
+        for mode, text in expected.items():
+            rendered = case["melodyOnly"] if mode == "melody" else case["full"]
+            if rendered != text:
+                raise SystemExit(f"{args.real_events.with_name(f'ref_abc_{mode}.abc')} is not what the serializer "
+                                 f"produces from ref_events.json; refusing to write a fixture that hides that")
+        payload["cases"]["real_piano30"] = case
 
     payload["chordSymbols"] = {chord: module.chord_symbol_to_abc(chord) for chord in CHORD_SYMBOLS}
     payload["chordFailures"] = {
