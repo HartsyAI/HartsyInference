@@ -9,10 +9,9 @@ The module depends only on numpy, so it is imported directly rather than stubbed
 
     python3 dump_sheetsage2_abc_reference.py --source /path/to/ComfyUI/comfy/audio_encoders/sheetsage2_abc.py
 
-Pass --real-events to fold in a transcription the released model actually produced, which pins the event shapes
-it really emits rather than the ones this file guesses at:
-
-    python3 dump_sheetsage2_abc_reference.py --source .../sheetsage2_abc.py --real-events .../ref_events.json
+A transcription the released model actually produced is folded in as the real_piano30 case, from
+sheetsage2_reference/real_piano30/ref_events.json, which pins the event shapes it really emits rather than the
+ones this file guesses at. Its two ABC renderings sit beside it and are checked against, not merely copied.
 
 Writes sheetsage2_reference/abc.json. Also pinned per case is the intermediate score, because the inferred
 measure table carries flags (pickup, partial, inferred, pad_before) that never reach the ABC text and so cannot
@@ -393,7 +392,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path, help="Path to the released sheetsage2_abc.py")
     parser.add_argument("--out", type=Path, default=Path(__file__).with_name("sheetsage2_reference"))
-    parser.add_argument("--real-events", type=Path, default=None,
+    parser.add_argument("--real-events", type=Path,
+                        default=Path(__file__).with_name("sheetsage2_reference") / "real_piano30" / "ref_events.json",
                         help="ref_events.json from a real transcription, added as the real_piano30 case")
     args = parser.parse_args()
 
@@ -405,7 +405,7 @@ def main() -> int:
         events, duration = build()
         payload["cases"][name] = run_case(module, events, duration)
 
-    if args.real_events is not None:
+    if args.real_events is not None and args.real_events.exists():
         events, duration, expected = load_real_case(args.real_events)
         case = run_case(module, events, duration)
         # The renderings that shipped with the transcription have to come back out of it unchanged, or the case

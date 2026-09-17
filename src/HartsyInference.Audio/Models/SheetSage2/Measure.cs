@@ -13,7 +13,8 @@ namespace HartsyInference.Audio.Models.SheetSage2;
 /// <param name="Pickup">Whether the span precedes the first downbeat.</param>
 /// <param name="Partial">Whether the span is the truncated tail after the last downbeat.</param>
 /// <param name="Inferred">Whether the span's meter was reconstructed rather than taken from agreeing beats.</param>
-/// <param name="NotatedNumerator">Beats to notate, when that differs from the span; null keeps <paramref name="Numerator"/>.</param>
+/// <param name="NotatedNumerator">Beats to notate when that differs from the span; null keeps
+/// <paramref name="Numerator"/>.</param>
 /// <param name="NotatedDenominator">Beat value to notate; null keeps <paramref name="Denominator"/>.</param>
 /// <param name="PadBefore">Whether the padding rest goes before the bar's notes instead of after.</param>
 public readonly record struct Measure(int Index, int StartBeat, int EndBeat, int Numerator, int Denominator,

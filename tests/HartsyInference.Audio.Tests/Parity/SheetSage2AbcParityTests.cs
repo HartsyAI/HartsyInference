@@ -36,19 +36,20 @@ public sealed class SheetSage2AbcParityTests
     }
 
     private static JsonElement LoadReference()
+        => JsonDocument.Parse(File.ReadAllText(FixturePath("abc.json"))).RootElement.Clone();
+
+    private static string FixturePath(params string[] parts)
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "python-reference", "sheetsage2_reference", "abc.json");
-        if (!File.Exists(path))
+        string[] tail = ["python-reference", "sheetsage2_reference", .. parts];
+        string path = Path.Combine([AppContext.BaseDirectory, .. tail]);
+        if (File.Exists(path)) return path;
+        // Fall back to the source tree when the fixture was not copied next to the test binary.
+        DirectoryInfo? dir = new(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "tests", "python-reference")))
         {
-            // Fall back to the source tree when the fixture was not copied next to the test binary.
-            DirectoryInfo? dir = new(AppContext.BaseDirectory);
-            while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "tests", "python-reference")))
-            {
-                dir = dir.Parent;
-            }
-            path = Path.Combine(dir?.FullName ?? ".", "tests", "python-reference", "sheetsage2_reference", "abc.json");
+            dir = dir.Parent;
         }
-        return JsonDocument.Parse(File.ReadAllText(path)).RootElement.Clone();
+        return Path.Combine([dir?.FullName ?? ".", "tests", .. tail]);
     }
 
     [Fact]
@@ -106,13 +107,19 @@ public sealed class SheetSage2AbcParityTests
     [Fact]
     public void ARealTranscription_RendersExactly()
     {
-        JsonElement want = Reference.GetProperty("cases").GetProperty("real_piano30");
-        List<TimedScoreEvent> events = ReadEvents(want.GetProperty("events"));
-        double duration = want.GetProperty("duration").GetDouble();
-        Assert.Equal(55, events.Count);
-        Assert.Equal(want.GetProperty("melodyOnly").GetString(), AbcSerializer.EventsToAbc(events, duration));
-        Assert.Equal(want.GetProperty("full").GetString(),
+        // Read straight from the transcription and the two renderings that shipped with it, so nothing this
+        // repository generated sits between the model's output and the comparison.
+        JsonDocument raw = JsonDocument.Parse(File.ReadAllText(FixturePath("real_piano30", "ref_events.json")));
+        List<TimedScoreEvent> events = ReadRawEvents(raw.RootElement.GetProperty("events"));
+        double duration = raw.RootElement.GetProperty("duration").GetDouble();
+        Assert.Equal(raw.RootElement.GetProperty("eventCount").GetInt32(), events.Count);
+        Assert.Equal(File.ReadAllText(FixturePath("real_piano30", "ref_abc_melody.abc")),
+            AbcSerializer.EventsToAbc(events, duration));
+        Assert.Equal(File.ReadAllText(FixturePath("real_piano30", "ref_abc_full.abc")),
             AbcSerializer.EventsToAbc(events, duration, melodyOnly: false));
+        // And the same transcription as the dump script folded it into abc.json, so the two agree.
+        JsonElement want = Reference.GetProperty("cases").GetProperty("real_piano30");
+        Assert.Equal(want.GetProperty("melodyOnly").GetString(), AbcSerializer.EventsToAbc(events, duration));
     }
 
     /// <summary>At least one pinned case has to actually diverge, or the gate above proves nothing.</summary>
@@ -178,10 +185,10 @@ public sealed class SheetSage2AbcParityTests
 
         JsonElement structure = want.GetProperty("structureEvents");
         Assert.Equal(structure.GetArrayLength(), score.StructureEvents.Count);
-        int event_ = 0;
+        int eventIndex = 0;
         foreach (JsonElement expected in structure.EnumerateArray())
         {
-            (int subbeat, string label) = score.StructureEvents[event_++];
+            (int subbeat, string label) = score.StructureEvents[eventIndex++];
             Assert.Equal(expected[0].GetInt32(), subbeat);
             Assert.Equal(expected[1].GetString(), label);
         }
@@ -239,7 +246,8 @@ public sealed class SheetSage2AbcParityTests
         {
             Exception error = Assert.ThrowsAny<AbcRebuildException>(
                 () => AbcPitchSpelling.KeySymbolToAbc(entry.Name));
-            string expected = entry.Value.GetString() == "ChordSymbolError" ? "ChordSymbolException" : "AbcRebuildException";
+            string expected = entry.Value.GetString() == "ChordSymbolError"
+                ? "ChordSymbolException" : "AbcRebuildException";
             Assert.Equal(expected, error.GetType().Name);
         }
     }
@@ -461,6 +469,47 @@ public sealed class SheetSage2AbcParityTests
         }
         return result;
     }
+
+    /// <summary>Reads the released implementation's own event shape, with the fields nested under "values".</summary>
+    private static List<TimedScoreEvent> ReadRawEvents(JsonElement events)
+    {
+        List<TimedScoreEvent> result = [];
+        foreach (JsonElement item in events.EnumerateArray())
+        {
+            JsonElement values = item.GetProperty("values");
+            ScoreRhythm? rhythm = null;
+            if (values.TryGetProperty("rhythm", out JsonElement raw))
+            {
+                (int, int)? meter = raw.TryGetProperty("meter", out JsonElement pair)
+                    ? (pair[0].GetInt32(), pair[1].GetInt32()) : null;
+                int? eighth = raw.TryGetProperty("eighth_position", out JsonElement position)
+                    ? position.GetInt32() : null;
+                rhythm = new ScoreRhythm(meter, eighth);
+            }
+            List<TimedScoreNote> melody = [];
+            if (values.TryGetProperty("melody", out JsonElement notes))
+            {
+                foreach (JsonElement note in notes.EnumerateArray())
+                {
+                    melody.Add(new TimedScoreNote(note.GetProperty("pitch").GetInt32(),
+                        note.GetProperty("track").GetInt32(), note.GetProperty("end_time").GetDouble()));
+                }
+            }
+            result.Add(new TimedScoreEvent
+            {
+                Time = item.GetProperty("time").GetDouble(),
+                Rhythm = rhythm,
+                Key = RawText(values, "key"),
+                Structure = RawText(values, "structure"),
+                Chord = RawText(values, "chord"),
+                Melody = melody.Count > 0 ? melody : null,
+            });
+        }
+        return result;
+    }
+
+    private static string? RawText(JsonElement values, string name)
+        => values.TryGetProperty(name, out JsonElement value) ? value.GetString() : null;
 
     private static string? Text(JsonElement item, string name)
     {

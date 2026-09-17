@@ -369,8 +369,9 @@ public static partial class AbcSerializer
         double period = MedianBeatPeriod(beats);
         if (!double.IsFinite(period) || period < 1.0 / ScoreTokenizer.TimeHz)
         {
-            throw new BeatGridException($"SheetSage2 decoded a beat period of {period.ToString("G6", CultureInfo.InvariantCulture)}s, "
-                + "which is below its own timestamp resolution; the beat grid cannot be continued to the end of the clip.");
+            throw new BeatGridException(
+                $"SheetSage2 decoded a beat period of {period.ToString("G6", CultureInfo.InvariantCulture)}s, which is "
+                + "below its own timestamp resolution; the beat grid cannot be continued to the end of the clip.");
         }
         while (beats[^1].Time < duration - TimeEpsilon)
         {
