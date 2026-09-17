@@ -27,6 +27,12 @@ public sealed record ModelAsset
     /// size-correct but byte-corrupt file loads as NaN).</summary>
     public string? Sha256 { get; init; }
 
+    /// <summary>Audio cache category to fetch into, when it is not the one this model's modality implies.
+    /// SheetSage2 transcribes, so its modality says <c>"stt"</c>, but its weights ship inside the YuE2 repo and
+    /// belong beside it under <c>"music"</c> — and the loader looks there, so a prefetch into <c>"stt"</c> would
+    /// download the file a second time and still leave an offline run without it.</summary>
+    public string? AudioCategory { get; init; }
+
     /// <summary>Names this asset was saved under before <see cref="TargetName"/> was changed, in the same
     /// models-root-relative form. An install that already holds the file under one of these keeps using it
     /// instead of re-downloading gigabytes to the new name — and, just as importantly, recipes that resolve

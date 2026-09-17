@@ -61,9 +61,16 @@ public sealed class SheetSage2Pipeline : IDisposable
     {
         IReadOnlyDictionary<string, string> fetched = await AudioModelCache
             .FetchAllAsync(hfRepoId, ModelFiles, category: "music", ct: ct).ConfigureAwait(false);
+        return LoadFrom(fetched["audio_encoders/sheetsage2_bf16.safetensors"]);
+    }
 
+    /// <summary>Loads from a checkpoint already on disk, fetching nothing. For a caller that has been handed a
+    /// specific file — a parity gate pinned to one checkpoint — rather than whichever the cache holds.</summary>
+    public static SheetSage2Pipeline LoadFrom(string checkpointPath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(checkpointPath);
         SafeTensorsLoader loader = new();
-        loader.Load(fetched["audio_encoders/sheetsage2_bf16.safetensors"]);
+        loader.Load(checkpointPath);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         ScoreTokenizer tokenizer = new();
@@ -98,7 +105,9 @@ public sealed class SheetSage2Pipeline : IDisposable
 
             int from = (int)Math.Round(window.Start * SampleRate);
             int to = Math.Min(audioMono.Length, (int)Math.Round(window.End * SampleRate));
-            Tensor memory = _encoder.Encode(backend, audioMono.AsSpan(from, to - from));
+            // The memory is ~15 MB and the backend holds it in its activation cache until the dispose callback
+            // runs, so a window's worth left undisposed is retained for the life of the backend, not the call.
+            using Tensor memory = _encoder.Encode(backend, audioMono.AsSpan(from, to - from));
             double stop = window.GenerationStop ?? Math.Min(duration - window.Start, SlidingWindowPlan.WindowSeconds);
             List<int> tokens = _decoder.GenerateTokens(backend, memory, stop, prefix is null ? default : CollectionsMarshal.AsSpan(prefix));
             truncated |= tokens.Count >= _decoder.Config.MaxTokens;

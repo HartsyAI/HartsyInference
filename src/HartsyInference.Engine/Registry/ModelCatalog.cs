@@ -947,7 +947,7 @@ public static class ModelCatalog
                 {
                     // Cached under the YuE2 repo it ships in, so a machine that already generates with YuE2
                     // does not fetch a second copy. CC BY-NC 4.0.
-                    new() { Repo = "Comfy-Org/YuE2", RepoPath = "audio_encoders/sheetsage2_bf16.safetensors", TargetSubdir = "Audio/SheetSage2", Role = "encoder-decoder" },
+                    new() { Repo = "Comfy-Org/YuE2", RepoPath = "audio_encoders/sheetsage2_bf16.safetensors", TargetSubdir = "Audio/SheetSage2", Role = "encoder-decoder", AudioCategory = "music" },
                 },
             },
             E("moonshine", stt, "Moonshine", "encoder-decoder", ok, cli: true),

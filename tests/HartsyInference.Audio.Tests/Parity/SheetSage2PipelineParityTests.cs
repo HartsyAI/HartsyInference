@@ -25,7 +25,7 @@ public sealed class SheetSage2PipelineParityTests(ITestOutputHelper output)
     private readonly ITestOutputHelper _out = output;
 
     [Fact]
-    public async Task Transcription_MatchesReleasedImplementation()
+    public void Transcription_MatchesReleasedImplementation()
     {
         string? checkpoint = Environment.GetEnvironmentVariable("SHEETSAGE2_CHECKPOINT");
         string? audioPath = Environment.GetEnvironmentVariable("SHEETSAGE2_AUDIO");
@@ -43,12 +43,32 @@ public sealed class SheetSage2PipelineParityTests(ITestOutputHelper output)
             return;
         }
         float[] audio = ReadMono24kWav(audioPath);
-        using SheetSage2Pipeline pipeline = await SheetSage2Pipeline.LoadAsync("Comfy-Org/YuE2");
+        // The guarded checkpoint is the one under test; going through the downloader would validate
+        // whichever copy the cache happens to hold, and would reach the network on a machine set up offline.
+        using SheetSage2Pipeline pipeline = SheetSage2Pipeline.LoadFrom(checkpoint);
         ScoreTranscription score = pipeline.Transcribe(backend, audio);
 
         _out.WriteLine($"{score.Duration:0.0}s in {score.WindowCount} window(s), truncated={score.Truncated}");
-        Assert.Equal(File.ReadAllText(Path.Combine(referenceDir, "ref_abc_melody.abc")), score.MelodyAbc);
-        Assert.Equal(File.ReadAllText(Path.Combine(referenceDir, "ref_abc_full.abc")), score.FullAbc);
+        // A whole score is too long to read in an assertion message, so on a mismatch the produced text is
+        // written beside the reference and the first differing line is named.
+        Compare(referenceDir, "ref_abc_melody.abc", score.MelodyAbc);
+        Compare(referenceDir, "ref_abc_full.abc", score.FullAbc);
+    }
+
+    private void Compare(string referenceDir, string name, string produced)
+    {
+        string expected = File.ReadAllText(Path.Combine(referenceDir, name));
+        if (expected == produced) return;
+        string dump = Path.Combine(Path.GetTempPath(), "sheetsage2-produced-" + name);
+        File.WriteAllText(dump, produced);
+        string[] want = expected.Split('\n');
+        string[] got = produced.Split('\n');
+        int line = 0;
+        while (line < want.Length && line < got.Length && want[line] == got[line]) line++;
+        _out.WriteLine($"{name}: differs at line {line + 1} of {want.Length} (produced {got.Length}); wrote {dump}");
+        _out.WriteLine($"  want: {(line < want.Length ? want[line] : "<eof>")}");
+        _out.WriteLine($"  got : {(line < got.Length ? got[line] : "<eof>")}");
+        Assert.Fail($"{name} differs at line {line + 1}; produced text written to {dump}");
     }
 
     /// <summary>CUDA, or skip. The encoder attends over 7,500 tokens across 24 layers, so the host path is not a
