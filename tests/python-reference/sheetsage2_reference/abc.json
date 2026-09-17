@@ -1,0 +1,7502 @@
+{
+ "subbeatDivision": 4,
+ "voiceIds": [
+  "Vocal",
+  "Ins"
+ ],
+ "cases": {
+  "common_time": {
+   "duration": 8.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "C:major",
+     "structure": "verse",
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 0,
+       "endTime": 0.5
+      },
+      {
+       "pitch": 48,
+       "track": 1,
+       "endTime": 2.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 1.0
+      }
+     ]
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "A:min",
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 2.0
+      }
+     ]
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj",
+     "melody": [
+      {
+       "pitch": 65,
+       "track": 0,
+       "endTime": 2.75
+      },
+      {
+       "pitch": 53,
+       "track": 1,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.75,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 0,
+       "endTime": 3.0
+      }
+     ]
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "G:7",
+     "melody": [
+      {
+       "pitch": 62,
+       "track": 0,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": "chorus",
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 72,
+       "track": 0,
+       "endTime": 5.625
+      },
+      {
+       "pitch": 43,
+       "track": 1,
+       "endTime": 6.0
+      }
+     ]
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.75,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 71,
+       "track": 0,
+       "endTime": 6.5
+      }
+     ]
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:7",
+     "melody": [
+      {
+       "pitch": 48,
+       "track": 1,
+       "endTime": 8.0
+      }
+     ]
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 8.0
+      }
+     ]
+    },
+    {
+     "time": 7.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 7.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nE4G4A8|F6E2D8|\nV: Ins\nC,16|F,16|\n% chorus\nV: Vocal\nc12-czB2-|B4G12|\nV: Ins\nG,,16|C,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E4G4\"Am\"A8|\"F\"F6E2\"G7\"D8|\nV: Ins\nC,16|F,16|\n% chorus\nV: Vocal\n\"C\"c12-czB2-|\"G7\"B4G12|\nV: Ins\nG,,16|C,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nE4G4A8|F6E2D8|\nV: Ins\nC,16|F,16|\n% chorus\nV: Vocal\nc12-czB2-|B4G12|\nV: Ins\nG,,16|C,16|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 17,
+    "subbeatCount": 65,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 12,
+      "endBeat": 16,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0,
+     7.125,
+     7.25,
+     7.375,
+     7.5,
+     7.625,
+     7.75,
+     7.875,
+     8.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0,
+     14.25,
+     14.5,
+     14.75,
+     15.0,
+     15.25,
+     15.5,
+     15.75,
+     16.0
+    ],
+    "subbeatDenominators": [
+     [
+      65,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      65,
+      "C"
+     ]
+    ],
+    "chordArr": [
+     [
+      8,
+      "C:maj"
+     ],
+     [
+      8,
+      "A:min"
+     ],
+     [
+      8,
+      "F:maj"
+     ],
+     [
+      8,
+      "G:7"
+     ],
+     [
+      16,
+      "C:maj"
+     ],
+     [
+      17,
+      "G:7"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "verse"
+     ],
+     [
+      32,
+      "chorus"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       131
+      ],
+      [
+       3,
+       130
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       3,
+       136
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       7,
+       140
+      ],
+      [
+       1,
+       133
+      ],
+      [
+       5,
+       132
+      ],
+      [
+       1,
+       131
+      ],
+      [
+       1,
+       130
+      ],
+      [
+       1,
+       127
+      ],
+      [
+       7,
+       126
+      ],
+      [
+       1,
+       147
+      ],
+      [
+       12,
+       146
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       1,
+       145
+      ],
+      [
+       5,
+       144
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       11,
+       136
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       99
+      ],
+      [
+       15,
+       98
+      ],
+      [
+       1,
+       109
+      ],
+      [
+       15,
+       108
+      ],
+      [
+       1,
+       89
+      ],
+      [
+       15,
+       88
+      ],
+      [
+       1,
+       99
+      ],
+      [
+       15,
+       98
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "meter_change": {
+   "duration": 7.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "G:major",
+     "structure": "intro",
+     "chord": "G:maj",
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 2.0
+      },
+      {
+       "pitch": 55,
+       "track": 1,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "D:maj",
+     "melody": [
+      {
+       "pitch": 74,
+       "track": 0,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": "verse",
+     "chord": "E:min",
+     "melody": [
+      {
+       "pitch": 76,
+       "track": 0,
+       "endTime": 5.5
+      },
+      {
+       "pitch": 52,
+       "track": 1,
+       "endTime": 7.0
+      }
+     ]
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 71,
+       "track": 0,
+       "endTime": 7.0
+      }
+     ]
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      3,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:G\n% intro\nV: Vocal\nG16|d16|\nV: Ins\nG,16-|G,16|\n% verse\nV: Vocal\nM:3/4\ne12|B12|\nV: Ins\nM:3/4\nE,12-|E,12|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:G\n% intro\nV: Vocal\n\"G\"G16|\"D\"d16|\nV: Ins\nG,16-|G,16|\n% verse\nV: Vocal\nM:3/4\n\"Em\"e12|\"C\"B12|\nV: Ins\nM:3/4\nE,12-|E,12|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:G\n% intro\nV: Vocal\nG16|d16|\nV: Ins\nG,16-|G,16|\n% verse\nV: Vocal\nM:3/4\ne12|B12|\nV: Ins\nM:3/4\nE,12-|E,12|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 15,
+    "subbeatCount": 57,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 11,
+      "numerator": 3,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 3,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 3,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 11,
+      "endBeat": 14,
+      "numerator": 3,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 3,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 3,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0
+    ],
+    "subbeatDenominators": [
+     [
+      57,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      57,
+      "G"
+     ]
+    ],
+    "chordArr": [
+     [
+      16,
+      "G:maj"
+     ],
+     [
+      16,
+      "D:maj"
+     ],
+     [
+      12,
+      "E:min"
+     ],
+     [
+      13,
+      "C:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "intro"
+     ],
+     [
+      32,
+      "verse"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       137
+      ],
+      [
+       15,
+       136
+      ],
+      [
+       1,
+       151
+      ],
+      [
+       15,
+       150
+      ],
+      [
+       1,
+       155
+      ],
+      [
+       11,
+       154
+      ],
+      [
+       1,
+       145
+      ],
+      [
+       11,
+       144
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       113
+      ],
+      [
+       31,
+       112
+      ],
+      [
+       1,
+       107
+      ],
+      [
+       23,
+       106
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "pickup_and_keys": {
+   "duration": 7.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": "C:major",
+     "structure": "intro",
+     "chord": "G:7",
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 1.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 60,
+       "track": 0,
+       "endTime": 2.0
+      },
+      {
+       "pitch": 36,
+       "track": 1,
+       "endTime": 3.0
+      }
+     ]
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "A:min",
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 0,
+       "endTime": 3.0
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "A:minor",
+     "structure": "verse",
+     "chord": "A:min",
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 4.25
+      },
+      {
+       "pitch": 45,
+       "track": 1,
+       "endTime": 5.0
+      }
+     ]
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.25,
+     "meter": null,
+     "eighthPosition": null,
+     "key": "Eb:major",
+     "structure": null,
+     "chord": "Eb:maj",
+     "melody": [
+      {
+       "pitch": 63,
+       "track": 0,
+       "endTime": 5.0
+      }
+     ]
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "Bb:7",
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 0,
+       "endTime": 7.0
+      },
+      {
+       "pitch": 46,
+       "track": 1,
+       "endTime": 7.0
+      }
+     ]
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% intro\nV: Vocal\nz8G8|C8E8|\nV: Ins\nZ|C,,16|\n% verse\nV: Vocal\nK:Am\nA8-A2[K:Eb]E6|B16|\nV: Ins\nK:Am\nA,,8-A,,2-[K:Eb]=A,,6|B,,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% intro\nV: Vocal\nz8\"G7\"G8|\"C\"C8\"Am\"E8|\nV: Ins\nZ|C,,16|\n% verse\nV: Vocal\nK:Am\n\"Am\"A8-A2[K:Eb]\"Eb\"E6|\"Bb7\"B16|\nV: Ins\nK:Am\nA,,8-A,,2-[K:Eb]=A,,6|B,,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% intro\nV: Vocal\nz8G8|C8E8|\nV: Ins\nZ|C,,16|\n% verse\nV: Vocal\nK:Am\nA8-A2[K:Eb]E6|B16|\nV: Ins\nK:Am\nA,,8-A,,2-[K:Eb]=A,,6|B,,16|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 15,
+    "subbeatCount": 57,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [
+     "measure 0: inferred 2/4 from downbeat span; declared numerators were [4, 4]",
+     "measure 0: padded leading 2/4 span to 4/4 with preceding rest"
+    ],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 2,
+      "numerator": 2,
+      "denominator": 4,
+      "pickup": true,
+      "partial": false,
+      "inferred": true,
+      "notatedNumerator": 4,
+      "notatedDenominator": 4,
+      "padBefore": true,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 2,
+      "endBeat": 6,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 6,
+      "endBeat": 10,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 10,
+      "endBeat": 14,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0
+    ],
+    "subbeatDenominators": [
+     [
+      57,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      24,
+      "C"
+     ],
+     [
+      10,
+      "Am"
+     ],
+     [
+      23,
+      "Eb"
+     ]
+    ],
+    "chordArr": [
+     [
+      8,
+      "G:7"
+     ],
+     [
+      8,
+      "C:maj"
+     ],
+     [
+      18,
+      "A:min"
+     ],
+     [
+      6,
+      "Eb:maj"
+     ],
+     [
+      17,
+      "Bb:7"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "intro"
+     ],
+     [
+      24,
+      "verse"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       137
+      ],
+      [
+       7,
+       136
+      ],
+      [
+       1,
+       123
+      ],
+      [
+       7,
+       122
+      ],
+      [
+       1,
+       131
+      ],
+      [
+       7,
+       130
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       9,
+       140
+      ],
+      [
+       1,
+       129
+      ],
+      [
+       5,
+       128
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       15,
+       142
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       8,
+       0
+      ],
+      [
+       1,
+       75
+      ],
+      [
+       15,
+       74
+      ],
+      [
+       1,
+       93
+      ],
+      [
+       15,
+       92
+      ],
+      [
+       1,
+       95
+      ],
+      [
+       15,
+       94
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "irregular_bars": {
+   "duration": 7.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "D:major",
+     "structure": "verse",
+     "chord": "D:maj",
+     "melody": [
+      {
+       "pitch": 62,
+       "track": 0,
+       "endTime": 2.0
+      },
+      {
+       "pitch": 50,
+       "track": 1,
+       "endTime": 3.5
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "A:maj",
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 3.5
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "B:min",
+     "melody": [
+      {
+       "pitch": 71,
+       "track": 0,
+       "endTime": 5.5
+      },
+      {
+       "pitch": 47,
+       "track": 1,
+       "endTime": 7.0
+      }
+     ]
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:maj",
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 7.0
+      }
+     ]
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:D\n% verse\nV: Vocal\nD16|\nV: Ins\nD,16-|\nV: Vocal\nM:3/4\nA12|\nV: Ins\nM:3/4\nD,12|\nV: Vocal\nM:4/4\nB16|G12z4|\nV: Ins\nM:4/4\nB,,16-|B,,12z4|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:D\n% verse\nV: Vocal\n\"D\"D16|\nV: Ins\nD,16-|\nV: Vocal\nM:3/4\n\"A\"A12|\nV: Ins\nM:3/4\nD,12|\nV: Vocal\nM:4/4\n\"Bm\"B16|\"G\"G12z4|\nV: Ins\nM:4/4\nB,,16-|B,,12z4|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:D\n% verse\nV: Vocal\nD16|\nV: Ins\nD,16-|\nV: Vocal\nM:3/4\nA12|\nV: Ins\nM:3/4\nD,12|\nV: Vocal\nM:4/4\nB16|G12z4|\nV: Ins\nM:4/4\nB,,16-|B,,12z4|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 15,
+    "subbeatCount": 57,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [
+     "measure 1: inferred 3/4 from downbeat span; declared numerators were [4, 4, 4]",
+     "measure 3: padded final 3/4 span to declared 4/4 with trailing rest"
+    ],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 7,
+      "numerator": 3,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": true,
+      "notatedNumerator": 3,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 3,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 7,
+      "endBeat": 11,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 11,
+      "endBeat": 14,
+      "numerator": 3,
+      "denominator": 4,
+      "pickup": false,
+      "partial": true,
+      "inferred": true,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0
+    ],
+    "subbeatDenominators": [
+     [
+      57,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      57,
+      "D"
+     ]
+    ],
+    "chordArr": [
+     [
+      16,
+      "D:maj"
+     ],
+     [
+      12,
+      "A:maj"
+     ],
+     [
+      16,
+      "B:min"
+     ],
+     [
+      13,
+      "G:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "verse"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       127
+      ],
+      [
+       15,
+       126
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       11,
+       140
+      ],
+      [
+       1,
+       145
+      ],
+      [
+       15,
+       144
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       11,
+       136
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       103
+      ],
+      [
+       27,
+       102
+      ],
+      [
+       1,
+       97
+      ],
+      [
+       27,
+       96
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "denominator_conflict": {
+   "duration": 6.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "C:major",
+     "structure": "instrumental",
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 60,
+       "track": 0,
+       "endTime": 2.0
+      },
+      {
+       "pitch": 48,
+       "track": 1,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      8
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      8
+     ],
+     "eighthPosition": 3,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj",
+     "melody": [
+      {
+       "pitch": 65,
+       "track": 0,
+       "endTime": 4.0
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:maj",
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 6.0
+      },
+      {
+       "pitch": 43,
+       "track": 1,
+       "endTime": 6.0
+      }
+     ]
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% instrumental\nV: Vocal\nC16|F16|G16|\nV: Ins\nC,16-|C,16|G,,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% instrumental\nV: Vocal\n\"C\"C16|\"F\"F16|\"G\"G16|\nV: Ins\nC,16-|C,16|G,,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% instrumental\nV: Vocal\nC16|F16|G16|\nV: Ins\nC,16-|C,16|G,,16|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 13,
+    "subbeatCount": 49,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [
+     "measure 0: placed denominator 4 at the measure boundary; row declarations were [4, 4, 8, 8]"
+    ],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": true,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0
+    ],
+    "subbeatDenominators": [
+     [
+      49,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      49,
+      "C"
+     ]
+    ],
+    "chordArr": [
+     [
+      16,
+      "C:maj"
+     ],
+     [
+      16,
+      "F:maj"
+     ],
+     [
+      17,
+      "G:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "instrumental"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       123
+      ],
+      [
+       15,
+       122
+      ],
+      [
+       1,
+       133
+      ],
+      [
+       15,
+       132
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       15,
+       136
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       99
+      ],
+      [
+       31,
+       98
+      ],
+      [
+       1,
+       89
+      ],
+      [
+       15,
+       88
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "chord_spellings": {
+   "duration": 8.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "F:major",
+     "structure": "bridge",
+     "chord": "C:maj/3",
+     "melody": [
+      {
+       "pitch": 65,
+       "track": 0,
+       "endTime": 4.0
+      },
+      {
+       "pitch": 41,
+       "track": 1,
+       "endTime": 8.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": "A#:min7/b3",
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "Db:maj7/7",
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": "Gb:min/5",
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F#:7/b7",
+     "melody": []
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": "E:hdim7",
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "B:sus4(b7)",
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": "G:minmaj7",
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "A#:major",
+     "structure": null,
+     "chord": "D:dim7",
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 0,
+       "endTime": 6.0
+      }
+     ]
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": "A:maj6",
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "E:min6",
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": "C:sus2",
+     "melody": []
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "G#:minor",
+     "structure": null,
+     "chord": "F:aug",
+     "melody": [
+      {
+       "pitch": 68,
+       "track": 0,
+       "endTime": 8.0
+      }
+     ]
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": "Bb:dim",
+     "melody": []
+    },
+    {
+     "time": 7.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": "N",
+     "melody": []
+    },
+    {
+     "time": 7.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": "Cb:maj",
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:F\n% bridge\nV: Vocal\nF16-|F16|\nV: Ins\nF,,16-|F,,16-|\nV: Vocal\nK:Bb\nB16|\nV: Ins\nK:Bb\nF,,16-|\nV: Vocal\nK:G#m\nG16|\nV: Ins\nK:G#m\n^E,,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:F\n% bridge\nV: Vocal\n\"C/E\"F4-\"A#m7/C#\"F4-\"Dbmaj7/C\"F4-\"Gbm/Db\"F4-|\"F#7/E\"F4-\"Em7b5\"F4-\"B7sus4\"F4-\"Gm(maj7)\"F4|\nV: Ins\nF,,16-|F,,16-|\nV: Vocal\nK:Bb\n\"Ddim7\"B4-\"A6\"B4-\"Em6\"B4-\"Csus2\"B4|\nV: Ins\nK:Bb\nF,,16-|\nV: Vocal\nK:G#m\n\"Faug\"G4-\"Bbdim\"G4-G4-\"Cb\"G4|\nV: Ins\nK:G#m\n^E,,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:F\n% bridge\nV: Vocal\nF4-F4-F4-F4-|F4-F4-F4-F4|\nV: Ins\nF,,16-|F,,16-|\nV: Vocal\nK:Bb\nB4-B4-B4-B4|\nV: Ins\nK:Bb\nF,,16-|\nV: Vocal\nK:G#m\nG4-G4-G4-G4|\nV: Ins\nK:G#m\n^E,,16|\n",
+   "strippedFullEqualsMelodyOnly": false,
+   "score": {
+    "beatCount": 17,
+    "subbeatCount": 65,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 12,
+      "endBeat": 16,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0,
+     7.125,
+     7.25,
+     7.375,
+     7.5,
+     7.625,
+     7.75,
+     7.875,
+     8.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0,
+     14.25,
+     14.5,
+     14.75,
+     15.0,
+     15.25,
+     15.5,
+     15.75,
+     16.0
+    ],
+    "subbeatDenominators": [
+     [
+      65,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      32,
+      "F"
+     ],
+     [
+      16,
+      "Bb"
+     ],
+     [
+      17,
+      "G#m"
+     ]
+    ],
+    "chordArr": [
+     [
+      4,
+      "C:maj/3"
+     ],
+     [
+      4,
+      "A#:min7/b3"
+     ],
+     [
+      4,
+      "Db:maj7/7"
+     ],
+     [
+      4,
+      "Gb:min/5"
+     ],
+     [
+      4,
+      "F#:7/b7"
+     ],
+     [
+      4,
+      "E:hdim7"
+     ],
+     [
+      4,
+      "B:sus4(b7)"
+     ],
+     [
+      4,
+      "G:minmaj7"
+     ],
+     [
+      4,
+      "D:dim7"
+     ],
+     [
+      4,
+      "A:maj6"
+     ],
+     [
+      4,
+      "E:min6"
+     ],
+     [
+      4,
+      "C:sus2"
+     ],
+     [
+      4,
+      "F:aug"
+     ],
+     [
+      4,
+      "Bb:dim"
+     ],
+     [
+      4,
+      "N"
+     ],
+     [
+      5,
+      "Cb:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "bridge"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       133
+      ],
+      [
+       31,
+       132
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       15,
+       142
+      ],
+      [
+       1,
+       139
+      ],
+      [
+       15,
+       138
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       85
+      ],
+      [
+       63,
+       84
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "silent_voices": {
+   "duration": 12.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "C:major",
+     "structure": "verse",
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 60,
+       "track": 0,
+       "endTime": 2.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj",
+     "melody": []
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:maj",
+     "melody": []
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 6.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "C:maj",
+     "melody": []
+    },
+    {
+     "time": 6.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 7.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 7.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 8.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": "chorus",
+     "chord": "A:min",
+     "melody": [
+      {
+       "pitch": 45,
+       "track": 1,
+       "endTime": 10.0
+      }
+     ]
+    },
+    {
+     "time": 8.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 9.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 9.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 10.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj",
+     "melody": [
+      {
+       "pitch": 53,
+       "track": 1,
+       "endTime": 12.0
+      }
+     ]
+    },
+    {
+     "time": 10.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 11.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 11.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nC16|Z3|\nV: Ins\nZ4|\n% chorus\nV: Vocal\nZ2|\nV: Ins\nA,,16|F,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"C16|\"F\"z16|\"G\"z16|\"C\"z16|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"Am\"z16|\"F\"z16|\nV: Ins\nA,,16|F,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nC16|z16|z16|z16|\nV: Ins\nZ4|\n% chorus\nV: Vocal\nz16|z16|\nV: Ins\nA,,16|F,16|\n",
+   "strippedFullEqualsMelodyOnly": false,
+   "score": {
+    "beatCount": 25,
+    "subbeatCount": 97,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 12,
+      "endBeat": 16,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 4,
+      "startBeat": 16,
+      "endBeat": 20,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 5,
+      "startBeat": 20,
+      "endBeat": 24,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0,
+     6.125,
+     6.25,
+     6.375,
+     6.5,
+     6.625,
+     6.75,
+     6.875,
+     7.0,
+     7.125,
+     7.25,
+     7.375,
+     7.5,
+     7.625,
+     7.75,
+     7.875,
+     8.0,
+     8.125,
+     8.25,
+     8.375,
+     8.5,
+     8.625,
+     8.75,
+     8.875,
+     9.0,
+     9.125,
+     9.25,
+     9.375,
+     9.5,
+     9.625,
+     9.75,
+     9.875,
+     10.0,
+     10.125,
+     10.25,
+     10.375,
+     10.5,
+     10.625,
+     10.75,
+     10.875,
+     11.0,
+     11.125,
+     11.25,
+     11.375,
+     11.5,
+     11.625,
+     11.75,
+     11.875,
+     12.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0,
+     14.25,
+     14.5,
+     14.75,
+     15.0,
+     15.25,
+     15.5,
+     15.75,
+     16.0,
+     16.25,
+     16.5,
+     16.75,
+     17.0,
+     17.25,
+     17.5,
+     17.75,
+     18.0,
+     18.25,
+     18.5,
+     18.75,
+     19.0,
+     19.25,
+     19.5,
+     19.75,
+     20.0,
+     20.25,
+     20.5,
+     20.75,
+     21.0,
+     21.25,
+     21.5,
+     21.75,
+     22.0,
+     22.25,
+     22.5,
+     22.75,
+     23.0,
+     23.25,
+     23.5,
+     23.75,
+     24.0
+    ],
+    "subbeatDenominators": [
+     [
+      97,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      97,
+      "C"
+     ]
+    ],
+    "chordArr": [
+     [
+      16,
+      "C:maj"
+     ],
+     [
+      16,
+      "F:maj"
+     ],
+     [
+      16,
+      "G:maj"
+     ],
+     [
+      16,
+      "C:maj"
+     ],
+     [
+      16,
+      "A:min"
+     ],
+     [
+      17,
+      "F:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "verse"
+     ],
+     [
+      64,
+      "chorus"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       123
+      ],
+      [
+       15,
+       122
+      ],
+      [
+       81,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       64,
+       0
+      ],
+      [
+       1,
+       93
+      ],
+      [
+       15,
+       92
+      ],
+      [
+       1,
+       109
+      ],
+      [
+       15,
+       108
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "free_tempo": {
+   "duration": 6.564400000000001,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "Bb:major",
+     "structure": "solo",
+     "chord": "Bb:maj",
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 0,
+       "endTime": 1.6548
+      },
+      {
+       "pitch": 46,
+       "track": 1,
+       "endTime": 3.3096
+      }
+     ]
+    },
+    {
+     "time": 0.4137,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 0.8274,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.2411,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.6548,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "Eb:maj",
+     "melody": [
+      {
+       "pitch": 75,
+       "track": 0,
+       "endTime": 3.3096
+      }
+     ]
+    },
+    {
+     "time": 2.0685000000000002,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.4822,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.8959,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.3096,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:7",
+     "melody": [
+      {
+       "pitch": 74,
+       "track": 0,
+       "endTime": 4.9644
+      }
+     ]
+    },
+    {
+     "time": 3.7233,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.1370000000000005,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.5507,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=145\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Bb\n% solo\nV: Vocal\nB16|e16|d16|Z|\nV: Ins\nB,,16-|B,,16|Z2|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=145\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Bb\n% solo\nV: Vocal\n\"Bb\"B16|\"Eb\"e16|\"F7\"d16|\"F7\"z12z3z|\nV: Ins\nB,,16-|B,,16|Z2|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=145\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Bb\n% solo\nV: Vocal\nB16|e16|d16|z12z3z|\nV: Ins\nB,,16-|B,,16|Z2|\n",
+   "strippedFullEqualsMelodyOnly": false,
+   "score": {
+    "beatCount": 17,
+    "subbeatCount": 65,
+    "unitDenominator": 16,
+    "tempo": 145.03263234227697,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 12,
+      "endBeat": 16,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.103425,
+     0.20685,
+     0.310275,
+     0.4137,
+     0.5171250000000001,
+     0.62055,
+     0.723975,
+     0.8274,
+     0.930825,
+     1.0342500000000001,
+     1.1376750000000002,
+     1.2411,
+     1.344525,
+     1.44795,
+     1.5513750000000002,
+     1.6548,
+     1.7582250000000001,
+     1.86165,
+     1.9650750000000001,
+     2.0685000000000002,
+     2.1719250000000003,
+     2.2753500000000004,
+     2.378775,
+     2.4822,
+     2.5856250000000003,
+     2.68905,
+     2.792475,
+     2.8959,
+     2.9993250000000002,
+     3.1027500000000003,
+     3.206175,
+     3.3096,
+     3.413025,
+     3.51645,
+     3.619875,
+     3.7233,
+     3.826725,
+     3.9301500000000003,
+     4.033575000000001,
+     4.1370000000000005,
+     4.240425,
+     4.34385,
+     4.447275,
+     4.5507,
+     4.654125,
+     4.75755,
+     4.860975,
+     4.9643999999999995,
+     5.067824999999999,
+     5.17125,
+     5.274675,
+     5.3781,
+     5.4815249999999995,
+     5.58495,
+     5.688375000000001,
+     5.7918,
+     5.895225,
+     5.9986500000000005,
+     6.102075000000001,
+     6.205500000000001,
+     6.308925,
+     6.412350000000001,
+     6.515775000000001,
+     6.619200000000001
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0,
+     14.25,
+     14.5,
+     14.75,
+     15.0,
+     15.25,
+     15.5,
+     15.75,
+     16.0
+    ],
+    "subbeatDenominators": [
+     [
+      65,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      65,
+      "Bb"
+     ]
+    ],
+    "chordArr": [
+     [
+      16,
+      "Bb:maj"
+     ],
+     [
+      16,
+      "Eb:maj"
+     ],
+     [
+      31,
+      "F:7"
+     ],
+     [
+      2,
+      "N"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "solo"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       143
+      ],
+      [
+       15,
+       142
+      ],
+      [
+       1,
+       153
+      ],
+      [
+       15,
+       152
+      ],
+      [
+       1,
+       151
+      ],
+      [
+       15,
+       150
+      ],
+      [
+       17,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       95
+      ],
+      [
+       31,
+       94
+      ],
+      [
+       33,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "overlapping_notes": {
+   "duration": 6.0,
+   "events": [
+    {
+     "time": 0.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "C:major",
+     "structure": "verse",
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 60,
+       "track": 0,
+       "endTime": 2.0
+      },
+      {
+       "pitch": 64,
+       "track": 0,
+       "endTime": 1.0
+      },
+      {
+       "pitch": 48,
+       "track": 1,
+       "endTime": 3.0
+      }
+     ]
+    },
+    {
+     "time": 0.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 1.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj",
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 0,
+       "endTime": 3.0
+      }
+     ]
+    },
+    {
+     "time": 2.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 2.5
+      }
+     ]
+    },
+    {
+     "time": 2.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": "G:maj",
+     "melody": [
+      {
+       "pitch": 71,
+       "track": 0,
+       "endTime": 6.0
+      },
+      {
+       "pitch": 50,
+       "track": 1,
+       "endTime": 6.0
+      }
+     ]
+    },
+    {
+     "time": 3.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 3.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 4.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.0,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.5,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nE8z4G4|A4B12-|B16|\nV: Ins\nC,16-|C,4D,12-|D,16|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E8z4\"F\"G4|\"F\"A4\"G\"B12-|\"G\"B16|\nV: Ins\nC,16-|C,4D,12-|D,16|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=120\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\nE8z4G4|A4B12-|B16|\nV: Ins\nC,16-|C,4D,12-|D,16|\n",
+   "strippedFullEqualsMelodyOnly": true,
+   "score": {
+    "beatCount": 13,
+    "subbeatCount": 49,
+    "unitDenominator": 16,
+    "tempo": 120.0,
+    "diagnostics": [],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 4,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 4,
+      "endBeat": 8,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 8,
+      "endBeat": 12,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.0,
+     0.125,
+     0.25,
+     0.375,
+     0.5,
+     0.625,
+     0.75,
+     0.875,
+     1.0,
+     1.125,
+     1.25,
+     1.375,
+     1.5,
+     1.625,
+     1.75,
+     1.875,
+     2.0,
+     2.125,
+     2.25,
+     2.375,
+     2.5,
+     2.625,
+     2.75,
+     2.875,
+     3.0,
+     3.125,
+     3.25,
+     3.375,
+     3.5,
+     3.625,
+     3.75,
+     3.875,
+     4.0,
+     4.125,
+     4.25,
+     4.375,
+     4.5,
+     4.625,
+     4.75,
+     4.875,
+     5.0,
+     5.125,
+     5.25,
+     5.375,
+     5.5,
+     5.625,
+     5.75,
+     5.875,
+     6.0
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0
+    ],
+    "subbeatDenominators": [
+     [
+      49,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      49,
+      "C"
+     ]
+    ],
+    "chordArr": [
+     [
+      12,
+      "C:maj"
+     ],
+     [
+      8,
+      "F:maj"
+     ],
+     [
+      29,
+      "G:maj"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "verse"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       1,
+       131
+      ],
+      [
+       7,
+       130
+      ],
+      [
+       4,
+       0
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       3,
+       136
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       3,
+       140
+      ],
+      [
+       1,
+       145
+      ],
+      [
+       27,
+       144
+      ],
+      [
+       1,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       1,
+       99
+      ],
+      [
+       19,
+       98
+      ],
+      [
+       1,
+       103
+      ],
+      [
+       27,
+       102
+      ],
+      [
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "real_piano30": {
+   "duration": 29.998666666666665,
+   "events": [
+    {
+     "time": 0.01,
+     "meter": [
+      4,
+      4
+     ],
+     "eighthPosition": 0,
+     "key": "D:minor",
+     "structure": "intro",
+     "chord": "N",
+     "melody": []
+    },
+    {
+     "time": 0.25,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 0.59,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": "intro",
+     "chord": "D:min",
+     "melody": [
+      {
+       "pitch": 77,
+       "track": 1,
+       "endTime": 2.25
+      }
+     ]
+    },
+    {
+     "time": 1.41,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.25,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 2.67,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 3.09
+      }
+     ]
+    },
+    {
+     "time": 3.09,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 74,
+       "track": 1,
+       "endTime": 3.51
+      }
+     ]
+    },
+    {
+     "time": 3.51,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 77,
+       "track": 1,
+       "endTime": 3.93
+      }
+     ]
+    },
+    {
+     "time": 3.93,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:min7",
+     "melody": [
+      {
+       "pitch": 77,
+       "track": 1,
+       "endTime": 5.17
+      }
+     ]
+    },
+    {
+     "time": 4.75,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 5.17,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 1,
+       "endTime": 5.59
+      }
+     ]
+    },
+    {
+     "time": 5.59,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 1,
+       "endTime": 7.26
+      }
+     ]
+    },
+    {
+     "time": 6.42,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 7.26,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "C:maj",
+     "melody": [
+      {
+       "pitch": 76,
+       "track": 1,
+       "endTime": 8.92
+      }
+     ]
+    },
+    {
+     "time": 8.09,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 8.92,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 9.34,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 67,
+       "track": 1,
+       "endTime": 9.76
+      }
+     ]
+    },
+    {
+     "time": 9.76,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 72,
+       "track": 1,
+       "endTime": 10.195
+      }
+     ]
+    },
+    {
+     "time": 10.195,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 76,
+       "track": 1,
+       "endTime": 10.63
+      }
+     ]
+    },
+    {
+     "time": 10.63,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "F:maj7",
+     "melody": [
+      {
+       "pitch": 76,
+       "track": 1,
+       "endTime": 11.835
+      }
+     ]
+    },
+    {
+     "time": 11.42,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 11.835,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 12.25
+      }
+     ]
+    },
+    {
+     "time": 12.25,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 13.05
+      }
+     ]
+    },
+    {
+     "time": 13.05,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 1,
+       "endTime": 13.260000000000002
+      }
+     ]
+    },
+    {
+     "time": 13.260000000000002,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 65,
+       "track": 1,
+       "endTime": 13.47
+      }
+     ]
+    },
+    {
+     "time": 13.47,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 13.68
+      }
+     ]
+    },
+    {
+     "time": 13.68,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 72,
+       "track": 1,
+       "endTime": 13.89
+      }
+     ]
+    },
+    {
+     "time": 13.89,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "A#:maj",
+     "melody": [
+      {
+       "pitch": 74,
+       "track": 1,
+       "endTime": 15.63
+      }
+     ]
+    },
+    {
+     "time": 14.8,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 15.63,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 16.025000000000002,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 62,
+       "track": 1,
+       "endTime": 16.42
+      }
+     ]
+    },
+    {
+     "time": 16.42,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 1,
+       "endTime": 16.840000000000003
+      }
+     ]
+    },
+    {
+     "time": 16.840000000000003,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 65,
+       "track": 1,
+       "endTime": 17.26
+      }
+     ]
+    },
+    {
+     "time": 17.26,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "G:min",
+     "melody": [
+      {
+       "pitch": 72,
+       "track": 1,
+       "endTime": 18.549999999999997
+      }
+     ]
+    },
+    {
+     "time": 18.13,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 18.549999999999997,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 1,
+       "endTime": 18.759999999999998
+      }
+     ]
+    },
+    {
+     "time": 18.759999999999998,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 18.97
+      }
+     ]
+    },
+    {
+     "time": 18.97,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 1,
+       "endTime": 20.59
+      }
+     ]
+    },
+    {
+     "time": 19.75,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 20.59,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "A:maj",
+     "melody": []
+    },
+    {
+     "time": 21.46,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 61,
+       "track": 1,
+       "endTime": 21.875
+      }
+     ]
+    },
+    {
+     "time": 21.875,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 64,
+       "track": 1,
+       "endTime": 22.29
+      }
+     ]
+    },
+    {
+     "time": 22.29,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 1,
+       "endTime": 23.93
+      }
+     ]
+    },
+    {
+     "time": 23.13,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 23.93,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": null,
+     "chord": "A:maj",
+     "melody": []
+    },
+    {
+     "time": 24.76,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 25.175,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 25.59
+      }
+     ]
+    },
+    {
+     "time": 25.59,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 26.46
+      }
+     ]
+    },
+    {
+     "time": 26.46,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 26.880000000000003,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 0,
+       "endTime": 27.3
+      }
+     ]
+    },
+    {
+     "time": 27.3,
+     "meter": null,
+     "eighthPosition": 0,
+     "key": null,
+     "structure": "verse",
+     "chord": "D:min",
+     "melody": [
+      {
+       "pitch": 70,
+       "track": 0,
+       "endTime": 27.695
+      }
+     ]
+    },
+    {
+     "time": 27.695,
+     "meter": null,
+     "eighthPosition": null,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": [
+      {
+       "pitch": 69,
+       "track": 0,
+       "endTime": 28.09
+      }
+     ]
+    },
+    {
+     "time": 28.09,
+     "meter": null,
+     "eighthPosition": 2,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 28.93,
+     "meter": null,
+     "eighthPosition": 4,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    },
+    {
+     "time": 29.84,
+     "meter": null,
+     "eighthPosition": 6,
+     "key": null,
+     "structure": null,
+     "chord": null,
+     "melody": []
+    }
+   ],
+   "melodyOnly": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=74\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Dm\n% intro\nV: Vocal\nZ4|\nV: Ins\nZ|f8z2A2d2f2|f6B2B8|e8z2G2c2e2|\nV: Vocal\nZ4|\nV: Ins\ne6A2A4EFAc|d8z2D2E2F2|c6BAB8|z4^C2E2A8|\nV: Vocal\nz6A2A4z2B2|\nV: Ins\nZ|\n% verse\nV: Vocal\nB2A2z12|\nV: Ins\nZ|\n",
+   "full": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=74\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Dm\n% intro\nV: Vocal\nZ|\"Dm\"z16|\"Gm7\"z16|\"C\"z16|\nV: Ins\nZ|f8z2A2d2f2|f6B2B8|e8z2G2c2e2|\nV: Vocal\n\"Fmaj7\"z16|\"A#\"z16|\"Gm\"z16|\"A\"z16|\nV: Ins\ne6A2A4EFAc|d8z2D2E2F2|c6BAB8|z4^C2E2A8|\nV: Vocal\n\"A\"z6A2A4z2B2|\nV: Ins\nZ|\n% verse\nV: Vocal\n\"Dm\"B2A2z8zz3|\nV: Ins\nZ|\n",
+   "strippedFull": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=74\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:Dm\n% intro\nV: Vocal\nZ|z16|z16|z16|\nV: Ins\nZ|f8z2A2d2f2|f6B2B8|e8z2G2c2e2|\nV: Vocal\nz16|z16|z16|z16|\nV: Ins\ne6A2A4EFAc|d8z2D2E2F2|c6BAB8|z4^C2E2A8|\nV: Vocal\nz6A2A4z2B2|\nV: Ins\nZ|\n% verse\nV: Vocal\nB2A2z8zz3|\nV: Ins\nZ|\n",
+   "strippedFullEqualsMelodyOnly": false,
+   "score": {
+    "beatCount": 39,
+    "subbeatCount": 153,
+    "unitDenominator": 16,
+    "tempo": 74.35186694929072,
+    "diagnostics": [
+     "measure 0: inferred 2/4 from downbeat span; declared numerators were [4, 4]",
+     "measure 0: padded leading 2/4 span to 4/4 with preceding rest"
+    ],
+    "measures": [
+     {
+      "index": 0,
+      "startBeat": 0,
+      "endBeat": 2,
+      "numerator": 2,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": true,
+      "notatedNumerator": 4,
+      "notatedDenominator": 4,
+      "padBefore": true,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 1,
+      "startBeat": 2,
+      "endBeat": 6,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 2,
+      "startBeat": 6,
+      "endBeat": 10,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 3,
+      "startBeat": 10,
+      "endBeat": 14,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 4,
+      "startBeat": 14,
+      "endBeat": 18,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 5,
+      "startBeat": 18,
+      "endBeat": 22,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 6,
+      "startBeat": 22,
+      "endBeat": 26,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 7,
+      "startBeat": 26,
+      "endBeat": 30,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 8,
+      "startBeat": 30,
+      "endBeat": 34,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     },
+     {
+      "index": 9,
+      "startBeat": 34,
+      "endBeat": 38,
+      "numerator": 4,
+      "denominator": 4,
+      "pickup": false,
+      "partial": false,
+      "inferred": false,
+      "notatedNumerator": 4,
+      "notatedDenominator": null,
+      "padBefore": false,
+      "abcNumerator": 4,
+      "abcDenominator": 4
+     }
+    ],
+    "subbeatTimes": [
+     0.01,
+     0.06999999999999999,
+     0.13,
+     0.19,
+     0.25,
+     0.33499999999999996,
+     0.42,
+     0.505,
+     0.59,
+     0.7949999999999999,
+     1.0,
+     1.205,
+     1.41,
+     1.6199999999999999,
+     1.83,
+     2.04,
+     2.25,
+     2.46,
+     2.67,
+     2.88,
+     3.09,
+     3.3,
+     3.51,
+     3.72,
+     3.93,
+     4.135,
+     4.34,
+     4.545,
+     4.75,
+     4.96,
+     5.17,
+     5.38,
+     5.59,
+     5.797499999999999,
+     6.005,
+     6.2125,
+     6.42,
+     6.63,
+     6.84,
+     7.05,
+     7.26,
+     7.467499999999999,
+     7.675,
+     7.8825,
+     8.09,
+     8.2975,
+     8.504999999999999,
+     8.7125,
+     8.92,
+     9.129999999999999,
+     9.34,
+     9.55,
+     9.76,
+     9.9775,
+     10.195,
+     10.412500000000001,
+     10.63,
+     10.8275,
+     11.025,
+     11.2225,
+     11.42,
+     11.6275,
+     11.835,
+     12.0425,
+     12.25,
+     12.45,
+     12.65,
+     12.850000000000001,
+     13.05,
+     13.260000000000002,
+     13.47,
+     13.68,
+     13.89,
+     14.1175,
+     14.345,
+     14.572500000000002,
+     14.8,
+     15.0075,
+     15.215,
+     15.422500000000001,
+     15.63,
+     15.8275,
+     16.025000000000002,
+     16.2225,
+     16.42,
+     16.630000000000003,
+     16.840000000000003,
+     17.05,
+     17.26,
+     17.4775,
+     17.695,
+     17.9125,
+     18.13,
+     18.34,
+     18.549999999999997,
+     18.759999999999998,
+     18.97,
+     19.165,
+     19.36,
+     19.555,
+     19.75,
+     19.96,
+     20.17,
+     20.38,
+     20.59,
+     20.8075,
+     21.025,
+     21.2425,
+     21.46,
+     21.6675,
+     21.875,
+     22.0825,
+     22.29,
+     22.5,
+     22.71,
+     22.919999999999998,
+     23.13,
+     23.33,
+     23.53,
+     23.73,
+     23.93,
+     24.1375,
+     24.345,
+     24.552500000000002,
+     24.76,
+     24.9675,
+     25.175,
+     25.3825,
+     25.59,
+     25.8075,
+     26.025,
+     26.2425,
+     26.46,
+     26.67,
+     26.880000000000003,
+     27.09,
+     27.3,
+     27.497500000000002,
+     27.695,
+     27.8925,
+     28.09,
+     28.3,
+     28.509999999999998,
+     28.72,
+     28.93,
+     29.1575,
+     29.384999999999998,
+     29.6125,
+     29.84,
+     30.04875,
+     30.2575,
+     30.466250000000002,
+     30.675
+    ],
+    "subbeatQuarters": [
+     0.0,
+     0.25,
+     0.5,
+     0.75,
+     1.0,
+     1.25,
+     1.5,
+     1.75,
+     2.0,
+     2.25,
+     2.5,
+     2.75,
+     3.0,
+     3.25,
+     3.5,
+     3.75,
+     4.0,
+     4.25,
+     4.5,
+     4.75,
+     5.0,
+     5.25,
+     5.5,
+     5.75,
+     6.0,
+     6.25,
+     6.5,
+     6.75,
+     7.0,
+     7.25,
+     7.5,
+     7.75,
+     8.0,
+     8.25,
+     8.5,
+     8.75,
+     9.0,
+     9.25,
+     9.5,
+     9.75,
+     10.0,
+     10.25,
+     10.5,
+     10.75,
+     11.0,
+     11.25,
+     11.5,
+     11.75,
+     12.0,
+     12.25,
+     12.5,
+     12.75,
+     13.0,
+     13.25,
+     13.5,
+     13.75,
+     14.0,
+     14.25,
+     14.5,
+     14.75,
+     15.0,
+     15.25,
+     15.5,
+     15.75,
+     16.0,
+     16.25,
+     16.5,
+     16.75,
+     17.0,
+     17.25,
+     17.5,
+     17.75,
+     18.0,
+     18.25,
+     18.5,
+     18.75,
+     19.0,
+     19.25,
+     19.5,
+     19.75,
+     20.0,
+     20.25,
+     20.5,
+     20.75,
+     21.0,
+     21.25,
+     21.5,
+     21.75,
+     22.0,
+     22.25,
+     22.5,
+     22.75,
+     23.0,
+     23.25,
+     23.5,
+     23.75,
+     24.0,
+     24.25,
+     24.5,
+     24.75,
+     25.0,
+     25.25,
+     25.5,
+     25.75,
+     26.0,
+     26.25,
+     26.5,
+     26.75,
+     27.0,
+     27.25,
+     27.5,
+     27.75,
+     28.0,
+     28.25,
+     28.5,
+     28.75,
+     29.0,
+     29.25,
+     29.5,
+     29.75,
+     30.0,
+     30.25,
+     30.5,
+     30.75,
+     31.0,
+     31.25,
+     31.5,
+     31.75,
+     32.0,
+     32.25,
+     32.5,
+     32.75,
+     33.0,
+     33.25,
+     33.5,
+     33.75,
+     34.0,
+     34.25,
+     34.5,
+     34.75,
+     35.0,
+     35.25,
+     35.5,
+     35.75,
+     36.0,
+     36.25,
+     36.5,
+     36.75,
+     37.0,
+     37.25,
+     37.5,
+     37.75,
+     38.0
+    ],
+    "subbeatDenominators": [
+     [
+      153,
+      4
+     ]
+    ],
+    "keyArr": [
+     [
+      153,
+      "Dm"
+     ]
+    ],
+    "chordArr": [
+     [
+      8,
+      "N"
+     ],
+     [
+      16,
+      "D:min"
+     ],
+     [
+      16,
+      "G:min7"
+     ],
+     [
+      16,
+      "C:maj"
+     ],
+     [
+      16,
+      "F:maj7"
+     ],
+     [
+      16,
+      "A#:maj"
+     ],
+     [
+      16,
+      "G:min"
+     ],
+     [
+      32,
+      "A:maj"
+     ],
+     [
+      13,
+      "D:min"
+     ],
+     [
+      4,
+      "N"
+     ]
+    ],
+    "structureEvents": [
+     [
+      0,
+      "intro"
+     ],
+     [
+      8,
+      "intro"
+     ],
+     [
+      136,
+      "verse"
+     ]
+    ],
+    "voiceArrs": {
+     "Vocal": [
+      [
+       126,
+       0
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       140
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       3,
+       140
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       1,
+       142
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       1,
+       142
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       140
+      ],
+      [
+       13,
+       0
+      ]
+     ],
+     "Ins": [
+      [
+       8,
+       0
+      ],
+      [
+       1,
+       157
+      ],
+      [
+       7,
+       156
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       140
+      ],
+      [
+       1,
+       151
+      ],
+      [
+       1,
+       150
+      ],
+      [
+       1,
+       157
+      ],
+      [
+       1,
+       156
+      ],
+      [
+       1,
+       157
+      ],
+      [
+       5,
+       156
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       1,
+       142
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       7,
+       142
+      ],
+      [
+       1,
+       155
+      ],
+      [
+       7,
+       154
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       1,
+       137
+      ],
+      [
+       1,
+       136
+      ],
+      [
+       1,
+       147
+      ],
+      [
+       1,
+       146
+      ],
+      [
+       1,
+       155
+      ],
+      [
+       1,
+       154
+      ],
+      [
+       1,
+       155
+      ],
+      [
+       5,
+       154
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       140
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       3,
+       140
+      ],
+      [
+       1,
+       131
+      ],
+      [
+       1,
+       133
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       147
+      ],
+      [
+       1,
+       151
+      ],
+      [
+       7,
+       150
+      ],
+      [
+       2,
+       0
+      ],
+      [
+       1,
+       127
+      ],
+      [
+       1,
+       126
+      ],
+      [
+       1,
+       131
+      ],
+      [
+       1,
+       130
+      ],
+      [
+       1,
+       133
+      ],
+      [
+       1,
+       132
+      ],
+      [
+       1,
+       147
+      ],
+      [
+       5,
+       146
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       1,
+       143
+      ],
+      [
+       7,
+       142
+      ],
+      [
+       4,
+       0
+      ],
+      [
+       1,
+       125
+      ],
+      [
+       1,
+       124
+      ],
+      [
+       1,
+       131
+      ],
+      [
+       1,
+       130
+      ],
+      [
+       1,
+       141
+      ],
+      [
+       7,
+       140
+      ],
+      [
+       33,
+       0
+      ]
+     ]
+    }
+   }
+  }
+ },
+ "chordSymbols": {
+  "N": null,
+  "X": null,
+  "?": null,
+  "C:maj": "C",
+  "C:min": "Cm",
+  "C:dim": "Cdim",
+  "C:aug": "Caug",
+  "C:7": "C7",
+  "C:maj7": "Cmaj7",
+  "C:min7": "Cm7",
+  "C:dim7": "Cdim7",
+  "C:hdim7": "Cm7b5",
+  "C:sus4": "Csus4",
+  "C:sus2": "Csus2",
+  "C:maj6": "C6",
+  "C:min6": "Cm6",
+  "C:sus4(b7)": "C7sus4",
+  "C:minmaj7": "Cm(maj7)",
+  "C:maj/3": "C/E",
+  "C:maj/5": "C/G",
+  "C:min/b3": "Cm/Eb",
+  "C:7/b7": "C7/Bb",
+  "C:maj7/7": "Cmaj7/B",
+  "A#:min/b3": "A#m/C#",
+  "Bb:maj/3": "Bb/D",
+  "Db:7/b7": "Db7/Cb",
+  "Gb:maj/5": "Gb/Db",
+  "Cb:maj": "Cb",
+  "B#:min": "B#m",
+  "Fbb:maj": "Fbb",
+  "G##:maj": "G##",
+  "C:maj/E": "C/E",
+  "C:maj/Bb": "C/Bb",
+  "C:maj/9": "C/D",
+  "C:maj/13": "C/A",
+  "C:maj/#11": "C/F#",
+  "F#:maj/bb7": "F#/Eb"
+ },
+ "chordFailures": {
+  "Cmaj": "ChordSymbolError",
+  "C:power": "ChordSymbolError",
+  "C:maj/x": "ChordSymbolError",
+  "H:maj": "ChordSymbolError",
+  "C:maj/0": "ChordSymbolError",
+  "C:maj/14": "ChordSymbolError"
+ },
+ "keySymbols": {
+  "C:major": "C",
+  "A:minor": "Am",
+  "F:major": "F",
+  "Bb:major": "Bb",
+  "Eb:major": "Eb",
+  "A#:major": "Bb",
+  "D#:major": "Eb",
+  "G#:minor": "G#m",
+  "Cb:major": "Cb",
+  "F#:major": "F#",
+  "C#:major": "C#",
+  "Gb:major": "Gb",
+  "Db:minor": "C#m",
+  "E#:major": "F",
+  "Bbb:major": "A",
+  "Cm": "Cm",
+  "F#m": "F#m",
+  "G": "G"
+ },
+ "keyFailures": {
+  "C:dorian": "AbcRebuildError",
+  "H:major": "ChordSymbolError",
+  "C#:lydian": "AbcRebuildError"
+ },
+ "keyAccidentals": {
+  "A": [
+   1,
+   0,
+   0,
+   1,
+   1,
+   0,
+   0
+  ],
+  "A#m": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "Ab": [
+   0,
+   -1,
+   -1,
+   0,
+   0,
+   -1,
+   -1
+  ],
+  "Abm": [
+   -1,
+   -1,
+   -1,
+   -1,
+   -1,
+   -1,
+   -1
+  ],
+  "Am": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "B": [
+   1,
+   1,
+   0,
+   1,
+   1,
+   1,
+   0
+  ],
+  "Bb": [
+   0,
+   0,
+   -1,
+   0,
+   0,
+   0,
+   -1
+  ],
+  "Bbm": [
+   0,
+   -1,
+   -1,
+   0,
+   -1,
+   -1,
+   -1
+  ],
+  "Bm": [
+   1,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0
+  ],
+  "C": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "C#": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "C#m": [
+   1,
+   1,
+   0,
+   1,
+   1,
+   0,
+   0
+  ],
+  "Cb": [
+   -1,
+   -1,
+   -1,
+   -1,
+   -1,
+   -1,
+   -1
+  ],
+  "Cm": [
+   0,
+   0,
+   -1,
+   0,
+   0,
+   -1,
+   -1
+  ],
+  "D": [
+   1,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0
+  ],
+  "D#m": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0
+  ],
+  "Db": [
+   0,
+   -1,
+   -1,
+   0,
+   -1,
+   -1,
+   -1
+  ],
+  "Dm": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   -1
+  ],
+  "E": [
+   1,
+   1,
+   0,
+   1,
+   1,
+   0,
+   0
+  ],
+  "Eb": [
+   0,
+   0,
+   -1,
+   0,
+   0,
+   -1,
+   -1
+  ],
+  "Ebm": [
+   -1,
+   -1,
+   -1,
+   0,
+   -1,
+   -1,
+   -1
+  ],
+  "Em": [
+   0,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0
+  ],
+  "F": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   -1
+  ],
+  "F#": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   0
+  ],
+  "F#m": [
+   1,
+   0,
+   0,
+   1,
+   1,
+   0,
+   0
+  ],
+  "Fm": [
+   0,
+   -1,
+   -1,
+   0,
+   0,
+   -1,
+   -1
+  ],
+  "G": [
+   0,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0
+  ],
+  "G#m": [
+   1,
+   1,
+   0,
+   1,
+   1,
+   1,
+   0
+  ],
+  "Gb": [
+   -1,
+   -1,
+   -1,
+   0,
+   -1,
+   -1,
+   -1
+  ],
+  "Gm": [
+   0,
+   0,
+   -1,
+   0,
+   0,
+   0,
+   -1
+  ]
+ },
+ "noteSpellings": {
+  "C": [
+   "C,",
+   "^C,",
+   "D,",
+   "^D,",
+   "E,",
+   "F,",
+   "^F,",
+   "G,",
+   "^G,",
+   "A,",
+   "_B,",
+   "B,",
+   "C",
+   "^C",
+   "D",
+   "^D",
+   "E",
+   "F",
+   "^F",
+   "G",
+   "^G",
+   "A",
+   "_B",
+   "B",
+   "c",
+   "^c",
+   "d",
+   "^d",
+   "e",
+   "f",
+   "^f",
+   "g",
+   "^g",
+   "a",
+   "_b",
+   "b"
+  ],
+  "G": [
+   "C,",
+   "^C,",
+   "D,",
+   "^D,",
+   "E,",
+   "=F,",
+   "F,",
+   "G,",
+   "^G,",
+   "A,",
+   "^A,",
+   "B,",
+   "C",
+   "^C",
+   "D",
+   "^D",
+   "E",
+   "=F",
+   "F",
+   "G",
+   "^G",
+   "A",
+   "^A",
+   "B",
+   "c",
+   "^c",
+   "d",
+   "^d",
+   "e",
+   "=f",
+   "f",
+   "g",
+   "^g",
+   "a",
+   "^a",
+   "b"
+  ],
+  "D": [
+   "=C,",
+   "C,",
+   "D,",
+   "^D,",
+   "E,",
+   "^E,",
+   "F,",
+   "G,",
+   "^G,",
+   "A,",
+   "^A,",
+   "B,",
+   "=C",
+   "C",
+   "D",
+   "^D",
+   "E",
+   "^E",
+   "F",
+   "G",
+   "^G",
+   "A",
+   "^A",
+   "B",
+   "=c",
+   "c",
+   "d",
+   "^d",
+   "e",
+   "^e",
+   "f",
+   "g",
+   "^g",
+   "a",
+   "^a",
+   "b"
+  ],
+  "A": [
+   "^B,,",
+   "C,",
+   "D,",
+   "^D,",
+   "E,",
+   "^E,",
+   "F,",
+   "=G,",
+   "G,",
+   "A,",
+   "^A,",
+   "B,",
+   "^B,",
+   "C",
+   "D",
+   "^D",
+   "E",
+   "^E",
+   "F",
+   "=G",
+   "G",
+   "A",
+   "^A",
+   "B",
+   "^B",
+   "c",
+   "d",
+   "^d",
+   "e",
+   "^e",
+   "f",
+   "=g",
+   "g",
+   "a",
+   "^a",
+   "b"
+  ],
+  "E": [
+   "^B,,",
+   "C,",
+   "=D,",
+   "D,",
+   "E,",
+   "^E,",
+   "F,",
+   "^^F,",
+   "G,",
+   "A,",
+   "^A,",
+   "B,",
+   "^B,",
+   "C",
+   "=D",
+   "D",
+   "E",
+   "^E",
+   "F",
+   "^^F",
+   "G",
+   "A",
+   "^A",
+   "B",
+   "^B",
+   "c",
+   "=d",
+   "d",
+   "e",
+   "^e",
+   "f",
+   "^^f",
+   "g",
+   "a",
+   "^a",
+   "b"
+  ],
+  "B": [
+   "^B,,",
+   "C,",
+   "^^C,",
+   "D,",
+   "E,",
+   "^E,",
+   "F,",
+   "^^F,",
+   "G,",
+   "=A,",
+   "A,",
+   "B,",
+   "^B,",
+   "C",
+   "^^C",
+   "D",
+   "E",
+   "^E",
+   "F",
+   "^^F",
+   "G",
+   "=A",
+   "A",
+   "B",
+   "^B",
+   "c",
+   "^^c",
+   "d",
+   "e",
+   "^e",
+   "f",
+   "^^f",
+   "g",
+   "=a",
+   "a",
+   "b"
+  ],
+  "F#": [
+   "^B,,",
+   "C,",
+   "^^C,",
+   "D,",
+   "=E,",
+   "E,",
+   "F,",
+   "^^F,",
+   "G,",
+   "^^G,",
+   "A,",
+   "B,",
+   "^B,",
+   "C",
+   "^^C",
+   "D",
+   "=E",
+   "E",
+   "F",
+   "^^F",
+   "G",
+   "^^G",
+   "A",
+   "B",
+   "^B",
+   "c",
+   "^^c",
+   "d",
+   "=e",
+   "e",
+   "f",
+   "^^f",
+   "g",
+   "^^g",
+   "a",
+   "b"
+  ],
+  "C#": [
+   "B,,",
+   "C,",
+   "^^C,",
+   "D,",
+   "^^D,",
+   "E,",
+   "F,",
+   "^^F,",
+   "G,",
+   "^^G,",
+   "A,",
+   "=B,",
+   "B,",
+   "C",
+   "^^C",
+   "D",
+   "^^D",
+   "E",
+   "F",
+   "^^F",
+   "G",
+   "^^G",
+   "A",
+   "=B",
+   "B",
+   "c",
+   "^^c",
+   "d",
+   "^^d",
+   "e",
+   "f",
+   "^^f",
+   "g",
+   "^^g",
+   "a",
+   "=b"
+  ],
+  "F": [
+   "C,",
+   "^C,",
+   "D,",
+   "_E,",
+   "E,",
+   "F,",
+   "^F,",
+   "G,",
+   "^G,",
+   "A,",
+   "B,",
+   "=B,",
+   "C",
+   "^C",
+   "D",
+   "_E",
+   "E",
+   "F",
+   "^F",
+   "G",
+   "^G",
+   "A",
+   "B",
+   "=B",
+   "c",
+   "^c",
+   "d",
+   "_e",
+   "e",
+   "f",
+   "^f",
+   "g",
+   "^g",
+   "a",
+   "b",
+   "=b"
+  ],
+  "Bb": [
+   "C,",
+   "^C,",
+   "D,",
+   "E,",
+   "=E,",
+   "F,",
+   "^F,",
+   "G,",
+   "_A,",
+   "A,",
+   "B,",
+   "=B,",
+   "C",
+   "^C",
+   "D",
+   "E",
+   "=E",
+   "F",
+   "^F",
+   "G",
+   "_A",
+   "A",
+   "B",
+   "=B",
+   "c",
+   "^c",
+   "d",
+   "e",
+   "=e",
+   "f",
+   "^f",
+   "g",
+   "_a",
+   "a",
+   "b",
+   "=b"
+  ],
+  "Eb": [
+   "C,",
+   "_D,",
+   "D,",
+   "E,",
+   "=E,",
+   "F,",
+   "^F,",
+   "G,",
+   "A,",
+   "=A,",
+   "B,",
+   "=B,",
+   "C",
+   "_D",
+   "D",
+   "E",
+   "=E",
+   "F",
+   "^F",
+   "G",
+   "A",
+   "=A",
+   "B",
+   "=B",
+   "c",
+   "_d",
+   "d",
+   "e",
+   "=e",
+   "f",
+   "^f",
+   "g",
+   "a",
+   "=a",
+   "b",
+   "=b"
+  ],
+  "Ab": [
+   "C,",
+   "D,",
+   "=D,",
+   "E,",
+   "=E,",
+   "F,",
+   "_G,",
+   "G,",
+   "A,",
+   "=A,",
+   "B,",
+   "=B,",
+   "C",
+   "D",
+   "=D",
+   "E",
+   "=E",
+   "F",
+   "_G",
+   "G",
+   "A",
+   "=A",
+   "B",
+   "=B",
+   "c",
+   "d",
+   "=d",
+   "e",
+   "=e",
+   "f",
+   "_g",
+   "g",
+   "a",
+   "=a",
+   "b",
+   "=b"
+  ],
+  "Db": [
+   "C,",
+   "D,",
+   "=D,",
+   "E,",
+   "=E,",
+   "F,",
+   "G,",
+   "=G,",
+   "A,",
+   "=A,",
+   "B,",
+   "_C",
+   "C",
+   "D",
+   "=D",
+   "E",
+   "=E",
+   "F",
+   "G",
+   "=G",
+   "A",
+   "=A",
+   "B",
+   "_c",
+   "c",
+   "d",
+   "=d",
+   "e",
+   "=e",
+   "f",
+   "g",
+   "=g",
+   "a",
+   "=a",
+   "b",
+   "_c'"
+  ],
+  "Gb": [
+   "=C,",
+   "D,",
+   "=D,",
+   "E,",
+   "_F,",
+   "F,",
+   "G,",
+   "=G,",
+   "A,",
+   "=A,",
+   "B,",
+   "C",
+   "=C",
+   "D",
+   "=D",
+   "E",
+   "_F",
+   "F",
+   "G",
+   "=G",
+   "A",
+   "=A",
+   "B",
+   "c",
+   "=c",
+   "d",
+   "=d",
+   "e",
+   "_f",
+   "f",
+   "g",
+   "=g",
+   "a",
+   "=a",
+   "b",
+   "c'"
+  ],
+  "Cb": [
+   "=C,",
+   "D,",
+   "=D,",
+   "E,",
+   "F,",
+   "=F,",
+   "G,",
+   "=G,",
+   "A,",
+   "__B,",
+   "B,",
+   "C",
+   "=C",
+   "D",
+   "=D",
+   "E",
+   "F",
+   "=F",
+   "G",
+   "=G",
+   "A",
+   "__B",
+   "B",
+   "c",
+   "=c",
+   "d",
+   "=d",
+   "e",
+   "f",
+   "=f",
+   "g",
+   "=g",
+   "a",
+   "__b",
+   "b",
+   "c'"
+  ],
+  "Am": [
+   "C,",
+   "^C,",
+   "D,",
+   "^D,",
+   "E,",
+   "F,",
+   "^F,",
+   "G,",
+   "^G,",
+   "A,",
+   "_B,",
+   "B,",
+   "C",
+   "^C",
+   "D",
+   "^D",
+   "E",
+   "F",
+   "^F",
+   "G",
+   "^G",
+   "A",
+   "_B",
+   "B",
+   "c",
+   "^c",
+   "d",
+   "^d",
+   "e",
+   "f",
+   "^f",
+   "g",
+   "^g",
+   "a",
+   "_b",
+   "b"
+  ],
+  "G#m": [
+   "^B,,",
+   "C,",
+   "^^C,",
+   "D,",
+   "E,",
+   "^E,",
+   "F,",
+   "^^F,",
+   "G,",
+   "=A,",
+   "A,",
+   "B,",
+   "^B,",
+   "C",
+   "^^C",
+   "D",
+   "E",
+   "^E",
+   "F",
+   "^^F",
+   "G",
+   "=A",
+   "A",
+   "B",
+   "^B",
+   "c",
+   "^^c",
+   "d",
+   "e",
+   "^e",
+   "f",
+   "^^f",
+   "g",
+   "=a",
+   "a",
+   "b"
+  ]
+ },
+ "noteSpellingsRunning": [
+  "E",
+  "e",
+  "D",
+  "d",
+  "E",
+  "C",
+  "_D"
+ ],
+ "durationSplits": {
+  "1": [
+   1
+  ],
+  "2": [
+   2
+  ],
+  "3": [
+   3
+  ],
+  "4": [
+   4
+  ],
+  "5": [
+   4,
+   1
+  ],
+  "6": [
+   6
+  ],
+  "7": [
+   6,
+   1
+  ],
+  "8": [
+   8
+  ],
+  "9": [
+   8,
+   1
+  ],
+  "11": [
+   8,
+   3
+  ],
+  "13": [
+   12,
+   1
+  ],
+  "15": [
+   12,
+   3
+  ],
+  "16": [
+   16
+  ],
+  "17": [
+   16,
+   1
+  ],
+  "23": [
+   16,
+   6,
+   1
+  ],
+  "31": [
+   24,
+   6,
+   1
+  ],
+  "48": [
+   48
+  ],
+  "49": [
+   48,
+   1
+  ],
+  "63": [
+   48,
+   12,
+   3
+  ],
+  "64": [
+   48,
+   16
+  ],
+  "96": [
+   48,
+   48
+  ],
+  "100": [
+   48,
+   48,
+   4
+  ],
+  "127": [
+   48,
+   48,
+   24,
+   6,
+   1
+  ],
+  "256": [
+   48,
+   48,
+   48,
+   48,
+   48,
+   16
+  ]
+ },
+ "compressibleFullRest": {
+  "z16": true,
+  "z8z8": true,
+  "z12z3z": true,
+  "z": true,
+  "": false,
+  "c16": false,
+  "z8c8": false,
+  "\"C\"z16": false,
+  "[K:C]z16": false,
+  "z16-": false,
+  "z8 z8": false,
+  "z8x": false,
+  "Z": false,
+  "z4z4z4z4": true
+ }
+}
