@@ -54,7 +54,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
             // first GEMM, minutes into a generation. Tracked immediately so a failure further down frees the
             // widened copies rather than leaving them to the finalizer.
-            loaders.Add(QuantizedWeightPolicy.PrepareForBackend(conv.Transformer, context.Backend));
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends));
             Dictionary<string, Tensor> weights = conv.Transformer;
             WanVideoConfig config = WanConfigDetector.Detect(weights);
             if (!config.HasAudioConditioning)

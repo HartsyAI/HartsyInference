@@ -95,7 +95,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             // first GEMM, minutes into a generation. Tracked immediately — in place of the source it wraps, so a
             // failure further down frees the widened copies rather than leaving them to the finalizer.
             QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareForBackend(converted.Transformer, context.Backend);
+                QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
             loaders[0] = new CompositeDisposable(source, prepared);
 
             // Merge BEFORE LoadWeights, not after: the merge swaps dictionary entries, and device caches are

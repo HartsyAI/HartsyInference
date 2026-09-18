@@ -196,7 +196,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
             // first GEMM, minutes into a generation. Tracked immediately so a failure further down frees the
             // widened copies rather than leaving them to the finalizer.
-            loaders.Add(QuantizedWeightPolicy.PrepareForBackend(conv.Transformer, context.Backend));
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends));
             bool isClipI2V = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
             int inChannels = conv.Transformer.TryGetValue("patch_embedding.weight", out Tensor? patchEmbed) ? (int)patchEmbed.Shape[1] : 0;
             WanVideoConfig config = ResolveConfig(familyId, isClipI2V, inChannels, conv.Transformer);
@@ -246,7 +246,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 {
                     throw new InvalidOperationException($"Wan low-noise expert '{swapPath}' has no recognized transformer weights after conversion.");
                 }
-                loaders.Add(QuantizedWeightPolicy.PrepareForBackend(convLow.Transformer, context.Backend));
+                loaders.Add(QuantizedWeightPolicy.PrepareForBackends(convLow.Transformer, context.TransformerBackends));
                 WanVideoConfig lowConfig = WanConfigDetector.Detect(convLow.Transformer);
                 if (lowConfig.InnerDim != config.InnerDim || lowConfig.NumLayers != config.NumLayers)
                 {

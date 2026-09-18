@@ -134,6 +134,55 @@ public sealed unsafe class SplitQkvRowScaleTests
         DisposeAll(output);
     }
 
+    /// <summary>Every split has to size its copies from the quant block layout, never <c>DType.SizeInBytes</c>.</summary>
+    /// <remarks>That property is 0 for every block quant, so a byte count derived from it is 0 and the copy moves
+    /// nothing — handing back projections full of zeros, which loads without complaint and shows up only as wrong
+    /// output. An OpenCLIP <c>attn.in_proj_weight</c> inside a quantized SD3/SDXL checkpoint is the real case.</remarks>
+    [Theory]
+    [InlineData("qkv")]
+    [InlineData("inproj")]
+    public void SplittingAQuantizedFusedWeightCopiesItsActualBytes(string split)
+    {
+        // in_proj is square by construction ([3H, H]), so both cases use that shape, and H has to be a whole number
+        // of Q8_0's 32-element blocks.
+        const int inner = 256;
+        Assert.Equal(0, DType.Q8_0.SizeInBytes);
+
+        using Tensor fused = new Tensor(new TensorShape(3 * inner, inner), DType.Q8_0);
+        Span<byte> bytes = fused.AsSpan<byte>();
+        for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i % 251 + 1);
+
+        Dictionary<string, Tensor> output = new();
+        try
+        {
+            string[] keys;
+            if (split == "qkv")
+            {
+                CheckpointConvertUtils.SplitQkvWeight(fused, inner, "blocks.0.attn", "to_q", "to_k", "to_v", output);
+                keys = ["blocks.0.attn.to_q.weight", "blocks.0.attn.to_k.weight", "blocks.0.attn.to_v.weight"];
+            }
+            else
+            {
+                CheckpointConvertUtils.SplitInProjWeight(fused, inner, "layers.0", output);
+                keys = ["layers.0.self_attn.q_proj.weight", "layers.0.self_attn.k_proj.weight",
+                    "layers.0.self_attn.v_proj.weight"];
+            }
+
+            long expected = DType.Q8_0.ComputeByteCount((long)inner * inner);
+            Assert.True(expected > 0);
+            for (int part = 0; part < keys.Length; part++)
+            {
+                ReadOnlySpan<byte> actual = output[keys[part]].AsReadOnlySpan<byte>()[..(int)expected];
+                ReadOnlySpan<byte> source = fused.AsReadOnlySpan<byte>().Slice((int)(part * expected), (int)expected);
+                Assert.True(actual.SequenceEqual(source), $"{keys[part]} did not receive its bytes.");
+            }
+        }
+        finally
+        {
+            DisposeAll(output);
+        }
+    }
+
     [Fact]
     public void SwapScaleShiftHalves_RefusesAWeightWithPerRowScales()
     {

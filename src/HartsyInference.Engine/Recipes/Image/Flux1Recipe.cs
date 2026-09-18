@@ -123,7 +123,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             // first GEMM, minutes into a generation. Tracked immediately — in place of the source it wraps, so a
             // failure further down frees the widened copies rather than leaving them to the finalizer.
             QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareForBackend(transformerWeights, context.Backend);
+                QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends);
             loaders[0] = new CompositeDisposable(source, prepared);
 
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
