@@ -9,7 +9,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// The diffusers folder layout ships the transformer in a per-component <c>transformer/</c> subdirectory whose state dict is already in the canonical form (<c>text_embeddings.in_layer.weight</c>, <c>visual_transformer_blocks.{i}.self_attention.to_query.weight</c>, etc.). This converter therefore mostly handles two real-world quirks:
 /// <list type="bullet">
 /// <item>Single-file repackaged checkpoints sometimes prepend a <c>transformer.</c> or <c>model.</c> prefix to every key. We strip the first matching prefix.</item>
-/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
+/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into <see cref="Tensor.Fp8ScaleFactor"/> by <see cref="Checkpoints.CheckpointSource"/>, before this converter runs.</item>
 /// </list>
 ///
 /// No sub-key renaming happens because the diffusers naming and the HartsyInference <c>Kandinsky5Transformer.LoadWeights</c> contract are intentionally aligned 1:1.</summary>

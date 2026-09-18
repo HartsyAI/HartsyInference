@@ -29,7 +29,7 @@ public sealed class ZImageCheckpointConverter
         /// <summary>True if any transformer linear weight is FP8 — pipeline should preload via the FP8 path.</summary>
         public required bool IsFp8Mix { get; init; }
 
-        /// <summary>Base/Turbo sampling variant resolved by <see cref="LoadAndConvert"/>. Direct dictionary conversion has no file identity and therefore returns <see cref="CheckpointVariant.Unknown"/>.</summary>
+        /// <summary>Base/Turbo sampling variant, resolved by the recipe from the file name via <see cref="DetectVariantFromFileName"/>. A conversion given no variant returns <see cref="CheckpointVariant.Unknown"/>.</summary>
         public CheckpointVariant Variant { get; init; }
     }
 
