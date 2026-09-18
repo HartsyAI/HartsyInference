@@ -351,6 +351,8 @@ public sealed class VulkanBackend : IBackend
                 // is the safe point that runs it. Nothing ran it on this backend before, so every such tensor's
                 // buffer stayed allocated until the backend itself was torn down.
                 b._xfer.DrainFinalizerCleanup();
+                // Every previous op's finally has run by now, so a buffer still parked from a rebind has no owner.
+                b._xfer.SweepOrphans();
             }
             b._opNestingDepth++;
         }

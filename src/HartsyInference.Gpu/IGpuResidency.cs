@@ -54,6 +54,13 @@ public interface IGpuResidency : IDisposable
     /// tensor its users forgot to dispose.</para></summary>
     void DrainFinalizerCleanup();
 
+    /// <summary>Frees the buffers displaced by a rebind that no caller claimed.
+    ///
+    /// <para>Call at the start of an op, alongside <see cref="DrainFinalizerCleanup"/>: by then every previous op's
+    /// cleanup has run, so anything still parked provably has no owner. A backend that never calls this leaks every
+    /// buffer an op displaced, for the whole generation.</para></summary>
+    void SweepOrphans();
+
     /// <summary>A one-line summary of cache occupancy and hit rate, for a log line or a diagnostic dump.</summary>
     string DiagnosticsSummary();
 }

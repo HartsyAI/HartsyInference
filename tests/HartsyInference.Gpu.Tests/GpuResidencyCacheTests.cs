@@ -30,6 +30,14 @@ public sealed class GpuResidencyCacheTests
         public int Downloads { get; private set; }
         public bool RefuseHostReads { get; set; }
         public HashSet<int> ExternallyOwnedIds { get; } = [];
+        public List<(Tensor Tensor, Buffer Buffer)> Demoted { get; } = [];
+        public List<(Tensor Tensor, Buffer Buffer)> Evicted { get; } = [];
+        public bool BlockCallbacks { get; set; }
+
+        /// <summary>Stands in for a backend that promotes a tensor it has seen uploaded twice.</summary>
+        public bool PromoteOnSecondUpload { get; set; }
+
+        private readonly Dictionary<Tensor, Buffer> _seen = new(ReferenceEqualityComparer.Instance);
 
         protected override Buffer AllocateDevice(long bytes)
         {
@@ -54,11 +62,288 @@ public sealed class GpuResidencyCacheTests
 
         protected override bool IsExternallyOwned(Buffer buffer) => ExternallyOwnedIds.Contains(buffer.Id);
 
+        protected override void OnWeightDemoted(Tensor tensor, Buffer buffer) => Demoted.Add((tensor, buffer));
+
+        protected override void OnActivationEvicted(Tensor tensor, Buffer buffer) => Evicted.Add((tensor, buffer));
+
+        protected override bool TryEnterCallback() => !BlockCallbacks;
+
+        protected override void OnTransientUploaded(Buffer buffer, Tensor source)
+        {
+            if (!PromoteOnSecondUpload)
+            {
+                return;
+            }
+            if (_seen.ContainsKey(source))
+            {
+                PromoteToWeight(source, buffer);
+                return;
+            }
+            _seen[source] = buffer;
+        }
+
         /// <summary>Allocation without an upload, for tests exercising the cache's bookkeeping rather than transfers.</summary>
         public Buffer AllocateForTest(long bytes) => AllocateDevice(bytes);
     }
 
     private static Tensor NewTensor(int elements = 64) => new(new TensorShape(elements), DType.F32);
+
+    private static long Size(Tensor tensor) => GpuResidencyCache<FakeCache.Buffer>.ByteSize(tensor);
+
+    /// <summary>A buffer displaced by a rebind must survive until the next op, because the op that displaced it may
+    /// still be holding it as its own input and will release it in a <c>finally</c> that has not run yet.</summary>
+    [Fact]
+    public void A_Displaced_Buffer_Is_Not_Freed_Until_The_Next_Op_Sweeps()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer first = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, first, Size(tensor));
+
+        FakeCache.Buffer second = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, second, Size(tensor));
+
+        Assert.False(first.Freed);      // the displacing op may still own it
+
+        cache.SweepOrphans();
+
+        Assert.True(first.Freed);
+        Assert.False(second.Freed);
+        Assert.Same(second, cache.CopyToDevice(tensor));
+    }
+
+    /// <summary>An in-place op writes through the buffer without replacing it. Whatever a backend hangs off that
+    /// activation describes its contents — a producer-emitted quantized sidecar — so the write stales it just as a
+    /// swap would, and the eviction hook has to fire even though nothing is displaced.</summary>
+    [Fact]
+    public void Rebinding_A_Tensor_To_The_Same_Buffer_Still_Reports_An_Eviction()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+
+        Assert.Single(cache.Evicted, entry => ReferenceEquals(entry.Buffer, buffer));
+        cache.SweepOrphans();
+        Assert.False(buffer.Freed);   // still bound, so nothing to reclaim
+    }
+
+    /// <summary>The in-place case: the displaced buffer IS the op's own input, so the op's cleanup frees it and the
+    /// sweep must not free it again.</summary>
+    [Fact]
+    public void A_Displaced_Buffer_The_Caller_Releases_Is_Not_Freed_Twice()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer input = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, input, Size(tensor));
+        FakeCache.Buffer output = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, output, Size(tensor));
+
+        cache.ReleaseIfNotCached(input, Size(tensor));   // the op's own finally
+        cache.SweepOrphans();
+
+        Assert.Single(cache.FreedBuffers, buffer => ReferenceEquals(buffer, input));
+    }
+
+    /// <summary>An arena owns its allocations wholesale, so a displaced one must never be handed back alone.</summary>
+    [Fact]
+    public void A_Displaced_Buffer_Owned_Elsewhere_Is_Never_Freed()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer arena = cache.AllocateForTest(Size(tensor));
+        cache.ExternallyOwnedIds.Add(arena.Id);
+        cache.CacheActivation(tensor, arena, Size(tensor));
+        cache.CacheActivation(tensor, cache.AllocateForTest(Size(tensor)), Size(tensor));
+
+        cache.SweepOrphans();
+
+        Assert.False(arena.Freed);
+    }
+
+    /// <summary>Teardown has to reach the parked set too: a parked buffer has already left the owned set, so the
+    /// teardown sweep over that set does not see it.</summary>
+    [Fact]
+    public void Teardown_Frees_A_Buffer_Still_Parked()
+    {
+        FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer first = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, first, Size(tensor));
+        cache.CacheActivation(tensor, cache.AllocateForTest(Size(tensor)), Size(tensor));
+
+        cache.Dispose();
+
+        Assert.True(first.Freed);
+    }
+
+    /// <summary>The core bug this guards: a resident weight whose tensor an op rebinds must stop being a weight.
+    /// CopyToDevice checks weights first, so leaving the entry makes every later read return the PRE-op bytes and
+    /// the device write is silently discarded.</summary>
+    [Fact]
+    public void An_Op_Writing_A_Resident_Weight_Demotes_It()
+    {
+        using FakeCache cache = new();
+        using Tensor weight = NewTensor();
+
+        cache.PreloadWeight(weight);
+        FakeCache.Buffer stale = cache.CopyToDevice(weight);
+
+        FakeCache.Buffer written = cache.AllocateForTest(Size(weight));
+        cache.CacheActivation(weight, written, Size(weight));
+
+        Assert.Same(written, cache.CopyToDevice(weight));
+        Assert.NotSame(stale, cache.CopyToDevice(weight));
+        Assert.Single(cache.Demoted, entry => ReferenceEquals(entry.Buffer, stale));
+    }
+
+    /// <summary>A demoted weight's cached conversions describe the pre-op contents, so they are stale too.</summary>
+    [Fact]
+    public void Demoting_A_Weight_Drops_Its_Cached_Conversions()
+    {
+        using FakeCache cache = new();
+        using Tensor weight = NewTensor();
+
+        cache.PreloadWeight(weight);
+        FakeCache.Buffer cast = cache.AllocateForTest(16);
+        cache.StoreWeightCast(weight, DType.F16, cast, 16);
+
+        cache.CacheActivation(weight, cache.AllocateForTest(Size(weight)), Size(weight));
+
+        Assert.False(cache.TryGetWeightCast(weight, DType.F16, out _));
+        Assert.True(cast.Freed);
+    }
+
+    /// <summary>A tensor's binding outlives the cache that planted it. The callback must check before it touches
+    /// anything — on CUDA this exact path threw during a model swap.</summary>
+    [Fact]
+    public void A_Callback_Arriving_After_Disposal_Does_Nothing()
+    {
+        FakeCache cache = new();
+        Tensor tensor = NewTensor();
+
+        cache.CacheActivation(tensor, cache.AllocateForTest(Size(tensor)), Size(tensor));
+        cache.Dispose();
+        int freedAtTeardown = cache.FreedBuffers.Count;
+
+        tensor.Dispose();   // fires the binding planted before disposal
+
+        Assert.Equal(freedAtTeardown, cache.FreedBuffers.Count);
+    }
+
+    /// <summary>The gate a backend closes while it is retiring.</summary>
+    [Fact]
+    public void A_Blocked_Callback_Leaves_The_Cache_Untouched()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+        cache.BlockCallbacks = true;
+
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.Equal(0, cache.Downloads);
+        Assert.False(buffer.Freed);
+    }
+
+    /// <summary>Promotion happens behind the caller's back, so host data stays authoritative: a later host write
+    /// has to drop the device copy, or every read afterwards is served the pre-write bytes. The same silent
+    /// wrong-answer bug as a weight an op writes through, arriving from the host side instead.</summary>
+    [Fact]
+    public void A_Host_Write_After_Promotion_Drops_The_Device_Copy()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        cache.PromoteOnSecondUpload = true;
+
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+        FakeCache.Buffer promoted = cache.CopyToDevice(tensor);
+        cache.ReleaseIfNotCached(promoted, Size(tensor));
+        Assert.Same(promoted, cache.CopyToDevice(tensor));
+
+        tensor.AsSpan<float>()[0] = 42f;   // host write; funnels through the demotion binding
+
+        Assert.True(promoted.Freed);
+        Assert.NotSame(promoted, cache.CopyToDevice(tensor));   // re-uploaded, so it carries the new byte
+        Assert.Equal(3, cache.Uploads);
+        Assert.Single(cache.Demoted, entry => ReferenceEquals(entry.Buffer, promoted));
+    }
+
+    /// <summary>A promotion binding must not outlive the residency it describes. Freeing the weight and preloading
+    /// it again is an explicit request for residency; a binding left over from the earlier promotion finds the tensor
+    /// back in the weight cache and evicts what the caller just asked for.</summary>
+    [Fact]
+    public void Freeing_A_Promoted_Weight_Detaches_Its_Demotion_Binding()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        cache.PromoteOnSecondUpload = true;
+
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+
+        cache.FreeWeights([tensor]);
+        cache.PreloadWeight(tensor);
+        FakeCache.Buffer explicitly = cache.CopyToDevice(tensor);
+
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.False(explicitly.Freed);
+        Assert.Same(explicitly, cache.CopyToDevice(tensor));
+    }
+
+    /// <summary>An explicit preload is the caller's decision, so a host read must not silently undo it.</summary>
+    [Fact]
+    public void A_Host_Read_After_An_Explicit_Preload_Keeps_The_Weight()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        cache.PreloadWeight(tensor);
+        FakeCache.Buffer resident = cache.CopyToDevice(tensor);
+
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.False(resident.Freed);
+        Assert.Same(resident, cache.CopyToDevice(tensor));
+    }
+
+    /// <summary>Auto-promotion runs entirely through the upload hook: a tensor uploaded twice becomes a resident
+    /// weight, and the caller's own release of that buffer is then correctly skipped.</summary>
+    [Fact]
+    public void A_Twice_Uploaded_Tensor_Can_Be_Promoted_By_The_Upload_Hook()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        cache.PromoteOnSecondUpload = true;
+
+        FakeCache.Buffer first = cache.CopyToDevice(tensor);
+        cache.ReleaseIfNotCached(first, Size(tensor));
+        FakeCache.Buffer second = cache.CopyToDevice(tensor);
+        cache.ReleaseIfNotCached(second, Size(tensor));
+
+        Assert.False(second.Freed);                        // the cache owns it now
+        Assert.Same(second, cache.CopyToDevice(tensor));   // and serves it without a third upload
+        Assert.Equal(2, cache.Uploads);
+    }
 
     [Fact]
     public void A_Cached_Tensor_Is_Served_Without_Another_Upload()

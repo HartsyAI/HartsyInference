@@ -58,6 +58,18 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// bound to its tensor — is not freed out from under the tensor that now points at it.</summary>
     protected readonly HashSet<TBuffer> CachedBuffers = [];
 
+    /// <summary>Buffers displaced by a rebind, waiting to find out whether anyone owned them.
+    ///
+    /// <para>When an op binds a tensor to a new buffer, the buffer it displaces is either the op's own input — whose
+    /// <c>finally</c> will release it — or nobody's, in which case no tensor maps to it and nothing ever will. The two
+    /// are indistinguishable at the moment of displacement, so the buffer parks here instead: a caller's
+    /// <see cref="ReleaseIfNotCached"/> claims it, and <see cref="SweepOrphans"/> frees whatever is still unclaimed
+    /// when the NEXT op starts, by which point every previous op's cleanup has provably run.</para></summary>
+    /// <remarks>Freeing at teardown instead is not a fix, it is a deferral: the buffers accumulate for the whole
+    /// generation. Measured on CUDA before this existed — twelve <c>Linear</c> calls at a 563 MB output stranded
+    /// 5942 MB and broke unrelated work sharing the card.</remarks>
+    protected readonly Dictionary<TBuffer, long> PendingOrphans = [];
+
     /// <summary>Whether a weight's dtype conversion is kept resident. Off trades recompute for roughly a third of the
     /// weight footprint, which is what lets a large fp8 model fit a card it otherwise would not.</summary>
     public bool CacheWeightCasts { get; set; } = true;
@@ -123,6 +135,22 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// the read would both violate the capture contract and drain a queue that is mid-record.</summary>
     protected virtual bool HostReadForbidden => false;
 
+    /// <summary>Gate for the callbacks a tensor fires on sync or dispose. Returning false skips the callback
+    /// entirely, for a backend that is tearing down and whose device state can no longer be touched.</summary>
+    /// <remarks>A tensor's binding outlives the moment it was planted: the tensor may be disposed, or finalized and
+    /// resurrected, long after the cache that bound it has retired. On CUDA a stale callback reaching a
+    /// <c>ConditionalWeakTable</c> on such an object graph threw outright, which is what made a GGUF model swap
+    /// crash. Paired with <see cref="ExitCallback"/> so a subclass can hold a lock across the body.</remarks>
+    protected virtual bool TryEnterCallback() => true;
+
+    /// <summary>Releases whatever <see cref="TryEnterCallback"/> took. Runs in a <c>finally</c>.</summary>
+    protected virtual void ExitCallback() { }
+
+    /// <summary>Called as a resident weight is demoted because an op bound its tensor to an activation buffer. The
+    /// weight's own buffer may need releasing through a different allocator than an activation's, and a backend that
+    /// promotes weights automatically has to stop re-promoting this one.</summary>
+    protected virtual void OnWeightDemoted(Tensor tensor, TBuffer buffer) { }
+
     // ── The shared algorithm ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A tensor's size in bytes.</summary>
@@ -179,8 +207,38 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         // it out from under the new one, so clear first — keyed, so another device's binding on this tensor stands.
         tensor.ClearGpuBinding(BindingKey);
 
+        if (Activations.TryGetValue(tensor, out (TBuffer Buffer, long Bytes) displaced))
+        {
+            // Fires on ANY rebind, including an in-place op that writes through the same buffer. What hangs off an
+            // activation describes its CONTENTS — a producer-emitted quantized sidecar, say — and a write through
+            // the buffer stales that just as surely as swapping the buffer does.
+            OnActivationEvicted(tensor, displaced.Buffer);
+            if (!EqualityComparer<TBuffer>.Default.Equals(displaced.Buffer, buffer))
+            {
+                Park(displaced.Buffer, displaced.Bytes);
+            }
+        }
+
+        // The tensor was a resident weight and an op has just written a device buffer for it. It cannot stay one:
+        // CopyToDevice checks Weights BEFORE Activations, so leaving the entry there makes every later read return
+        // the pre-op bytes and the device write is silently discarded — a whole-engine correctness bug, not a leak.
+        // Demotion here is unconditional, which is wider than strictly necessary and deliberately so: a tensor being
+        // bound as an op's output is not a weight any more, whatever route made it one.
+        if (Weights.Remove(tensor, out TBuffer? demoted))
+        {
+            OnWeightDemoted(tensor, demoted);
+            if (!EqualityComparer<TBuffer>.Default.Equals(demoted, buffer))
+            {
+                Park(demoted, ByteSize(tensor));
+            }
+            // Every cached conversion describes the pre-op contents, so all of them are stale.
+            ReleaseWeightCasts(tensor);
+        }
+
         Activations[tensor] = (buffer, bytes);
         CachedBuffers.Add(buffer);
+        // Re-cached between being parked and being swept: it has an owner again.
+        PendingOrphans.Remove(buffer);
 
         tensor.SetGpuBinding(
             BindingKey,
@@ -190,6 +248,24 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
     /// <summary>Host code read the tensor: bring the value back and give up the device copy.</summary>
     private void SyncActivationToHost(Tensor tensor)
+    {
+        // Disposal first, before any collection is touched: this callback was planted on a tensor that can outlive
+        // the cache, and by here the device it would talk to may be gone.
+        if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
+        {
+            return;
+        }
+        try
+        {
+            SyncActivationToHostCore(tensor);
+        }
+        finally
+        {
+            ExitCallback();
+        }
+    }
+
+    private void SyncActivationToHostCore(Tensor tensor)
     {
         if (HostReadForbidden)
         {
@@ -216,6 +292,22 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>The tensor is gone: drop the device copy without reading it back.</summary>
     private void ReleaseActivation(Tensor tensor)
     {
+        if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
+        {
+            return;
+        }
+        try
+        {
+            ReleaseActivationCore(tensor);
+        }
+        finally
+        {
+            ExitCallback();
+        }
+    }
+
+    private void ReleaseActivationCore(Tensor tensor)
+    {
         if (!Activations.Remove(tensor, out (TBuffer Buffer, long Bytes) entry))
         {
             return;
@@ -234,6 +326,108 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             return;
         }
         FreeDevice(buffer, bytes);
+    }
+
+    /// <summary>Parks a displaced buffer until its ownership is known. See <see cref="PendingOrphans"/>.</summary>
+    private void Park(TBuffer buffer, long bytes)
+    {
+        CachedBuffers.Remove(buffer);
+        // Something else frees this one wholesale, so it must never be handed back individually.
+        if (!IsExternallyOwned(buffer))
+        {
+            PendingOrphans[buffer] = bytes;
+        }
+    }
+
+    /// <summary>Frees the displaced buffers nobody claimed.</summary>
+    /// <remarks>Call at the START of an op, never inside <see cref="CacheActivation"/>. That timing is the whole
+    /// mechanism: by the start of the next op every previous op's <c>finally</c> has run, so anything still parked
+    /// provably has no owner. Sweeping at the point of displacement would double-free the in-place case, where the
+    /// displaced buffer is the op's own input and that op's cleanup is still to come.</remarks>
+    public virtual void SweepOrphans()
+    {
+        if (PendingOrphans.Count == 0)
+        {
+            return;
+        }
+        foreach ((TBuffer buffer, long bytes) in PendingOrphans)
+        {
+            // Bound to a tensor again since it was parked, so it is owned and no longer an orphan.
+            if (!CachedBuffers.Contains(buffer))
+            {
+                ReleaseBuffer(buffer, bytes);
+            }
+        }
+        PendingOrphans.Clear();
+    }
+
+    /// <summary>Makes an already-uploaded buffer this tensor's resident weight, without re-uploading it.
+    ///
+    /// <para>The seam a backend needs to promote a tensor it has seen uploaded more than once: the buffer must enter
+    /// the weight cache and the owned set together, or the caller's own cleanup frees what the cache now points
+    /// at.</para>
+    ///
+    /// <para>Promotion happens behind the caller's back — nobody asked for this tensor to become resident — so it
+    /// plants a demotion binding, and the correctness of the whole mechanism rests on it. Host data stays
+    /// authoritative for a promoted weight, so any later host access must DROP the device copy rather than sync it
+    /// back; without the binding, a host write would leave the stale device bytes cached and every later
+    /// <see cref="CopyToDevice"/> would serve them. That is the same silent wrong-answer bug as a weight an op
+    /// writes through, arriving from the other direction.</para></summary>
+    /// <remarks>An explicit <see cref="PreloadWeight"/> deliberately plants nothing: the caller asked for residency
+    /// and owns the lifetime, so a host read should not silently undo it.</remarks>
+    protected void PromoteToWeight(Tensor tensor, TBuffer buffer)
+    {
+        Weights[tensor] = buffer;
+        CachedBuffers.Add(buffer);
+        PendingOrphans.Remove(buffer);
+
+        // Keyed, so a second device promoting the same host tensor does not overwrite this one's hook. Sync and
+        // dispose are the same action: there is nothing on the device worth reading back.
+        tensor.ClearGpuBinding(BindingKey);
+        tensor.SetGpuBinding(
+            BindingKey,
+            sync: () => DemotePromotedWeight(tensor),
+            dispose: () => DemotePromotedWeight(tensor));
+    }
+
+    /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
+    private void DemotePromotedWeight(Tensor tensor)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
+        {
+            return;
+        }
+        try
+        {
+            if (!Weights.Remove(tensor, out TBuffer? buffer))
+            {
+                return;
+            }
+            // No D2H. The host buffer is the authority here — that is what makes this a demotion and not an
+            // eviction — and copying the device bytes back would overwrite the write that triggered this.
+            OnWeightDemoted(tensor, buffer);
+            CachedBuffers.Remove(buffer);
+            ReleaseBuffer(buffer, ByteSize(tensor));
+            ReleaseWeightCasts(tensor);
+        }
+        finally
+        {
+            ExitCallback();
+        }
+    }
+
+    /// <summary>Releases every cached conversion of one weight.</summary>
+    private void ReleaseWeightCasts(Tensor weight)
+    {
+        if (!WeightCasts.Remove(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
+        {
+            return;
+        }
+        foreach ((TBuffer cast, long castBytes) in casts.Values)
+        {
+            CachedBuffers.Remove(cast);
+            ReleaseBuffer(cast, castBytes);
+        }
     }
 
     /// <summary>Whether a conversion of this tensor is worth keeping. True only for a resident weight: an activation
@@ -280,6 +474,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return;
         }
+        // The caller did own this one after all, so the sweep must not free it a second time.
+        PendingOrphans.Remove(buffer);
         ReleaseBuffer(buffer, bytes);
     }
 
@@ -324,18 +520,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             if (Weights.Remove(weight, out TBuffer? buffer))
             {
+                // A promoted weight carries a demotion binding. Leaving it planted outlives what it refers to: if
+                // this tensor is preloaded again the stale callback finds it back in Weights and evicts the new,
+                // explicitly-requested residency; and if the tensor is finalized after this cache is disposed, the
+                // work queues under a key nobody will ever drain, rooting both forever.
+                weight.ClearGpuBinding(BindingKey);
                 CachedBuffers.Remove(buffer);
                 ReleaseBuffer(buffer, ByteSize(weight));
             }
             // A conversion outlives nothing: its only purpose is to serve the weight that is going away.
-            if (WeightCasts.Remove(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
-            {
-                foreach ((TBuffer cast, long castBytes) in casts.Values)
-                {
-                    CachedBuffers.Remove(cast);
-                    ReleaseBuffer(cast, castBytes);
-                }
-            }
+            ReleaseWeightCasts(weight);
         }
     }
 
@@ -358,6 +552,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
         foreach ((Tensor tensor, TBuffer buffer) in Weights.ToArray())
         {
+            // Same reason as FreeWeights: a promoted weight's binding must not outlive the cache that planted it.
+            tensor.ClearGpuBinding(BindingKey);
             if (released.Add(buffer))
             {
                 ReleaseBuffer(buffer, ByteSize(tensor));
@@ -389,6 +585,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             }
         }
         CachedBuffers.Clear();
+
+        // Parked buffers left CachedBuffers when they were displaced, so the sweep above does not reach them.
+        foreach ((TBuffer orphan, long bytes) in PendingOrphans)
+        {
+            if (released.Add(orphan))
+            {
+                ReleaseBuffer(orphan, bytes);
+            }
+        }
+        PendingOrphans.Clear();
     }
 
     /// <inheritdoc/>
