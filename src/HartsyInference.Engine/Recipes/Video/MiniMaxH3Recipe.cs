@@ -14,6 +14,8 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.MiniMaxH3;
+using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Pipelines;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
@@ -88,7 +90,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         context = context with { VideoPlan = executionPlan };
         WarnIfPlacementIgnored(context);
         MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(context.CheckpointPath, context.Components);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         MergedLoraStack? loraStack = null;
         MergedLoraStack? pddLoraStack = null;
         MiniMaxH3PddAdapter? pddAdapter = null;
@@ -140,6 +142,10 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             IReadOnlyList<LoraResolver.LoraSpec> ordinarySpecs = pddIndex < 0
                 ? loraSpecs
                 : loraSpecs.Where((_, index) => index != pddIndex).ToArray();
+            // A quant no device running the blocks can hold packed widens here rather than failing inside the first
+            // GEMM, minutes into a generation. H3 shards and runs context-parallel, so the question is what ALL of
+            // them can read, not just the primary.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(ditWeights, context.TransformerBackends));
             loraStack = ApplyLoras(context.Backend, ordinarySpecs, ditWeights);
             transformer.LoadWeights(ditWeights);
             IReadOnlyDictionary<string, int> funControlModelIndices = LoadFunControlNets(
@@ -252,7 +258,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             constructedTextEncoder?.Dispose();
             loraStack?.Dispose();
             pddLoraStack?.Dispose();
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -292,13 +298,12 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     }
 
     /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can land on it first — the merge rewrites entries in place, so it has to happen before the transformer reads them.</summary>
-    private static MiniMaxH3Transformer LoadTransformer(string file, List<SafeTensorsLoader> loaders,
+    private static MiniMaxH3Transformer LoadTransformer(string file, List<IDisposable> loaders,
         DType bodyDType, out MiniMaxH3Config config, out Dictionary<string, Tensor> transformerWeights)
     {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(file);
-        loaders.Add(loader);
-        Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(loader.GetAllTensors());
+        CheckpointSource source = CheckpointSource.Open(file);
+        loaders.Add(source);
+        Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         // The bf16 DiT is larger than host RAM, so it stays bf16 and the backend casts per call.
         MiniMaxH3CheckpointConverter.ConvertedWeights converted =
             MiniMaxH3CheckpointConverter.Convert(raw, castToF32: false);
@@ -312,9 +317,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 || key.EndsWith("norm1.weight", StringComparison.Ordinal)
                 || key.EndsWith("norm2.weight", StringComparison.Ordinal)
                 || key.Equals("rope.inv_freq", StringComparison.Ordinal);
-            if (isNorm && promotedWeights[key].DType != DType.F32)
+            Tensor current = promotedWeights[key];
+            if (isNorm && current.DType != DType.F32)
             {
-                promotedWeights[key] = promotedWeights[key].CastTo(DType.F32);
+                // A GGUF build can carry a quantized norm, and CastTo refuses a quantized source by design —
+                // decoding a block layout is the dequantizer's job, not a dtype conversion's.
+                promotedWeights[key] = current.DType.IsQuantized
+                    ? GgufDequantizer.Dequantize(current, DType.F32)
+                    : current.CastTo(DType.F32);
                 promoted++;
             }
         }
@@ -345,7 +355,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// index. Request streams keep their own strengths and windows, so several streams can reuse one registered
     /// branch without duplicating its weights.</summary>
     private static IReadOnlyDictionary<string, int> LoadFunControlNets(RecipeContext context,
-        MiniMaxH3Transformer transformer, List<SafeTensorsLoader> loaders)
+        MiniMaxH3Transformer transformer, List<IDisposable> loaders)
     {
         Dictionary<string, int> modelIndices = new Dictionary<string, int>(VideoArtifactPath.Comparer);
         if (context.VideoPlan is null)
@@ -476,17 +486,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
     private static (MiniMaxH3VideoVaeDecoder Decoder, MiniMaxH3VideoVaeEncoder? Encoder) LoadVideoVae(
-        string file, List<SafeTensorsLoader> loaders)
+        string file, List<IDisposable> loaders)
     {
         string dir = Path.GetDirectoryName(file)!;
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(file);
-        loaders.Add(loader);
-        // The published int8 ConvRot VAE quantizes only rank-2 transformer Linears. Attach each layer's row scale
-        // and rotation descriptor before the VAE sees the dictionary; convolutions and norms remain in their
-        // checkpoint precision and therefore bypass the existing int8 Linear path naturally.
-        Dictionary<string, Tensor> weights = CheckpointConvertUtils.AttachInt8QuantInfo(
-            new Dictionary<string, Tensor>(loader.GetAllTensors()));
+        // The published int8 ConvRot VAE quantizes only rank-2 transformer Linears; the container attaches each
+        // layer's row scale and rotation descriptor, and convolutions and norms stay in their checkpoint precision
+        // and bypass the int8 Linear path naturally.
+        CheckpointSource checkpoint = CheckpointSource.Open(file);
+        loaders.Add(checkpoint);
+        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(checkpoint.Weights, StringComparer.Ordinal);
         string wrapper = Path.Combine(dir, "config.json");
         string source = Path.Combine(dir, "source", "config.json");
         MiniMaxH3VideoVaeConfig config = File.Exists(wrapper)
@@ -519,16 +527,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a decode-only build must still generate soundtracks.</summary>
     private static (MiniMaxH3AudioVaeDecoder? Decoder, MiniMaxH3AudioVaeEncoder? Encoder) LoadAudioVae(
-        string? file, List<SafeTensorsLoader> loaders)
+        string? file, List<IDisposable> loaders)
     {
         if (file is null)
         {
             return (null, null);
         }
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(file);
-        loaders.Add(loader);
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(loader.GetAllTensors());
+        CheckpointSource source = CheckpointSource.Open(file);
+        loaders.Add(source);
+        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         MiniMaxH3AudioVaeDecoder decoder = new MiniMaxH3AudioVaeDecoder();
         MiniMaxH3AudioVaeEncoder? encoder = null;
         try
@@ -552,12 +559,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         }
     }
 
-    private static MiniMaxH3TextEncoder LoadTextEncoder(string file, List<SafeTensorsLoader> loaders)
+    private static MiniMaxH3TextEncoder LoadTextEncoder(string file, List<IDisposable> loaders)
     {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(file);
-        loaders.Add(loader);
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(loader.GetAllTensors());
+        CheckpointSource source = CheckpointSource.Open(file);
+        loaders.Add(source);
+        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         MiniMaxH3TextEncoder encoder = new MiniMaxH3TextEncoder();
         encoder.LoadWeights(weights);
         Logs.Info($"[MiniMaxH3Recipe] Text encoder: {weights.Count} tensors.");
