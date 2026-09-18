@@ -6,6 +6,9 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Core.Memory;
+using HartsyInference.Core.Models;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Gguf;
@@ -48,32 +51,24 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
         // loader read T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the SideModels entry.
         // The optional ByT5 glyph branch is not wired here either (it is optional at forward time upstream too).
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
-        IDisposable? ggufHandle = null;
+        IDisposable? checkpoint = null;
         try
         {
-            // GGUF repacks ship original-Tencent keys; the converter remaps them to diffusers naming and the quants
-            // stay native (transient per-GEMM dequant). BF16 GGUF tensors MUST become F16 — the transient weight
-            // path skips BF16 and yields a blank image.
-            bool isGguf = context.CheckpointPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
-            HunyuanImageCheckpointConverter.ConvertedWeights converted;
-            if (isGguf)
+            // GGUF repacks ship original-Tencent keys; the converter remaps them to diffusers naming either way and
+            // the quants stay native (transient per-GEMM dequant).
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            // A BF16 tensor passing through a GGUF must become F16 — the transient weight path skips BF16 and yields a
+            // blank image. Kept keyed on the container rather than on the dtype alone: the safetensors builds run
+            // without this cast today, and the real rule is a backend capability nobody has measured, so widening it
+            // here would change a working path on a guess.
+            bool castBf16 = source.Format == ModelFormat.Gguf;
+            Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(source.Weights.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, Tensor> kv in source.Weights)
             {
-                GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
-                ggufHandle = gguf;
-                Dictionary<string, Tensor> relabeled = GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights);
-                Dictionary<string, Tensor> cast = new Dictionary<string, Tensor>(relabeled.Count);
-                foreach (KeyValuePair<string, Tensor> kv in relabeled)
-                {
-                    cast[kv.Key] = kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
-                }
-                converted = HunyuanImageCheckpointConverter.Convert(cast);
+                raw[kv.Key] = castBf16 && kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
             }
-            else
-            {
-                (HunyuanImageCheckpointConverter.ConvertedWeights c, SafeTensorsLoader mainLoader) = HunyuanImageCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-                converted = c;
-                loaders.Add(mainLoader);
-            }
+            HunyuanImageCheckpointConverter.ConvertedWeights converted = HunyuanImageCheckpointConverter.Convert(raw);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"HunyuanImage checkpoint '{Path.GetFileName(context.CheckpointPath)}' contains no transformer weights.");
@@ -84,6 +79,10 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             HunyuanImageTransformer transformer = new HunyuanImageTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackend(converted.Transformer, context.Backend);
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(converted.Transformer);
@@ -132,7 +131,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
-            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, ggufHandle, loraStack);
+            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
         }
         catch (Exception ex)
         {
@@ -141,7 +140,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
-            ggufHandle?.Dispose();
+            checkpoint?.Dispose();
             throw;
         }
     }

@@ -6,7 +6,9 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -50,31 +52,19 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
         // this ports the text-to-image core.
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
-        IDisposable? ggufHandle = null;
+        IDisposable? checkpoint = null;
         try
         {
-            // GGUF repacks ship BFL-native keys (Flux2KeyMapper: "we just pass through") — the quants stay
-            // native (transient per-GEMM dequant); BF16 GGUF tensors still need the F16 cast below.
-            bool isGguf = context.CheckpointPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
-            Dictionary<string, Tensor> rawWeights;
-            if (isGguf)
-            {
-                GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
-                ggufHandle = gguf;
-                rawWeights = GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights);
-            }
-            else
-            {
-                SafeTensorsLoader transformerLoader = new SafeTensorsLoader();
-                transformerLoader.Load(context.CheckpointPath);
-                loaders.Add(transformerLoader);
-                rawWeights = transformerLoader.GetAllTensors();
-            }
+            // One container for either format: a Flux.2 GGUF is a repack of this same file and keeps its BFL key
+            // names, so nothing below needs to know which one arrived. Quantized tensors stay packed and dequantize
+            // transiently per GEMM.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
             // Pre-cast BF16 → F16 on CPU (F16 keeps the same footprint as BF16 and F16↔F32 is supported on every op).
-            // GGUF-quantized tensors (Q4_K etc.) stay native — they dequant transiently per-GEMM elsewhere, and
-            // a plain CastTo throws for quantized dtypes (needs GgufDequantizer instead).
-            Dictionary<string, Tensor> castWeights = new Dictionary<string, Tensor>(rawWeights.Count);
-            foreach (KeyValuePair<string, Tensor> kvp in rawWeights)
+            // Quantized tensors stay native — they dequant transiently per-GEMM elsewhere, and a plain CastTo throws
+            // for quantized dtypes (needs GgufDequantizer instead).
+            Dictionary<string, Tensor> castWeights = new Dictionary<string, Tensor>(source.Weights.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
                 castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
             }
@@ -86,6 +76,10 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             Flux2CheckpointConverter converter = new Flux2CheckpointConverter(config.HiddenSize, mlpInner);
             Dictionary<string, Tensor> converted = converter.ConvertTransformer(castWeights);
             castWeights.Clear();
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackend(converted, context.Backend);
 
             Flux2Transformer transformer = new Flux2Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -157,7 +151,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 hiddenLayers: null,
                 bnEps: 1e-5f);
             Logs.Info($"[Flux2Recipe] Flux.2 ready ({DescribeConfig(config)}).");
-            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, ggufHandle, loraStack);
+            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
         }
         catch (Exception ex)
         {
@@ -166,7 +160,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
-            ggufHandle?.Dispose();
+            checkpoint?.Dispose();
             throw;
         }
     }

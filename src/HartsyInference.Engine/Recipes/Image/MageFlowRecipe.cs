@@ -6,6 +6,8 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.Mage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Gguf;
@@ -42,29 +44,23 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
         bool isEdit = lower.Contains("edit");
 
         List<SafeTensorsLoader> loaders = new();
-        IDisposable? ggufHandle = null;
+        IDisposable? checkpoint = null;
         try
         {
             // ── DiT: quant-native (GGUF stays quantized for the per-GEMM dequant path; safetensors fp8/bf16 kept). ──
-            Dictionary<string, Tensor> ditWeights;
-            bool isGguf = context.CheckpointPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
-            if (isGguf)
-            {
-                GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
-                ggufHandle = gguf;
-                ditWeights = Remap(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights), CheckpointConvertUtils.StripTransformerPrefix);
-            }
-            else
-            {
-                (ditWeights, SafeTensorsLoader ditLoader) = ComponentLoader.Load(context.CheckpointPath, "MageFlowRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
-                loaders.Add(ditLoader);
-            }
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            Dictionary<string, Tensor> ditWeights = Remap(source.Weights, CheckpointConvertUtils.StripTransformerPrefix);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"Mage-Flow checkpoint '{fileName}' contains no transformer weights (looked for transformer_blocks.* / img_in.*).");
             Logs.Info($"[MageFlowRecipe] Parsed DiT: {ditWeights.Count} tensors ({(isEdit ? "edit" : "t2i")}{(isTurbo ? ", turbo" : "")}).");
 
             QwenImageConfig config = QwenImageConfig.MageFlow;
             QwenImageTransformer transformer = new QwenImageTransformer(config);
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackend(ditWeights, context.Backend);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
@@ -92,13 +88,13 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             MageFlowPipeline pipeline = new MageFlowPipeline(context.Backend, textEncoder, transformer, vae, config, vaeEncoder);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info($"[MageFlowRecipe] Mage-Flow ready (Qwen3-VL-4B; static shift 6.0; VAE dec={decW.Count}/enc={encW.Count}{(vaeEncoder is not null ? ", edit-capable" : "")}).");
-            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, ggufHandle, loraStack);
+            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
         }
         catch (Exception ex)
         {
             Logs.Error("[MageFlowRecipe] Construction failed.", ex);
             foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
-            ggufHandle?.Dispose();
+            checkpoint?.Dispose();
             throw;
         }
     }
