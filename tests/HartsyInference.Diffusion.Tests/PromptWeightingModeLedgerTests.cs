@@ -81,8 +81,12 @@ public sealed class PromptWeightingModeLedgerTests
         // supported_models.py:2404 -> ernie.ErnieTokenizer (:9) -> disable_weights at ernie.py:14 (Mistral3 arm).
         ["ernie-image"] = PromptWeightingMode.CondScale,
         // supported_models.py:2227 -> kandinsky5.Kandinsky5TokenizerImage (:19), a Kandinsky5Tokenizer subclass whose
-        // clip_l arm (kandinsky5.py:10, emitted at :14) is a plain SDTokenizer and KEEPS weights. Its Qwen arm inherits
-        // QwenImageTokenizer's hard disable (qwen_image.py:39), so SwarmUI weights CLIP-L only — do not blend both arms.
+        // clip_l arm (kandinsky5.py:10, emitted at :14) is a plain SDTokenizer and KEEPS weights, which is what selects
+        // the ComfyBlend path; the Qwen arm inherits QwenImageTokenizer's hard disable (qwen_image.py:39).
+        // But the blend only rewrites hidden states (sd1_clip.py:54-63; first_pooled is taken at :47, before the loop),
+        // and Kandinsky5TEModel.encode_token_weights (kandinsky5.py:39-43) returns the Qwen cond plus CLIP-L's POOLED
+        // vector, discarding l_out entirely. So on Kandinsky5 SwarmUI's weighting is a no-op end to end, and parity is
+        // to leave the conditioning alone. Do NOT "fix" it by blending the Qwen arm — that diverges from the reference.
         ["kandinsky5"] = PromptWeightingMode.ComfyBlend,
         // supported_models.py:1157 -> anima.AnimaTokenizer (:18-21): qwen3_06b (:8-11) + t5xxl (:13-16), neither disables.
         ["anima"] = PromptWeightingMode.ComfyBlend,
@@ -115,7 +119,8 @@ public sealed class PromptWeightingModeLedgerTests
         ["ltx-2.5-distilled"] = PromptWeightingMode.CondScale,
         // supported_models.py:988 -> minimax.MiniMaxH3Tokenizer (:136) -> disable_weights at minimax.py:158.
         ["minimax-h3"] = PromptWeightingMode.CondScale,
-        // supported_models.py:2203 -> kandinsky5.Kandinsky5Tokenizer (:6); same CLIP-L arm as the image variant above.
+        // supported_models.py:2203 -> kandinsky5.Kandinsky5Tokenizer (:6); same CLIP-L arm, same discarded-l_out no-op
+        // as the image variant above (both go through Kandinsky5TEModel, kandinsky5.py:39-43).
         ["kandinsky5-video"] = PromptWeightingMode.ComfyBlend,
     };
 
