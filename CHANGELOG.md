@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.93
+
+- **The shared residency cache now reclaims buffers an op displaces, and stops serving stale weights.** Four things
+  CUDA's own cache had already solved, adopted before CUDA moves onto the shared one — so that migration is a port
+  onto familiar ground rather than a rediscovery of the same bugs in a new place.
+
+  A buffer displaced by a rebind used to stay owned by nothing until teardown. Whether it is the op's own input —
+  whose cleanup will free it — or nobody's is not knowable at the moment of displacement, so it now parks: the
+  caller's release claims it, and whatever is left is freed when the NEXT op starts, by which point every previous
+  op's `finally` has provably run. Freeing at teardown instead was not a fix but a deferral; measured on CUDA before
+  it had this, twelve `Linear` calls at a 563 MB output stranded 5942 MB.
+
+  More seriously, a resident weight whose tensor an op bound to a new buffer stayed a weight, and lookups check
+  weights first — so every later read returned the pre-op bytes and the device write was silently discarded. That is
+  the same shape as the auto-promotion bug fixed in CUDA in August, and it was waiting in the shared base for the
+  first backend to write through a weight. A tensor bound as an op's output is no longer a weight, whatever route
+  made it one, and its cached dtype conversions go with it.
+
+  The callbacks a tensor fires on read or dispose now check disposal before touching anything, behind a gate a
+  backend can hold closed while it retires: a binding outlives the cache that planted it, and on CUDA that path
+  threw during a model swap. Finally, `PromoteToWeight` gives a backend the seam it needs to promote a tensor it has
+  seen uploaded twice — the buffer has to enter the weight cache and the owned set together, or the caller's own
+  cleanup frees what the cache now points at.
+
 ## alpha.92
 
 - **Two backends on the shared residency cache would have handed out the same binding key.** The counter was a
