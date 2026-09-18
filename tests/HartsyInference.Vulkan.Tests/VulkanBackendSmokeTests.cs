@@ -1871,6 +1871,54 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); bias.Dispose(); batched.Dispose();
     }
 
+    /// <summary>The same per-image equivalence at an SDXL-sized convolution. The small-shape case above fits inside a
+    /// single matmul tile; this one spans many, so a per-image offset that is right modulo the tile width but wrong
+    /// across tiles shows up here and nowhere else.</summary>
+    [Fact]
+    public void Backend_Conv2D_Batched_MatchesPerImage_AtUnetScale()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int B = 2, Cin = 320, Cout = 320, H = 64, W = 64, Kh = 3, Kw = 3;
+        Tensor input = new(new TensorShape(B, Cin, H, W), DType.F32);
+        Tensor weight = new(new TensorShape(Cout, Cin, Kh, Kw), DType.F32);
+        Tensor batched = new(new TensorShape(B, Cout, H, W), DType.F32);
+
+        Random rng = new(99);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        for (int n = 0; n < B; n++)
+            for (int i = 0; i < Cin * H * W; i++)
+                iS[n * Cin * H * W + i] = (float)(rng.NextDouble() * 2 - 1) + n * 2.0f;
+        for (int i = 0; i < Cout * Cin * Kh * Kw; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.02f;
+
+        backend.Conv2D(batched, input, weight, null, strideH: 1, strideW: 1, padH: 1, padW: 1);
+        ReadOnlySpan<float> batchedOut = batched.AsReadOnlySpan<float>();
+
+        int imageIn = Cin * H * W, imageOut = Cout * H * W;
+        float maxErr = 0f, maxAbs = 0f;
+        for (int n = 0; n < B; n++)
+        {
+            Tensor single = new(new TensorShape(1, Cin, H, W), DType.F32);
+            Tensor singleOut = new(new TensorShape(1, Cout, H, W), DType.F32);
+            iS.Slice(n * imageIn, imageIn).CopyTo(single.AsSpan<float>());
+            backend.Conv2D(singleOut, single, weight, null, strideH: 1, strideW: 1, padH: 1, padW: 1);
+            ReadOnlySpan<float> expected = singleOut.AsReadOnlySpan<float>();
+            for (int i = 0; i < imageOut; i++)
+            {
+                maxErr = MathF.Max(maxErr, MathF.Abs(batchedOut[n * imageOut + i] - expected[i]));
+                maxAbs = MathF.Max(maxAbs, MathF.Abs(expected[i]));
+            }
+            single.Dispose(); singleOut.Dispose();
+        }
+
+        // Relative to the tensor's own scale: accumulation order across tiles is not bitwise-stable.
+        Assert.True(maxErr / maxAbs < 1e-5f, $"Batched Conv2D diverged at UNet scale: maxErr {maxErr:E3} on maxAbs {maxAbs:E3}.");
+
+        input.Dispose(); weight.Dispose(); batched.Dispose();
+    }
+
     /// <summary>The dtype-fallback branches must not re-enter themselves. <c>((IBackend)this).X(...)</c> looks like
     /// "call the managed default" but the class method implicitly implements the interface member, so interface
     /// dispatch lands straight back in the override and recurses until the stack overflows — a documented bug class
