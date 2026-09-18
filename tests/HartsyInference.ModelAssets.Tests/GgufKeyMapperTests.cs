@@ -1,4 +1,5 @@
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Gguf.KeyMappers;
 using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests;
@@ -208,6 +209,37 @@ public sealed class GgufKeyMapperTests
         ];
         IGgufKeyMapper m = GgufKeyMapperRegistry.DetectByKeys(keys);
         Assert.Equal("flite", m.Architecture);
+    }
+
+    /// <summary>The precedence rules that the family table's ordering exists for. Each of these checkpoints also
+    /// satisfies a broader family's signature, and losing the ordering does not throw — it loads the file as another
+    /// architecture's weights, which renders as a black image.</summary>
+    [Theory]
+    // Radiance is classic Chroma plus the pixel-space NeRF head, so it matches Chroma's signature too.
+    [InlineData("chroma-radiance", "distilled_guidance_layer.0.weight", "nerf_blocks.0.weight", "double_blocks.0.img_attn.qkv.weight")]
+    // Zeta is the Z-Image DiT with a dec_net head, so it matches Z-Image's refiner signature too.
+    [InlineData("zeta-chroma", "noise_refiner.0.weight", "context_refiner.0.weight", "dec_net.0.weight")]
+    // The Tencent Hunyuan Image repack carries Flux's double+single block naming; byt5_in is what separates it,
+    // and from HunyuanVideo, which shares the same block naming again.
+    [InlineData("hunyuan_image", "double_blocks.0.img_attn_qkv.weight", "single_blocks.0.linear1.weight", "byt5_in.proj.weight")]
+    [InlineData("hunyuan_image", "transformer_blocks.0.dual_attention.to_q.weight", "transformer_blocks.0.ff.net.0.weight", "x_embedder.weight")]
+    [InlineData("flux2", "double_stream_modulation_img.weight", "double_blocks.0.mlp.linear_in.weight", "single_blocks.0.linear1.weight")]
+    [InlineData("ernie_image", "shared_adaLN_modulation.1.weight", "transformer_blocks.0.mlp.gate_proj.weight", "patch_embed.proj.weight")]
+    [InlineData("qwen_image", "transformer_blocks.0.attn.add_q_proj.weight", "transformer_blocks.0.ff.net.0.proj.weight", "img_in.weight")]
+    public void DetectByKeys_PrefersTheSpecificFamilyOverTheBroaderOneItAlsoMatches(string expected, params string[] keys)
+    {
+        Assert.Equal(expected, GgufKeyMapperRegistry.DetectByKeys(keys).Architecture);
+    }
+
+    [Fact]
+    public void DiffusionFamilies_MapEveryKeyToItself()
+    {
+        // A diffusion GGUF is a repack of the safetensors build, so the whole point of these mappers is that they do
+        // nothing to the keys; a family that started rewriting them would break the converter that reads them.
+        foreach (IGgufKeyMapper family in DiffusionGgufFamilies.InDetectionOrder)
+        {
+            Assert.Equal("blocks.0.attn.to_q.weight", family.MapKey("blocks.0.attn.to_q.weight"));
+        }
     }
 
     [Fact]

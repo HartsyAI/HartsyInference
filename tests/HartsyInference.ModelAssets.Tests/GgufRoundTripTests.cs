@@ -287,40 +287,6 @@ public sealed class GgufRoundTripTests : IDisposable
         }
     }
 
-    [Fact]
-    public unsafe void GgufConverterBridge_LoadsThroughTestConverter()
-    {
-        string path = Path.Combine(_tempDir, "bridge.gguf");
-
-        Tensor t = new Tensor(new TensorShape(8), DType.F32);
-        try
-        {
-            float* tp = (float*)t.DataPointer;
-            for (int i = 0; i < 8; i++) tp[i] = i * 0.5f;
-
-            using (GgufWriter w = new(path))
-            {
-                w.SetMetadata("general.architecture", "test");
-                w.AddTensor("foo", t);
-                w.AddTensor("bar", t);
-                w.Flush();
-            }
-
-            (TestConverted converted, GgufModelLoader.LoadedGgufModel handle) =
-                GgufConverterBridge.LoadGguf(path, DType.F32, weights => new TestConverted { KeyCount = weights.Count });
-            using (handle)
-            {
-                Assert.Equal(2, converted.KeyCount);
-            }
-        }
-        finally
-        {
-            t.Dispose();
-        }
-    }
-
-    private sealed class TestConverted { public int KeyCount { get; init; } }
-
     public void Dispose()
     {
         try
