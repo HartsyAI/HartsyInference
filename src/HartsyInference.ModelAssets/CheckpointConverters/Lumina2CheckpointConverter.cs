@@ -1,3 +1,4 @@
+using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
@@ -22,19 +23,36 @@ public sealed class Lumina2CheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Every file that makes up this checkpoint: the one path for a single file, or every shard beside it when a sibling <c>*.safetensors.index.json</c> marks a diffusers multi-shard release (the real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards).</summary>
-    /// <remarks>The shards are opened as one <see cref="Checkpoints.CheckpointSource"/> rather than merged raw:
+    /// <summary>Every file that makes up this checkpoint: the shard set a sibling <c>*.safetensors.index.json</c> lists <paramref name="checkpointPath"/> as a member of (the real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards), or the one path otherwise.</summary>
+    /// <remarks><para>The shards are opened as one <see cref="Checkpoints.CheckpointSource"/> rather than merged raw:
     /// safetensors sharding makes no promise that a weight and its <c>.weight_scale</c> land in the same file, so
-    /// folding each shard alone splits pairs that belong together.</remarks>
+    /// folding each shard alone splits pairs that belong together.</para>
+    /// <para>Membership is what decides it, not the index's mere presence: a GGUF repack parked beside the original
+    /// sharded release would otherwise be discarded for the full-precision checkpoint the index names, which loads a
+    /// different model — or nothing, out of memory — with no sign that the selection was ignored.</para></remarks>
     public static IReadOnlyList<string> ResolveShardPaths(string checkpointPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(checkpointPath);
         string? dir = Path.GetDirectoryName(checkpointPath);
-        if (string.IsNullOrEmpty(dir) || Directory.GetFiles(dir, "*.safetensors.index.json").Length == 0)
+        if (string.IsNullOrEmpty(dir))
             return [checkpointPath];
-        string[] shards = Directory.GetFiles(dir, "*.safetensors");
-        Array.Sort(shards, StringComparer.Ordinal);
-        return shards.Length == 0 ? [checkpointPath] : shards;
+        string selected = Path.GetFileName(checkpointPath);
+        foreach (string indexPath in Directory.GetFiles(dir, "*.safetensors.index.json"))
+        {
+            SortedSet<string> members = ReadIndexMembers(indexPath);
+            if (!members.Contains(selected))
+                continue;
+            List<string> shards = new List<string>(members.Count);
+            foreach (string member in members)
+            {
+                string shard = Path.Combine(dir, member);
+                if (!File.Exists(shard))
+                    throw new FileNotFoundException($"Lumina-2 shard '{member}' listed in '{indexPath}' is missing.", shard);
+                shards.Add(shard);
+            }
+            return shards;
+        }
+        return [checkpointPath];
     }
 
     /// <summary>Partitions a flat dict of Lumina-Image-2.0 safetensors keys.</summary>
@@ -163,5 +181,25 @@ public sealed class Lumina2CheckpointConverter
                 return true;
         }
         return false;
+    }
+
+    /// <summary>The distinct shard file names a diffusers <c>*.safetensors.index.json</c> weight map points at, in ordinal order.</summary>
+    private static SortedSet<string> ReadIndexMembers(string indexPath)
+    {
+        SortedSet<string> members = new SortedSet<string>(StringComparer.Ordinal);
+        using FileStream stream = File.OpenRead(indexPath);
+        using JsonDocument document = JsonDocument.Parse(stream);
+        if (!document.RootElement.TryGetProperty("weight_map", out JsonElement weightMap)
+            || weightMap.ValueKind != JsonValueKind.Object)
+        {
+            return members;
+        }
+        foreach (JsonProperty entry in weightMap.EnumerateObject())
+        {
+            string? file = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
+            if (!string.IsNullOrEmpty(file))
+                members.Add(file);
+        }
+        return members;
     }
 }

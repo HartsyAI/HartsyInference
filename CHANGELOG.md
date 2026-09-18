@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
   companion carry is deleted, dead now that folding precedes renaming.
 - Lumina-2, HiDream and OmniGen 2 widen to the dtype their transformer actually runs, rather than the F16 default
   that would have left a GGUF mixing dense F32 with widened F16.
+- **Selecting a Lumina-2 GGUF stored beside the original sharded release loaded the release instead.** Any sibling
+  `*.safetensors.index.json` used to expand the selection into every safetensors in the folder; the index now has to
+  list the selected file before it expands anything, so a repack — or any second checkpoint parked there — loads as
+  itself.
 
 ## alpha.94
 
