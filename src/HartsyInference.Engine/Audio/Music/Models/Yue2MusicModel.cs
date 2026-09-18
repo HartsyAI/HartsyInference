@@ -194,10 +194,13 @@ internal static class Yue2MusicModel
     }
 
     /// <summary>The conventional user-placed location, <c>{models}/audio/music/yue2/*.safetensors</c> or <c>*.gguf</c>.</summary>
-    /// <remarks>A GGUF build is taken only when <paramref name="quant"/> asks for one and a placed file names that
-    /// precision — nothing is quantized at load, and the hub ships no GGUF, so this never becomes a download. Among the
-    /// rest the requested variant's own filename wins and anything else is taken in sorted order: enumeration order is
-    /// the filesystem's, and picking a different checkpoint run to run is indistinguishable from the model drifting.</remarks>
+    /// <remarks><para>A caller who named a variant gets that variant's own filename or nothing — serving whatever else
+    /// happens to be in the directory would hand them a different precision than they asked for, under that variant's
+    /// cache key. Only the default resolution takes what is placed, in sorted order: enumeration order is the
+    /// filesystem's, and picking a different checkpoint run to run is indistinguishable from the model drifting.</para>
+    /// <para>There a GGUF naming the precision <paramref name="quant"/> resolved to wins, which is how
+    /// <see cref="AudioLmQuant"/> selects one. Nothing is quantized at load and nothing here downloads a GGUF — the hub
+    /// ships none, so placing the file is the only way one arrives.</para></remarks>
     private static string? LocatePlaced(string file, AudioLmQuant quant)
     {
         string directory = AudioModelRoot.WeightsDirectory(Category, "yue2");
@@ -206,21 +209,21 @@ internal static class Yue2MusicModel
             .Where(f => f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
                 || f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
             .OrderBy(f => f, StringComparer.Ordinal)];
+        string preferred = Path.GetFileName(file);
+        string? exact = candidates.FirstOrDefault(f => Path.GetFileName(f).Equals(preferred, StringComparison.OrdinalIgnoreCase));
+        if (!string.Equals(file, Bf16File, StringComparison.Ordinal))
+            return exact;
+
         string? quantTag = quant switch
         {
             AudioLmQuant.Q4K => "q4_k",
             AudioLmQuant.Q8 => "q8_0",
             _ => null,
         };
-        if (quantTag is not null)
-        {
-            string? gguf = candidates.FirstOrDefault(f => f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)
+        string? gguf = quantTag is null ? null
+            : candidates.FirstOrDefault(f => f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)
                 && Path.GetFileName(f).Contains(quantTag, StringComparison.OrdinalIgnoreCase));
-            if (gguf is not null) return gguf;
-        }
-        string preferred = Path.GetFileName(file);
-        return candidates.FirstOrDefault(f => Path.GetFileName(f).Equals(preferred, StringComparison.OrdinalIgnoreCase))
-            ?? candidates.FirstOrDefault(f => f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase));
+        return gguf ?? exact ?? candidates.FirstOrDefault(f => f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Maps the engine's generic music request onto YuE2's own knobs.</summary>

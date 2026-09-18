@@ -293,6 +293,32 @@ public sealed unsafe class Yue2QuantizedConversionTests : IDisposable
         Assert.True(anyNonZero, "a split of zeros would satisfy every other assertion here");
     }
 
+    /// <summary>On a backend with no int8 kernel every packed weight has to be gone by the time a GEMM sees it — asking only whether the format exists, rather than whether this consumer can run it, is what leaves an int8 weight in front of a backend that cannot read one.</summary>
+    [Fact]
+    public void PrepareForBackend_WidensEveryPackedWeightForAConsumerWithNoInt8Path()
+    {
+        Dictionary<string, Tensor> raw = BuildInt8Checkpoint();
+        using CheckpointSource source = CheckpointSource.Open(Write(raw));
+        using Yue2Weights converted = Yue2CheckpointConverter.Convert(source.Weights, _geometry);
+
+        using QuantizedWeightPolicy.PreparedWeights preparedAr =
+            QuantizedWeightPolicy.PrepareFor(converted.Ar, _ => false, "a backend with no packed-weight kernels");
+        using QuantizedWeightPolicy.PreparedWeights preparedNar =
+            QuantizedWeightPolicy.PrepareFor(converted.Nar, _ => false, "a backend with no packed-weight kernels");
+
+        Assert.True(preparedAr.WidenedCount > 0);
+        Assert.True(preparedNar.WidenedCount > 0);
+        foreach (Dictionary<string, Tensor> stack in (Dictionary<string, Tensor>[])[converted.Ar, converted.Nar])
+        {
+            foreach ((string key, Tensor weight) in stack)
+            {
+                Assert.False(weight.DType.IsQuantized, $"'{key}' is still {weight.DType.Name}");
+                Assert.Null(weight.QuantInfo);
+            }
+        }
+        Assert.Equal(DType.F16, converted.Ar["lm_head.weight"].DType);
+    }
+
     /// <summary>The tokenizer rides in the checkpoint as a rank-1 U8 tensor; the fold must leave it alone and its length must come from the element count, not a dtype whose size it shares with nothing.</summary>
     [Fact]
     public void Convert_ReadsTheEmbeddedTokenizerThroughTheContainerUntouched()
