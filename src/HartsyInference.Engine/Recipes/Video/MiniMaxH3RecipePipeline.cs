@@ -2056,7 +2056,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         // After the transformer that reads them: the merged tensors are the DiT's weights, not copies.
         _loraStack?.Dispose();
         _pddLoraStack?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }
