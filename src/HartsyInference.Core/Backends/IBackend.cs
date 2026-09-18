@@ -141,6 +141,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Gated residual over the last dim: <c>out = residual + gate*value</c>, gate <c>[B,D]</c> broadcast over the seq axis.</summary>
     unsafe void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
+        => GatedResidualLastDimReference(output, residual, value, gate);
+
+    /// <summary>The managed <see cref="GatedResidualLastDim"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).GatedResidualLastDim(...)</c> re-enters the override through interface
+    /// dispatch and recurses until the stack overflows.</summary>
+    static unsafe void GatedResidualLastDimReference(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
             throw new NotSupportedException("GatedResidualLastDim default fallback only supports F32.");
@@ -1482,7 +1488,18 @@ public interface IBackend : IDisposable
 
     /// <summary>Wan2.2 VAE channel RMS norm: <c>scale = sqrt(C)/max(L2_over_C, eps)</c>, <c>out = x·scale·gamma</c>.</summary>
     unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
+        => WanRmsNormChannelReference(output, input, gamma, eps);
+
+    /// <summary>The managed <see cref="WanRmsNormChannel"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).WanRmsNormChannel(...)</c> re-enters the override through interface
+    /// dispatch and recurses until the stack overflows.</summary>
+    static unsafe void WanRmsNormChannelReference(Tensor output, Tensor input, Tensor? gamma, float eps)
     {
+        // Stated rather than assumed: the loop below reads every operand as float*, so a non-F32 tensor would be
+        // reinterpreted bit-for-bit and produce plausible garbage. The other references in this file guard the
+        // same way.
+        if (output.DType != DType.F32 || input.DType != DType.F32 || (gamma is not null && gamma.DType != DType.F32))
+            throw new NotSupportedException("WanRmsNormChannel default fallback only supports F32.");
         int b = (int)input.Shape[0], c = (int)input.Shape[1];
         long spatial = input.ElementCount / ((long)b * c);
         float sqrtC = MathF.Sqrt(c);

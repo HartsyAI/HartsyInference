@@ -15,6 +15,26 @@ stable release will require. Dates are UTC.
   and then died several layers down in a model loader complaining about a missing text-encoder weight. Both were
   found the hard way, drawing a wrong conclusion from a run that had not used the settings it was given.
 
+## alpha.86
+
+- **Vulkan convolves a batch.** `Conv2D` refused `batch > 1` outright, which is what made SDXL unusable on the
+  Vulkan backend: its fused denoise loop runs one batch=2 UNet forward per step, with the positive and negative
+  prompt concatenated for classifier-free guidance, so the first convolution of the first step threw. SD1.5 never
+  hit it only because it runs CFG as two separate batch=1 passes. No kernel changed: the im2col shader already
+  wrote each image's columns as its own block, and `matmul_tiled` has carried the `aOffset`/`bOffset`/`cOffset`
+  push constants "for batched dispatch" all along — the convolution now walks them per image the way
+  `BatchedMatMul` already did. The column-tile budget is divided across the batch, so the cap that exists to bound
+  peak im2col memory keeps meaning what it says instead of being exceeded by a factor of the batch.
+- **Three dtype fallbacks stopped calling themselves.** `((IBackend)this).X(...)` reads as "run the managed
+  default", but the class method implicitly implements the interface member, so interface dispatch re-enters the
+  override: `WanRmsNormChannel`, `GatedResidualLastDim` and `RopeApplyDecodeStep` each recursed until the stack
+  overflowed, taking the process with them, for any input that took the fallback branch. This is a bug class the
+  troubleshooting notes already describe and had already cost two earlier instances; these were three more. The
+  first two now call a static reference, as that note prescribes, and the third throws — it is a device-position
+  op whose interface default is an empty body, so "falling back" would have silently skipped the rotary embedding
+  and returned a plausible wrong token rather than failing.
+- `WanRmsNormChannel`'s reference states its F32-only contract instead of assuming it. It reads every operand as
+  `float*`, so an F16 tensor reaching it would have been reinterpreted bit-for-bit into plausible garbage.
 ## alpha.85
 
 - **`--backend vulkan` now reaches Vulkan for text generation.** `TextService` derived its device key as "not CPU,
