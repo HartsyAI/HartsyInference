@@ -1,4 +1,6 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
@@ -39,9 +41,13 @@ public static class Yue2CheckpointConverter
 
     /// <summary>The three weight sets, in the naming <see cref="GenericTransformer"/> and the Oobleck codec expect.
     /// An unrecognised key throws: a silently dropped weight is a wrong song, not a warning.</summary>
+    /// <remarks>Quantized builds (the official <c>int8_convrot</c> repack, or a GGUF) arrive here already folded by
+    /// <see cref="Checkpoints.CheckpointSource"/>: the projections stay packed for the backend, and only the entries
+    /// this model reads on the host are decoded.</remarks>
     public static Yue2Weights Convert(IReadOnlyDictionary<string, Tensor> raw, Yue2Geometry? geometry = null)
     {
         ArgumentNullException.ThrowIfNull(raw);
+        CheckpointConvertUtils.RequireFoldedCompanions(raw, nameof(Yue2CheckpointConverter));
         Yue2Geometry shape = geometry ?? Yue2Geometry.Released;
         int layers = shape.NumHiddenLayers;
         Dictionary<string, Tensor> ar = new(StringComparer.Ordinal);
@@ -50,36 +56,46 @@ public static class Yue2CheckpointConverter
         List<Tensor> owned = [];
         byte[]? tokenizerJson = null;
 
-        foreach ((string key, Tensor tensor) in raw)
+        // Every split and every host-side decode below allocates, and none of them is in the caller's hands until
+        // this returns — a refusal partway through would otherwise strand half the checkpoint.
+        try
         {
-            if (key == TokenizerKey) { tokenizerJson = ReadBytes(tensor); continue; }
-
-            if (key.StartsWith(VaePrefix, StringComparison.Ordinal))
+            foreach ((string key, Tensor tensor) in raw)
             {
-                // The Oobleck codec host-reads its weight-norm pairs and Snake alpha/beta as F32 spans.
-                vae[key[VaePrefix.Length..]] = CastToF32IfNeeded(tensor, owned);
-                continue;
+                if (key == TokenizerKey) { tokenizerJson = ReadBytes(tensor); continue; }
+
+                if (key.StartsWith(VaePrefix, StringComparison.Ordinal))
+                {
+                    // The Oobleck codec host-reads its weight-norm pairs and Snake alpha/beta as F32 spans.
+                    vae[key[VaePrefix.Length..]] = CastToF32IfNeeded(tensor, owned);
+                    continue;
+                }
+                if (key.StartsWith(ArPrefix, StringComparison.Ordinal)) { MapBody(key[ArPrefix.Length..], tensor, ar, shape, owned, isAr: true); continue; }
+                if (key.StartsWith(NarPrefix, StringComparison.Ordinal)) { MapNar(key[NarPrefix.Length..], tensor, nar, shape, owned); continue; }
+
+                throw new InvalidOperationException($"YuE2 checkpoint carries an unrecognised key '{key}'.");
             }
-            if (key.StartsWith(ArPrefix, StringComparison.Ordinal)) { MapBody(key[ArPrefix.Length..], tensor, ar, shape, owned, isAr: true); continue; }
-            if (key.StartsWith(NarPrefix, StringComparison.Ordinal)) { MapNar(key[NarPrefix.Length..], tensor, nar, shape, owned); continue; }
 
-            throw new InvalidOperationException($"YuE2 checkpoint carries an unrecognised key '{key}'.");
+            if (tokenizerJson is null)
+                throw new InvalidOperationException($"YuE2 checkpoint has no '{TokenizerKey}' tensor; it is the only tokenizer the model ships.");
+
+            // Comfy duplicates the shared final norm; the NAR stack reads it through llm2vae, so both need it.
+            if (!nar.ContainsKey("model.norm.weight") && ar.TryGetValue("model.norm.weight", out Tensor? shared))
+                nar["model.norm.weight"] = shared;
+
+            RequireComplete(ar, layers, "autoregressive", lmHead: true);
+            RequireComplete(nar, layers, "acoustic", lmHead: false);
+            foreach (string required in (string[])["vae2llm.weight", "vae2llm.bias", "llm2vae.weight", "llm2vae.bias",
+                                                   "latent_pos_embed.pe", "time_embedder.mlp.0.weight", "time_embedder.mlp.2.weight"])
+            {
+                if (!nar.ContainsKey(required))
+                    throw new InvalidOperationException($"YuE2 acoustic stack is missing '{required}'.");
+            }
         }
-
-        if (tokenizerJson is null)
-            throw new InvalidOperationException($"YuE2 checkpoint has no '{TokenizerKey}' tensor; it is the only tokenizer the model ships.");
-
-        // Comfy duplicates the shared final norm; the NAR stack reads it through llm2vae, so both need it.
-        if (!nar.ContainsKey("model.norm.weight") && ar.TryGetValue("model.norm.weight", out Tensor? shared))
-            nar["model.norm.weight"] = shared;
-
-        RequireComplete(ar, layers, "autoregressive", lmHead: true);
-        RequireComplete(nar, layers, "acoustic", lmHead: false);
-        foreach (string required in (string[])["vae2llm.weight", "vae2llm.bias", "llm2vae.weight", "llm2vae.bias",
-                                               "latent_pos_embed.pe", "time_embedder.mlp.0.weight", "time_embedder.mlp.2.weight"])
+        catch
         {
-            if (!nar.ContainsKey(required))
-                throw new InvalidOperationException($"YuE2 acoustic stack is missing '{required}'.");
+            foreach (Tensor tensor in owned) tensor.Dispose();
+            throw;
         }
 
         return new Yue2Weights(ar, nar, vae, tokenizerJson, owned);
@@ -89,7 +105,8 @@ public static class Yue2CheckpointConverter
     {
         switch (sub)
         {
-            // Host-read by the projection and the sinusoidal timestep embedding.
+            // The acoustic stack's projections and its sinusoidal timestep embedding run against an F32 activation
+            // it builds on the host, so these stay F32 rather than following the body's dtype.
             case "vae2llm.weight" or "vae2llm.bias" or "llm2vae.weight" or "llm2vae.bias"
                  or "time_embedder.mlp.0.weight" or "time_embedder.mlp.0.bias"
                  or "time_embedder.mlp.2.weight" or "time_embedder.mlp.2.bias":
@@ -106,8 +123,11 @@ public static class Yue2CheckpointConverter
     {
         if (sub is "model.embed_tokens.weight" or "model.lm_head.weight" or "model.norm.weight")
         {
-            // GenericTransformer takes lm_head unprefixed; embed/norm keep their model-relative names.
-            output[sub == "model.lm_head.weight" ? "lm_head.weight" : sub] = tensor;
+            // GenericTransformer takes lm_head unprefixed; embed/norm keep their model-relative names. The embedding
+            // table is gathered row by row on the host, which packed bytes cannot survive — lm_head is a GEMM and
+            // stays packed for the backend.
+            output[sub == "model.lm_head.weight" ? "lm_head.weight" : sub] =
+                sub == "model.embed_tokens.weight" ? WidenIfPacked(tensor, DType.F32, owned) : tensor;
             return;
         }
         if (!sub.StartsWith("model.layers.", StringComparison.Ordinal))
@@ -131,9 +151,9 @@ public static class Yue2CheckpointConverter
                         + $"{geometry.NumAttentionHeads}/{geometry.NumKeyValueHeads}-head, head_dim {geometry.HeadDim} "
                         + $"geometry expects {q + 2 * kv}.");
                 }
-                output[$"{layer}.self_attn.q_proj.weight"] = RowSlice(tensor, 0, q, owned);
-                output[$"{layer}.self_attn.k_proj.weight"] = RowSlice(tensor, q, kv, owned);
-                output[$"{layer}.self_attn.v_proj.weight"] = RowSlice(tensor, q + kv, kv, owned);
+                PublishSplit(tensor, [(int)q, (int)kv, (int)kv],
+                    [$"{layer}.self_attn.q_proj.weight", $"{layer}.self_attn.k_proj.weight",
+                     $"{layer}.self_attn.v_proj.weight"], output, owned);
                 return;
             }
             case "mlp.gate_up_proj.weight":
@@ -145,8 +165,8 @@ public static class Yue2CheckpointConverter
                         $"YuE2 '{layer}.mlp.gate_up_proj.weight' has {tensor.Shape[0]} rows; the configured "
                         + $"intermediate size {geometry.IntermediateSize} expects {2L * geometry.IntermediateSize}.");
                 }
-                output[$"{layer}.mlp.gate_proj.weight"] = RowSlice(tensor, 0, half, owned);
-                output[$"{layer}.mlp.up_proj.weight"] = RowSlice(tensor, half, half, owned);
+                PublishSplit(tensor, [(int)half, (int)half],
+                    [$"{layer}.mlp.gate_proj.weight", $"{layer}.mlp.up_proj.weight"], output, owned);
                 return;
             }
             case "self_attn.o_proj.weight" or "mlp.down_proj.weight"
@@ -158,6 +178,18 @@ public static class Yue2CheckpointConverter
                 return;
             default:
                 throw new InvalidOperationException($"YuE2 {(isAr ? "AR" : "acoustic")} layer carries an unrecognised leaf '{leaf}'.");
+        }
+    }
+
+    /// <summary>Row-splits a fused projection and hands every piece to the caller's dictionary and owned list.</summary>
+    private static void PublishSplit(Tensor fused, IReadOnlyList<int> rowCounts, IReadOnlyList<string> keys,
+        Dictionary<string, Tensor> output, List<Tensor> owned)
+    {
+        Tensor[] pieces = CheckpointConvertUtils.SplitRows(fused, rowCounts, keys);
+        for (int i = 0; i < keys.Count; i++)
+        {
+            output[keys[i]] = pieces[i];
+            owned.Add(pieces[i]);
         }
     }
 
@@ -182,28 +214,44 @@ public static class Yue2CheckpointConverter
 
     private static unsafe byte[] ReadBytes(Tensor tensor)
     {
-        byte[] bytes = new byte[tensor.ElementCount * tensor.DType.SizeInBytes];
+        byte[] bytes = new byte[tensor.DType.ComputeByteCount(tensor.ElementCount)];
         fixed (byte* dst = bytes)
             Buffer.MemoryCopy((void*)tensor.DataPointer, dst, bytes.Length, bytes.Length);
         return bytes;
     }
 
-    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> into a new owned tensor of the same dtype.</summary>
-    private static unsafe Tensor RowSlice(Tensor src, long startRow, long numRows, List<Tensor> owned)
+    /// <summary>Decodes a packed weight to <paramref name="target"/>; returns the input untouched when it carries no quantization companions.</summary>
+    /// <remarks>Raw int8 bytes are <c>value/scale</c> in a Hadamard-rotated basis, so reading them as numbers is not a
+    /// wrong magnitude, it is a different weight — and <see cref="Tensor.CastTo"/> refuses a GGUF block quant outright.
+    /// Only the entries YuE2 reads on the host come through here; the projections stay packed for the backend.</remarks>
+    private static Tensor WidenIfPacked(Tensor tensor, DType target, List<Tensor> owned)
     {
-        long cols = src.Shape.Rank == 1 ? 1 : src.ElementCount / src.Shape[0];
-        long rowBytes = cols * src.DType.SizeInBytes;
-        Tensor dst = new(new TensorShape(numRows, cols), src.DType);
-        byte* sp = (byte*)src.DataPointer + startRow * rowBytes;
-        Buffer.MemoryCopy(sp, (void*)dst.DataPointer, numRows * rowBytes, numRows * rowBytes);
-        owned.Add(dst);
-        return dst;
+        if (tensor.QuantInfo is null && !tensor.DType.IsQuantized) return tensor;
+        Tensor wide;
+        if (tensor.DType == DType.I8 && tensor.QuantInfo is { RowScale: not null } info)
+        {
+            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(tensor, info.RowScale, info.ConvRotGroupSize);
+            wide = bf16.CastTo(target);
+        }
+        else if (tensor.DType.IsQuantized && tensor.QuantInfo is null)
+        {
+            wide = GgufDequantizer.Dequantize(tensor, target);
+        }
+        else
+        {
+            throw new NotSupportedException(
+                $"YuE2 carries a {tensor.QuantInfo?.Format ?? tensor.DType.Name} weight where this model reads raw "
+                + "floats on the host, and there is no decoder for that format here. Use the BF16 or int8_convrot build.");
+        }
+        owned.Add(wide);
+        return wide;
     }
 
     private static Tensor CastToF32IfNeeded(Tensor tensor, List<Tensor> owned)
     {
-        if (tensor.DType == DType.F32) return tensor;
-        Tensor cast = tensor.CastTo(DType.F32);
+        Tensor wide = WidenIfPacked(tensor, DType.F32, owned);
+        if (wide.DType == DType.F32) return wide;
+        Tensor cast = wide.CastTo(DType.F32);
         owned.Add(cast);
         return cast;
     }

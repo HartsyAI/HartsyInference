@@ -60,11 +60,32 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     /// <summary>F32 view-or-copy: dequantizes quantized tensors, casts 16-bit floats, returns the SAME reference when already F32 (callers check <c>ReferenceEquals</c> before disposing).</summary>
+    /// <remarks>A ComfyUI <c>int8_tensorwise</c> weight is plain I8 whose scale — and, under ConvRot, whose basis —
+    /// lives on <see cref="Tensor.QuantInfo"/>, so it is not <c>IsQuantized</c> and a cast would read a different
+    /// weight rather than refuse. The embedding table of an int8 checkpoint reaches here, and it is host-gathered.</remarks>
     internal static Tensor EnsureF32(Tensor t)
     {
         if (t.DType == DType.F32) return t;
         if (t.DType.IsQuantized) return HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
+        if (t.DType == DType.I8 && t.QuantInfo is { RowScale: not null } int8)
+        {
+            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(t, int8.RowScale, int8.ConvRotGroupSize);
+            return bf16.CastTo(DType.F32);
+        }
         return t.CastTo(DType.F32);
+    }
+
+    /// <summary>True when every part can be byte-concatenated without losing a quantization companion.</summary>
+    /// <remarks>A ComfyUI <c>int8_tensorwise</c> weight keeps its dequant scale on <see cref="Tensor.QuantInfo"/>,
+    /// indexed by exactly the rows a concatenation renumbers, so the fused copy would be raw int8 with no scale.
+    /// Fusion is a decode-time dispatch saving; the separate projections are already the packed-weight fast path.</remarks>
+    private static bool Fusable(params Tensor?[] parts)
+    {
+        foreach (Tensor? part in parts)
+        {
+            if (part?.QuantInfo is not null) return false;
+        }
+        return true;
     }
 
     /// <summary>Concatenates weight (<c>[N,K]</c>) or bias (<c>[N]</c>) tensors along dim 0 (output rows) via a plain byte-level copy — correct for any dtype, including block-quantized formats, since a GGUF/our quant block never spans two output rows. Load-time only, used to fuse separate Q/K/V or gate/up projections into a single larger GEMV dispatch. All parts must share dtype and (for 2D) K.</summary>
@@ -1056,13 +1077,13 @@ public sealed unsafe class GenericTransformer : IDisposable
             // tensor based on shape; K is shared across Q/K/V so this is expected to always hold in practice,
             // but the check keeps an edge case safely falling back to the existing separate-projection path
             // instead of building a nonsensical concatenation).
-            if (hasOwnKv && _qW.DType == _kW!.DType && _qW.DType == _vW!.DType)
+            if (hasOwnKv && _qW.DType == _kW!.DType && _qW.DType == _vW!.DType && Fusable(_qW, _kW, _vW))
             {
                 _qkvW = ConcatRows(_qW, _kW, _vW);
                 if (_qB is not null && _kB is not null && _vB is not null)
                     _qkvB = ConcatRows(_qB, _kB, _vB);
             }
-            else if (hasOwnKv && _qW.DType == _kW!.DType
+            else if (hasOwnKv && _qW.DType == _kW!.DType && Fusable(_qW, _kW)
                 && EngineKnobs.QkFusion.Value)
             {
                 // Mixed-dtype v (see _qkW's doc comment): fuse what still matches.
@@ -1161,7 +1182,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // Fused gate+up dispatch — same rationale/technique as _qkvW (see its doc comment). Dense
                 // SwiGLU/GeGLU only (non-gated FFNs have no gate_proj to fuse with); dtype-match guard for the
                 // same mixed-quant-scheme edge case.
-                if (_cfg.GatedFfn && _gateW is not null && _gateW.DType == _upW!.DType)
+                if (_cfg.GatedFfn && _gateW is not null && _gateW.DType == _upW!.DType && Fusable(_gateW, _upW))
                 {
                     _gateUpW = ConcatRows(_gateW, _upW);
                     if (_gateB is not null && _upB is not null)
