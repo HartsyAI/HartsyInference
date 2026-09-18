@@ -918,10 +918,20 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   deployed binary contains code no source tree has; reconstruct deliberately (verify the working path still
   works after), don't patch blind.
 - **`((IBackend)this).X()` as a "call the managed default" idiom is infinite recursion, not a fallback** — the
-  class method implicitly implements the interface member, so interface dispatch re-enters the override. Two
-  instances found this way (a CUDA pixel-shuffle fallback, `VulkanBackend.AffineBroadcastLastDim`'s
-  dtype-mismatch branch — a stack overflow on any non-F32/F16 Vulkan input). Fix is a static `*Reference`
-  method the override can call directly, not an interface cast.
+  class method implicitly implements the interface member, so interface dispatch re-enters the override. Fix is
+  a static `*Reference` method the override can call directly, not an interface cast. **Five instances so far**:
+  a CUDA pixel-shuffle fallback and `VulkanBackend.AffineBroadcastLastDim`'s dtype-mismatch branch (2026-08), then
+  `VulkanBackend`'s `WanRmsNormChannel`, `GatedResidualLastDim` and `RopeApplyDecodeStep` (2026-09-18). The
+  recurrence rate is the point: the idiom reads as correct, and the failure is a process-killing stack overflow
+  rather than a catchable exception, so nothing short of grepping for it finds the next one. `src/` is clean as of
+  2026-09-18 — the only remaining matches are these warnings.
+  - A default whose body is EMPTY needs a different answer than a static reference. `RopeApplyDecodeStep`'s
+    default is `{ }` — the contract for a backend that cannot decode on-device at all — so "falling back" would
+    have silently skipped the rotary embedding and returned a plausible wrong token. It throws instead, matching
+    `EmbedGatherDecodeStep`/`ArgMaxInto`/`ApplyRepetitionPenaltyStep`.
+  - Give the extracted `*Reference` an explicit dtype guard. `WanRmsNormChannelReference` reads every operand as
+    `float*`; without the guard an F16 tensor is reinterpreted bit-for-bit into plausible garbage, trading a loud
+    crash for a quiet wrong answer.
 
 ---
 
