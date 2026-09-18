@@ -49,6 +49,8 @@ MATRIX
 )
 
 status=0
+confirmed=0
+selected=0
 printf 'case\tbackend\tresult\tdigest\n'
 
 while IFS=$'\t' read -r id ckpt spec; do
@@ -57,10 +59,15 @@ while IFS=$'\t' read -r id ckpt spec; do
     if [ -n "$FILTER" ] && [ "$id" != "$FILTER" ]; then
         continue
     fi
+    selected=$((selected + 1))
     IFS='|' read -r cmd positional args <<< "$spec"
     path="$MODELS/$ckpt"
     if [ ! -e "$path" ]; then
-        printf '%s\t%s\tuntested\t-\n' "$id" "$BACKEND"
+        # Recording what this machine has is reasonable; COMPARING and reporting success because the checkpoint was
+        # missing is not. A case that should have been checked and was not is a failed gate, not a quiet note —
+        # otherwise a machine holding only the image checkpoints proves the LLM path unchanged by never running it.
+        printf '%s\t%s\tuntested\t%s\n' "$id" "$BACKEND" "$path"
+        [ "$MODE" = compare ] && status=1
         continue
     fi
 
@@ -119,11 +126,22 @@ while IFS=$'\t' read -r id ckpt spec; do
     fi
     if [ "$digest" = "$(cat "$REF/$id.digest")" ]; then
         printf '%s\t%s\tidentical\t%s\n' "$id" "$BACKEND" "$digest"
+        confirmed=$((confirmed + 1))
     else
         printf '%s\t%s\tCHANGED\t%s (reference %s)\n' "$id" "$BACKEND" "$digest" "$(cat "$REF/$id.digest")"
         cp "$artifact" "$REF/$id.actual.${artifact##*.}"
         status=1
     fi
 done <<< "$CASES"
+
+if [ "$selected" -eq 0 ]; then
+    printf 'no case matched --filter %s\n' "$FILTER" >&2
+    exit 2
+fi
+if [ "$MODE" = compare ]; then
+    # Say what was actually proved. A gate that reports success without naming a count invites reading an empty run
+    # as a passing one.
+    printf '%d of %d selected case(s) confirmed identical on %s\n' "$confirmed" "$selected" "$BACKEND" >&2
+fi
 
 exit $status
