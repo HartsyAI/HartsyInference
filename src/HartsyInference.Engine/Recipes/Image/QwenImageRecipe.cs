@@ -73,6 +73,9 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
                 QuantizedWeightPolicy.PrepareForBackend(converted.Transformer, context.Backend);
+            // Tracked immediately so a failure further down frees the widened copies rather than
+            // leaving them to the finalizer.
+            checkpoint = new CompositeDisposable(source, prepared);
             // Weights load as-is (fp8/fp16 kept for the quantized GEMM path) — the reference does NOT upcast the
             // transformer to F32.
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -222,7 +225,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             bool refTimestepZero = converted.Transformer.ContainsKey("__index_timestep_zero__");
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
             return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder,
-                multimodalEncoder, visionEncoder, refTimestepZero, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
+                multimodalEncoder, visionEncoder, refTimestepZero, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {

@@ -61,6 +61,9 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
                 QuantizedWeightPolicy.PrepareForBackend(ditWeights, context.Backend);
+            // Tracked immediately so a failure further down frees the widened copies rather than
+            // leaving them to the finalizer.
+            checkpoint = new CompositeDisposable(source, prepared);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
@@ -88,7 +91,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             MageFlowPipeline pipeline = new MageFlowPipeline(context.Backend, textEncoder, transformer, vae, config, vaeEncoder);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             Logs.Info($"[MageFlowRecipe] Mage-Flow ready (Qwen3-VL-4B; static shift 6.0; VAE dec={decW.Count}/enc={encW.Count}{(vaeEncoder is not null ? ", edit-capable" : "")}).");
-            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
+            return new MageFlowRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder, isTurbo, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {

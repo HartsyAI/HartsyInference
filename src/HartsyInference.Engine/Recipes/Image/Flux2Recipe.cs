@@ -80,6 +80,9 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
                 QuantizedWeightPolicy.PrepareForBackend(converted, context.Backend);
+            // Tracked immediately so a failure further down frees the widened copies rather than
+            // leaving them to the finalizer.
+            checkpoint = new CompositeDisposable(source, prepared);
 
             Flux2Transformer transformer = new Flux2Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -151,7 +154,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 hiddenLayers: null,
                 bnEps: 1e-5f);
             Logs.Info($"[Flux2Recipe] Flux.2 ready ({DescribeConfig(config)}).");
-            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
+            return new Flux2RecipePipeline(pipeline, config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt, encoder, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {

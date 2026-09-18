@@ -50,6 +50,11 @@ public static class QuantizedWeightPolicy
                 Tensor weight = weights[key];
                 if (!weight.DType.IsQuantized || supportsResidentQuant(weight.DType))
                     continue;
+                // A weight carrying QuantInfo is a ComfyUI format (int8_tensorwise, nvfp4) whose scales live beside it
+                // and whose decode is not GGUF's; sending it to the GGUF dequantizer would report a missing codec for
+                // a format that has one. Those are attached only by a caller that knows the backend consumes them.
+                if (weight.QuantInfo is not null)
+                    continue;
                 Tensor wide = GgufDequantizer.Dequantize(weight, wideDType);
                 created.Add(wide);
                 weights[key] = wide;

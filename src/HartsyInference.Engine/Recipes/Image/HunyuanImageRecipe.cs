@@ -83,6 +83,9 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
                 QuantizedWeightPolicy.PrepareForBackend(converted.Transformer, context.Backend);
+            // Tracked immediately so a failure further down frees the widened copies rather than
+            // leaving them to the finalizer.
+            checkpoint = new CompositeDisposable(source, prepared);
             MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
             transformer.LoadWeights(converted.Transformer);
@@ -131,7 +134,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
-            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, new CompositeDisposable(checkpoint, prepared), loraStack);
+            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {
