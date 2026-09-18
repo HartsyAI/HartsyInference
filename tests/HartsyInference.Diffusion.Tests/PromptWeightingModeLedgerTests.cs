@@ -1,0 +1,218 @@
+using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Engine.Recipes;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace HartsyInference.Diffusion.Tests;
+
+/// <summary>Pins which of SwarmUI's two prompt-weighting mechanisms each family must use, read out of ComfyUI's own
+/// tokenizers rather than inferred. SwarmUI decides with a single runtime probe —
+/// <c>use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)"))</c>
+/// (<c>SwarmText.py:553</c>, helper at <c>:216-225</c>) — so a family is <see cref="PromptWeightingMode.CondScale"/>
+/// only when EVERY tokenizer arm passes ComfyUI's <c>disable_weights=True</c>; a single weight-keeping arm (Kandinsky5's
+/// CLIP-L, HiDream's CLIP-L/G) puts the whole family back on <see cref="PromptWeightingMode.ComfyBlend"/>.
+/// <para>Each entry carries the evidence chain as a comment: the ComfyUI config that names the tokenizer, the tokenizer
+/// class, and the line that does (or does not) disable weights. Paths are relative to ComfyUI's <c>comfy/</c>, except
+/// <c>WorkflowGenerator.cs</c>/<c>SwarmText.py</c> which are SwarmUI's. Once an entry is here a wrong mode is permanent,
+/// so families with no ComfyUI support at all live in <see cref="Unresolved"/> and are NOT guessed.</para></summary>
+public sealed class PromptWeightingModeLedgerTests
+{
+    /// <summary>The verified family → mechanism table. Keys are engine family ids (<c>IArchitectureRecipe.Name</c> /
+    /// <c>IVideoRecipe.Name</c>), not SwarmUI compat-class ids.</summary>
+    private static readonly Dictionary<string, PromptWeightingMode> Ledger = new(StringComparer.Ordinal)
+    {
+        // --- Image families ---
+
+        // supported_models.py:94 -> sd1_clip.SD1Tokenizer; SDTokenizer's disable_weights defaults false (sd1_clip.py:487).
+        ["sd15"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:273 -> sdxl_clip.SDXLTokenizer (sdxl_clip.py:24): clip_l + clip_g, neither disables weights.
+        ["sdxl"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:201 -> the same sdxl_clip.SDXLTokenizer; only the model half differs on the refiner.
+        ["sdxl-refiner"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:584 -> sd3_clip.SD3Tokenizer (sd3_clip.py:41-45): clip_l + clip_g + t5xxl, none disable.
+        ["sd3"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:661 -> aura_t5.AuraT5Tokenizer (aura_t5.py:16) -> PT5XlTokenizer (:11-14), Pile-T5, no disable.
+        ["auraflow"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:771 -> flux.FluxTokenizer (flux.py:17) = clip_l + T5XXLTokenizer (flux.py:11-14), no disable.
+        // Kontext/Fill/Canny/Depth/Redux are the same Flux config (FluxInpaint :773 inherits clip_target), same answer.
+        ["flux1"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:827/832/838 -> KleinTokenizer (flux.py:169), KleinTokenizer8B (:172), Flux2Tokenizer (:104);
+        // the Mistral arm also disables in its ctor (flux.py:88). All three Flux.2 text stacks discard weights.
+        ["flux2"] = PromptWeightingMode.CondScale,
+        // supported_models.py:1797 -> pixart_t5.PixArtTokenizer (pixart_t5.py:29) -> T5XXLTokenizer (:24-27), no disable.
+        ["chroma"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:1833 ChromaRadiance(Chroma) adds no clip_target, so it inherits Chroma's T5 stack (:1794-1797).
+        ["chroma-radiance"] = PromptWeightingMode.ComfyBlend,
+        // Zeta-Chroma is the Z-Image S3-DiT retrained for pixel space: its dec_net.* head makes ComfyUI stamp
+        // image_model="zimage_pixel" (model_detection.py:618-620) -> ZImagePixelSpace(ZImage) (supported_models.py:1230),
+        // which inherits ZImage.clip_target (:1225-1228) -> z_image.ZImageTokenizer -> disable_weights (z_image.py:23).
+        ["zeta-chroma"] = PromptWeightingMode.CondScale,
+        // supported_models.py:1228 -> z_image.ZImageTokenizer (z_image.py:12) -> disable_weights at z_image.py:23.
+        ["zimage"] = PromptWeightingMode.CondScale,
+        // supported_models.py:1202 -> lumina2.LuminaTokenizer (lumina2.py:22-24) -> Gemma2BTokenizer (:7-11), which does
+        // NOT disable weights; sd.py:1843-1850 routes a Gemma-2-2B TE here. lumina2.py:20's disable_weights belongs to
+        // Gemma3_4BTokenizer, reached only through NTokenizer (:26-28, sd.py:1851-1858) — a different model's TE.
+        // Lumina2Recipe.cs:54 pins SideModels.Gemma2_2B and :127 rejects the Gemma-3 tokenizer by hash, so only this arm applies.
+        ["lumina2"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:2052 -> qwen_image.QwenImageTokenizer (:14) -> disable_weights at qwen_image.py:39.
+        // Qwen-Image Edit rides the same tokenizer (the llama_template_images branch, :18/:20-38), so same mode.
+        ["qwen-image"] = PromptWeightingMode.CondScale,
+        // supported_models.py:2109 -> hunyuan_image.HunyuanImageTokenizer (:13), a QwenImageTokenizer subclass, so the
+        // Qwen arm disables (qwen_image.py:39). Its byt5 arm (:8-11) keeps weights but is only populated for QUOTED text
+        // (:24-38), and SwarmUI's discriminator probes the unquoted literal "(x:2)" — byt5 never enters the probe.
+        ["hunyuan-image"] = PromptWeightingMode.CondScale,
+        // supported_models.py:1906 -> omnigen2.Omnigen2Tokenizer (:13) -> Qwen25_3BTokenizer (:7-10); :18-23 wraps the
+        // llama template WITHOUT passing disable_weights, so weights survive.
+        ["omnigen2"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:1927 -> boogu.BooguTokenizer (:20), a qwen3vl.Qwen3VLTokenizer subclass -> qwen3vl.py:187.
+        ["boogu"] = PromptWeightingMode.CondScale,
+        // supported_models.py:1994 -> krea2.Krea2Tokenizer (:23), a Qwen3VLTokenizer subclass -> qwen3vl.py:187. The extra
+        // attention patch is SwarmUI's, not ComfyUI's: WorkflowGenerator.cs:965-972 inserts SwarmAttnTokenWeights for
+        // IsKrea2() && ModelSpecificEnhancements only, implemented at SwarmText.py:281-312.
+        ["krea2"] = PromptWeightingMode.CondScaleWithAttention,
+        // supported_models.py:2023 -> mage_flow.MageFlowTokenizer (:23), a Qwen3VLTokenizer subclass -> qwen3vl.py:187.
+        ["mage-flow"] = PromptWeightingMode.CondScale,
+        // HiDream's own clip_target returns None (supported_models.py:1679, "TODO"); the TE is loaded through
+        // sd.py:1995 -> hidream.HiDreamTokenizer (hidream.py:10-15). clip_l/clip_g keep weights, so the probe sees them
+        // even though the llama arm (hunyuan_video.LLAMA3Tokenizer) and t5 arm are along for the ride.
+        ["hidream"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:1965 -> ideogram4.Ideogram4Tokenizer (:28) -> disable_weights at ideogram4.py:42.
+        ["ideogram4"] = PromptWeightingMode.CondScale,
+        // supported_models.py:2404 -> ernie.ErnieTokenizer (:9) -> disable_weights at ernie.py:14 (Mistral3 arm).
+        ["ernie-image"] = PromptWeightingMode.CondScale,
+        // supported_models.py:2227 -> kandinsky5.Kandinsky5TokenizerImage (:19), a Kandinsky5Tokenizer subclass whose
+        // clip_l arm (kandinsky5.py:10, emitted at :14) is a plain SDTokenizer and KEEPS weights. Its Qwen arm inherits
+        // QwenImageTokenizer's hard disable (qwen_image.py:39), so SwarmUI weights CLIP-L only — do not blend both arms.
+        ["kandinsky5"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:1157 -> anima.AnimaTokenizer (:18-21): qwen3_06b (:8-11) + t5xxl (:13-16), neither disables.
+        ["anima"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:877 -> gpt_oss.LensTokenizer (:496) -> LensGptOssTokenizer (:456) disable_weights at :475.
+        ["lens"] = PromptWeightingMode.CondScale,
+
+        // --- Video families ---
+
+        // supported_models.py:1341 -> wan.WanT5Tokenizer (:20-22) -> UMT5XXlTokenizer (:11-14), no disable_weights. Every
+        // Wan variant class (WAN21_I2V :1362, WAN21_Vace :1406, WAN22_Animate :1443, WAN_Animate2 :1456, WAN22_S2V :1430,
+        // WAN22_T2V :1470) subclasses WAN21_T2V and adds no clip_target, so all of them share this one answer.
+        ["wan"] = PromptWeightingMode.ComfyBlend,
+        ["wan-22-5b"] = PromptWeightingMode.ComfyBlend,
+        ["wan-21-1_3b"] = PromptWeightingMode.ComfyBlend,
+        ["wan-21-14b"] = PromptWeightingMode.ComfyBlend,
+        ["wan-vace"] = PromptWeightingMode.ComfyBlend,
+        ["wan-animate"] = PromptWeightingMode.ComfyBlend,
+        ["wan-animate-2"] = PromptWeightingMode.ComfyBlend,
+        ["wan-s2v"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:1038 -> hunyuan_video.HunyuanVideoTokenizer (:47-51) = clip_l + LLAMA3Tokenizer (:26-29),
+        // neither disables. This is HunyuanVideo 1.0 (LLaVA-Llama-3 + CLIP-L, HunyuanVideoRecipe.cs:90-95); the 1.5
+        // tokenizer (hunyuan_video.py:79, a HunyuanImageTokenizer subclass) would be CondScale and is not this recipe.
+        ["hunyuan-video"] = PromptWeightingMode.ComfyBlend,
+        // supported_models.py:945 -> lt.LTXVT5Tokenizer (:17-19) -> T5XXLTokenizer (:11-14), no disable_weights.
+        ["ltx-video"] = PromptWeightingMode.ComfyBlend,
+        // LTX-2 loads its TE through sd.py's CLIPType.LTXV branch, not the checkpoint's clip_target: sd.py:2019 ->
+        // lt.LTXAVGemmaTokenizer (:79-81) -> Gemma3_12BTokenizer disable_weights (lt.py:76). A Gemma-4 TE takes the
+        // sibling branch (sd.py:2022-2030) -> gemma4.py:1610, also disabled. Both arms agree, so the family is CondScale.
+        ["ltx-video-2"] = PromptWeightingMode.CondScale,
+        ["ltx-2.5-distilled"] = PromptWeightingMode.CondScale,
+        // supported_models.py:988 -> minimax.MiniMaxH3Tokenizer (:136) -> disable_weights at minimax.py:158.
+        ["minimax-h3"] = PromptWeightingMode.CondScale,
+        // supported_models.py:2203 -> kandinsky5.Kandinsky5Tokenizer (:6); same CLIP-L arm as the image variant above.
+        ["kandinsky5-video"] = PromptWeightingMode.ComfyBlend,
+    };
+
+    /// <summary>Families with NO ComfyUI support, so SwarmUI has no behaviour to match and no mode can be read from a
+    /// primary source. They are listed rather than guessed: a wrong entry in <see cref="Ledger"/> becomes permanent.
+    /// <para><c>lance-image</c>/<c>lance-video</c> — ByteDance Lance is absent from ComfyUI entirely (no
+    /// <c>supported_models.py</c> class, no <c>CLIPType</c>, no tokenizer module).</para>
+    /// <para><c>f-lite</c> — Freepik F-Lite is likewise absent; its T5-XXL stack makes ComfyBlend the likely answer but
+    /// there is no ComfyUI tokenizer to read it off, so it stays out.</para></summary>
+    private static readonly string[] Unresolved = ["f-lite", "lance-image", "lance-video"];
+
+    private readonly ITestOutputHelper _output;
+
+    public PromptWeightingModeLedgerTests(ITestOutputHelper output) => _output = output;
+
+    /// <summary>Every registered family must declare a verified mode or be explicitly unresolved, so a newly landed
+    /// recipe fails here until someone reads its ComfyUI tokenizer instead of inheriting a default.</summary>
+    [Fact]
+    public void EveryRegisteredFamilyIsLedgeredOrExplicitlyUnresolved()
+    {
+        List<string> missing = [];
+        foreach (string family in RegisteredFamilies())
+        {
+            if (!Ledger.ContainsKey(family) && !Unresolved.Contains(family, StringComparer.Ordinal))
+            {
+                missing.Add(family);
+            }
+        }
+        _output.WriteLine($"registered: {string.Join(", ", RegisteredFamilies())}");
+        Assert.True(missing.Count == 0,
+            $"No verified prompt-weighting mode for: {string.Join(", ", missing)}. Read the family's ComfyUI "
+            + "tokenizer (disable_weights on every arm => CondScale) and add it, or list it as unresolved.");
+    }
+
+    /// <summary>The reverse direction: a ledger key that no longer resolves is a rename nobody carried across, and it
+    /// would silently stop pinning anything.</summary>
+    [Fact]
+    public void EveryLedgeredFamilyResolvesToARegisteredRecipe()
+    {
+        HashSet<string> registered = new(RegisteredFamilies(), StringComparer.Ordinal);
+        foreach (string family in Ledger.Keys.Concat(Unresolved))
+        {
+            Assert.True(registered.Contains(family), $"'{family}' is ledgered but no longer registered.");
+        }
+    }
+
+    /// <summary>A family cannot be both pinned and unresolved.</summary>
+    [Fact]
+    public void UnresolvedFamiliesAreAbsentFromTheLedger()
+    {
+        foreach (string family in Unresolved)
+        {
+            Assert.False(Ledger.ContainsKey(family), $"'{family}' is listed unresolved but also ledgered.");
+        }
+    }
+
+    /// <summary>Krea2 is the only family whose workflow gets <c>SwarmAttnTokenWeights</c>
+    /// (<c>WorkflowGenerator.cs:965-972</c>). Flux, Chroma, Qwen-Image and HunyuanVideo expose the same <c>img_slice</c>
+    /// hook the patch needs (<c>SwarmText.py:284</c>), so the tempting generalization is wrong: SwarmUI does not wire
+    /// the node for them, and doing it here would diverge from the reference rather than match it.</summary>
+    [Fact]
+    public void Krea2IsTheOnlyFamilyUsingTheAttentionPatch()
+    {
+        string[] withAttention = [.. Ledger
+            .Where(entry => entry.Value == PromptWeightingMode.CondScaleWithAttention)
+            .Select(entry => entry.Key)
+            .Order(StringComparer.Ordinal)];
+        Assert.Equal(["krea2"], withAttention);
+    }
+
+    /// <summary><see cref="PromptWeightingMode.None"/> means "never reaches <c>SwarmTextEncodeAdvanced</c>"
+    /// (<c>WorkflowGenerator.cs:2584-2599</c>), which is true of the music families only. No image or video family may
+    /// claim it — that would turn a missing implementation into a declared non-feature.</summary>
+    [Fact]
+    public void NoImageOrVideoFamilyDeclaresNoWeighting()
+    {
+        foreach (KeyValuePair<string, PromptWeightingMode> entry in Ledger)
+        {
+            Assert.True(entry.Value != PromptWeightingMode.None,
+                $"'{entry.Key}' declares None; only music families bypass SwarmTextEncodeAdvanced.");
+        }
+    }
+
+    /// <summary>The mechanisms split roughly in half across the catalogue; a mode that collapsed to one value would mean
+    /// the table was filled in by default rather than read, which is exactly the failure this ledger exists to prevent.</summary>
+    [Fact]
+    public void BothMechanismsAreRepresented()
+    {
+        Assert.Contains(PromptWeightingMode.ComfyBlend, Ledger.Values);
+        Assert.Contains(PromptWeightingMode.CondScale, Ledger.Values);
+        _output.WriteLine($"ComfyBlend: {Ledger.Values.Count(m => m == PromptWeightingMode.ComfyBlend)}, "
+            + $"CondScale: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScale)}, "
+            + $"CondScaleWithAttention: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScaleWithAttention)}, "
+            + $"unresolved: {Unresolved.Length}");
+    }
+
+    /// <summary>Both registries, image first, as a stable ordered list.</summary>
+    private static IReadOnlyList<string> RegisteredFamilies() =>
+        [.. RecipeRegistry.RegisteredNames.Concat(VideoRecipeRegistry.RegisteredNames).Order(StringComparer.Ordinal)];
+}
