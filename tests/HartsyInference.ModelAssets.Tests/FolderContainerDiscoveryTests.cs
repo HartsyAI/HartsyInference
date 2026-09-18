@@ -63,6 +63,20 @@ public sealed class FolderContainerDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public void DiscoverContainerFiles_RefusesAShardThatOnlyLooksLikeACheckpoint()
+    {
+        // Dropping the unreadable one instead would load the rest of the set as if it were whole.
+        string dir = Component("half-pulled");
+        WriteSafeTensors(Path.Combine(dir, "model-00001-of-00002.safetensors"), "blocks.0.attn.to_q.weight");
+        File.WriteAllText(Path.Combine(dir, "model-00002-of-00002.safetensors"),
+            "version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 4096\n");
+
+        UnsupportedModelException error = Assert.Throws<UnsupportedModelException>(
+            () => CheckpointConvertUtils.DiscoverContainerFiles(dir));
+        Assert.Contains("model-00002-of-00002.safetensors", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void OpenShards_RefusesASetThatMixesContainers()
     {
         string dir = Component("mixed");

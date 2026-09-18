@@ -154,8 +154,7 @@ public sealed class CheckpointSource : IDisposable
             {
                 CheckpointSource shard = Open(path, unfolded);
                 shards.Add(shard);
-                // Two formats in one set is a repack sitting beside the release it replaces, not a shard set:
-                // merging them puts two whole models in one dictionary and lets whichever sorts later win.
+                // Two formats in one set is a repack beside the release it replaces, not a shard set.
                 if (shards.Count > 1 && shard.Format != format)
                 {
                     throw new UnsupportedModelException(

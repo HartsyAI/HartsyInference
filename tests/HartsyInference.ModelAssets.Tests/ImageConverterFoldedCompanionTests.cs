@@ -282,9 +282,8 @@ public sealed class ImageConverterFoldedCompanionTests
     [Fact]
     public void ZetaChromaCheckpointConverter_RefusesToFuseSplitAttentionStoredInThreeDtypes()
     {
-        // A per-tensor GGUF quantizer is free to give K a cheaper encoding than Q. The fused tensor is allocated
-        // entirely in Q's dtype, so concatenating the three byte runs leaves a tensor nothing can decode — and when
-        // Q is the cheap one, the copies run past the allocation.
+        // The fused tensor is allocated entirely in Q's dtype, so a cheaper K leaves it under-filled, and a cheaper
+        // Q lets the copies run past it.
         Dictionary<string, Tensor> weights = new()
         {
             ["layers.0.attention.to_q.weight"] = new Tensor(new TensorShape(4, 256), DType.Q8_0),

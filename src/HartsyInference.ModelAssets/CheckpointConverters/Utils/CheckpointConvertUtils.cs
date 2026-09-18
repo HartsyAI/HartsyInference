@@ -113,10 +113,13 @@ public static unsafe class CheckpointConvertUtils
     // ── Shard Loading ──────────────────────────────────────────
 
     /// <summary>Every checkpoint container directly under <paramref name="directory"/>, in ordinal order, identified by its leading bytes rather than by its extension.</summary>
-    /// <remarks>The extension decides nothing here for the same reason it decides nothing in
+    /// <remarks><para>The extension decides nothing for the same reason it decides nothing in
     /// <see cref="Checkpoints.CheckpointSource.Sniff"/>: a GGUF repack of a diffusers component is published under
     /// whatever name its author chose, and a glob for <c>*.safetensors</c> makes it invisible rather than refusing it.
-    /// Configs, tokenizers and index files in the same folder sniff as neither container and drop out.</remarks>
+    /// Configs, tokenizers and index files in the same folder sniff as neither container and drop out.</para>
+    /// <para>A file that carries a checkpoint extension and still fails to sniff is refused rather than dropped. That
+    /// is an LFS pointer or a truncated download, and skipping it would load the rest of a shard set as if it were
+    /// whole — half a model, no error.</para></remarks>
     public static string[] DiscoverContainerFiles(string directory)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
@@ -128,7 +131,16 @@ public static unsafe class CheckpointConvertUtils
         foreach (string candidate in candidates)
         {
             if (Checkpoints.CheckpointSource.TrySniff(candidate, out _))
+            {
                 containers.Add(candidate);
+                continue;
+            }
+            string extension = Path.GetExtension(candidate);
+            if (extension.Equals(".safetensors", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".gguf", StringComparison.OrdinalIgnoreCase))
+            {
+                Checkpoints.CheckpointSource.Sniff(candidate);
+            }
         }
         return [.. containers];
     }
