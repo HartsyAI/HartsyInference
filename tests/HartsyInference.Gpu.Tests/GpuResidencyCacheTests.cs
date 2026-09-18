@@ -120,6 +120,32 @@ public sealed class GpuResidencyCacheTests
         Assert.False(replacement.Freed);
     }
 
+    /// <summary>Teardown must release the buffer an in-place re-cache orphaned.
+    ///
+    /// <para>Re-caching overwrites the tensor's dictionary entry, and clearing its binding only nulls the callbacks —
+    /// neither releases the buffer that was there before. It is then owned by nothing: unreachable from any cache,
+    /// still owned by this instance. Walking the caches at teardown misses it, and on a real backend it survives to
+    /// its finalizer, which destroys it against a device that no longer exists. That is a native crash, three layers
+    /// from the cause, and it took three attempts to find — this test reproduces it without a GPU.</para></summary>
+    [Fact]
+    public void Teardown_Releases_A_Buffer_Orphaned_By_Recaching()
+    {
+        FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        long bytes = GpuResidencyCache<FakeCache.Buffer>.ByteSize(tensor);
+
+        FakeCache.Buffer orphaned = cache.AllocateForTest(bytes);
+        cache.CacheActivation(tensor, orphaned, bytes);
+
+        FakeCache.Buffer current = cache.AllocateForTest(bytes);
+        cache.CacheActivation(tensor, current, bytes);   // the first buffer is now owned by nothing
+
+        cache.FreeAllCached();
+
+        Assert.True(orphaned.Freed, "the re-cached tensor's previous buffer was never released");
+        Assert.True(current.Freed);
+    }
+
     [Fact]
     public void A_Preloaded_Weight_Outlives_An_Activation_Sweep()
     {

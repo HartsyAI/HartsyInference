@@ -917,6 +917,21 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   assembly. If the extension's own source checkout doesn't contain the refusal string you're seeing, its
   deployed binary contains code no source tree has; reconstruct deliberately (verify the working path still
   works after), don't patch blind.
+- **`public new` where you meant `override` silently keeps the base implementation.** It compiles, reads almost
+  exactly like an override, and breaks virtual dispatch: a base method calling `FreeAllCached()` runs its OWN body,
+  not the subclass's, so the subclass's version sits there looking correct and never runs. Cost a native
+  `vkDestroyBuffer: Invalid device` crash at process teardown — three layers from the declaration — while moving
+  Vulkan onto the shared residency cache. Same family as the `((IBackend)this).X()` entry below: an idiom that looks
+  right, fails far from where it is written, and cannot be spotted by reading the subclass alone. A member the base
+  calls on itself must be `virtual`/`override`; `new` is only ever right for a member nothing dispatches through.
+- **Teardown is where a device-memory refactor breaks, not the hot path.** Three separate bugs in one migration, all
+  invisible to a single generation and all fatal across a suite that constructs and destroys a backend per test:
+  a deferred free at teardown is never serviced (there is no later flush, and the buffer's finalizer then destroys it
+  against a dead device); `new` instead of `override` (above); and an ORPHANED buffer — an in-place op re-caches its
+  tensor with a new buffer, overwriting the dictionary entry, and `ClearGpuBinding` only nulls the callbacks rather
+  than releasing anything, so the previous buffer is owned by nothing. Iterating the caches at teardown therefore
+  misses it; the owned-buffer SET has to be swept too. The tell for all three is a crash count that moves between
+  runs (26, then 35, then 18 tests) — that is a finalizer racing, not a dispatch bug.
 - **`((IBackend)this).X()` as a "call the managed default" idiom is infinite recursion, not a fallback** — the
   class method implicitly implements the interface member, so interface dispatch re-enters the override. Fix is
   a static `*Reference` method the override can call directly, not an interface cast. **Five instances so far**:

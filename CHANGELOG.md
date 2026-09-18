@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.90
+
+- **Vulkan's residency cache is now the shared one.** Its three caches, lookup order, tensor-binding lifecycle,
+  weight-cast cache and offload policy come from `GpuResidencyCache<TBuffer>`; what stays behind is what is
+  genuinely Vulkan — the ReBAR-or-staging upload, the non-coherent flush, deferred frees against the command
+  stream's timeline, and the step-graph retain list. Output is byte-identical: SD1.5 and Krea2 both hash-match
+  their pre-migration images exactly.
+- **Vulkan drains its finalizer cleanup queue.** A tensor finalized rather than disposed cannot free its device
+  buffer from the finalizer thread, so the work is queued for a safe point — and nothing on this backend ever ran
+  it, so those buffers stayed allocated until the backend itself was torn down. The outermost op scope runs it now.
+- Each cache instance takes its own binding key instead of every Vulkan device sharing `0`, so one device's
+  teardown can no longer drop another's binding on a tensor resident on both.
+- Three teardown bugs found and fixed while migrating, all recorded in the troubleshooting notes: a deferred free
+  at teardown is never serviced, `public new` silently keeps the base implementation where `override` was meant,
+  and a buffer orphaned by an in-place re-cache is reachable from the owned-buffer set but from no cache.
+
 ## alpha.89
 
 - **A shared GPU layer, `HartsyInference.Gpu`.** Nothing references it yet: the package is built and tested first so
