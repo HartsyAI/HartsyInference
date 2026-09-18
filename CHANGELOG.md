@@ -18,6 +18,11 @@ stable release will require. Dates are UTC.
   (`VideoFeatures.DrivingAudio`), so a family that cannot consume it rejects the request during planning instead of
   accepting the option and ignoring it, and a sparse VSA profile — which is T2VA-only — is refused there rather
   than at the execution boundary.
+- Video: **Wan-S2V declares `VideoFeatures.DrivingAudio`.** Classifying `VideoRequest.VideoAudioReference` as a
+  planned feature reached every family that reads that field, not only H3 — and S2V reads it as the driving speech
+  it cannot run without. Undeclared, the generic planner answered `video.feature.unsupported` before construction,
+  so the documented speech-to-video path would have failed on its own mandatory input. The declaration is the whole
+  fix; the gate itself is unchanged, and a family that does not consume a supplied track still refuses one.
 - Measured on a 90-frame 512x288 pair, same seed and prompt, differing only in the locked track: the output audio
   correlates 0.9771 with the driving track through the VAE round-trip; a silence-driven run emits rms 0.00002
   rather than inventing a soundtrack; the two clips diverge at SSIM 0.556; and motion runs 2.36x higher while

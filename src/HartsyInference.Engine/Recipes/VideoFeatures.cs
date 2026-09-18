@@ -51,7 +51,8 @@ public enum VideoFeatures
     /// segment's tail fixed (MiniMax-H3 long-form).</summary>
     LongFormChain = 4096,
 
-    /// <summary>A soundtrack the clip is generated against, held fixed while the video denoises (MiniMax-H3
-    /// lip-sync). Distinct from <see cref="ReferenceAudios"/>, which only describes the sound to aim for.</summary>
+    /// <summary>Audio the clip is generated against rather than invented alongside — Wan-S2V's Wav2Vec2-encoded
+    /// driving speech, or the track MiniMax-H3 holds every audio row fixed at while the video denoises. Distinct
+    /// from <see cref="ReferenceAudios"/>, which only describes the sound to aim for.</summary>
     DrivingAudio = 8192,
 }
