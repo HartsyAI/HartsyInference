@@ -37,6 +37,10 @@ public static class BackendGate
     private static readonly Dictionary<string, string?> _unavailable = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object _probeLock = new();
 
+    /// <summary>The Vulkan device ordinal the probe settled on. Written under <see cref="_probeLock"/> before the
+    /// probe returns success, so it is set by the time anything can call <see cref="Create"/>.</summary>
+    private static int _vulkanOrdinal;
+
     /// <summary>Opens <paramref name="kind"/>, or reports why not. Returns false after logging a SKIPPED line when
     /// the backend is unavailable — unless <see cref="RequireEnvVar"/> is set, in which case it throws.</summary>
     /// <remarks>The caller owns the returned backend and should <c>using</c> it. A fresh instance per test rather
@@ -97,34 +101,52 @@ public static class BackendGate
                     : null;
 
             case "vulkan":
+                int deviceCount;
                 try
                 {
                     using VulkanInstance instance = new();
-                    if (instance.EnumeratePhysicalDevices().Length == 0)
-                    {
-                        return "no Vulkan physical devices";
-                    }
+                    deviceCount = instance.EnumeratePhysicalDevices().Length;
                 }
                 catch (Exception ex)
                 {
                     return $"Vulkan loader failed: {ex.GetType().Name}: {ex.Message}";
+                }
+                if (deviceCount == 0)
+                {
+                    return "no Vulkan physical devices";
                 }
                 if (KernelDir("Spirv", "HartsyInference.Vulkan") is null)
                 {
                     return "no compiled SPIR-V directory beside the tests or in the repo";
                 }
                 // A software rasterizer reports the host's silicon vendor like any other device, so it has to be
-                // excluded explicitly or it silently stands in for hardware in anything measured.
-                if (Environment.GetEnvironmentVariable(AllowSoftwareEnvVar) != "1")
+                // excluded explicitly or it silently stands in for hardware in anything measured. Which ordinal it
+                // lands on is the loader's business, not ours: installing lavapipe alongside a real GPU routinely
+                // puts the software ICD first, so probing only ordinal 0 would report a machine with a 4090 in it as
+                // having no usable Vulkan. Search for one, and remember which, because the backend has to be opened
+                // on the same ordinal that was accepted.
+                bool allowSoftware = Environment.GetEnvironmentVariable(AllowSoftwareEnvVar) == "1";
+                string? lastName = null;
+                for (int ordinal = 0; ordinal < deviceCount; ordinal++)
                 {
-                    using VulkanBackend probe = new(0, KernelDir("Spirv", "HartsyInference.Vulkan"));
-                    if (probe.Capabilities.Vendor == GpuVendor.Software)
+                    try
                     {
-                        return $"only a software Vulkan device is present ({probe.Capabilities.DeviceName}); "
-                            + $"set {AllowSoftwareEnvVar}=1 to test against it";
+                        using VulkanBackend probe = new(ordinal, KernelDir("Spirv", "HartsyInference.Vulkan"));
+                        lastName = probe.Capabilities.DeviceName;
+                        if (allowSoftware || probe.Capabilities.Vendor != GpuVendor.Software)
+                        {
+                            _vulkanOrdinal = ordinal;
+                            return null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // One unusable device does not speak for the rest; keep the reason in case none work out.
+                        lastName = $"ordinal {ordinal} failed to open: {ex.GetType().Name}: {ex.Message}";
                     }
                 }
-                return null;
+                return $"no hardware Vulkan device among {deviceCount} enumerated (last: {lastName}); "
+                    + $"set {AllowSoftwareEnvVar}=1 to test against a software one";
 
             default:
                 return $"unknown backend kind '{kind}'";
@@ -135,7 +157,8 @@ public static class BackendGate
     {
         "cpu" => new CpuBackend(),
         "cuda" => new CudaBackend(0, KernelDir("Ptx", "HartsyInference.Cuda")),
-        "vulkan" => new VulkanBackend(0, KernelDir("Spirv", "HartsyInference.Vulkan")),
+        // The ordinal the probe accepted, which is not always 0 — see Probe.
+        "vulkan" => new VulkanBackend(_vulkanOrdinal, KernelDir("Spirv", "HartsyInference.Vulkan")),
         _ => throw new ArgumentException($"Unknown backend kind '{kind}'.", nameof(kind)),
     };
 

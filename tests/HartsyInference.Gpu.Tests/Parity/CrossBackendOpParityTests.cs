@@ -5,7 +5,7 @@ using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
-namespace HartsyInference.Vulkan.Tests;
+namespace HartsyInference.Gpu.Tests.Parity;
 
 /// <summary>The same op, on every GPU backend, against the CPU implementation.
 ///
