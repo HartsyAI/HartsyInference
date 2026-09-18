@@ -221,6 +221,46 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
         }
     }
 
+    /// <summary>A weight and its companion split across shards still pair up.</summary>
+    /// <remarks>Safetensors sharding makes no promise that related tensors share a file. Folding each shard on its own
+    /// therefore splits pairs that belong together: an I8 weight whose scale is in the next shard refuses outright,
+    /// and the fp8 case is worse because it is silent — the weight keeps a factor of 1.0 while the shard holding its
+    /// scale drops it as an unclaimed companion, leaving a weight running at 1/scale.</remarks>
+    [Fact]
+    public void OpenShards_PairsAWeightWithACompanionInAnotherShard()
+    {
+        Dictionary<string, Tensor> first = new()
+        {
+            ["blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(4, 8), DType.F8E4M3),
+        };
+        Dictionary<string, Tensor> second = new()
+        {
+            ["blocks.0.attn.to_q.scale_weight"] = F32(new TensorShape(1)),
+            ["blocks.0.norm.weight"] = F32(new TensorShape(8)),
+        };
+        second["blocks.0.attn.to_q.scale_weight"].AsSpan<float>()[0] = 0.0195f;
+        try
+        {
+            string a = Path.Combine(_tempDir, "model-00001-of-00002.safetensors");
+            string b = Path.Combine(_tempDir, "model-00002-of-00002.safetensors");
+            SafeTensorsWriter.Save(a, first);
+            SafeTensorsWriter.Save(b, second);
+
+            using CheckpointSource source = CheckpointSource.OpenShards([a, b]);
+
+            Assert.Equal(0.0195f, source.Weights["blocks.0.attn.to_q.weight"].Fp8ScaleFactor);
+            Assert.DoesNotContain("blocks.0.attn.to_q.scale_weight", source.Weights.Keys);
+            // Both shards' inventories are visible through the one header.
+            Assert.Contains("blocks.0.attn.to_q.weight", source.Header.Descriptors.Keys);
+            Assert.Contains("blocks.0.norm.weight", source.Header.Descriptors.Keys);
+        }
+        finally
+        {
+            foreach (Tensor tensor in first.Values) tensor.Dispose();
+            foreach (Tensor tensor in second.Values) tensor.Dispose();
+        }
+    }
+
     [Fact]
     public void Header_NamesTheDominantQuantByBytesNotByTensorCount()
     {

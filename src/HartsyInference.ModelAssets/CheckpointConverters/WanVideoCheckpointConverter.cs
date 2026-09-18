@@ -178,22 +178,16 @@ public sealed class WanVideoCheckpointConverter
             throw new FileNotFoundException($"No safetensors shards found in: {transformerDir}");
         Array.Sort(shards, StringComparer.Ordinal);
 
-        List<IDisposable> sources = new(shards.Length);
-        Dictionary<string, Tensor> merged = new(2048);
+        // OpenShards, not a loop of Open: sharding makes no promise that a weight and its .weight_scale land in the
+        // same file, and folding each shard alone splits pairs that belong together.
+        CheckpointSource source = CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
-            {
-                CheckpointSource source = CheckpointSource.Open(shard);
-                sources.Add(source);
-                foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
-                    merged[kvp.Key] = kvp.Value;
-            }
-            return (Convert(merged), sources);
+            return (Convert(source.Weights), new List<IDisposable> { source });
         }
         catch
         {
-            foreach (IDisposable source in sources) source.Dispose();
+            source.Dispose();
             throw;
         }
     }

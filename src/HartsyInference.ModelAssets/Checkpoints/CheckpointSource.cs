@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -105,6 +106,56 @@ public sealed class CheckpointSource : IDisposable
             ModelFormat.Gguf => OpenGguf(path, resolved),
             _ => OpenSafeTensors(path, resolved),
         };
+    }
+
+    /// <summary>Opens a multi-shard checkpoint as one source: every shard merged first, companions folded once over the whole.</summary>
+    /// <remarks><para>Order is the entire point. Safetensors sharding makes no promise that a weight and its
+    /// <c>.weight_scale</c> land in the same file, so folding each shard on its own splits pairs that belong together:
+    /// an I8 weight whose scale is in the next shard refuses outright, and an fp8 one keeps the default factor of 1.0
+    /// while the shard holding its scale drops it as an unclaimed companion — the silent case, which is a weight
+    /// running at <c>1/scale</c>.</para>
+    /// <para>So the shards are opened unfolded, merged, and folded once. A later shard wins a duplicate key, matching
+    /// what every shard loader in this repo already does.</para></remarks>
+    public static CheckpointSource OpenShards(IReadOnlyList<string> paths, CheckpointOpenOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (paths.Count == 0)
+            throw new ArgumentException("A sharded checkpoint needs at least one file.", nameof(paths));
+        if (paths.Count == 1)
+            return Open(paths[0], options);
+
+        CheckpointOpenOptions resolved = options ?? new CheckpointOpenOptions();
+        CheckpointOpenOptions unfolded = resolved with { FoldQuantCompanions = false };
+        List<CheckpointSource> shards = new List<CheckpointSource>(paths.Count);
+        List<Tensor> owned = new List<Tensor>();
+        try
+        {
+            Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+            Dictionary<string, SafeTensorDescriptor> descriptors = new(StringComparer.Ordinal);
+            Dictionary<string, string> metadata = new(StringComparer.Ordinal);
+            ModelFormat format = ModelFormat.SafeTensors;
+            foreach (string path in paths)
+            {
+                CheckpointSource shard = Open(path, unfolded);
+                shards.Add(shard);
+                format = shard.Format;
+                foreach (KeyValuePair<string, Tensor> entry in shard.Weights) merged[entry.Key] = entry.Value;
+                foreach (KeyValuePair<string, SafeTensorDescriptor> entry in shard.Header.Descriptors)
+                    descriptors[entry.Key] = entry.Value;
+                foreach (KeyValuePair<string, string> entry in shard.Header.Metadata) metadata[entry.Key] = entry.Value;
+            }
+
+            CheckpointHeader header = new CheckpointHeader(format, descriptors, metadata);
+            IReadOnlyDictionary<string, Tensor> weights = Normalize(merged, resolved, owned);
+            return new CheckpointSource(format, paths[0], weights, header,
+                new CompositeDisposable(shards.ToArray()), shards[0].Gguf, shards[0].Architecture, owned);
+        }
+        catch
+        {
+            foreach (Tensor tensor in owned) tensor.Dispose();
+            foreach (CheckpointSource shard in shards) shard.Dispose();
+            throw;
+        }
     }
 
     private static CheckpointSource OpenSafeTensors(string path, CheckpointOpenOptions options)
