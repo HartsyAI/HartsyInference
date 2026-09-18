@@ -465,56 +465,19 @@ public sealed class LoraStack : IDisposable
         return finalTensor;
     }
 
-    /// <summary>Re-rotates the merged rows back into ConvRot storage order and row-quantizes them to I8 with a freshly recomputed absmax/127 scale — the inverse of <see cref="Int8ConvRotCodec.DequantToBf16"/>. The scale must be recomputed, not carried: the delta moves each row's absmax, and requantizing against the old scale clips every value the LoRA pushed past it. The new RowScale is stack-owned (the base weight's is borrowed from the loader) and always per-row, which every consumer already accepts for a formerly per-tensor scale.</summary>
-    private unsafe Tensor RequantizeF32ToInt8ConvRot(Tensor accumF32, QuantWeightInfo info)
+    /// <summary>Packs the merged rows back into ConvRot storage through <see cref="Int8ConvRotCodec.QuantizeFromF32"/> and re-attaches the descriptor. The fresh RowScale is stack-owned, unlike the base weight's, which is borrowed from the loader.</summary>
+    private Tensor RequantizeF32ToInt8ConvRot(Tensor accumF32, QuantWeightInfo info)
     {
-        long rows = accumF32.Shape[0];
-        long cols = accumF32.Shape[1];
-        Tensor quantized = new Tensor(new TensorShape(rows, cols), DType.I8);
-        Tensor rowScale = new Tensor(new TensorShape(rows), DType.F32);
-        try
+        (Tensor quantized, Tensor rowScale) = Int8ConvRotCodec.QuantizeFromF32(accumF32, info.ConvRotGroupSize);
+        quantized.QuantInfo = new QuantWeightInfo
         {
-            float* accum = (float*)accumF32.DataPointer;
-            sbyte* destination = (sbyte*)quantized.DataPointer;
-            float* scales = (float*)rowScale.DataPointer;
-            int groupSize = info.ConvRotGroupSize;
-            Parallel.For(0, (int)rows, row =>
-            {
-                Span<float> rowSpan = new Span<float>(accum + row * cols, (int)cols);
-                if (groupSize > 0)
-                {
-                    // H is symmetric and orthogonal, so the same rotation that un-packed the weight re-packs it.
-                    Int8ConvRotCodec.ApplyRotationInPlace(rowSpan, groupSize);
-                }
-                float absmax = 0f;
-                foreach (float value in rowSpan)
-                {
-                    absmax = MathF.Max(absmax, MathF.Abs(value));
-                }
-                float scale = absmax > 0f ? absmax / 127f : 1.0f;
-                scales[row] = scale;
-                sbyte* destinationRow = destination + row * cols;
-                for (int column = 0; column < (int)cols; column++)
-                {
-                    destinationRow[column] = (sbyte)Math.Clamp((int)MathF.Round(rowSpan[column] / scale), -127, 127);
-                }
-            });
-            quantized.QuantInfo = new QuantWeightInfo
-            {
-                Format = info.Format,
-                RowScale = rowScale,
-                ConvRotGroupSize = info.ConvRotGroupSize,
-                FullPrecisionMatMul = info.FullPrecisionMatMul,
-            };
-            _ownedMerged.Add(rowScale);
-            return quantized;
-        }
-        catch
-        {
-            rowScale.Dispose();
-            quantized.Dispose();
-            throw;
-        }
+            Format = info.Format,
+            RowScale = rowScale,
+            ConvRotGroupSize = info.ConvRotGroupSize,
+            FullPrecisionMatMul = info.FullPrecisionMatMul,
+        };
+        _ownedMerged.Add(rowScale);
+        return quantized;
     }
 
     /// <summary>Whether this layer's ΔW is the shape of the weight it would be added to. Rank-2 only: a quantized or dense convolution target is not wired yet, and a flattened delta added to a rank-4 weight would land on the wrong elements.</summary>

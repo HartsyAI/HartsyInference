@@ -105,6 +105,67 @@ public static unsafe class Int8ConvRotCodec
         return result;
     }
 
+    /// <summary>The inverse of <see cref="DequantToBf16"/>: re-rotates F32 rows into ConvRot storage order and row-quantizes them to I8 against a freshly recomputed <c>absmax/127</c> scale, returning the packed weight and its per-row scale.</summary>
+    /// <remarks><para>The scale is recomputed, never carried. Whatever moved the rows — a merged LoRA delta, an
+    /// offline quantization pass — moves each row's absmax with them, and requantizing against the old scale clips
+    /// every value that was pushed past it.</para>
+    /// <para>The result's scale is always per-row, even where the source was per-tensor; every consumer already
+    /// accepts that, and a single scale cannot express what re-quantization produces. Both returned tensors are the
+    /// caller's to dispose. <paramref name="values"/> is CONSUMED: the rotation runs in place.</para></remarks>
+    /// <param name="values">F32 <c>[out, in]</c>, un-rotated. Mutated in place.</param>
+    /// <param name="convRotGroupSize">0 for a weight quantized without rotation.</param>
+    public static (Tensor Weight, Tensor RowScale) QuantizeFromF32(Tensor values, int convRotGroupSize)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        if (values.DType != DType.F32 || values.Shape.Rank != 2)
+            throw new ArgumentException($"ConvRot source must be F32 rank-2; got {values.DType} {values.Shape}.", nameof(values));
+        long rows = values.Shape[0];
+        long columns = values.Shape[1];
+        if (convRotGroupSize > 0)
+        {
+            ValidateGroupSize(convRotGroupSize);
+            if (columns % convRotGroupSize != 0)
+                throw new ArgumentException($"ConvRot group size {convRotGroupSize} does not divide in_features {columns}.", nameof(convRotGroupSize));
+        }
+
+        Tensor quantized = new Tensor(new TensorShape(rows, columns), DType.I8);
+        Tensor rowScale = new Tensor(new TensorShape(rows), DType.F32);
+        try
+        {
+            float* source = (float*)values.DataPointer;
+            sbyte* destination = (sbyte*)quantized.DataPointer;
+            float* scales = (float*)rowScale.DataPointer;
+            Parallel.For(0, (int)rows, row =>
+            {
+                Span<float> rowSpan = new Span<float>(source + row * columns, (int)columns);
+                if (convRotGroupSize > 0)
+                {
+                    // H is symmetric and orthogonal, so the same rotation that un-packed the weight re-packs it.
+                    ApplyRotationInPlace(rowSpan, convRotGroupSize);
+                }
+                float absmax = 0f;
+                foreach (float value in rowSpan)
+                {
+                    absmax = MathF.Max(absmax, MathF.Abs(value));
+                }
+                float scale = absmax > 0f ? absmax / 127f : 1.0f;
+                scales[row] = scale;
+                sbyte* destinationRow = destination + row * columns;
+                for (int column = 0; column < (int)columns; column++)
+                {
+                    destinationRow[column] = (sbyte)Math.Clamp((int)MathF.Round(rowSpan[column] / scale), -127, 127);
+                }
+            });
+            return (quantized, rowScale);
+        }
+        catch
+        {
+            rowScale.Dispose();
+            quantized.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>Radix-4 butterfly over each contiguous group, equivalent to <c>v @ H</c>.</summary>
     /// <remarks>Each stage applies the 4×4 seed along one digit axis. With
     /// <c>h4 = [[1,1,1,-1],[1,1,-1,1],[1,-1,1,1],[-1,1,1,1]]</c> every output is the group sum minus twice the
