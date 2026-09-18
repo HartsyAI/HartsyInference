@@ -150,6 +150,118 @@ public sealed unsafe class TensorViewQuantMetadataTests
         Assert.Same(perTensor, shared.RowScale);
     }
 
+    private static LowRankAdjunct Adjunct(long outFeatures, long inFeatures, long rank, float scale = 0.75f)
+    {
+        Tensor down = new(new TensorShape(rank, inFeatures), DType.F32);
+        Tensor up = new(new TensorShape(outFeatures, rank), DType.F32);
+        Span<float> upValues = up.AsSpan<float>();
+        for (int i = 0; i < upValues.Length; i++) upValues[i] = i;
+        return new LowRankAdjunct { Terms = [new LowRankAdjunctTerm { Down = down, Up = up, Scale = scale }] };
+    }
+
+    [Fact]
+    public void WithLowRankAdjunct_LeavesTheBaseAloneAndAliasesItsBytes()
+    {
+        // The whole point: the base object is what caches, resident models and the identity-keyed device cache
+        // hold, so a LoRA written onto it would follow into the next request that reuses the entry.
+        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K) { Fp8ScaleFactor = 0.5f };
+        LowRankAdjunct adjunct = Adjunct(4, 256, 2);
+
+        using Tensor patched = weight.WithLowRankAdjunct(adjunct);
+
+        Assert.Null(weight.LowRankAdjunct);
+        Assert.Same(adjunct, patched.LowRankAdjunct);
+        Assert.NotSame(weight, patched);
+        Assert.True(weight.DataPointer == patched.DataPointer, "WithLowRankAdjunct copied instead of aliasing.");
+        Assert.Equal(weight.Shape, patched.Shape);
+        Assert.Equal(DType.Q4_K, patched.DType);
+        Assert.Equal(0.5f, patched.Fp8ScaleFactor);
+    }
+
+    [Fact]
+    public void Reshape_CarriesTheAdjunctWhenRowsAndColumnsSurvive()
+    {
+        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K);
+        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(4, 256, 2));
+
+        using Tensor view = patched.Reshape(new TensorShape(4, 16, 16));
+
+        Assert.Same(patched.LowRankAdjunct, view.LowRankAdjunct);
+    }
+
+    [Fact]
+    public void Reshape_ThatRenumbersRows_RefusesAnAdjunctWeight()
+    {
+        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K);
+        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(4, 256, 2));
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
+            () => patched.Reshape(new TensorShape(256, 4)));
+        Assert.Contains("LoRA-adjunct", error.Message);
+    }
+
+    [Fact]
+    public void ReinterpretAs_ThatChangesTheInputWidth_RefusesAnAdjunctWeight()
+    {
+        // nvfp4 relabels U8 [N, K/2] as F4E2M1 [N, K]: rows survive, the inner dimension does not, and the
+        // adjunct's down matrix is indexed by exactly that dimension.
+        using Tensor packed = new Tensor(new TensorShape(6, 8), DType.U8);
+        using Tensor patched = packed.WithLowRankAdjunct(Adjunct(6, 8, 2));
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
+            () => patched.ReinterpretAs(DType.F4E2M1, new TensorShape(6, 16)));
+        Assert.Contains("LoRA-adjunct", error.Message);
+    }
+
+    [Fact]
+    public void SliceRows_LeavesTheAdjunctToTheCaller()
+    {
+        // Same rule QuantInfo follows: only the caller knows the window, and a silently carried whole-weight
+        // adjunct would add the wrong rows' delta to a chunked projection.
+        using Tensor weight = new Tensor(new TensorShape(6, 256), DType.Q4_K);
+        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(6, 256, 2));
+
+        using Tensor slice = patched.SliceRows(2, 3);
+
+        Assert.Null(slice.LowRankAdjunct);
+    }
+
+    [Fact]
+    public void AdjunctSliceRows_NarrowsTheUpMatrixAndSharesTheDownMatrix()
+    {
+        LowRankAdjunct adjunct = Adjunct(6, 256, 2);
+        LowRankAdjunctTerm whole = adjunct.Terms[0];
+
+        LowRankAdjunct window = adjunct.SliceRows(2, 3);
+        LowRankAdjunctTerm sliced = window.Terms[0];
+
+        Assert.Same(whole.Down, sliced.Down);
+        Assert.Equal(3L, sliced.Up!.Shape[0]);
+        Assert.Equal(2L, sliced.Up.Shape[1]);
+        // Row 2 of a [6, 2] up matrix filled with its flat index starts at 4.
+        Assert.Equal(4f, sliced.Up.AsReadOnlySpan<float>()[0]);
+        Assert.Equal(whole.Scale, sliced.Scale);
+        // Memoized: the device weight cache is keyed by tensor identity, so the same window must be the same object.
+        Assert.Same(window, adjunct.SliceRows(2, 3));
+    }
+
+    [Fact]
+    public void AdjunctExpandWeights_YieldsEveryFactorTheGemmWillRead()
+    {
+        using Tensor weight = new Tensor(new TensorShape(6, 256), DType.Q4_K);
+        LowRankAdjunct adjunct = Adjunct(6, 256, 2);
+        using Tensor patched = weight.WithLowRankAdjunct(adjunct);
+        LowRankAdjunct window = adjunct.SliceRows(0, 3);
+
+        List<Tensor> expanded = [.. LowRankAdjunct.ExpandWeights([patched])];
+
+        Assert.Contains(patched, expanded);
+        Assert.Contains(adjunct.Terms[0].Down, expanded);
+        Assert.Contains(adjunct.Terms[0].Up!, expanded);
+        // The windows a chunked projection created must be freed with the weight too, not leaked on the device.
+        Assert.Contains(window.Terms[0].Up!, expanded);
+    }
+
     [Fact]
     public void QuantInfoSliceRows_RefusesNvfp4BlockScales()
     {

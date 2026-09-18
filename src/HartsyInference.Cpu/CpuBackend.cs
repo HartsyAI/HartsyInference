@@ -30,6 +30,8 @@ public sealed class CpuBackend : IBackend
     public void MatMul(Tensor output, Tensor a, Tensor b)
     {
         ThrowIfDisposed();
+        LowRankAdjunctGemm.RefuseAdjunct(a, "CpuBackend.MatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "CpuBackend.MatMul");
         MatMulKernels.MatMul(output, a, b);
     }
 
@@ -37,6 +39,8 @@ public sealed class CpuBackend : IBackend
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
         ThrowIfDisposed();
+        LowRankAdjunctGemm.RefuseAdjunct(a, "CpuBackend.BatchedMatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "CpuBackend.BatchedMatMul");
         MatMulKernels.BatchedMatMul(output, a, b);
     }
 
@@ -45,12 +49,17 @@ public sealed class CpuBackend : IBackend
     {
         ThrowIfDisposed();
         MatMulKernels.LinearTransB(output, input, weight, bias);
+        if (weight.LowRankAdjunct is LowRankAdjunct adjunct)
+        {
+            LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
+        }
     }
 
     /// <inheritdoc />
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
         ThrowIfDisposed();
+        LowRankAdjunctGemm.RefuseAdjunct(weight, "CpuBackend.Conv2D");
         Conv2DKernels.Conv2D(output, input, weight, bias, strideH, strideW, padH, padW);
     }
 

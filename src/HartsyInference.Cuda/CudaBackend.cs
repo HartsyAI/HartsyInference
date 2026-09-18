@@ -1213,6 +1213,8 @@ public sealed class CudaBackend : IBackend
     /// <summary>Matrix multiply via cuBLAS GemmEx: output = a @ b. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        LowRankAdjunctGemm.RefuseAdjunct(a, "CudaBackend.MatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "CudaBackend.MatMul");
         using NvtxRange _nvtx = NvtxRange.Push("MatMul");
         EnterOp();
         EnsureKernels();
@@ -1550,6 +1552,7 @@ public sealed class CudaBackend : IBackend
         Tensor gateLogits, int heads, int headDim)
     {
         bool fused = FuseHeadGateIntoQuant && input.DType == DType.F16 && gateLogits.DType == DType.F16
+            && weight.LowRankAdjunct is null
             && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi && qi.ConvRotGroupSize > 0
             && CanRunResidentInt8(output, input, weight, qi, 0, -1) && _kernels is not null
             && _kernels.HasFusedGatedConvRotQuant((int)weight.Shape[1], qi.ConvRotGroupSize, srcF16: true, heads, headDim);
@@ -1582,7 +1585,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block — writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
     public unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
-        bool fused = weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
+        bool fused = weight.LowRankAdjunct is null && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
             && CanRunResidentInt8(output, input, weight, qi, 0, -1);
         LinearImpl(output, input, weight, bias, cacheWeightCast: true, fuseGelu: fused);
         if (!fused) Gelu(output, output);
@@ -1603,7 +1606,7 @@ public sealed class CudaBackend : IBackend
         for (int i = 0; i < ops.Length; i++)
         {
             LinearOp op = ops[i];
-            eligible[i] = GroupedLinear
+            eligible[i] = GroupedLinear && op.Weight.LowRankAdjunct is null
                 && op.Weight.DType == DType.I8 && op.Weight.QuantInfo is { RowScale: not null } qi
                 && CanRunResidentInt8(op.Output, input, op.Weight, qi, 0, -1)
                 && (k == 0 || ((int)op.Weight.Shape[1] == k && qi.ConvRotGroupSize == group));
@@ -1717,9 +1720,34 @@ public sealed class CudaBackend : IBackend
         throw new ArgumentOutOfRangeException(nameof(slot));
     }
 
+    /// <summary>Runs the projection, then adds any LoRA adjunct the weight carries — <c>y = x·Wᵀ + Σ s·(x·Aᵀ)·Bᵀ</c>, the runtime form a block-quantized base needs because its bytes cannot be re-quantized after a merge.</summary>
+    /// <remarks>Wrapping rather than folding into <see cref="LinearCore"/> is deliberate: that method returns early
+    /// from a dozen fused-GEMV branches, and a per-branch accumulate is exactly the kind of miss that reads as a weak
+    /// LoRA. The two epilogue-fusing callers (<see cref="LinearGelu"/>, <see cref="LinearHeadGated"/>) un-fuse
+    /// themselves when an adjunct is present, since the adjunct belongs between the GEMM and the activation.</remarks>
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
         int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false,
         Tensor? preGate = null, int preGateHeads = 0, int preGateHeadDim = 0)
+    {
+        LinearCore(output, input, weight, bias, cacheWeightCast, weightRowOffset, weightRowCount, fuseGelu,
+            preGate, preGateHeads, preGateHeadDim);
+        if (weight.LowRankAdjunct is not LowRankAdjunct adjunct)
+        {
+            return;
+        }
+        if (fuseGelu || preGate is not null)
+        {
+            throw new NotSupportedException(
+                "A LoRA adjunct cannot be added after a fused epilogue — the activation would apply to the base "
+                + "projection only. LinearGelu/LinearHeadGated must un-fuse when the weight carries one.");
+        }
+        LowRankAdjunctGemm.Accumulate(this, output, input,
+            weightRowCount >= 0 ? adjunct.SliceRows(weightRowOffset, weightRowCount) : adjunct);
+    }
+
+    private unsafe void LinearCore(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
+        int weightRowOffset, int weightRowCount, bool fuseGelu,
+        Tensor? preGate, int preGateHeads, int preGateHeadDim)
     {
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
             ? $"Linear m={input.ElementCount / weight.Shape[weight.Shape.Rank - 1]}x{weight.Shape[0]}x{weight.Shape[weight.Shape.Rank - 1]}"
@@ -1736,7 +1764,8 @@ public sealed class CudaBackend : IBackend
             using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize);
             try
             {
-                LinearImpl(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount);
+                LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
+                    fuseGelu, preGate, preGateHeads, preGateHeadDim);
             }
             finally
             {
@@ -1756,7 +1785,8 @@ public sealed class CudaBackend : IBackend
             using Tensor dequantized = Nvfp4ResidentCodec.DequantToBf16(weight, nvfp4Info.BlockScale, nvfp4Info.GlobalScale);
             try
             {
-                LinearImpl(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount);
+                LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
+                    fuseGelu, preGate, preGateHeads, preGateHeadDim);
             }
             finally
             {
@@ -2369,6 +2399,8 @@ public sealed class CudaBackend : IBackend
     /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        LowRankAdjunctGemm.RefuseAdjunct(a, "CudaBackend.BatchedMatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "CudaBackend.BatchedMatMul");
         using NvtxRange _nvtx = NvtxRange.Push("BatchedMatMul");
         EnterOp();
         EnsureKernels();
@@ -2451,6 +2483,7 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
+        LowRankAdjunctGemm.RefuseAdjunct(weight, "CudaBackend.Conv2D");
         using NvtxRange _nvtx = NvtxRange.Push("Conv2D");
         EnterOp();
         EnsureKernels();
@@ -10603,7 +10636,7 @@ public sealed class CudaBackend : IBackend
         List<Tensor>? uploaded = null;
         try
         {
-            foreach (Tensor weight in weights)
+            foreach (Tensor weight in LowRankAdjunct.ExpandWeights(weights))
             {
                 // Only weights this call actually uploaded are rollback candidates — one already resident from
                 // an earlier phase (or from HARTSY_KEEP_MODELS) is not ours to free. PreloadWeight reports this
@@ -10640,7 +10673,7 @@ public sealed class CudaBackend : IBackend
     public void FreeWeights(IEnumerable<Tensor> weights)
     {
         EnterOp();
-        List<Tensor> materialized = weights as List<Tensor> ?? [.. weights];
+        List<Tensor> materialized = [.. LowRankAdjunct.ExpandWeights(weights)];
         GpuTransferHelper.FreeWeights(materialized);
         foreach (Tensor weight in materialized) FreeFp8InputScale(weight);
     }
