@@ -1,5 +1,6 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Registry;
@@ -85,13 +86,12 @@ public static class ModelArchitectureDetector
     public static ModelArchitecture Detect(IReadOnlyDictionary<string, Tensor> weights) =>
         Detect(weights.Keys);
 
-    /// <summary>Detects the architecture from a safetensors file by reading only its header (no tensor data is materialized). For a diffusers-layout directory or multi-shard checkpoint, pass the representative file resolved by <see cref="ModelLayoutResolver"/>.</summary>
-    public static ModelArchitecture DetectFromFile(string safetensorsPath)
-    {
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(safetensorsPath);
-        return Detect(loader.Descriptors.Keys);
-    }
+    /// <summary>Detects the architecture from a checkpoint file by reading only its header, in either container. For a diffusers-layout directory or multi-shard checkpoint, pass the representative file resolved by <see cref="ModelLayoutResolver"/>.</summary>
+    /// <remarks>This opened every file as safetensors, so a GGUF checkpoint could not be identified at all: the header
+    /// parse failed with "Invalid safetensors header length" and the user was told their file was malformed. It was
+    /// reachable only by naming the family explicitly, which defeats the point of detection.</remarks>
+    public static ModelArchitecture DetectFromFile(string checkpointPath) =>
+        Detect(CheckpointHeader.Read(checkpointPath).Descriptors.Keys);
 
     /// <summary>Lightweight prefix-membership probe over a checkpoint's key set. Sorted once so prefix hits are a single binary search rather than a full scan per query.</summary>
     private sealed class KeySet
