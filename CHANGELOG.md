@@ -13,8 +13,13 @@ stable release will require. Dates are UTC.
   type and a cache over another each started at 1. That is the collision the key exists to prevent, moved up a
   level: a host tensor resident on two devices, which split placement makes ordinary, would carry both bindings
   under one key and their finalizer-cleanup buckets would collide, so one backend's drain runs the other's device
-  cleanup. Latent until a second backend joined the base, which is the next step. The counter now lives on a
-  non-generic holder, with a test that two caches over different buffer types never share a key.
+  cleanup. Latent until a second backend joined the base, which is the next step.
+
+  Moving the counter off the generic class was only half of it: CUDA's state registry allocates binding keys from a
+  private counter of its own, also starting at 1, so a CUDA cache and a Vulkan cache collide today — not after some
+  future step — the first time one tensor is resident on both. The sequence now lives in Core beside the bindings it
+  names, where every backend already reaches, and CUDA draws from it. A source test keeps it the only one: the bug
+  has now been written twice, each copy correct alone, and neither was visible until a second backend existed.
 
 ## alpha.91
 
