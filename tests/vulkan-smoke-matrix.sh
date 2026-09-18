@@ -44,10 +44,10 @@ mkdir -p "$OUT"
 CASES=$(cat <<'MATRIX'
 image	sd15	bench-cache/e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916/v1-5-pruned-emaonly-fp16.safetensors	image|a red apple on a table|--steps 4 --width 512 --height 512 --seed 42
 image	sdxl	Stable-Diffusion/SDXL/sd_xl_base_1.0.safetensors	image|a red apple on a wooden table|--steps 4 --width 768 --height 768 --seed 42
-image	krea2	Stable-Diffusion/Krea2	image|a red apple on a wooden table|--steps 4 --width 1024 --height 1024 --seed 42
-image	flux	Stable-Diffusion/Flux	image|a red apple on a wooden table|--steps 4 --width 1024 --height 1024 --seed 42
-image	qwenimage	Stable-Diffusion/QwenImage	image|a red apple on a wooden table|--steps 4 --width 1024 --height 1024 --seed 42
-image	zimage	Stable-Diffusion/ZImage	image|a red apple on a wooden table|--steps 4 --width 1024 --height 1024 --seed 42
+image	krea2	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m krea2 --steps 4 --width 1024 --height 1024 --seed 42
+image	flux	Stable-Diffusion/Flux	image|a red apple on a wooden table|-m flux1 --steps 4 --width 1024 --height 1024 --seed 42
+image	qwenimage	Stable-Diffusion/QwenImage	image|a red apple on a wooden table|-m qwen-image --steps 4 --width 1024 --height 1024 --seed 42
+image	zimage	Stable-Diffusion/ZImage	image|a red apple on a wooden table|-m zimage --steps 4 --width 1024 --height 1024 --seed 42
 llm	llama32-1b	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write one sentence about a robot.|--max-tokens 64
 llm	gpt2-medium	llm/gpt2/gpt2-medium.Q4_K_M.gguf	text|Once upon a time|--max-tokens 64
 video	wan	Stable-Diffusion/Wan/wan2.2_ti2v_5B_fp16.safetensors	video|a cat walking|-m wan --width 256 --height 256 --frames 5 --steps 4
@@ -69,9 +69,18 @@ while IFS=$'\t' read -r modality id ckpt spec; do
     path=""
     if [ "$ckpt" != "-" ]; then
         path="$MODELS/$ckpt"
+        # A DIRECTORY that exists but holds no weights is the common case here — the model tree is laid out
+        # ahead of the download. Testing the path alone reports that as a crash, which is worse than useless: it
+        # invents a Vulkan failure for a model nothing ever tried to run.
+        missing=""
         if [ ! -e "$path" ]; then
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$modality" "$id" "$BACKEND" "untested" "0" "no local checkpoint at $ckpt"
-            printf '%-9s %-14s %-10s %9s  %s\n' "$modality" "$id" "untested" "-" "no local checkpoint" >&2
+            missing="no local checkpoint at $ckpt"
+        elif [ -d "$path" ] && [ -z "$(find "$path" -name '*.safetensors' -o -name '*.gguf' 2>/dev/null | head -1)" ]; then
+            missing="no weights under $ckpt"
+        fi
+        if [ -n "$missing" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$modality" "$id" "$BACKEND" "untested" "0" "$missing"
+            printf '%-9s %-14s %-10s %9s  %s\n' "$modality" "$id" "untested" "-" "$missing" >&2
             continue
         fi
     fi
@@ -89,11 +98,14 @@ while IFS=$'\t' read -r modality id ckpt spec; do
 
     log="$OUT/$id.$BACKEND.log"
     start=$(date +%s.%N)
+    # stdin from /dev/null: a model whose companion weights are absent asks "Download these now? [y/N]" and waits.
+    # With a terminal attached that is a hang until the per-case timeout; the answer here has to be "no, and say so",
+    # since a smoke matrix that silently pulls tens of gigabytes is not a smoke matrix.
     # shellcheck disable=SC2086
     if [ "$prompt" = "-" ]; then
-        timeout "$TIMEOUT" dotnet "$CLI" "$cmd" ${path:+--model-path "$path"} $args -b "$BACKEND" -o "$OUT/$id.$BACKEND" >"$log" 2>&1
+        timeout "$TIMEOUT" dotnet "$CLI" "$cmd" ${path:+--model-path "$path"} $args -b "$BACKEND" -o "$OUT/$id.$BACKEND" >"$log" 2>&1 </dev/null
     else
-        timeout "$TIMEOUT" dotnet "$CLI" "$cmd" "$prompt" ${path:+--model-path "$path"} $args -b "$BACKEND" -o "$OUT/$id.$BACKEND" >"$log" 2>&1
+        timeout "$TIMEOUT" dotnet "$CLI" "$cmd" "$prompt" ${path:+--model-path "$path"} $args -b "$BACKEND" -o "$OUT/$id.$BACKEND" >"$log" 2>&1 </dev/null
     fi
     rc=$?
     secs=$(printf '%.1f' "$(echo "$(date +%s.%N) - $start" | bc)")
@@ -101,10 +113,15 @@ while IFS=$'\t' read -r modality id ckpt spec; do
     if [ $rc -eq 124 ]; then
         status="timeout"; detail="exceeded ${TIMEOUT}s"
     elif [ $rc -ne 0 ]; then
-        status="crash"
-        # The first exception type is the useful half; the stack is in the log.
-        detail=$(grep -oE '[A-Za-z.]*(Exception|Error)[^:]*: [^\n]{0,120}' "$log" | head -1)
-        [ -z "$detail" ] && detail="exit $rc (see $log)"
+        if grep -q "Download these now?" "$log" 2>/dev/null; then
+            # The model itself was never exercised, so this says nothing about the backend.
+            status="incomplete"; detail="companion weights absent (declined the download prompt)"
+        else
+            status="crash"
+            # The first exception type is the useful half; the stack is in the log.
+            detail=$(grep -oE '[A-Za-z.]*(Exception|Error)[^:]*: [^\n]{0,120}' "$log" | head -1)
+            [ -z "$detail" ] && detail="exit $rc (see $log)"
+        fi
     else
         status="ran"; detail=$(basename "$log")
     fi

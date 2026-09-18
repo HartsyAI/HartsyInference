@@ -36,6 +36,12 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 ## 3. AMD / ROCm + cross-vendor (Vulkan) support
 
 - [ ] Real AMD/Intel validation; llvmpipe is useful for small-subgroup correctness, not hardware/performance proof.
+- [ ] gpt2-medium Q4_K_M segfaults on Vulkan and runs on CUDA. Not the quantization: Qwen3-4B Q4_K_M is fine, so
+  it is specific to the GPT-2 architecture. Per-model verdicts are in [VULKAN_STATUS.md](VULKAN_STATUS.md).
+- [ ] SDXL's Vulkan output diverges from CUDA's from the same seed, and the gap grows with step count. The
+  batched convolution, the batch-independence of GroupNorm/Silu/Linear/SDPA, `CfgEulerStep` and TF32 are all
+  ruled out; attention and the GEMM dtype path are untested. A cross-backend SSIM gate cannot be set until this
+  is understood — for scale, toggling TF32 inside CUDA alone costs ~2% over 20 steps.
 - [ ] Subgroup-size pinning, im2col 64-bit indexing, descriptor-pool timeline lifetime checks.
 - [ ] Real-model Vulkan decode parity/throughput before enabling GraphDecodeSupported by default.
 - [ ] INT8 loading policy, end-to-end quality gate, cached quantized-weight lifetime, and shape-specific tuning.
