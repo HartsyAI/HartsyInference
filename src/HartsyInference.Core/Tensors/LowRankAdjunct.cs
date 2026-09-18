@@ -44,7 +44,10 @@ public sealed class LowRankAdjunct
     /// <summary>Returns this adjunct narrowed to a contiguous run of output rows — what a windowed GEMM (a fused projection consumed in parts) needs.</summary>
     /// <remarks>The result is MEMOIZED per window. Backends cache device copies by tensor identity, so handing a
     /// freshly-sliced <see cref="LowRankAdjunctTerm.Up"/> to every call of a per-step projection would re-upload it
-    /// every step; the same window must come back as the same objects.</remarks>
+    /// every step; the same window must come back as the same objects. A window is created on first use, after the
+    /// preload pass has run, so it reaches residency through the backend's repeat-upload promotion rather than
+    /// through <see cref="ExpandWeights"/> — which is why a graph owner's pre-capture warm-up forward matters here
+    /// for the same reason it does for every other per-call scratch buffer.</remarks>
     public LowRankAdjunct SliceRows(long rowOffset, long rowCount)
     {
         lock (_rowWindows)
