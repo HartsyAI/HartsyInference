@@ -38,6 +38,25 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Activations exempt from <see cref="OffloadActivations"/> — cross-step state that must not move.</summary>
     protected readonly HashSet<Tensor> Pinned = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>A resident weight's dtype conversions, keyed by weight then by target dtype name. A quantized or fp8
+    /// weight is converted once and reused, instead of being converted again by every GEMM that reads it.
+    ///
+    /// <para>Only WEIGHTS are cached this way. An activation changes every step, so a keyed entry would never be hit
+    /// and would grow without bound.</para></summary>
+    /// <remarks>Each entry carries its own size: a conversion's byte count is not the weight's — that is the whole
+    /// point of converting — so a backend that needs the size to free an allocation cannot recompute it from the
+    /// tensor.</remarks>
+    protected readonly Dictionary<Tensor, Dictionary<string, (TBuffer Buffer, long Bytes)>> WeightCasts = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Every buffer the cache owns. A backend frees its own op temporaries through
+    /// <see cref="ReleaseIfNotCached"/>, which consults this so a temporary that has since been cached — an output
+    /// bound to its tensor — is not freed out from under the tensor that now points at it.</summary>
+    protected readonly HashSet<TBuffer> CachedBuffers = [];
+
+    /// <summary>Whether a weight's dtype conversion is kept resident. Off trades recompute for roughly a third of the
+    /// weight footprint, which is what lets a large fp8 model fit a card it otherwise would not.</summary>
+    public bool CacheWeightCasts { get; set; } = true;
+
     private long _hits;
     private long _misses;
     private long _d2hSyncs;
@@ -156,6 +175,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         tensor.ClearGpuBinding(BindingKey);
 
         Activations[tensor] = (buffer, bytes);
+        CachedBuffers.Add(buffer);
 
         tensor.SetGpuBinding(
             BindingKey,
@@ -184,6 +204,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         OnActivationEvicted(tensor, entry.Buffer);
         Pinned.Remove(tensor);
+        CachedBuffers.Remove(entry.Buffer);
         ReleaseBuffer(entry.Buffer, entry.Bytes);
     }
 
@@ -196,6 +217,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         OnActivationEvicted(tensor, entry.Buffer);
         Pinned.Remove(tensor);
+        CachedBuffers.Remove(entry.Buffer);
         ReleaseBuffer(entry.Buffer, entry.Bytes);
     }
 
@@ -207,6 +229,53 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             return;
         }
         FreeDevice(buffer, bytes);
+    }
+
+    /// <summary>Whether a conversion of this tensor is worth keeping. True only for a resident weight: an activation
+    /// is different next step, so its entry would never be hit again.</summary>
+    public bool ShouldCacheCast(Tensor weight) => CacheWeightCasts && Weights.ContainsKey(weight);
+
+    /// <summary>A previously stored conversion of <paramref name="weight"/> to <paramref name="want"/>, if any.</summary>
+    public bool TryGetWeightCast(Tensor weight, DType want, out TBuffer? buffer)
+    {
+        buffer = default;
+        if (!CacheWeightCasts)
+        {
+            return false;
+        }
+        if (WeightCasts.TryGetValue(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts)
+            && casts.TryGetValue(want.Name, out (TBuffer Buffer, long Bytes) hit))
+        {
+            Interlocked.Increment(ref _hits);
+            buffer = hit.Buffer;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Stores a conversion of <paramref name="weight"/> to <paramref name="want"/>. The buffer becomes
+    /// cache-owned, so a later <see cref="ReleaseIfNotCached"/> leaves it alone.</summary>
+    public void StoreWeightCast(Tensor weight, DType want, TBuffer buffer, long bytes)
+    {
+        if (!WeightCasts.TryGetValue(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
+        {
+            casts = new Dictionary<string, (TBuffer, long)>(StringComparer.Ordinal);
+            WeightCasts[weight] = casts;
+        }
+        casts[want.Name] = (buffer, bytes);
+        CachedBuffers.Add(buffer);
+    }
+
+    /// <summary>Releases a buffer the backend allocated for an op, unless the cache has since taken ownership of it.
+    /// The guard is the point: an op's output buffer is routinely handed to <see cref="CacheActivation"/> and then
+    /// released by the same op's cleanup, and freeing it there would leave the tensor pointing at dead memory.</summary>
+    public void ReleaseIfNotCached(TBuffer? buffer, long bytes)
+    {
+        if (buffer is null || CachedBuffers.Contains(buffer))
+        {
+            return;
+        }
+        ReleaseBuffer(buffer, bytes);
     }
 
     /// <summary>Uploads one weight and keeps it resident. Already-resident weights cost nothing.</summary>
@@ -222,6 +291,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             weight.ClearGpuBinding(BindingKey);
             Weights[weight] = promoted.Buffer;
+            CachedBuffers.Add(promoted.Buffer);
             return;
         }
         MakeCurrent();
@@ -229,10 +299,11 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         TBuffer buffer = AllocateDevice(bytes);
         Upload(buffer, weight, bytes);
         Weights[weight] = buffer;
+        CachedBuffers.Add(buffer);
     }
 
     /// <inheritdoc/>
-    public void PreloadWeights(IEnumerable<Tensor> weights)
+    public virtual void PreloadWeights(IEnumerable<Tensor> weights)
     {
         foreach (Tensor weight in weights)
         {
@@ -241,35 +312,78 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <inheritdoc/>
-    public void FreeWeights(IEnumerable<Tensor> weights)
+    public virtual void FreeWeights(IEnumerable<Tensor> weights)
     {
         MakeCurrent();
         foreach (Tensor weight in weights)
         {
             if (Weights.Remove(weight, out TBuffer? buffer))
             {
+                CachedBuffers.Remove(buffer);
                 ReleaseBuffer(buffer, ByteSize(weight));
+            }
+            // A conversion outlives nothing: its only purpose is to serve the weight that is going away.
+            if (WeightCasts.Remove(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
+            {
+                foreach ((TBuffer cast, long castBytes) in casts.Values)
+                {
+                    CachedBuffers.Remove(cast);
+                    ReleaseBuffer(cast, castBytes);
+                }
             }
         }
     }
 
     /// <inheritdoc/>
-    public void FreeAllCached()
+    public virtual void FreeAllCached()
     {
         MakeCurrent();
+        HashSet<TBuffer> released = [];
+
         foreach ((Tensor tensor, (TBuffer buffer, long bytes)) in Activations.ToArray())
         {
             tensor.ClearGpuBinding(BindingKey);
-            ReleaseBuffer(buffer, bytes);
+            if (released.Add(buffer))
+            {
+                ReleaseBuffer(buffer, bytes);
+            }
         }
         Activations.Clear();
         Pinned.Clear();
 
         foreach ((Tensor tensor, TBuffer buffer) in Weights.ToArray())
         {
-            ReleaseBuffer(buffer, ByteSize(tensor));
+            if (released.Add(buffer))
+            {
+                ReleaseBuffer(buffer, ByteSize(tensor));
+            }
         }
         Weights.Clear();
+
+        foreach (Dictionary<string, (TBuffer Buffer, long Bytes)> casts in WeightCasts.Values)
+        {
+            foreach ((TBuffer cast, long castBytes) in casts.Values)
+            {
+                if (released.Add(cast))
+                {
+                    ReleaseBuffer(cast, castBytes);
+                }
+            }
+        }
+        WeightCasts.Clear();
+
+        // Anything still owned but no longer reachable from a cache. An in-place op re-caches its tensor with a NEW
+        // buffer, which overwrites the dictionary entry and leaves the previous buffer owned by nothing — clearing
+        // the tensor's binding does not release it, it only stops the callbacks firing. Those orphans have to be
+        // released HERE or they outlive the device and their finalizer destroys a buffer against a dead one.
+        foreach (TBuffer orphan in CachedBuffers)
+        {
+            if (released.Add(orphan))
+            {
+                ReleaseBuffer(orphan, 0);
+            }
+        }
+        CachedBuffers.Clear();
     }
 
     /// <inheritdoc/>
@@ -314,7 +428,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     public void DrainFinalizerCleanup() => Tensor.DrainPendingFinalizerGpuCleanup(BindingKey);
 
     /// <inheritdoc/>
-    public string DiagnosticsSummary()
+    public virtual string DiagnosticsSummary()
     {
         long weightBytes = Weights.Keys.Sum(ByteSize);
         long activationBytes = Activations.Values.Sum(entry => entry.Bytes);

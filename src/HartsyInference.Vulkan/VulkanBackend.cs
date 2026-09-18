@@ -343,7 +343,15 @@ public sealed class VulkanBackend : IBackend
             _b = b;
             _opName = opName;
             _startTicks = b._profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            if (b._opNestingDepth == 0) b._dispatchesThisOp = 0;
+            if (b._opNestingDepth == 0)
+            {
+                b._dispatchesThisOp = 0;
+                // A tensor finalized rather than disposed cannot free its device buffer from the finalizer thread,
+                // which has no business touching this device, so the work is queued instead. The outermost op scope
+                // is the safe point that runs it. Nothing ran it on this backend before, so every such tensor's
+                // buffer stayed allocated until the backend itself was torn down.
+                b._xfer.DrainFinalizerCleanup();
+            }
             b._opNestingDepth++;
         }
 
@@ -769,7 +777,7 @@ public sealed class VulkanBackend : IBackend
         if (src.DType == want) return (srcBuf, null);
 
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
-        if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer cachedCast)) return (cachedCast, null);
+        if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
         bool cacheThis = _xfer.ShouldCacheCast(src);
 
         long elements = src.ElementCount;
