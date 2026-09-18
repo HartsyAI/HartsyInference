@@ -81,9 +81,10 @@ public sealed class LtGemmPlanCacheTests
 
         try
         {
-            // Constructor-time policy must be isolated per backend. Pin the high-precision knob off rather than
-            // clearing it, so neither a settings file nor a leftover override can collapse all three cases to plain
-            // COMPUTE_32F.
+            // Constructor-time policy must be isolated per backend. RunF32PolicyCase's object initializer already
+            // pins HighPrecisionGemm=false on each backend it builds — the ctor seeds the property from the knob and
+            // the initializer then overrides it — so this is belt-and-braces for any backend built without it, not
+            // the thing that keeps the three cases from collapsing to plain COMPUTE_32F.
             KnobStore.Set(EngineKnobs.HighPrecisionGemm, false);
 
             int? defaultPolicy = RunF32PolicyCase(noTf32: false, fastF16: false);
