@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="LoraApplier"/> can merge. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
+/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="RecipeLoraMerge"/> can apply. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
 public static class LoraResolver
 {
     /// <summary>One resolved LoRA: the on-disk file plus its diffusion-side and text-encoder-side strengths.</summary>

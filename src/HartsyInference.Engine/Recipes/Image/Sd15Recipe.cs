@@ -45,11 +45,10 @@ public sealed class Sd15Recipe : IArchitectureRecipe
         MergedLoraStack? loraStack = null;
         try
         {
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                unetWeights: converted.UNet,
-                clipLWeights: converted.ClipL);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Unet = converted.UNet, ClipL = converted.ClipL },
+                "Sd15Recipe");
         }
         catch (Exception ex)
         {

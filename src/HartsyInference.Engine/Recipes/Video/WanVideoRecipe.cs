@@ -219,10 +219,10 @@ public sealed class WanVideoRecipe : IVideoRecipe
             // (same ordering constraint as MiniMaxH3Recipe/Sd3Recipe's LoRA merges). One resolved stack is reused
             // for the low-noise expert below (when a MoE pair is configured) rather than re-loading the LoRA file
             // a second time — Wan 2.2's dual-expert split shares one LoRA selection across both experts.
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                transformerWeights: conv.Transformer);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = conv.Transformer },
+                "WanVideoRecipe");
 
             WanVideoTransformer transformer = new WanVideoTransformer(config);
             transformer.LoadWeights(conv.Transformer);

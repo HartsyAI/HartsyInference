@@ -66,8 +66,10 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             checkpoint = new CompositeDisposable(source, prepared);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: ditWeights);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = ditWeights },
+                "MageFlowRecipe");
             transformer.LoadWeights(ditWeights);
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──

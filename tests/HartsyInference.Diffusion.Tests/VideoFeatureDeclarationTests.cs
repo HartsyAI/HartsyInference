@@ -33,7 +33,7 @@ public sealed class VideoFeatureDeclarationTests
         "minimax-h3",
     ];
 
-    /// <summary>Every video family whose recipe calls <c>LoraApplier.BuildAndApply</c> before its transformer's
+    /// <summary>Every video family whose recipe calls <c>RecipeLoraMerge.Apply</c> before its transformer's
     /// <c>LoadWeights</c> — as of 2026-08-20 that is all of them.
     /// <para>Same reasoning as the image-side pin: declaring the bit without wiring the merge passes the feature gate,
     /// never merges, and yields a normal clip the user reads as a weak LoRA. No runtime check can catch it, because

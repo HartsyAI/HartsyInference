@@ -49,12 +49,10 @@ public sealed class SdxlRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> clipGWeights = WeightStaging.ToOwnedF32(converted.ClipG);
             Dictionary<string, Tensor> vaeWeights = WeightStaging.ToOwnedF32(converted.Vae);
 
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                unetWeights: unetWeights,
-                clipLWeights: clipLWeights,
-                clipGWeights: clipGWeights);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Unet = unetWeights, ClipL = clipLWeights, ClipG = clipGWeights },
+                "SdxlRecipe");
 
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             clipL.LoadWeights(clipLWeights, "text_model");

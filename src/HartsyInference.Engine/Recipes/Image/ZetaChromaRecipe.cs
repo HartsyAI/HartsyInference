@@ -49,8 +49,10 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
         ZetaChromaTransformer transformer = new ZetaChromaTransformer(config);
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
         // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
+        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            context,
+            new LoraMergeTargets { Transformer = conv.Transformer },
+            "ZetaChromaRecipe");
         transformer.LoadWeights(conv.Transformer);
 
         // 2. Qwen3-4B caption encoder — its weights are uploaded and freed per generation, like Z-Image.

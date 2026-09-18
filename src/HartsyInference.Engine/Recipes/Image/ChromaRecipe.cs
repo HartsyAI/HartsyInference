@@ -56,8 +56,10 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         ChromaTransformer transformer = new ChromaTransformer(config);
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
         // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: zConv.Transformer);
+        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            context,
+            new LoraMergeTargets { Transformer = zConv.Transformer },
+            "ChromaRecipe");
         transformer.LoadWeights(zConv.Transformer);
 
         // DiT sharding split point — byte-weighted: Chroma's 19 double blocks are ~2× its 38 single blocks,

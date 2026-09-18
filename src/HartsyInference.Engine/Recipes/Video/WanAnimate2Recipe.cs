@@ -86,10 +86,10 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
                 + $"({config.NumLayers} blocks, inner {config.InnerDim}, log_scale {config.Animate2LogScale}).");
 
             // Merge BEFORE LoadWeights (identity-keyed device caches — same ordering as WanVideoRecipe).
-            loraStack = Features.LoraApplier.BuildAndApply(
-                Features.LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                transformerWeights: conv.Transformer);
+            loraStack = Features.RecipeLoraMerge.Apply(
+                context,
+                new Features.LoraMergeTargets { Transformer = conv.Transformer },
+                "WanAnimate2Recipe");
 
             WanAnimate2Transformer transformer = new WanAnimate2Transformer(config);
             transformer.LoadWeights(conv.Transformer);

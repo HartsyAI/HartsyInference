@@ -86,8 +86,10 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             BooguImageTransformer transformer = new BooguImageTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerW);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = transformerW },
+                "BooguImageRecipe");
             transformer.LoadWeights(transformerW);
 
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_8B);

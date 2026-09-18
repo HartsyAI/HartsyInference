@@ -101,12 +101,10 @@ public sealed class Sd3Recipe : IArchitectureRecipe
             // Merge BEFORE LoadWeights, not after: the merge swaps dictionary entries, and device caches are
             // identity-keyed, so a tensor already captured by a layer would keep serving its stale copy
             // (same ordering constraint as MiniMaxH3Recipe/WanVideoRecipe's LoRA merges).
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                transformerWeights: converted.Transformer,
-                clipLWeights: clipLWeights,
-                clipGWeights: clipGWeights);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = converted.Transformer, ClipL = clipLWeights, ClipG = clipGWeights },
+                "Sd3Recipe");
 
             int patchEmbedOutChannels = DetectPatchEmbedOutChannels(converted.Transformer);
             Sd3Config sd3Config = Sd3Config.FromWeightShape(patchEmbedOutChannels);

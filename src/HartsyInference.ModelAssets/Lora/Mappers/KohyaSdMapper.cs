@@ -84,6 +84,15 @@ public static class KohyaSdMapper
                 return true;
             }
         }
+        // sd-scripts numbers the encoders in the order the family declares them, so te3 is SD3's T5 arm. Without this
+        // row the prefix matches nothing (lora_te_ needs the underscore at that position) and every T5 layer is lost.
+        if (root.StartsWith("lora_te3_", StringComparison.Ordinal))
+        {
+            string body = root["lora_te3_".Length..];
+            canonicalKey = LoraKeyTransformer.UnderscoreToDot(body) + ".weight";
+            target = LoraTarget.TextEncoder2;
+            return true;
+        }
         if (root.StartsWith("lora_te_", StringComparison.Ordinal))
         {
             string body = root["lora_te_".Length..];

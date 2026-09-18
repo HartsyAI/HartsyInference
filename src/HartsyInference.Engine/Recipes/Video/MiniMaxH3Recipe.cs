@@ -338,7 +338,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         {
             return null;
         }
-        return LoraApplier.BuildAndApply(specs, backend, transformerWeights: weights);
+        return RecipeLoraMerge.Apply(specs, backend, new LoraMergeTargets { Transformer = weights }, "MiniMaxH3Recipe");
     }
 
     /// <summary>Loads each plan-deduplicated Fun branch once and binds its canonical path to the transformer's model

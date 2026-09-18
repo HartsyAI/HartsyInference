@@ -55,8 +55,10 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
             OmniGen2Transformer transformer = new OmniGen2Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = converted.Transformer },
+                "OmniGen2Recipe");
             transformer.LoadWeights(VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.F32], DType.BF16));
 
             string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();

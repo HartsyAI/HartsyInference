@@ -76,8 +76,10 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
             HunyuanVideoDit dit = new HunyuanVideoDit(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: ditWeights);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = ditWeights },
+                "HunyuanVideoRecipe");
             dit.LoadWeights(ditWeights);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanVideoVae3D, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
