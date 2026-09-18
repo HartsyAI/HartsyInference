@@ -29,6 +29,11 @@ stable release will require. Dates are UTC.
   GEMM, minutes into a generation, with a stack trace naming a kernel rather than a file; the loader asks the
   backend what it can hold packed and widens the rest on the host, saying which dtypes and why. A Q2_K or IQ4_NL
   diffusion GGUF — both routinely published — loads slowly instead of crashing.
+- **A shipped checkpoint that rendered black now works.** Black Forest Labs' own `FLUX.2-klein-4b-fp8` carries 80
+  fp8 weights and 160 companion scales, and the Flux.2 converter was one of the 23 that never folded them — so every
+  fp8 weight ran at scale 1.0 instead of `stored x scale`, and the generation saturated to a fully black image. This
+  is what the fold gap looks like when it lands on an official release, and why the fold belongs to the container
+  rather than to a 24th converter.
 - **A GGUF video checkpoint reaches planning.** The planner opened every checkpoint as safetensors, so a GGUF
   build died before any recipe was reached, and MiniMax-H3's component resolution could not even see a `.gguf`
   file. Both read the shared header now, and a component's format reports as `gguf-q4_k` and the like.
