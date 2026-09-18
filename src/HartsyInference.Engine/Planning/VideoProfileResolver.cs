@@ -2628,8 +2628,7 @@ internal static class VideoProfileResolver
     {
         ValidateComponentShape(descriptors, "dec_in_proj.weight", role, issues, 2048, 32, 1);
         ValidateComponentShape(descriptors, "dec_in_proj.bias", role, issues, 2048);
-        ValidateComponentShape(descriptors, "decoder.conv_pre.weight_v", role, issues, 1024, 2048, 7);
-        ValidateComponentShape(descriptors, "decoder.conv_pre.weight_g", role, issues, 1024, 1, 1);
+        ValidateWeightNormConv(descriptors, "decoder.conv_pre", role, issues, 1024, 2048, 7);
         ValidateComponentShape(descriptors, "decoder.conv_pre.bias", role, issues, 1024);
         int[] decoderChannels = [512, 256, 128, 64, 32, 16, 8];
         int decoderInput = 1024;
@@ -2638,8 +2637,7 @@ internal static class VideoProfileResolver
             int output = decoderChannels[stage];
             int kernel = stage < 2 ? 9 : 4;
             string up = $"decoder.ups.{stage}.0";
-            ValidateComponentShape(descriptors, up + ".weight_v", role, issues, decoderInput, output, kernel);
-            ValidateComponentShape(descriptors, up + ".weight_g", role, issues, decoderInput, 1, 1);
+            ValidateWeightNormConv(descriptors, up, role, issues, decoderInput, output, kernel);
             ValidateComponentShape(descriptors, up + ".bias", role, issues, output);
             for (int branch = 0; branch < 3; branch++)
             {
@@ -2648,13 +2646,11 @@ internal static class VideoProfileResolver
                 for (int layer = 0; layer < 3; layer++)
                 {
                     string prefix = $"decoder.resblocks.{resblock}";
-                    ValidateComponentShape(descriptors, $"{prefix}.convs1.{layer}.weight_v", role, issues,
+                    ValidateWeightNormConv(descriptors, $"{prefix}.convs1.{layer}", role, issues,
                         output, output, resKernel);
-                    ValidateComponentShape(descriptors, $"{prefix}.convs1.{layer}.weight_g", role, issues, output, 1, 1);
                     ValidateComponentShape(descriptors, $"{prefix}.convs1.{layer}.bias", role, issues, output);
-                    ValidateComponentShape(descriptors, $"{prefix}.convs2.{layer}.weight_v", role, issues,
+                    ValidateWeightNormConv(descriptors, $"{prefix}.convs2.{layer}", role, issues,
                         output, output, resKernel);
-                    ValidateComponentShape(descriptors, $"{prefix}.convs2.{layer}.weight_g", role, issues, output, 1, 1);
                     ValidateComponentShape(descriptors, $"{prefix}.convs2.{layer}.bias", role, issues, output);
                     for (int activation = layer * 2; activation <= layer * 2 + 1; activation++)
                     {
@@ -2671,11 +2667,9 @@ internal static class VideoProfileResolver
         ValidateComponentIndexedFamily(descriptors.Keys, "decoder.resblocks.", 21, role, issues);
         ValidateComponentShape(descriptors, "decoder.activation_post.act.alpha", role, issues, 8);
         ValidateComponentShape(descriptors, "decoder.activation_post.act.beta", role, issues, 8);
-        ValidateComponentShape(descriptors, "decoder.conv_post.weight_v", role, issues, 1, 8, 7);
-        ValidateComponentShape(descriptors, "decoder.conv_post.weight_g", role, issues, 1, 1, 1);
+        ValidateWeightNormConv(descriptors, "decoder.conv_post", role, issues, 1, 8, 7);
 
-        ValidateComponentShape(descriptors, "encoder.block.0.weight_v", role, issues, 64, 1, 7);
-        ValidateComponentShape(descriptors, "encoder.block.0.weight_g", role, issues, 64, 1, 1);
+        ValidateWeightNormConv(descriptors, "encoder.block.0", role, issues, 64, 1, 7);
         ValidateComponentShape(descriptors, "encoder.block.0.bias", role, issues, 64);
         ValidateComponentShape(descriptors, "pre_block.attn.qkv.weight", role, issues, 6144, 2048);
         ValidateComponentShape(descriptors, "pre_block.proj.weight", role, issues, 32, 2048);
@@ -2757,6 +2751,27 @@ internal static class VideoProfileResolver
             issues.Add(Error("video.component.nvfp4_invalid",
                 $"NVFP4 text tensor '{stem}' has an invalid packed shape or companion set.", role));
         }
+    }
+
+    /// <summary>Validates a weight-norm convolution that may ship either unfused (<c>weight_v</c> + <c>weight_g</c>) or already fused (<c>weight</c>).</summary>
+    /// <remarks>Both forms are in circulation for the same component — the vendor release carries the PyTorch
+    /// <c>weight_norm</c> parametrization and the ComfyUI repack ships it collapsed — and
+    /// <c>MiniMaxH3AudioVaeDecoder</c>/<c>Encoder</c> load either. Demanding the unfused pair here refused a
+    /// checkpoint the engine could actually run, which is the worst kind of planning error: the refusal is
+    /// authoritative and the capability it denies exists.</remarks>
+    private static void ValidateWeightNormConv(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors,
+        string prefix, string role, List<VideoPlanIssue> issues, params long[] expected)
+    {
+        if (descriptors.ContainsKey(prefix + ".weight") && !descriptors.ContainsKey(prefix + ".weight_v"))
+        {
+            ValidateComponentShape(descriptors, prefix + ".weight", role, issues, expected);
+            return;
+        }
+        ValidateComponentShape(descriptors, prefix + ".weight_v", role, issues, expected);
+        long[] gainShape = new long[expected.Length];
+        gainShape[0] = expected[0];
+        for (int i = 1; i < gainShape.Length; i++) gainShape[i] = 1;
+        ValidateComponentShape(descriptors, prefix + ".weight_g", role, issues, gainShape);
     }
 
     private static void ValidateComponentShape(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors,
