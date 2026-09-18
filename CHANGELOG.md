@@ -24,11 +24,16 @@ stable release will require. Dates are UTC.
   first backend to write through a weight. A tensor bound as an op's output is no longer a weight, whatever route
   made it one, and its cached dtype conversions go with it.
 
+  `PromoteToWeight` gives a backend the seam it needs to promote a tensor it has seen uploaded twice — the buffer
+  has to enter the weight cache and the owned set together, or the caller's own cleanup frees what the cache now
+  points at — and plants the demotion binding that makes promotion safe. Promotion happens behind the caller's back,
+  so host data stays authoritative: a later host write drops the device copy rather than syncing it back, because
+  without that a write would leave the stale device bytes cached and every later lookup would serve them. An
+  explicit preload deliberately plants nothing, since there the caller asked for residency and owns the lifetime.
+
   The callbacks a tensor fires on read or dispose now check disposal before touching anything, behind a gate a
   backend can hold closed while it retires: a binding outlives the cache that planted it, and on CUDA that path
-  threw during a model swap. Finally, `PromoteToWeight` gives a backend the seam it needs to promote a tensor it has
-  seen uploaded twice — the buffer has to enter the weight cache and the owned set together, or the caller's own
-  cleanup frees what the cache now points at.
+  threw during a model swap.
 
 ## alpha.92
 

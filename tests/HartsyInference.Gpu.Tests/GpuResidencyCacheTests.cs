@@ -258,6 +258,48 @@ public sealed class GpuResidencyCacheTests
         Assert.False(buffer.Freed);
     }
 
+    /// <summary>Promotion happens behind the caller's back, so host data stays authoritative: a later host write
+    /// has to drop the device copy, or every read afterwards is served the pre-write bytes. The same silent
+    /// wrong-answer bug as a weight an op writes through, arriving from the host side instead.</summary>
+    [Fact]
+    public void A_Host_Write_After_Promotion_Drops_The_Device_Copy()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        cache.PromoteOnSecondUpload = true;
+
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+        FakeCache.Buffer promoted = cache.CopyToDevice(tensor);
+        cache.ReleaseIfNotCached(promoted, Size(tensor));
+        Assert.Same(promoted, cache.CopyToDevice(tensor));
+
+        tensor.AsSpan<float>()[0] = 42f;   // host write; funnels through the demotion binding
+
+        Assert.True(promoted.Freed);
+        Assert.NotSame(promoted, cache.CopyToDevice(tensor));   // re-uploaded, so it carries the new byte
+        Assert.Equal(3, cache.Uploads);
+        Assert.Single(cache.Demoted, entry => ReferenceEquals(entry.Buffer, promoted));
+    }
+
+    /// <summary>An explicit preload is the caller's decision, so a host read must not silently undo it.</summary>
+    [Fact]
+    public void A_Host_Read_After_An_Explicit_Preload_Keeps_The_Weight()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        cache.PreloadWeight(tensor);
+        FakeCache.Buffer resident = cache.CopyToDevice(tensor);
+
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.False(resident.Freed);
+        Assert.Same(resident, cache.CopyToDevice(tensor));
+    }
+
     /// <summary>Auto-promotion runs entirely through the upload hook: a tensor uploaded twice becomes a resident
     /// weight, and the caller's own release of that buffer is then correctly skipped.</summary>
     [Fact]

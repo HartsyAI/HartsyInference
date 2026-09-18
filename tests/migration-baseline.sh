@@ -76,8 +76,27 @@ while IFS=$'\t' read -r id ckpt spec; do
         continue
     fi
     case "$artifact" in
-        *.png) digest="$(ffmpeg -nostdin -loglevel error -i "$artifact" -f rawvideo -pix_fmt rgb24 - 2>/dev/null | md5sum | cut -d' ' -f1)" ;;
-        *)     digest="$(md5sum "$artifact" | cut -d' ' -f1)" ;;
+        *.png)
+            # Decode to a FILE and check it, rather than piping into md5sum. A pipeline reports the last command's
+            # status, so a missing or failing ffmpeg left md5sum hashing empty stdin — and the empty digest is
+            # stable, so recording and comparing would both produce it and the gate would report `identical`
+            # without having looked at a single pixel. A gate that cannot fail is worse than no gate.
+            raw="$WORK/$id.rgb24"
+            if ! ffmpeg -nostdin -loglevel error -i "$artifact" -f rawvideo -pix_fmt rgb24 -y "$raw"                 >>"$WORK/$id.log" 2>&1 || [ ! -s "$raw" ]; then
+                printf '%s\t%s\tCRASH\tcould not decode %s (see %s)\n' "$id" "$BACKEND" "$artifact" "$WORK/$id.log"
+                status=1
+                continue
+            fi
+            digest="$(md5sum "$raw" | cut -d' ' -f1)"
+            ;;
+        *)
+            if [ ! -s "$artifact" ]; then
+                printf '%s\t%s\tCRASH\tempty artifact %s\n' "$id" "$BACKEND" "$artifact"
+                status=1
+                continue
+            fi
+            digest="$(md5sum "$artifact" | cut -d' ' -f1)"
+            ;;
     esac
 
     if [ "$MODE" = record ]; then

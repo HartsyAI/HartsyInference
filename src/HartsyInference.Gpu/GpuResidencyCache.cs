@@ -365,12 +365,55 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     ///
     /// <para>The seam a backend needs to promote a tensor it has seen uploaded more than once: the buffer must enter
     /// the weight cache and the owned set together, or the caller's own cleanup frees what the cache now points
-    /// at.</para></summary>
+    /// at.</para>
+    ///
+    /// <para>Promotion happens behind the caller's back — nobody asked for this tensor to become resident — so it
+    /// plants a demotion binding, and the correctness of the whole mechanism rests on it. Host data stays
+    /// authoritative for a promoted weight, so any later host access must DROP the device copy rather than sync it
+    /// back; without the binding, a host write would leave the stale device bytes cached and every later
+    /// <see cref="CopyToDevice"/> would serve them. That is the same silent wrong-answer bug as a weight an op
+    /// writes through, arriving from the other direction.</para></summary>
+    /// <remarks>An explicit <see cref="PreloadWeight"/> deliberately plants nothing: the caller asked for residency
+    /// and owns the lifetime, so a host read should not silently undo it.</remarks>
     protected void PromoteToWeight(Tensor tensor, TBuffer buffer)
     {
         Weights[tensor] = buffer;
         CachedBuffers.Add(buffer);
         PendingOrphans.Remove(buffer);
+
+        // Keyed, so a second device promoting the same host tensor does not overwrite this one's hook. Sync and
+        // dispose are the same action: there is nothing on the device worth reading back.
+        tensor.ClearGpuBinding(BindingKey);
+        tensor.SetGpuBinding(
+            BindingKey,
+            sync: () => DemotePromotedWeight(tensor),
+            dispose: () => DemotePromotedWeight(tensor));
+    }
+
+    /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
+    private void DemotePromotedWeight(Tensor tensor)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
+        {
+            return;
+        }
+        try
+        {
+            if (!Weights.Remove(tensor, out TBuffer? buffer))
+            {
+                return;
+            }
+            // No D2H. The host buffer is the authority here — that is what makes this a demotion and not an
+            // eviction — and copying the device bytes back would overwrite the write that triggered this.
+            OnWeightDemoted(tensor, buffer);
+            CachedBuffers.Remove(buffer);
+            ReleaseBuffer(buffer, ByteSize(tensor));
+            ReleaseWeightCasts(tensor);
+        }
+        finally
+        {
+            ExitCallback();
+        }
     }
 
     /// <summary>Releases every cached conversion of one weight.</summary>
