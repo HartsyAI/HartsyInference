@@ -1811,6 +1811,103 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
     }
 
+    /// <summary>Every image in a batched convolution must equal that image convolved alone. Conv2D refused
+    /// <c>batch &gt; 1</c> outright until now, which is what made SDXL unusable on Vulkan: its fused denoise loop runs
+    /// one batch=2 UNet forward per step (positive+negative concatenated for CFG), so the very first convolution
+    /// threw. SD1.5 never hit it because it runs CFG as two separate batch=1 passes.
+    ///
+    /// <para>Comparing against the per-image result rather than a hand-rolled reference is what makes this catch the
+    /// offset bugs specifically: every image reading image 0's columns, or every image writing image 0's output
+    /// plane, produces self-consistent output that only a cross-image comparison distinguishes.</para></summary>
+    [Theory]
+    [InlineData(0)]        // single tile: one GEMM per image
+    [InlineData(2048)]     // forced multi-tile: exercises bOffset/cOffset against a SHORTER final tile
+    public void Backend_Conv2D_Batched_MatchesPerImage(int maxColTileBytes)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        if (maxColTileBytes > 0) backend.Conv2DMaxColTileBytes = (ulong)maxColTileBytes;
+
+        const int B = 3, Cin = 4, Cout = 6, H = 12, W = 10, Kh = 3, Kw = 3;
+        Tensor input = new(new TensorShape(B, Cin, H, W), DType.F32);
+        Tensor weight = new(new TensorShape(Cout, Cin, Kh, Kw), DType.F32);
+        Tensor bias = new(new TensorShape(Cout), DType.F32);
+        Tensor batched = new(new TensorShape(B, Cout, H, W), DType.F32);
+
+        Random rng = new(4242);
+        Span<float> iS = input.AsSpan<float>();
+        Span<float> wS = weight.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        // Per-image offset so the images are not merely different values but different DISTRIBUTIONS — copying
+        // image 0 over the others would otherwise still land inside a loose tolerance.
+        for (int n = 0; n < B; n++)
+            for (int i = 0; i < Cin * H * W; i++)
+                iS[n * Cin * H * W + i] = (float)(rng.NextDouble() * 2 - 1) + n * 3.0f;
+        for (int i = 0; i < Cout * Cin * Kh * Kw; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+        for (int i = 0; i < Cout; i++) bS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+
+        backend.Conv2D(batched, input, weight, bias, strideH: 1, strideW: 1, padH: 1, padW: 1);
+        ReadOnlySpan<float> batchedOut = batched.AsReadOnlySpan<float>();
+
+        int imageIn = Cin * H * W, imageOut = Cout * H * W;
+        float maxErr = 0f;
+        for (int n = 0; n < B; n++)
+        {
+            Tensor single = new(new TensorShape(1, Cin, H, W), DType.F32);
+            Tensor singleOut = new(new TensorShape(1, Cout, H, W), DType.F32);
+            iS.Slice(n * imageIn, imageIn).CopyTo(single.AsSpan<float>());
+
+            backend.Conv2D(singleOut, single, weight, bias, strideH: 1, strideW: 1, padH: 1, padW: 1);
+
+            ReadOnlySpan<float> expected = singleOut.AsReadOnlySpan<float>();
+            for (int i = 0; i < imageOut; i++)
+                maxErr = MathF.Max(maxErr, MathF.Abs(batchedOut[n * imageOut + i] - expected[i]));
+
+            single.Dispose(); singleOut.Dispose();
+        }
+
+        Assert.True(maxErr < 1e-4f, $"Batched Conv2D diverged from the per-image result: maxErr {maxErr:E3}.");
+
+        input.Dispose(); weight.Dispose(); bias.Dispose(); batched.Dispose();
+    }
+
+    /// <summary>The dtype-fallback branches must not re-enter themselves. <c>((IBackend)this).X(...)</c> looks like
+    /// "call the managed default" but the class method implicitly implements the interface member, so interface
+    /// dispatch lands straight back in the override and recurses until the stack overflows — a documented bug class
+    /// in TROUBLESHOOTING.md that had three live instances here.
+    ///
+    /// <para>A stack overflow cannot be caught in .NET: it kills the process. So these asserts ARE the gate — before
+    /// the fix the test host died outright rather than failing, and the exception type below is only reachable
+    /// because the fallbacks now call the static reference instead of themselves.</para></summary>
+    [Fact]
+    public void Backend_DtypeFallbacks_DoNotRecurse()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        // WanRmsNormChannel: F16 takes the non-F32 branch.
+        Tensor f16In = new(new TensorShape(1, 4, 2, 2), DType.F16);
+        Tensor f16Out = new(new TensorShape(1, 4, 2, 2), DType.F16);
+        Assert.Throws<NotSupportedException>(() => backend.WanRmsNormChannel(f16Out, f16In, null, 1e-6f));
+        f16In.Dispose(); f16Out.Dispose();
+
+        // GatedResidualLastDim: a gate dtype that disagrees with value takes the fallback.
+        Tensor res = new(new TensorShape(1, 2, 8), DType.F16);
+        Tensor val = new(new TensorShape(1, 2, 8), DType.F16);
+        Tensor gate = new(new TensorShape(1, 8), DType.F16);
+        Tensor gOut = new(new TensorShape(1, 2, 8), DType.F16);
+        Assert.Throws<NotSupportedException>(() => backend.GatedResidualLastDim(gOut, res, val, gate));
+        res.Dispose(); val.Dispose(); gate.Dispose(); gOut.Dispose();
+
+        // RopeApplyDecodeStep: devicePos 0 is never a valid persistent buffer handle.
+        Tensor x = new(new TensorShape(1, 1, 2, 8), DType.F32);
+        Tensor cos = new(new TensorShape(1, 8), DType.F32);
+        Tensor sin = new(new TensorShape(1, 8), DType.F32);
+        Assert.Throws<NotSupportedException>(
+            () => backend.RopeApplyDecodeStep(x, cos, sin, rotaryDim: 8, interleaved: false, devicePos: 0));
+        x.Dispose(); cos.Dispose(); sin.Dispose();
+    }
+
     /// <summary>Regression gate for the real Krea2-on-Vulkan VAE-decode OOM (2026-07-30):
     /// <c>Conv2D</c>'s im2col buffer used to materialize the FULL <c>[gemmK, outH*outW]</c> column matrix
     /// in one allocation — ~7 GB at Krea2's 1024x1024 decode resolution, which OOM'd even with the
