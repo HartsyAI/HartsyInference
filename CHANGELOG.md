@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.88
+
+- **The backend contract now describes a device instead of listing the two backends that exist.** `IsGpu` tested for
+  CUDA-or-Vulkan by name, so a device added later would have read as a CPU to every caller that gates on it — same-
+  device serialization, weight preloading, VRAM reclamation would each have skipped it silently. It asks whether the
+  device is not a CPU, and `DeviceType` names ROCm and Metal so that question has real answers to give.
+- `CacheWeightCasts` moved onto `IBackend`. Both GPU backends already had the property with the same name and the
+  same meaning, and the one caller reached them through a type test naming each — so a third backend would have been
+  skipped while the log line still claimed the flag had been applied. The recipe helper no longer references the CUDA
+  or Vulkan packages at all.
+- Backends report their vendor, device name and total VRAM. A VRAM tier can only be resolved from a number somebody
+  publishes, and nothing published one. Vendor matters because several decisions are per-vendor rather than per-API —
+  cooperative-matrix reliability above all — and a software rasterizer is its own vendor, since llvmpipe otherwise
+  reports the silicon vendor of the host and would walk into a hardware comparison.
+- Vulkan finally declares that its convolution bands its im2col workspace. It has done so since the Krea2 VAE-decode
+  fix, but never said so, leaving the VAE planner to assume the naive blow-up on that backend.
+
 ## alpha.87
 
 - **A mistyped command-line option now fails instead of being ignored.** Spectre collects an option no command
