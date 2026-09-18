@@ -25,6 +25,14 @@ stable release will require. Dates are UTC.
 - H3's text encoder reads its embedding row scale from wherever the fold left it. Reading only the companion key
   made a container-opened checkpoint look like one with a missing scale, and the refusal below rejected the
   published int8 build.
+- MiniMax-H3 asks only the devices that will execute its blocks before deciding whether a quantized DiT can stay
+  packed. It never runs context-parallel or CFG-parallel — the recipe warns the operator about exactly that — so a
+  peer with no packed-weight kernel used to widen the whole checkpoint on the host for a device that reads none of
+  it, which turns a 6.7 GB Q2_K build into roughly 40 GB.
+- A quantized `.gguf` component no longer displaces a proven dense one. Component ranking read only the ComfyUI
+  markers (`fp8`, `int8`, `nvfp4`), so `…video_vae-Q4_K.gguf` landed in the dense class beside the FP16 build and
+  the size tie-break then chose it — the silent substitution the video VAE's explicit-selection gate exists to
+  prevent.
 
 ## alpha.96
 

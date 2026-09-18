@@ -177,15 +177,26 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
+    private static readonly string[] _quantMarkers =
+        ["nvfp4", "fp8", "int8", "mxfp", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_k",
+         "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4", "iq3", "iq2"];
+
+    private static readonly string[] _denseMarkers = ["fp32", "f32", "fp16", "f16", "bf16"];
+
     /// <summary>Ranks quantized variants before or after dense precision according to the component's release
     /// status. File size breaks ties within the selected precision class.</summary>
-    /// <remarks><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
+    /// <remarks><para><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
     /// first-class resident format (<c>CudaBackend</c>'s int8 IMMA path), so it ranks with the other quantized
-    /// builds and the size tie-break below decides between them.</remarks>
+    /// builds and the size tie-break below decides between them.</para>
+    /// <para>A <c>.gguf</c> counts as quantized unless it names a dense precision. Reading only the ComfyUI markers
+    /// classified <c>…video_vae-Q4_K.gguf</c> as dense, which put it in the same class as the proven FP16 build under
+    /// <c>preferQuantized: false</c> — and the size tie-break then chose it, which is the silent substitution that
+    /// argument exists to prevent.</para></remarks>
     private static int FormatRank(string name, bool preferQuantized)
     {
         string lower = name.ToLowerInvariant();
-        bool quantized = lower.Contains("nvfp4") || lower.Contains("fp8") || lower.Contains("int8");
+        bool quantized = _quantMarkers.Any(lower.Contains)
+            || (lower.EndsWith(".gguf", StringComparison.Ordinal) && !_denseMarkers.Any(lower.Contains));
         return quantized == preferQuantized ? 0 : 1;
     }
 
