@@ -476,6 +476,10 @@ public static class GenerationDispatch
             ReferenceAudios = SplitPaths(parameters.GetStringOrNull("ref-audios"))
                 ?.Select(p => LoadAudioClip(p) ?? throw new FileNotFoundException($"Reference audio not found: {p}"))
                 .ToList(),
+            VideoAudioReference = parameters.GetStringOrNull("driving-audio") is string drivingAudio
+                ? LoadAudioClip(drivingAudio)
+                    ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
+                : null,
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),

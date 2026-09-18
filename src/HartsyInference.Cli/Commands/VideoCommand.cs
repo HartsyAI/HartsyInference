@@ -6,7 +6,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a video (frame sequence) from a prompt with any registered video family. CUDA-only.</summary>
+/// <summary>Generates a video (frame sequence) from a prompt with any registered video family.</summary>
 /// <remarks>Validation-pending per family — see <c>docs/Checklists/MODEL_STATUS_VIDEO.md</c>.</remarks>
 public sealed class VideoCommand : Command<VideoCommand.Settings>
 {
@@ -33,10 +33,12 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Confirm a detected H3 model profile. This cannot override incompatible tensors or hashes; --profile remains Engine tuning.")]
         public string? ModelProfile { get; init; }
 
-        /// <summary>Compute backend (must be cuda for video).</summary>
+        /// <summary>Compute backend selector.</summary>
+        /// <remarks>A sparse-attention profile (MiniMax-H3 VSA) still refuses a backend without a native kernel for
+        /// it; the planner says so by name. Dense families are not restricted by backend.</remarks>
         [CommandOption("-b|--backend")]
-        [Description("Backend (video requires cuda).")]
-        public string Backend { get; init; } = "cuda";
+        [Description("Backend: auto, cpu, cuda, or vulkan.")]
+        public string Backend { get; init; } = "auto";
 
         /// <summary>Negative prompt.</summary>
         [CommandOption("-n|--negative")]
@@ -162,6 +164,12 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [CommandOption("--ref-audio")]
         [Description("Reference audio clip (WAV) to condition on; repeat for more (MiniMax-H3 takes up to 3).")]
         public string[]? ReferenceAudios { get; init; }
+
+        /// <summary>Track the video is generated against, rather than one the model invents.</summary>
+        [CommandOption("--driving-audio")]
+        [Description("Audio track (WAV) to lock the soundtrack to so the video is generated against it (lip-sync). "
+            + "Longer tracks are trimmed to the clip, shorter ones zero-padded.")]
+        public string? DrivingAudio { get; init; }
 
         /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
         [CommandOption("--guide-image")]
@@ -369,6 +377,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         {
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
         }
+        parameters.PutIfSet("driving-audio", settings.DrivingAudio);
         if (settings.GuideImages is { Length: > 0 })
         {
             parameters.Put("guide-images", string.Join('\n', settings.GuideImages));

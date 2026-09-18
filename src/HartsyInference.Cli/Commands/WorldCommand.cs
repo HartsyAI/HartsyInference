@@ -35,8 +35,8 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
-        [Description("Backend: auto, cpu, cuda, or vulkan (cuda recommended).")]
-        public string Backend { get; init; } = "cuda";
+        [Description("Backend: auto, cpu, cuda, or vulkan.")]
+        public string Backend { get; init; } = "auto";
 
         /// <summary>Number of frames to roll out.</summary>
         [CommandOption("--frames")]

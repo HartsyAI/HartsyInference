@@ -2,6 +2,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Xunit;
@@ -99,6 +100,42 @@ public sealed class GenericVideoPlanningCompatibilityTests
         Assert.Equal(nameof(VideoRequest.SparseAttentionPolicy), issue.Field);
         Assert.False(plan.IsValid);
     }
+
+    /// <summary>Wan-S2V's driving speech arrives in <c>VideoRequest.VideoAudioReference</c>, which
+    /// <c>VideoService.RequestedFeatures</c> classifies as <see cref="VideoFeatures.DrivingAudio"/>. The recipe has
+    /// to declare that bit: undeclared, the generic gate below refused the one input
+    /// <c>WanS2VRecipePipeline.Generate</c> cannot run without, so every speech-to-video request failed planning
+    /// before anything was constructed.</summary>
+    [Fact]
+    public async Task WanS2VDrivingSpeech_IsNotRefusedByTheGenericFeatureGate()
+    {
+        WanS2VRecipe recipe = new WanS2VRecipe();
+        VideoRequest request = new VideoRequest { Prompt = "test", VideoAudioReference = Track() };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(
+            Spec(), request, "wan-s2v", recipe.Defaults, recipe.Supports, CancellationToken.None);
+
+        Assert.DoesNotContain(plan.Issues, issue => issue.Code == "video.feature.unsupported");
+        Assert.True(plan.IsValid);
+    }
+
+    /// <summary>The control: the gate still bites, so the declaration above is one family earning a bit rather than
+    /// a loosened check. Accepting driving audio and silently ignoring it is the failure it exists to prevent.</summary>
+    [Fact]
+    public async Task DrivingAudio_IsRefusedByAFamilyThatDoesNotDeclareIt()
+    {
+        VideoRequest request = new VideoRequest { Prompt = "test", VideoAudioReference = Track() };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(
+            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+
+        VideoPlanIssue issue = Assert.Single(plan.Issues, issue => issue.Code == "video.feature.unsupported");
+        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
+        Assert.Contains(nameof(VideoFeatures.DrivingAudio), issue.Message, StringComparison.Ordinal);
+        Assert.False(plan.IsValid);
+    }
+
+    private static AudioClip Track() => new AudioClip { Data = [0x52, 0x49, 0x46, 0x46], Format = "wav" };
 
     private static ModelSpec Spec() => new ModelSpec
     {
