@@ -48,6 +48,18 @@ llama32-1b	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write a short sto
 MATRIX
 )
 
+# A digest is the only thing this script compares, so an unusable one must never reach the comparison. md5sum
+# failing leaves the substitution empty, and an empty value is stable — record and compare would both produce it and
+# the run would report `identical` having hashed nothing. Demand the exact shape of an MD5.
+digest_of() {
+    local value
+    value="$(md5sum "$1" | cut -d' ' -f1)" || return 1
+    case "$value" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s' "$value" ;;
+        *) return 1 ;;
+    esac
+}
+
 status=0
 confirmed=0
 selected=0
@@ -101,7 +113,11 @@ while IFS=$'\t' read -r id ckpt spec; do
                 status=1
                 continue
             fi
-            digest="$(md5sum "$raw" | cut -d' ' -f1)"
+            if ! digest="$(digest_of "$raw")"; then
+                printf '%s\t%s\tCRASH\tcould not hash %s\n' "$id" "$BACKEND" "$raw"
+                status=1
+                continue
+            fi
             ;;
         *)
             if [ ! -s "$artifact" ]; then
@@ -109,7 +125,11 @@ while IFS=$'\t' read -r id ckpt spec; do
                 status=1
                 continue
             fi
-            digest="$(md5sum "$artifact" | cut -d' ' -f1)"
+            if ! digest="$(digest_of "$artifact")"; then
+                printf '%s\t%s\tCRASH\tcould not hash %s\n' "$id" "$BACKEND" "$artifact"
+                status=1
+                continue
+            fi
             ;;
     esac
 

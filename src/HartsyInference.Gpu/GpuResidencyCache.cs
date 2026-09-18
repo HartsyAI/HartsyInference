@@ -520,6 +520,11 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             if (Weights.Remove(weight, out TBuffer? buffer))
             {
+                // A promoted weight carries a demotion binding. Leaving it planted outlives what it refers to: if
+                // this tensor is preloaded again the stale callback finds it back in Weights and evicts the new,
+                // explicitly-requested residency; and if the tensor is finalized after this cache is disposed, the
+                // work queues under a key nobody will ever drain, rooting both forever.
+                weight.ClearGpuBinding(BindingKey);
                 CachedBuffers.Remove(buffer);
                 ReleaseBuffer(buffer, ByteSize(weight));
             }
@@ -547,6 +552,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
         foreach ((Tensor tensor, TBuffer buffer) in Weights.ToArray())
         {
+            // Same reason as FreeWeights: a promoted weight's binding must not outlive the cache that planted it.
+            tensor.ClearGpuBinding(BindingKey);
             if (released.Add(buffer))
             {
                 ReleaseBuffer(buffer, ByteSize(tensor));

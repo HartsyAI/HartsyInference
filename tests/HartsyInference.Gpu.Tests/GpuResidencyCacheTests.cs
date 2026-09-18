@@ -281,6 +281,32 @@ public sealed class GpuResidencyCacheTests
         Assert.Single(cache.Demoted, entry => ReferenceEquals(entry.Buffer, promoted));
     }
 
+    /// <summary>A promotion binding must not outlive the residency it describes. Freeing the weight and preloading
+    /// it again is an explicit request for residency; a binding left over from the earlier promotion finds the tensor
+    /// back in the weight cache and evicts what the caller just asked for.</summary>
+    [Fact]
+    public void Freeing_A_Promoted_Weight_Detaches_Its_Demotion_Binding()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        cache.PromoteOnSecondUpload = true;
+
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+        cache.ReleaseIfNotCached(cache.CopyToDevice(tensor), Size(tensor));
+
+        cache.FreeWeights([tensor]);
+        cache.PreloadWeight(tensor);
+        FakeCache.Buffer explicitly = cache.CopyToDevice(tensor);
+
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.False(explicitly.Freed);
+        Assert.Same(explicitly, cache.CopyToDevice(tensor));
+    }
+
     /// <summary>An explicit preload is the caller's decision, so a host read must not silently undo it.</summary>
     [Fact]
     public void A_Host_Read_After_An_Explicit_Preload_Keeps_The_Weight()
