@@ -6,7 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -38,8 +38,8 @@ public sealed class FluxDitShardingVramTests
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/6] Loading Flux dev fp8 from {checkpoint}...");
-        (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-            FluxCheckpointConverter.LoadAndConvert(checkpoint);
+        CheckpointSource loader = CheckpointSource.Open(checkpoint);
+        FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
         try
         {
             (int doubles, int singles, bool hasGuidance) = FluxCheckpointConverter.DetectArchitecture(converted.Transformer);

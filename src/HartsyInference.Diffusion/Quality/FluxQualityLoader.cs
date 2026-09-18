@@ -3,12 +3,12 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Diffusion.Quality;
 
-/// <summary>Applies a <see cref="QualityProfile"/> to Flux converter output. Call between <see cref="FluxCheckpointConverter.LoadAndConvert"/> and the per-component <c>LoadWeights</c> calls. Mutates the dictionaries in place; original tensors are disposed after the cast.
+/// <summary>Applies a <see cref="QualityProfile"/> to Flux converter output. Call between <see cref="FluxCheckpointConverter.Convert"/> and the per-component <c>LoadWeights</c> calls. Mutates the dictionaries in place; original tensors are disposed after the cast.
 ///
 /// <para>Example:</para>
 /// <code>
-/// (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-///     FluxCheckpointConverter.LoadAndConvert(path);
+/// using CheckpointSource source = CheckpointSource.Open(path);
+/// FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(source.Weights);
 /// QualityProfile profile = QualityProfile.From(QualityPreset.High);  // FP8 backbone, FP16 encoders/VAE
 /// FluxQualityLoader.Apply(converted, profile);
 /// // ...then construct FluxTransformer / ClipTextEncoder / T5TextEncoder / VaeDecoder and call LoadWeights as usual.
