@@ -2368,6 +2368,14 @@ public interface IBackend : IDisposable
     /// <summary>True when <see cref="RelativeL1Distance"/> runs without pulling operands to the host; feature caching must gate on this.</summary>
     bool SupportsDeviceStepCacheGate => false;
 
+    /// <summary>True when this backend can hold a weight of <paramref name="dtype"/> <b>packed</b> and dequantize it inside a GEMM, rather than needing it materialized wide before the model loads.</summary>
+    /// <remarks><para>This is what decides whether a quantized checkpoint costs its on-disk size or four times it. A
+    /// backend answering false for a dtype does not fail — the loader dequantizes on the host instead, which is slower
+    /// and far larger but correct. Answering true for a dtype with no kernel is the failure that matters: the weight
+    /// reaches a GEMM that cannot read it and the model dies mid-generation rather than at load.</para>
+    /// <para>The default is the honest one for a backend with no packed-weight kernels at all.</para></remarks>
+    bool SupportsResidentQuant(DType dtype) => false;
+
     /// <summary>Marks a tensor's activation as surviving <see cref="FreeActivations()"/>, for cross-step state living only on-device.</summary>
     void PinActivation(Tensor tensor) { }
 

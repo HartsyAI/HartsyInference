@@ -60,6 +60,16 @@ public sealed class VulkanBackend : IBackend
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
 
+    /// <summary>The GGUF block quants this backend has dequant shaders for, and only on a device that can run them.</summary>
+    /// <remarks>Every <c>dequant_*.comp.glsl</c> here writes F16 and so requires
+    /// <c>GL_EXT_shader_explicit_arithmetic_types_float16</c>. On a device without it — Polaris under RADV, for one —
+    /// a packed weight has no way to become numbers on the GPU, so the loader has to widen it on the host first. Saying
+    /// true there would put a Q4_K weight in front of a shader that cannot read it.</remarks>
+    public bool SupportsResidentQuant(DType dtype) =>
+        Capabilities.SupportsF16
+        && (dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
+            || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K);
+
     /// <summary>Count of lazy D2H syncs since <see cref="ResetD2hSyncCount"/>; mirrors <c>CudaBackend</c>'s counter of the same name — ~0 means the traced region stayed GPU-resident.</summary>
     public long GetD2hSyncCount() => _xfer.GetSyncCount();
 

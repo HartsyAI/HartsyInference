@@ -3797,6 +3797,16 @@ public sealed class CudaBackend : IBackend
 
     public bool SupportsF16Activations => true;
 
+    /// <summary>The GGUF block quants this backend dequantizes inside a GEMM, plus the ComfyUI packed formats its Linear branches read directly.</summary>
+    /// <remarks>Exactly the set <c>LaunchGgufDequantToF16</c> dispatches — anything else has no kernel and must arrive
+    /// wide. <c>I8</c> and <c>F4E2M1</c> are the int8_tensorwise and nvfp4 resident paths, which consume their scales
+    /// from <see cref="Tensor.QuantInfo"/>; fp8 is not listed because it is not a quantized dtype here, it is a storage
+    /// dtype with a scalar on the tensor.</remarks>
+    public bool SupportsResidentQuant(DType dtype) =>
+        dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
+        || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
+        || dtype == DType.I8 || dtype == DType.F4E2M1;
+
     /// <summary>True once the optional stepcache.ptx module is compiled/shipped; the step-cache stays disabled on CUDA without it.</summary>
     /// <remarks>Built via src/HartsyInference.Cuda/Kernels/dit/build.sh.</remarks>
     public bool SupportsDeviceStepCacheGate => _kernels is not null && _kernels.HasStepCacheKernels;
