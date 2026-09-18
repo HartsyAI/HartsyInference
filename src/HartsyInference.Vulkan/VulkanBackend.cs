@@ -1344,14 +1344,16 @@ public sealed class VulkanBackend : IBackend
             throw new NotSupportedException(
                 $"Vulkan Conv2D im2col tile needs {tileColElements} elements (N={batch}, Cin={inCh}, k={kH}x{kW}), " +
                 "exceeding the shader's 32-bit index range even at the minimum 1-column tile. Use the CUDA backend.");
-        // cOffset/bOffset are uint push constants; the last image's base must be addressable. The output
-        // allocation below would fail long before this on any real shape, but a wrapped offset would silently
-        // write image N-1's rows over image 0's instead of failing, so it is checked rather than assumed.
-        long lastImageOutBase = (long)(batch - 1) * outCh * fullN;
-        if (lastImageOutBase + fullN > uint.MaxValue)
+        // cOffset/bOffset are uint push constants and the shader indexes `cOffset + gRow * ldc + gCol`, so the
+        // addressable span is the WHOLE output, not the last image's base: gRow runs to outCh-1 on top of that
+        // base. Checking only the base would pass a shape whose later channel rows still wrap — and a wrapped
+        // offset silently overwrites earlier output instead of failing. The allocation below would fail first on
+        // any real shape, but "would fail first" is not a bound, so the bound is checked.
+        long outputElements = (long)batch * outCh * fullN;
+        if (outputElements > uint.MaxValue)
             throw new NotSupportedException(
-                $"Vulkan Conv2D output needs element offset {lastImageOutBase + fullN} for N={batch}, Cout={outCh}, " +
-                $"{outH}x{outW}, exceeding the matmul shader's 32-bit offset range. Use the CUDA backend.");
+                $"Vulkan Conv2D output spans {outputElements} elements (N={batch}, Cout={outCh}, {outH}x{outW}), " +
+                "exceeding the matmul shader's 32-bit offset range. Use the CUDA backend.");
         ulong colBytes = (ulong)(tileColElements * gemmDtype.SizeInBytes);
         VulkanBuffer colBuf = _xfer.AllocateDevice(colBytes);
 
