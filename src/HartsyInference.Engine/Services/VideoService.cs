@@ -4,6 +4,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -74,9 +75,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             {
                 sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
             }
-            catch (Exception error) when (error is CudaException or DllNotFoundException
+            // Constructing the backend is part of the probe, so its construction failures are probe failures: a
+            // Vulkan loader present with no compatible device throws VulkanException, and an out-of-range ordinal
+            // throws ArgumentOutOfRangeException. Left unlisted they fault planning instead of producing the
+            // video.vsa.backend_unsupported issue this block exists to produce. Adding a backend package means
+            // adding its construction exception here, until the backend registry makes the probe generic.
+            catch (Exception error) when (error is CudaException or VulkanException or DllNotFoundException
                 or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
-                or NotSupportedException)
+                or NotSupportedException or ArgumentOutOfRangeException)
             {
                 RecordSparseBackendFailure(error);
             }

@@ -161,6 +161,48 @@ public sealed class BackendSelectorTests
         Assert.Equal(expected, BackendFactory.IsDeviceKind(kind));
     }
 
+    /// <summary>A key naming a device is reduced to one concrete spelling of it. Two spellings of one device must
+    /// not read as two devices to a caller that uses the key to identify a slot or a serialization gate.</summary>
+    [Theory]
+    [InlineData("cuda", "cuda:0")]
+    [InlineData("cuda:0", "cuda:0")]
+    [InlineData("cuda:2", "cuda:2")]
+    [InlineData("vulkan", "vulkan:0")]
+    [InlineData("vulkan:1", "vulkan:1")]
+    [InlineData("cpu", "cpu")]
+    public void CanonicalDeviceKey_Gives_One_Spelling_Per_Device(string selector, string expected)
+    {
+        Assert.Equal(expected, BackendFactory.CanonicalDeviceKey(selector));
+    }
+
+    /// <summary>'auto' must not survive canonicalization. It resolves to a real backend, so a caller that then asks
+    /// "is this a device kind?" would be told no and skip the gate that serializes access to the very GPU the
+    /// request is about to use — while a second slot sat beside the concrete key naming that same device.</summary>
+    [Theory]
+    [InlineData("auto")]
+    [InlineData("auto:1")]
+    public void CanonicalDeviceKey_Resolves_Auto_To_A_Concrete_Device(string selector)
+    {
+        string canonical = BackendFactory.CanonicalDeviceKey(selector);
+        Assert.NotEqual("auto", BackendFactory.Kind(canonical));
+        // Driver-dependent by nature, so this asserts the invariant rather than a fixed string: whatever 'auto'
+        // resolves to on this machine, the key names it concretely and carries the requested ordinal.
+        string resolved = BackendFactory.Resolve(selector);
+        Assert.Equal(
+            BackendFactory.IsDeviceKind(resolved) ? $"{resolved}:{BackendFactory.ParseOrdinal(selector)}" : resolved,
+            canonical);
+    }
+
+    /// <summary>A layer-split composite is a LIST of selectors, not one, and comes back untouched — reading it as a
+    /// single selector would parse "0+cuda:1" as an ordinal.</summary>
+    [Theory]
+    [InlineData("cuda:0+cuda:1")]
+    [InlineData("not-a-backend")]
+    public void CanonicalDeviceKey_Leaves_What_It_Cannot_Name_Alone(string selector)
+    {
+        Assert.Equal(selector, BackendFactory.CanonicalDeviceKey(selector));
+    }
+
     /// <summary>A registered recipe name resolves as its own family id. The video error text advertises these names as
     /// "currently drivable", and the Wan compat classes exist ONLY there — no catalog entry carries them — so before
     /// this they were advertised, accepted on the command line, and then rejected as family 'unknown'.</summary>

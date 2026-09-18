@@ -892,16 +892,18 @@ public sealed class TextService : ITextService, IDisposable
         return string.IsNullOrWhiteSpace(q) ? "Describe this image in detail." : q;
     }
 
-    /// <summary>Normalizes a requested device string to a slot key: blank → primary; a bare device kind → its
-    /// ordinal-0 form; else the lowercased key as-is.</summary>
-    /// <remarks>The key identifies a SLOT, so two spellings of one device must not produce two. This canonicalized
-    /// only "cuda", which was consistent while CUDA was the only device kind a slot could name.</remarks>
+    /// <summary>Normalizes a requested device string to a slot key: blank → primary; anything that names a device →
+    /// its concrete <c>kind:ordinal</c> form; else the lowercased key as-is.</summary>
+    /// <remarks>The key identifies a SLOT and is what <see cref="GateOrdinalsFor"/> reads, so it has to be concrete
+    /// on both counts. Canonicalizing only "cuda" was consistent while CUDA was the only device kind a slot could
+    /// name. <c>auto</c> is the sharper case: <see cref="CreateBackendFor"/> resolves it and can build a GPU backend,
+    /// while <c>auto</c> as a gate ordinal reads as CPU — so the slot would run unserialized against the very device
+    /// it shares, and would sit in a second slot beside the concrete key naming that same device.</remarks>
     private string NormalizeDeviceKey(string? device)
     {
         if (string.IsNullOrWhiteSpace(device))
             return PrimaryDeviceKey();
-        string key = device.Trim().ToLowerInvariant();
-        return BackendFactory.IsDeviceKind(key) ? $"{key}:0" : key;
+        return BackendFactory.CanonicalDeviceKey(device);
     }
 
     /// <summary>This service's primary device key, derived from the engine's backend selector.</summary>
