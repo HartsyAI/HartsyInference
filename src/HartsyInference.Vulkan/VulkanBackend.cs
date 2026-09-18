@@ -1334,8 +1334,9 @@ public sealed class VulkanBackend : IBackend
         // what it says instead of being exceeded by a factor of the batch.
         long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)batch * (ulong)gemmDtype.SizeInBytes)));
         long tileN = Math.Min(fullN, maxTileN);
-        long imageColElements = (long)gemmK * tileN;
-        long tileColElements = imageColElements * batch;
+        // Whole-batch element count. Per-image offsets below are computed from thisTileN, not from this, because
+        // the final tile is short and each image's block is packed at that shorter stride.
+        long tileColElements = (long)gemmK * tileN * batch;
         // The im2col/matmul GLSL address the column/output buffers with 32-bit indices. Above
         // int.MaxValue elements the index would wrap, silently corrupting output. Shrinking tileN
         // can't help when gemmK alone exceeds this range — fail loudly instead.

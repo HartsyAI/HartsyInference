@@ -55,6 +55,52 @@ public sealed class VulkanBatchEquivalenceTests(ITestOutputHelper output)
         return rel;
     }
 
+    /// <summary>The one op the fused batched-CFG denoise loop uses that the reference host loop does not:
+    /// <c>CfgEulerStep</c> folds the CFG combine and the Euler update into a single in-place kernel on the
+    /// device-resident latent, once per step. An error here would not show up in any single-op comparison against
+    /// fresh tensors — it would accumulate across steps into the latent it mutates, which is exactly the signature
+    /// of a generation that drifts further from the reference the longer it runs. Checked against the managed
+    /// reference over repeated in-place applications, not one.</summary>
+    [Fact]
+    public void CfgEulerStep_Matches_The_Reference_Across_Repeated_InPlace_Steps()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        // Through the interface: CpuBackend does not declare CfgEulerStep, so this is the managed
+        // default body itself — the numerical reference, not another override.
+        using Cpu.CpuBackend cpuBackend = new();
+        IBackend cpu = cpuBackend;
+
+        const int Count = 4 * 64 * 64;
+        using Tensor zGpu = Rand(new TensorShape(1, 4, 64, 64), 21, 0.1f);
+        using Tensor zRef = new(new TensorShape(1, 4, 64, 64), DType.F32);
+        zGpu.AsReadOnlySpan<float>().CopyTo(zRef.AsSpan<float>());
+
+        float maxErr = 0f, maxAbs = 0f;
+        for (int step = 0; step < 20; step++)
+        {
+            using Tensor pos = Rand(new TensorShape(1, 4, 64, 64), 100 + step, 0.05f);
+            using Tensor neg = Rand(new TensorShape(1, 4, 64, 64), 200 + step, -0.05f);
+            const float guidance = 7.0f;
+            float delta = -0.05f - step * 0.001f;
+
+            backend.CfgEulerStep(zGpu, pos, neg, guidance, delta);
+            cpu.CfgEulerStep(zRef, pos, neg, guidance, delta);
+
+            ReadOnlySpan<float> a = zGpu.AsReadOnlySpan<float>();
+            ReadOnlySpan<float> e = zRef.AsReadOnlySpan<float>();
+            maxErr = 0f; maxAbs = 0f;
+            for (int i = 0; i < Count; i++)
+            {
+                maxErr = MathF.Max(maxErr, MathF.Abs(a[i] - e[i]));
+                maxAbs = MathF.Max(maxAbs, MathF.Abs(e[i]));
+            }
+            _out.WriteLine($"step {step,2}: maxErr={maxErr:E3} rel={maxErr / maxAbs:E3}");
+        }
+
+        Assert.True(maxErr / maxAbs < 1e-5f, $"CfgEulerStep drifted from the reference: rel {maxErr / maxAbs:E3}.");
+    }
+
     [Fact]
     public void Ops_Give_The_Same_Answer_For_An_Image_In_A_Batch_As_Alone()
     {
