@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.89
+
+- **A shared GPU layer, `HartsyInference.Gpu`.** Nothing references it yet: the package is built and tested first so
+  each backend can be moved onto it one at a time, with its own suite green at every step.
+- `GpuResidencyCache<TBuffer>` is the device-residency cache both GPU backends had written separately — the same
+  three caches, the same weight → activation → fresh-upload order, the same four-step activation bind. A backend
+  supplies five operations that genuinely need an API (allocate, free, upload, download, make-current) and inherits
+  the rest. Two drifts between the old copies are settled by having one: only one of them drained the finalizer
+  cleanup queue, so tensors finalized rather than disposed leaked their device memory on the other; and one keyed
+  every device's tensor binding as 0, which holds only until two of its devices are used at once.
+- Because the cache decides *which* tensor is resident rather than doing any transfer itself, it is testable against
+  a fake buffer with no GPU at all. Nine tests cover the cases that previously needed hardware to reach: re-caching a
+  tensor in place, a weight surviving an activation sweep, pinning, per-device binding independence, arena-owned
+  buffers, and a host read during capture.
+- `OpProfile` gives both backends the per-op timing only one had, so the pipelines that already call
+  `ResetOpProfile`/`DumpOpProfile` stop silently producing nothing on the other.
+
 ## alpha.88
 
 - **The backend contract now describes a device instead of listing the two backends that exist.** `IsGpu` tested for
