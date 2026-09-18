@@ -892,13 +892,16 @@ public sealed class TextService : ITextService, IDisposable
         return string.IsNullOrWhiteSpace(q) ? "Describe this image in detail." : q;
     }
 
-    /// <summary>Normalizes a requested device string to a slot key: blank → primary; bare "cuda" → cuda:0; else the lowercased key as-is.</summary>
+    /// <summary>Normalizes a requested device string to a slot key: blank → primary; a bare device kind → its
+    /// ordinal-0 form; else the lowercased key as-is.</summary>
+    /// <remarks>The key identifies a SLOT, so two spellings of one device must not produce two. This canonicalized
+    /// only "cuda", which was consistent while CUDA was the only device kind a slot could name.</remarks>
     private string NormalizeDeviceKey(string? device)
     {
         if (string.IsNullOrWhiteSpace(device))
             return PrimaryDeviceKey();
         string key = device.Trim().ToLowerInvariant();
-        return key == "cuda" ? "cuda:0" : key;
+        return BackendFactory.IsDeviceKind(key) ? $"{key}:0" : key;
     }
 
     /// <summary>This service's primary device key, derived from the engine's backend selector.</summary>

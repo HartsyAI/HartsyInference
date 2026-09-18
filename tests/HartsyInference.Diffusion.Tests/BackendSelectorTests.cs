@@ -174,12 +174,14 @@ public sealed class BackendSelectorTests
         Assert.Equal(familyId, InferenceEngine.ResolveVideoFamilyId(spec));
     }
 
-    /// <summary>A name no registry knows still falls through to header detection rather than being invented — the caller
-    /// gets the "unregistered family" plan error naming what IS drivable, not a recipe lookup that cannot be satisfied.</summary>
+    /// <summary>A name no registry knows still falls through to header detection rather than being invented. Resolution
+    /// therefore reaches the checkpoint — and reports the path it could not read — instead of returning a family id no
+    /// recipe can satisfy, which would surface much later as a construction failure naming a recipe the user never chose.</summary>
     [Fact]
-    public void An_Unregistered_Name_Does_Not_Become_Its_Own_Family()
+    public void An_Unregistered_Name_Falls_Through_To_Detection()
     {
         ModelSpec spec = new() { Requested = "not-a-real-family", Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
-        Assert.NotEqual("not-a-real-family", InferenceEngine.ResolveVideoFamilyId(spec));
+        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => InferenceEngine.ResolveVideoFamilyId(spec));
+        Assert.Contains("/nonexistent.safetensors", ex.Message);
     }
 }
