@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Utilities;
@@ -164,8 +165,11 @@ public sealed unsafe class ActivationOffloadTests
     public void StepCacheCrossStepState_PagesToHostAndStillReconstructs()
     {
         // DeviceFeatureCache latches the switch into a static readonly on first touch, so it must be set before the
-        // type is first used — this is the only test in this assembly that touches the class.
-        Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_OFFLOAD", "1");
+        // type is first used — this is the only test in this assembly that touches the class. That latch is the
+        // defect, not this ordering: the knob is declared KnobScope.Runtime ("read each generation") and freezing it
+        // means a per-request override silently does nothing. Assert.Empty below is what keeps this honest — if the
+        // latch missed, the page-out did not run and the pins are still held.
+        KnobStore.Set(EngineKnobs.StepCacheOffload, true);
         try
         {
             TensorShape shape = new TensorShape(512, 1024);
@@ -190,7 +194,7 @@ public sealed unsafe class ActivationOffloadTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_OFFLOAD", null);
+            KnobStore.Clear(EngineKnobs.StepCacheOffload);
         }
     }
 }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -96,10 +97,9 @@ public sealed unsafe class SageAttnKernelTests
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
         using Tensor gpuOut2 = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
+        KnobStore.Set(EngineKnobs.SageAttn, true);
+        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
+        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -114,8 +114,9 @@ public sealed unsafe class SageAttnKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
         }
 
         (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
@@ -159,12 +160,10 @@ public sealed unsafe class SageAttnKernelTests
         _ = *(float*)q.DataPointer;   // host-materialize the zero buffers
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
-        string? previousPv = Environment.GetEnvironmentVariable("HARTSY_SAGE_PV");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_PV", "f16acc");
+        KnobStore.Set(EngineKnobs.SageAttn, true);
+        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
+        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
+        KnobStore.Set(EngineKnobs.SagePv, "f16acc");
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -175,9 +174,10 @@ public sealed unsafe class SageAttnKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_PV", previousPv);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
+            KnobStore.Clear(EngineKnobs.SagePv);
         }
 
         // Uniform attention over constant V ⇒ output ≡ VConst everywhere.
@@ -232,10 +232,9 @@ public sealed unsafe class SageAttnKernelTests
             ((IBackend)cpu).ScaledDotProductAttention(cpuOut, qRef, kRef, vRef, null, scale);
 
         using Tensor gpuOut16 = new Tensor(new TensorShape(B, H, sq, d), DType.F16);
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousMinSkv = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", "1");   // force dispatch at test sizes
+        KnobStore.Set(EngineKnobs.SageAttn, true);
+        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
+        KnobStore.Set(EngineKnobs.SageF16MinSkv, 1);   // force dispatch at test sizes
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -246,8 +245,9 @@ public sealed unsafe class SageAttnKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", previousMinSkv);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageF16MinSkv);
         }
 
         using Tensor gpuOut = gpuOut16.CastTo(DType.F32);
@@ -284,10 +284,9 @@ public sealed unsafe class SageAttnKernelTests
             ((IBackend)cpu).ScaledDotProductAttention(cpuOut, q, k, v, null, scale);
 
         using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
-        Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
+        KnobStore.Set(EngineKnobs.SageAttn, true);
+        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
+        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -298,8 +297,9 @@ public sealed unsafe class SageAttnKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
         }
 
         (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);

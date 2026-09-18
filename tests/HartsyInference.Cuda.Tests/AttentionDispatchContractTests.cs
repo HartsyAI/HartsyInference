@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -20,24 +21,22 @@ public sealed class AttentionDispatchContractTests
     [Fact]
     public void SageF32Dispatch_RequiresTwoExplicitOptIns()
     {
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousNarrowing = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", null);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
             Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
 
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "1");
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
             Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
 
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", "1");
+            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
             Assert.True(CudaBackend.SageF32ValueNarrowingEnabled);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousNarrowing);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
         }
     }
 

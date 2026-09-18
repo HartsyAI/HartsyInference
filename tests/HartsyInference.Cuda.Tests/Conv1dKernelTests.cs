@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
@@ -41,8 +42,10 @@ public sealed unsafe class Conv1dKernelTests
         // route (default ON) now serves these shapes too — including causal pads and transposed convs — but
         // it runs TF32 tensor cores (tolerance-class, ~1e-3), so pin the backend to the PTX kernels here.
         // The cuDNN route's numerics are covered by the codec end-to-end A/B instead.
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN", "0");
+        // Through the knob, not the environment variable: nothing reads the environment any more, so setting
+        // HARTSY_AUDIO_CONV_CUDNN here pinned nothing and these tests were silently measuring the cuDNN path
+        // they exist to avoid.
+        KnobStore.Set(EngineKnobs.AudioConvCudnn, false);
         try
         {
             using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -53,7 +56,7 @@ public sealed unsafe class Conv1dKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_AUDIO_CONV_CUDNN", prev);
+            KnobStore.Clear(EngineKnobs.AudioConvCudnn);
         }
     }
 

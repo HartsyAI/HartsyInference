@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -184,7 +185,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
         Assert.NotEqual((0, 0), cuda.Kernels!.Ltx25Na3dTile(h, w, headDim));
 
         using Tensor untiled = new Tensor(shape, DType.F32);
-        Environment.SetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED", "0");
+        KnobStore.Set(EngineKnobs.Ltx25Na3dTiled, false);
         try
         {
             cuda.Na3d(untiled, q, k, v, kernel, kernel, kernel, scale: 0.125f);
@@ -192,7 +193,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_LTX25_NA3D_TILED", null);
+            KnobStore.Clear(EngineKnobs.Ltx25Na3dTiled);
         }
 
         float* a = (float*)tiled.DataPointer;
