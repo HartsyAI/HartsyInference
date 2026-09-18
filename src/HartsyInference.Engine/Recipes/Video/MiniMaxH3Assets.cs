@@ -233,11 +233,15 @@ public sealed record MiniMaxH3Assets
     }
 
     /// <summary>Every checkpoint file under <paramref name="dir"/>, in either container.</summary>
-    /// <remarks>Extension is only how candidates are found; what a file is gets settled by
+    /// <remarks><para>Extension is only how candidates are found; what a file is gets settled by
     /// <c>CheckpointSource.Sniff</c> when it is opened. This was safetensors-only for one release, while the planner
     /// could read a GGUF header but the recipe still opened components with <c>SafeTensorsLoader</c> — offering a
     /// candidate the recipe could not load moved the failure later and made it less clear. Every H3 component now
-    /// opens through the container, so the candidates match what can actually load.</remarks>
+    /// opens through the container, so the candidates match what can actually load.</para>
+    /// <para>Deliberately not <c>CheckpointConvertUtils.DiscoverContainerFiles</c>, which sniffs leading bytes: this
+    /// walks several model roots recursively and ranks by filename, so it would read every unrelated checkpoint under
+    /// <c>text_encoders/</c> to answer a question about names. The container still decides what a file is — when the
+    /// recipe opens it.</para></remarks>
     private static IEnumerable<string> EnumerateCheckpoints(string dir, SearchOption option) =>
         Directory.EnumerateFiles(dir, "*.safetensors", option)
             .Concat(Directory.EnumerateFiles(dir, "*.gguf", option));
