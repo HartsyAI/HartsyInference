@@ -147,7 +147,15 @@ public sealed class PromptWeightingModeLedgerTests
     /// <para><b>hunyuan-image</b> needs the UNPADDED weights: it pads to 1034 and the encoder then slices
     /// <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the padded array through
     /// gives <c>offset = keep − 1034</c> and every prompt weight falls off the front — a silent no-op rather than an
-    /// error.</para></summary>
+    /// error.</para>
+    /// <para><b>minimax-h3</b> tokenizes INSIDE its encoder (<c>MiniMaxH3TextEncoding.Build</c>), interleaving
+    /// vision/audio blocks with the text and emitting <c>TagRuns</c>; its cond is rank-2 <c>[seq, hidden]</c>, so the
+    /// weights must be built alongside <c>Encoded.TokenIds</c> and forced to 1 on every non-text run. That is the E1
+    /// seam, not something to bolt onto the recipe layer.</para>
+    /// <para><b>ltx-video-2</b> pads to a fixed conditioning length that the connector consumes positionally (it
+    /// replaces learnable registers by position), so where a row scale lands relative to that connector is unverified.
+    /// <b>krea2</b> is ledgered <see cref="PromptWeightingMode.CondScaleWithAttention"/> and cannot declare a mode
+    /// until the joint-attention patch exists.</para></summary>
     private static readonly string[] NotYetWired =
     [
         "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "hidream",

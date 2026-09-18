@@ -131,8 +131,20 @@ public static class RefinerStage
             }
         }
 
+        // The prompt still carries the emphasis grammar only because the BASE family weights it; a refiner that
+        // cannot must not inherit the parens and read them as prose.
+        string refinePrompt = request.Prompt;
+        string? refineNegative = request.NegativePrompt;
+        if (engine.PromptWeightingFor(baseSpec) != Diffusion.Prompting.PromptWeightingMode.None)
+        {
+            Diffusion.Prompting.PromptWeightingMode refinerWeighting = engine.PromptWeightingFor(refinerSpec);
+            refinePrompt = Diffusion.Prompting.PromptFeatureFlattening.Rebind(refinePrompt, refinerWeighting);
+            refineNegative = Diffusion.Prompting.PromptFeatureFlattening.Rebind(refineNegative, refinerWeighting);
+        }
         ImageRequest refineRequest = request with
         {
+            Prompt = refinePrompt,
+            NegativePrompt = refineNegative,
             Width = width,
             Height = height,
             Steps = spec.Steps,

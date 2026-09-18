@@ -355,11 +355,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
         }
 
-        // SwarmUI's CondScale weighting runs AFTER the template trim, on the encoder output
-        // (multiply_cond_by_token_weights, SwarmText.py:256-271). The scale is a per-request copy rather than an
-        // in-place edit because the cache above is keyed on token ids alone, and CondScale encodes the SAME ids
-        // whether or not the prompt was weighted -- an in-place scale would serve the next plain request a
-        // weighted cond, and a second weight would compound on the first.
+        // Weighting runs after the template trim, on a copy: the cache above is keyed on token ids alone, and a
+        // weighted prompt tokenizes to the same ids, so an in-place scale would leak into the next plain request.
         Tensor? weightedCond = promptWeights is null
             ? null : CondTokenWeights.Apply(TextEncoderBackend, condHidden, null, promptWeights).Cond;
         if (weightedCond is not null)

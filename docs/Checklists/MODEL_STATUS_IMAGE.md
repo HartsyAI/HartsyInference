@@ -220,12 +220,26 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `PromptWeighting` now gates the parens form and only SDXL/SD1.5 declare it; video and music strip
   unconditionally. Verified: `a photo of an <weight[1.5]:orange> cat` on Krea 2 is now byte-identical to the
   plain `a photo of an orange cat`, and `<alternate:cat,dog>` is byte-identical to plain `a photo of a cat`.
-- [ ] **Per-token prompt weighting for LLM-conditioned architectures** (Krea 2, Flux, Z-Image, Qwen-Image, Anima,
-  …). The weight is currently *dropped* for them — correctly, in that nothing leaks into the text, but ComfyUI
-  does honor it: `SwarmText.py`'s `calc_leaf` re-attaches the weight to each token and
-  `apply_comfy_token_weights` applies it per tokenizer key, T5/Qwen included. Matching that means teaching
-  `WeightedConditioning` (or a sibling) to scale LLM-encoder token embeddings, then declaring
-  `ImageFeatures.PromptWeighting` on those recipes. Not a DiT limitation — purely unimplemented here.
+- [~] **Per-token prompt weighting for LLM-conditioned architectures — PARTIAL.** SwarmUI uses two mechanisms and
+  picks between them with one runtime probe, `use_attn_token_weights = not token_batches_have_weights(
+  clip.tokenize("(x:2)"))` (`SwarmText.py:553`): a family is CondScale only when EVERY tokenizer arm sets
+  ComfyUI's `disable_weights`, and one weight-keeping arm puts the whole family on ComfyBlend. Which one each
+  family needs is pinned with file:line evidence in `PromptWeightingModeLedgerTests` — 38 of 41 registered
+  families, with `f-lite`/`lance-*` unresolved because ComfyUI has no support for them to read it off.
+  A recipe declares its `PromptWeightingMode`, `ImageFeatures.PromptWeighting` / `VideoFeatures.PromptWeighting`
+  derive from that declaration, and both services flatten through `PromptFeatureFlattening.Prepare`.
+  Wired so far: **Qwen-Image, Mage-Flow, Flux.2** (CondScale — `CondTokenWeights.ScaleRightAligned`, applied
+  AFTER the template trim, on a per-request copy because the conditioning caches are keyed on token ids and
+  CondScale does not change them) plus SD1.5/SDXL, which keep their existing CLIP blend. The rest are listed in
+  the ledger test's `NotYetWired` and roll out with the plan's E2/E3 phases; a family may not declare a mode its
+  pipeline cannot act on, because the declaration is what keeps the `(text:N)` parens in the prompt.
+- [ ] **ComfyBlend on the LLM/T5 encoders is the remaining half.** `ComfyBlend.Apply` exists and is pinned
+  against `EmphasisMath.ApplyComfy`, but each family still needs its own `gen_empty_tokens` baseline
+  (`comfy/sd1_clip.py:15-25`: `[start?] + [end?] + pad × (len − n)`), encoded at the SAME length and the SAME
+  layer tap as the real prompt — per-encoder facts that must be read off ComfyUI's tokenizer, not guessed.
+  **Kandinsky5 is a special case:** its TE model returns the Qwen cond plus CLIP-L's pooled vector and discards
+  the blended hidden states (`kandinsky5.py:39-43`), so SwarmUI's weighting is a no-op there and parity is to
+  strip the emphasis and blend nothing.
 - [ ] **Per-step prompt scheduling for LLM-conditioned architectures.** Only SDXL/SD1.5 declare
   `ImageFeatures.PromptScheduling`, so `<alternate:>`/`<fromto[N]:>` collapse to their step-0 value everywhere
   else. Their pipelines would each need to consume a multi-variant `ConditioningSchedule` in their denoise loop.

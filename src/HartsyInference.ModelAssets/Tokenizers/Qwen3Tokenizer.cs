@@ -232,6 +232,10 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// <summary>The fixed window <see cref="EncodeChat"/> truncates and right-pads to.</summary>
     public int MaxLength => _maxLength;
 
+    /// <summary>The id <see cref="EncodeChat"/> right-pads with — resolved from the loaded tokenizer rather than the
+    /// <see cref="BosTokenId"/> constant, which is only the fallback.</summary>
+    public int PadTokenId => _bosTokenId;
+
     private void AppendBpe(List<int> dst, string text)
     {
         IReadOnlyList<int> ids = EncodeBpe(text);

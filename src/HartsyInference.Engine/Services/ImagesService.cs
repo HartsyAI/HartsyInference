@@ -42,11 +42,8 @@ public sealed class ImagesService : IImagesService
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
-                // Resolve SwarmUI's literal <weight[N]:>/<alternate:>/<fromto[N]:> tags here, upstream of every
-                // recipe pipeline and of the segment/region tag parsing below, so no pipeline ever sees tag garbage.
-                // What survives is decided by what the resolved recipe declares: the emphasis grammar for a family
-                // whose pipeline weights tokens, the inner text alone for one that does not, and the raw scheduling
-                // tags only for a recipe whose denoise loop consumes a multi-variant ConditioningSchedule.
+                // Upstream of every pipeline AND of the segment/region parsing below, so no pipeline sees a raw
+                // tag; what survives is whatever the resolved recipe declares it can act on.
                 ImageFeatures promptFeatures = _engine.SupportedFeatures(spec);
                 bool schedulingSupported = (promptFeatures & ImageFeatures.PromptScheduling) != 0;
                 PromptWeightingMode weightingMode = _engine.PromptWeightingFor(spec);

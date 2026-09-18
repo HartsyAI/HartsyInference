@@ -363,13 +363,13 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         IArchitectureRecipe recipe = ResolveRecipe(spec);
         return recipe.Supports
-            | (Weights(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
+            | (AppliesWeighting(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
     }
 
     /// <summary>Whether a declared mode means the emphasis grammar must survive prompt flattening. The feature bit is
     /// derived from the mode here rather than declared per recipe so the two can never disagree — a recipe that set the
     /// bit without a mode would keep the parens and hand its encoder the digits as prose.</summary>
-    private static bool Weights(Diffusion.Prompting.PromptWeightingMode mode) =>
+    private static bool AppliesWeighting(Diffusion.Prompting.PromptWeightingMode mode) =>
         mode != Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
@@ -425,7 +425,7 @@ public sealed class InferenceEngine : IInferenceEngine
             Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(spec.LocalPath),
             _ => recipe.Supports,
         };
-        return recipe is not null && Weights(recipe.PromptWeighting)
+        return recipe is not null && AppliesWeighting(recipe.PromptWeighting)
             ? declared | VideoFeatures.PromptWeighting
             : declared;
     }

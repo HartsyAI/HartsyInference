@@ -138,7 +138,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         }
         (int[] prefix, int[] suffix) = _qwenTokenizer!.ChatTemplateIds();
         WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _qwenTokenizer.EncodeRaw, prefix, suffix);
-        return PadToWindow(built, _qwenTokenizer.MaxLength, Qwen3Tokenizer.BosTokenId);
+        return PadToWindow(built, _qwenTokenizer.MaxLength, _qwenTokenizer.PadTokenId);
     }
 
     /// <summary>Builds Flux.2 Dev conditioning ids: <c>&lt;s&gt;[SYSTEM_PROMPT]sys[/SYSTEM_PROMPT][INST]prompt[/INST]</c>. Special markers are spliced as raw ids (BOS=1, [SYSTEM_PROMPT]=17, [/SYSTEM_PROMPT]=18, [INST]=3, [/INST]=4) around byte-level BPE segments — special strings are pre-token boundaries in the HF reference, so segment-wise encoding is id-exact. No EOS (ComfyUI <c>has_end_token=False</c>). The byte-level map is per-byte, so encoding each emphasis span separately concatenates to the same string the whole-prompt call would have produced.</summary>
