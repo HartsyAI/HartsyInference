@@ -86,8 +86,8 @@ public sealed class WanVideoLoader : IDisposable
         Config = cfg;
         Logs.Info($"WanVideoLoader: {WanConfigDetector.Describe(cfg)}");
 
-        (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-        _loaders.AddRange(vaeLoaders);
+        (Dictionary<string, Tensor> vaeW, CheckpointSource vaeSource) = LanceCheckpointConverter.LoadVae(vaePath);
+        _loaders.Add(vaeSource);
         IWanVaeDecoder vaeDecoder;
         IWanVaeEncoder vaeEncoder;
         if (cfg.VaeLatentChannels >= 48)

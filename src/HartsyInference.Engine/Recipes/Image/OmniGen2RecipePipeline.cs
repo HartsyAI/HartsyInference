@@ -17,7 +17,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed OmniGen 2 pipeline driven against the native <see cref="ImageRequest"/>. The Qwen2.5-VL-3B forward lives outside <see cref="OmniGen2Pipeline"/>, so this owns the encoder: it live-encodes the ComfyUI chat template (full sequence, no prefix drop, final hidden state after the last RMSNorm), frees the encoder's device weights, then runs <see cref="OmniGen2Pipeline.GenerateFromEmbeddings"/>. Two single-slot embedding caches (positive + negative) let seed-only reruns skip the encoder entirely, as the SwarmUI backend's <c>OmniGen2CacheEntry.GetOrEncode</c> did. Wraps the constructed OmniGen 2 pipeline plus its text stack, taking ownership of every disposable.</summary>
 public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Tokenizer tokenizer,
-    LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, List<SafeTensorsLoader> loaders,
+    LlamaStyleEncoder textEncoder, OmniGen2Transformer transformer, IBackend backend, IReadOnlyList<IDisposable> componentSources,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>ComfyUI's OmniGen2 system prompt, verbatim (<c>comfy/text_encoders/omnigen2.py</c> llama_template).</summary>
@@ -32,7 +32,7 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
     private readonly LlamaStyleEncoder _textEncoder = textEncoder;
     private readonly OmniGen2Transformer _transformer = transformer;
     private readonly IBackend _backend = backend;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
 
     private string? _cachedPrompt;
     private Tensor? _cachedEmbeds;
@@ -184,9 +184,9 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
         _tokenizer.Dispose();
         _textEncoder.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

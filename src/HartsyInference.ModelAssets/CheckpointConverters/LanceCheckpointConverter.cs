@@ -22,71 +22,70 @@ public sealed class LanceCheckpointConverter
     }
 
     /// <summary>Loads + buckets <c>model.safetensors</c> from <paramref name="variantDir"/> (e.g. <c>{root}/Lance_3B</c> or <c>{root}/Lance_3B_Video</c>).</summary>
-    public static (ConvertedWeights Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadAndConvert(string variantDir)
+    /// <remarks>Every shard opens as one <see cref="Checkpoints.CheckpointSource"/>, so a GGUF or a quantized repack
+    /// loads and the quantization companions fold across the whole variant before <see cref="RouteKey"/> strips any
+    /// prefix — folding after the strip pairs nothing and drops the scale silently.</remarks>
+    public static (ConvertedWeights Weights, Checkpoints.CheckpointSource Source) LoadVariant(string variantDir)
     {
         if (!Directory.Exists(variantDir))
             throw new DirectoryNotFoundException($"Lance variant folder not found: {variantDir}");
         string[] shards = Directory.GetFiles(variantDir, "*.safetensors");
         if (shards.Length == 0)
             throw new FileNotFoundException($"No model.safetensors shards found in: {variantDir}");
-        Array.Sort(shards);
+        Array.Sort(shards, StringComparer.Ordinal);
 
-        Dictionary<string, Tensor> transformer = new(4000);
-        Dictionary<string, Tensor> vit = new(800);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
-            {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    Bucket(kvp.Key, kvp.Value, transformer, vit);
-                }
-            }
-            Dictionary<string, Tensor> foldedT = CheckpointConvertUtils.ApplyFp8ScaledDequant(transformer);
-            ConvertedWeights converted = new() { Transformer = foldedT, Vit = vit };
-            return (converted, loaders);
+            return (Convert(source.Weights), source);
         }
         catch
         {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            source.Dispose();
             throw;
         }
     }
 
+    /// <summary>Buckets an already-folded Lance weight dictionary into backbone and ViT halves.</summary>
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
+    {
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(LanceCheckpointConverter));
+
+        Dictionary<string, Tensor> transformer = new(4000);
+        Dictionary<string, Tensor> vit = new(800);
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
+        {
+            if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
+            Bucket(kvp.Key, kvp.Value, transformer, vit);
+        }
+        return new ConvertedWeights { Transformer = transformer, Vit = vit };
+    }
+
     /// <summary>Loads the Wan2.2 VAE weights from a safetensors file/folder (convert <c>Wan2.2_VAE.pth</c> → safetensors offline first). Strips a leading <c>model.</c> so keys match <c>Wan22VaeDecoder</c> (<c>conv2.*</c>, <c>decoder.*</c>).</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVae(string vaePathOrDir)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadVae(string vaePathOrDir)
     {
         string[] shards = Directory.Exists(vaePathOrDir) ? Directory.GetFiles(vaePathOrDir, "*.safetensors")
             : [vaePathOrDir];
         if (shards.Length == 0 || !File.Exists(shards[0]))
             throw new FileNotFoundException($"Wan2.2 VAE safetensors not found at: {vaePathOrDir} (convert Wan2.2_VAE.pth → safetensors first).");
-        Array.Sort(shards);
+        Array.Sort(shards, StringComparer.Ordinal);
 
-        Dictionary<string, Tensor> merged = new(400);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
+            Dictionary<string, Tensor> merged = new(400);
+            foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    string key = kvp.Key.StartsWith("model.", StringComparison.Ordinal) ? kvp.Key["model.".Length..] : kvp.Key;
-                    merged[key] = kvp.Value;
-                }
+                string key = kvp.Key.StartsWith("model.", StringComparison.Ordinal) ? kvp.Key["model.".Length..] : kvp.Key;
+                merged[key] = kvp.Value;
             }
-            return (merged, loaders);
+            return (merged, source);
         }
         catch
         {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            source.Dispose();
             throw;
         }
     }

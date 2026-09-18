@@ -144,6 +144,82 @@ public sealed class ImageConverterFoldedCompanionTests
     }
 
     [Fact]
+    public void HiDreamCheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["double_stream_blocks.0.attn.to_q.weight"] = Weight(2560, 64) };
+        try
+        {
+            AssertRefusesUnfolded("double_stream_blocks.0.attn.to_q.scale_weight",
+                w => HiDreamCheckpointConverter.Convert(w), folded);
+
+            HiDreamCheckpointConverter.ConvertedWeights converted = HiDreamCheckpointConverter.Convert(folded);
+            Assert.Same(folded["double_stream_blocks.0.attn.to_q.weight"],
+                converted.Transformer["double_stream_blocks.0.attn.to_q.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
+    public void OmniGen2CheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["transformer.x_embedder.weight"] = Weight(2520, 64) };
+        try
+        {
+            AssertRefusesUnfolded("transformer.x_embedder.weight_scale", w => OmniGen2CheckpointConverter.Convert(w), folded);
+
+            OmniGen2CheckpointConverter.ConvertedWeights converted = OmniGen2CheckpointConverter.Convert(folded);
+            Assert.Same(folded["transformer.x_embedder.weight"], converted.Transformer["x_embedder.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
+    public void Kandinsky5CheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["visual_embeddings.in_layer.weight"] = Weight(1792, 64) };
+        try
+        {
+            AssertRefusesUnfolded("visual_embeddings.in_layer.weight_scale",
+                w => Kandinsky5CheckpointConverter.Convert(w), folded);
+
+            Kandinsky5CheckpointConverter.ConvertedWeights converted = Kandinsky5CheckpointConverter.Convert(folded);
+            Assert.Same(folded["visual_embeddings.in_layer.weight"],
+                converted.Transformer["visual_embeddings.in_layer.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
+    public void LanceCheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        // The backbone prefix is what makes this converter fold-order sensitive: it strips
+        // `language_model.model.` from the weight, and a companion folded afterwards would pair nothing.
+        Dictionary<string, Tensor> folded = new() { ["language_model.model.layers.0.mlp.up_proj.weight"] = Weight(2048, 64) };
+        try
+        {
+            AssertRefusesUnfolded("language_model.model.layers.0.mlp.up_proj.weight_scale",
+                w => LanceCheckpointConverter.Convert(w), folded);
+
+            LanceCheckpointConverter.ConvertedWeights converted = LanceCheckpointConverter.Convert(folded);
+            Assert.Same(folded["language_model.model.layers.0.mlp.up_proj.weight"],
+                converted.Transformer["layers.0.mlp.up_proj.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
     public void ZetaChromaCheckpointConverter_RefusesToFuseSplitAttentionThatCarriesPerRowScales()
     {
         // Fusing Q/K/V along dim 0 concatenates rows, and int8_tensorwise scales are indexed by row. Keeping only

@@ -24,19 +24,19 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
     private readonly LanceConfig _config;
     private readonly LanceTransformer _transformer;
     private readonly ILlmTokenizer _tokenizer;
-    private readonly IReadOnlyList<SafeTensorsLoader> _loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Lance video pipeline plus its tokenizer, taking ownership of every disposable.</summary>
     public LanceVideoRecipePipeline(LanceVideoPipeline pipeline, LanceConfig config, LanceTransformer transformer, ILlmTokenizer tokenizer,
-        IReadOnlyList<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
+        IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _pipeline = pipeline;
         _config = config;
         _transformer = transformer;
         _tokenizer = tokenizer;
-        _loaders = loaders;
+        _componentSources = componentSources;
     }
 
     /// <inheritdoc/>
@@ -89,9 +89,9 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
         _pipeline.Dispose();
         _transformer.Dispose();
         (_tokenizer as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

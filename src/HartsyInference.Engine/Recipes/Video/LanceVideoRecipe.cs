@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
@@ -38,10 +39,13 @@ public sealed class LanceVideoRecipe : IVideoRecipe
             ?? throw new DirectoryNotFoundException($"Lance checkpoint folder not found: {context.CheckpointPath}");
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        (LanceCheckpointConverter.ConvertedWeights conv, IReadOnlyList<SafeTensorsLoader> loaders) = LanceCheckpointConverter.LoadAndConvert(checkpointFolder);
-        List<SafeTensorsLoader> owned = new List<SafeTensorsLoader>(loaders);
+        (LanceCheckpointConverter.ConvertedWeights conv, CheckpointSource lanceSource) = LanceCheckpointConverter.LoadVariant(checkpointFolder);
+        List<IDisposable> owned = new List<IDisposable> { lanceSource };
         try
         {
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation.
+            owned.Add(QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends));
             if (conv.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"Lance checkpoint '{checkpointFolder}' has no language_model transformer weights.");
@@ -58,8 +62,8 @@ public sealed class LanceVideoRecipe : IVideoRecipe
             transformer.LoadWeights(conv.Transformer);
 
             // Wan2.2 VAE decoder — computes in F32 (the Wan VAE resnets overflow at F16).
-            (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-            owned.AddRange(vaeLoaders);
+            (Dictionary<string, Tensor> vaeWeightsRaw, CheckpointSource vaeSource) = LanceCheckpointConverter.LoadVae(vaePath);
+            owned.Add(vaeSource);
             Wan22VaeDecoder vae = new Wan22VaeDecoder();
             vae.LoadWeights(VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32));
 
@@ -86,9 +90,9 @@ public sealed class LanceVideoRecipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[LanceVideoRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in owned)
+            foreach (IDisposable source in owned)
             {
-                loader.Dispose();
+                source.Dispose();
             }
             throw;
         }

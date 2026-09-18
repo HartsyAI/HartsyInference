@@ -367,8 +367,8 @@ internal static class VideoRecipeUtils
     internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<IDisposable> loaders)
     {
         ArgumentNullException.ThrowIfNull(loaders);
-        (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
-        loaders.AddRange(vaeLoaders);
+        (Dictionary<string, Tensor> vaeWeightsRaw, CheckpointSource vaeSource) = LanceCheckpointConverter.LoadVae(vaePath);
+        loaders.Add(vaeSource);
         Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeightsRaw, DType.F32);
         if (isWan21)
         {

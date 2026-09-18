@@ -24,12 +24,12 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
     private readonly ClipTokenizer _clipTokenizer;
     private readonly IBackend _backend;
     private readonly Kandinsky5Transformer _transformer;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Kandinsky 5 Video pipeline plus its dual text stack, taking ownership of every disposable.</summary>
     public Kandinsky5VideoRecipePipeline(Kandinsky5VideoPipeline pipeline, LlamaStyleEncoder qwen, ClipTextEncoder clipL,
-        Qwen2Tokenizer qwenTokenizer, ClipTokenizer clipTokenizer, IBackend backend, Kandinsky5Transformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
+        Qwen2Tokenizer qwenTokenizer, ClipTokenizer clipTokenizer, IBackend backend, Kandinsky5Transformer transformer, IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _pipeline = pipeline;
@@ -39,7 +39,7 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
         _clipTokenizer = clipTokenizer;
         _backend = backend;
         _transformer = transformer;
-        _loaders = loaders;
+        _componentSources = componentSources;
     }
 
     /// <inheritdoc/>
@@ -128,9 +128,9 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
         _qwenTokenizer.Dispose();
         _clipTokenizer.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

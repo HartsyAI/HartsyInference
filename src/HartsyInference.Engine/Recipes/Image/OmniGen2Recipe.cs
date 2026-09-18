@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -38,16 +39,23 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
         // TODO(E-IMG-4/5): the reference-image edit path (Init Image / Prompt Images → VAE ref latents + dual
         // text/image guidance via OmniGen2Pipeline.EditFromEmbeddings) is deferred, as are user text-encoder / VAE
         // overrides from ImageRequest.Components (the loader read T2IParamTypes.QwenModel / T2IParamTypes.VAE).
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            (OmniGen2CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader transformerLoader) = OmniGen2CheckpointConverter.LoadAndConvert(context.CheckpointPath);
-            loaders.Add(transformerLoader);
+            // One container for either format: an OmniGen 2 GGUF is a repack of this same file under the same
+            // diffusers key names.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(source);
+            OmniGen2CheckpointConverter.ConvertedWeights converted = OmniGen2CheckpointConverter.Convert(source.Weights);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"OmniGen2 checkpoint '{Path.GetFileName(context.CheckpointPath)}' contains no transformer weights.");
             }
             Logs.Info($"[OmniGen2Recipe] Parsed checkpoint: {converted.Transformer.Count} transformer tensors.");
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Widened straight to BF16 because that is what the cast below puts the dense weights
+            // in — going via F16 would allocate the same weight twice.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends, DType.BF16));
 
             // BF16 (not F16, not F32): F16 overflows under CFG (NaN → all-black at cfg >= 5), F32 doubles the
             // footprint to ~16 GB. BF16 keeps 8 GB with F32's exponent range — the validated e2e recipe.
@@ -88,7 +96,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[OmniGen2Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

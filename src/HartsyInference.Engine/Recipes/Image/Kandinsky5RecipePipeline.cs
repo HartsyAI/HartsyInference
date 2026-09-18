@@ -18,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Kandinsky 5 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Kandinsky5Pipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: it wraps the prompt in Kandinsky's fixed "promt engineer" ChatML template, runs Qwen2.5-VL-7B for the last hidden state and drops the template prefix, frees those weights, then takes the CLIP-L pooled embedding — the two inputs the reference <c>encode_prompt</c> produces. Ported from the diffusers reference, not from a SwarmUI loader (none exists); UNVERIFIED against real weights. Wraps the constructed Kandinsky 5 pipeline plus its dual text stack, taking ownership of every disposable.</summary>
 public sealed unsafe class Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline, LlamaStyleEncoder qwen, ClipTextEncoder clipL,
     Qwen2Tokenizer qwenTokenizer, ClipTokenizer clipTokenizer, IBackend backend, Kandinsky5Transformer transformer,
-    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
+    IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Kandinsky5Pipeline _pipeline = pipeline;
     private readonly LlamaStyleEncoder _qwen = qwen;
@@ -27,7 +27,7 @@ public sealed unsafe class Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline,
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly IBackend _backend = backend;
     private readonly Kandinsky5Transformer _transformer = transformer;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -123,9 +123,9 @@ public sealed unsafe class Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline,
         _qwenTokenizer.Dispose();
         _clipTokenizer.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

@@ -1,6 +1,5 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -16,25 +15,19 @@ public sealed class OmniGen2CheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions an OmniGen 2 single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
-    }
-
     /// <summary>Partitions a flat dict by key prefix.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because folding after a converter has stripped a key prefix pairs nothing
+    /// and drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        Dictionary<string, Tensor> dequanted = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(OmniGen2CheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new();
         Dictionary<string, Tensor> vae = new();
         Dictionary<string, Tensor> textEncoder = new();
 
-        foreach (KeyValuePair<string, Tensor> kvp in dequanted)
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;

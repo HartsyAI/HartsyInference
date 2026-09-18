@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -51,10 +52,13 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
 
         // TODO(E-IMG-4): honor user-picked CLIP-L / CLIP-G / T5 / Llama / VAE overrides from ImageRequest.Components
         // (the SwarmUI loader read T2IParamTypes.ClipLModel/ClipGModel/T5XXLModel/LLaMAModel/VAE).
-        (HiDreamCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader mainLoader) = HiDreamCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        // One container for either format: a HiDream GGUF is a repack of this same file under the same diffusers
+        // key names, so the converter cannot tell them apart.
+        CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+        List<IDisposable> loaders = new List<IDisposable> { source };
         try
         {
+            HiDreamCheckpointConverter.ConvertedWeights converted = HiDreamCheckpointConverter.Convert(source.Weights);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException(
@@ -62,6 +66,11 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                     "(looked for caption_projection.* / double_stream_blocks.*).");
             }
             Logs.Info($"[HiDreamRecipe] Parsed checkpoint: {converted.Transformer.Count} transformer tensors, fp8_mix={converted.IsFp8Mix}.");
+
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Widened straight to F32 because that is what the cast below puts the dense weights in
+            // — going via F16 would allocate the same weight twice.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends, DType.F32));
 
             HiDreamConfig config = HiDreamConfig.AutoDetect(converted.Transformer);
             HiDreamTransformer transformer = new HiDreamTransformer(config);
@@ -162,7 +171,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[HiDreamRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -171,7 +180,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     }
 
     /// <summary>Resolves + loads one standalone side-model file, registering its loader for disposal and stripping the Comfy <paramref name="comfyPrefix"/> wrapper off every key.</summary>
-    private static Dictionary<string, Tensor> LoadSideModel(ModelAsset asset, string comfyPrefix, List<SafeTensorsLoader> loaders)
+    private static Dictionary<string, Tensor> LoadSideModel(ModelAsset asset, string comfyPrefix, List<IDisposable> loaders)
     {
         string path = ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         SafeTensorsLoader loader = new SafeTensorsLoader();

@@ -14,7 +14,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Lance image pipeline driven against the native <see cref="ImageRequest"/>. Tokenizes the caption only — the pipeline wraps it in the upstream chat-templated scaffold itself — and calls <see cref="LanceImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>LanceLoader.Generate</c> text-to-image drive path. Wraps the constructed Lance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
 public sealed class LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceConfig config,
-    LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<SafeTensorsLoader> loaders,
+    LanceTransformer transformer, ILlmTokenizer tokenizer, IReadOnlyList<IDisposable> componentSources,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Total downscale between pixels and transformer tokens (VAE 16x, latent patch (1,1,1) per the real checkpoint).</summary>
@@ -24,7 +24,7 @@ public sealed class LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceC
     private readonly LanceConfig _config = config;
     private readonly LanceTransformer _transformer = transformer;
     private readonly ILlmTokenizer _tokenizer = tokenizer;
-    private readonly IReadOnlyList<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -99,9 +99,9 @@ public sealed class LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceC
         _pipeline.Dispose();
         _transformer.Dispose();
         (_tokenizer as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
