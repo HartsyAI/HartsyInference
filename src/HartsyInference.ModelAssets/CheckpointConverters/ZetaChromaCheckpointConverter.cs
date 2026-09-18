@@ -43,6 +43,13 @@ public sealed class ZetaChromaCheckpointConverter
                     $"Zeta-Chroma '{prefix}' has per-tensor fp8 scales that differ across Q/K/V "
                     + $"({q.Fp8ScaleFactor}/{k.Fp8ScaleFactor}/{v.Fp8ScaleFactor}); one fused weight carries only one.");
             }
+            if (q.DType != k.DType || q.DType != v.DType)
+            {
+                throw new NotSupportedException(
+                    $"Zeta-Chroma '{prefix}' stores Q/K/V in three different dtypes "
+                    + $"({q.DType.Name}/{k.DType.Name}/{v.DType.Name}); one fused weight declares one encoding, so "
+                    + "concatenating their bytes would produce a tensor nothing can decode.");
+            }
             // Block quants pack fixed-size blocks that never span a row, so the concatenation is byte-exact only
             // while each row is a whole number of blocks — which SliceByteCount validates.
             long qBytes = CheckpointConvertUtils.SliceByteCount(q, q.ElementCount);
@@ -51,10 +58,11 @@ public sealed class ZetaChromaCheckpointConverter
             Tensor fused = new Tensor(new TensorShape(q.Shape[0] + k.Shape[0] + v.Shape[0], q.Shape[1]), q.DType);
             fused.Fp8ScaleFactor = q.Fp8ScaleFactor;
             fused.Fp8InputScaleFactor = q.Fp8InputScaleFactor;
+            long fusedBytes = CheckpointConvertUtils.SliceByteCount(fused, fused.ElementCount);
             byte* dst = (byte*)fused.DataPointer;
-            Buffer.MemoryCopy((void*)q.DataPointer, dst, qBytes, qBytes);
-            Buffer.MemoryCopy((void*)k.DataPointer, dst + qBytes, kBytes, kBytes);
-            Buffer.MemoryCopy((void*)v.DataPointer, dst + qBytes + kBytes, vBytes, vBytes);
+            Buffer.MemoryCopy((void*)q.DataPointer, dst, fusedBytes, qBytes);
+            Buffer.MemoryCopy((void*)k.DataPointer, dst + qBytes, fusedBytes - qBytes, kBytes);
+            Buffer.MemoryCopy((void*)v.DataPointer, dst + qBytes + kBytes, fusedBytes - qBytes - kBytes, vBytes);
             weights[prefix + "qkv.weight"] = fused;
             weights.Remove(qKey);
             weights.Remove(prefix + "to_k.weight");

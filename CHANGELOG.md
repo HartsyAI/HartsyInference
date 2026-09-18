@@ -19,7 +19,9 @@ stable release will require. Dates are UTC.
   `SplitRows`, which narrows each piece's row scale before the first allocation so a refusal cannot strand one.
 - **F-Lite never folded its quantization companions at all**, so an fp8_scaled build ran every weight at `1/scale`.
 - Zeta-Chroma's attention fusion concatenated Q/K/V and dropped every companion; it refuses a per-row-quantized
-  weight by name instead. Krea 2's pre-rename companion carry is deleted, dead now that folding precedes renaming.
+  weight by name instead, and likewise a build that stores Q, K and V in three different dtypes — the fused tensor
+  can declare only one, and a K or V wider than Q used to be copied past the end of it. Krea 2's pre-rename
+  companion carry is deleted, dead now that folding precedes renaming.
 - Lumina-2, HiDream and OmniGen 2 widen to the dtype their transformer actually runs, rather than the F16 default
   that would have left a GGUF mixing dense F32 with widened F16.
 
