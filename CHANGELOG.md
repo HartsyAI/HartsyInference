@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.87
+
+- **A mistyped command-line option now fails instead of being ignored.** Spectre collects an option no command
+  declares as a "remaining" argument, and nothing reads those — so a typo did not fail, it ran the generation with
+  a different setting than the one asked for and reported success. `--cfgscale 2` (the option is `--cfg`) quietly
+  generated at the model's default guidance, and `--detect` (it is `--mode detect`) quietly fell through to CLIP
+  and then died several layers down in a model loader complaining about a missing text-encoder weight. Both were
+  found the hard way, drawing a wrong conclusion from a run that had not used the settings it was given.
+
 ## alpha.85
 
 - **`--backend vulkan` now reaches Vulkan for text generation.** `TextService` derived its device key as "not CPU,
