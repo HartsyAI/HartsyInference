@@ -236,7 +236,74 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         {
             return GenerateChain(request, chainTotal, progress, cancel);
         }
-        return GenerateOnce(request, progress, cancel);
+        return GenerateOnce(ApplyDrivingAudio(request), progress, cancel);
+    }
+
+    /// <summary>Locks the audio stream to a supplied track so the video denoises against it instead of inventing its
+    /// own soundtrack — H3 has no audio-driven mode, and its reference audio is a soft exhibit that the generated
+    /// audio can drift away from. Built here rather than on the request for the same reason chaining builds its
+    /// masks internally: the request-level mask surface carries its own release gate.</summary>
+    private static VideoRequest ApplyDrivingAudio(VideoRequest request)
+    {
+        if (request.VideoAudioReference is null)
+        {
+            return request;
+        }
+        if (request.AudioDenoiseMask is not null)
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 driving audio builds its own audio mask; supplying both is ambiguous.", nameof(request));
+        }
+        RejectTimingEditsThatBreakLipSync(request);
+        int frames = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
+        // All-zero: every audio row is preserved from the track, so the source is the output and video follows it.
+        float[] locked = new float[MiniMaxH3Geometry.AudioLatentFrames(frames)];
+        Logs.Info($"[MiniMaxH3RecipePipeline] Driving audio: locking {locked.Length} audio latent rows to the "
+            + "supplied track; video denoises against it.");
+        return request with
+        {
+            AudioDenoiseMask = new AudioDenoiseMask
+            {
+                Values = locked,
+                Rate = MiniMaxH3Geometry.AudioLatentFps,
+                Source = request.VideoAudioReference,
+            },
+        };
+    }
+
+    /// <summary>Refuses the output timing edits that would move the video relative to the track driving it.</summary>
+    /// <remarks><para>Frame edits are applied to the frames only: <c>VideoRecipeUtils.ToVideoFrames</c> drops the
+    /// leading frames and builds the boomerang, and a differing fps is muxed rather than resampled, while the
+    /// soundtrack is only trimmed or padded at its end. Each of those therefore slides the picture against audio that
+    /// did not move — a start trim offsets the whole clip, a boomerang leaves the reverse leg playing forward audio,
+    /// and an fps override changes the video's speed and not the track's.</para>
+    /// <para>Refusing rather than transforming the audio: lip sync is the entire point of driving audio, so a silent
+    /// desync is the worst available outcome, and the transforms are not obviously wanted even when they are possible
+    /// — reversed speech for a boomerang leg is not what anyone asked for. An end trim is allowed because the audio is
+    /// trimmed at its end too, which leaves the start aligned.</para></remarks>
+    internal static void RejectTimingEditsThatBreakLipSync(VideoRequest request)
+    {
+        if (request.TrimVideoStartFrames > 0)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 driving audio keeps the video locked to the supplied track, and trimming "
+                + $"{request.TrimVideoStartFrames} frames from the start would shift the picture against audio that "
+                + "does not move. Trim the track instead, or drop the start trim.", nameof(request));
+        }
+        if (request.VideoBoomerang)
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 driving audio keeps the video locked to the supplied track, and a boomerang plays the "
+                + "frames back in reverse against a soundtrack that only runs forward. Drop the boomerang, or "
+                + "generate without driving audio.", nameof(request));
+        }
+        if (request.Fps is int fps && fps != MiniMaxH3Geometry.Fps)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 driving audio keeps the video locked to the supplied track, and muxing at {fps} fps "
+                + $"instead of the native {MiniMaxH3Geometry.Fps} changes the video's speed without changing the "
+                + "track's. Leave fps unset, or generate without driving audio.", nameof(request));
+        }
     }
 
     /// <summary>One segment: the whole single-generation path, from geometry snapping through VAE decode.</summary>
@@ -427,7 +494,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         IBackend? worstBackend = null;
         foreach ((IBackend backend, string label, long weights) in stages)
         {
-            if (CheckOneBackend(backend, label, _config, weights, frames, width, height, seq,
+            if (CheckOneBackend(backend, label, _config, _pipeline.UsesSparseAttention, weights,
+                    frames, width, height, seq,
                     out long deficit, out long budget, out long free) is OutOfVramException failure
                 && deficit > worstDeficit)
             {
@@ -456,8 +524,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// use depends on this backend's own free VRAM and pinned policy, which is exactly the per-backend split
     /// <see cref="MiniMaxH3Transformer.ForwardSharded"/> already makes.</remarks>
     private static OutOfVramException? CheckOneBackend(IBackend backend, string label, MiniMaxH3Config config,
-        long residentWeightBytes, int frames, int width, int height, int seq, out long deficit, out long budget,
-        out long freeForPolicy)
+        bool sparseAttention, long residentWeightBytes, int frames, int width, int height, int seq,
+        out long deficit, out long budget, out long freeForPolicy)
     {
         deficit = 0;
         budget = 0;
@@ -473,7 +541,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         }
         freeForPolicy = freeBytes;
         long floorBytes = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
-            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, freeBytes, backend));
+            seq, config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, config, DType.F32, freeBytes, backend),
+            sparseAttention);
         long availableForActivations = freeBytes - residentWeightBytes;
         budget = availableForActivations;
         if (floorBytes <= availableForActivations)
@@ -510,7 +579,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             int candidateSeq = SequenceLengthFor(width, height, candidate);
             if (MiniMaxH3ActivationEstimate.EstimateFloorBytes(
                 candidateSeq, _config, DType.F32,
-                MiniMaxH3ChunkPolicy.ScratchRows(candidateSeq, _config, DType.F32, freeBytes, backend))
+                MiniMaxH3ChunkPolicy.ScratchRows(candidateSeq, _config, DType.F32, freeBytes, backend),
+                _pipeline.UsesSparseAttention)
                 <= budgetBytes)
             {
                 return candidate;
@@ -962,9 +1032,23 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             TrimVideoEndFrames = 0,
             VideoBoomerang = false,
         };
+        // A driven chain locks the WHOLE segment, context head included: that head is the track's own earlier
+        // stretch, so there is no preserved/denoised audio boundary to feather and no phase to carry — the carry
+        // is doing its job for video alone. The slice starts where this segment sits in the assembled timeline.
+        AudioDenoiseMask? drivingMask = null;
+        if (request.VideoAudioReference is not null)
+        {
+            drivingMask = new AudioDenoiseMask
+            {
+                Values = new float[MiniMaxH3Geometry.AudioLatentFrames(segment.FrameCount)],
+                Rate = MiniMaxH3Geometry.AudioLatentFps,
+                Source = SliceDrivingAudio(
+                    request.VideoAudioReference, assembled.Count - segment.ContextFrames, segment.FrameCount),
+            };
+        }
         if (segment.Index == 0)
         {
-            return segmentRequest;
+            return drivingMask is null ? segmentRequest : segmentRequest with { AudioDenoiseMask = drivingMask };
         }
 
         // A guide or end frame belongs to the opening shot; re-applying it would fight the carried tail.
@@ -979,13 +1063,35 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 MaskFrameValues = MiniMaxH3ChainPlanner.VideoMaskFrameValues(segment),
                 SourceFrames = tail,
             },
-            AudioDenoiseMask = sampleRate <= 0 ? null : new AudioDenoiseMask
+            AudioDenoiseMask = drivingMask ?? (sampleRate <= 0 ? null : new AudioDenoiseMask
             {
                 Values = MiniMaxH3ChainPlanner.AudioMaskValues(segment),
                 Rate = MiniMaxH3Geometry.AudioLatentFps,
                 Source = TailAudio(assembledAudio, sampleRate, segment.ContextFrames),
-            },
+            }),
         };
+    }
+
+    /// <summary>The stretch of the driving track this segment occupies, zero-filled past the end so a track shorter
+    /// than the video still lands on whole rows rather than failing the encoder's exact-length check.</summary>
+    private static AudioClip SliceDrivingAudio(AudioClip track, int startFrame, int frameCount)
+    {
+        const int rate = 48_000;
+        (float[] left, float[] right) = AudioClipCodec.DecodeStereo(track, rate);
+        int start = (int)Math.Round(startFrame / (double)MiniMaxH3Geometry.Fps * rate);
+        int count = (int)Math.Round(frameCount / (double)MiniMaxH3Geometry.Fps * rate);
+        float[] sliceLeft = new float[count];
+        float[] sliceRight = new float[count];
+        for (int i = 0; i < count; i++)
+        {
+            int source = start + i;
+            if (source >= 0 && source < left.Length)
+            {
+                sliceLeft[i] = left[source];
+                sliceRight[i] = right[source];
+            }
+        }
+        return new AudioClip { Data = AudioClipCodec.EncodeWav(sliceLeft, sliceRight, rate), Format = "wav" };
     }
 
     /// <summary>The last <paramref name="count"/> assembled frames, in order, as the next segment's preserved head.</summary>

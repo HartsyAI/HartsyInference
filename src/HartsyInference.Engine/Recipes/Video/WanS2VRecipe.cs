@@ -25,7 +25,11 @@ public sealed class WanS2VRecipe : IVideoRecipe
     /// <inheritdoc/>
     /// <remarks>Wan-S2V turns the init image into appended identity reference tokens.</remarks>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20, matching the plain Wan family. The merge runs against the shared <c>weights</c> dict before BOTH the transformer and the audio encoder load from it, so an S2V LoRA touching either lands.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
+    /// <remarks><see cref="VideoFeatures.DrivingAudio"/> added 2026-09-17, with the bit itself. S2V's driving speech
+    /// arrives in <c>VideoRequest.VideoAudioReference</c> — the field that now classifies as this feature — and
+    /// <c>WanS2VRecipePipeline.Generate</c> throws without it, so leaving it undeclared had the generic planner
+    /// refuse the family's own mandatory input before construction.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora | VideoFeatures.DrivingAudio;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);
 

@@ -379,7 +379,11 @@ internal static class VideoProfileResolver
         };
 
     // Chaining rides on the denoise masks every task below already carries, so it is task-independent.
-    private static VideoFeatures FeaturesForTask(VideoTaskFamily task) => VideoFeatures.LongFormChain | task switch
+    // Chaining and driving audio ride on every dense task: both only rearrange what the audio/video rows are
+    // denoised against. The sparse branch above hands back Lora alone, which is what makes a VSA request carrying
+    // either of them fail in planning rather than at the execution boundary.
+    private static VideoFeatures FeaturesForTask(VideoTaskFamily task) =>
+        VideoFeatures.LongFormChain | VideoFeatures.DrivingAudio | task switch
     {
         VideoTaskFamily.T2Va => VideoFeatures.VideoDenoiseMask | VideoFeatures.AudioDenoiseMask | VideoFeatures.Lora,
         VideoTaskFamily.Fl2Va => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Guides
