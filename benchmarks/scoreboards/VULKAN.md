@@ -73,6 +73,37 @@ dispatch throughput gap that folds into the same coopmat/dispatch-overhead inves
 numbers above, rather than a separate anomaly. Regression-guarded by
 `VulkanLeakTests.Vulkan_100Iter_LargeTransient_PoolsInsteadOfReallocating`.
 
+## First real-model LLM decode on Vulkan, and why there was none before (2026-09-18)
+
+Until alpha.85, `hartsy text -b vulkan` **ran on CUDA.** `TextService.PrimaryDeviceKey` derived its device key as
+"not CPU, therefore CUDA", so every non-CPU selector became `cuda:{ordinal}` and the text slot built a CUDA
+backend. Any Vulkan-vs-CUDA text number taken against this engine before that fix was CUDA measured twice, and the
+synthetic decode-step section below — which drives `VulkanBackend` directly rather than through the service — is
+the only LLM measurement here that was ever actually on Vulkan.
+
+First real-model figures, RTX 4090, Llama-3.2-1B-Instruct Q8_0, same prompt and token count:
+
+| Tokens | CUDA | Vulkan |
+|---|---:|---:|
+| 40 | 10.6 s | 40.0 s |
+
+The op profile (`--set diagnostics.vkProfile=true`) is the useful half:
+
+```
+Op            Count   Total(ms)   Avg(ms)   Dispatches      %
+Linear          520      5015.5      9.65          520   99.7%
+GEMM fast-path: coopmat2=0 (0.0%), coopmat=0 (0.0%), tiled-fallback=520 (100.0%)
+```
+
+**Zero tensor-core engagement.** Every GEMM takes the naive tiled kernel, because the GGUF loader hands Vulkan
+host-dequantized F32 weights (`dequantizeToF32: backend is not CudaBackend`) and both coopmat paths require F16.
+The same branch is why a 1B model occupied ~12 GB of VRAM. So the LLM gap is not in the decode loop: it is weight
+dtype plus the missing quantized GEMV, and neither is visible until requests reach the backend they name.
+
+The general lesson, for anything added to this file: **a backend comparison is worth nothing until the request is
+proven to have arrived at the backend under test.** The engagement counters and the op profile are that proof;
+a selector string is not.
+
 ## Results — synthetic LLM decode-step, GPU-residency closure (Vulkan-only, no CUDA baseline run)
 
 `VulkanLinearProfileMeasurement.Measure_LlmDecodeStep_ResidencyVsDispatchOverhead` drives one synthetic
