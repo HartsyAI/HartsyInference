@@ -29,6 +29,14 @@ stable release will require. Dates are UTC.
   GEMM, minutes into a generation, with a stack trace naming a kernel rather than a file; the loader asks the
   backend what it can hold packed and widens the rest on the host, saying which dtypes and why. A Q2_K or IQ4_NL
   diffusion GGUF — both routinely published — loads slowly instead of crashing.
+- **Flux.1, SD3/SD3.5 and the Wan video family load GGUF too.** They worked on safetensors and simply could not
+  open a quantized build; routing them through the container is the whole change. Verified with real generations
+  from real community files: Flux.1-dev Q4_K_S (city96), SD3.5-medium Q8_0 (city96) and Wan 2.1 T2V 1.3B Q8_0.
+- Two things that had to be fixed for those, both invisible until a published file was actually read. The SD3
+  converter only routed keys under a `model.diffusion_model.` prefix, and city96's SD3.5 GGUF ships bare LDM keys,
+  so every transformer tensor was dropped and the DiT loaded empty. And Wan's checkpoint is the first to carry
+  tensors that are not matrices — 31 rank-3 modulation tables and a rank-5 Conv3d patch embed — which only arrive
+  with the right shape because the container now reverses every ggml axis rather than just the two of a matrix.
 - **A shipped checkpoint that rendered black now works.** Black Forest Labs' own `FLUX.2-klein-4b-fp8` carries 80
   fp8 weights and 160 companion scales, and the Flux.2 converter was one of the 23 that never folded them — so every
   fp8 weight ran at scale 1.0 instead of `stored x scale`, and the generation saturated to a fully black image. This
