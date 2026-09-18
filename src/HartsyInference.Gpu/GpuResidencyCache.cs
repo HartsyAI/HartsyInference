@@ -20,12 +20,17 @@ namespace HartsyInference.Gpu;
 public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     where TBuffer : notnull
 {
-    private static long _nextKey;
-
     /// <inheritdoc/>
     /// <remarks>Starts at 1. Zero is left alone as the bucket the older context-less callers used, so a cache that
-    /// has not been migrated yet cannot collide with one that has.</remarks>
-    public nint BindingKey { get; } = (nint)Interlocked.Increment(ref _nextKey);
+    /// has not been migrated yet cannot collide with one that has.
+    ///
+    /// <para>The sequence lives in Core, shared with CUDA's own state registry, rather than on this class. Two
+    /// reasons, both learned by getting it wrong: a static field inside a generic class exists once per CLOSED type,
+    /// so a counter here would give <c>GpuResidencyCache&lt;ulong&gt;</c> and <c>GpuResidencyCache&lt;VulkanBuffer&gt;</c>
+    /// one each and both would hand out key 1; and a counter anywhere in this package would still not cover the CUDA
+    /// registry, which allocates its own keys and would collide with this one the first time a tensor was resident on
+    /// a CUDA and a Vulkan device at once.</para></remarks>
+    public nint BindingKey { get; } = GpuBindingKeys.Next();
 
     /// <summary>Weights: uploaded once, kept until explicitly freed. Reference equality, because two distinct tensors
     /// with equal contents are still two tensors, and a tensor's contents can change under it.</summary>

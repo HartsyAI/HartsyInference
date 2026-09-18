@@ -14,7 +14,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>All per-backend mutable state, identified by a process-unique <see cref="Key"/>.</summary>
     internal sealed class State
     {
-        /// <summary>Process-unique identity of this backend registration, never reused. Keys the registry, each tensor's GPU bindings, and the finalizer-cleanup buckets.</summary>
+        /// <summary>Process-unique identity of this backend registration, never reused. Keys the registry, each tensor's GPU bindings, and the finalizer-cleanup buckets. Drawn from <see cref="GpuBindingKeys"/> — the sequence every backend shares — and NOT from a counter here: a tensor resident on a CUDA and a Vulkan device at once holds one binding per cache, and two counters each starting at 1 give both caches the same key, so one backend's teardown silently clears the other's binding.</summary>
         public nint Key;
 
         /// <summary>Original registry-routing handle. Kept stable until final retirement even if the owning CudaContext has already zeroed its native handle during a faulted cleanup path.</summary>
@@ -129,9 +129,6 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Fast path for ambient-less callers: the sole registered state when exactly one backend exists. Null when zero or 2+ states are registered.</summary>
     private static volatile State? _sole;
 
-    /// <summary>Monotonic source for <see cref="State.Key"/>. Starts at 1; key 0 is the context-less bucket.</summary>
-    private static long _nextKey;
-
     /// <summary>Serializes registration/retirement so <see cref="_sole"/> and the indexes stay consistent.</summary>
     private static readonly object _registryLock = new();
 
@@ -149,7 +146,7 @@ internal static unsafe class GpuTransferHelper
     {
         State state = new State
         {
-            Key = (nint)Interlocked.Increment(ref _nextKey),
+            Key = GpuBindingKeys.Next(),
             RegisteredContextHandle = context.Handle,
             Context = context,
             StreamHandle = stream,

@@ -183,6 +183,33 @@ public sealed class GpuResidencyCacheTests
         Assert.False(cache.TryGetCached(evictable, out _));
     }
 
+    /// <summary>A cache over a DIFFERENT buffer type is still a different owner.
+    ///
+    /// <para>A static field inside a generic class is per closed type, so a counter declared on the generic gives
+    /// <c>GpuResidencyCache&lt;ulong&gt;</c> and <c>GpuResidencyCache&lt;VulkanBuffer&gt;</c> one counter each and both
+    /// hand out key 1. That is the "every device keyed 0" bug one level up, and it only appears once a second
+    /// backend is on the base: a host tensor resident on both — a text encoder on one, a denoiser on the other —
+    /// then carries both bindings under the same key, and their finalizer-cleanup buckets collide, so one backend's
+    /// drain runs the other's device cleanup.</para></summary>
+    [Fact]
+    public void Caches_Over_Different_Buffer_Types_Do_Not_Share_Keys()
+    {
+        using FakeCache handleCache = new();
+        using OtherBufferCache structCache = new();
+
+        Assert.NotEqual(handleCache.BindingKey, structCache.BindingKey);
+    }
+
+    /// <summary>A second cache type, standing in for another backend's buffer handle.</summary>
+    private sealed class OtherBufferCache : GpuResidencyCache<long>
+    {
+        protected override long AllocateDevice(long bytes) => bytes;
+        protected override void FreeDevice(long buffer, long bytes) { }
+        protected override void Upload(long destination, Tensor source, long bytes) { }
+        protected override void DownloadSynced(nint hostDestination, long source, long bytes) { }
+        protected override void MakeCurrent() { }
+    }
+
     /// <summary>Two caches are two devices. A tensor resident on both must be released by each independently — a
     /// shared key would let one device's teardown drop the other's binding, and the surviving cache would then hand
     /// out a buffer nobody owns.</summary>
