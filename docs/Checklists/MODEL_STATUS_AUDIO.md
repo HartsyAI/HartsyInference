@@ -137,6 +137,20 @@ the score and emits one semantic codec token per 25 Hz frame; a second stack of 
 weights flow-matches 64-channel acoustic latents while attending over the AR's per-layer KV cache; an Oobleck VAE
 decodes them. Despite the name it shares **no** architecture with YuE v1. See `docs/Research/YUE2_ARCHITECTURE.md`.
 
+**Quantized checkpoints.** Both published builds load: `yue2_3b_bf16.safetensors` and the `int8_convrot` repack,
+which stores 229 Linear weights as int8 with a per-output-row scale in a Hadamard-rotated basis (ConvRot group 256).
+On CUDA those stay packed at one byte per parameter and the int8 GEMM reads them directly; on a backend with no int8
+path `QuantizedWeightPolicy` widens them at load. Four entries cannot stay packed whatever the backend and are
+decoded during conversion: the embedding table and the semantic head window, both read row-wise rather than through a
+GEMM, and `llm2vae` and the timestep MLP, which run against an F32 activation. A GGUF build loads through the same
+container and `AudioLmQuant` picks a placed `q4_k`/`q8_0` file over the dense one, but nothing publishes a GGUF YuE2
+yet and nothing is quantized at load. **Not yet real-weight verified** — the int8 path is pinned by synthetic cases
+and by the published header, and still needs a song rendered against the BF16 baseline.
+
+**LoRA is not wired.** A LoRA reaches YuE2's runner cache key but no merge runs, so the request logs a warning and
+generates the base model's song. The intended mapping when the shared merge lands is the AR stack as the text-encoder
+target and the acoustic stack as the transformer target.
+
 **Duration is a context budget.** At 25 tokens a second the 24,576-token context holds about 980 seconds minus
 whatever the prompt and score already spent, so the ceiling is 900 s and the *effective* limit is per-request:
 `Max Duration` is trimmed to what actually fits and the granted length comes back as `budgetSeconds` in the result
