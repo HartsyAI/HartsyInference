@@ -39,13 +39,13 @@ public sealed class PromptFeatureFlatteningTests
     [Fact]
     public void NoRecipeDeclaresThePromptWeightingBitDirectly()
     {
-        foreach (string family in RecipeRegistry.RegisteredNames)
+        foreach (string family in RecipeRegistry.DefaultNames)
         {
             IArchitectureRecipe recipe = RecipeRegistry.Resolve(family)!;
             Assert.True((recipe.Supports & ImageFeatures.PromptWeighting) == 0,
                 $"'{family}' sets ImageFeatures.PromptWeighting directly; declare PromptWeighting instead.");
         }
-        foreach (string family in VideoRecipeRegistry.RegisteredNames)
+        foreach (string family in VideoRecipeRegistry.DefaultNames)
         {
             IVideoRecipe recipe = VideoRecipeRegistry.Resolve(family)!;
             Assert.True((recipe.Supports & VideoFeatures.PromptWeighting) == 0,

@@ -30,6 +30,39 @@ public static partial class PromptWeighting
         return result;
     }
 
+    /// <summary>The prompt text with every emphasis marker removed — SwarmUI's <c>join_text(leaves, False)</c>
+    /// (<c>SwarmText.py:203-213</c>), which is what it hands an encoder it is not weighting. Used by a family whose
+    /// tokenizer merges the prompt into its chat template in one BPE call: splitting there to carry per-span weights
+    /// would move a token boundary, so an unweighted prompt keeps the whole-string call and this supplies the string.</summary>
+    public static string Join(IReadOnlyList<WeightedSpan> spans)
+    {
+        ArgumentNullException.ThrowIfNull(spans);
+        if (spans.Count == 1)
+        {
+            return spans[0].Text;
+        }
+        StringBuilder joined = new StringBuilder();
+        foreach (WeightedSpan span in spans)
+        {
+            joined.Append(span.Text);
+        }
+        return joined.ToString();
+    }
+
+    /// <summary>Whether any span carries a weight other than 1, i.e. whether the weighting path has anything to do.</summary>
+    public static bool HasWeights(IReadOnlyList<WeightedSpan> spans)
+    {
+        ArgumentNullException.ThrowIfNull(spans);
+        foreach (WeightedSpan span in spans)
+        {
+            if (span.Weight != 1f)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>Splits the prompt on <c>&lt;break&gt;</c> (case-insensitive) into independently-encoded chunks, then parses each into weighted spans. Empty chunks are preserved so positive/negative prompts can be padded to equal chunk counts by the caller.</summary>
     public static IReadOnlyList<IReadOnlyList<WeightedSpan>> ParseChunks(string prompt)
     {

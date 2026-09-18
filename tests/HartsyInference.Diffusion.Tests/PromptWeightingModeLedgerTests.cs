@@ -140,7 +140,7 @@ public sealed class PromptWeightingModeLedgerTests
     /// editing this test, which is the point.</summary>
     private static readonly string[] NotYetWired =
     [
-        "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "flux2", "hidream",
+        "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "hidream",
         "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video", "krea2", "lens",
         "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
         "sd3", "sdxl-refiner", "wan", "wan-21-1_3b", "wan-21-14b", "wan-22-5b", "wan-animate",
@@ -287,13 +287,13 @@ public sealed class PromptWeightingModeLedgerTests
     /// <summary>What each registered recipe declares, image first.</summary>
     private static IEnumerable<(string Family, PromptWeightingMode Mode)> DeclaredModes()
     {
-        foreach (string family in RecipeRegistry.RegisteredNames)
+        foreach (string family in RecipeRegistry.DefaultNames)
         {
             IArchitectureRecipe recipe = RecipeRegistry.Resolve(family)
                 ?? throw new InvalidOperationException($"'{family}' is registered but does not resolve to a recipe.");
             yield return (family, recipe.PromptWeighting);
         }
-        foreach (string family in VideoRecipeRegistry.RegisteredNames)
+        foreach (string family in VideoRecipeRegistry.DefaultNames)
         {
             IVideoRecipe recipe = VideoRecipeRegistry.Resolve(family)
                 ?? throw new InvalidOperationException($"'{family}' is registered but does not resolve to a recipe.");
@@ -301,7 +301,9 @@ public sealed class PromptWeightingModeLedgerTests
         }
     }
 
-    /// <summary>Both registries, image first, as a stable ordered list.</summary>
+    /// <summary>Both registries' SHIPPED families, image first, as a stable ordered list. Deliberately not
+    /// <c>RegisteredNames</c>: tests register throwaway recipes into these static registries and never remove them, so
+    /// the runtime list depends on which other suite ran first in the same process.</summary>
     private static IReadOnlyList<string> RegisteredFamilies() =>
-        [.. RecipeRegistry.RegisteredNames.Concat(VideoRecipeRegistry.RegisteredNames).Order(StringComparer.Ordinal)];
+        [.. RecipeRegistry.DefaultNames.Concat(VideoRecipeRegistry.DefaultNames).Order(StringComparer.Ordinal)];
 }
