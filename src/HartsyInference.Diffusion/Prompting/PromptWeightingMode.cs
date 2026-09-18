@@ -8,8 +8,11 @@ namespace HartsyInference.Diffusion.Prompting;
 /// family back on <see cref="ComfyBlend"/>.</summary>
 public enum PromptWeightingMode
 {
-    /// <summary>No weighting: the family never passes through <c>SwarmTextEncodeAdvanced</c>, so dropping weights IS
-    /// parity. Music families only (<c>WorkflowGenerator.cs:2584-2599</c>).</summary>
+    /// <summary>No weighting: the emphasis grammar is stripped before the recipe sees the prompt. That IS parity for
+    /// the music families, which never pass through <c>SwarmTextEncodeAdvanced</c>
+    /// (<c>WorkflowGenerator.cs:2584-2599</c>). It is also the interface default, so a family whose mode has not been
+    /// read off ComfyUI yet, or whose pipeline cannot act on one yet, keeps today's behaviour instead of feeding the
+    /// literal digits to its encoder as prose.</summary>
     None,
 
     /// <summary>Weights survive tokenization, so ComfyUI blends them into the encoder OUTPUT:

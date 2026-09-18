@@ -21,6 +21,11 @@ public interface IVideoRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies — the
+    /// video counterpart of <see cref="IArchitectureRecipe.PromptWeighting"/>, and the source of
+    /// <see cref="VideoFeatures.PromptWeighting"/>.</summary>
+    Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
+
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null; the generic fallback keeps a recipe that has not declared its own numbers working.</summary>
     VideoDefaults Defaults => VideoDefaults.Standard;

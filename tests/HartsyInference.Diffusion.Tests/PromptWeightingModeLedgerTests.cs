@@ -132,6 +132,21 @@ public sealed class PromptWeightingModeLedgerTests
     /// there is no ComfyUI tokenizer to read it off, so it stays out.</para></summary>
     private static readonly string[] Unresolved = ["f-lite", "lance-image", "lance-video"];
 
+    /// <summary>Ledgered families whose recipe still declares <see cref="PromptWeightingMode.None"/> because their
+    /// pipeline does not consume weights yet. A recipe may NOT declare a mode it cannot act on: the declaration is what
+    /// keeps the <c>(text:N)</c> grammar in the prompt, so an unwired pipeline would hand the parens and digits to its
+    /// encoder as prose — a regression on a family that works today. The rollout is sequenced by the plan's E2 (Wan /
+    /// LTX / HunyuanVideo) and E3 (remaining image recipes) phases; this list can only shrink, and shrinking it means
+    /// editing this test, which is the point.</summary>
+    private static readonly string[] NotYetWired =
+    [
+        "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "flux2", "hidream",
+        "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video", "krea2", "lens",
+        "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "mage-flow", "minimax-h3", "omnigen2",
+        "qwen-image", "sd3", "sdxl-refiner", "wan", "wan-21-1_3b", "wan-21-14b", "wan-22-5b", "wan-animate",
+        "wan-animate-2", "wan-s2v", "wan-vace", "zeta-chroma", "zimage",
+    ];
+
     private readonly ITestOutputHelper _output;
 
     public PromptWeightingModeLedgerTests(ITestOutputHelper output) => _output = output;
@@ -215,6 +230,75 @@ public sealed class PromptWeightingModeLedgerTests
             + $"CondScale: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScale)}, "
             + $"CondScaleWithAttention: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScaleWithAttention)}, "
             + $"unresolved: {Unresolved.Length}");
+    }
+
+    /// <summary>The join between the ledger and the code: a recipe that declares a mode must declare the one read off
+    /// ComfyUI. This is the assertion the whole ledger exists for — a wrong mode still generates an image, just with the
+    /// emphasis applied to the wrong thing, so nothing else would catch it.</summary>
+    [Fact]
+    public void EveryRecipeThatDeclaresAModeDeclaresTheLedgeredOne()
+    {
+        foreach ((string family, PromptWeightingMode declared) in DeclaredModes())
+        {
+            if (declared == PromptWeightingMode.None)
+            {
+                continue;
+            }
+            Assert.True(Ledger.TryGetValue(family, out PromptWeightingMode ledgered),
+                $"'{family}' declares {declared} but has no ledger entry; read its ComfyUI tokenizer first.");
+            Assert.True(declared == ledgered,
+                $"'{family}' declares {declared} but the ledger reads {ledgered} off ComfyUI's tokenizer.");
+        }
+    }
+
+    /// <summary>The reverse: a family may not declare a mode its pipeline cannot act on, and the list of the ones that
+    /// still cannot is pinned exactly so wiring one is a deliberate edit rather than a silent drift.</summary>
+    [Fact]
+    public void TheUnwiredFamiliesAreExactlyTheOnesListed()
+    {
+        List<string> stillNone = [];
+        foreach ((string family, PromptWeightingMode declared) in DeclaredModes())
+        {
+            if (declared == PromptWeightingMode.None && Ledger.ContainsKey(family))
+            {
+                stillNone.Add(family);
+            }
+        }
+        _output.WriteLine($"wired: {Ledger.Count - stillNone.Count} of {Ledger.Count} ledgered families");
+        string[] expected = [.. NotYetWired.Order(StringComparer.Ordinal)];
+        string[] actual = [.. stillNone.Order(StringComparer.Ordinal)];
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>A family with no verified mode must not be wired on a guess: unresolved means unresolved.</summary>
+    [Fact]
+    public void UnresolvedFamiliesDeclareNoMode()
+    {
+        foreach ((string family, PromptWeightingMode declared) in DeclaredModes())
+        {
+            if (Unresolved.Contains(family, StringComparer.Ordinal))
+            {
+                Assert.True(declared == PromptWeightingMode.None,
+                    $"'{family}' has no ComfyUI tokenizer to read, but its recipe declares {declared}.");
+            }
+        }
+    }
+
+    /// <summary>What each registered recipe declares, image first.</summary>
+    private static IEnumerable<(string Family, PromptWeightingMode Mode)> DeclaredModes()
+    {
+        foreach (string family in RecipeRegistry.RegisteredNames)
+        {
+            IArchitectureRecipe recipe = RecipeRegistry.Resolve(family)
+                ?? throw new InvalidOperationException($"'{family}' is registered but does not resolve to a recipe.");
+            yield return (family, recipe.PromptWeighting);
+        }
+        foreach (string family in VideoRecipeRegistry.RegisteredNames)
+        {
+            IVideoRecipe recipe = VideoRecipeRegistry.Resolve(family)
+                ?? throw new InvalidOperationException($"'{family}' is registered but does not resolve to a recipe.");
+            yield return (family, recipe.PromptWeighting);
+        }
     }
 
     /// <summary>Both registries, image first, as a stable ordered list.</summary>

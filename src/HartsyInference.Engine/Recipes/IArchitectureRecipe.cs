@@ -25,6 +25,12 @@ public interface IArchitectureRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies. Read off
+    /// ComfyUI's tokenizer for the family and pinned by <c>PromptWeightingModeLedgerTests</c>; declared only once the
+    /// pipeline consumes it, because <see cref="ImageFeatures.PromptWeighting"/> derives from this and a declaration
+    /// the pipeline ignores would leave the emphasis parens in the prompt as prose.</summary>
+    Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
+
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null. The generic 20-step / CFG-7.5 fallback keeps a recipe that has not declared its own numbers working;
     /// variant-dependent families refine it further via <see cref="IRecipePipeline.VariantDefaults"/>.</summary>
