@@ -415,6 +415,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _dequantQ4_0ToF16;
     private readonly CudaModule _dequantQ5_0Module;
     private readonly nint _dequantQ5_0ToF16;
+    private readonly CudaModule _dequantQ2_KModule;
+    private readonly nint _dequantQ2_KToF16;
+    private readonly CudaModule _dequantQ3_KModule;
+    private readonly nint _dequantQ3_KToF16;
     private readonly CudaModule _dequantQ4_KModule;
     private readonly nint _dequantQ4_KToF16;
     private readonly CudaModule _dequantQ5_KModule;
@@ -1001,6 +1005,10 @@ public sealed class CudaKernels : IDisposable
         _dequantQ4_0ToF16 = _dequantQ4_0Module.GetFunction("dequant_q4_0_to_f16");
         _dequantQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_0_to_f16.ptx"));
         _dequantQ5_0ToF16 = _dequantQ5_0Module.GetFunction("dequant_q5_0_to_f16");
+        _dequantQ2_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q2_k_to_f16.ptx"));
+        _dequantQ2_KToF16 = _dequantQ2_KModule.GetFunction("dequant_q2_k_to_f16");
+        _dequantQ3_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q3_k_to_f16.ptx"));
+        _dequantQ3_KToF16 = _dequantQ3_KModule.GetFunction("dequant_q3_k_to_f16");
         _dequantQ4_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q4_k_to_f16.ptx"));
         _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
         _dequantQ5_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_k_to_f16.ptx"));
@@ -4509,6 +4517,27 @@ public sealed class CudaKernels : IDisposable
             throw new ArgumentException($"Q5_0 element count must be a multiple of 32, got {elementCount}.");
         int blockCount = elementCount / 32;
         LaunchDequantImpl(_dequantQ5_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
+    }
+
+    /// <summary>Launches Q2_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
+    /// <remarks>Q2_K is the smallest K-quant: a 6.7 GB MiniMax-H3 build against 21 GB at Q8_0. Without this the
+    /// loader has to widen it on the host, which at 2.6 bits per weight means roughly a sixfold expansion — enough to
+    /// put a model that would have fit a 12 GB card out of reach of a 24 GB one.</remarks>
+    public unsafe void LaunchDequantQ2_KToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 256 != 0)
+            throw new ArgumentException($"Q2_K element count must be a multiple of 256, got {elementCount}.");
+        int superBlockCount = elementCount / 256;
+        LaunchDequantImpl(_dequantQ2_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
+    }
+
+    /// <summary>Launches Q3_K → F16 dequant. Element count must be a multiple of 256.</summary>
+    public unsafe void LaunchDequantQ3_KToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 256 != 0)
+            throw new ArgumentException($"Q3_K element count must be a multiple of 256, got {elementCount}.");
+        int superBlockCount = elementCount / 256;
+        LaunchDequantImpl(_dequantQ3_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
     }
 
     /// <summary>Launches Q4_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>

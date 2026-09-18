@@ -3843,6 +3843,7 @@ public sealed class CudaBackend : IBackend
     /// dtype with a scalar on the tensor.</remarks>
     public bool SupportsResidentQuant(DType dtype) =>
         dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
+        || dtype == DType.Q2_K || dtype == DType.Q3_K
         || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
         || dtype == DType.I8 || dtype == DType.F4E2M1;
 
@@ -8979,6 +8980,10 @@ public sealed class CudaBackend : IBackend
             _kernels!.LaunchDequantQ4_0ToF16(output, input, count, _stream.Handle);
         else if (srcDtype == DType.Q5_0)
             _kernels!.LaunchDequantQ5_0ToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q2_K)
+            _kernels!.LaunchDequantQ2_KToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q3_K)
+            _kernels!.LaunchDequantQ3_KToF16(output, input, count, _stream.Handle);
         else if (srcDtype == DType.Q4_K)
             _kernels!.LaunchDequantQ4_KToF16(output, input, count, _stream.Handle);
         else if (srcDtype == DType.Q5_K)
@@ -8986,7 +8991,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype == DType.Q6_K)
             _kernels!.LaunchDequantQ6_KToF16(output, input, count, _stream.Handle);
         else
-            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
+            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
     }
 
     /// <summary>Test hook for the native-fp8 activation quantization kernels.</summary>
