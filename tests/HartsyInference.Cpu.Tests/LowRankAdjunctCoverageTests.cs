@@ -1,3 +1,4 @@
+using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -15,6 +16,88 @@ namespace HartsyInference.Cpu.Tests;
 public sealed class LowRankAdjunctCoverageTests
 {
     private const int Rows = 6, Cols = 8, Rank = 2, Batch = 3;
+
+    /// <summary>How an <see cref="IBackend"/> entry that can receive a LoRA'd tensor is expected to behave.</summary>
+    private enum AdjunctCoverage
+    {
+        /// <summary>Accumulates the adjunct into its result — pinned by a [Fact] here or in the CUDA twin.</summary>
+        Applies,
+
+        /// <summary>Throws by name when handed a tensor carrying one, because it has no shape to apply it in.</summary>
+        Refuses,
+
+        /// <summary>Cannot receive one: its weight is a rank-1 norm or gate vector, and
+        /// <c>LoraStack.RequireRank2AdjunctTarget</c> means an adjunct is never attached to those.</summary>
+        NotATarget,
+    }
+
+    /// <summary>Every <see cref="IBackend"/> entry that takes a tensor a LoRA could have been attached to, and which
+    /// of the two outcomes it owes. Adding a row is the point: the test below fails until a new entry appears here.</summary>
+    private static readonly Dictionary<string, AdjunctCoverage> _coverage = new(StringComparer.Ordinal)
+    {
+        ["Linear"] = AdjunctCoverage.Applies,
+        ["LinearWeightRows"] = AdjunctCoverage.Applies,
+        ["LinearGelu"] = AdjunctCoverage.Applies,
+        ["LinearHeadGated"] = AdjunctCoverage.Applies,
+        ["LinearMulti"] = AdjunctCoverage.Applies,
+        ["QuantizedMatMul"] = AdjunctCoverage.Applies,
+        ["MatMul"] = AdjunctCoverage.Refuses,
+        ["BatchedMatMul"] = AdjunctCoverage.Refuses,
+        ["Conv2D"] = AdjunctCoverage.Refuses,
+        ["Conv1d"] = AdjunctCoverage.Refuses,
+        ["Conv3d"] = AdjunctCoverage.Refuses,
+        ["Conv2dDepthwise"] = AdjunctCoverage.Refuses,
+        ["ConvTranspose1d"] = AdjunctCoverage.Refuses,
+        ["ConvTranspose2d"] = AdjunctCoverage.Refuses,
+        ["GroupNorm"] = AdjunctCoverage.NotATarget,
+        ["GroupNormSilu"] = AdjunctCoverage.NotATarget,
+        ["LayerNorm"] = AdjunctCoverage.NotATarget,
+        ["ChannelLayerNorm3d"] = AdjunctCoverage.NotATarget,
+        ["RmsNorm"] = AdjunctCoverage.NotATarget,
+        ["RmsNormAdd"] = AdjunctCoverage.NotATarget,
+        ["RmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
+        ["AddRmsNorm"] = AdjunctCoverage.NotATarget,
+        ["AddRmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
+    };
+
+    /// <summary>The [Fact]s below are hand-written, so on their own they only prove the entries someone remembered.
+    /// This closes that: a new <see cref="IBackend"/> method taking a <c>Tensor weight</c> fails the suite until it is
+    /// classified above, which forces the applies-or-refuses decision at the moment the entry is added rather than
+    /// the moment a LoRA looks weak.
+    /// <para>It pins the classification, not the behaviour — the signatures vary too much to invoke generically, so
+    /// the [Fact]s remain what verifies that an <c>Applies</c> entry really does.</para></summary>
+    [Fact]
+    public void EveryBackendEntryTakingAWeightIsClassified()
+    {
+        string[] found = typeof(IBackend)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Where(m => m.GetParameters().Any(p =>
+                p.ParameterType == typeof(Tensor) && p.Name is "weight" or "quantWeight"))
+            .Select(m => m.Name)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        string[] unclassified = found.Where(n => !_coverage.ContainsKey(n)).ToArray();
+        Assert.True(unclassified.Length == 0,
+            $"IBackend gained {string.Join(", ", unclassified)}, which take a weight a LoRA can be attached to. "
+            + "Classify each in _coverage as Applies, Refuses or NotATarget — and if it is Applies or Refuses, add "
+            + "the [Fact] that proves it. A silent miss reads as 'the LoRA looks weak' and never as an error.");
+
+        // Three entries the predicate cannot reach: the matmuls name their operands `a`/`b`, and LinearMulti carries
+        // its weights inside a LinearOp span. They are asserted to still exist so a rename cannot leave a stale row.
+        string[] weightNotInASignature = ["MatMul", "BatchedMatMul", "LinearMulti"];
+        string[] stale = _coverage.Keys
+            .Where(k => !found.Contains(k, StringComparer.Ordinal)
+                && !weightNotInASignature.Contains(k, StringComparer.Ordinal))
+            .ToArray();
+        Assert.True(stale.Length == 0, $"_coverage names {string.Join(", ", stale)}, which IBackend no longer has.");
+        foreach (string name in weightNotInASignature)
+        {
+            Assert.Contains(typeof(IBackend).GetMethods(), m => m.Name == name);
+        }
+    }
+
 
     /// <summary>Each element of the delta: rank · down · up, with the file carrying no alpha (scale 1.0).</summary>
     private const float Down = 0.5f, Up = 0.25f;
