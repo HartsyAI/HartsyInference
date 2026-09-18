@@ -93,6 +93,57 @@ public sealed class ImageConverterFoldedCompanionTests
     }
 
     [Fact]
+    public void Lumina2CheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["x_embedder.weight"] = Weight(2304, 64) };
+        try
+        {
+            AssertRefusesUnfolded("x_embedder.weight_scale", w => Lumina2CheckpointConverter.Convert(w), folded);
+
+            Lumina2CheckpointConverter.ConvertedWeights converted = Lumina2CheckpointConverter.Convert(folded);
+            Assert.Same(folded["x_embedder.weight"], converted.Transformer["x_embedder.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
+    public void AuraFlowCheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["init_x_linear.weight"] = Weight(3072, 64) };
+        try
+        {
+            AssertRefusesUnfolded("init_x_linear.weight_scale", w => AuraFlowCheckpointConverter.Convert(w), folded);
+
+            AuraFlowCheckpointConverter.ConvertedWeights converted = AuraFlowCheckpointConverter.Convert(folded);
+            Assert.Same(folded["init_x_linear.weight"], converted.Transformer["pos_embed.proj.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
+    public void AnimaCheckpointConverter_RefusesAnUnfoldedDictionaryAndAcceptsAFoldedOne()
+    {
+        Dictionary<string, Tensor> folded = new() { ["net.x_embedder.proj.1.weight"] = Weight(2048, 64) };
+        try
+        {
+            AssertRefusesUnfolded("net.x_embedder.proj.1.weight_scale", w => AnimaCheckpointConverter.Convert(w), folded);
+
+            AnimaCheckpointConverter.ConvertedWeights converted = AnimaCheckpointConverter.Convert(folded);
+            Assert.Same(folded["net.x_embedder.proj.1.weight"], converted.Transformer["x_embedder.proj.1.weight"]);
+        }
+        finally
+        {
+            DisposeAll(folded);
+        }
+    }
+
+    [Fact]
     public void ZetaChromaCheckpointConverter_RefusesToFuseSplitAttentionThatCarriesPerRowScales()
     {
         // Fusing Q/K/V along dim 0 concatenates rows, and int8_tensorwise scales are indexed by row. Keeping only

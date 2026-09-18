@@ -1,5 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -9,6 +10,7 @@ using HartsyInference.Engine.HuggingFace;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
@@ -54,13 +56,22 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
         string tevPath = ModelDownloader.EnsureSideModelAsync(SideModels.Gemma2_2B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
+        IDisposable? checkpoint = null;
         try
         {
-            (Lumina2CheckpointConverter.ConvertedWeights converted, IReadOnlyList<SafeTensorsLoader> transformerLoaders) =
-                Lumina2CheckpointConverter.LoadAndConvert(context.CheckpointPath);
-            loaders.AddRange(transformerLoaders);
+            // One container for either format, and OpenShards so a two-shard diffusers release folds its
+            // quantization companions once over the merge — a weight and its .weight_scale need not share a shard.
+            CheckpointSource source = CheckpointSource.OpenShards(
+                Lumina2CheckpointConverter.ResolveShardPaths(context.CheckpointPath));
+            checkpoint = source;
+            Lumina2CheckpointConverter.ConvertedWeights converted = Lumina2CheckpointConverter.Convert(source.Weights);
             Dictionary<string, Tensor> transformerWeights = VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.BF16], DType.F32);
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(source, prepared);
 
             Lumina2Config config = Lumina2Config.FromWeights(transformerWeights);
             Logs.Info($"[Lumina2Recipe] Building transformer (2B NextDiT).");
@@ -112,15 +123,16 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[Lumina2Recipe] Lumina-2 ready.");
-            return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, loaders, loraStack);
+            return new Lumina2RecipePipeline(pipeline, context.Backend, textEncoder, tokenizer, transformer, SystemPrompt, checkpoint, loaders, loraStack);
         }
         catch (Exception ex)
         {
             Logs.Error("[Lumina2Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
+            checkpoint?.Dispose();
             throw;
         }
     }

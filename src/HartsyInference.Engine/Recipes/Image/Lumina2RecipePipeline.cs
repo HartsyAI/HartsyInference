@@ -18,7 +18,8 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Lumina-2 pipeline driven against the native <see cref="ImageRequest"/>. Unlike the other recipes, the Gemma-2 text-encoder forward is NOT owned by the pipeline (HartsyInference's Gemma-2 encoder is an approximation), so this holds the encoder + tokenizer and produces the <c>hidden_states[-2]</c> caption embeddings itself (system-prompt-prefixed, one plain string, real tokens only) — with a one-slot cond/negative cache — then calls <see cref="Lumina2Pipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>Lumina2Loader.Generate</c> text-to-image drive path. Wraps the constructed Lumina-2 pipeline plus its text encoder + tokenizer, taking ownership of every disposable. The backend is retained because the caption encode runs outside the pipeline.</summary>
 public sealed class Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend backend, LlamaStyleEncoder textEncoder,
-    GemmaTokenizer tokenizer, Lumina2Transformer transformer, string systemPrompt, List<SafeTensorsLoader> loaders,
+    GemmaTokenizer tokenizer, Lumina2Transformer transformer, string systemPrompt, IDisposable checkpoint,
+    IReadOnlyList<IDisposable> sideModelLoaders,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Lumina2Pipeline _pipeline = pipeline;
@@ -27,7 +28,8 @@ public sealed class Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend bac
     private readonly GemmaTokenizer _tokenizer = tokenizer;
     private readonly Lumina2Transformer _transformer = transformer;
     private readonly string _systemPrompt = systemPrompt;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IDisposable _checkpoint = checkpoint;
+    private readonly IReadOnlyList<IDisposable> _sideModelLoaders = sideModelLoaders;
 
     // Single-slot prompt-embedding caches (cond + negative), keyed on the raw prompt text — repeat prompts skip
     // the Gemma-2 forward. Host-materialized so activation reclaims can't revert them.
@@ -148,7 +150,8 @@ public sealed class Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend bac
         _pipeline.Dispose();
         _textEncoder.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        _checkpoint.Dispose();
+        foreach (IDisposable loader in _sideModelLoaders)
         {
             loader.Dispose();
         }

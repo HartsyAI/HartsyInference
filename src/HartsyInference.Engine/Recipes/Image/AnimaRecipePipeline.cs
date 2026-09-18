@@ -29,16 +29,15 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;
     private readonly IBackend _backend;
-    private readonly SafeTensorsLoader _checkpointLoader;
-    private readonly SafeTensorsLoader _qwenLoader;
-    private readonly SafeTensorsLoader _vaeLoader;
+    private readonly IDisposable _checkpoint;
+    private readonly IReadOnlyList<IDisposable> _sideModelLoaders;
 
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
         AnimaTransformer transformer, AnimaLlmAdapter llmAdapter, IBackend backend,
-        SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader, SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
+        IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _pipeline = pipeline;
@@ -48,9 +47,8 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         _transformer = transformer;
         _llmAdapter = llmAdapter;
         _backend = backend;
-        _checkpointLoader = checkpointLoader;
-        _qwenLoader = qwenLoader;
-        _vaeLoader = vaeLoader;
+        _checkpoint = checkpoint;
+        _sideModelLoaders = sideModelLoaders;
     }
 
     /// <inheritdoc/>
@@ -208,9 +206,11 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         _t5Tokenizer.Dispose();
         _transformer.Dispose();
         _llmAdapter.Dispose();
-        _checkpointLoader.Dispose();
-        _qwenLoader.Dispose();
-        _vaeLoader.Dispose();
+        _checkpoint.Dispose();
+        foreach (IDisposable loader in _sideModelLoaders)
+        {
+            loader.Dispose();
+        }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
     }
