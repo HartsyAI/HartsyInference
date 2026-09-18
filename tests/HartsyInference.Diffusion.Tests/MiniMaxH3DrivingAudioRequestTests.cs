@@ -50,6 +50,25 @@ public sealed class MiniMaxH3DrivingAudioRequestTests
         Assert.Contains(expectedInMessage, error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>The refusal has to sit above the chain branch, not inside the single-segment path.</summary>
+    /// <remarks>A request whose ChainTotalFrames exceeds one segment returns through GenerateChain and never reaches
+    /// ApplyDrivingAudio, yet its assembled frames take the same trim, boomerang and fps edits at the end — so a
+    /// guard living in the single-segment path leaves exactly the long-form requests unprotected.</remarks>
+    [Fact]
+    public void AChainedRequestIsGuardedToo()
+    {
+        VideoRequest request = new VideoRequest
+        {
+            Prompt = "test",
+            VideoAudioReference = Track(),
+            Frames = 124,
+            ChainTotalFrames = 500,
+            VideoBoomerang = true,
+        };
+
+        Assert.Throws<ArgumentException>(() => MiniMaxH3RecipePipeline.RejectTimingEditsThatBreakLipSync(request));
+    }
+
     /// <summary>An END trim stays allowed: the soundtrack is trimmed at its end too, so the start stays aligned.</summary>
     [Fact]
     public void AnEndTrimIsStillAllowedWithDrivingAudio()

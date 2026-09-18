@@ -231,6 +231,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + $"{MiniMaxH3Geometry.Fps} — the video generates at {MiniMaxH3Geometry.Fps} fps and is muxed at "
                 + $"{requestedFps} fps (slow/fast motion), not resampled.");
         }
+        // Above the chain branch, not inside ApplyDrivingAudio: a chained request returns through GenerateChain
+        // without ever reaching that method, and its assembled frames take the same edits at the end.
+        if (request.VideoAudioReference is not null)
+        {
+            RejectTimingEditsThatBreakLipSync(request);
+        }
         if (request.ChainTotalFrames is int chainTotal
             && chainTotal > MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124))
         {
@@ -254,7 +260,6 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             throw new ArgumentException(
                 "MiniMax-H3 driving audio builds its own audio mask; supplying both is ambiguous.", nameof(request));
         }
-        RejectTimingEditsThatBreakLipSync(request);
         int frames = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
         // All-zero: every audio row is preserved from the track, so the source is the output and video follows it.
         float[] locked = new float[MiniMaxH3Geometry.AudioLatentFrames(frames)];
