@@ -24,11 +24,14 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 public sealed class CheckpointSource : IDisposable
 {
     private readonly IDisposable _handle;
+    private readonly IReadOnlyList<Tensor> _owned;
     private int _disposed;
 
     private CheckpointSource(ModelFormat format, string path, IReadOnlyDictionary<string, Tensor> weights,
-        CheckpointHeader header, IDisposable handle, GgufMetadata? gguf, string? architecture)
+        CheckpointHeader header, IDisposable handle, GgufMetadata? gguf, string? architecture,
+        IReadOnlyList<Tensor> owned)
     {
+        _owned = owned;
         Format = format;
         Path = path;
         Weights = weights;
@@ -111,13 +114,14 @@ public sealed class CheckpointSource : IDisposable
         {
             loader.Load(path);
             Dictionary<string, Tensor> weights = loader.GetAllTensors();
+            List<Tensor> owned = new List<Tensor>();
             Dictionary<string, string> metadata = loader.Metadata is null
                 ? new Dictionary<string, string>(StringComparer.Ordinal)
                 : new Dictionary<string, string>(loader.Metadata, StringComparer.Ordinal);
             CheckpointHeader header = new CheckpointHeader(ModelFormat.SafeTensors,
                 new Dictionary<string, SafeTensorDescriptor>(loader.Descriptors, StringComparer.Ordinal), metadata);
-            return new CheckpointSource(ModelFormat.SafeTensors, path, Normalize(weights, options), header, loader,
-                gguf: null, architecture: null);
+            return new CheckpointSource(ModelFormat.SafeTensors, path, Normalize(weights, options, owned), header,
+                loader, gguf: null, architecture: null, owned);
         }
         catch
         {
@@ -132,12 +136,13 @@ public sealed class CheckpointSource : IDisposable
         try
         {
             IReadOnlyDictionary<string, Tensor> weights = options.RelabelGgufRank2
-                ? GgufModelLoader.RelabelRank2ToPyTorchOrder(model.Weights)
+                ? GgufModelLoader.RelabelToPyTorchOrder(model.Weights)
                 : model.Weights;
             Dictionary<string, Tensor> mutable = new(weights.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, Tensor> entry in weights) mutable[entry.Key] = entry.Value;
-            return new CheckpointSource(ModelFormat.Gguf, path, Normalize(mutable, options),
-                CheckpointHeader.Read(path), model, model.Metadata, model.Architecture);
+            List<Tensor> owned = new List<Tensor>();
+            return new CheckpointSource(ModelFormat.Gguf, path, Normalize(mutable, options, owned),
+                CheckpointHeader.Read(path), model, model.Metadata, model.Architecture, owned);
         }
         catch
         {
@@ -152,12 +157,32 @@ public sealed class CheckpointSource : IDisposable
     /// after the rename pairs nothing and the scale is dropped — the weight then runs at 1/scale, which is not an error,
     /// just noise. Folding first makes that class of bug unreachable.</remarks>
     private static IReadOnlyDictionary<string, Tensor> Normalize(Dictionary<string, Tensor> weights,
-        CheckpointOpenOptions options)
+        CheckpointOpenOptions options, List<Tensor> owned)
     {
         if (!options.FoldQuantCompanions)
             return weights;
         Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights);
-        return CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4);
+        Dictionary<string, Tensor> normalized =
+            CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4);
+        CollectAllocations(weights, normalized, owned);
+        return normalized;
+    }
+
+    /// <summary>Records every tensor <see cref="Normalize"/> allocated, so this source frees them with the file it borrowed the rest from.</summary>
+    /// <remarks>Most normalized weights are the mapped ones with metadata attached — the same objects, nothing to own.
+    /// The exceptions allocate: an NF4 weight is decoded into a new tensor, and an eagerly-unpacked NVFP4 one likewise.
+    /// Those are gigabytes on a real checkpoint, and a recipe treats what it gets from here as borrowed, so with nobody
+    /// tracking them a failed construction or an unload leaves them alive until a finalizer runs. Identity is the test
+    /// because it is the actual question: a tensor that is not one of the originals was made here.</remarks>
+    private static void CollectAllocations(Dictionary<string, Tensor> original,
+        IReadOnlyDictionary<string, Tensor> normalized, List<Tensor> owned)
+    {
+        HashSet<Tensor> borrowed = new HashSet<Tensor>(original.Count, ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
+        foreach (Tensor tensor in original.Values) borrowed.Add(tensor);
+        foreach (Tensor tensor in normalized.Values)
+        {
+            if (!borrowed.Contains(tensor)) owned.Add(tensor);
+        }
     }
 
     /// <summary>"GGUF" read as a little-endian uint32.</summary>
@@ -167,6 +192,7 @@ public sealed class CheckpointSource : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        foreach (Tensor tensor in _owned) tensor.Dispose();
         _handle.Dispose();
     }
 }

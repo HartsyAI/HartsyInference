@@ -84,7 +84,7 @@ public sealed record CheckpointHeader(
             {
                 Name = key,
                 DType = source.DType,
-                Shape = RelabelRank2(source.Shape),
+                Shape = ReverseNeOrder(source.Shape),
                 DataOffset = source.AbsoluteOffset,
                 ByteLength = source.DType.ComputeByteCount(source.Shape.ElementCount),
             };
@@ -92,9 +92,19 @@ public sealed record CheckpointHeader(
         return new CheckpointHeader(ModelFormat.Gguf, descriptors, RenderMetadata(loader.Metadata));
     }
 
-    /// <summary>Swaps a rank-2 GGUF shape from ggml's <c>[in, out]</c> to the engine's <c>[out, in]</c>, matching what <see cref="GgufModelLoader.RelabelRank2ToPyTorchOrder"/> does to the tensors themselves.</summary>
-    private static TensorShape RelabelRank2(TensorShape shape) =>
-        shape.Rank == 2 ? new TensorShape(shape[1], shape[0]) : shape;
+    /// <summary>Reverses a GGUF shape from ggml's <c>ne</c> order — fastest axis first — to the engine's.</summary>
+    /// <remarks>Every rank reverses, not only matrices: a convolution kernel the engine calls
+    /// <c>[out, in, kh, kw]</c> is stored <c>[kw, kh, in, out]</c>, and un-reversing only rank 2 would leave it
+    /// declaring its kernel width as its output channel count. The byte layout is untouched either way — this is
+    /// metadata, and ggml's row-major data already matches the engine's.</remarks>
+    private static TensorShape ReverseNeOrder(TensorShape shape)
+    {
+        if (shape.Rank < 2) return shape;
+        Span<long> dims = stackalloc long[shape.Rank];
+        shape.CopyDimsTo(dims);
+        dims.Reverse();
+        return new TensorShape(dims);
+    }
 
     /// <summary>Renders the GGUF KV block as strings so both containers' metadata reads the same way. Arrays — token vocabularies above all — are reported by length rather than materialized, since a caller comparing header metadata never wants a 150k-entry string join.</summary>
     private static Dictionary<string, string> RenderMetadata(GgufMetadata metadata)

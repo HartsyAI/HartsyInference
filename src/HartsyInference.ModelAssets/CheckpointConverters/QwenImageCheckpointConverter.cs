@@ -26,6 +26,7 @@ public sealed class QwenImageCheckpointConverter
     /// <c>.weight_scale</c> and folding after the rename drops the scale silently.</remarks>
     public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(QwenImageCheckpointConverter));
         Dictionary<string, Tensor> transformer = new(2500);
         Dictionary<string, Tensor> textEncoder = new(800);
         Dictionary<string, Tensor> vae = new(300);

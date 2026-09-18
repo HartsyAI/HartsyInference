@@ -77,6 +77,98 @@ public sealed unsafe class QuantizedWeightPolicyTests
     }
 
     [Fact]
+    public void PrepareForBackend_WidensAQuantizedWeightThatIsNotAMatrix()
+    {
+        // Only a GEMM reads a packed weight. A quantized SD1.5 UNet's rank-4 conv kernels would otherwise load
+        // happily and die in Conv2D, which has no dequant path at all — so the rank decides this, not the backend.
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["down_blocks.0.resnets.0.conv1.weight"] = Q8Weight(4).Reshape(new TensorShape(2, 2, 1, 32)),
+            ["blocks.0.attn.to_q.weight"] = Q8Weight(2),
+        };
+        try
+        {
+            using QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareFor(weights, _ => true, "packed-quant backend");
+
+            Assert.Equal(1, prepared.WidenedCount);
+            Assert.Equal(DType.F16, weights["down_blocks.0.resnets.0.conv1.weight"].DType);
+            Assert.Equal(new TensorShape(2, 2, 1, 32), weights["down_blocks.0.resnets.0.conv1.weight"].Shape);
+            // The matrix the backend can read stays packed.
+            Assert.Equal(DType.Q8_0, weights["blocks.0.attn.to_q.weight"].DType);
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
+    [Fact]
+    public void PrepareForBackend_WidensACompanionBackedInt8WeightOnABackendWithoutAnInt8Path()
+    {
+        // int8_tensorwise arrives as plain I8 — the dtype does not report as quantized — so a policy that asked only
+        // DType.IsQuantized left these untouched on CPU and Vulkan and let them reach an op that cannot read them.
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["blocks.0.attn.to_q.weight"] = Int8Weight(4, 256, out Tensor rowScale),
+        };
+        try
+        {
+            using QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareFor(weights, _ => false, "dense-only backend");
+
+            Assert.Equal(1, prepared.WidenedCount);
+            Tensor widened = weights["blocks.0.attn.to_q.weight"];
+            Assert.Equal(DType.F16, widened.DType);
+            Assert.Null(widened.QuantInfo);
+            Assert.Equal(new TensorShape(4, 256), widened.Shape);
+        }
+        finally
+        {
+            rowScale.Dispose();
+            DisposeAll(weights);
+        }
+    }
+
+    [Fact]
+    public void PrepareForBackend_LeavesACompanionBackedInt8WeightPackedWhenTheBackendReadsIt()
+    {
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["blocks.0.attn.to_q.weight"] = Int8Weight(4, 256, out Tensor rowScale),
+        };
+        Tensor original = weights["blocks.0.attn.to_q.weight"];
+        try
+        {
+            using QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareFor(weights, dtype => dtype == DType.I8, "int8 backend");
+
+            Assert.Equal(0, prepared.WidenedCount);
+            // Widening it would turn LTX 2.5's 21.5 GB DiT back into 42 GB, which is the whole reason for the format.
+            Assert.Same(original, weights["blocks.0.attn.to_q.weight"]);
+        }
+        finally
+        {
+            rowScale.Dispose();
+            DisposeAll(weights);
+        }
+    }
+
+    /// <summary>A ComfyUI <c>int8_tensorwise</c> weight as the container hands it over: packed I8 with its per-row scale on QuantInfo.</summary>
+    private static Tensor Int8Weight(int rows, int columns, out Tensor rowScale)
+    {
+        rowScale = new Tensor(new TensorShape(rows, 1), DType.F32);
+        Span<float> scales = rowScale.AsSpan<float>();
+        for (int i = 0; i < rows; i++) scales[i] = 0.01f * (i + 1);
+
+        Tensor weight = new Tensor(new TensorShape(rows, columns), DType.I8);
+        Span<sbyte> values = weight.AsSpan<sbyte>();
+        for (int i = 0; i < values.Length; i++) values[i] = (sbyte)(i % 127 - 63);
+        weight.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = rowScale };
+        return weight;
+    }
+
+    [Fact]
     public void PrepareForBackend_NeverTouchesADenseWeight()
     {
         Dictionary<string, Tensor> weights = Weights();

@@ -168,6 +168,60 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
     }
 
     [Fact]
+    public void Open_ReversesEveryGgufAxis_NotOnlyMatrices()
+    {
+        // ggml ne order reverses every axis, so a convolution kernel the engine calls [out, in, kh, kw] is stored
+        // [kw, kh, in, out]. Un-reversing only rank 2 leaves every conv in an SD1.5 UNet declaring its kernel width
+        // as its output channel count.
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["conv_in.weight"] = F32(new TensorShape(8, 4, 3, 3)),
+            ["blocks.0.attn.to_q.weight"] = F32(new TensorShape(4, 8)),
+            ["blocks.0.norm.weight"] = F32(new TensorShape(8)),
+        };
+        try
+        {
+            (string safetensorsPath, string ggufPath) = WriteBothContainers(weights);
+            using CheckpointSource fromSafeTensors = CheckpointSource.Open(safetensorsPath);
+            using CheckpointSource fromGguf = CheckpointSource.Open(ggufPath);
+
+            foreach (string key in weights.Keys)
+            {
+                Assert.Equal(fromSafeTensors.Weights[key].Shape, fromGguf.Weights[key].Shape);
+                Assert.Equal(fromSafeTensors.Header.Descriptors[key].Shape, fromGguf.Header.Descriptors[key].Shape);
+            }
+        }
+        finally
+        {
+            foreach (Tensor tensor in weights.Values) tensor.Dispose();
+        }
+    }
+
+    [Fact]
+    public void AConverterGivenAnUnfoldedDictionaryRefusesByName()
+    {
+        // The fold has to precede the rename, so a caller that skips the container and hands over a raw loader
+        // dictionary must fail loudly — the alternative is a model whose weights are quietly real/scale, which has no
+        // symptom at load and renders as noise at the end of a generation.
+        Dictionary<string, Tensor> raw = new()
+        {
+            ["transformer.transformer_blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(4, 8), DType.F8E4M3),
+            ["transformer.transformer_blocks.0.attn.to_q.weight_scale"] = F32(new TensorShape(1)),
+        };
+        try
+        {
+            NotSupportedException error = Assert.Throws<NotSupportedException>(
+                () => CheckpointConverters.QwenImageCheckpointConverter.Convert(raw));
+            Assert.Contains("weight_scale", error.Message);
+            Assert.Contains("CheckpointSource.Open", error.Message);
+        }
+        finally
+        {
+            foreach (Tensor tensor in raw.Values) tensor.Dispose();
+        }
+    }
+
+    [Fact]
     public void Header_NamesTheDominantQuantByBytesNotByTensorCount()
     {
         // A real GGUF is mostly quantized matrices and a long tail of F32 norms, so a count would report "not

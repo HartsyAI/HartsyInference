@@ -1,5 +1,6 @@
 using System.Text;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets;
 using HartsyInference.ModelAssets.Nf4;
 using Xunit;
 
@@ -100,6 +101,44 @@ public sealed unsafe class Nf4CompanionFoldTests
         finally
         {
             DisposeAll(weights);
+        }
+    }
+
+    [Fact]
+    public void OpenedThroughTheContainer_TheDecodedWeightIsFreedWithIt()
+    {
+        // An NF4 weight is decoded into a NEW tensor, not a view of the file, so nothing frees it unless the source
+        // does. A recipe treats what the container hands over as borrowed, so a failed construction or an unload
+        // would otherwise leave gigabytes alive until a finalizer ran.
+        string dir = Path.Combine(Path.GetTempPath(), $"nf4_container_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Dictionary<string, Tensor> weights = Layer();
+            string path = Path.Combine(dir, "model.safetensors");
+            try
+            {
+                SafeTensors.SafeTensorsWriter.Save(path, weights);
+            }
+            finally
+            {
+                DisposeAll(weights);
+            }
+
+            Tensor decoded;
+            using (Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.Open(path))
+            {
+                decoded = source.Weights["mlp.gate_proj.weight"];
+                Assert.Equal(DType.F32, decoded.DType);
+                _ = decoded.DataPointer;
+            }
+
+            Assert.Throws<ObjectDisposedException>(() => _ = decoded.DataPointer);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            catch (IOException) { /* a mmap the OS has not released yet is not a test failure */ }
         }
     }
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
@@ -48,19 +49,26 @@ public static class QuantizedWeightPolicy
             foreach (string key in weights.Keys.ToList())
             {
                 Tensor weight = weights[key];
-                if (!weight.DType.IsQuantized || supportsResidentQuant(weight.DType))
+                // A ComfyUI-format weight is packed too, but its dtype does not say so — int8_tensorwise arrives as
+                // plain I8 with its scales on QuantInfo — so the dtype alone cannot answer whether the backend can
+                // consume it, and asking only IsQuantized would leave those untouched on a backend with no int8 path.
+                bool packed = weight.DType.IsQuantized || weight.QuantInfo is not null;
+                if (!packed)
                     continue;
-                // A weight carrying QuantInfo is a ComfyUI format (int8_tensorwise, nvfp4) whose scales live beside it
-                // and whose decode is not GGUF's; sending it to the GGUF dequantizer would report a missing codec for
-                // a format that has one. Those are attached only by a caller that knows the backend consumes them.
-                if (weight.QuantInfo is not null)
+                // Only a GEMM reads a packed weight. A rank-4 convolution kernel, or anything else that is not a
+                // matrix, reaches an op with no dequant path at all — so a quantized SD1.5 UNet would load happily
+                // and then die in Conv2D. Rank decides this, not the backend, which is why it is checked first.
+                bool matrix = weight.Shape.Rank == 2;
+                if (matrix && supportsResidentQuant(weight.DType))
                     continue;
-                Tensor wide = GgufDequantizer.Dequantize(weight, wideDType);
+                Tensor wide = Widen(weight, key, wideDType);
                 created.Add(wide);
                 weights[key] = wide;
                 (widenedKeys ??= new List<string>()).Add(key);
-                countByDtype.TryGetValue(weight.DType.Name, out int seen);
-                countByDtype[weight.DType.Name] = seen + 1;
+                string reason = weight.QuantInfo?.Format ?? weight.DType.Name;
+                if (!matrix) reason += $" rank-{weight.Shape.Rank}";
+                countByDtype.TryGetValue(reason, out int seen);
+                countByDtype[reason] = seen + 1;
             }
         }
         catch
@@ -72,10 +80,31 @@ public static class QuantizedWeightPolicy
         if (widenedKeys is not null)
         {
             string breakdown = string.Join(", ", countByDtype.Select(entry => $"{entry.Value}×{entry.Key}"));
-            Logs.Info($"Quant policy: {consumerName} has no packed-weight kernel for {breakdown}; "
+            Logs.Info($"Quant policy: no packed-weight path on {consumerName} for {breakdown}; "
                 + $"widened {widenedKeys.Count} weights to {wideDType.Name} on the host.");
         }
         return new PreparedWeights(created);
+    }
+
+    /// <summary>Decodes one packed weight to <paramref name="wideDType"/>, by whichever scheme it was packed under.</summary>
+    /// <remarks>Three schemes reach here and they share nothing: GGUF's block quants carry their scales inside the
+    /// blocks, <c>int8_tensorwise</c> carries a per-row scale beside the weight and may have been Hadamard-rotated
+    /// along the input dimension, and NVFP4 carries padded swizzled block scales. Picking by <see cref="Tensor.QuantInfo"/>
+    /// rather than by dtype is what keeps an I8 ComfyUI weight out of the GGUF dequantizer, which would report a
+    /// missing codec for a format that has one.</remarks>
+    private static Tensor Widen(Tensor weight, string key, DType wideDType)
+    {
+        if (weight.QuantInfo is not QuantWeightInfo info)
+            return GgufDequantizer.Dequantize(weight, wideDType);
+        if (weight.DType == DType.I8 && info.RowScale is not null)
+        {
+            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(weight, info.RowScale, info.ConvRotGroupSize);
+            return wideDType == DType.BF16 ? bf16.To(bf16.Device) : bf16.CastTo(wideDType);
+        }
+        throw new UnsupportedModelException(
+            $"'{key}' is {info.Format}, which this backend cannot consume packed and which has no host decoder here. "
+            + "Use a BF16, fp8_scaled or GGUF build of this model, or run it on a backend with native support.",
+            null, info.Format);
     }
 
     /// <summary>Owns the widened copies <see cref="PrepareForBackend"/> put into a weight dictionary.</summary>

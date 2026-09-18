@@ -316,6 +316,32 @@ public static unsafe class CheckpointConvertUtils
         return d.ComputeByteCount(elementCount);
     }
 
+    /// <summary>Refuses a weight dictionary whose quantization companions have not been folded yet.</summary>
+    /// <remarks><para>Converters take their input from <see cref="Checkpoints.CheckpointSource"/>, which folds
+    /// companions before any renaming happens — it has to, because a converter renames <c>.weight</c> and has no rule
+    /// for <c>.weight_scale</c>, so folding afterwards pairs nothing and drops the scale.</para>
+    /// <para>A caller that hands over a raw loader dictionary instead gets this refusal rather than a model whose
+    /// weights are quietly <c>real/scale</c>. That failure has no symptom at load and renders as noise at the end of a
+    /// generation, which is the whole reason the fold moved.</para></remarks>
+    public static void RequireFoldedCompanions(IReadOnlyDictionary<string, Tensor> weights, string converterName)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        foreach (string key in weights.Keys)
+        {
+            if (!key.EndsWith(WeightScaleSuffix, StringComparison.Ordinal)
+                && !key.EndsWith(".scale_weight", StringComparison.Ordinal)
+                && !key.EndsWith(ComfyQuantDescriptor.Suffix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            throw new NotSupportedException(
+                $"{converterName} was given a checkpoint dictionary that still contains '{key}'. Quantization "
+                + "companions must be folded onto their weights before conversion — open the checkpoint with "
+                + "CheckpointSource.Open, which does it. Folding after conversion silently drops the scale, and a "
+                + "weight without its scale renders as noise rather than failing.");
+        }
+    }
+
     /// <summary>Carries a fused tensor's quantization companions onto one row-range slice of it.</summary>
     /// <remarks>The two fp8 scalars are per-tensor and apply to every row unchanged. <see cref="QuantWeightInfo"/> is
     /// narrowed to the slice's rows because its <c>RowScale</c> is indexed by them — a split that kept the fused scale
