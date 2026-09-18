@@ -37,12 +37,12 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly WanVideoTransformer? _transformer2;
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly ClipVisionEncoder? _clipVision;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable. <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
-        T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<SafeTensorsLoader> loaders,
+        T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<IDisposable> loaders,
         WanVideoTransformer? transformer2 = null, MergedLoraStack? loraStack = null)
     {
         _transformer2 = transformer2;
@@ -263,7 +263,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         // The LoRA stack owns the merged tensors both transformers reference, so it outlives them by exactly
         // this much (same pattern as Sd3RecipePipeline/Flux1RecipePipeline/SdxlRecipePipeline).
         _loraStack?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

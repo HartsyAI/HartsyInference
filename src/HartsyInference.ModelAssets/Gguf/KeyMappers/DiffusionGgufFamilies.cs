@@ -46,6 +46,15 @@ public static class DiffusionGgufFamilies
         new DiffusionGgufKeyMapper("sd3", [Or(Has("joint_blocks."), And(Has("x_block."), Has("attn.")))]),
         new DiffusionGgufKeyMapper("sd15", [Has("input_blocks.")], [Has("label_emb.")]),
         new DiffusionGgufKeyMapper("flite", [Is("register_tokens"), And(Has("blocks."), Has(".self_attn."))]),
+        // Wan's whole family — T2V/I2V/TI2V and the VACE, Animate and S2V conditioning builds, which all keep the
+        // backbone's naming. Asked after F-Lite, the only other row whose blocks carry a .self_attn.: F-Lite is
+        // claimed first by its register_tokens, and cannot reach here anyway since it has no cross-attention and
+        // spells its patch embed patch_embed. (no -ing). The dots in .self_attn. / .cross_attn. are load-bearing in
+        // the other direction — HunyuanVideo's token refiner has blocks.N.self_attn_qkv, which they exclude.
+        // vace_/pose_patch_embedding contain patch_embedding., which is fine: those files are Wan too.
+        DiffusionGgufKeyMapper.MatchingAny("wan",
+            [And(Has("blocks."), Has(".self_attn.")), And(Has("blocks."), Has(".cross_attn.")), Has("patch_embedding.")],
+            [Has("patch_embedding."), Has("condition_embedder.time_embedder.")]),
         new DiffusionGgufKeyMapper("chroma",
             [Has("distilled_guidance_layer."), Or(Has("double_blocks."), Has("single_blocks."))]),
         new DiffusionGgufKeyMapper("auraflow",
