@@ -207,11 +207,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         // it out from under the new one, so clear first — keyed, so another device's binding on this tensor stands.
         tensor.ClearGpuBinding(BindingKey);
 
-        if (Activations.TryGetValue(tensor, out (TBuffer Buffer, long Bytes) displaced)
-            && !EqualityComparer<TBuffer>.Default.Equals(displaced.Buffer, buffer))
+        if (Activations.TryGetValue(tensor, out (TBuffer Buffer, long Bytes) displaced))
         {
+            // Fires on ANY rebind, including an in-place op that writes through the same buffer. What hangs off an
+            // activation describes its CONTENTS — a producer-emitted quantized sidecar, say — and a write through
+            // the buffer stales that just as surely as swapping the buffer does.
             OnActivationEvicted(tensor, displaced.Buffer);
-            Park(displaced.Buffer, displaced.Bytes);
+            if (!EqualityComparer<TBuffer>.Default.Equals(displaced.Buffer, buffer))
+            {
+                Park(displaced.Buffer, displaced.Bytes);
+            }
         }
 
         // The tensor was a resident weight and an op has just written a device buffer for it. It cannot stay one:

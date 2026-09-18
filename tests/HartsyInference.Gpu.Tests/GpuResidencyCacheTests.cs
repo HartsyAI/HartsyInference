@@ -31,6 +31,7 @@ public sealed class GpuResidencyCacheTests
         public bool RefuseHostReads { get; set; }
         public HashSet<int> ExternallyOwnedIds { get; } = [];
         public List<(Tensor Tensor, Buffer Buffer)> Demoted { get; } = [];
+        public List<(Tensor Tensor, Buffer Buffer)> Evicted { get; } = [];
         public bool BlockCallbacks { get; set; }
 
         /// <summary>Stands in for a backend that promotes a tensor it has seen uploaded twice.</summary>
@@ -62,6 +63,8 @@ public sealed class GpuResidencyCacheTests
         protected override bool IsExternallyOwned(Buffer buffer) => ExternallyOwnedIds.Contains(buffer.Id);
 
         protected override void OnWeightDemoted(Tensor tensor, Buffer buffer) => Demoted.Add((tensor, buffer));
+
+        protected override void OnActivationEvicted(Tensor tensor, Buffer buffer) => Evicted.Add((tensor, buffer));
 
         protected override bool TryEnterCallback() => !BlockCallbacks;
 
@@ -108,6 +111,24 @@ public sealed class GpuResidencyCacheTests
         Assert.True(first.Freed);
         Assert.False(second.Freed);
         Assert.Same(second, cache.CopyToDevice(tensor));
+    }
+
+    /// <summary>An in-place op writes through the buffer without replacing it. Whatever a backend hangs off that
+    /// activation describes its contents — a producer-emitted quantized sidecar — so the write stales it just as a
+    /// swap would, and the eviction hook has to fire even though nothing is displaced.</summary>
+    [Fact]
+    public void Rebinding_A_Tensor_To_The_Same_Buffer_Still_Reports_An_Eviction()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+
+        Assert.Single(cache.Evicted, entry => ReferenceEquals(entry.Buffer, buffer));
+        cache.SweepOrphans();
+        Assert.False(buffer.Freed);   // still bound, so nothing to reclaim
     }
 
     /// <summary>The in-place case: the displaced buffer IS the op's own input, so the op's cleanup frees it and the
