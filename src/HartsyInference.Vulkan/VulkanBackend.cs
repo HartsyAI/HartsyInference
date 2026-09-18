@@ -1318,11 +1318,6 @@ public sealed class VulkanBackend : IBackend
         (VulkanBuffer inRes, VulkanBuffer? inOwned) = CastIfNeeded(input, inBuf, gemmDtype);
         (VulkanBuffer wRes, VulkanBuffer? wOwned) = CastIfNeeded(weight, wBuf, gemmDtype);
 
-        // im2col: rows = N*Cin*kH*kW, cols = N*outH*outW (per the shader's flat layout). Until
-        // per-batch base offsets land in the matmul kernel (Phase 4) we restrict to batch=1.
-        if (batch != 1)
-            throw new NotImplementedException("VulkanBackend.Conv2D: batch>1 requires per-batch base offsets in the matmul kernel — Phase 4 work item.");
-
         int gemmK = inCh * kH * kW;
         int fullN = outH * outW;
 
@@ -1334,16 +1329,31 @@ public sealed class VulkanBackend : IBackend
         // colOffset=0/tileCols=fullN (the tileN==fullN case below) reproduces the prior untiled
         // dispatch exactly, so small convs (the overwhelming majority of call sites) pay zero extra
         // allocations or dispatches — this only kicks in above Conv2DMaxColTileBytes.
-        long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)gemmDtype.SizeInBytes)));
+        // The budget covers the whole batch: im2col materializes every image's columns for a tile before the
+        // GEMMs consume them, so a batch=2 conv holds two of these at once. Dividing here keeps the cap meaning
+        // what it says instead of being exceeded by a factor of the batch.
+        long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)batch * (ulong)gemmDtype.SizeInBytes)));
         long tileN = Math.Min(fullN, maxTileN);
-        long tileColElements = (long)gemmK * tileN;
+        // Whole-batch element count. Per-image offsets below are computed from thisTileN, not from this, because
+        // the final tile is short and each image's block is packed at that shorter stride.
+        long tileColElements = (long)gemmK * tileN * batch;
         // The im2col/matmul GLSL address the column/output buffers with 32-bit indices. Above
         // int.MaxValue elements the index would wrap, silently corrupting output. Shrinking tileN
         // can't help when gemmK alone exceeds this range — fail loudly instead.
         if (tileColElements > int.MaxValue)
             throw new NotSupportedException(
-                $"Vulkan Conv2D im2col tile needs {tileColElements} elements (Cin={inCh}, k={kH}x{kW}), " +
+                $"Vulkan Conv2D im2col tile needs {tileColElements} elements (N={batch}, Cin={inCh}, k={kH}x{kW}), " +
                 "exceeding the shader's 32-bit index range even at the minimum 1-column tile. Use the CUDA backend.");
+        // cOffset/bOffset are uint push constants and the shader indexes `cOffset + gRow * ldc + gCol`, so the
+        // addressable span is the WHOLE output, not the last image's base: gRow runs to outCh-1 on top of that
+        // base. Checking only the base would pass a shape whose later channel rows still wrap — and a wrapped
+        // offset silently overwrites earlier output instead of failing. The allocation below would fail first on
+        // any real shape, but "would fail first" is not a bound, so the bound is checked.
+        long outputElements = (long)batch * outCh * fullN;
+        if (outputElements > uint.MaxValue)
+            throw new NotSupportedException(
+                $"Vulkan Conv2D output spans {outputElements} elements (N={batch}, Cout={outCh}, {outH}x{outW}), " +
+                "exceeding the matmul shader's 32-bit offset range. Use the CUDA backend.");
         ulong colBytes = (ulong)(tileColElements * gemmDtype.SizeInBytes);
         VulkanBuffer colBuf = _xfer.AllocateDevice(colBytes);
 
@@ -1385,7 +1395,8 @@ public sealed class VulkanBackend : IBackend
             {
                 long thisTileN = Math.Min(tileN, fullN - nStart);
 
-                // Step 1: im2col (tile)
+                // Step 1: im2col (tile) — writes all `batch` images' columns as consecutive
+                // [gemmK, thisTileN] blocks, which is the layout the shader already produced for N>1.
                 {
                     BinaryWriteUInt(im2colPc, 0, (uint)batch);
                     BinaryWriteUInt(im2colPc, 4, (uint)inCh);
@@ -1401,11 +1412,15 @@ public sealed class VulkanBackend : IBackend
                     BinaryWriteUInt(im2colPc, 44, (uint)outW);
                     BinaryWriteUInt(im2colPc, 48, (uint)nStart);
                     BinaryWriteUInt(im2colPc, 52, (uint)thisTileN);
-                    Dispatch(im2colKernel, im2colBufs, im2colPc, GroupCount(gemmK * thisTileN, LocalX1D));
+                    Dispatch(im2colKernel, im2colBufs, im2colPc, GroupCount((long)batch * gemmK * thisTileN, LocalX1D));
                 }
 
-                // Step 2: matmul (tile) — weight[Cout, gemmK] @ col[gemmK, thisTileN] written into
-                // the REAL [Cout, fullN] output buffer at column offset nStart (ldc=fullN, cOffset=nStart).
+                // Step 2: matmul, once per image — weight[Cout, gemmK] @ col_n[gemmK, thisTileN] written into
+                // the REAL [Cout, fullN] plane of image n at column offset nStart (ldc=fullN). The weight is shared,
+                // so only B and C move: bOffset walks the column blocks im2col just wrote, cOffset walks the output
+                // planes. Batching this way needs no kernel change — matmul_tiled has carried aOffset/bOffset/cOffset
+                // "for batched dispatch" all along, and BatchedMatMul already drives it the same way.
+                for (int n = 0; n < batch; n++)
                 {
                     int M = outCh, K = gemmK, N = (int)thisTileN;
                     BinaryWriteUInt(matmulPc, 0, (uint)M);
@@ -1417,8 +1432,8 @@ public sealed class VulkanBackend : IBackend
                     BinaryWriteFloat(matmulPc, 24, 1.0f);
                     BinaryWriteFloat(matmulPc, 28, 0.0f);
                     BinaryWriteUInt(matmulPc, 32, 0u);
-                    BinaryWriteUInt(matmulPc, 36, 0u);
-                    BinaryWriteUInt(matmulPc, 40, (uint)nStart);
+                    BinaryWriteUInt(matmulPc, 36, (uint)((long)n * gemmK * thisTileN));
+                    BinaryWriteUInt(matmulPc, 40, (uint)((long)n * outCh * fullN + nStart));
 
                     uint groupsX = (uint)(((uint)N + BN - 1) / BN);
                     uint groupsY = (uint)((M + BM - 1) / BM);
@@ -1622,7 +1637,7 @@ public sealed class VulkanBackend : IBackend
         using OpScope _op = EnterOp();
         if (input.DType != DType.F32 || output.DType != DType.F32 || (gamma is not null && gamma.DType != DType.F32))
         {
-            ((IBackend)this).WanRmsNormChannel(output, input, gamma, eps);
+            IBackend.WanRmsNormChannelReference(output, input, gamma, eps);
             return;
         }
         int c = (int)input.Shape[1];
@@ -1704,7 +1719,7 @@ public sealed class VulkanBackend : IBackend
         if ((value.DType != DType.F32 && value.DType != DType.F16)
             || residual.DType != value.DType || output.DType != value.DType || gate.DType != DType.F32)
         {
-            ((IBackend)this).GatedResidualLastDim(output, residual, value, gate);
+            IBackend.GatedResidualLastDimReference(output, residual, value, gate);
             return;
         }
         int rank = value.Shape.Rank;
@@ -3199,8 +3214,12 @@ public sealed class VulkanBackend : IBackend
         if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf)
             || x.DType != DType.F32 || cosTable.DType != DType.F32 || sinTable.DType != DType.F32)
         {
-            ((IBackend)this).RopeApplyDecodeStep(x, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-            return;
+            // Matches EmbedGatherDecodeStep/ArgMaxInto/ApplyRepetitionPenaltyStep: a device-position op with no
+            // valid device position has nothing to fall back TO. The interface default is an empty body — the
+            // contract for a backend that cannot decode on-device at all — so reaching it here would silently skip
+            // the rotary embedding and return a plausible, wrong logit instead of failing.
+            throw new NotSupportedException(
+                "RopeApplyDecodeStep requires F32 x/cos/sin and a valid device-position buffer.");
         }
         int headDim = (int)x.Shape[x.Shape.Rank - 1];
         int numHeads = (int)(x.ElementCount / headDim);
