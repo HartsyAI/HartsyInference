@@ -137,7 +137,17 @@ public sealed class PromptWeightingModeLedgerTests
     /// keeps the <c>(text:N)</c> grammar in the prompt, so an unwired pipeline would hand the parens and digits to its
     /// encoder as prose — a regression on a family that works today. The rollout is sequenced by the plan's E2 (Wan /
     /// LTX / HunyuanVideo) and E3 (remaining image recipes) phases; this list can only shrink, and shrinking it means
-    /// editing this test, which is the point.</summary>
+    /// editing this test, which is the point.
+    /// <para><b>Kandinsky5 and kandinsky5-video are not an oversight.</b> They are ledgered ComfyBlend because CLIP-L
+    /// keeps weights, but <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>) returns the Qwen
+    /// cond plus CLIP-L's POOLED vector and discards the blended hidden states, so SwarmUI's weighting is a no-op end
+    /// to end and parity is to leave the conditioning alone. Their correct end state is to declare ComfyBlend, strip
+    /// the emphasis from the prompt and apply no blend — declaring it before that is wired would keep the parens in
+    /// the prompt for the Qwen arm to read as prose, which is the OPPOSITE of parity.</para>
+    /// <para><b>hunyuan-image</b> needs the UNPADDED weights: it pads to 1034 and the encoder then slices
+    /// <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the padded array through
+    /// gives <c>offset = keep − 1034</c> and every prompt weight falls off the front — a silent no-op rather than an
+    /// error.</para></summary>
     private static readonly string[] NotYetWired =
     [
         "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "hidream",
