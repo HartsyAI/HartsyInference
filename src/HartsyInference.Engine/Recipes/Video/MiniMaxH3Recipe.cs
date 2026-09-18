@@ -143,9 +143,9 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 ? loraSpecs
                 : loraSpecs.Where((_, index) => index != pddIndex).ToArray();
             // A quant no device running the blocks can hold packed widens here rather than failing inside the first
-            // GEMM, minutes into a generation. H3 shards and runs context-parallel, so the question is what ALL of
-            // them can read, not just the primary.
-            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(ditWeights, context.TransformerBackends));
+            // GEMM, minutes into a generation. The question is what the devices that RUN the blocks can read, which
+            // for H3 is not context.TransformerBackends — see ExecutingBackends.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(ditWeights, ExecutingBackends(context)));
             loraStack = ApplyLoras(context.Backend, ordinarySpecs, ditWeights);
             transformer.LoadWeights(ditWeights);
             IReadOnlyDictionary<string, int> funControlModelIndices = LoadFunControlNets(
@@ -278,6 +278,25 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         long attnChunkBytes = (long)chunkRows * inner * 6L * DType.F32.SizeInBytes;
         long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
         return Math.Max(attnChunkBytes, mlpChunkBytes) + MiniMaxH3ActivationEstimate.FudgeBytes;
+    }
+
+    /// <summary>The devices that will actually execute H3's blocks: the primary, plus the DiT-shard peer when one is
+    /// configured.</summary>
+    /// <remarks><see cref="RecipeContext.TransformerBackends"/> is the wrong set here. It also yields the
+    /// context-parallel ranks and the CFG-parallel peer, and <see cref="WarnIfPlacementIgnored"/> exists precisely
+    /// because H3 runs on neither — so a peer that cannot hold Q2_K packed would widen the whole DiT on the host for
+    /// a device that never reads a block, turning a 6.7 GB build into roughly 40 GB. The shard peer is included
+    /// unconditionally because whether it is used is not settled until the Fun ControlNet count is known, which is
+    /// after the weights have to be prepared; including a device that turns out idle only costs precision, never
+    /// correctness.</remarks>
+    internal static IEnumerable<IBackend> ExecutingBackends(RecipeContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        yield return context.Backend;
+        if (context.DitShardBackend is not null && !ReferenceEquals(context.DitShardBackend, context.Backend))
+        {
+            yield return context.DitShardBackend;
+        }
     }
 
     /// <summary>Warns when placement knobs are configured that H3 cannot use, so the operator learns why they saw no effect instead of silently paying for an unused second CUDA context (<see cref="RecipeContext.AllBackends"/> still constructs and gates on every configured backend regardless of whether a recipe consumes it).</summary>
