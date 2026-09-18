@@ -346,18 +346,19 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>The CUDA ordinal <paramref name="deviceKey"/> gates on; -1 for CPU (ungated). For a composite layer-split key the LAST stage's device is returned — single-selector callers get that selector's own ordinal (multi-gate callers use <see cref="GateOrdinalsFor"/>).</summary>
+    /// <summary>The device ordinal <paramref name="deviceKey"/> gates on; -1 for CPU (ungated). For a composite layer-split key the LAST stage's device is returned — single-selector callers get that selector's own ordinal (multi-gate callers use <see cref="GateOrdinalsFor"/>).</summary>
+    /// <remarks>Any device backend gates, not only CUDA: a second Vulkan generation on one card contends for the same
+    /// VRAM as a second CUDA one.</remarks>
     private static int GateOrdinalFor(string deviceKey)
     {
         string last = deviceKey.Contains('+')
             ? deviceKey.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[^1]
             : deviceKey;
-        if (!last.StartsWith("cuda", StringComparison.OrdinalIgnoreCase))
+        if (!BackendFactory.IsDeviceKind(BackendFactory.Kind(last)))
         {
             return -1;
         }
-        int colon = last.IndexOf(':');
-        return colon >= 0 && int.TryParse(last[(colon + 1)..], out int ordinal) ? ordinal : 0;
+        return BackendFactory.ParseOrdinal(last);
     }
 
     /// <summary>The shard-device list in effect for <paramref name="deviceKey"/>: a request-level <c>"cuda:0+cuda:1"</c> composite wins; else the engine placement's <c>ShardDevices</c> applies to the primary slot; else empty (single-device).</summary>
@@ -891,47 +892,48 @@ public sealed class TextService : ITextService, IDisposable
         return string.IsNullOrWhiteSpace(q) ? "Describe this image in detail." : q;
     }
 
-    /// <summary>Normalizes a requested device string to a slot key: blank → primary; bare "cuda" → cuda:0; else the lowercased key as-is.</summary>
+    /// <summary>Normalizes a requested device string to a slot key: blank → primary; anything that names a device →
+    /// its concrete <c>kind:ordinal</c> form; else the lowercased key as-is.</summary>
+    /// <remarks>The key identifies a SLOT and is what <see cref="GateOrdinalsFor"/> reads, so it has to be concrete
+    /// on both counts. Canonicalizing only "cuda" was consistent while CUDA was the only device kind a slot could
+    /// name. <c>auto</c> is the sharper case: <see cref="CreateBackendFor"/> resolves it and can build a GPU backend,
+    /// while <c>auto</c> as a gate ordinal reads as CPU — so the slot would run unserialized against the very device
+    /// it shares, and would sit in a second slot beside the concrete key naming that same device.</remarks>
     private string NormalizeDeviceKey(string? device)
     {
         if (string.IsNullOrWhiteSpace(device))
             return PrimaryDeviceKey();
-        string key = device.Trim().ToLowerInvariant();
-        return key == "cuda" ? "cuda:0" : key;
+        return BackendFactory.CanonicalDeviceKey(device);
     }
 
     /// <summary>This service's primary device key, derived from the engine's backend selector.</summary>
+    /// <remarks>Carries the engine's KIND as well as its ordinal. This used to read "not cpu, therefore cuda", so a
+    /// <c>vulkan</c> engine silently ran its LLM on CUDA — on a machine with no CUDA device that is a driver error
+    /// instead of a generation, and on a mixed box it is a generation on the wrong backend entirely.</remarks>
     private string PrimaryDeviceKey()
     {
         string resolved = BackendFactory.Resolve(_engine.BackendSelector);
         // Carry the engine's ordinal through: otherwise a 'cuda:1' engine renders on GPU 1 while its LLM lands on GPU 0.
-        return resolved == "cpu" ? "cpu" : $"cuda:{BackendFactory.ParseOrdinal(_engine.BackendSelector)}";
+        // Only a device kind carries one — 'auto:1' resolving to CPU on a GPU-less host must stay plain "cpu".
+        return BackendFactory.IsDeviceKind(resolved)
+            ? BackendFactory.WithOrdinal(resolved, BackendFactory.ParseOrdinal(_engine.BackendSelector))
+            : resolved;
     }
 
-    /// <summary>Creates the compute backend for a device key ("cpu" / "cuda:{ordinal}"), carrying the engine's VRAM policy onto it.</summary>
+    /// <summary>Creates the compute backend for a device key ("cpu" / "cuda:{ordinal}" / "vulkan:{ordinal}"), carrying the engine's VRAM policy onto it.</summary>
     /// <remarks>Instance rather than static so the policy lands here too: text slots build their own backends instead
     /// of going through <c>EnsureBackend</c>, which used to leave them on the environment's policy while every
     /// image/video backend honoured the host's configured one.</remarks>
     private IBackend CreateBackendFor(string deviceKey)
     {
         string key = (deviceKey ?? "cuda").Trim().ToLowerInvariant();
-        IBackend backend;
-        if (key == "cpu")
+        if (!BackendFactory.IsValidSelector(key))
         {
-            backend = BackendFactory.Create("cpu");
+            throw new HartsyInferenceException(
+                $"Local LLM device '{deviceKey}' is not a backend selector — expected one of "
+                + $"{string.Join(", ", BackendFactory.ValidSelectors)}, optionally with a ':{{ordinal}}' suffix.");
         }
-        else if (key.StartsWith("cuda"))
-        {
-            int ordinal = 0;
-            int colon = key.IndexOf(':');
-            if (colon >= 0 && int.TryParse(key[(colon + 1)..], out int n))
-                ordinal = n;
-            backend = BackendFactory.CreateCuda(ordinal);
-        }
-        else
-        {
-            throw new HartsyInferenceException($"Local LLM device '{deviceKey}' is not supported — choose CUDA or CPU.");
-        }
+        IBackend backend = BackendFactory.Create(key);
         _engine.ApplyVramPolicy(backend);
         return backend;
     }

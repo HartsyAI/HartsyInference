@@ -310,8 +310,31 @@ public static class BackendFactory
         return auto ? $"auto → {withDevice}" : withDevice;
     }
 
+    /// <summary>Reduces <paramref name="selector"/> to the concrete device it names: <c>auto</c> is resolved,
+    /// a device kind is given its explicit ordinal, and <c>cpu</c> stays bare.</summary>
+    /// <remarks>For callers that use a selector as a KEY — a cache slot, a gate ordinal — where two spellings of one
+    /// device must not read as two devices, and where <c>auto</c> must not survive to be classified as "not a
+    /// device" by a later check while <see cref="Create"/> builds a GPU backend from it.
+    ///
+    /// <para>A layer-split composite (<c>cuda:0+cuda:1</c>) and anything <see cref="IsValidSelector"/> rejects come
+    /// back unchanged: the first is a list of selectors rather than one, and the second has no concrete device to
+    /// name. Both are the caller's to handle.</para></remarks>
+    public static string CanonicalDeviceKey(string? selector)
+    {
+        string key = (selector ?? "").Trim().ToLowerInvariant();
+        if (key.Length == 0 || key.Contains('+') || !IsValidSelector(key))
+        {
+            return key;
+        }
+        string kind = Kind(key);
+        string resolved = kind == "auto" ? Resolve(key) : kind;
+        return IsDeviceKind(resolved) ? $"{resolved}:{ParseOrdinal(key)}" : resolved;
+    }
+
     /// <summary>Whether <paramref name="kind"/> names a backend that runs on a selectable device.</summary>
-    private static bool IsDeviceKind(string kind) => kind == "cuda" || kind == "vulkan";
+    /// <remarks>Public so callers stop spelling the test as <c>StartsWith("cuda")</c>: a device selector that is not
+    /// CPU is not therefore CUDA, and that assumption silently routed non-CUDA requests onto CUDA.</remarks>
+    public static bool IsDeviceKind(string kind) => kind == "cuda" || kind == "vulkan";
 
     /// <summary>Throws when <paramref name="selector"/> cannot resolve to a constructible backend on this machine,
     /// without constructing one — syntax plus a driver device-count query only. Lets a host surface a bad

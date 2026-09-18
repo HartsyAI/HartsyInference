@@ -69,6 +69,12 @@ public static class Program
         app.Configure(config =>
         {
             config.SetApplicationName("hartsy");
+            // Refuse an option no command declares instead of collecting it as a "remaining" argument. The default
+            // is to accept it silently, which means a typo does not fail — it runs the generation with a DIFFERENT
+            // setting than the one asked for and reports success. `--cfgscale 2` (the option is `--cfg`) and
+            // `--detect` (it is `--mode detect`) both did exactly that, and the second one produced a confusing
+            // failure three layers down, in a model loader complaining about a missing weight.
+            config.Settings.StrictParsing = true;
             config.AddCommand<TextCommand>("text")
                 .WithDescription("Generate text from a prompt with a local LLM (streams tokens).")
                 .WithExample("text", "\"Explain transformers in one sentence.\"", "-m", "qwen3", "--model-path", "/models/qwen3")

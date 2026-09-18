@@ -496,6 +496,15 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         if (spec.Catalog is not null)
             return spec.Catalog.Id;
+        // A registered recipe name is a valid answer even with no catalog entry behind it. The video error text
+        // lists those names as "currently drivable", and several (the Wan compat classes) exist only there — so
+        // without this, -m wan-22-5b was advertised, accepted, and then reported as family 'unknown'.
+        string requested = (spec.Requested ?? "").Trim();
+        if (requested.Length > 0
+            && (VideoRecipeRegistry.Resolve(requested) is not null || RecipeRegistry.Resolve(requested) is not null))
+        {
+            return requested;
+        }
         // Reached before every construction guard, via SupportedFeatures/DefaultsFor. An unknown selection has no
         // catalog entry AND no located file, so without this the null path lands in the layout resolver and the
         // caller is told "Model path not found: " with nothing after the colon.
