@@ -86,7 +86,8 @@ public sealed class PromptWeightingModeLedgerTests
         // But the blend only rewrites hidden states (sd1_clip.py:54-63; first_pooled is taken at :47, before the loop),
         // and Kandinsky5TEModel.encode_token_weights (kandinsky5.py:39-43) returns the Qwen cond plus CLIP-L's POOLED
         // vector, discarding l_out entirely. So on Kandinsky5 SwarmUI's weighting is a no-op end to end, and parity is
-        // to leave the conditioning alone. Do NOT "fix" it by blending the Qwen arm — that diverges from the reference.
+        // to leave the conditioning alone. Do NOT "fix" it by blending the Qwen arm — that diverges from the
+        // reference. See NotYetWired for why the recipe stays undeclared until strip-and-blend-nothing exists.
         ["kandinsky5"] = PromptWeightingMode.ComfyBlend,
         // supported_models.py:1157 -> anima.AnimaTokenizer (:18-21): qwen3_06b (:8-11) + t5xxl (:13-16), neither disables.
         ["anima"] = PromptWeightingMode.ComfyBlend,

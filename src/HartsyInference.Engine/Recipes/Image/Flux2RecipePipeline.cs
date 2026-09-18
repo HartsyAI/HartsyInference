@@ -122,8 +122,11 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     /// <summary>Tokenizes <paramref name="prompt"/> through whichever text stack this checkpoint carries, carrying the
     /// per-token weights its emphasis grammar asks for. Klein's <see cref="Qwen3Tokenizer.EncodeChat"/> merges
     /// <c>user\n</c> with the prompt in ONE BPE call, which is load-bearing for a prompt that begins with whitespace —
-    /// so an unweighted prompt keeps that call verbatim and only a weighted one splits per span, which is what SwarmUI
-    /// itself does (<c>calc_leaf</c> tokenizes each leaf alone).</summary>
+    /// so an unweighted prompt keeps that call verbatim and only a weighted one splits per span.</summary>
+    /// <remarks>A WEIGHTED prompt therefore tokenizes per leaf, and a leaf that begins with whitespace will not merge
+    /// with the <c>user\n</c> before it: <c>"\n(cat:1.5)"</c> emits two newline tokens where <c>"\ncat"</c> emits
+    /// one. That is SwarmUI's own behaviour — <c>calc_leaf</c> tokenizes each leaf alone — so it is parity, not drift,
+    /// and <c>ChatTemplateWeightingTests</c> pins it so nobody later "fixes" it into a boundary shift.</remarks>
     private WeightedTokenSequence Tokenize(string prompt)
     {
         IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(prompt);
