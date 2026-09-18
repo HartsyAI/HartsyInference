@@ -197,6 +197,17 @@ public sealed class LoraStack : IDisposable
                 skippedShape++;
                 continue;
             }
+            (int _, int _, LoraLayer doraLayer, float _) = slices.Find(sl => sl.Layer.Delta.DoraScale is not null);
+            if (doraLayer is not null)
+            {
+                // The magnitude vector describes the adapter's own rows. On the output axis those are a window of the
+                // fused weight and could be handled; on the input axis the normalizer is a column norm over ALL rows
+                // of the weight, which a slice cannot supply, and picking the branch is the file's choice, not ours.
+                throw new NotSupportedException(
+                    $"LoRA for '{fusedKey}' is a DoRA adapter targeting one slice of a fused projection. Its magnitude "
+                    + "rescaling is defined over the whole weight, so it cannot be applied to a slice of one. Use a "
+                    + "build of this model that keeps the projection split, or a plain LoRA.");
+            }
             if (RequiresRuntimeAdjunct(fusedBase))
             {
                 List<LowRankAdjunctTerm> terms = AdjunctTermsFor(adjuncts, fusedKey);
@@ -515,11 +526,21 @@ public sealed class LoraStack : IDisposable
     private static bool DeltaShapeMatches(LoraLayer layer, Tensor baseW) =>
         baseW.Shape.Rank == 2 && layer.Delta.MatchesShape(baseW);
 
+    /// <summary>Folds one layer's ΔW into <paramref name="accumF32"/>, which holds the weight itself rather than a delta.</summary>
+    /// <remarks>A DoRA adapter is not additive — the magnitude vector rescales the whole LoRA'd weight row- or
+    /// column-wise — so it takes <see cref="LoraDoraDecompose"/> instead of the scale-and-add, and needs the base
+    /// weight this accumulator already carries. Stacking several adapters on one weight applies them in sequence,
+    /// each decomposing against the result of the last, which is what ComfyUI does patch by patch.</remarks>
     private static void AccumulateDelta(IBackend backend, Tensor accumF32, LoraDelta delta, float strength)
     {
         Tensor deltaF32 = delta.ComputeF32(backend);
         try
         {
+            if (delta.DoraScale is not null)
+            {
+                LoraDoraDecompose.Apply(accumF32, deltaF32, delta.DoraScale, delta.Scale, strength);
+                return;
+            }
             backend.Scale(deltaF32, deltaF32, strength * delta.Scale);
             backend.Add(accumF32, accumF32, deltaF32);
         }

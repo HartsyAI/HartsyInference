@@ -22,6 +22,12 @@ stable release will require. Dates are UTC.
   which owns the merge-before-load invariant.
 - **A text-encoder LoRA strength now does something.** `TencStrength` reached the cache key but never the merge, so
   the stack applied one strength to everything; CLIP-L, CLIP-G and the new `TextEncoder2` target take it properly.
+- **A DoRA adapter is now actually decomposed on a dense base.** The magnitude vector reached `LoraDelta.DoraScale`
+  and the decomposition was written and pinned against ComfyUI's reference, but nothing on the merge path called it —
+  so a DoRA file merged as a plain LoRA with its magnitudes dropped, no warning anywhere. The quantized path already
+  refused by name; only the dense one was silent, which is the exact failure the rest of this work exists to remove.
+  A DoRA aimed at one slice of a fused projection is refused instead: its normalizer is defined over a whole weight,
+  and on the input axis that is a column norm across every row, which a third of them cannot supply.
 - A stacked LoRA carrying layers for a component the caller passed no dictionary for now warns by target and count.
   Adding `TextEncoder2` would otherwise have introduced exactly the silent partial merge this work is about — those
   keys used to be skipped as unrecognized and would now parse cleanly into a target nothing consumes.
