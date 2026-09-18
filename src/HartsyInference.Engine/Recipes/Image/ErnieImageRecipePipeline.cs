@@ -15,14 +15,14 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed ERNIE-Image pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ErnieImagePipeline"/> owns the Ministral-3-3B forward and self-manages its GPU preload/free per generation, so this only tokenizes (raw prompt, no chat template — BOS prepended, EOS appended, no padding; the pipeline assembles the sequence) and calls <see cref="ErnieImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ErnieImageLoader.Generate</c> drive path. Wraps the constructed ERNIE-Image pipeline plus its tokenizer and text stack, taking ownership of every disposable.</summary>
 public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieTokenizer tokenizer, ErnieImageLlamaTextEncoder textEncoder,
-    LlamaStyleEncoder llama, ErnieImageTransformer transformer, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
+    LlamaStyleEncoder llama, ErnieImageTransformer transformer, IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly ErnieImagePipeline _pipeline = pipeline;
     private readonly ErnieTokenizer _tokenizer = tokenizer;
     private readonly ErnieImageLlamaTextEncoder _textEncoder = textEncoder;
     private readonly LlamaStyleEncoder _llama = llama;
     private readonly ErnieImageTransformer _transformer = transformer;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -91,9 +91,9 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
         _textEncoder.Dispose();
         _llama.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

@@ -1,6 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Core.Memory;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -33,36 +34,26 @@ public sealed class FLiteCheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Holds the SafeTensorsLoader instances open while the returned tensors are in use. Dispose to release the mmap-backed memory.</summary>
-    public sealed class LoaderHandle : IDisposable
-    {
-        private readonly List<SafeTensorsLoader> _loaders;
-
-        internal LoaderHandle(List<SafeTensorsLoader> loaders) { _loaders = loaders; }
-
-        public void Dispose()
-        {
-            foreach (SafeTensorsLoader loader in _loaders) loader.Dispose();
-            _loaders.Clear();
-        }
-    }
-
-    /// <summary>Loads all F-Lite components from a folder. Reads every safetensors file in <c>{root}/dit_model</c>, <c>{root}/text_encoder</c>, <c>{root}/vae</c> and partitions them into the three component dicts.</summary>
-    public static (ConvertedWeights weights, LoaderHandle handle) LoadAndConvert(string folderPath)
+    /// <summary>Loads all F-Lite components from a folder. Reads every checkpoint container in <c>{root}/dit_model</c>, <c>{root}/text_encoder</c>, <c>{root}/vae</c> and partitions them into the three component dicts.</summary>
+    /// <remarks>Each component opens as one <see cref="Checkpoints.CheckpointSource"/>, so a GGUF or a quantized
+    /// repack of any of the three loads, and its quantization companions are folded across the whole component
+    /// rather than per shard — F-Lite never folded them at all before, so an fp8_scaled build ran at
+    /// <c>1/scale</c>.</remarks>
+    /// <returns>The three component dicts, plus the single handle that keeps their memory mapped.</returns>
+    public static (ConvertedWeights weights, IDisposable sources) LoadFolder(string folderPath)
     {
         if (!Directory.Exists(folderPath))
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"F-Lite folder does not exist: {folderPath}");
 
-        List<SafeTensorsLoader> loaders = new();
-
+        List<IDisposable> sources = new List<IDisposable>(3);
         try
         {
-            Dictionary<string, Tensor> transformer = LoadComponent(folderPath, "dit_model", loaders);
-            Dictionary<string, Tensor> textEncoder = LoadComponent(folderPath, "text_encoder", loaders);
+            Dictionary<string, Tensor> transformer = LoadComponent(folderPath, "dit_model", sources);
+            Dictionary<string, Tensor> textEncoder = LoadComponent(folderPath, "text_encoder", sources);
             // VAE in F-Lite folder is the Flux Schnell VAE saved in diffusers format — keys are
             // already canonical (encoder.down_blocks.X.resnets.Y..., decoder.up_blocks.X..., etc.)
             // No key remap is needed (and would mangle them — ConvertVaeKey targets LDM-format keys).
-            Dictionary<string, Tensor> vae = LoadComponent(folderPath, "vae", loaders);
+            Dictionary<string, Tensor> vae = LoadComponent(folderPath, "vae", sources);
 
             Logs.Info($"F-Lite loaded: dit={transformer.Count} keys, t5={textEncoder.Count} keys, vae={vae.Count} keys.");
 
@@ -72,39 +63,27 @@ public sealed class FLiteCheckpointConverter
                 T5 = textEncoder,
                 Vae = vae,
             };
-            return (converted, new LoaderHandle(loaders));
+            return (converted, new CompositeDisposable([.. sources]));
         }
         catch
         {
-            foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
+            foreach (IDisposable source in sources) source.Dispose();
             throw;
         }
     }
 
-    private static Dictionary<string, Tensor> LoadComponent(string root, string component, List<SafeTensorsLoader> loaders)
+    private static Dictionary<string, Tensor> LoadComponent(string root, string component, List<IDisposable> sources)
     {
         string componentDir = Path.Combine(root, component);
         if (!Directory.Exists(componentDir))
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"F-Lite component directory missing: {componentDir}");
 
-        string[] shards = Directory.GetFiles(componentDir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(componentDir);
         if (shards.Length == 0)
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"No safetensors shards in {componentDir}");
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"No safetensors or GGUF checkpoint in {componentDir}");
 
-        Dictionary<string, Tensor> merged = new();
-        foreach (string shard in shards)
-        {
-            SafeTensorsLoader loader = new();
-            loader.Load(shard);
-            loaders.Add(loader);
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-            {
-                if (merged.ContainsKey(kvp.Key))
-                    throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Duplicate key '{kvp.Key}' across shards in {componentDir}");
-                merged[kvp.Key] = kvp.Value;
-            }
-        }
-        return merged;
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
+        sources.Add(source);
+        return new Dictionary<string, Tensor>(source.Weights);
     }
-
 }

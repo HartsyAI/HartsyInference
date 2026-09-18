@@ -20,7 +20,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Krea 2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Krea2Pipeline"/> owns the Qwen3-VL-4B forward (it taps 12 decoder layers itself), so this only builds the templated token ids — byte-identical to Qwen-Image's template — plus the prefix-drop indices and calls <see cref="Krea2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Krea2Loader.Generate</c>. Wraps the constructed Krea 2 pipeline plus its components, taking ownership of every disposable.</summary>
 public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
     Krea2Transformer transformer, QwenImageVaeDecoder vae, QwenImageVaeEncoder? vaeEncoder, bool isTurbo,
-    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
+    IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Krea 2's prompt template is byte-identical to Qwen-Image's — same system prompt, same prefix-drop design.</summary>
     private const string Krea2SystemPrompt =
@@ -37,7 +37,7 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
     private readonly QwenImageVaeDecoder _vae = vae;
     private readonly QwenImageVaeEncoder? _vaeEncoder = vaeEncoder;
     private readonly bool _isTurbo = isTurbo;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <summary>A Turbo/TDM checkpoint samples in 8 guidance-free steps, so it resolves against <see cref="Krea2Recipe.TurboDefaults"/> rather than Base's 28 steps at CFG 4.5.</summary>
@@ -170,9 +170,9 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         _transformer.Dispose();
         _vae.Dispose();
         _vaeEncoder?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

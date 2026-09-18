@@ -33,7 +33,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     private readonly IBackend _backend;
     private readonly IBackend _textBackend;
     private readonly ImageDefaults _variantDefaults;
-    private readonly SafeTensorsLoader _checkpointLoader;
+    private readonly IDisposable _checkpoint;
     private readonly SafeTensorsLoader _qwenLoader;
     private readonly SafeTensorsLoader _vaeLoader;
     private int _disposed;
@@ -52,7 +52,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
         ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder, Tensor[] transformerWeightTensors,
         Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights, IBackend backend, IBackend textBackend,
-        ImageDefaults variantDefaults, SafeTensorsLoader checkpointLoader, SafeTensorsLoader qwenLoader,
+        ImageDefaults variantDefaults, IDisposable checkpoint, SafeTensorsLoader qwenLoader,
         SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
@@ -68,7 +68,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         _backend = backend;
         _textBackend = textBackend;
         _variantDefaults = variantDefaults;
-        _checkpointLoader = checkpointLoader;
+        _checkpoint = checkpoint;
         _qwenLoader = qwenLoader;
         _vaeLoader = vaeLoader;
     }
@@ -372,7 +372,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
             TryDispose("transformer host weight", weight.Dispose);
         foreach (Tensor weight in _ownedVaeWeights)
             TryDispose("VAE host weight", weight.Dispose);
-        TryDispose("checkpoint loader", _checkpointLoader.Dispose);
+        TryDispose("checkpoint", _checkpoint.Dispose);
         TryDispose("text-encoder loader", _qwenLoader.Dispose);
         TryDispose("VAE loader", _vaeLoader.Dispose);
         // Last: the stack owns the merged weight tensors the transformer was serving.

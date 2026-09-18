@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using HartsyInference.Video.Pipelines;
@@ -45,7 +46,7 @@ public sealed unsafe class Kandinsky5W8A8MeasurementTests
         if (!File.Exists(Path.Combine(ptxDir, "w8a8.ptx"))) { _output.WriteLine("SKIPPED: w8a8.ptx missing"); return; }
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
-        (Kandinsky5CheckpointConverter.ConvertedWeights converted, List<SafeTensorsLoader> loaders) =
+        (Kandinsky5CheckpointConverter.ConvertedWeights converted, CheckpointSource transformerSource) =
             Kandinsky5CheckpointConverter.LoadDiffusersFolder(transformerDir);
         try
         {
@@ -136,7 +137,7 @@ public sealed unsafe class Kandinsky5W8A8MeasurementTests
                 $"(determinism floor {floorRel:e3})");
             Assert.True(maxRel < 3e-2, $"W8A8 velocity relL2 exceeds the near-lossless budget at some timestep: max={maxRel:e3}");
         }
-        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+        finally { transformerSource.Dispose(); }
     }
 
     private static Tensor Zeros(TensorShape shape)

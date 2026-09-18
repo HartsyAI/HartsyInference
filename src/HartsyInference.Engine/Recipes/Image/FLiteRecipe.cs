@@ -5,7 +5,9 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
@@ -38,35 +40,49 @@ public sealed class FLiteRecipe : IArchitectureRecipe
         string folderPath = ResolveFolderRoot(context.CheckpointPath, "dit_model", "text_encoder", "vae");
         Logs.Info($"[FLiteRecipe] Loading F-Lite folder: {Path.GetFileName(folderPath)}.");
 
-        (FLiteCheckpointConverter.ConvertedWeights converted, FLiteCheckpointConverter.LoaderHandle handle) = FLiteCheckpointConverter.LoadAndConvert(folderPath);
-        Logs.Info($"[FLiteRecipe] Converted: {converted.Transformer.Count} dit / {converted.T5.Count} T5 / {converted.Vae.Count} VAE keys.");
-        if (converted.Transformer.Count == 0 || converted.T5.Count == 0 || converted.Vae.Count == 0)
+        (FLiteCheckpointConverter.ConvertedWeights converted, IDisposable sources) = FLiteCheckpointConverter.LoadFolder(folderPath);
+        IDisposable checkpoint = sources;
+        try
         {
-            handle.Dispose();
-            throw new InvalidOperationException($"F-Lite folder '{folderPath}' is missing dit_model / text_encoder / vae components.");
+            Logs.Info($"[FLiteRecipe] Converted: {converted.Transformer.Count} dit / {converted.T5.Count} T5 / {converted.Vae.Count} VAE keys.");
+            if (converted.Transformer.Count == 0 || converted.T5.Count == 0 || converted.Vae.Count == 0)
+            {
+                throw new InvalidOperationException($"F-Lite folder '{folderPath}' is missing dit_model / text_encoder / vae components.");
+            }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(sources, prepared);
+
+            FLiteConfig config = FLiteConfig.V1;
+            Logs.Info($"[FLiteRecipe] Building transformer (hidden={config.HiddenSize}, depth={config.Depth}).");
+            FLiteTransformer transformer = new FLiteTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = converted.Transformer },
+                "FLiteRecipe");
+            transformer.LoadWeights(converted.Transformer);
+
+            T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
+            t5.LoadWeights(converted.T5);
+
+            VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
+            vae.LoadWeights(converted.Vae);
+
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, converted.Vae, "FLiteRecipe");
+            FLitePipeline pipeline = new FLitePipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
+            Logs.Info("[FLiteRecipe] F-Lite ready.");
+            return new FLiteRecipePipeline(pipeline, new T5Tokenizer(maxLength: 512), checkpoint, loraStack);
         }
-
-        FLiteConfig config = FLiteConfig.V1;
-        Logs.Info($"[FLiteRecipe] Building transformer (hidden={config.HiddenSize}, depth={config.Depth}).");
-        FLiteTransformer transformer = new FLiteTransformer(config);
-        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
-        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
-            context,
-            new LoraMergeTargets { Transformer = converted.Transformer },
-            "FLiteRecipe");
-        transformer.LoadWeights(converted.Transformer);
-
-        T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
-        t5.LoadWeights(converted.T5);
-
-        VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
-        vae.LoadWeights(converted.Vae);
-
-                VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux, converted.Vae, "FLiteRecipe");
-        FLitePipeline pipeline = new FLitePipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
-        Logs.Info("[FLiteRecipe] F-Lite ready.");
-        return new FLiteRecipePipeline(pipeline, new T5Tokenizer(maxLength: 512), handle, loraStack);
+        catch (Exception ex)
+        {
+            Logs.Error("[FLiteRecipe] Construction failed.", ex);
+            checkpoint.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Resolves the F-Lite diffusers-folder root from the checkpoint path: if it is already a directory containing one of the expected subfolders it is used directly, otherwise the loader walks up to 3 parent levels from the picked file (mirrors the SwarmUI loader's <c>ResolveFolderRoot</c>).</summary>

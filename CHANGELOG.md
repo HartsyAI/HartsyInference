@@ -6,6 +6,34 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.95
+
+- **Seventeen more image families open their checkpoints through the one container**, so each accepts a GGUF or a
+  quantized repack rather than safetensors alone: Chroma and its Radiance and Zeta variants, Z-Image, Lumina-2,
+  AuraFlow, Anima, Ideogram 4, ERNIE-Image, Krea 2, HiDream, Boogu, Mage-Flow's side models, Kandinsky 5, Lance,
+  OmniGen 2 and F-Lite. Every image recipe now loads this way except SD1.5/SDXL, which need rank-4 quantized
+  convolution support first, and Lens.
+- **Chroma's four split helpers sized their copies from `DType.SizeInBytes`, which is 0 for every block quant.** On
+  a GGUF they produced correctly-shaped, entirely zero projections while the dense path stayed byte-perfect — the
+  same arithmetic that was fixed in the QKV splits, in four more places. They go through a new quant-aware
+  `SplitRows`, which narrows each piece's row scale before the first allocation so a refusal cannot strand one.
+- **F-Lite never folded its quantization companions at all**, so an fp8_scaled build ran every weight at `1/scale`.
+- Zeta-Chroma's attention fusion concatenated Q/K/V and dropped every companion; it refuses a per-row-quantized
+  weight by name instead, and likewise a build that stores Q, K and V in three different dtypes — the fused tensor
+  can declare only one, and a K or V wider than Q used to be copied past the end of it. Krea 2's pre-rename
+  companion carry is deleted, dead now that folding precedes renaming.
+- Lumina-2, HiDream and OmniGen 2 widen to the dtype their transformer actually runs, rather than the F16 default
+  that would have left a GGUF mixing dense F32 with widened F16.
+- **A component published as `.gguf` inside a diffusers folder was invisible.** F-Lite, Lance, Kandinsky 5, Krea 2
+  and Boogu discovered their components with a `*.safetensors` glob and threw before the container could be sniffed,
+  so the GGUF path they now advertise was unreachable without renaming every file to a lie. Folder discovery reads
+  the leading bytes instead, the way single-file loading always has, and a set that mixes the two containers is
+  refused rather than merged into one dictionary.
+- **Selecting a Lumina-2 GGUF stored beside the original sharded release loaded the release instead.** Any sibling
+  `*.safetensors.index.json` used to expand the selection into every safetensors in the folder; the index now has to
+  list the selected file before it expands anything, so a repack — or any second checkpoint parked there — loads as
+  itself.
+
 ## alpha.94
 
 - **A LoRA now applies to a block-quantized base without requantizing it.** The classic codecs a GGUF uses have no

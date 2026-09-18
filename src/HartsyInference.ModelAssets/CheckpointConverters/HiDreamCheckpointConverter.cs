@@ -1,10 +1,9 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a HiDream i1 single-file safetensors checkpoint into transformer / VAE / CLIP-L / CLIP-G / T5-XXL / Llama-3.1 dictionaries. HiDream ships in canonical diffusers naming, so no key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</summary>
+/// <summary>Loads + buckets a HiDream i1 single-file safetensors checkpoint into transformer / VAE / CLIP-L / CLIP-G / T5-XXL / Llama-3.1 dictionaries. HiDream ships in canonical diffusers naming, so no key remapping is required. </summary>
 public sealed class HiDreamCheckpointConverter
 {
     /// <summary>Result of partitioning a HiDream i1 single-file checkpoint.</summary>
@@ -19,19 +18,13 @@ public sealed class HiDreamCheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions a HiDream i1 single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
-    }
-
     /// <summary>Partitions a flat dict by key prefix.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because folding after a converter has renamed <c>.weight</c> pairs nothing
+    /// and drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        Dictionary<string, Tensor> dequanted = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(HiDreamCheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new();
         Dictionary<string, Tensor> vae = new();
@@ -40,7 +33,7 @@ public sealed class HiDreamCheckpointConverter
         Dictionary<string, Tensor> t5 = new();
         Dictionary<string, Tensor> llama = new();
 
-        foreach (KeyValuePair<string, Tensor> kvp in dequanted)
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;

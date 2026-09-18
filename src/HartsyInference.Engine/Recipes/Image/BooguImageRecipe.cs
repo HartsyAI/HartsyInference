@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
@@ -61,18 +62,21 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            (Dictionary<string, Tensor> transformerW, SafeTensorsLoader transformerL) =
+            (Dictionary<string, Tensor> transformerW, CheckpointSource transformerSource) =
                 ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
-            loaders.Add(transformerL);
+            loaders.Add(transformerSource);
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(transformerW, context.TransformerBackends));
 
             // TODO(E-IMG-4): the reference-image edit path also loads the Qwen3-VL vision tower (visual.* keys) and
             // wires a Qwen3VlMultimodalEncoder. Text-to-image only here, so the language tower alone is loaded.
-            (Dictionary<string, Tensor> teW, SafeTensorsLoader teL) =
+            (Dictionary<string, Tensor> teW, CheckpointSource teSource) =
                 ComponentLoader.Load(tePath, "BooguImageRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
-            loaders.Add(teL);
+            loaders.Add(teSource);
 
             // The auto-downloaded flux_ae.safetensors ships BFL-native LDM keys; ConvertVaeKey remaps LDM → diffusers
             // and passes already-diffusers keys through unchanged (a raw load throws on mid_block.resnets.0).
@@ -107,7 +111,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[BooguImageRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

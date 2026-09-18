@@ -8,8 +8,8 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
@@ -91,7 +91,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
             // nvfp4ToFp8: the DiTs are ~93% nvfp4. Dequantizing to F16 would need 35.9 GB for the pair; folding the
@@ -107,6 +107,12 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
             Logs.Info($"[Ideogram4Recipe] Loading Flux.2 VAE: {Path.GetFileName(vaePath)}.");
             Dictionary<string, Tensor> vaeWeights = ComponentLoader.Load(vaePath, "Ideogram4Recipe", keyTransform: null, applyFp8Dequant: false, loaders);
+
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Both DiTs are one model split by role and execute on the same devices, so both go
+            // through the same policy; the handles are added to the disposal bag as they are created.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(condWeights, context.TransformerBackends));
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(uncondWeights, context.TransformerBackends));
 
             Ideogram4Config config = Ideogram4Config.V4;
             Logs.Info($"[Ideogram4Recipe] Building models (dim={config.LlmFeaturesDim} LLM features, {config.MaxTextTokens} max text tokens).");
@@ -149,7 +155,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Ideogram4Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

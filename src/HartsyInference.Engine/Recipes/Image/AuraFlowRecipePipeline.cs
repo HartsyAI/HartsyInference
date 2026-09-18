@@ -12,12 +12,12 @@ using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed AuraFlow pipeline driven against the native <see cref="ImageRequest"/>. <see cref="AuraFlowPipeline"/> owns the Pile-T5-XL encoder, so this only tokenizes the prompt/negative (plus their T5 attention masks) and calls <see cref="AuraFlowPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>AuraFlowLoader.Generate</c> drive path (text-to-image only). Wraps the constructed AuraFlow pipeline plus its tokenizer, taking ownership of every disposable.</summary>
-public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenizer tokenizer, SafeTensorsLoader checkpointLoader,
+public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenizer tokenizer, IDisposable checkpoint,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly AuraFlowPipeline _pipeline = pipeline;
     private readonly T5Tokenizer _tokenizer = tokenizer;
-    private readonly SafeTensorsLoader _checkpointLoader = checkpointLoader;
+    private readonly IDisposable _checkpoint = checkpoint;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -62,7 +62,7 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
     {
         _pipeline.Dispose();
         _tokenizer.Dispose();
-        _checkpointLoader.Dispose();
+        _checkpoint.Dispose();
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
     }

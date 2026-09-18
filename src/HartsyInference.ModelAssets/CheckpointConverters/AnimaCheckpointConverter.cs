@@ -1,6 +1,5 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -35,26 +34,20 @@ public sealed class AnimaCheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions an Anima single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
-    }
-
     /// <summary>Partitions a flat dict by key prefix and strips prefixes from the surviving keys.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter strips the <c>net.</c> prefix from <c>.weight</c>
+    /// without pairing <c>.weight_scale</c>, and folding after that drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        Dictionary<string, Tensor> dequanted = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(AnimaCheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new();
         Dictionary<string, Tensor> llmAdapter = new();
         Dictionary<string, Tensor> vae = new();
         Dictionary<string, Tensor> textEncoder = new();
 
-        foreach (KeyValuePair<string, Tensor> kvp in dequanted)
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;

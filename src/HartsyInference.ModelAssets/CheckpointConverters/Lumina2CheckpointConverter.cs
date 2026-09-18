@@ -1,9 +1,10 @@
+using System.Text.Json;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converter for Lumina-Image-2.0 (Alpha-VLLM) safetensors checkpoints. The diffusers and ComfyUI single-file distributions both use the same key naming as the upstream <c>Lumina2Transformer2DModel</c>: separate <c>attn.to_q/to_k/to_v.weight</c>, <c>attn.to_out.0.weight</c>, <c>attn.norm_q/k.weight</c>, <c>norm1.norm.weight</c> + <c>norm1.linear.{weight,bias}</c> (or just <c>norm1.weight</c> on context_refiner), <c>norm2.weight</c>, <c>ffn_norm{1,2}.weight</c>, <c>feed_forward.linear_{1,2,3}.weight</c>, <c>x_embedder.{weight,bias}</c>, <c>time_caption_embed.{caption_embedder.{0,1},timestep_embedder.linear_{1,2}}.*</c>, and <c>norm_out.linear_{1,2}.{weight,bias}</c>. This converter is mostly passthrough — its job is to fold per-tensor weight scales into <see cref="Tensor.Fp8ScaleFactor"/> (when shipped with ComfyUI <c>fp8_scaled</c> metadata) and partition transformer/VAE/text-encoder buckets.</summary>
+/// <summary>Converter for Lumina-Image-2.0 (Alpha-VLLM) safetensors checkpoints. The diffusers and ComfyUI single-file distributions both use the same key naming as the upstream <c>Lumina2Transformer2DModel</c>: separate <c>attn.to_q/to_k/to_v.weight</c>, <c>attn.to_out.0.weight</c>, <c>attn.norm_q/k.weight</c>, <c>norm1.norm.weight</c> + <c>norm1.linear.{weight,bias}</c> (or just <c>norm1.weight</c> on context_refiner), <c>norm2.weight</c>, <c>ffn_norm{1,2}.weight</c>, <c>feed_forward.linear_{1,2,3}.weight</c>, <c>x_embedder.{weight,bias}</c>, <c>time_caption_embed.{caption_embedder.{0,1},timestep_embedder.linear_{1,2}}.*</c>, and <c>norm_out.linear_{1,2}.{weight,bias}</c>. This converter is mostly passthrough — its job is to partition transformer/VAE/text-encoder buckets.</summary>
 public sealed class Lumina2CheckpointConverter
 {
     /// <summary>Result of partitioning a Lumina-Image-2.0 single-file safetensors checkpoint.</summary>
@@ -22,48 +23,51 @@ public sealed class Lumina2CheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions a Lumina-Image-2.0 checkpoint: a single file, or one shard of a diffusers multi-shard release (detected via a sibling <c>*.safetensors.index.json</c> in the same directory — the real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards; every other shard alongside <paramref name="checkpointPath"/> is merged in too).</summary>
-    public static (ConvertedWeights weights, IReadOnlyList<SafeTensorsLoader> loaders) LoadAndConvert(string checkpointPath)
+    /// <summary>Every file that makes up this checkpoint: the shard set a sibling <c>*.safetensors.index.json</c> lists <paramref name="checkpointPath"/> as a member of (the real <c>Alpha-VLLM/Lumina-Image-2.0</c> diffusers weights ship as 2 shards), or the one path otherwise.</summary>
+    /// <remarks><para>The shards are opened as one <see cref="Checkpoints.CheckpointSource"/> rather than merged raw:
+    /// safetensors sharding makes no promise that a weight and its <c>.weight_scale</c> land in the same file, so
+    /// folding each shard alone splits pairs that belong together.</para>
+    /// <para>Membership is what decides it, not the index's mere presence: a GGUF repack parked beside the original
+    /// sharded release would otherwise be discarded for the full-precision checkpoint the index names, which loads a
+    /// different model — or nothing, out of memory — with no sign that the selection was ignored.</para></remarks>
+    public static IReadOnlyList<string> ResolveShardPaths(string checkpointPath)
     {
+        ArgumentException.ThrowIfNullOrEmpty(checkpointPath);
         string? dir = Path.GetDirectoryName(checkpointPath);
-        bool isMultiShard = !string.IsNullOrEmpty(dir) && Directory.GetFiles(dir, "*.safetensors.index.json").Length > 0;
-
-        List<SafeTensorsLoader> loaders = new();
-        Dictionary<string, Tensor> merged = new();
-        try
+        if (string.IsNullOrEmpty(dir))
+            return [checkpointPath];
+        string selected = Path.GetFileName(checkpointPath);
+        foreach (string indexPath in Directory.GetFiles(dir, "*.safetensors.index.json"))
         {
-            string[] shardPaths = isMultiShard
-                ? Directory.GetFiles(dir!, "*.safetensors").OrderBy(p => p, StringComparer.Ordinal).ToArray()
-                : new[] { checkpointPath };
-            foreach (string shardPath in shardPaths)
+            SortedSet<string> members = ReadIndexMembers(indexPath);
+            if (!members.Contains(selected))
+                continue;
+            List<string> shards = new List<string>(members.Count);
+            foreach (string member in members)
             {
-                SafeTensorsLoader loader = new();
-                loader.Load(shardPath);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
-                    merged[kv.Key] = kv.Value;
+                string shard = Path.Combine(dir, member);
+                if (!File.Exists(shard))
+                    throw new FileNotFoundException($"Lumina-2 shard '{member}' listed in '{indexPath}' is missing.", shard);
+                shards.Add(shard);
             }
+            return shards;
         }
-        catch
-        {
-            foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
-            throw;
-        }
-
-        ConvertedWeights converted = Convert(merged);
-        return (converted, loaders);
+        return [checkpointPath];
     }
 
     /// <summary>Partitions a flat dict of Lumina-Image-2.0 safetensors keys.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter strips key prefixes its <c>.weight_scale</c>
+    /// companion does not share, and folding after that pairs nothing and drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        Dictionary<string, Tensor> dequanted = ApplyFp8WeightScales(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(Lumina2CheckpointConverter));
 
-        Dictionary<string, Tensor> transformer = new(dequanted.Count);
+        Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> vae = new();
         Dictionary<string, Tensor> textEncoder = new();
 
-        foreach (KeyValuePair<string, Tensor> kvp in dequanted)
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;
@@ -179,43 +183,23 @@ public sealed class Lumina2CheckpointConverter
         return false;
     }
 
-    /// <summary>Folds ComfyUI <c>fp8_scaled</c> per-tensor scale companions into <see cref="Tensor.Fp8ScaleFactor"/>. Suffix used here is <c>.weight_scale</c> (matches ComfyUI's convention for Lumina 2.0 quants when distributed). Also drops <c>.comfy_quant</c> metadata blobs.</summary>
-    private static unsafe Dictionary<string, Tensor> ApplyFp8WeightScales(Dictionary<string, Tensor> source)
+    /// <summary>The distinct shard file names a diffusers <c>*.safetensors.index.json</c> weight map points at, in ordinal order.</summary>
+    private static SortedSet<string> ReadIndexMembers(string indexPath)
     {
-        Dictionary<string, Tensor> scales = new();
-        foreach (KeyValuePair<string, Tensor> kvp in source)
+        SortedSet<string> members = new SortedSet<string>(StringComparer.Ordinal);
+        using FileStream stream = File.OpenRead(indexPath);
+        using JsonDocument document = JsonDocument.Parse(stream);
+        if (!document.RootElement.TryGetProperty("weight_map", out JsonElement weightMap)
+            || weightMap.ValueKind != JsonValueKind.Object)
         {
-            if (kvp.Key.EndsWith(".weight_scale", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".weight_scale".Length];
-                scales[baseKey] = kvp.Value;
-            }
+            return members;
         }
-        if (scales.Count == 0)
-            return source;
-
-        Dictionary<string, Tensor> result = new(source.Count - 2 * scales.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in source)
+        foreach (JsonProperty entry in weightMap.EnumerateObject())
         {
-            if (kvp.Key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
-                kvp.Key.EndsWith(".comfy_quant", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (kvp.Value.DType == DType.F8E4M3 &&
-                kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".weight".Length];
-                if (scales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
-                {
-                    float scale = ((float*)scaleT.DataPointer)[0];
-                    kvp.Value.Fp8ScaleFactor = scale;
-                }
-            }
-
-            result[kvp.Key] = kvp.Value;
+            string? file = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
+            if (!string.IsNullOrEmpty(file))
+                members.Add(file);
         }
-        return result;
+        return members;
     }
 }

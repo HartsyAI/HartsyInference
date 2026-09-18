@@ -33,18 +33,18 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
     private readonly MageVaeDecoder _vae;
     private readonly MageVaeEncoder? _vaeEncoder;
     private readonly bool _isTurbo;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources;
     private readonly IDisposable? _ggufHandle;
     private readonly MergedLoraStack? _loraStack;
     private int _disposed;
 
     public MageFlowRecipePipeline(MageFlowPipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, MageVaeDecoder vae, MageVaeEncoder? vaeEncoder, bool isTurbo,
-        List<SafeTensorsLoader> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
+        IReadOnlyList<IDisposable> componentSources, IDisposable? ggufHandle, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _pipeline = pipeline; _tokenizer = tokenizer; _textEncoder = textEncoder; _transformer = transformer;
-        _vae = vae; _vaeEncoder = vaeEncoder; _isTurbo = isTurbo; _loaders = loaders; _ggufHandle = ggufHandle;
+        _vae = vae; _vaeEncoder = vaeEncoder; _isTurbo = isTurbo; _componentSources = componentSources; _ggufHandle = ggufHandle;
     }
 
     public ImageDefaults? VariantDefaults => _isTurbo ? MageFlowRecipe.TurboDefaults : MageFlowRecipe.FamilyDefaults;
@@ -154,7 +154,7 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         _vae.Dispose();
         _vaeEncoder?.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders) loader.Dispose();
+        foreach (IDisposable source in _componentSources) source.Dispose();
         _ggufHandle?.Dispose();
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

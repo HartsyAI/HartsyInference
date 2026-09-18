@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -72,22 +73,25 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         string vaePath = ResolveComponent(context.Components?.Vae, SideModels.QwenImageVae, context.Cancel,
             "Qwen-Image VAE", "VAE", "vae");
 
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) = ComponentLoader.Load(
+            (Dictionary<string, Tensor> ditWeights, CheckpointSource ditSource) = ComponentLoader.Load(
                 context.CheckpointPath, "Krea2Recipe", key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)), applyFp8Dequant: true);
-            loaders.Add(ditLoader);
+            loaders.Add(ditSource);
             if (ditWeights.Count == 0)
             {
                 throw new InvalidOperationException($"Krea 2 checkpoint '{fileName}' contains no transformer weights.");
             }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(ditWeights, context.TransformerBackends));
 
-            (Dictionary<string, Tensor> teWeights, SafeTensorsLoader teLoader) = ComponentLoader.Load(encoderPath, "Krea2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
-            loaders.Add(teLoader);
+            (Dictionary<string, Tensor> teWeights, CheckpointSource teSource) = ComponentLoader.Load(encoderPath, "Krea2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
+            loaders.Add(teSource);
 
-            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = ComponentLoader.Load(vaePath, "Krea2Recipe", keyTransform: null, applyFp8Dequant: false);
-            loaders.Add(vaeLoader);
+            (Dictionary<string, Tensor> vaeWeights, CheckpointSource vaeSource) = ComponentLoader.Load(vaePath, "Krea2Recipe", keyTransform: null, applyFp8Dequant: false);
+            loaders.Add(vaeSource);
 
             // Krea 2's fp8-scaled transformer is ~13 GB; caching every fp8->F16/BF16 weight cast roughly doubles
             // that in VRAM (original fp8 + cached activation-dtype copy) and OOMs partway through text encoding —
@@ -140,7 +144,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Krea2Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

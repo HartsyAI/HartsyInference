@@ -12,7 +12,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 public sealed class Krea2CheckpointConverter
 {
     /// <summary>Loads the Krea 2 transformer from <c>{root}/transformer/</c> (or a <c>krea2*</c> single file). fp8 folded. Keys are normalized to the diffusers <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> convention via <see cref="RemapTransformerKey"/> (handles both the released <b>raw</b> Comfy single-file naming — <c>blocks.N.*</c> / <c>txtfusion.*</c> / <c>tmlp</c> / <c>tproj</c> / <c>last.*</c> — and an already-diffusers folder, which passes through).</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTransformer(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadTransformer(string rootPath)
     {
         string[] shards = CheckpointConvertUtils.DiscoverShards(Path.Combine(rootPath, "transformer"), rootPath, "krea2", "Krea 2");
         return CheckpointConvertUtils.LoadShards(shards, 1200,
@@ -22,22 +22,12 @@ public sealed class Krea2CheckpointConverter
     /// <summary>Maps a Krea 2 transformer weight key to the diffusers convention the engine's <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> consumes. The released checkpoints use the model's original ("raw") names; this rewrites them. Already-diffusers keys are returned unchanged.
     ///
     /// <para>Top level: <c>first→img_in</c>, <c>tmlp.0/2→time_embed.linear_1/2</c>, <c>tproj.1→time_mod_proj</c>, <c>txtmlp.0.scale→txt_in.norm.weight</c>, <c>txtmlp.1/3→txt_in.linear_1/2</c>, <c>txtfusion→text_fusion</c>, <c>last.modulation.lin→final_layer.scale_shift_table</c>, <c>last.norm.scale→final_layer.norm.weight</c>, <c>last.linear→final_layer.linear</c>. Blocks: <c>blocks.N→transformer_blocks.N</c> with the per-block sub-map (<c>prenorm/postnorm.scale→norm1/norm2.weight</c>, <c>attn.w{q,k,v,o}→attn.to_{q,k,v,out.0}</c>, <c>attn.gate→attn.to_gate</c>, <c>attn.qknorm.{q,k}norm.scale→attn.norm_{q,k}.weight</c>, <c>mlp.{gate,up,down}→ff.{gate,up,down}</c>, <c>mod.lin→scale_shift_table</c>).</para></summary>
+    /// <remarks>Companion keys never reach here: <see cref="Checkpoints.CheckpointSource"/> folds
+    /// <c>.weight_scale</c> / <c>.scale_weight</c> onto their weights before any key mapping runs, which is what
+    /// closed the Krea2-class bug where a converter renamed <c>.weight</c> but not its companion and left the fp8
+    /// weights ~250–900× too large.</remarks>
     public static string RemapTransformerKey(string key)
     {
-        // fp8 scale companions (`.weight_scale` / `.scale_weight`) must remap to the SAME base key as their
-        // `.weight` so ApplyFp8ScaledDequant can pair them (e.g. raw `blocks.0.attn.wq.weight_scale` →
-        // `transformer_blocks.0.attn.to_q.weight_scale`, matching `…attn.to_q.weight`). Remap the underlying
-        // weight name, then restore the scale suffix. Without this the scale is dropped and fp8 weights stay
-        // ~250–900× too large → noise.
-        foreach (string suffix in new[] { ".weight_scale", ".scale_weight" })
-        {
-            if (key.EndsWith(suffix, StringComparison.Ordinal))
-            {
-                string mappedWeight = RemapTransformerKey(key[..^suffix.Length] + ".weight");
-                return mappedWeight[..^".weight".Length] + suffix;
-            }
-        }
-
         // Already-diffusers keys pass through.
         if (key.StartsWith("img_in.", StringComparison.Ordinal) || key.StartsWith("transformer_blocks.", StringComparison.Ordinal)
             || key.StartsWith("text_fusion.", StringComparison.Ordinal) || key.StartsWith("time_embed.", StringComparison.Ordinal)
@@ -104,20 +94,19 @@ public sealed class Krea2CheckpointConverter
     }
 
     /// <summary>Loads the Qwen-Image VAE from <c>{root}/vae/</c> (keys consumed directly by <c>QwenImageVaeDecoder</c>).</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVae(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadVae(string rootPath)
     {
         string dir = Path.Combine(rootPath, "vae");
         if (!Directory.Exists(dir))
             throw new DirectoryNotFoundException($"VAE folder not found: {dir}");
-        string[] shards = Directory.GetFiles(dir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(dir);
         if (shards.Length == 0)
-            throw new FileNotFoundException($"No VAE .safetensors found under {dir}.");
-        Array.Sort(shards);
+            throw new FileNotFoundException($"No VAE checkpoint found under {dir}.");
         return CheckpointConvertUtils.LoadShards(shards, 400, k => k);
     }
 
     /// <summary>Loads + remaps the Qwen3-VL-4B language tower from <c>{root}/text_encoder/</c> to the <c>LlamaStyleEncoder</c> convention (drops the vision tower and <c>lm_head</c>).</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTextEncoder(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadTextEncoder(string rootPath)
     {
         string te1 = Path.Combine(rootPath, "text_encoder");
         string te2 = Path.Combine(rootPath, "text_encoders");

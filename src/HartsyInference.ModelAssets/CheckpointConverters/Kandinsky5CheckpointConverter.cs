@@ -9,7 +9,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// The diffusers folder layout ships the transformer in a per-component <c>transformer/</c> subdirectory whose state dict is already in the canonical form (<c>text_embeddings.in_layer.weight</c>, <c>visual_transformer_blocks.{i}.self_attention.to_query.weight</c>, etc.). This converter therefore mostly handles two real-world quirks:
 /// <list type="bullet">
 /// <item>Single-file repackaged checkpoints sometimes prepend a <c>transformer.</c> or <c>model.</c> prefix to every key. We strip the first matching prefix.</item>
-/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into <see cref="Tensor.Fp8ScaleFactor"/> via <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/>.</item>
+/// <item>ComfyUI-style FP8 scaled-weight companions (<c>*.scale_weight</c>) are folded into <see cref="Tensor.Fp8ScaleFactor"/> by <see cref="Checkpoints.CheckpointSource"/>, before this converter runs.</item>
 /// </list>
 ///
 /// No sub-key renaming happens because the diffusers naming and the HartsyInference <c>Kandinsky5Transformer.LoadWeights</c> contract are intentionally aligned 1:1.</summary>
@@ -24,9 +24,12 @@ public sealed class Kandinsky5CheckpointConverter
     }
 
     /// <summary>Converts a flat weight dictionary loaded from a Kandinsky 5 transformer safetensors.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter strips key prefixes its <c>.weight_scale</c>
+    /// companion does not share, and folding after that pairs nothing and drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(Kandinsky5CheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
@@ -51,63 +54,56 @@ public sealed class Kandinsky5CheckpointConverter
         return new ConvertedWeights { Transformer = transformer };
     }
 
-    /// <summary>Convenience: load a single safetensors file and convert. The caller owns the loader and must dispose it once weights are no longer referenced.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        Dictionary<string, Tensor> raw = loader.GetAllTensors();
-        ConvertedWeights converted = Convert(raw);
-        return (converted, loader);
-    }
-
-    /// <summary>Loads a diffusers folder layout: scans the <c>transformer/</c> subdirectory for safetensors shards and merges them into a single dictionary. Returns the converted result plus the loaders (disposed by the caller).</summary>
-    public static (ConvertedWeights weights, List<SafeTensorsLoader> loaders) LoadDiffusersFolder(string transformerDir)
+    /// <summary>Loads a diffusers folder layout: every safetensors shard in the <c>transformer/</c> subdirectory, opened as one source so the quantization companions fold once over the merge.</summary>
+    public static (ConvertedWeights weights, Checkpoints.CheckpointSource source) LoadDiffusersFolder(string transformerDir)
     {
         if (!Directory.Exists(transformerDir))
             throw new DirectoryNotFoundException(
                 $"Kandinsky 5 transformer dir not found: {transformerDir}");
 
-        List<SafeTensorsLoader> loaders = new();
-        Dictionary<string, Tensor> merged = new(2048);
-        string[] shards = Directory.GetFiles(transformerDir, "*.safetensors");
-        Array.Sort(shards, StringComparer.Ordinal);
-        foreach (string shard in shards)
-        {
-            SafeTensorsLoader loader = new();
-            loader.Load(shard);
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                merged[kvp.Key] = kvp.Value;
-            loaders.Add(loader);
-        }
-
-        ConvertedWeights converted = Convert(merged);
-        return (converted, loaders);
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(transformerDir);
+        if (shards.Length == 0)
+            throw new FileNotFoundException($"No safetensors or GGUF checkpoint found in: {transformerDir}");
+        return OpenAndConvert(() => Checkpoints.CheckpointSource.OpenShards(shards));
     }
 
-    /// <summary>Loads the T2V video transformer from either a diffusers <c>transformer/</c> directory or a single repackaged safetensors file. The video state dict uses the same canonical key set as T2I (plus the wider 33-channel <c>visual_embeddings.in_layer</c>), so the conversion path is shared.</summary>
-    public static (ConvertedWeights weights, List<SafeTensorsLoader> loaders) LoadVideoTransformer(string transformerPathOrDir)
+    /// <summary>Loads the transformer from either a diffusers <c>transformer/</c> directory or a single repackaged file. The T2V state dict uses the same canonical key set as T2I (plus the wider 33-channel <c>visual_embeddings.in_layer</c>), so both drive this one path.</summary>
+    public static (ConvertedWeights weights, Checkpoints.CheckpointSource source) LoadTransformer(string transformerPathOrDir)
     {
         if (Directory.Exists(transformerPathOrDir))
             return LoadDiffusersFolder(transformerPathOrDir);
 
         if (!File.Exists(transformerPathOrDir))
-            throw new FileNotFoundException($"Kandinsky 5 video transformer not found: {transformerPathOrDir}");
+            throw new FileNotFoundException($"Kandinsky 5 transformer not found: {transformerPathOrDir}");
 
-        (ConvertedWeights weights, SafeTensorsLoader loader) = LoadAndConvert(transformerPathOrDir);
-        return (weights, [loader]);
+        return OpenAndConvert(() => Checkpoints.CheckpointSource.Open(transformerPathOrDir));
     }
 
-    /// <summary>Loads the HunyuanVideo VAE shard (<c>vae/diffusion_pytorch_model.safetensors</c> or a directory containing it) for <c>HunyuanVideoVaeDecoder</c>/<c>HunyuanVideoVaeEncoder</c>. The diffusers shard is already keyed <c>encoder.* / decoder.* / quant_conv.* / post_quant_conv.*</c>; a <c>vae.</c> wrapper prefix (single-file repacks) is stripped. Caller disposes the loaders.</summary>
-    public static (Dictionary<string, Tensor> weights, List<SafeTensorsLoader> loaders) LoadHunyuanVideoVae(string vaePathOrDir)
+    /// <summary>Opens a source and converts it, disposing the source if the conversion refuses.</summary>
+    private static (ConvertedWeights weights, Checkpoints.CheckpointSource source) OpenAndConvert(
+        Func<Checkpoints.CheckpointSource> open)
+    {
+        Checkpoints.CheckpointSource source = open();
+        try
+        {
+            return (Convert(source.Weights), source);
+        }
+        catch
+        {
+            source.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Loads the HunyuanVideo VAE shard (<c>vae/diffusion_pytorch_model.safetensors</c> or a directory containing it) for <c>HunyuanVideoVaeDecoder</c>/<c>HunyuanVideoVaeEncoder</c>. The diffusers shard is already keyed <c>encoder.* / decoder.* / quant_conv.* / post_quant_conv.*</c>; a <c>vae.</c> wrapper prefix (single-file repacks) is stripped. Caller disposes the source.</summary>
+    public static (Dictionary<string, Tensor> weights, Checkpoints.CheckpointSource source) LoadHunyuanVideoVae(string vaePathOrDir)
     {
         string[] shards;
         if (Directory.Exists(vaePathOrDir))
         {
-            shards = Directory.GetFiles(vaePathOrDir, "*.safetensors");
-            Array.Sort(shards, StringComparer.Ordinal);
+            shards = CheckpointConvertUtils.DiscoverContainerFiles(vaePathOrDir);
             if (shards.Length == 0)
-                throw new FileNotFoundException($"No safetensors found in Kandinsky 5 VAE dir: {vaePathOrDir}");
+                throw new FileNotFoundException($"No safetensors or GGUF checkpoint found in Kandinsky 5 VAE dir: {vaePathOrDir}");
         }
         else if (File.Exists(vaePathOrDir))
         {
@@ -118,21 +114,23 @@ public sealed class Kandinsky5CheckpointConverter
             throw new FileNotFoundException($"Kandinsky 5 VAE not found: {vaePathOrDir}");
         }
 
-        List<SafeTensorsLoader> loaders = new();
-        Dictionary<string, Tensor> weights = new(1024);
-        foreach (string shard in shards)
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
+        try
         {
-            SafeTensorsLoader loader = new();
-            loader.Load(shard);
-            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
+            Dictionary<string, Tensor> weights = new(1024);
+            foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
                 string key = kvp.Key;
                 if (key.StartsWith("vae.", StringComparison.Ordinal))
                     key = key["vae.".Length..];
                 weights[key] = kvp.Value;
             }
-            loaders.Add(loader);
+            return (weights, source);
         }
-        return (weights, loaders);
+        catch
+        {
+            source.Dispose();
+            throw;
+        }
     }
 }

@@ -70,6 +70,23 @@ public sealed class CheckpointSource : IDisposable
         ArgumentException.ThrowIfNullOrEmpty(path);
         if (!File.Exists(path))
             throw new FileNotFoundException($"Checkpoint '{path}' does not exist.", path);
+        if (TrySniff(path, out ModelFormat format))
+            return format;
+        throw new UnsupportedModelException(
+            $"Checkpoint '{path}' is neither safetensors nor GGUF: its leading bytes match no container this "
+            + "engine reads, and it may be too small to hold a header at all.");
+    }
+
+    /// <summary>Identifies a checkpoint's container from its leading bytes, reporting false instead of throwing for a file that is not one this engine reads.</summary>
+    /// <remarks>This is what lets a folder be scanned for checkpoints without the extension deciding: a component
+    /// directory holds configs and tokenizers beside its weights, and a repack is as likely to be named
+    /// <c>.safetensors</c> as <c>.gguf</c> whatever it holds.</remarks>
+    public static bool TrySniff(string path, out ModelFormat format)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        format = default;
+        if (!File.Exists(path))
+            return false;
 
         Span<byte> prologue = stackalloc byte[9];
         long length;
@@ -77,23 +94,22 @@ public sealed class CheckpointSource : IDisposable
         {
             length = stream.Length;
             if (length < prologue.Length || stream.ReadAtLeast(prologue, prologue.Length, throwOnEndOfStream: false) < prologue.Length)
-            {
-                throw new UnsupportedModelException(
-                    $"Checkpoint '{path}' is {length} bytes — too small to be any known format.");
-            }
+                return false;
         }
 
-        uint magic = BinaryPrimitives.ReadUInt32LittleEndian(prologue);
-        if (magic == GgufMagic)
-            return ModelFormat.Gguf;
+        if (BinaryPrimitives.ReadUInt32LittleEndian(prologue) == GgufMagic)
+        {
+            format = ModelFormat.Gguf;
+            return true;
+        }
 
         long headerLength = BinaryPrimitives.ReadInt64LittleEndian(prologue);
         if (headerLength > 0 && headerLength <= length - 8 && prologue[8] == (byte)'{')
-            return ModelFormat.SafeTensors;
-
-        throw new UnsupportedModelException(
-            $"Checkpoint '{path}' is neither safetensors nor GGUF: it opens with 0x{magic:X8}, which matches no "
-            + "container this engine reads.");
+        {
+            format = ModelFormat.SafeTensors;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>Opens a checkpoint, normalizing it to engine key names, engine matrix order and folded quantization companions.</summary>
@@ -138,6 +154,13 @@ public sealed class CheckpointSource : IDisposable
             {
                 CheckpointSource shard = Open(path, unfolded);
                 shards.Add(shard);
+                // Two formats in one set is a repack beside the release it replaces, not a shard set.
+                if (shards.Count > 1 && shard.Format != format)
+                {
+                    throw new UnsupportedModelException(
+                        $"Checkpoint set mixes containers: '{paths[0]}' is {format} and '{path}' is {shard.Format}. "
+                        + "A shard set is one format; open the one you meant to load on its own.");
+                }
                 format = shard.Format;
                 foreach (KeyValuePair<string, Tensor> entry in shard.Weights) merged[entry.Key] = entry.Value;
                 foreach (KeyValuePair<string, SafeTensorDescriptor> entry in shard.Header.Descriptors)

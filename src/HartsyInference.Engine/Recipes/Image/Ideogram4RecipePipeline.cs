@@ -19,7 +19,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Ideogram 4 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Ideogram4Pipeline"/> owns the Qwen3-VL forward, so this only chat-templates and trims the prompt tokens, snaps the resolution to Ideogram's 16-pixel grid, and maps <see cref="ImageRequest.Steps"/> onto the nearest official sampler preset (the preset carries the per-step asymmetric-CFG guidance schedule, so CfgScale and the negative prompt are ignored by design). Mirrors the SwarmUI backend's <c>Ideogram4Loader.Generate</c> drive path. Wraps the constructed Ideogram 4 pipeline plus its tokenizer and both transformers, taking ownership of every disposable.</summary>
 public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
-    Ideogram4Transformer conditional, Ideogram4Transformer unconditional, List<SafeTensorsLoader> loaders,
+    Ideogram4Transformer conditional, Ideogram4Transformer unconditional, IReadOnlyList<IDisposable> componentSources,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Ideogram4Pipeline _pipeline = pipeline;
@@ -27,7 +27,7 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
     private readonly LlamaStyleEncoder _textEncoder = textEncoder;
     private readonly Ideogram4Transformer _conditional = conditional;
     private readonly Ideogram4Transformer _unconditional = unconditional;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -154,9 +154,9 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
         _textEncoder.Dispose();
         _conditional.Dispose();
         _unconditional.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors both transformers were serving.
         _loraStack?.Dispose();

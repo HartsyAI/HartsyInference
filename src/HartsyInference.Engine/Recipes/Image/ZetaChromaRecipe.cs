@@ -4,7 +4,9 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -37,40 +39,62 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
         // input.Get(T2IParamTypes.QwenModel)); this always takes the canonical SideModels entry.
         string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        // 1. Load + convert (Z-Image-derived converter).
-        (ZImageCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader loader) = ZetaChromaCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        if (conv.Transformer.Count == 0)
+        List<IDisposable> loaders = new List<IDisposable>();
+        IDisposable? checkpoint = null;
+        try
         {
-            loader.Dispose();
-            throw new InvalidOperationException("Zeta-Chroma checkpoint has no recognized transformer weights after conversion.");
-        }
-        ZetaChromaConfig config = ZetaChromaConfig.FromWeights(conv.Transformer);
-        Logs.Info($"[ZetaChromaRecipe] Architecture: pixel-space, patch={config.PatchSize}, x0-prediction.");
-        ZetaChromaTransformer transformer = new ZetaChromaTransformer(config);
-        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
-        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
-            context,
-            new LoraMergeTargets { Transformer = conv.Transformer },
-            "ZetaChromaRecipe");
-        transformer.LoadWeights(conv.Transformer);
+            // 1. Load + convert (Z-Image-derived converter), through the one container so a GGUF or fp8_scaled
+            // repack of the same file reaches the converter identically.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            ZImageCheckpointConverter.ConvertedWeights conv = ZetaChromaCheckpointConverter.Convert(source.Weights);
+            if (conv.Transformer.Count == 0)
+            {
+                throw new InvalidOperationException("Zeta-Chroma checkpoint has no recognized transformer weights after conversion.");
+            }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(source, prepared);
 
-        // 2. Qwen3-4B caption encoder — its weights are uploaded and freed per generation, like Z-Image.
-        SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
-        qwenLoader.Load(qwenPath);
-        IReadOnlyDictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
-        if (qwenWeights.Count == 0)
+            ZetaChromaConfig config = ZetaChromaConfig.FromWeights(conv.Transformer);
+            Logs.Info($"[ZetaChromaRecipe] Architecture: pixel-space, patch={config.PatchSize}, x0-prediction.");
+            ZetaChromaTransformer transformer = new ZetaChromaTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = conv.Transformer },
+                "ZetaChromaRecipe");
+            transformer.LoadWeights(conv.Transformer);
+
+            // 2. Qwen3-4B caption encoder — its weights are uploaded and freed per generation, like Z-Image.
+            SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
+            qwenLoader.Load(qwenPath);
+            loaders.Add(qwenLoader);
+            IReadOnlyDictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
+            if (qwenWeights.Count == 0)
+            {
+                throw new InvalidOperationException($"Qwen3 model file '{qwenPath}' has no tensors.");
+            }
+            LlamaStyleEncoder qwen = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_4B);
+            qwen.LoadWeights(qwenWeights);
+            Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 256);
+
+            ZetaChromaPipeline pipeline = new ZetaChromaPipeline(context.Backend, transformer, config);
+            Logs.Info("[ZetaChromaRecipe] Zeta-Chroma ready (mid-pretraining checkpoint — output is validation-gated).");
+            return new ZetaChromaRecipePipeline(pipeline, config, qwen, tokenizer, context.Backend, checkpoint, loaders, loraStack);
+        }
+        catch (Exception ex)
         {
-            qwenLoader.Dispose();
-            loader.Dispose();
-            throw new InvalidOperationException($"Qwen3 model file '{qwenPath}' has no tensors.");
+            Logs.Error("[ZetaChromaRecipe] Construction failed.", ex);
+            foreach (IDisposable loader in loaders)
+            {
+                loader.Dispose();
+            }
+            checkpoint?.Dispose();
+            throw;
         }
-        LlamaStyleEncoder qwen = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_4B);
-        qwen.LoadWeights(qwenWeights);
-        Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 256);
-
-        ZetaChromaPipeline pipeline = new ZetaChromaPipeline(context.Backend, transformer, config);
-        Logs.Info("[ZetaChromaRecipe] Zeta-Chroma ready (mid-pretraining checkpoint — output is validation-gated).");
-        return new ZetaChromaRecipePipeline(pipeline, config, qwen, tokenizer, context.Backend, loader, qwenLoader, loraStack);
     }
 }

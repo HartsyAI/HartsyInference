@@ -1,6 +1,5 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -20,10 +19,13 @@ public sealed class AuraFlowCheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Converts a flat AuraFlow single-file weight dictionary into transformer + T5 + VAE buckets. Routes by prefix: <c>model.*</c> → transformer (strip <c>model.</c>, then run BFL→diffusers rename); <c>text_encoders.pile_t5xl.transformer.*</c> → T5 (strip the prefix); <c>vae.*</c> → VAE (strip <c>vae.</c>). Folds ComfyUI <c>.scale_weight</c> FP8 companions into <c>Tensor.Fp8ScaleFactor</c> first.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <summary>Converts a flat AuraFlow single-file weight dictionary into transformer + T5 + VAE buckets. Routes by prefix: <c>model.*</c> → transformer (strip <c>model.</c>, then run BFL→diffusers rename); <c>text_encoders.pile_t5xl.transformer.*</c> → T5 (strip the prefix); <c>vae.*</c> → VAE (strip <c>vae.</c>).</summary>
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter renames <c>.weight</c> without renaming
+    /// <c>.weight_scale</c> and folding after the rename drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(AuraFlowCheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new(800);
         Dictionary<string, Tensor> t5 = new(250);
@@ -58,16 +60,6 @@ public sealed class AuraFlowCheckpointConverter
         }
 
         return new ConvertedWeights { Transformer = transformer, T5 = t5, Vae = vae };
-    }
-
-    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        Dictionary<string, Tensor> raw = loader.GetAllTensors();
-        ConvertedWeights converted = Convert(raw);
-        return (converted, loader);
     }
 
     private static void ConvertKey(string key, Tensor tensor, Dictionary<string, Tensor> output)

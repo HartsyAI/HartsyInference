@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
@@ -37,12 +38,12 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
         // TODO(E-IMG-4/5): a VideoRequest.Components Qwen2.5-VL / CLIP-L / VAE override is still deferred.
         string transformerDir = ResolveTransformerDir(context.CheckpointPath);
         string vaeDir = Path.Combine(Path.GetDirectoryName(transformerDir.TrimEnd('/', '\\'))!, "vae");
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
             Logs.Info($"[Kandinsky5VideoRecipe] Loading video transformer: {transformerDir}.");
-            (Kandinsky5CheckpointConverter.ConvertedWeights converted, List<SafeTensorsLoader> shardLoaders) = Kandinsky5CheckpointConverter.LoadVideoTransformer(transformerDir);
-            loaders.AddRange(shardLoaders);
+            (Kandinsky5CheckpointConverter.ConvertedWeights converted, CheckpointSource transformerSource) = Kandinsky5CheckpointConverter.LoadTransformer(transformerDir);
+            loaders.Add(transformerSource);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"Kandinsky 5 Video checkpoint '{transformerDir}' has no transformer weights.");
@@ -61,8 +62,8 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             transformer.LoadWeights(transformerWeights);
 
             Logs.Info($"[Kandinsky5VideoRecipe] Loading HunyuanVideo VAE (diffusers naming): {vaeDir}.");
-            (Dictionary<string, Tensor> vaeWeightsRaw, List<SafeTensorsLoader> vaeLoaders) = Kandinsky5CheckpointConverter.LoadHunyuanVideoVae(vaeDir);
-            loaders.AddRange(vaeLoaders);
+            (Dictionary<string, Tensor> vaeWeightsRaw, CheckpointSource vaeSource) = Kandinsky5CheckpointConverter.LoadHunyuanVideoVae(vaeDir);
+            loaders.Add(vaeSource);
             Dictionary<string, Tensor> vaeWeights = VaePrecisionHelper.CastWeights(vaeWeightsRaw, [DType.BF16], DType.F16);
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(vaeWeights);
@@ -100,7 +101,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[Kandinsky5VideoRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -129,7 +130,7 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
         return Kandinsky5Config.VideoLite2B;
     }
 
-    /// <summary>Maps the resolved checkpoint path to the diffusers <c>transformer/</c> directory <see cref="Kandinsky5CheckpointConverter.LoadVideoTransformer"/> expects: the catalog's primary asset resolves to the transformer shard FILE inside that folder, so a file path degrades to its parent directory; a directory is used as-is (or its own <c>transformer</c> subfolder, when it is the checkpoint root rather than the transformer folder itself).</summary>
+    /// <summary>Maps the resolved checkpoint path to the diffusers <c>transformer/</c> directory <see cref="Kandinsky5CheckpointConverter.LoadTransformer"/> expects: the catalog's primary asset resolves to the transformer shard FILE inside that folder, so a file path degrades to its parent directory; a directory is used as-is (or its own <c>transformer</c> subfolder, when it is the checkpoint root rather than the transformer folder itself).</summary>
     private static string ResolveTransformerDir(string rawPath)
     {
         if (string.IsNullOrWhiteSpace(rawPath))

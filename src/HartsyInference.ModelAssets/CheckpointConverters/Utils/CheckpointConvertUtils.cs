@@ -112,47 +112,80 @@ public static unsafe class CheckpointConvertUtils
 
     // ── Shard Loading ──────────────────────────────────────────
 
-    /// <summary>Finds .safetensors shards in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
+    /// <summary>Every checkpoint container directly under <paramref name="directory"/>, in ordinal order, identified by its leading bytes rather than by its extension.</summary>
+    /// <remarks><para>The extension decides nothing for the same reason it decides nothing in
+    /// <see cref="Checkpoints.CheckpointSource.Sniff"/>: a GGUF repack of a diffusers component is published under
+    /// whatever name its author chose, and a glob for <c>*.safetensors</c> makes it invisible rather than refusing it.
+    /// Configs, tokenizers and index files in the same folder sniff as neither container and drop out.</para>
+    /// <para>A file that carries a checkpoint extension and still fails to sniff is refused rather than dropped. That
+    /// is an LFS pointer or a truncated download, and skipping it would load the rest of a shard set as if it were
+    /// whole — half a model, no error.</para></remarks>
+    public static string[] DiscoverContainerFiles(string directory)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        if (!Directory.Exists(directory))
+            return [];
+        string[] candidates = Directory.GetFiles(directory, "*", SearchOption.TopDirectoryOnly);
+        Array.Sort(candidates, StringComparer.Ordinal);
+        List<string> containers = new List<string>(candidates.Length);
+        foreach (string candidate in candidates)
+        {
+            if (Checkpoints.CheckpointSource.TrySniff(candidate, out _))
+            {
+                containers.Add(candidate);
+                continue;
+            }
+            string extension = Path.GetExtension(candidate);
+            if (extension.Equals(".safetensors", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".gguf", StringComparison.OrdinalIgnoreCase))
+            {
+                Checkpoints.CheckpointSource.Sniff(candidate);
+            }
+        }
+        return [.. containers];
+    }
+
+    /// <summary>Finds the checkpoint containers in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
     public static string[] DiscoverShards(string preferredDir, string rootPath, string what, string modelName)
     {
-        if (Directory.Exists(preferredDir))
-        {
-            string[] s = Directory.GetFiles(preferredDir, "*.safetensors");
-            if (s.Length > 0) { Array.Sort(s); return s; }
-        }
-        string[] all = Directory.GetFiles(rootPath, "*.safetensors");
+        string[] preferred = DiscoverContainerFiles(preferredDir);
+        if (preferred.Length > 0)
+            return preferred;
+        string[] all = DiscoverContainerFiles(rootPath);
         string[] match = Array.FindAll(all, f => Path.GetFileName(f).ToLowerInvariant().Contains(what));
         if (match.Length == 0)
-            throw new FileNotFoundException($"No {modelName} {what} .safetensors found under {preferredDir} or {rootPath}.");
-        Array.Sort(match);
+            throw new FileNotFoundException($"No {modelName} {what} checkpoint found under {preferredDir} or {rootPath}.");
         return match;
     }
 
-    /// <summary>Loads and merges shards, mapping each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers, and folding fp8_scaled companions via <see cref="ApplyFp8ScaledDequant"/>. On failure the loaders opened so far are disposed.</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadShards(
+    /// <summary>Opens every shard as one <see cref="Checkpoints.CheckpointSource"/> and maps each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers. On failure the source is disposed.</summary>
+    /// <remarks><para>The container folds the quantization companions across the merged set, before
+    /// <paramref name="keyMap"/> renames anything. Both halves of that order matter: safetensors sharding makes no
+    /// promise that a weight and its <c>.weight_scale</c> land in the same file, and a key map that renames
+    /// <c>.weight</c> has no rule for <c>.weight_scale</c>, so folding last would drop the scale and run the weight at
+    /// <c>1/scale</c> — noise at the end of a generation rather than a failure at load.</para>
+    /// <para>It also means a GGUF or a quantized repack of a sharded folder loads, which a raw safetensors merge
+    /// could not read at all.</para></remarks>
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadShards(
         string[] shards, int capacity, Func<string, string?> keyMap)
     {
-        Dictionary<string, Tensor> merged = new(capacity);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
+        ArgumentNullException.ThrowIfNull(shards);
+        ArgumentNullException.ThrowIfNull(keyMap);
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
+            Dictionary<string, Tensor> merged = new(capacity);
+            foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    string? mapped = keyMap(kvp.Key);
-                    if (mapped is not null) merged[mapped] = kvp.Value;
-                }
+                if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
+                string? mapped = keyMap(kvp.Key);
+                if (mapped is not null) merged[mapped] = kvp.Value;
             }
-            return (ApplyFp8ScaledDequant(merged), loaders);
+            return (merged, source);
         }
         catch
         {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            source.Dispose();
             throw;
         }
     }
@@ -429,6 +462,71 @@ public static unsafe class CheckpointConvertUtils
         output[$"{prefix}.{qName}.bias"] = qBias;
         output[$"{prefix}.{kName}.bias"] = kBias;
         output[$"{prefix}.{vName}.bias"] = vBias;
+    }
+
+    /// <summary>Splits a fused tensor along dim 0 into row ranges of the given sizes, carrying its quantization companions onto every piece.</summary>
+    /// <remarks><para>The general form of <see cref="SplitQkvWeight"/>, for the fused projections that are not three
+    /// equal thirds — Chroma's 4-way <c>linear1</c>, a QKV whose K and V are grouped smaller than Q. Byte offsets come
+    /// from <see cref="SliceByteCount"/>, never from <c>DType.SizeInBytes</c>, which is 0 for every block quant and
+    /// would copy nothing at all while the dense path stayed correct.</para>
+    /// <para>Companions are narrowed before the first allocation, because that narrowing can refuse and a refusal
+    /// afterwards would strand every piece allocated so far.</para></remarks>
+    /// <param name="fused">The fused tensor; rank 1 (a bias) or rank 2 (a weight).</param>
+    /// <param name="rowCounts">Row counts per piece, in order, summing to <c>fused.Shape[0]</c>.</param>
+    /// <param name="sliceKeys">The engine key each piece will be published under, used in the refusal message.</param>
+    public static Tensor[] SplitRows(Tensor fused, IReadOnlyList<int> rowCounts, IReadOnlyList<string> sliceKeys)
+    {
+        ArgumentNullException.ThrowIfNull(fused);
+        ArgumentNullException.ThrowIfNull(rowCounts);
+        ArgumentNullException.ThrowIfNull(sliceKeys);
+        if (rowCounts.Count != sliceKeys.Count)
+            throw new ArgumentException($"{rowCounts.Count} row counts but {sliceKeys.Count} keys.", nameof(sliceKeys));
+        if (fused.Shape.Rank is not (1 or 2))
+            throw new NotSupportedException($"Cannot row-split a rank-{fused.Shape.Rank} tensor ('{sliceKeys[0]}').");
+
+        long innerDim = fused.Shape.Rank == 2 ? fused.Shape[1] : 1;
+        long totalRows = 0;
+        for (int i = 0; i < rowCounts.Count; i++) totalRows += rowCounts[i];
+        if (totalRows != fused.Shape[0])
+            throw new InvalidOperationException(
+                $"Split of '{sliceKeys[0]}' asks for {totalRows} rows but the fused tensor has {fused.Shape[0]}.");
+
+        QuantWeightInfo?[] narrowed = new QuantWeightInfo?[rowCounts.Count];
+        if (fused.QuantInfo is not null)
+        {
+            long rowOffset = 0;
+            for (int i = 0; i < rowCounts.Count; i++)
+            {
+                narrowed[i] = fused.QuantInfo.SliceRows(rowOffset, rowCounts[i], sliceKeys[i]);
+                rowOffset += rowCounts[i];
+            }
+        }
+
+        Tensor?[] pieces = new Tensor?[rowCounts.Count];
+        try
+        {
+            byte* src = (byte*)fused.DataPointer;
+            long byteOffset = 0;
+            for (int i = 0; i < rowCounts.Count; i++)
+            {
+                long chunkBytes = SliceByteCount(fused, rowCounts[i] * innerDim);
+                TensorShape shape = fused.Shape.Rank == 2
+                    ? new TensorShape(rowCounts[i], innerDim) : new TensorShape(rowCounts[i]);
+                Tensor piece = new Tensor(shape, fused.DType);
+                pieces[i] = piece;
+                CarryQuantCompanions(fused, piece, narrowed[i]);
+                Buffer.MemoryCopy(src + byteOffset, (void*)piece.DataPointer, chunkBytes, chunkBytes);
+                byteOffset += chunkBytes;
+            }
+        }
+        catch
+        {
+            foreach (Tensor? piece in pieces) piece?.Dispose();
+            throw;
+        }
+        Tensor[] result = new Tensor[pieces.Length];
+        for (int i = 0; i < pieces.Length; i++) result[i] = pieces[i]!;
+        return result;
     }
 
     /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>

@@ -18,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Boogu-Image pipeline driven against the native <see cref="ImageRequest"/>. Builds the Qwen3-VL chat-templated instruction tokens, encodes them through the 8B language tower under the loader's TE ⇄ DiT staging (evict the resident DiT, encode, free the encoder weights), and calls <see cref="BooguImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>BooguImageLoader.Generate</c> text-to-image drive path. Wraps the constructed Boogu-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
 public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
-    BooguImageTransformer transformer, IBackend backend, IReadOnlyList<SafeTensorsLoader> loaders,
+    BooguImageTransformer transformer, IBackend backend, IReadOnlyList<IDisposable> componentSources,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>
@@ -30,7 +30,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
     private readonly LlamaStyleEncoder _textEncoder = textEncoder;
     private readonly BooguImageTransformer _transformer = transformer;
     private readonly IBackend _backend = backend;
-    private readonly IReadOnlyList<SafeTensorsLoader> _loaders = loaders;
+    private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     // Prompt-embedding cache: repeat prompts skip the whole Qwen3-VL-8B encode (and the DiT eviction it forces —
@@ -181,9 +181,9 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
         _textEncoder.Dispose();
         _transformer.Dispose();
         _tokenizer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable source in _componentSources)
         {
-            loader.Dispose();
+            source.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();

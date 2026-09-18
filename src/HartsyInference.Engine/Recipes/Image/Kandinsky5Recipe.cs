@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -37,28 +38,22 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4): honor user-picked Qwen2.5-VL / CLIP-L / VAE overrides from ImageRequest.Components.
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            Kandinsky5CheckpointConverter.ConvertedWeights converted;
-            if (Directory.Exists(context.CheckpointPath))
-            {
-                Logs.Info($"[Kandinsky5Recipe] Loading transformer diffusers dir: {context.CheckpointPath}.");
-                (Kandinsky5CheckpointConverter.ConvertedWeights c, List<SafeTensorsLoader> shardLoaders) = Kandinsky5CheckpointConverter.LoadDiffusersFolder(context.CheckpointPath);
-                converted = c;
-                loaders.AddRange(shardLoaders);
-            }
-            else
-            {
-                Logs.Info($"[Kandinsky5Recipe] Loading transformer: {Path.GetFileName(context.CheckpointPath)}.");
-                (Kandinsky5CheckpointConverter.ConvertedWeights c, SafeTensorsLoader loader) = Kandinsky5CheckpointConverter.LoadAndConvert(context.CheckpointPath);
-                converted = c;
-                loaders.Add(loader);
-            }
+            // One container for either format and either layout: a Kandinsky 5 GGUF is a repack of these same
+            // weights under the same key names.
+            Logs.Info($"[Kandinsky5Recipe] Loading transformer: {context.CheckpointPath}.");
+            (Kandinsky5CheckpointConverter.ConvertedWeights converted, CheckpointSource source) =
+                Kandinsky5CheckpointConverter.LoadTransformer(context.CheckpointPath);
+            loaders.Add(source);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"Kandinsky 5 checkpoint '{context.CheckpointPath}' has no transformer weights.");
             }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends));
 
             // BF16 -> F16 (12 GB, native F16 GEMM). The transient BF16 dequant path is validated for fp8/GGUF, not
             // BF16, and produced a blank image in the generation test; F32 would be 24 GB.
@@ -109,7 +104,7 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Kandinsky5Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
