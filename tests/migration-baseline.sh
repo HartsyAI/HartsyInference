@@ -8,6 +8,7 @@
 #   tests/migration-baseline.sh --record                     # write the reference (once, on unmodified CUDA)
 #   tests/migration-baseline.sh                              # compare against it
 #   tests/migration-baseline.sh --backend vulkan --record    # the same gate for the Vulkan half
+#   tests/migration-baseline.sh --filter sd15                # one case, for iterating on a change
 #
 # One script for both backends on purpose: a digest is only evidence against a digest taken the same way, and the
 # first Vulkan byte-identity checks were hashed by a different method than this, so they cannot be compared to
@@ -24,12 +25,14 @@ BASE="${HARTSY_MIGRATION_BASELINE:-$HOME/Desktop/migration-baselines}"
 WORK="$(mktemp -d)"
 MODE="compare"
 BACKEND="cuda"
+FILTER=""
 trap 'rm -rf "$WORK"' EXIT
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --record)  MODE="record";  shift ;;
         --backend) BACKEND="$2";   shift 2 ;;
+        --filter)  FILTER="$2";    shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -50,6 +53,10 @@ printf 'case\tbackend\tresult\tdigest\n'
 
 while IFS=$'\t' read -r id ckpt spec; do
     [ -z "$id" ] && continue
+    # A filtered run reports only what it ran. Silence about a case is not a claim about it.
+    if [ -n "$FILTER" ] && [ "$id" != "$FILTER" ]; then
+        continue
+    fi
     IFS='|' read -r cmd positional args <<< "$spec"
     path="$MODELS/$ckpt"
     if [ ! -e "$path" ]; then
