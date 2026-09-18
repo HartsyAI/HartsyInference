@@ -27,6 +27,58 @@ stable release will require. Dates are UTC.
   by name, with no dense fallback.
 - `hartsy video` and `hartsy world` default to `--backend auto` and no longer describe themselves as CUDA-only.
   Neither ever enforced it: the restriction is per-profile (H3's sparse attention), not per-command.
+## alpha.84
+
+- Driving audio refuses the output timing edits that would slide the picture against it: a start trim, a boomerang,
+  or an fps other than the native 24. Frame edits reach the frames only, and the soundtrack is trimmed at its end
+  alone, so each of those quietly broke the lip sync the feature exists to provide.
+- Video: **MiniMax-H3 can be driven by a soundtrack you supply** (`--driving-audio`, `VideoRequest.VideoAudioReference`).
+  H3 has no audio-driven mode of its own and its reference audio is a soft exhibit the generated soundtrack can
+  drift away from, which is no use when the words have to match. The mechanism that does drive video is the one
+  long-form chaining already uses: hold every audio row fixed at the supplied track and let video denoise against
+  it, so the model composes a picture around audio it cannot change. The mask is built inside the pipeline, so the
+  request-level mask surface keeps its own release gate. A track longer than the clip is trimmed and a shorter one
+  zero-padded, which is what the audio VAE's fixed-length encode already did. It is a planned feature
+  (`VideoFeatures.DrivingAudio`), so a family that cannot consume it rejects the request during planning instead of
+  accepting the option and ignoring it, and a sparse VSA profile — which is T2VA-only — is refused there rather
+  than at the execution boundary.
+- Video: **Wan-S2V declares `VideoFeatures.DrivingAudio`.** Classifying `VideoRequest.VideoAudioReference` as a
+  planned feature reached every family that reads that field, not only H3 — and S2V reads it as the driving speech
+  it cannot run without. Undeclared, the generic planner answered `video.feature.unsupported` before construction,
+  so the documented speech-to-video path would have failed on its own mandatory input. The declaration is the whole
+  fix; the gate itself is unchanged, and a family that does not consume a supplied track still refuses one.
+- Measured on a 90-frame 512x288 pair, same seed and prompt, differing only in the locked track: the output audio
+  correlates 0.9771 with the driving track through the VAE round-trip; a silence-driven run emits rms 0.00002
+  rather than inventing a soundtrack; the two clips diverge at SSIM 0.556; and motion runs 2.36x higher while
+  speech plays than after it stops, against 0.80x for the silence control.
+
+## alpha.83
+
+- Video: **an unchunked MiniMax-H3 geometry is no longer charged for its own buffers twice.** Below
+  `MinChunkableRows` the forward runs whole, and then `Attention`'s qkv and head-major q/k/v ARE the full-sequence
+  buffers the pass-1 term models — the floor added both, counting one allocation twice (about 257 MB at seq 4700).
+  Chunked they are genuinely distinct, since kFull/vFull outlive each chunk in flight, so the correction applies
+  only when the scratch spans the whole sequence.
+- Sizing that scratch by the real sequence rather than a fixed 4,096 rows (alpha.80) made the over-count reachable:
+  it added 99 MB at seq 4700, turning a 51 MB margin into a 48 MB deficit and refusing a 90-frame 512x288 clip on
+  a 24 GB card that had generated the same geometry minutes earlier. Every calibrated estimate sits above the
+  chunking threshold, so none of them covered this branch; the new test pins an unchunked floor against what the
+  unchunked forward actually allocates.
+- The floor now models attention per implementation rather than assuming one shape. `AttentionSparse` keeps a
+  full-sequence gate and the token-major buffer it permutes from alongside qkv and head-major q/k/v, an 8x
+  projection peak against the dense path's 6x — and it holds that at ANY length, because `ForwardNamedBlock`
+  selects it before testing `seq > chunkRows` and there is no chunked sparse path. Charging the released VSA
+  profile a chunk's worth would have approved a near-limit generation that then ran out of VRAM, which is the
+  dangerous direction for a pre-flight. The MLP chunks in both modes and is sized separately. A caller that does
+  not name the mode gets the larger sparse reservation, so an omitted argument cannot under-estimate; the
+  calibrated boundaries name themselves dense, since they measured the fp8 FL2VA path.
+- The unchunked peak also reserves the modulated attention/MLP input. `ForwardNamedBlock` disposes it only after
+  the call returns, so it is a second `[seq, hidden]` buffer live beside the residual — about 168 MB just below the
+  chunking threshold. `Modulate` can emit fp8, but not on a bf16 checkpoint or with `numerics.modulateEmitFp8` off,
+  so the reservation is F32. Chunked, the kFull/vFull term covered it incidentally; unchunked nothing did.
+- The activation-accounting tests move out of `SyntheticSmoke` into the unit lane. They are arithmetic only — no
+  model, GPU, checkpoint or network — but the class trait meant the documented CPU command skipped every one of
+  them. This accounting has regressed twice now; quarantining its guards is what let the first one through.
 
 ## alpha.82
 

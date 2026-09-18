@@ -50,4 +50,9 @@ public enum VideoFeatures
     /// <summary>Output longer than one generation, produced as chained segments that each hold the previous
     /// segment's tail fixed (MiniMax-H3 long-form).</summary>
     LongFormChain = 4096,
+
+    /// <summary>Audio the clip is generated against rather than invented alongside — Wan-S2V's Wav2Vec2-encoded
+    /// driving speech, or the track MiniMax-H3 holds every audio row fixed at while the video denoises. Distinct
+    /// from <see cref="ReferenceAudios"/>, which only describes the sound to aim for.</summary>
+    DrivingAudio = 8192,
 }

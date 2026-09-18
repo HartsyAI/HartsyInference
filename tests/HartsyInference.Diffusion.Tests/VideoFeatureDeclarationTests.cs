@@ -55,6 +55,12 @@ public sealed class VideoFeatureDeclarationTests
     /// <summary>A driving motion video is Wan-Animate's core conditioning.</summary>
     private static readonly string[] ExpectedDrivingVideo = ["wan-animate", "wan-animate-2"];
 
+    /// <summary>Audio that drives the picture: Wan-S2V's Wav2Vec2-encoded speech, and the track MiniMax-H3 locks its
+    /// audio rows to. Both read it from <c>VideoRequest.VideoAudioReference</c>, the field
+    /// <c>VideoService.RequestedFeatures</c> classifies as this bit, so this pin runs in the OTHER direction too: a
+    /// family that consumes the field and omits the declaration has the planner refuse its own input.</summary>
+    private static readonly string[] ExpectedDrivingAudio = ["minimax-h3", "wan-s2v"];
+
     private readonly ITestOutputHelper _output;
 
     public VideoFeatureDeclarationTests(ITestOutputHelper output) => _output = output;
@@ -100,6 +106,14 @@ public sealed class VideoFeatureDeclarationTests
         string[] actual = DeclaringFamilies(VideoFeatures.DrivingVideo);
         _output.WriteLine($"driving-video: {string.Join(", ", actual)}");
         Assert.Equal([.. ExpectedDrivingVideo.Order(StringComparer.Ordinal)], actual);
+    }
+
+    [Fact]
+    public void DrivingAudioIsDeclaredByEveryFamilyASuppliedTrackDrives()
+    {
+        string[] actual = DeclaringFamilies(VideoFeatures.DrivingAudio);
+        _output.WriteLine($"driving-audio: {string.Join(", ", actual)}");
+        Assert.Equal([.. ExpectedDrivingAudio.Order(StringComparer.Ordinal)], actual);
     }
 
     /// <summary>An end frame is generated *toward* from a start frame, so declaring it alone is incoherent.</summary>
