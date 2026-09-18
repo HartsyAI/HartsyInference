@@ -52,7 +52,7 @@ public sealed record MiniMaxH3Assets
         {
             throw new FileNotFoundException(
                 $"MiniMax-H3 checkpoint not found at '{checkpointPath}' (expected a folder with a transformer/ "
-                + "subfolder, or the DiT .safetensors file itself).");
+                + "subfolder, or the DiT .safetensors or .gguf file itself).");
         }
         return FromFlat(checkpointPath, components);
     }
@@ -177,15 +177,26 @@ public sealed record MiniMaxH3Assets
         return null;
     }
 
+    private static readonly string[] _quantMarkers =
+        ["nvfp4", "fp8", "int8", "mxfp", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_k",
+         "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4", "iq3", "iq2"];
+
+    private static readonly string[] _denseMarkers = ["fp32", "f32", "fp16", "f16", "bf16"];
+
     /// <summary>Ranks quantized variants before or after dense precision according to the component's release
     /// status. File size breaks ties within the selected precision class.</summary>
-    /// <remarks><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
+    /// <remarks><para><c>int8_convrot</c> used to rank last because the engine could not load it at all; it is now a
     /// first-class resident format (<c>CudaBackend</c>'s int8 IMMA path), so it ranks with the other quantized
-    /// builds and the size tie-break below decides between them.</remarks>
+    /// builds and the size tie-break below decides between them.</para>
+    /// <para>A <c>.gguf</c> counts as quantized unless it names a dense precision. Reading only the ComfyUI markers
+    /// classified <c>…video_vae-Q4_K.gguf</c> as dense, which put it in the same class as the proven FP16 build under
+    /// <c>preferQuantized: false</c> — and the size tie-break then chose it, which is the silent substitution that
+    /// argument exists to prevent.</para></remarks>
     private static int FormatRank(string name, bool preferQuantized)
     {
         string lower = name.ToLowerInvariant();
-        bool quantized = lower.Contains("nvfp4") || lower.Contains("fp8") || lower.Contains("int8");
+        bool quantized = _quantMarkers.Any(lower.Contains)
+            || (lower.EndsWith(".gguf", StringComparison.Ordinal) && !_denseMarkers.Any(lower.Contains));
         return quantized == preferQuantized ? 0 : 1;
     }
 
@@ -218,16 +229,20 @@ public sealed record MiniMaxH3Assets
             files = EnumerateCheckpoints(dir, SearchOption.AllDirectories).ToList();
         }
         return files.Count > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
-            : throw new FileNotFoundException($"No .safetensors in {dir}.");
+            : throw new FileNotFoundException($"No .safetensors or .gguf in {dir}.");
     }
 
-    /// <summary>Every checkpoint file under <paramref name="dir"/> this recipe can actually load.</summary>
-    /// <remarks>Safetensors only, deliberately. <c>MiniMaxH3Recipe</c> still opens every component with
-    /// <c>SafeTensorsLoader</c>, so offering a <c>.gguf</c> as a candidate would select it in planning and then fail
-    /// during construction with a header error — later and less clearly than not offering it at all. The planner reads
-    /// GGUF headers already; this opens back up when the recipe's components do too, which is what H3 GGUF support
-    /// needs anyway (dequant kernels for the classic quants its community builds use, and norm promotion that does not
-    /// go through <c>CastTo</c>).</remarks>
+    /// <summary>Every checkpoint file under <paramref name="dir"/>, in either container.</summary>
+    /// <remarks><para>Extension is only how candidates are found; what a file is gets settled by
+    /// <c>CheckpointSource.Sniff</c> when it is opened. This was safetensors-only for one release, while the planner
+    /// could read a GGUF header but the recipe still opened components with <c>SafeTensorsLoader</c> — offering a
+    /// candidate the recipe could not load moved the failure later and made it less clear. Every H3 component now
+    /// opens through the container, so the candidates match what can actually load.</para>
+    /// <para>Deliberately not <c>CheckpointConvertUtils.DiscoverContainerFiles</c>, which sniffs leading bytes: this
+    /// walks several model roots recursively and ranks by filename, so it would read every unrelated checkpoint under
+    /// <c>text_encoders/</c> to answer a question about names. The container still decides what a file is — when the
+    /// recipe opens it.</para></remarks>
     private static IEnumerable<string> EnumerateCheckpoints(string dir, SearchOption option) =>
-        Directory.EnumerateFiles(dir, "*.safetensors", option);
+        Directory.EnumerateFiles(dir, "*.safetensors", option)
+            .Concat(Directory.EnumerateFiles(dir, "*.gguf", option));
 }

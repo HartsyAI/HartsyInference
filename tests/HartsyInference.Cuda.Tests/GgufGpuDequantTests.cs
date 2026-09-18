@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.ModelAssets.Gguf;
@@ -60,6 +61,49 @@ public sealed class GgufGpuDequantTests
         try
         {
             FillQ5_0(src, blocks);
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    /// <summary>Q2_K is the smallest K-quant, and the reason it is worth a kernel: a 6.7 GB MiniMax-H3 build against
+    /// 21 GB at Q8_0. Widened on the host instead it expands roughly sixfold, which puts a model that would fit a
+    /// 12 GB card out of reach of a 24 GB one.</summary>
+    [Fact]
+    public unsafe void Q2_K_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int superBlocks = 3;
+        const int totalElems = superBlocks * 256;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.Q2_K);
+        try
+        {
+            FillQ2_K(src, superBlocks);
+            // A fixture whose mins were all zero would certify a kernel that dropped the dmin term entirely.
+            byte* scales = (byte*)src.DataPointer;
+            Assert.Contains(Enumerable.Range(0, 16), i => (scales[i] >> 4) != 0);
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    /// <summary>Q3_K's high bit is stored INVERTED — a set mask bit means "do not subtract 4" — which is the single
+    /// easiest thing to get backwards in this layout, and a sign error there is not visibly wrong, just wrong.</summary>
+    [Fact]
+    public unsafe void Q3_K_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int superBlocks = 3;
+        const int totalElems = superBlocks * 256;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.Q3_K);
+        try
+        {
+            FillQ3_K(src, superBlocks);
+            AssertQ3KFixtureExercisesBothHighBitBranches(src, superBlocks);
             using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
             using Tensor gpuOut = RunGpuDequant(src, totalElems);
             CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
@@ -167,6 +211,8 @@ public sealed class GgufGpuDequantTests
             if (src.DType == DType.Q8_0) kernels.LaunchDequantQ8_0ToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q4_0) kernels.LaunchDequantQ4_0ToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q5_0) kernels.LaunchDequantQ5_0ToF16(devDst, devSrc, totalElems, stream);
+            else if (src.DType == DType.Q2_K) kernels.LaunchDequantQ2_KToF16(devDst, devSrc, totalElems, stream);
+            else if (src.DType == DType.Q3_K) kernels.LaunchDequantQ3_KToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q4_K) kernels.LaunchDequantQ4_KToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q5_K) kernels.LaunchDequantQ5_KToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q6_K) kernels.LaunchDequantQ6_KToF16(devDst, devSrc, totalElems, stream);
@@ -237,6 +283,59 @@ public sealed class GgufGpuDequantTests
             block[2] = (byte)qh; block[3] = (byte)(qh >> 8); block[4] = (byte)(qh >> 16); block[5] = (byte)(qh >> 24);
             byte* qs = block + 6;
             for (int i = 0; i < 16; i++) qs[i] = (byte)((i * 11 + b * 17) & 0xFF);
+        }
+    }
+
+    /// <summary>Proves the Q3_K fixture actually reaches both sides of the inverted high bit. Without this a kernel
+    /// that always subtracted 4 — or never did — could match the CPU codec on a fixture that only ever took one
+    /// branch, and the test would certify a sign error.</summary>
+    private static unsafe void AssertQ3KFixtureExercisesBothHighBitBranches(Tensor t, int superBlocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        bool sawSet = false, sawClear = false;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* hmask = p + sb * 110;
+            for (int element = 0; element < 256; element++)
+            {
+                int h = element >> 7, r = element & 127, j = r >> 5, o = r & 31;
+                bool bit = (hmask[16 * (o >> 4) + (o & 15)] & (1u << (4 * h + j))) != 0;
+                if (bit) sawSet = true; else sawClear = true;
+            }
+        }
+        Assert.True(sawSet && sawClear, "The Q3_K fixture must produce both high-bit branches.");
+    }
+
+    /// <summary>Q2_K super-block: 16 scale bytes (4-bit scale | 4-bit min), 64 quant bytes, then d and dmin.
+    /// Varied per super-block so a kernel that ignored the block index would not pass.</summary>
+    private static unsafe void FillQ2_K(Tensor t, int superBlocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* block = p + sb * 84;
+            for (int i = 0; i < 16; i++) block[i] = (byte)(0x13 + i * 7 + sb);
+            byte* qs = block + 16;
+            for (int i = 0; i < 64; i++) qs[i] = (byte)(0x6C + (i * 5 & 0x7F) + sb);
+            *(Half*)(block + 80) = (Half)(0.75f + sb * 0.25f);
+            *(Half*)(block + 82) = (Half)(0.125f * (sb + 1));
+        }
+    }
+
+    /// <summary>Q3_K super-block: 32 hmask bytes, 64 quant bytes, 12 packed 6-bit signed scales, then d. The hmask
+    /// pattern deliberately sets a mix of bits so both branches of the inverted high bit are exercised.</summary>
+    private static unsafe void FillQ3_K(Tensor t, int superBlocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* block = p + sb * 110;
+            for (int i = 0; i < 32; i++) block[i] = (byte)(0x5A + i * 3 + sb);
+            byte* qs = block + 32;
+            for (int i = 0; i < 64; i++) qs[i] = (byte)(0x27 + (i * 11 & 0x7F) + sb);
+            byte* scales = block + 96;
+            for (int i = 0; i < 12; i++) scales[i] = (byte)(0x1D + i * 13 + sb);
+            *(Half*)(block + 108) = (Half)(0.5f + sb * 0.125f);
         }
     }
 

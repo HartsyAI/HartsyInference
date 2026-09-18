@@ -98,7 +98,15 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         ThrowIfDisposed();
 
         _embedWeight = weights["model.embed_tokens.weight"];
-        weights.TryGetValue("model.embed_tokens.weight_scale", out _embedScale);
+        // The row scale arrives one of two ways. A checkpoint opened through CheckpointSource has had it folded onto
+        // QuantInfo and the companion KEY REMOVED, which is the whole point of folding before conversion; a raw
+        // loader dictionary still carries the key. Reading only the key made the folded path look like a checkpoint
+        // with a missing scale, and the refusal below then rejected the published int8 build.
+        _embedScale = _embedWeight.QuantInfo?.RowScale;
+        if (_embedScale is null)
+        {
+            weights.TryGetValue("model.embed_tokens.weight_scale", out _embedScale);
+        }
         if (_embedWeight.Shape.Rank != 2)
             throw new InvalidOperationException($"model.embed_tokens.weight must be rank-2; got {_embedWeight.Shape}.");
         _vocabSize = (int)_embedWeight.Shape[0];

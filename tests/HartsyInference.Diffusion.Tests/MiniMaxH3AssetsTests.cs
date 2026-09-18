@@ -131,6 +131,50 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.DoesNotContain("int8", assets.VideoVae);
     }
 
+    /// <summary>The same gate, in the container the quantized builds actually ship in. A GGUF names its quant rather
+    /// than a ComfyUI marker, so reading only <c>fp8</c>/<c>int8</c>/<c>nvfp4</c> put <c>-Q4_K.gguf</c> in the dense
+    /// class beside the proven FP16 file — and the size tie-break then chose it.</summary>
+    [Fact]
+    public void FlatLayout_DoesNotAutoSelectAQuantizedGgufVideoVae()
+    {
+        string dit = BuildFlatLayout();
+        string dir = Path.Combine(_root, "Models", "vae", "MiniMaxH3");
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae-Q4_K.gguf"), []);
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae_fp16.safetensors"), new byte[64]);
+
+        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(dit);
+
+        Assert.Contains("fp16", assets.VideoVae);
+        Assert.DoesNotContain("Q4_K", assets.VideoVae);
+    }
+
+    /// <summary>A GGUF that names no precision at all is still treated as quantized, because nothing in the name says
+    /// otherwise and the video VAE's gate is "explicit selection or the proven build".</summary>
+    [Fact]
+    public void FlatLayout_TreatsAnUnlabelledGgufAsQuantized()
+    {
+        string dit = BuildFlatLayout();
+        string dir = Path.Combine(_root, "Models", "vae", "MiniMaxH3");
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae.gguf"), []);
+        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae_fp16.safetensors"), new byte[64]);
+
+        Assert.Contains("fp16", MiniMaxH3Assets.Resolve(dit).VideoVae);
+    }
+
+    /// <summary>The other direction: a quantized GGUF text encoder outranks BF16, since there the preference is for
+    /// the quantized build and a 32B encoder in BF16 does not fit alongside the DiT.</summary>
+    [Fact]
+    public void FlatLayout_PrefersAQuantizedGgufTextEncoderOverBf16()
+    {
+        string dit = BuildFlatLayout();
+        string dir = Path.Combine(_root, "Models", "text_encoders");
+        File.Delete(Path.Combine(dir, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
+        File.WriteAllBytes(Path.Combine(dir, "qwen3vl_32b_minimax_h3_bf16.safetensors"), []);
+        File.WriteAllBytes(Path.Combine(dir, "qwen3vl_32b_minimax_h3-Q5_K.gguf"), new byte[64]);
+
+        Assert.Contains("Q5_K", MiniMaxH3Assets.Resolve(dit).TextEncoder);
+    }
+
     /// <summary>SwarmUI's model root has a real <c>Video/</c> folder for video assets. Searching it for VAEs would
     /// let an unrelated file with a colliding name resolve as the VAE.</summary>
     [Fact]

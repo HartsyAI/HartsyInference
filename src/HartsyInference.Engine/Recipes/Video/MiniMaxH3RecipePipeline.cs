@@ -42,7 +42,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private readonly IBackend _vaeBackend;
     private readonly MiniMaxH3TextEncoder _textEncoder;
     private readonly Qwen2Tokenizer _tokenizer;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly MiniMaxH3VideoVaeEncoder? _videoVaeEncoder;
     private readonly MiniMaxH3AudioVaeEncoder? _audioVaeEncoder;
     private readonly MergedLoraStack? _loraStack;
@@ -53,7 +53,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 
     /// <summary>Takes ownership of the pipeline, the pre-encoded conditioning, and every loader backing the weights. The encoders are null for decode-only VAEs, which disables keyframe and reference conditioning respectively.</summary>
     public MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
-        MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
+        MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<IDisposable> loaders,
         MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null, MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null,
         MergedLoraStack? loraStack = null, IBackend? textEncoderBackend = null, IBackend? vaeBackend = null)
         : this(backend, pipeline, config, textEncoder, tokenizer, loaders, false,
@@ -63,7 +63,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
 
     /// <summary>Takes ownership of all model components while explicitly binding whether their detected profile can combine guide and reference conditioning.</summary>
     internal MiniMaxH3RecipePipeline(IBackend backend, MiniMaxH3Pipeline pipeline, MiniMaxH3Config config,
-        MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<SafeTensorsLoader> loaders,
+        MiniMaxH3TextEncoder textEncoder, Qwen2Tokenizer tokenizer, List<IDisposable> loaders,
         bool supportsHybridConditioning, MiniMaxH3VideoVaeEncoder? videoVaeEncoder = null,
         MiniMaxH3AudioVaeEncoder? audioVaeEncoder = null, MergedLoraStack? loraStack = null,
         IBackend? textEncoderBackend = null, IBackend? vaeBackend = null, MergedLoraStack? pddLoraStack = null,
@@ -2056,7 +2056,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         // After the transformer that reads them: the merged tensors are the DiT's weights, not copies.
         _loraStack?.Dispose();
         _pddLoraStack?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

@@ -21,6 +21,7 @@ public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
     /// <summary>Converts a transformer-only single-file Flux.2 checkpoint (BFL format) into the canonical key layout consumed by <see cref="Flux2Transformer"/>.</summary>
     public Dictionary<string, Tensor> ConvertTransformer(IReadOnlyDictionary<string, Tensor> allWeights)
     {
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(Flux2CheckpointConverter));
         Dictionary<string, Tensor> output = new(allWeights.Count + 100);
 
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)

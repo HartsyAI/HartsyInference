@@ -33,6 +33,7 @@ public sealed class HunyuanImageCheckpointConverter
     /// container that already folded costs a dictionary copy and nothing else.</remarks>
     public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> source)
     {
+        CheckpointConvertUtils.RequireFoldedCompanions(source, nameof(HunyuanImageCheckpointConverter));
         Dictionary<string, Tensor> allWeights = source as Dictionary<string, Tensor>
             ?? new Dictionary<string, Tensor>(source, StringComparer.Ordinal);
         if (allWeights.ContainsKey("double_blocks.0.img_attn_qkv.weight") ||

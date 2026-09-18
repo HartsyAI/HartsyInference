@@ -34,6 +34,8 @@ KERNELS_SM75=(
     "dequant_q8_0_to_f16"
     "dequant_q4_0_to_f16"
     "dequant_q5_0_to_f16"
+    "dequant_q2_k_to_f16"
+    "dequant_q3_k_to_f16"
     "dequant_q4_k_to_f16"
     "dequant_q5_k_to_f16"
     "dequant_q6_k_to_f16"
