@@ -89,13 +89,41 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
         backend.Sync();
         ReadOnlySpan<Half> a = new ReadOnlySpan<Half>((void*)actual.DataPointer, Batch * count);
         ReadOnlySpan<Half> f = new ReadOnlySpan<Half>((void*)full.DataPointer, Batch * Rows);
+        // The two sides are different GEMM shapes over the same numbers, so they can land on ADJACENT F16 values.
+        // The tolerance has to be relative, not absolute: F16's spacing scales with magnitude, so one step is 2^-6
+        // near 29 and 2^-5 near 32, and any fixed epsilon is either too tight at the top of the range or too loose
+        // at the bottom to catch a real miss. Two steps of headroom, measured against the value itself.
         for (int row = 0; row < Batch; row++)
         {
             for (int column = 0; column < count; column++)
             {
-                Assert.Equal((float)f[(row * Rows) + offset + column], (float)a[(row * count) + column], 2);
+                float windowed = (float)a[(row * count) + column];
+                float whole = (float)f[(row * Rows) + offset + column];
+                float twoF16Steps = Math.Max(0.002f, Math.Abs(whole) * (2f / 1024f));
+                Assert.True(Math.Abs(whole - windowed) <= twoF16Steps,
+                    $"row {row} column {column}: windowed {windowed} vs whole {whole} (allowed {twoF16Steps}).");
             }
         }
+
+        // Negative control: the same window over the UNPATCHED weight must fall outside that tolerance, or the
+        // assertion above would pass just as happily on a backend that never applied the adjunct at all.
+        using Tensor unpatched = new Tensor(new TensorShape(Batch, count), DType.F16);
+        backend.LinearWeightRows(unpatched, fixture.Input, fixture.Packed, null, offset, count);
+        backend.Sync();
+        ReadOnlySpan<Half> u = new ReadOnlySpan<Half>((void*)unpatched.DataPointer, Batch * count);
+        int movedBeyondTolerance = 0;
+        for (int i = 0; i < Batch * count; i++)
+        {
+            int row = i / count, column = i % count;
+            float whole = (float)f[(row * Rows) + offset + column];
+            if (Math.Abs(whole - (float)u[i]) > Math.Max(0.002f, Math.Abs(whole) * (2f / 1024f)))
+            {
+                movedBeyondTolerance++;
+            }
+        }
+        Assert.True(movedBeyondTolerance > Batch * count / 2,
+            $"Only {movedBeyondTolerance} of {Batch * count} elements moved past the tolerance without the adjunct, "
+            + "so this test could pass on a backend that ignored it.");
     }
 
     /// <summary>The fused-epilogue entry. GELU(base + delta) is not GELU(base) + delta, so the backend must un-fuse
@@ -245,6 +273,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
         public Fixture(Tensor packed, DType activation, int batch = Batch)
         {
             _owned.Add(packed);
+            Packed = packed;
             Input = Ramp(batch, Cols, activation);
             _owned.Add(Input);
 
@@ -269,6 +298,9 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
         }
 
         public Tensor Input { get; }
+
+        /// <summary>The same weight WITHOUT an adjunct, so a test can prove its tolerance still catches a miss.</summary>
+        public Tensor Packed { get; } = null!;
 
         public Tensor Patched { get; }
 
