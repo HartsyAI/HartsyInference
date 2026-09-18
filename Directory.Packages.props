@@ -39,6 +39,9 @@
     <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
+    <!-- Source-shape lint tests parse C# rather than pattern-match it: a regex over declarations cannot see a
+         negated initializer, a static constructor, or a Lazy wrapper, and each miss is a real escape. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.5.0" />
   </ItemGroup>
 
   <!-- Benchmarking -->

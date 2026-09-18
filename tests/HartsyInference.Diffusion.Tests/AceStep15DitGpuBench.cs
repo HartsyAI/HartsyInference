@@ -1,3 +1,4 @@
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -13,7 +14,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// tokens). Isolates the optimized DiT (no VAE / text encoder), so host RAM stays low. Gated behind
 /// <c>HARTSY_ACE15_GPU_BENCH=1</c> and the checkpoint path so a normal run skips it.
 /// <code>HARTSY_ACE15_GPU_BENCH=1 dotnet test tests/HartsyInference.Diffusion.Tests --filter AceStep15DitGpuBench</code>
-/// Env: <c>HARTSY_DIT_F16</c> / <c>HARTSY_DIT_GRAPH</c> toggle the F16 / CUDA-graph paths for A/B timing.</summary>
+/// Settings: <c>numerics.ditF16</c> / <c>numerics.ditGraph</c> toggle the F16 / CUDA-graph paths for A/B timing
+/// (via <c>--set</c> or the settings file; the old environment names are not read).</summary>
 [Trait("Category", "GpuIntegration")]
 public unsafe class AceStep15DitGpuBench
 {
@@ -56,8 +58,11 @@ public unsafe class AceStep15DitGpuBench
             float[] ts = AceStep15Config.GetTimesteps(cfg.FlowShift);
 
             cuda.PreloadWeights(dit.EnumerateWeights());
-            bool f16 = Environment.GetEnvironmentVariable("HARTSY_DIT_F16") == "1";
-            bool graph = Environment.GetEnvironmentVariable("HARTSY_DIT_GRAPH") == "1";
+            // The values that actually decide the run, not the environment names that used to. Reading the names
+            // meant this line could report F16=False on a run that was using F16 — a benchmark labelling its own
+            // output with a setting it was not using.
+            bool f16 = DitDtype.Act == DType.F16;
+            bool graph = DitStepGraph.Enabled || DitStepGraph.EnabledDefaultOn;
             _output.WriteLine($"config: {frames} frames ({frames / cfg.PatchSize} tokens), condLen {condLen}, F16={f16}, GRAPH={graph}");
 
             // Warmup (JIT kernels, allocate workspaces, capture graph if enabled).

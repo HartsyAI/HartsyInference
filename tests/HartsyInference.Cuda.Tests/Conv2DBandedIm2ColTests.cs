@@ -40,8 +40,10 @@ public sealed unsafe class Conv2DBandedIm2ColTests
     [Fact]
     public void Conv2D_BandedIm2Col_MatchesCpu()
     {
-        // Pre-set HARTSY_IM2COL_BAND_MB (e.g. 99999) to compare the unbanded path's noise floor.
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HARTSY_IM2COL_BAND_MB")))
+        // Pin vram.im2colBandMb (e.g. 99999) before this runs to compare the unbanded path's noise floor. The check
+        // asks the knob store whether someone already did; it used to read the environment, which nothing sets, so
+        // the band was forced unconditionally and the escape hatch this line exists to offer did not work.
+        if (!KnobStore.HasOverride(EngineKnobs.Im2colBandMb))
             KnobStore.Set(EngineKnobs.Im2colBandMb, 1L);
         if (!CudaContext.IsAvailable())
         {

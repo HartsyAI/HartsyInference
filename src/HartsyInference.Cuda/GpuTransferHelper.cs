@@ -108,7 +108,7 @@ internal static unsafe class GpuTransferHelper
     internal sealed class UploadState { public int Count; public bool Promoted; public bool Blocked; }
 
     /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
-    public static readonly bool AutoPromoteWeights = !EngineKnobs.NoAutopromote.Value;
+    public static bool AutoPromoteWeights => !EngineKnobs.NoAutopromote.Value;
 
     /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
     private static long _autoPromoteHeadroomBytes => EngineKnobs.AutopromoteHeadroomMb.Value << 20;

@@ -24,9 +24,11 @@ stable release will require. Dates are UTC.
   is baked in, and the three that still are (Vulkan coopmat, profiling and submit-per-op, all decided when the
   device and its pipelines are built) are named by a test.
 
-  Measured first, because the fix depends on it: a scoped resolve costs 57 ns and the per-op orphan sweep — the
-  hottest reader — runs 9,741 times in a 1024x1024 8-step generation. That is 0.56 ms in eleven seconds, so the
-  reads are live rather than cached behind new machinery.
+  Measured first, because the fix depends on it. `KnobResolutionBenchmarks` is kept so the resolve cost stays
+  reproducible — roughly 57 ns with a request profile pushed, which is the production path. The other half of the
+  number was a one-off: counting the per-op orphan sweep, the hottest reader, gave 9,741 calls for a 1024x1024
+  8-step image, so about 0.56 ms across an eleven-second generation. Live reads, rather than a snapshot cache built
+  for 0.005%.
 
 - **Tests configured the engine through environment variables nothing reads.** 95 call sites across 24 files set a
   variable that was retired when settings moved to knobs, so they were measuring defaults under a name claiming
