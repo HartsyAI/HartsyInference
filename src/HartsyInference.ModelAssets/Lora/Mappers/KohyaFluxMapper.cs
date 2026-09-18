@@ -6,13 +6,9 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora.Mappers;
 
-/// <summary>Parses Kohya/sd-scripts Flux LoRA files. Handles fused QKV (3-way split for double-stream attention) and fused linear1 (4-way split for single-stream blocks). Flux mlp_ratio is fixed at 4, so single-stream linear1 has shape [7*hidden, in].</summary>
+/// <summary>Parses Kohya/sd-scripts Flux LoRA files. Handles fused QKV (3-way split for double-stream attention) and fused linear1 (4-way split for single-stream blocks). Flux mlp_ratio is fixed at 4, so single-stream linear1 has shape [7*hidden, in]. Role suffixes come from <see cref="LoraRoleSuffix"/>.</summary>
 public static class KohyaFluxMapper
 {
-    private const string DownSuffix = ".lora_down.weight";
-    private const string UpSuffix = ".lora_up.weight";
-    private const string AlphaSuffix = ".alpha";
-
     private static readonly Regex _doubleBlock = new(@"^double_blocks_(\d+)_(img|txt)_(attn_qkv|attn_proj|mlp_0|mlp_2|mod_lin)$", RegexOptions.Compiled);
     private static readonly Regex _singleBlock = new(@"^single_blocks_(\d+)_(linear1|linear2|modulation_lin)$", RegexOptions.Compiled);
 
@@ -24,8 +20,13 @@ public static class KohyaFluxMapper
         Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
-            if (!TryClassifyRoleAndRoot(key, out LoraRole role, out string root))
+            if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
             {
+                continue;
+            }
+            if (role is LoraRole.Diff or LoraRole.BiasDiff)
+            {
+                Logs.Warning($"Kohya Flux LoRA key '{key}' is a full-weight diff, which this format does not carry; skipping.");
                 continue;
             }
 
@@ -53,7 +54,7 @@ public static class KohyaFluxMapper
         }
 
         return LoraGroupBuffer.BuildLayers(groups,
-            sourceKey => $"Kohya Flux LoRA group '{sourceKey}' missing down or up; skipping.");
+            sourceKey => $"Kohya Flux LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
     }
 
     private static void ProcessClipKey(SafeTensorsLoader loader, string sourceKey, LoraRole role, string body, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
@@ -170,12 +171,7 @@ public static class KohyaFluxMapper
     private static void AddSimple(SafeTensorsLoader loader, string sourceKey, LoraRole role, string canonicalKey, LoraTarget target, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups)
     {
         LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, target, canonicalKey, sourceKey);
-        switch (role)
-        {
-            case LoraRole.Down: group.Down = loader.GetTensor(sourceKey); break;
-            case LoraRole.Up: group.Up = loader.GetTensor(sourceKey); break;
-            case LoraRole.Alpha: group.Alpha = ReadScalar(loader.GetTensor(sourceKey)); break;
-        }
+        group.Assign(role, loader.GetTensor(sourceKey));
     }
 
     private static unsafe void AddFusedSplit(SafeTensorsLoader loader, string sourceKey, LoraRole role, string[] canonicalKeys, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups, int splitWays)
@@ -183,6 +179,15 @@ public static class KohyaFluxMapper
         // Fused QKV / linear1: lora_down is shared across all splits, lora_up is split along dim 0,
         // alpha is shared. Slices of lora_up borrow from the same mmap region.
         Tensor source = loader.GetTensor(sourceKey);
+
+        if (role is not (LoraRole.Down or LoraRole.Up or LoraRole.Alpha))
+        {
+            // Splitting a LyCORIS factor across a fused projection is not the same operation per decomposition
+            // (a LoHa factor row-slices, a Kronecker factor does not), so it is refused by name rather than guessed.
+            Logs.Warning($"Kohya Flux LoRA key '{sourceKey}' carries a {role} matrix on a FUSED projection, which "
+                + "this mapper cannot split; skipping.");
+            return;
+        }
 
         if (role == LoraRole.Up)
         {
@@ -228,26 +233,7 @@ public static class KohyaFluxMapper
         for (int s = 0; s < splitWays; s++)
         {
             LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
-            switch (role)
-            {
-                case LoraRole.Down: group.Down = source; break;
-                case LoraRole.Alpha: group.Alpha = ReadScalar(source); break;
-            }
+            group.Assign(role, source);
         }
     }
-
-    private static bool TryClassifyRoleAndRoot(string key, out LoraRole role, out string root)
-    {
-        if (key.EndsWith(DownSuffix, StringComparison.Ordinal)) { role = LoraRole.Down; root = key[..^DownSuffix.Length]; return true; }
-        if (key.EndsWith(UpSuffix, StringComparison.Ordinal)) { role = LoraRole.Up; root = key[..^UpSuffix.Length]; return true; }
-        // PEFT spellings of the same two roles (ComfyUI-style BFL LoRAs pair diffusion_model. roots with .lora_A/.lora_B).
-        if (key.EndsWith(".lora_A.weight", StringComparison.Ordinal)) { role = LoraRole.Down; root = key[..^".lora_A.weight".Length]; return true; }
-        if (key.EndsWith(".lora_B.weight", StringComparison.Ordinal)) { role = LoraRole.Up; root = key[..^".lora_B.weight".Length]; return true; }
-        if (key.EndsWith(AlphaSuffix, StringComparison.Ordinal)) { role = LoraRole.Alpha; root = key[..^AlphaSuffix.Length]; return true; }
-        role = default; root = string.Empty; return false;
-    }
-
-    private static unsafe float ReadScalar(Tensor t) => KohyaSdMapper.ReadScalar(t);
-
-    private enum LoraRole { Down, Up, Alpha }
 }

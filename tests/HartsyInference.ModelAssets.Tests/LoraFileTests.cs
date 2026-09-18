@@ -756,11 +756,7 @@ public sealed class LoraFileTests : IDisposable
             {
                 TargetKey = "transformer_blocks.0.attn.to_q.weight",
                 Target = LoraTarget.Transformer,
-                LoraDown = down,
-                LoraUp = up,
-                Alpha = 4f,
-                Rank = 4,
-                Variant = LoraVariant.StandardLora,
+                Delta = new StandardLoraDelta { Down = down, Up = up, Alpha = 4f },
             };
 
             Assert.Equal("transformer_blocks.0.attn.to_q.weight", layer.TargetKey);

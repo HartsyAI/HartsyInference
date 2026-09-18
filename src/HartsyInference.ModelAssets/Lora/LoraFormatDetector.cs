@@ -147,12 +147,10 @@ public static class LoraFormatDetector
         return false;
     }
 
-    /// <summary>Whether <paramref name="key"/> ends with a PEFT (<c>.lora_A</c>/<c>.lora_B</c>) or kohya (<c>.lora_down</c>/<c>.lora_up</c>) role suffix — both spellings are accepted on every root <see cref="Mappers.DiffusersFluxMapper"/> parses.</summary>
+    /// <summary>Whether <paramref name="key"/> ends with a decomposition-matrix suffix — PEFT (<c>.lora_A</c>/<c>.lora_B</c>), kohya (<c>.lora_down</c>/<c>.lora_up</c>) or LyCORIS (<c>.hada_*</c>/<c>.lokr_*</c>). Routing through <see cref="LoraRoleSuffix"/> is what makes a LyCORIS file detectable for every family here: the prefix arms above decide the family, and the suffix vocabulary decides only whether the key is a LoRA matrix at all.</summary>
+    /// <remarks>Scalar companions (<c>.alpha</c>, <c>.dora_scale</c>) and full-weight diffs are deliberately excluded:
+    /// a file whose only marker on a root is a scalar is not evidence that the root carries an adapter, and the
+    /// bare-root arm below would otherwise claim it.</remarks>
     private static bool HasLoraSuffix(string key) =>
-        key.EndsWith(".lora_A.weight", StringComparison.Ordinal)
-        || key.EndsWith(".lora_B.weight", StringComparison.Ordinal)
-        || key.EndsWith(".lora_A.default.weight", StringComparison.Ordinal)
-        || key.EndsWith(".lora_B.default.weight", StringComparison.Ordinal)
-        || key.EndsWith(".lora_down.weight", StringComparison.Ordinal)
-        || key.EndsWith(".lora_up.weight", StringComparison.Ordinal);
+        LoraRoleSuffix.TryStrip(key, out _, out LoraRole role) && LoraRoleSuffix.IsDecompositionMatrix(role);
 }
