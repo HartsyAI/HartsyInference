@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.Audio.Models.Music;
 
@@ -62,14 +63,29 @@ public sealed class Yue2ArLm : IDisposable
         // BF16 row-slice (134 MB) that the per-token GEMM reads instead of the full 756 MB one.
         (int start, int count) = Yue2Protocol.Window(Yue2Phase.Semantic);
         if (weights.TryGetValue("lm_head.weight", out Tensor? head) && head.Shape.Rank == 2 && head.Shape[0] >= start + count)
-            _semanticHead = RowSlice(head, start, count);
+            _semanticHead = SliceHeadWindow(head, start, count);
     }
 
-    /// <summary>An owned copy of <paramref name="numRows"/> rows of a row-major 2-D weight, keeping its dtype.</summary>
-    private static unsafe Tensor RowSlice(Tensor src, int startRow, int numRows)
+    /// <summary>An owned copy of <paramref name="numRows"/> rows of a row-major 2-D weight, keeping its dtype — or, for
+    /// a packed head, that row window decoded to plain floats.</summary>
+    /// <remarks>The window is decoded rather than kept packed because its 32,769 rows are not a multiple of 4, which
+    /// the cuBLASLt int8 path requires: a packed slice would fall back to dequantizing the whole window on the host
+    /// once per token. Decoding it once here costs the same 134 MB the BF16 build already spends.</remarks>
+    internal static unsafe Tensor SliceHeadWindow(Tensor src, int startRow, int numRows)
     {
         long cols = src.ElementCount / src.Shape[0];
-        long rowBytes = cols * src.DType.SizeInBytes;
+        if (src.DType == DType.I8 && src.QuantInfo is { RowScale: not null } info)
+        {
+            QuantWeightInfo window = info.SliceRows(startRow, numRows, "lm_head.weight");
+            using Tensor packed = src.SliceRows(startRow, numRows);
+            return Int8ConvRotCodec.DequantToBf16(packed, window.RowScale!, window.ConvRotGroupSize);
+        }
+        if (src.DType.IsQuantized)
+        {
+            using Tensor packed = src.SliceRows(startRow, numRows);
+            return GgufDequantizer.Dequantize(packed, DType.F16);
+        }
+        long rowBytes = src.DType.ComputeByteCount(cols);
         Tensor dst = new(new TensorShape(numRows, cols), src.DType);
         Buffer.MemoryCopy((byte*)src.DataPointer + startRow * rowBytes, (void*)dst.DataPointer,
             numRows * rowBytes, numRows * rowBytes);

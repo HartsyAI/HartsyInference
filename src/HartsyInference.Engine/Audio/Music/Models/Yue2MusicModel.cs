@@ -4,10 +4,11 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Audio;
@@ -27,6 +28,7 @@ internal static class Yue2MusicModel
 {
     private const string DefaultRepo = "Comfy-Org/YuE2";
     private const string Bf16File = "checkpoints/yue2_3b_bf16.safetensors";
+    private const string Int8ConvRotFile = "checkpoints/yue2_3b_int8_convrot.safetensors";
     private const string Category = "music";
 
     /// <summary>The checkpoint participates in the cache key so switching files never serves the previous one's
@@ -38,42 +40,60 @@ internal static class Yue2MusicModel
         LoadAsync = (context, selector, cancel) => LoadAsync(context, ResolveFile(selector.Variant), selector.LocalPath, cancel),
     };
 
-    /// <summary>Maps a variant suffix to a checkpoint file. Only the BF16 build is wired today; the
-    /// <c>int8_convrot</c> repack needs the per-layer quant reader and is refused by name rather than silently
-    /// falling back to a different precision than the caller asked for.</summary>
-    private static string ResolveFile(string variant)
+    /// <summary>Maps a variant suffix to one of the two published checkpoint files.</summary>
+    /// <remarks>Both builds load through the same container: <c>int8_convrot</c>'s <c>.weight_scale</c> and
+    /// <c>.comfy_quant</c> companions fold onto the weights before conversion, the projections stay packed at one byte
+    /// per parameter on a backend with an int8 path, and <see cref="QuantizedWeightPolicy"/> widens them on one
+    /// without. An unrecognised suffix is the BF16 release.</remarks>
+    internal static string ResolveFile(string variant)
     {
         string lower = (variant ?? string.Empty).Trim().ToLowerInvariant();
-        if (lower.Contains("int8", StringComparison.Ordinal) || lower.Contains("convrot", StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                "YuE2's int8_convrot checkpoint is not wired yet; use the default (BF16) variant.");
-        }
-        return Bf16File;
+        bool int8 = lower.Contains("int8", StringComparison.Ordinal) || lower.Contains("convrot", StringComparison.Ordinal);
+        return int8 ? Int8ConvRotFile : Bf16File;
     }
 
     private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string file, string? localPath, CancellationToken cancel)
     {
+        // A LoRA reaches the runner cache key (MusicLoadContext.CacheSuffix) but nothing here applies it, so a request
+        // carrying one would otherwise get a fresh runner that generates exactly the base model's song.
+        if (context.Loras is { Entries.Count: > 0 } loras)
+        {
+            Logs.Warning($"[YuE2] {loras.Entries.Count} LoRA(s) were requested, but YuE2 has no LoRA merge wired — "
+                + "the song will be the base model's.");
+        }
+
         // An explicitly placed checkpoint wins; otherwise take the conventional local directory if it is already
         // populated, and only then reach for the hub — the file is 7.8 GB and a second copy helps nobody.
         string path = localPath is { Length: > 0 } && File.Exists(localPath)
             ? localPath
-            : LocatePlaced() ?? await AudioModelCache.GetAsync(DefaultRepo, file, Category, ct: cancel).ConfigureAwait(false);
+            : LocatePlaced(file, context.LmQuant) ?? await AudioModelCache.GetAsync(DefaultRepo, file, Category, ct: cancel).ConfigureAwait(false);
 
         Logs.Info($"[YuE2] loading {path}");
-        SafeTensorsLoader loader = new SafeTensorsLoader();
+        // One container for either format, and the fold that attaches a quantized weight's scale has to run before
+        // the converter renames anything — a converter renames `.weight` and has no rule for `.weight_scale`.
+        CheckpointSource source = CheckpointSource.Open(path);
+        IDisposable held = source;
         Yue2Pipeline pipeline;
         Yue2Weights weights;
         try
         {
-            loader.Load(path);
-            if (!Yue2CheckpointConverter.IsComfyCheckpoint(loader.Descriptors))
+            if (!Yue2CheckpointConverter.IsComfyCheckpoint(source.Header.Descriptors))
             {
                 throw new NotSupportedException(
                     $"'{path}' is not a YuE2 checkpoint. Expected the Comfy-Org single-file repack "
                     + "(text_encoders. / model.diffusion_model. / vae. prefixes).");
             }
-            weights = Yue2CheckpointConverter.Convert(loader.GetAllTensors());
+            weights = Yue2CheckpointConverter.Convert(source.Weights);
+            held = new CompositeDisposable(weights, source);
+
+            // Both stacks run on the primary backend — YuE2 reads no ShardStages — so any quant it has no packed-weight
+            // kernel for widens here rather than failing inside the first GEMM, minutes into a song.
+            QuantizedWeightPolicy.PreparedWeights preparedAr =
+                QuantizedWeightPolicy.PrepareForBackend(weights.Ar, context.Backend);
+            held = new CompositeDisposable(preparedAr, weights, source);
+            QuantizedWeightPolicy.PreparedWeights preparedNar =
+                QuantizedWeightPolicy.PrepareForBackend(weights.Nar, context.Backend);
+            held = new CompositeDisposable(preparedAr, preparedNar, weights, source);
 
             Yue2Config config = Yue2Config.V1;
             Yue2Tokenizer tokenizer = new Yue2Tokenizer(weights.TokenizerJson);
@@ -87,7 +107,7 @@ internal static class Yue2MusicModel
         }
         catch
         {
-            loader.Dispose();
+            held.Dispose();
             throw;
         }
 
@@ -166,27 +186,44 @@ internal static class Yue2MusicModel
             };
         }
 
-        return new MusicRunner(Yue2Config.V1.SampleRate, Synth, pipeline, weights, loader)
+        return new MusicRunner(Yue2Config.V1.SampleRate, Synth, pipeline, held)
         {
             Planner = Plan,
             Budgeter = Budget,
         };
     }
 
-    /// <summary>The conventional user-placed location, <c>{models}/audio/music/yue2/*.safetensors</c>.</summary>
-    private static string? LocatePlaced()
+    /// <summary>The conventional user-placed location, <c>{models}/audio/music/yue2/*.safetensors</c> or <c>*.gguf</c>.</summary>
+    /// <remarks><para>A caller who named a variant gets that variant's own filename or nothing — serving whatever else
+    /// happens to be in the directory would hand them a different precision than they asked for, under that variant's
+    /// cache key. Only the default resolution takes what is placed, in sorted order: enumeration order is the
+    /// filesystem's, and picking a different checkpoint run to run is indistinguishable from the model drifting.</para>
+    /// <para>There a GGUF naming the precision <paramref name="quant"/> resolved to wins, which is how
+    /// <see cref="AudioLmQuant"/> selects one. Nothing is quantized at load and nothing here downloads a GGUF — the hub
+    /// ships none, so placing the file is the only way one arrives.</para></remarks>
+    private static string? LocatePlaced(string file, AudioLmQuant quant)
     {
         string directory = AudioModelRoot.WeightsDirectory(Category, "yue2");
         if (!Directory.Exists(directory)) return null;
-        // The quant repack is not wired yet, so it is never a candidate. Among the rest the canonical release name
-        // wins and anything else is taken in sorted order — enumeration order is the filesystem's, and picking a
-        // different checkpoint run to run would be indistinguishable from the model drifting.
-        List<string> candidates = [.. Directory.EnumerateFiles(directory, "*.safetensors", SearchOption.TopDirectoryOnly)
-            .Where(f => !Path.GetFileName(f).Contains("int8", StringComparison.OrdinalIgnoreCase))
+        List<string> candidates = [.. Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
+            .Where(f => f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
+                || f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
             .OrderBy(f => f, StringComparer.Ordinal)];
-        string preferred = Path.GetFileName(Bf16File);
-        return candidates.FirstOrDefault(f => Path.GetFileName(f).Equals(preferred, StringComparison.OrdinalIgnoreCase))
-            ?? candidates.FirstOrDefault();
+        string preferred = Path.GetFileName(file);
+        string? exact = candidates.FirstOrDefault(f => Path.GetFileName(f).Equals(preferred, StringComparison.OrdinalIgnoreCase));
+        if (!string.Equals(file, Bf16File, StringComparison.Ordinal))
+            return exact;
+
+        string? quantTag = quant switch
+        {
+            AudioLmQuant.Q4K => "q4_k",
+            AudioLmQuant.Q8 => "q8_0",
+            _ => null,
+        };
+        string? gguf = quantTag is null ? null
+            : candidates.FirstOrDefault(f => f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileName(f).Contains(quantTag, StringComparison.OrdinalIgnoreCase));
+        return gguf ?? exact ?? candidates.FirstOrDefault(f => f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Maps the engine's generic music request onto YuE2's own knobs.</summary>

@@ -6,6 +6,33 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.96
+
+- **YuE2 loads its own published `int8_convrot` repack.** It was refused by name, on the grounds that the per-layer
+  quant reader did not exist; it does now, and it lives at the container, so the refusal's reason was stale. The
+  refusal itself was not: with it simply deleted the file does not load, because YuE2 quantizes more than the
+  refusal's comment assumed. Reading the published header rather than the doc showed 229 `int8_tensorwise` weights
+  at ConvRot group 256 — and among them the **embedding table**, the **output head**, `llm2vae` and the timestep
+  MLP, three of which this model reads on the host.
+
+  So four things had to change before the refusal could go. The fused QKV and gate/up splits now narrow each part's
+  per-row dequant scale to the rows it takes and size the copy through the block layout rather than
+  `DType.SizeInBytes`, which is 0 for every block quant and copies nothing. The host-read entries are decoded
+  instead of cast — raw int8 bytes in a Hadamard-rotated basis are a different weight, not a wrong magnitude.
+  `GenericTransformer` stops byte-concatenating Q/K/V and gate/up into one fused dispatch when a part carries a row
+  scale the concatenation renumbers away, and its host-gathered embedding table decodes such a weight rather than
+  casting it — both apply to every model that loads a ComfyUI int8 checkpoint, not just this one. The AR stack's
+  32,769-row semantic head is decoded once at load rather than kept packed, because that row count is not a
+  multiple of four and the packed GEMM would otherwise dequantize the whole window once per token.
+
+  Not yet run against the real 7.8 GB file: the numbers here come from the published header and from synthetic
+  cases, and the song itself still needs a listen against the BF16 build.
+- **YuE2 opens through `CheckpointSource`**, so a GGUF build loads as readily as a safetensors one, and
+  `AudioLmQuant` selects a placed `q4_k`/`q8_0` GGUF when one exists. Nothing is quantized at load and nothing new
+  is downloaded — the hub ships no GGUF YuE2, and writing one is the offline tooling's job.
+- A LoRA sent to YuE2 now says so in the log. It reached the runner cache key but nothing applied it, so the
+  request got a fresh runner that generated exactly the base model's song.
+
 ## alpha.95
 
 - **Seventeen more image families open their checkpoints through the one container**, so each accepts a GGUF or a
