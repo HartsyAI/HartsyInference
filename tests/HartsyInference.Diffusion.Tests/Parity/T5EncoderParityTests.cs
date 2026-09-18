@@ -6,7 +6,7 @@ using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
@@ -65,8 +65,8 @@ public sealed class T5EncoderParityTests
 
         string sourceCheckpoint = File.Exists(TestPaths.Flux.Dev) ? TestPaths.Flux.Dev : TestPaths.Flux.Schnell;
         Stopwatch sw = Stopwatch.StartNew();
-        (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-            FluxCheckpointConverter.LoadAndConvert(sourceCheckpoint);
+        CheckpointSource loader = CheckpointSource.Open(sourceCheckpoint);
+        FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
         sw.Stop();
         _output.WriteLine($"Loaded T5 weights from {Path.GetFileName(sourceCheckpoint)} in {sw.ElapsedMilliseconds}ms.");
 

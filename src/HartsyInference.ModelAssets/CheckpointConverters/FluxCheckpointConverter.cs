@@ -1,6 +1,5 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -30,14 +29,12 @@ public sealed class FluxCheckpointConverter
     private const int MlpDim = 12288;
 
     /// <summary>Converts a single-file Flux checkpoint into separate per-component weight dictionaries. Auto-detects BFL vs diffusers format.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter renames <c>.weight</c> and splits fused projections
+    /// without renaming <c>.weight_scale</c>, so folding after the rename drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        // Pre-process: detect ComfyUI fp8_scaled format (presence of `*.scale_weight` companion tensors)
-        // and dequant matching FP8 weights to F16 by multiplying each value by its scalar scale.
-        // Drops the `.scale_weight` and `.scale_input` metadata keys from the dict so the rest of
-        // the converter can run unchanged on a "regular" fp8 weight set.
-        allWeights = ApplyFp8ScaledDequant(allWeights);
-
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(FluxCheckpointConverter));
         Dictionary<string, Tensor> transformer = new(4000);
         Dictionary<string, Tensor> clipL = new(200);
         Dictionary<string, Tensor> t5 = new(800);
@@ -124,59 +121,6 @@ public sealed class FluxCheckpointConverter
             T5 = t5,
             Vae = vae,
         };
-    }
-
-    /// <summary>Loads a single-file checkpoint and converts it in one step.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
-    }
-
-    /// <summary>Detects ComfyUI's <c>fp8_scaled</c> format and folds per-tensor <c>scale_weight</c> values into each FP8 weight tensor's <see cref="Tensor.Fp8ScaleFactor"/>. Keeps weights at native FP8 (12B-param transformer stays under 12GB instead of ballooning to 24GB after dequant); scale is applied at GEMM time via cuBLAS' <c>alpha</c>. Companion <c>scale_input</c> tensors are dropped — we cast FP8→F16 and run F16 GEMM. Returns the original dict unchanged when no <c>scale_weight</c> keys are present.</summary>
-    private static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
-    {
-        // Pre-scan for any scale_weight keys to decide whether this is the scaled format.
-        Dictionary<string, Tensor> scaleWeights = new();
-        foreach (KeyValuePair<string, Tensor> kvp in source)
-        {
-            if (kvp.Key.EndsWith(".scale_weight", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".scale_weight".Length];
-                scaleWeights[baseKey] = kvp.Value;
-            }
-        }
-        if (scaleWeights.Count == 0)
-            return source;
-
-        Dictionary<string, Tensor> result = new(source.Count - 2 * scaleWeights.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in source)
-        {
-            // Drop the scale companion keys — they're consumed by being folded into Fp8ScaleFactor.
-            if (kvp.Key.EndsWith(".scale_weight", StringComparison.Ordinal) ||
-                kvp.Key.EndsWith(".scale_input", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            // For an FP8 weight tensor with a matching scale companion, attach the scale to the
-            // tensor's Fp8ScaleFactor so the GEMM call site can fold it into cuBLAS alpha.
-            if (kvp.Value.DType == DType.F8E4M3 &&
-                kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".weight".Length];
-                if (scaleWeights.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
-                {
-                    float scale = ((float*)scaleT.DataPointer)[0];
-                    kvp.Value.Fp8ScaleFactor = scale;
-                }
-            }
-
-            result[kvp.Key] = kvp.Value;
-        }
-        return result;
     }
 
     // ── BFL Transformer Key Conversion ──────────────────────────────────────────

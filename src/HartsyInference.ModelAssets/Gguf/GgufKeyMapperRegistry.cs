@@ -14,27 +14,11 @@ public static class GgufKeyMapperRegistry
     private static Dictionary<string, IGgufKeyMapper> BuildRegistry()
     {
         Dictionary<string, IGgufKeyMapper> r = new(StringComparer.OrdinalIgnoreCase);
-        // Pixel-space variants must precede their parent families (and Flux, whose double+single-block
-        // signature also matches the whole Chroma family): DetectByKeys probes mappers in registration
-        // order and a Radiance/Zeta checkpoint is a strict key-superset of classic Chroma / Z-Image.
-        Register(r, new ChromaRadianceKeyMapper());
-        Register(r, new ZetaChromaKeyMapper());
-        // HunyuanImageKeyMapper before FluxKeyMapper: FluxKeyMapper.MatchesByKeys only checks for
-        // double_blocks./single_blocks. presence, which HunyuanImage's Tencent-style GGUF also has (plus its
-        // distinguishing byt5_in./img_attn_qkv. keys) — without this ordering Flux's broader check wins the
-        // race and every HunyuanImage GGUF silently loads as garbage Flux weights (black-image bug, 2026-07-21).
-        Register(r, new HunyuanImageKeyMapper());
-        Register(r, new FluxKeyMapper());
-        Register(r, new Flux2KeyMapper());
-        Register(r, new SdxlKeyMapper());
-        Register(r, new Sd3KeyMapper());
-        Register(r, new Sd15KeyMapper());
-        Register(r, new FLiteKeyMapper());
-        Register(r, new ChromaKeyMapper());
-        Register(r, new AuraFlowKeyMapper());
-        Register(r, new ZImageKeyMapper());
-        Register(r, new ErnieImageKeyMapper());
-        Register(r, new QwenImageKeyMapper());
+        // Diffusion families first, in the order DiffusionGgufFamilies documents: their identity mappers carry only a
+        // recognition rule, and several of those rules are supersets of each other (Radiance over Chroma, Zeta over
+        // Z-Image, Hunyuan Image's Tencent repack over Flux — that last one silently loaded every HunyuanImage GGUF as
+        // garbage Flux weights until the ordering was fixed, 2026-07-21).
+        foreach (IGgufKeyMapper family in DiffusionGgufFamilies.InDetectionOrder) Register(r, family);
         // Gemma before Llama: Gemma's heuristic (sandwich norms) is a strict superset of the llama-family keys.
         Register(r, new GemmaKeyMapper());
         Register(r, new Gemma4KeyMapper());

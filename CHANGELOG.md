@@ -6,6 +6,58 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.90
+
+- **Every checkpoint now opens through one container, whatever format it is in.** Quantized-checkpoint support
+  had been wired architecture by architecture: a recipe that wanted GGUF grew a second constructor parameter and
+  a second code path, so GGUF loaded for four image models and no video ones, and the ComfyUI fp8/int8 companion
+  fold was copy-pasted into 24 of 47 checkpoint converters and simply missing from the rest.
+- Nothing about a container is architecture-specific, which is the whole point. A diffusion GGUF is a repack —
+  the publisher quantizes the released safetensors file and keeps its tensor names — so once the keys are mapped,
+  the shapes relabelled and the quantization companions folded, a converter cannot tell the two apart.
+  `CheckpointSource` does those three things once, sniffing the container from its magic bytes rather than its
+  extension, because repacks are routinely published under the wrong one.
+- **The fold runs before the converter, and that ordering is the fix.** A converter renames `.weight` and has no
+  rule for `.weight_scale`, so folding afterwards pairs nothing and drops the scale — and a weight without its
+  scale is not an error, it is a weight hundreds of times too large that renders as noise at the end of a
+  generation. Folding at the container makes that class of bug unreachable.
+- The same failure existed one level down: a `Tensor` built over another's bytes — a reshape, a dtype relabel, a
+  same-device copy, a fused-projection split — started life with no scales at all. Those now carry the per-tensor
+  fp8 factors always and the per-row companions whenever the row numbering survives, and refuse rather than pair
+  each row with another row's scale when it does not.
+- **A quantized weight the backend has no kernel for is now caught at load.** It used to fail inside the first
+  GEMM, minutes into a generation, with a stack trace naming a kernel rather than a file; the loader asks the
+  backend what it can hold packed and widens the rest on the host, saying which dtypes and why. A Q2_K or IQ4_NL
+  diffusion GGUF — both routinely published — loads slowly instead of crashing.
+- **Flux.1, SD3/SD3.5 and the Wan video family load GGUF too.** They worked on safetensors and simply could not
+  open a quantized build; routing them through the container is the whole change. Verified with real generations
+  from real community files: Flux.1-dev Q4_K_S (city96), SD3.5-medium Q8_0 (city96) and Wan 2.1 T2V 1.3B Q8_0.
+- Two things that had to be fixed for those, both invisible until a published file was actually read. The SD3
+  converter only routed keys under a `model.diffusion_model.` prefix, and city96's SD3.5 GGUF ships bare LDM keys,
+  so every transformer tensor was dropped and the DiT loaded empty. And Wan's checkpoint is the first to carry
+  tensors that are not matrices — 31 rank-3 modulation tables and a rank-5 Conv3d patch embed — which only arrive
+  with the right shape because the container now reverses every ggml axis rather than just the two of a matrix.
+- **A shipped checkpoint that rendered black now works.** Black Forest Labs' own `FLUX.2-klein-4b-fp8` carries 80
+  fp8 weights and 160 companion scales, and the Flux.2 converter was one of the 23 that never folded them — so every
+  fp8 weight ran at scale 1.0 instead of `stored x scale`, and the generation saturated to a fully black image. This
+  is what the fold gap looks like when it lands on an official release, and why the fold belongs to the container
+  rather than to a 24th converter.
+- **A GGUF video checkpoint reaches planning.** The planner opened every checkpoint as safetensors, so a GGUF
+  build died before any recipe was reached, and MiniMax-H3's component resolution could not even see a `.gguf`
+  file. Both read the shared header now, and a component's format reports as `gguf-q4_k` and the like.
+- **A fused projection can be read in windows when it is block-quantized.** This is what put a GGUF MiniMax-H3
+  out of reach rather than merely making it slower: H3 reads its packed `qkv_proj` in two windows, that chunking
+  is how the model runs at all, and the weight it chunks is the one the quantization applies to.
+- bitsandbytes NF4 checkpoints load, through a decoder that had been written and never wired. Every quantity the
+  file declares is reconciled against its actual byte counts first, so a layout misread refuses by name instead
+  of decoding to plausible noise.
+- Fourteen GGUF key mappers were the same class fourteen times — a family name, a recognition rule, and a method
+  returning its argument — and are now one table of recognition rules. Writing them side by side surfaced that
+  Flux.2 was asked after Flux although it keeps Flux's block naming, so a Flux.2 GGUF with no declared
+  architecture detected as Flux.1.
+- The GGUF writer emitted dimensions in the engine's order while every other tool reads ggml's, so a file the
+  quantizer produced came back with every matrix transposed. Nothing consumed those files yet; they are now
+  readable by other tools and by our own recipes.
 ## alpha.89
 
 - **A shared GPU layer, `HartsyInference.Gpu`.** Nothing references it yet: the package is built and tested first so

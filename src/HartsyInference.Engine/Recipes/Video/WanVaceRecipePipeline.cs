@@ -29,12 +29,12 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
     private readonly T5TextEncoder _umt5;
     private readonly WanVaceTransformer _transformer;
     private readonly IWanVaeEncoder _vaeEncoder;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed VACE pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanVaceRecipePipeline(IBackend backend, WanVacePipeline pipeline, WanVideoConfig config, T5Tokenizer tokenizer,
-        T5TextEncoder umt5, WanVaceTransformer transformer, IWanVaeEncoder vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
+        T5TextEncoder umt5, WanVaceTransformer transformer, IWanVaeEncoder vaeEncoder, List<IDisposable> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _backend = backend;
@@ -116,7 +116,7 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
         _umt5.Dispose();
         _transformer.Dispose();
         (_vaeEncoder as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

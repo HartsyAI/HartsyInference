@@ -9,7 +9,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
@@ -99,8 +99,8 @@ public sealed class FluxSsimTests
         }
 
         Stopwatch sw = Stopwatch.StartNew();
-        (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-            FluxCheckpointConverter.LoadAndConvert(checkpointPath);
+        CheckpointSource loader = CheckpointSource.Open(checkpointPath);
+        FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
         sw.Stop();
         _output.WriteLine($"Loaded {variantTag} checkpoint in {sw.ElapsedMilliseconds}ms.");
 

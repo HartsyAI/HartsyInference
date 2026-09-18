@@ -78,33 +78,13 @@ public sealed class ModelManager : IDisposable
     public IReadOnlyCollection<string> UnhealthyChatModels =>
         [.. _llmSessions.Where(kv => kv.Value.Scheduler is { IsLoopAlive: false }).Select(kv => kv.Key)];
 
-    // Diffusion mappers registered in GgufKeyMapperRegistry.BuildRegistry() — a small, closed list that
-    // changes far less often than the LLM side. Used to derive "is this GGUF architecture a language model"
-    // WITHOUT loading any tensor data: GetByArchitecture(arch) is a metadata-only dictionary lookup, and if
-    // the matched mapper is one of these, the file is diffusion, not LLM.
-    //
-    // This must be a real upfront check, not a "try the LLM loader, catch and fall back" strategy — that
-    // was tried first and caused a real incident: GgufLanguageModel.Load's expensive step (GgufModelLoader
-    // reading + dequantizing every tensor to F32/F16) runs BEFORE GgufConfigFactory's cheap architecture
-    // validation, so attempting to load a multi-GB diffusion GGUF (e.g. Flux) down the LLM path fully
-    // materializes its tensors — 10+ GB of RAM — before anything has a chance to throw. That OOM-killed the
-    // test process along with unrelated processes on the box. Never attempt a heavy loader speculatively;
-    // decide which loader to use from cheap metadata alone.
-    private static readonly HashSet<Type> DiffusionMapperTypes =
-    [
-        typeof(ChromaRadianceKeyMapper), typeof(ZetaChromaKeyMapper), typeof(FluxKeyMapper), typeof(Flux2KeyMapper),
-        typeof(SdxlKeyMapper), typeof(Sd3KeyMapper), typeof(Sd15KeyMapper), typeof(FLiteKeyMapper), typeof(ChromaKeyMapper),
-        typeof(AuraFlowKeyMapper), typeof(ZImageKeyMapper), typeof(ErnieImageKeyMapper), typeof(HunyuanImageKeyMapper),
-        typeof(QwenImageKeyMapper),
-    ];
-
     /// <summary>Loads a model from a local path or HuggingFace repo id and caches the constructed pipeline.
     /// Returns the architecture that was detected. Routes to the LLM/SSM loader ONLY when a cheap GGUF
     /// metadata peek (<see cref="GgufLoader"/>, header/tensor-descriptors only — no weight-data read) finds
     /// an architecture that is either a known SSM architecture or registered in
     /// <see cref="GgufKeyMapperRegistry"/> under a NON-diffusion mapper; every other case (unrecognized
     /// architecture, or a diffusion mapper match) goes straight to diffusion detection, never attempting the
-    /// LLM loader speculatively. See <see cref="DiffusionMapperTypes"/> for why this can't be a
+    /// LLM loader speculatively. See <see cref="IsLikelyLlmArchitecture"/> for why this cannot be a
     /// try-then-fall-back strategy.</summary>
     public async Task<string> LoadAsync(string modelIdOrPath, CancellationToken ct)
     {
@@ -198,7 +178,15 @@ public sealed class ModelManager : IDisposable
     private static bool IsLikelyLlmArchitecture(string arch)
     {
         IGgufKeyMapper? mapper = GgufKeyMapperRegistry.GetByArchitecture(arch);
-        return mapper is not null && !DiffusionMapperTypes.Contains(mapper.GetType());
+        // Every diffusion family resolves to a DiffusionGgufKeyMapper, so "not one of those" is the language-model
+        // answer, derived from a metadata-only dictionary lookup with no tensor data read.
+        //
+        // This must be a real upfront check, not a "try the LLM loader, catch and fall back" strategy — that was tried
+        // first and caused a real incident: GgufLanguageModel.Load's expensive step (reading and dequantizing every
+        // tensor) runs BEFORE the cheap architecture validation, so sending a multi-GB diffusion GGUF down the LLM path
+        // fully materialized its tensors — 10+ GB — before anything could throw, and OOM-killed the test process along
+        // with unrelated processes on the box. Never attempt a heavy loader speculatively.
+        return mapper is not null and not DiffusionGgufKeyMapper;
     }
 
     /// <summary>Runs the given synchronous GPU-touching work under the shared <see cref="InferenceQueue"/>

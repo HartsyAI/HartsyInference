@@ -21,10 +21,12 @@ public sealed class QwenImageCheckpointConverter
     }
 
     /// <summary>Converts a raw checkpoint dictionary to per-component diffusers-format dicts.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because a converter renames <c>.weight</c> without renaming
+    /// <c>.weight_scale</c> and folding after the rename drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
-
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(QwenImageCheckpointConverter));
         Dictionary<string, Tensor> transformer = new(2500);
         Dictionary<string, Tensor> textEncoder = new(800);
         Dictionary<string, Tensor> vae = new(300);
@@ -74,15 +76,6 @@ public sealed class QwenImageCheckpointConverter
             TextEncoder = textEncoder,
             Vae = vae,
         };
-    }
-
-    /// <summary>Loads a single-file Qwen-Image checkpoint and converts it in one call.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
     }
 
     private static void ConvertTransformerKey(string key, Tensor tensor, Dictionary<string, Tensor> output)

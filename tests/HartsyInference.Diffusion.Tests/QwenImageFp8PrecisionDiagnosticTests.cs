@@ -6,6 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -80,8 +81,9 @@ public sealed class QwenImageFp8PrecisionDiagnosticTests
         try
         {
             _output.WriteLine($"[1/4] Loading Qwen-Image Edit fp8 checkpoint from {checkpoint}...");
-            (QwenImageCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
-                QwenImageCheckpointConverter.LoadAndConvert(checkpoint);
+            CheckpointSource loader = CheckpointSource.Open(checkpoint);
+            QwenImageCheckpointConverter.ConvertedWeights converted =
+                QwenImageCheckpointConverter.Convert(loader.Weights);
             try
             {
                 QwenImageConfig config = QwenImageConfig.V1;
@@ -182,8 +184,9 @@ public sealed class QwenImageFp8PrecisionDiagnosticTests
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/3] Loading Qwen-Image Edit fp8 checkpoint from {checkpoint}...");
-        (QwenImageCheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) =
-            QwenImageCheckpointConverter.LoadAndConvert(checkpoint);
+        CheckpointSource loader = CheckpointSource.Open(checkpoint);
+        QwenImageCheckpointConverter.ConvertedWeights converted =
+            QwenImageCheckpointConverter.Convert(loader.Weights);
         try
         {
             QwenImageConfig config = QwenImageConfig.V1;

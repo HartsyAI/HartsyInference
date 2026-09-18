@@ -1,10 +1,9 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Converts single-file SD3 checkpoints (Stability AI / ComfyUI format) to diffusers-format weight dictionaries. Handles fused QKV splitting and key remapping for the MMDiT transformer, triple text encoders, and 16-channel VAE.</summary>
+/// <summary>Converts single-file SD3 checkpoints (Stability AI / ComfyUI format) to diffusers-format weight dictionaries. Handles fused QKV splitting and key remapping for the MMDiT transformer, triple text encoders, and 16-channel VAE. A key belonging to no other component is read as an MMDiT key with or without the Stability <c>model.diffusion_model.</c> wrapper, so a transformer-only file saved bare still loads.</summary>
 public sealed class Sd3CheckpointConverter
 {
     /// <summary>Result of converting a single-file SD3 checkpoint into per-component weight dictionaries.</summary>
@@ -26,12 +25,13 @@ public sealed class Sd3CheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Converts a single-file SD3 checkpoint into separate per-component weight dictionaries. Folds ComfyUI fp8_scaled per-tensor `.scale_weight` companions into <c>Tensor.Fp8ScaleFactor</c> before bucketing (SD3.5 FP8 distributions ship the T5-XXL encoder this way), and drops zero-byte `*.scaled_fp8` format markers.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <summary>Converts a single-file SD3 checkpoint into separate per-component weight dictionaries, dropping zero-byte <c>*.scaled_fp8</c> format markers.</summary>
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter renames <c>.weight</c> and splits fused projections
+    /// without renaming <c>.weight_scale</c>, so folding after the rename drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        // Fold per-tensor FP8 scale companions into Tensor.Fp8ScaleFactor (matches Flux fp8_scaled handling).
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
-
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(Sd3CheckpointConverter));
         Dictionary<string, Tensor> transformer = new(2000);
         Dictionary<string, Tensor> clipL = new(200);
         Dictionary<string, Tensor> clipG = new(400);
@@ -85,6 +85,13 @@ public sealed class Sd3CheckpointConverter
                 if (diffusersKey is not null)
                     vae[diffusersKey] = tensor;
             }
+            // A transformer-only file carries the MMDiT bare: every published SD3/SD3.5 GGUF drops the Stability
+            // wrapper, so requiring it here dropped every tensor and the recipe reported an empty checkpoint.
+            // ConvertTransformerKey ignores what it does not recognize, so an unrelated key still falls through.
+            else
+            {
+                ConvertTransformerKey(key, tensor, transformer);
+            }
         }
 
         return new ConvertedWeights
@@ -95,15 +102,6 @@ public sealed class Sd3CheckpointConverter
             T5 = t5,
             Vae = vae,
         };
-    }
-
-    /// <summary>Loads a single-file checkpoint and converts it in one step.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
     }
 
     // ── MMDiT Transformer Key Conversion ──────────────────────────────────────────

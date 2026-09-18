@@ -119,6 +119,40 @@ public sealed record RecipeContext
         }
     }
 
+    /// <summary>Every distinct backend that will execute transformer blocks — the primary plus any CFG-parallel,
+    /// DiT-shard or context-parallel peer, and deliberately NOT the text-encoder or VAE backends.</summary>
+    /// <remarks>A decision about the transformer's own weights has to hold on every device that runs them. The obvious
+    /// mistake is to ask <see cref="Backend"/> alone: a CUDA primary reports that it can consume an int8 or GGUF weight
+    /// packed, so the weight stays packed, and then a CPU or F16-less Vulkan shard is handed a weight it has no kernel
+    /// for and dies in its first Linear. <see cref="AllBackends"/> is the wrong set for this because it includes the
+    /// text-encoder and VAE devices, which never see a transformer weight and would narrow the answer for no reason.</remarks>
+    public IEnumerable<IBackend> TransformerBackends
+    {
+        get
+        {
+            HashSet<IBackend> seen = new HashSet<IBackend>(ReferenceEqualityComparer.Instance as IEqualityComparer<IBackend>);
+            foreach (IBackend candidate in EnumerateTransformerCandidates())
+            {
+                if (seen.Add(candidate)) yield return candidate;
+            }
+        }
+    }
+
+    private IEnumerable<IBackend> EnumerateTransformerCandidates()
+    {
+        yield return Backend;
+        if (CfgParallelBackend is not null) yield return CfgParallelBackend;
+        if (DitShardBackend is not null) yield return DitShardBackend;
+        if (DitShardBackends is not null)
+        {
+            foreach (IBackend stageBackend in DitShardBackends) yield return stageBackend;
+        }
+        if (CpBackends is not null)
+        {
+            foreach (IBackend rankBackend in CpBackends) yield return rankBackend;
+        }
+    }
+
     /// <summary>Optional swappable-component overrides; null keeps the recipe's defaults.</summary>
     public ComponentOverrides? Components { get; init; }
 

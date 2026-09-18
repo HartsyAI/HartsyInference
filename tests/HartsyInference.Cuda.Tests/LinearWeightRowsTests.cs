@@ -1,6 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
@@ -137,5 +140,84 @@ public sealed unsafe class LinearWeightRowsTests
         }
 
         _ = rows;
+    }
+
+    /// <summary>A GGUF weight's rows, which the row-range path refused outright until the byte offset moved to after
+    /// cast resolution.</summary>
+    /// <remarks>MiniMax-H3 reads its packed <c>qkv_proj</c> in two windows, and that chunking is how the model runs at
+    /// all — so refusing a row range on a block-quantized weight is what made a GGUF H3 unreachable, not merely slower.
+    /// The reference here is the same rows as their own tensor: a distinct identity, so it uploads and dequantizes
+    /// independently of the resident weight the range is offsetting into.</remarks>
+    [Theory]
+    [InlineData("Q8_0", 96)]
+    [InlineData("Q8_0", 256)]
+    [InlineData("Q4_K", 256)]
+    public void RowRangeOfABlockQuantizedWeightMatchesTheSameRowsAlone(string dtype, int hidden)
+    {
+        const int inner = 128, m = 64;
+        int outDim = inner * 3;
+        DType weightDType = dtype == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor weight = RandomQuantized(weightDType, new TensorShape(outDim, hidden), 11);
+        using Tensor input = RandomF32(new TensorShape(m, hidden), 22);
+        cuda.PreloadWeights(new[] { weight });
+
+        foreach ((int off, int count, string name) in new[] { (0, inner, "q"), (inner, inner * 2, "kv") })
+        {
+            using Tensor viaRowRange = new Tensor(new TensorShape(m, count), DType.F32);
+            cuda.LinearWeightRows(viaRowRange, input, weight, null, off, count);
+            _ = viaRowRange.DataPointer;
+
+            using Tensor slice = weight.SliceRows(off, count).To(weight.Device);
+            using Tensor viaSlice = new Tensor(new TensorShape(m, count), DType.F32);
+            cuda.Linear(viaSlice, input, slice, null);
+            _ = viaSlice.DataPointer;
+
+            AssertBitExact(viaSlice, viaRowRange, $"{dtype} hidden={hidden} range={name}");
+        }
+    }
+
+    /// <summary>The quant policy asked about a CUDA primary alone versus that primary plus a CPU peer.</summary>
+    /// <remarks>Transformer weights are one set of bytes shared by every device that executes the blocks. CUDA reports
+    /// it can hold Q8_0 packed, so asking it alone leaves the weight packed — and a DiT shard or context-parallel rank
+    /// on a device without that kernel is then handed something it cannot read and dies in its first Linear. Two real
+    /// backends rather than stubs, because the whole point is that the capability answers are the real ones.</remarks>
+    [Fact]
+    public void QuantPolicyIntersectsEveryBackendThatRunsTheBlocks()
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using CpuBackend cpuBackend = new CpuBackend();
+        // Through IBackend: the CPU backend does not override the capability, so it answers with the interface default,
+        // which is the honest answer for a backend with no packed-weight kernels at all.
+        IBackend cpu = cpuBackend;
+        Assert.True(cuda.SupportsResidentQuant(DType.Q8_0), "CUDA should read Q8_0 packed.");
+        Assert.False(cpu.SupportsResidentQuant(DType.Q8_0), "The CPU backend has no packed-weight kernels.");
+
+        using Tensor packed = RandomQuantized(DType.Q8_0, new TensorShape(64, 256), 5);
+        Dictionary<string, Tensor> onlyCuda = new() { ["blocks.0.attn.to_q.weight"] = packed };
+        using (QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(onlyCuda, new IBackend[] { cuda }))
+        {
+            Assert.Equal(0, prepared.WidenedCount);
+            Assert.Same(packed, onlyCuda["blocks.0.attn.to_q.weight"]);
+        }
+
+        Dictionary<string, Tensor> bothDevices = new() { ["blocks.0.attn.to_q.weight"] = packed };
+        using (QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(bothDevices, new IBackend[] { cuda, cpu }))
+        {
+            Assert.Equal(1, prepared.WidenedCount);
+            Assert.Equal(DType.F16, bothDevices["blocks.0.attn.to_q.weight"].DType);
+        }
+    }
+
+    /// <summary>A real block-quantized weight, produced by the engine's own quantizer so its super-block scales are
+    /// finite values rather than whatever random bytes decode to — a comparison against Inf or NaN would pass by
+    /// accident on a good day and flake on a bad one.</summary>
+    private static Tensor RandomQuantized(DType dtype, TensorShape shape, int seed)
+    {
+        using Tensor dense = RandomF32(shape, seed);
+        return GgufQuantizer.Quantize(dense, dtype);
     }
 }

@@ -187,10 +187,19 @@ to fix today. Confirm the premise still holds before acting on one.
   clamps to `F8_E4M3_MAX = 448` (`float_utils.py`), so its quantizer never emits `0x7F` as a block scale or an
   fp8 weight. It surfaced as a `relL2 = NaN` on an all-256-scale-bytes synthetic case, which is the only way to
   hit it. Do not "unify" these without first checking which callers depend on which.
-- **`Tensor.Reshape` drops `Fp8ScaleFactor`** (and `QuantInfo`). `Nvfp4Linear.Load` reshapes its block scale to
-  the rank-3 bank shape *before* `DequantBf16Core` reads `blockScale.Fp8ScaleFactor`, so a non-1 factor would be
-  silently ignored there while the resident path (which reads the un-reshaped tensor) honours it. Latent only
-  because the factor is 1 in every checkpoint inspected.
+- **A view carries its quantization companions** (alpha.83). `Tensor.Reshape`, `ReinterpretAs` and `To` used to
+  build a tensor over another's bytes with `Fp8ScaleFactor` back at 1.0, no `Fp8InputScaleFactor` and no
+  `QuantInfo` — so `Nvfp4Linear.Load`, which reshapes its block scale to the rank-3 bank shape *before*
+  `DequantBf16Core` reads `blockScale.Fp8ScaleFactor`, silently ignored a non-1 factor that the resident path
+  honoured. That was latent (the factor is 1 in every checkpoint inspected) and is the mild end of the class: a
+  converter that reshapes or splits a quantized weight dropped its scale outright, and a weight without its scale
+  is not an error, it is a weight hundreds of times too large.
+  The two per-tensor fp8 scalars now follow the bytes unconditionally. `QuantInfo` follows them when the leading
+  dimension survives and **refuses otherwise**, because its `RowScale` is indexed by that dimension and a view
+  that renumbers the rows would pair each row with another row's scale. Row slices — a fused QKV split, a
+  windowed projection — narrow the companion to match through `QuantWeightInfo.SliceRows`, which shares a
+  per-tensor scale as-is and refuses NVFP4, whose block scales are padded to 128 rows and swizzled and so are not
+  addressable by a row range.
 - **Per-weight quant scale caches are freed wholesale, not per weight.** `_int8RowScaleDevice`,
   `_nvfp4ScaleDevice` and `_w8a8WeightCache` are all released by `FreeW8A8Cache` (Dispose /
   `FreeAllDeviceMemory` / `FreePreloadedWeights`) and not by `FreeWeights`. Since they are keyed by `Tensor`,

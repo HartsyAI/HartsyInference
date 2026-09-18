@@ -11,6 +11,7 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.MiniMaxH3;
 using HartsyInference.Video.Encoding;
@@ -1513,16 +1514,17 @@ internal static class VideoProfileResolver
         }
     }
 
+    /// <summary>Reads a checkpoint's tensor inventory without mapping weight data, from either container.</summary>
+    /// <remarks>This used to open the file as safetensors unconditionally, so a GGUF build of a planned model failed
+    /// here — in planning, before any recipe was reached — with a header-parse error rather than an answer about the
+    /// checkpoint. <see cref="CheckpointHeader"/> normalizes GGUF keys and shapes to the safetensors build's, so every
+    /// structural check below reads the same names either way.</remarks>
     private static HeaderSnapshot ReadHeader(string path)
     {
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(path);
-        Dictionary<string, SafeTensorDescriptor> descriptors =
-            new Dictionary<string, SafeTensorDescriptor>(loader.Descriptors, StringComparer.Ordinal);
-        Dictionary<string, string> metadata = loader.Metadata is null
-            ? new Dictionary<string, string>(StringComparer.Ordinal)
-            : new Dictionary<string, string>(loader.Metadata, StringComparer.Ordinal);
-        return new HeaderSnapshot(descriptors, metadata);
+        CheckpointHeader header = CheckpointHeader.Read(path);
+        return new HeaderSnapshot(
+            new Dictionary<string, SafeTensorDescriptor>(header.Descriptors, StringComparer.Ordinal),
+            new Dictionary<string, string>(header.Metadata, StringComparer.Ordinal));
     }
 
     private static void ValidateH3Structure(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors,
@@ -2218,8 +2220,16 @@ internal static class VideoProfileResolver
     }
 
     /// <summary>Classifies a component from dtype and quantization-companion structure without reading tensor data.</summary>
+    /// <remarks>A GGUF's block quants are reported as <c>gguf-q4_k</c> and the like, named by the dtype most of the
+    /// file's bytes are in: a GGUF keeps its norms and biases wide, so counting tensors would call a file that is
+    /// overwhelmingly Q4_K an F32 one.</remarks>
     internal static string DetectFormat(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
     {
+        string? ggufQuant = DominantGgufQuant(descriptors);
+        if (ggufQuant is not null)
+        {
+            return $"gguf-{ggufQuant.ToLowerInvariant()}";
+        }
         bool hasNvfp4 = descriptors.Values.Any(descriptor => descriptor.DType == DType.U8)
             && descriptors.Keys.Any(key => key.EndsWith(".weight_scale_2", StringComparison.Ordinal));
         if (hasNvfp4)
@@ -2246,6 +2256,25 @@ internal static class VideoProfileResolver
             return "fp16";
         }
         return "fp32";
+    }
+
+    /// <summary>The GGUF block-quant dtype holding most of this checkpoint's bytes, or null when none is block-quantized.</summary>
+    private static string? DominantGgufQuant(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors)
+    {
+        Dictionary<string, long> bytesByDtype = new(StringComparer.Ordinal);
+        foreach (SafeTensorDescriptor descriptor in descriptors.Values)
+        {
+            if (!descriptor.DType.IsQuantized) continue;
+            bytesByDtype.TryGetValue(descriptor.DType.Name, out long seen);
+            bytesByDtype[descriptor.DType.Name] = seen + descriptor.ByteLength;
+        }
+        string? dominant = null;
+        long best = 0;
+        foreach (KeyValuePair<string, long> entry in bytesByDtype)
+        {
+            if (entry.Value > best) (dominant, best) = (entry.Key, entry.Value);
+        }
+        return dominant;
     }
 
     private static async Task<VideoProfileSidecar?> ReadSidecarAsync(string checkpointPath, string hash,

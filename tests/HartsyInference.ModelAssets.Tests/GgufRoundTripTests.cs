@@ -15,6 +15,11 @@ public sealed class GgufRoundTripTests : IDisposable
         Directory.CreateDirectory(_tempDir);
     }
 
+    /// <summary>The writer emits ggml <c>ne</c> order — fastest axis first — so a rank-2 tensor comes back from the
+    /// loader transposed and is put right by <see cref="GgufModelLoader.RelabelRank2ToPyTorchOrder"/>, exactly as a
+    /// city96 or llama.cpp file is. Asserting the shape survives the raw load instead would pin the old behaviour,
+    /// where our output was self-consistent, unreadable by every other GGUF tool, and transposed by the relabel every
+    /// read path in this engine applies.</summary>
     [Fact]
     public unsafe void RoundTrip_SimpleF32_PreservesShapeAndData()
     {
@@ -42,8 +47,12 @@ public sealed class GgufRoundTripTests : IDisposable
             Assert.Single(loaded.Weights);
             Assert.True(loaded.Weights.ContainsKey("test.tensor"));
 
-            Tensor dst = loaded.Weights["test.tensor"];
-            Assert.Equal(DType.F32, dst.DType);
+            Tensor raw = loaded.Weights["test.tensor"];
+            Assert.Equal(DType.F32, raw.DType);
+            Assert.Equal(3L, raw.Shape[0]);
+            Assert.Equal(2L, raw.Shape[1]);
+
+            Tensor dst = GgufModelLoader.RelabelRank2ToPyTorchOrder(loaded.Weights)["test.tensor"];
             Assert.Equal(2L, dst.Shape[0]);
             Assert.Equal(3L, dst.Shape[1]);
 
@@ -277,40 +286,6 @@ public sealed class GgufRoundTripTests : IDisposable
             q.Dispose();
         }
     }
-
-    [Fact]
-    public unsafe void GgufConverterBridge_LoadsThroughTestConverter()
-    {
-        string path = Path.Combine(_tempDir, "bridge.gguf");
-
-        Tensor t = new Tensor(new TensorShape(8), DType.F32);
-        try
-        {
-            float* tp = (float*)t.DataPointer;
-            for (int i = 0; i < 8; i++) tp[i] = i * 0.5f;
-
-            using (GgufWriter w = new(path))
-            {
-                w.SetMetadata("general.architecture", "test");
-                w.AddTensor("foo", t);
-                w.AddTensor("bar", t);
-                w.Flush();
-            }
-
-            (TestConverted converted, GgufModelLoader.LoadedGgufModel handle) =
-                GgufConverterBridge.LoadGguf(path, DType.F32, weights => new TestConverted { KeyCount = weights.Count });
-            using (handle)
-            {
-                Assert.Equal(2, converted.KeyCount);
-            }
-        }
-        finally
-        {
-            t.Dispose();
-        }
-    }
-
-    private sealed class TestConverted { public int KeyCount { get; init; } }
 
     public void Dispose()
     {

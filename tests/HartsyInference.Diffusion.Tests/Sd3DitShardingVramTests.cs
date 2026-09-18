@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -34,7 +34,8 @@ public sealed class Sd3DitShardingVramTests
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/5] Loading SD3.5 transformer from {checkpoint}...");
-        (Sd3CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) = Sd3CheckpointConverter.LoadAndConvert(checkpoint);
+        CheckpointSource loader = CheckpointSource.Open(checkpoint);
+        Sd3CheckpointConverter.ConvertedWeights converted = Sd3CheckpointConverter.Convert(loader.Weights);
         _output.WriteLine($"  transformer={converted.Transformer.Count} keys, {sw.Elapsed.TotalSeconds:F1}s");
 
         try

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -9,6 +10,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
@@ -48,23 +50,27 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 
     public IRecipePipeline Construct(RecipeContext context)
     {
-        // TODO(E-IMG-4/5): split-file + GGUF transformer inputs, and honoring user CLIP-L/T5/VAE overrides from
+        // TODO(E-IMG-4/5): split-file inputs, and honoring user CLIP-L/T5/VAE overrides from
         // ImageRequest.Components (the SwarmUI loader read T2IParamTypes.ClipLModel/T5XXLModel/VAE), are not yet
         // wired — this takes the all-in-one path with canonical side-model fallback for any missing component.
         // TODO(E-IMG-4/5): FLUX.1 Tools (Canny/Depth/Fill), Kontext, Redux, ControlNet, img2img/inpaint deferred —
         // this ports the vanilla Dev/Schnell text-to-image core only.
-        (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader mainLoader) = FluxCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        Dictionary<string, Tensor> transformerWeights = converted.Transformer;
-        if (transformerWeights.Count == 0)
-        {
-            mainLoader.Dispose();
-            throw new InvalidOperationException("Flux.1: this checkpoint contains no transformer weights — not a Flux diffusion model.");
-        }
-
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        List<IDisposable> loaders = new List<IDisposable>();
         MergedLoraStack? loraStack = null;
         try
         {
+            // One container for either format: a Flux.1 GGUF is a repack of the same BFL file and keeps its bare
+            // key names, so nothing below needs to know which one arrived. Quantized tensors stay packed and
+            // dequantize transiently per GEMM.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(source);
+            FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(source.Weights);
+            Dictionary<string, Tensor> transformerWeights = converted.Transformer;
+            if (transformerWeights.Count == 0)
+            {
+                throw new InvalidOperationException("Flux.1: this checkpoint contains no transformer weights — not a Flux diffusion model.");
+            }
+
             Dictionary<string, Tensor> clipLWeights = converted.ClipL;
             Dictionary<string, Tensor> t5Weights = converted.T5;
             Dictionary<string, Tensor> vaeWeights = converted.Vae;
@@ -113,6 +119,15 @@ public sealed class Flux1Recipe : IArchitectureRecipe
                 RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: true);
             }
 
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation. Tracked immediately — in place of the source it wraps, so a
+            // failure further down frees the widened copies rather than leaving them to the finalizer.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends);
+            loaders[0] = new CompositeDisposable(source, prepared);
+
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             loraStack = LoraApplier.BuildAndApply(
                 LoraResolver.Resolve(context.Loras),
                 context.Backend,
@@ -168,7 +183,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         {
             Logs.Error("[Flux1Recipe] Construction failed.", ex);
             loraStack?.Dispose();
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

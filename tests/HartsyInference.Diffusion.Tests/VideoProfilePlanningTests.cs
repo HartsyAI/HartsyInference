@@ -90,6 +90,32 @@ public sealed class VideoProfilePlanningTests : IDisposable
     }
 
     [Fact]
+    public void ComponentFormat_NamesAGgufByTheQuantHoldingMostOfItsBytes()
+    {
+        // A GGUF keeps its norms and biases wide, so counting tensors would call a file that is overwhelmingly Q4_K an
+        // F32 one — and the format string is what a plan reports to the user about what they are about to run.
+        Dictionary<string, SafeTensorDescriptor> descriptors = new(StringComparer.Ordinal)
+        {
+            ["blocks.0.attn.qkv_proj.weight"] = Descriptor("blocks.0.attn.qkv_proj.weight", DType.Q4_K, 512, 2688),
+            ["blocks.0.attn.o_proj.weight"] = Descriptor("blocks.0.attn.o_proj.weight", DType.Q4_K, 512, 2688),
+            ["blocks.0.norm.weight"] = Descriptor("blocks.0.norm.weight", DType.F32, 2688),
+            ["blocks.1.norm.weight"] = Descriptor("blocks.1.norm.weight", DType.F32, 2688),
+            ["rope.inv_freq"] = Descriptor("rope.inv_freq", DType.F32, 16),
+        };
+
+        Assert.Equal("gguf-q4_k", VideoProfileResolver.DetectFormat(descriptors));
+
+        static SafeTensorDescriptor Descriptor(string name, DType dtype, params long[] dimensions) => new()
+        {
+            Name = name,
+            DType = dtype,
+            Shape = new TensorShape(dimensions),
+            DataOffset = 0,
+            ByteLength = dtype.ComputeByteCount(dimensions.Aggregate(1L, (product, value) => product * value)),
+        };
+    }
+
+    [Fact]
     public void ComponentFormat_DetectsNvfp4AwqBeforeItsInt8EmbeddingFallback()
     {
         Dictionary<string, SafeTensorDescriptor> descriptors = new(StringComparer.Ordinal)
