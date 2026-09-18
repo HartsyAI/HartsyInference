@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
@@ -137,5 +138,50 @@ public sealed unsafe class LinearWeightRowsTests
         }
 
         _ = rows;
+    }
+
+    /// <summary>A GGUF weight's rows, which the row-range path refused outright until the byte offset moved to after
+    /// cast resolution.</summary>
+    /// <remarks>MiniMax-H3 reads its packed <c>qkv_proj</c> in two windows, and that chunking is how the model runs at
+    /// all — so refusing a row range on a block-quantized weight is what made a GGUF H3 unreachable, not merely slower.
+    /// The reference here is the same rows as their own tensor: a distinct identity, so it uploads and dequantizes
+    /// independently of the resident weight the range is offsetting into.</remarks>
+    [Theory]
+    [InlineData("Q8_0", 96)]
+    [InlineData("Q8_0", 256)]
+    [InlineData("Q4_K", 256)]
+    public void RowRangeOfABlockQuantizedWeightMatchesTheSameRowsAlone(string dtype, int hidden)
+    {
+        const int inner = 128, m = 64;
+        int outDim = inner * 3;
+        DType weightDType = dtype == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using Tensor weight = RandomQuantized(weightDType, new TensorShape(outDim, hidden), 11);
+        using Tensor input = RandomF32(new TensorShape(m, hidden), 22);
+        cuda.PreloadWeights(new[] { weight });
+
+        foreach ((int off, int count, string name) in new[] { (0, inner, "q"), (inner, inner * 2, "kv") })
+        {
+            using Tensor viaRowRange = new Tensor(new TensorShape(m, count), DType.F32);
+            cuda.LinearWeightRows(viaRowRange, input, weight, null, off, count);
+            _ = viaRowRange.DataPointer;
+
+            using Tensor slice = weight.SliceRows(off, count).To(weight.Device);
+            using Tensor viaSlice = new Tensor(new TensorShape(m, count), DType.F32);
+            cuda.Linear(viaSlice, input, slice, null);
+            _ = viaSlice.DataPointer;
+
+            AssertBitExact(viaSlice, viaRowRange, $"{dtype} hidden={hidden} range={name}");
+        }
+    }
+
+    /// <summary>A real block-quantized weight, produced by the engine's own quantizer so its super-block scales are
+    /// finite values rather than whatever random bytes decode to — a comparison against Inf or NaN would pass by
+    /// accident on a good day and flake on a bad one.</summary>
+    private static Tensor RandomQuantized(DType dtype, TensorShape shape, int seed)
+    {
+        using Tensor dense = RandomF32(shape, seed);
+        return GgufQuantizer.Quantize(dense, dtype);
     }
 }

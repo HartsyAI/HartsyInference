@@ -1759,15 +1759,14 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
-        // A row range addresses the weight by byte offset, which block-quantized layouts (super-block scales
-        // interleaved with packed nibbles) cannot express, and it makes the W8A8 int8 cache — keyed on the WHOLE
-        // weight — describe the wrong rows. Both are refused rather than silently mis-slicing; every fused-GEMV
-        // branch below is m<=8 (LLM decode) and so is unreachable from the chunked-DiT callers that need this.
+        // A row range is applied as a byte offset after cast resolution (see the offset below), so a block-quantized
+        // weight is served by the ordinary dequant-then-GEMM path: the whole weight materializes to gemmDtype and the
+        // range indexes that, never the packed bytes. What a range still cannot do is address the packed layout
+        // directly, so every branch that does — the W8A8 int8 cache keyed on the whole weight, the resident int8 and
+        // nvfp4 chains, the fused quantized GEMVs — excludes itself on rowRange rather than silently mis-slicing.
         bool rowRange = weightRowOffset != 0 || weightRowCount >= 0;
         if (rowRange)
         {
-            if (weight.DType.IsQuantized)
-                throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
             if (bias is not null && bias.DType != output.DType)
                 throw new NotSupportedException(
                     $"LinearWeightRows needs bias dtype to match output ({bias.DType} vs {output.DType}) — a cast would rebase the slice.");

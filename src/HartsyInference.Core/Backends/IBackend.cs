@@ -55,24 +55,14 @@ public interface IBackend : IDisposable
     /// can offset a device pointer override it.</summary>
     unsafe void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
     {
-        if (weight.DType.IsQuantized)
-            throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
-        using Tensor rows = new Tensor(new TensorShape(weightRowCount, weight.Shape[1]), weight.DType)
-        {
-            Fp8ScaleFactor = weight.Fp8ScaleFactor,
-        };
-        SliceRowsGeneric(rows, weight, weightRowOffset);
-        if (bias is null)
-        {
-            Linear(output, input, rows, null);
-            return;
-        }
-        // Bias is 1-D, one value per output channel, so it slices by ELEMENT — SliceRowsGeneric's row stride
-        // (its last dim is the whole vector) would offset by rowOffset*count instead.
-        using Tensor biasRows = new Tensor(new TensorShape(weightRowCount), bias.DType);
-        long biasOffsetBytes = bias.DType.ComputeByteCount(weightRowOffset);
-        long biasBytes = bias.DType.ComputeByteCount(weightRowCount);
-        Buffer.MemoryCopy((byte*)bias.DataPointer + biasOffsetBytes, biasRows.DataPointer, biasBytes, biasBytes);
+        // Rows are the outermost axis, so the window is a byte offset — including for a block-quantized weight, whose
+        // blocks never span rows. This used to refuse those outright, which is what made MiniMax-H3's chunked
+        // projections unreachable from a GGUF build: the chunking is how the model runs at all, and the weight it
+        // chunks is the one the quantization applies to.
+        using Tensor rows = weight.SliceRows(weightRowOffset, weightRowCount);
+        rows.QuantInfo = weight.QuantInfo?.SliceRows(weightRowOffset, weightRowCount, "the weight passed to LinearWeightRows");
+        // Bias is 1-D, one value per output channel, so its window is the same row range read as elements.
+        using Tensor? biasRows = bias?.SliceRows(weightRowOffset, weightRowCount);
         Linear(output, input, rows, biasRows);
     }
 
