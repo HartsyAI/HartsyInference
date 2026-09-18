@@ -76,6 +76,52 @@ public sealed class LoraDoraMergeTests : IDisposable
         }
     }
 
+    /// <summary>Two DoRA adapters on one weight decompose in sequence, each against the result of the last — what
+    /// ComfyUI does patch by patch. The merge loop makes that claim; without this it is only a comment. The two
+    /// magnitude vectors differ, so a composition applied in the wrong order lands somewhere else.</summary>
+    [Fact]
+    public void DenseMerge_StacksTwoDoraAdaptersInSequence()
+    {
+        float[] first = [1.3f, 0.7f, 2.1f, 0.9f];
+        float[] second = [0.6f, 1.8f, 1.1f, 1.45f];
+        string firstPath = DoraLora("stack-1", first, [Rows]);
+        string secondPath = DoraLora("stack-2", second, [Rows]);
+
+        Tensor baseW = Weight(Rows, Cols);
+        Dictionary<string, Tensor> weights = new() { ["blocks.0.to_q.weight"] = baseW };
+        float[] actual;
+        using (LoraStack stack = new LoraStack())
+        using (CpuBackend backend = new CpuBackend())
+        {
+            stack.AddFromPath(firstPath, strength: 1.0f);
+            stack.AddFromPath(secondPath, strength: 1.0f);
+            Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
+            actual = Read(weights["blocks.0.to_q.weight"]);
+        }
+        baseW.Dispose();
+
+        using Tensor expected = Weight(Rows, Cols);
+        DecomposeInto(expected, first);
+        DecomposeInto(expected, second);
+        float[] reference = Read(expected);
+        for (int i = 0; i < actual.Length; i++)
+        {
+            Assert.Equal(reference[i], actual[i], 4);
+        }
+        // Order matters: the reverse composition must not also satisfy the assertion above, or the test would pass
+        // on an implementation that applied them backwards.
+        using Tensor reversed = Weight(Rows, Cols);
+        DecomposeInto(reversed, second);
+        DecomposeInto(reversed, first);
+        float[] other = Read(reversed);
+        int differing = 0;
+        for (int i = 0; i < actual.Length; i++)
+        {
+            if (Math.Abs(reference[i] - other[i]) > 1e-3f) { differing++; }
+        }
+        Assert.True(differing > actual.Length / 2, "the two orderings are indistinguishable; fixture proves nothing.");
+    }
+
     /// <summary>The file has to parse as DoRA in the first place — if the <c>.dora_scale</c> suffix stopped routing to
     /// <see cref="LoraDelta.DoraScale"/> the merge above would silently go back to being a plain LoRA and still pass
     /// its own reference.</summary>
@@ -141,6 +187,16 @@ public sealed class LoraDoraMergeTests : IDisposable
         magnitude.AsSpan().CopyTo(scale.AsSpan<float>());
         LoraDoraDecompose.Apply(weight, delta, scale, scale: 1.0f, strength);
         return Read(weight);
+    }
+
+    /// <summary>Applies one decomposition in place, so a caller can compose several the way the merge loop does.</summary>
+    private static void DecomposeInto(Tensor weightF32, float[] magnitude)
+    {
+        using Tensor delta = new Tensor(new TensorShape(Rows, Cols), DType.F32);
+        delta.AsSpan<float>().Fill(Rank * DownValue * UpValue);
+        using Tensor scale = new Tensor(new TensorShape(magnitude.Length), DType.F32);
+        magnitude.AsSpan().CopyTo(scale.AsSpan<float>());
+        LoraDoraDecompose.Apply(weightF32, delta, scale, scale: 1.0f, strength: 1.0f);
     }
 
     /// <summary>What the merge produced before the decomposition was wired in: W + strength·scale·ΔW.</summary>

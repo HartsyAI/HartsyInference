@@ -65,7 +65,9 @@ public sealed class LowRankAdjunctCoverageTests
     /// classified above, which forces the applies-or-refuses decision at the moment the entry is added rather than
     /// the moment a LoRA looks weak.
     /// <para>It pins the classification, not the behaviour — the signatures vary too much to invoke generically, so
-    /// the [Fact]s remain what verifies that an <c>Applies</c> entry really does.</para></summary>
+    /// the [Fact]s remain what verifies that an <c>Applies</c> entry really does. The predicate is also a naming
+    /// convention: an entry that calls its weight <c>w</c>, <c>filter</c> or <c>kernel</c> slips past reflection and
+    /// has to be added by hand, next to the three below that already do.</para></summary>
     [Fact]
     public void EveryBackendEntryTakingAWeightIsClassified()
     {
