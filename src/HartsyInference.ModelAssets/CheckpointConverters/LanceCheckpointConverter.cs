@@ -29,10 +29,9 @@ public sealed class LanceCheckpointConverter
     {
         if (!Directory.Exists(variantDir))
             throw new DirectoryNotFoundException($"Lance variant folder not found: {variantDir}");
-        string[] shards = Directory.GetFiles(variantDir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(variantDir);
         if (shards.Length == 0)
-            throw new FileNotFoundException($"No model.safetensors shards found in: {variantDir}");
-        Array.Sort(shards, StringComparer.Ordinal);
+            throw new FileNotFoundException($"No safetensors or GGUF checkpoint found in: {variantDir}");
 
         Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try
@@ -66,11 +65,11 @@ public sealed class LanceCheckpointConverter
     /// <summary>Loads the Wan2.2 VAE weights from a safetensors file/folder (convert <c>Wan2.2_VAE.pth</c> → safetensors offline first). Strips a leading <c>model.</c> so keys match <c>Wan22VaeDecoder</c> (<c>conv2.*</c>, <c>decoder.*</c>).</summary>
     public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadVae(string vaePathOrDir)
     {
-        string[] shards = Directory.Exists(vaePathOrDir) ? Directory.GetFiles(vaePathOrDir, "*.safetensors")
+        string[] shards = Directory.Exists(vaePathOrDir)
+            ? CheckpointConvertUtils.DiscoverContainerFiles(vaePathOrDir)
             : [vaePathOrDir];
         if (shards.Length == 0 || !File.Exists(shards[0]))
-            throw new FileNotFoundException($"Wan2.2 VAE safetensors not found at: {vaePathOrDir} (convert Wan2.2_VAE.pth → safetensors first).");
-        Array.Sort(shards, StringComparer.Ordinal);
+            throw new FileNotFoundException($"Wan2.2 VAE weights not found at: {vaePathOrDir} (convert Wan2.2_VAE.pth → safetensors first).");
 
         Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try

@@ -1,6 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Memory;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -33,7 +34,7 @@ public sealed class FLiteCheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Loads all F-Lite components from a folder. Reads every safetensors file in <c>{root}/dit_model</c>, <c>{root}/text_encoder</c>, <c>{root}/vae</c> and partitions them into the three component dicts.</summary>
+    /// <summary>Loads all F-Lite components from a folder. Reads every checkpoint container in <c>{root}/dit_model</c>, <c>{root}/text_encoder</c>, <c>{root}/vae</c> and partitions them into the three component dicts.</summary>
     /// <remarks>Each component opens as one <see cref="Checkpoints.CheckpointSource"/>, so a GGUF or a quantized
     /// repack of any of the three loads, and its quantization companions are folded across the whole component
     /// rather than per shard — F-Lite never folded them at all before, so an fp8_scaled build ran at
@@ -77,10 +78,9 @@ public sealed class FLiteCheckpointConverter
         if (!Directory.Exists(componentDir))
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"F-Lite component directory missing: {componentDir}");
 
-        string[] shards = Directory.GetFiles(componentDir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(componentDir);
         if (shards.Length == 0)
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"No safetensors shards in {componentDir}");
-        Array.Sort(shards, StringComparer.Ordinal);
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"No safetensors or GGUF checkpoint in {componentDir}");
 
         Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         sources.Add(source);

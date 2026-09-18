@@ -24,6 +24,11 @@ stable release will require. Dates are UTC.
   companion carry is deleted, dead now that folding precedes renaming.
 - Lumina-2, HiDream and OmniGen 2 widen to the dtype their transformer actually runs, rather than the F16 default
   that would have left a GGUF mixing dense F32 with widened F16.
+- **A component published as `.gguf` inside a diffusers folder was invisible.** F-Lite, Lance, Kandinsky 5, Krea 2
+  and Boogu discovered their components with a `*.safetensors` glob and threw before the container could be sniffed,
+  so the GGUF path they now advertise was unreachable without renaming every file to a lie. Folder discovery reads
+  the leading bytes instead, the way single-file loading always has, and a set that mixes the two containers is
+  refused rather than merged into one dictionary.
 - **Selecting a Lumina-2 GGUF stored beside the original sharded release loaded the release instead.** Any sibling
   `*.safetensors.index.json` used to expand the selection into every safetensors in the folder; the index now has to
   list the selected file before it expands anything, so a repack — or any second checkpoint parked there — loads as

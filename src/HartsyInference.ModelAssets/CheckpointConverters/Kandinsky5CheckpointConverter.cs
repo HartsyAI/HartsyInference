@@ -61,10 +61,9 @@ public sealed class Kandinsky5CheckpointConverter
             throw new DirectoryNotFoundException(
                 $"Kandinsky 5 transformer dir not found: {transformerDir}");
 
-        string[] shards = Directory.GetFiles(transformerDir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(transformerDir);
         if (shards.Length == 0)
-            throw new FileNotFoundException($"No safetensors shards found in: {transformerDir}");
-        Array.Sort(shards, StringComparer.Ordinal);
+            throw new FileNotFoundException($"No safetensors or GGUF checkpoint found in: {transformerDir}");
         return OpenAndConvert(() => Checkpoints.CheckpointSource.OpenShards(shards));
     }
 
@@ -102,10 +101,9 @@ public sealed class Kandinsky5CheckpointConverter
         string[] shards;
         if (Directory.Exists(vaePathOrDir))
         {
-            shards = Directory.GetFiles(vaePathOrDir, "*.safetensors");
-            Array.Sort(shards, StringComparer.Ordinal);
+            shards = CheckpointConvertUtils.DiscoverContainerFiles(vaePathOrDir);
             if (shards.Length == 0)
-                throw new FileNotFoundException($"No safetensors found in Kandinsky 5 VAE dir: {vaePathOrDir}");
+                throw new FileNotFoundException($"No safetensors or GGUF checkpoint found in Kandinsky 5 VAE dir: {vaePathOrDir}");
         }
         else if (File.Exists(vaePathOrDir))
         {

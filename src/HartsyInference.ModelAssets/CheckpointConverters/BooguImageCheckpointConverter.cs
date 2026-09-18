@@ -23,10 +23,9 @@ public sealed class BooguImageCheckpointConverter
         string dir = Path.Combine(rootPath, "vae");
         if (!Directory.Exists(dir))
             throw new DirectoryNotFoundException($"VAE folder not found: {dir}");
-        string[] shards = Directory.GetFiles(dir, "*.safetensors");
+        string[] shards = CheckpointConvertUtils.DiscoverContainerFiles(dir);
         if (shards.Length == 0)
-            throw new FileNotFoundException($"No VAE .safetensors found under {dir}.");
-        Array.Sort(shards);
+            throw new FileNotFoundException($"No VAE checkpoint found under {dir}.");
         return CheckpointConvertUtils.LoadShards(shards, 400, k => CheckpointConvertUtils.ConvertVaeKey(k));
     }
 

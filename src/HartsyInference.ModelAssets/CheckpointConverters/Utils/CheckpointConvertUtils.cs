@@ -112,19 +112,37 @@ public static unsafe class CheckpointConvertUtils
 
     // ── Shard Loading ──────────────────────────────────────────
 
-    /// <summary>Finds .safetensors shards in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
+    /// <summary>Every checkpoint container directly under <paramref name="directory"/>, in ordinal order, identified by its leading bytes rather than by its extension.</summary>
+    /// <remarks>The extension decides nothing here for the same reason it decides nothing in
+    /// <see cref="Checkpoints.CheckpointSource.Sniff"/>: a GGUF repack of a diffusers component is published under
+    /// whatever name its author chose, and a glob for <c>*.safetensors</c> makes it invisible rather than refusing it.
+    /// Configs, tokenizers and index files in the same folder sniff as neither container and drop out.</remarks>
+    public static string[] DiscoverContainerFiles(string directory)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        if (!Directory.Exists(directory))
+            return [];
+        string[] candidates = Directory.GetFiles(directory, "*", SearchOption.TopDirectoryOnly);
+        Array.Sort(candidates, StringComparer.Ordinal);
+        List<string> containers = new List<string>(candidates.Length);
+        foreach (string candidate in candidates)
+        {
+            if (Checkpoints.CheckpointSource.TrySniff(candidate, out _))
+                containers.Add(candidate);
+        }
+        return [.. containers];
+    }
+
+    /// <summary>Finds the checkpoint containers in <paramref name="preferredDir"/>, falling back to files directly under <paramref name="rootPath"/> whose lowercase name contains <paramref name="what"/>. <paramref name="modelName"/> only labels the not-found error.</summary>
     public static string[] DiscoverShards(string preferredDir, string rootPath, string what, string modelName)
     {
-        if (Directory.Exists(preferredDir))
-        {
-            string[] s = Directory.GetFiles(preferredDir, "*.safetensors");
-            if (s.Length > 0) { Array.Sort(s); return s; }
-        }
-        string[] all = Directory.GetFiles(rootPath, "*.safetensors");
+        string[] preferred = DiscoverContainerFiles(preferredDir);
+        if (preferred.Length > 0)
+            return preferred;
+        string[] all = DiscoverContainerFiles(rootPath);
         string[] match = Array.FindAll(all, f => Path.GetFileName(f).ToLowerInvariant().Contains(what));
         if (match.Length == 0)
-            throw new FileNotFoundException($"No {modelName} {what} .safetensors found under {preferredDir} or {rootPath}.");
-        Array.Sort(match);
+            throw new FileNotFoundException($"No {modelName} {what} checkpoint found under {preferredDir} or {rootPath}.");
         return match;
     }
 
