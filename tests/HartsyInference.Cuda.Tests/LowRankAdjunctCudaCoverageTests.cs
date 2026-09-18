@@ -167,17 +167,25 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
         using CudaBackend backend = new CudaBackend(0, PtxDir());
         if (!backend.StepGraphSupported) { _output.WriteLine("SKIPPED: no step-graph support"); return; }
         using Fixture fixture = new Fixture(DType.Q8_0, DType.F16);
+        // Both the weight AND its adjunct factors must be resident before capture — a host-to-device copy of a
+        // non-resident tensor inside a capture is not a replayable node. PreloadWeights follows the factors for
+        // exactly this reason.
         backend.PreloadWeights([fixture.Patched]);
 
+        // The activation has to be device-resident too, which is why the capture reads a warmed-up copy of it
+        // rather than the host tensor (the pattern every graph owner in this suite follows).
+        using Tensor residentInput = new Tensor(fixture.Input.Shape, DType.F16);
+        backend.Scale(residentInput, fixture.Input, 1.0f);
         using Tensor output = new Tensor(new TensorShape(Batch, Rows), DType.F16);
-        // Warm-up outside the capture sizes every scratch buffer, the pattern every graph owner follows.
-        backend.Linear(output, fixture.Input, fixture.Patched, null);
+        backend.Linear(output, residentInput, fixture.Patched, null);
         backend.Sync();
 
         backend.StepGraphBegin();
-        backend.Linear(output, fixture.Input, fixture.Patched, null);
+        backend.Linear(output, residentInput, fixture.Patched, null);
         backend.StepGraphEndAndLaunch();
         backend.Sync();
+        // Reading the output would consume the device buffer the graph baked an address for, so drop the graph first.
+        backend.StepGraphReset();
 
         using Tensor expected = new Tensor(new TensorShape(Batch, Rows), DType.F16);
         backend.Linear(expected, fixture.Input, fixture.Merged, null);

@@ -34,8 +34,8 @@ public static class DiffusersFluxMapper
             }
             else if (root.StartsWith("text_encoder_2.", StringComparison.Ordinal))
             {
-                // Checked before the shorter prefix: "text_encoder." is a prefix of "text_encoder_2." only in the
-                // reverse order, but keeping the longer test first makes that independent of the spelling.
+                // Neither prefix is a prefix of the other (the twelfth character is '_' against '.'), so the order
+                // here is only for readability, not correctness.
                 body = root["text_encoder_2.".Length..];
                 target = LoraTarget.TextEncoder2;
             }

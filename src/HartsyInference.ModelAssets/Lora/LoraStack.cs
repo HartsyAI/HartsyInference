@@ -44,11 +44,42 @@ public sealed class LoraStack : IDisposable
     {
         int total = 0;
         if (unetWeights is not null) total += ApplyTo(unetWeights, LoraTarget.UNet, backend);
+        else WarnUnservedTarget(LoraTarget.UNet);
         if (transformerWeights is not null) total += ApplyTo(transformerWeights, LoraTarget.Transformer, backend);
+        else WarnUnservedTarget(LoraTarget.Transformer);
         if (clipLWeights is not null) total += ApplyTo(clipLWeights, LoraTarget.ClipL, backend);
+        else WarnUnservedTarget(LoraTarget.ClipL);
         if (clipGWeights is not null) total += ApplyTo(clipGWeights, LoraTarget.ClipG, backend);
+        else WarnUnservedTarget(LoraTarget.ClipG);
         if (textEncoder2Weights is not null) total += ApplyTo(textEncoder2Weights, LoraTarget.TextEncoder2, backend);
+        else WarnUnservedTarget(LoraTarget.TextEncoder2);
         return total;
+    }
+
+    /// <summary>Warns when the stack holds layers for a component the caller passed no dictionary for.</summary>
+    /// <remarks>Silence here is the same failure the zero-match refusal exists for, one component down: the LoRA
+    /// applies to the parts the recipe DID pass, the generation succeeds, and the missing arm reads as a weak LoRA.
+    /// It warns rather than throws because a LoRA legitimately carrying a text-encoder arm is not a reason to refuse
+    /// a pipeline that only exposes its transformer.</remarks>
+    private void WarnUnservedTarget(LoraTarget target)
+    {
+        int layers = 0;
+        foreach (Entry entry in _entries)
+        {
+            foreach (LoraLayer layer in entry.File.Layers)
+            {
+                if (layer.Target == target) layers++;
+            }
+            foreach (LoraFullWeightDiff diff in entry.File.FullWeightDiffs)
+            {
+                if (diff.Target == target) layers++;
+            }
+        }
+        if (layers > 0)
+        {
+            Logs.Warning($"{layers} LoRA layer(s) target {target}, which this pipeline did not pass a weight "
+                + "dictionary for; that part of the LoRA is not applied.");
+        }
     }
 
     /// <summary>Merges every stacked LoRA layer matching the given target into the weight dictionary. Replaces affected entries with freshly-allocated owned tensors. Returns the number of weights modified.</summary>

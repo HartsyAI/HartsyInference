@@ -15,10 +15,10 @@ public static class LoraResolver
         /// <summary>Resolved on-disk path of the LoRA weights.</summary>
         public required string FilePath { get; init; }
 
-        /// <summary>Strength applied to UNet/Transformer/CLIP-G targets.</summary>
+        /// <summary>Strength applied to the diffusion body — the UNet or transformer.</summary>
         public required float ModelStrength { get; init; }
 
-        /// <summary>Strength applied to the CLIP-L text-encoder side; equals <see cref="ModelStrength"/> when unspecified.</summary>
+        /// <summary>Strength applied to EVERY text-encoder arm (CLIP-L, CLIP-G, T5/LLM), matching SwarmUI's <c>strength_clip</c>; equals <see cref="ModelStrength"/> when unspecified.</summary>
         public required float TencStrength { get; init; }
     }
 

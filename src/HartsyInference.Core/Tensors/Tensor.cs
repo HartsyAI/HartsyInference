@@ -375,6 +375,11 @@ public sealed unsafe class Tensor : IDisposable
     public Tensor WithLowRankAdjunct(LowRankAdjunct adjunct)
     {
         ArgumentNullException.ThrowIfNull(adjunct);
+        // Rank-2 only, at the source. The delta is a GEMM addend, so a convolution has nothing to add it to — and
+        // refusing here is what keeps the list of ops that must handle an adjunct closed at the Linear family.
+        if (Shape.Rank != 2)
+            throw new HartsyInferenceException(
+                $"A LoRA adjunct applies only to a 2-D Linear weight; this one is {Shape} ({DType.Name}).");
         void* ptr = DataPointer;
 
         Tensor view = new(ptr, Shape, DType, Device);

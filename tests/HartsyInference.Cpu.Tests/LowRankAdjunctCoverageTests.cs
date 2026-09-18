@@ -127,8 +127,9 @@ public sealed class LowRankAdjunctCoverageTests
         using Harness harness = new Harness();
         using Tensor image = new Tensor(new TensorShape(1, Cols, 1, 1), DType.F32);
         using Tensor output = new Tensor(new TensorShape(1, Rows, 1, 1), DType.F32);
-        using Tensor kernel = harness.Base.Reshape(new TensorShape(Rows, Cols, 1, 1));
-        using Tensor patchedKernel = kernel.WithLowRankAdjunct(harness.Patched.LowRankAdjunct!);
+        // Attaching to a rank-4 weight is refused outright; a 1x1 VIEW of a patched Linear weight is the only way
+        // an adjunct can reach a convolution at all, which is why the op refuses as well.
+        using Tensor patchedKernel = harness.Patched.Reshape(new TensorShape(Rows, Cols, 1, 1));
         NotSupportedException error = Assert.Throws<NotSupportedException>(
             () => harness.Backend.Conv2D(output, image, patchedKernel, null, 1, 1, 0, 0));
         Assert.Contains("Conv2D", error.Message);
