@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Gpu" />
     <InternalsVisibleTo Include="HartsyInference.Cuda" />
     <InternalsVisibleTo Include="HartsyInference.Cpu" />
     <InternalsVisibleTo Include="HartsyInference.Vulkan" />
