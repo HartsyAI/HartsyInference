@@ -35,4 +35,18 @@ public sealed class BackendCapabilities
 
     /// <summary>Descriptive name of this backend.</summary>
     public required string Name { get; init; }
+
+    /// <summary>Who made the device, for the decisions whose answer is per-vendor rather than per-API — cooperative
+    /// matrix reliability, subgroup width, kernel tuning constants. <see cref="GpuVendor.Software"/> marks a CPU
+    /// implementation of a GPU API, which is useful for correctness and must never be reported as hardware.</summary>
+    public GpuVendor Vendor { get; init; }
+
+    /// <summary>The device's own name, as the driver reports it ("NVIDIA GeForce RTX 4090"). <see cref="Name"/> is a
+    /// description of the BACKEND and is free to say whatever reads well; this is the device, for evidence rows.</summary>
+    public string DeviceName { get; init; } = "";
+
+    /// <summary>Total device memory in bytes; 0 when not a device backend.</summary>
+    /// <remarks>Distinct from a free/total query, which is a runtime measurement: this is the card's size, known at
+    /// construction, and is what a VRAM tier is resolved from.</remarks>
+    public long TotalVramBytes { get; init; }
 }

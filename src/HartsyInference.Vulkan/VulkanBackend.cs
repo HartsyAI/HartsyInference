@@ -166,6 +166,13 @@ public sealed class VulkanBackend : IBackend
             SupportsSdpa = true,
             SupportsFft = false,
             MaxRank = 6,
+            Vendor = Vk.Vendor,
+            DeviceName = Vk.DeviceName,
+            TotalVramBytes = (long)Vk.TotalVramBytes,
+            // Conv2D has always bounded its im2col workspace (see its tiling comment) but never said so, leaving
+            // the VAE planner to assume the naive inCh·k²·outH·outW blow-up on this backend.
+            BandsIm2Col = true,
+            Im2ColWorkspaceCapBytes = (long)Conv2DDefaultMaxColTileBytes,
         };
     }
 
@@ -180,7 +187,12 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Peak per-tile im2col buffer size for <see cref="Conv2D"/> (see its tiling comment). Settable so tests can force a small value and exercise the multi-tile path deterministically without needing a multi-GB conv shape; production code never needs to touch this. Default 256 MiB.</summary>
-    public ulong Conv2DMaxColTileBytes { get; set; } = 256UL * 1024 * 1024;
+    public ulong Conv2DMaxColTileBytes { get; set; } = Conv2DDefaultMaxColTileBytes;
+
+    /// <summary>The production per-tile im2col cap. Named so <see cref="Capabilities"/> can report it without
+    /// reading the settable property, which tests shrink to force the multi-tile path — a capability is a fact about
+    /// the backend, and must not report whatever a test last set.</summary>
+    internal const ulong Conv2DDefaultMaxColTileBytes = 256UL * 1024 * 1024;
 
     public void Sync()
     {

@@ -286,6 +286,10 @@ public sealed class CudaBackend : IBackend
     /// against the F16 fallback.</remarks>
     public bool EnableNativeFp8Gemm { get; set; }
 
+    /// <inheritdoc/>
+    /// <remarks>Reports the same flag <see cref="LinearImpl"/> consults, so the two cannot drift.</remarks>
+    public bool NativeFp8Gemm => EnableNativeFp8Gemm;
+
     /// <summary>Use the division-free head-major rope kernel (<c>HARTSY_ROPE_V2=0</c> to fall back). Bit-identical.</summary>
     public bool EnableRopeHeadMajorV2 { get; set; }
 
@@ -1161,6 +1165,9 @@ public sealed class CudaBackend : IBackend
         Capabilities = new BackendCapabilities
         {
             Name = $"CUDA ({_context.DeviceName}, SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor})",
+            Vendor = GpuVendor.Nvidia,
+            DeviceName = _context.DeviceName,
+            TotalVramBytes = (long)_context.GetMemoryInfo().totalBytes,
             SupportsF32 = true,
             SupportsF16 = true,
             SupportsBF16 = _context.ComputeCapabilityMajor >= 8,

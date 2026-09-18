@@ -11,4 +11,11 @@ public enum DeviceType : byte
 
     /// <summary>Vulkan GPU compute via SPIR-V compute shaders (extends dotLLM's P/Invoke approach).</summary>
     Vulkan = 2,
+
+    /// <summary>AMD ROCm/HIP GPU compute. Declared before the backend exists so code that asks "is this a GPU?"
+    /// is written against the question rather than against the list of backends that happened to exist.</summary>
+    Rocm = 3,
+
+    /// <summary>Apple Metal GPU compute. Declared for the same reason as <see cref="Rocm"/>.</summary>
+    Metal = 4,
 }
