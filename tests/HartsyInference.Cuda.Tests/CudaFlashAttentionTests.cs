@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -235,23 +236,21 @@ public sealed unsafe class CudaFlashAttentionTests
         using Tensor v = Rnd(1, hkv, lk, d);
         using Tensor outMono = new(new TensorShape(1, hq, 1, d), DType.F32);
         using Tensor outSplit = new(new TensorShape(1, hq, 1, d), DType.F32);
-        string? prevOff = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF");
-        string? prevForce = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", "1");
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", null);
+            KnobStore.Set(EngineKnobs.FlashSplitOff, true);
+            KnobStore.Set(EngineKnobs.FlashSplitForce, false);
             b.FlashAttention(outMono, q, k, v, lk, group, causal: true, qOffset: lk - 1, scale, softcap, sink: null, window, alibiSlopes: null);
             backend.Sync();
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", null);
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", "1");
+            KnobStore.Set(EngineKnobs.FlashSplitOff, false);
+            KnobStore.Set(EngineKnobs.FlashSplitForce, true);
             b.FlashAttention(outSplit, q, k, v, lk, group, causal: true, qOffset: lk - 1, scale, softcap, sink: null, window, alibiSlopes: null);
             backend.Sync();
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", prevOff);
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", prevForce);
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
+            KnobStore.Clear(EngineKnobs.FlashSplitForce);
         }
 
         float* mo = (float*)outMono.DataPointer;
@@ -318,12 +317,11 @@ public sealed unsafe class CudaFlashAttentionTests
         using Tensor actual = new Tensor(q.Shape, DType.F32);
         AttentionReference.FlashAttention(expected, q, k, v, skv, 1, causal: false, qOffset: 0, scale);
 
-        string? previousV2 = Environment.GetEnvironmentVariable("HARTSY_SDPA_V2");
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", "1");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", null);
+            KnobStore.Set(EngineKnobs.SdpaV2, true);
+            KnobStore.Set(EngineKnobs.SageAttn, false);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, false);
             using CudaBackend backend = new CudaBackend(0, ptxDir);
             if (backend.Context.ComputeCapabilityMajor < 8)
             {
@@ -338,8 +336,9 @@ public sealed unsafe class CudaFlashAttentionTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", previousV2);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            KnobStore.Clear(EngineKnobs.SdpaV2);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
         }
 
         float* ep = (float*)expected.DataPointer;

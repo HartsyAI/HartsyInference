@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
 using Xunit;
@@ -78,14 +79,12 @@ public sealed class LtGemmPlanCacheTests
             }
         }
 
-        string? previousNoTf32 = Environment.GetEnvironmentVariable("HARTSY_NO_TF32");
-        string? previousFastF16 = Environment.GetEnvironmentVariable("HARTSY_GEMM_F16");
-        string? previousHighPrecision = Environment.GetEnvironmentVariable("HARTSY_HIGH_PRECISION_GEMM");
         try
         {
-            // Constructor-time policy must be isolated per backend. Explicitly clear the high-precision override
-            // so an external test environment cannot collapse all three cases to plain COMPUTE_32F.
-            Environment.SetEnvironmentVariable("HARTSY_HIGH_PRECISION_GEMM", null);
+            // Constructor-time policy must be isolated per backend. Pin the high-precision knob off rather than
+            // clearing it, so neither a settings file nor a leftover override can collapse all three cases to plain
+            // COMPUTE_32F.
+            KnobStore.Set(EngineKnobs.HighPrecisionGemm, false);
 
             int? defaultPolicy = RunF32PolicyCase(noTf32: false, fastF16: false);
             if (defaultPolicy is null)
@@ -104,9 +103,9 @@ public sealed class LtGemmPlanCacheTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_NO_TF32", previousNoTf32);
-            Environment.SetEnvironmentVariable("HARTSY_GEMM_F16", previousFastF16);
-            Environment.SetEnvironmentVariable("HARTSY_HIGH_PRECISION_GEMM", previousHighPrecision);
+            KnobStore.Clear(EngineKnobs.NoTf32);
+            KnobStore.Clear(EngineKnobs.GemmF16);
+            KnobStore.Clear(EngineKnobs.HighPrecisionGemm);
         }
     }
 
@@ -630,8 +629,10 @@ public sealed class LtGemmPlanCacheTests
 
     private static int? RunF32PolicyCase(bool noTf32, bool fastF16)
     {
-        Environment.SetEnvironmentVariable("HARTSY_NO_TF32", noTf32 ? "1" : null);
-        Environment.SetEnvironmentVariable("HARTSY_GEMM_F16", fastF16 ? "1" : null);
+        // Pinned rather than cleared: this helper is asked for one exact policy, and clearing would let a settings
+        // file decide it instead.
+        KnobStore.Set(EngineKnobs.NoTf32, noTf32);
+        KnobStore.Set(EngineKnobs.GemmF16, fastF16);
 
         using CudaBackend backend = new(0, PtxDir())
         {

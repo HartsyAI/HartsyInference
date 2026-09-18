@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Tensors;
 using Xunit;
@@ -62,10 +63,13 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-            string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", sage ? "1" : "0");
+            // HARTSY_SAGE_ATTN drove BOTH knobs: SageAttn decides whether the kernel runs at all (default ON,
+            // "!= 0" sense) and SageAttnExplicit additionally unlocks the unsafe F32-to-F16 V narrowing ("== 1").
+            // Setting only the explicit one leaves Sage running on the sage:false arm, which is what this bench
+            // exists to contrast.
+            KnobStore.Set(EngineKnobs.SageAttn, sage);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, sage);
+            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, sage);
             long sageBefore = cuda.SageAttentionExecutionCount;
             long cudnnBefore = cuda.CudnnSdpaExecutionCount;
             try
@@ -88,8 +92,9 @@ public sealed unsafe class SageSdpaMicroBench
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
+                KnobStore.Clear(EngineKnobs.SageAttn);
+                KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+                KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
             }
         }
 
@@ -136,10 +141,9 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-            string? previousMinSkv = Environment.GetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", sage ? "1" : null);
+            KnobStore.Set(EngineKnobs.SageAttn, sage);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, sage);
+            if (sage) { KnobStore.Set(EngineKnobs.SageF16MinSkv, 1); } else { KnobStore.Clear(EngineKnobs.SageF16MinSkv); }
             long sageBefore = cuda.SageAttentionExecutionCount;
             long cudnnBefore = cuda.CudnnSdpaExecutionCount;
             try
@@ -162,8 +166,9 @@ public sealed unsafe class SageSdpaMicroBench
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_F16_MIN_SKV", previousMinSkv);
+                KnobStore.Clear(EngineKnobs.SageAttn);
+                KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+                KnobStore.Clear(EngineKnobs.SageF16MinSkv);
             }
         }
 
@@ -195,10 +200,9 @@ public sealed unsafe class SageSdpaMicroBench
 
         double[] Run(Tensor outT, bool sage)
         {
-            string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-            string? previousUnsafeNarrow = Environment.GetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", sage ? "1" : "0");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", sage ? "1" : "0");
+            KnobStore.Set(EngineKnobs.SageAttn, sage);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, sage);
+            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, sage);
             long sageBefore = cuda.SageAttentionExecutionCount;
             try
             {
@@ -219,8 +223,9 @@ public sealed unsafe class SageSdpaMicroBench
             }
             finally
             {
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-                Environment.SetEnvironmentVariable("HARTSY_SAGE_UNSAFE_F32_V_NARROW", previousUnsafeNarrow);
+                KnobStore.Clear(EngineKnobs.SageAttn);
+                KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+                KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
             }
         }
 

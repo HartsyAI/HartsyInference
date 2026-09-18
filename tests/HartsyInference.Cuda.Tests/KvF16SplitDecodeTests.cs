@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -68,22 +69,21 @@ public sealed unsafe class KvF16SplitDecodeTests
         b.KvCacheAppend(vF16, vF32, offset: 0);
         backend.Sync();
 
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF");
         using Tensor splitOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         using Tensor monoOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", null);
+            KnobStore.Set(EngineKnobs.FlashSplitOff, false);
             b.FlashAttention(splitOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
 
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", "1");
+            KnobStore.Set(EngineKnobs.FlashSplitOff, true);
             b.FlashAttention(monoOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", prev);
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
         }
 
         float* s = (float*)splitOut.DataPointer;
@@ -137,21 +137,20 @@ public sealed unsafe class KvF16SplitDecodeTests
         b.KvCacheAppend(vF16, vF32, offset: 0);
         backend.Sync();
 
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF");
         using Tensor splitOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         using Tensor monoOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", null);
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
             b.FlashAttention(splitOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", "1");
+            KnobStore.Set(EngineKnobs.FlashSplitOff, true);
             b.FlashAttention(monoOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", prev);
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
         }
 
         float* r = (float*)refOut.DataPointer;
