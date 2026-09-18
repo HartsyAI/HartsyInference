@@ -156,12 +156,18 @@ public sealed class GgufWriter : IDisposable
         }
     }
 
+    /// <summary>Writes one tensor's descriptor. Dimensions are emitted in ggml <c>ne</c> order — fastest-varying axis
+    /// first, the reverse of the engine's — which is what every other GGUF tool writes and reads.</summary>
+    /// <remarks>This used to emit the engine's order verbatim, which made our output self-consistent and wrong for
+    /// everyone else: llama.cpp and ComfyUI-GGUF both read <c>ne</c>, and our own read path applies
+    /// <see cref="GgufModelLoader.RelabelRank2ToPyTorchOrder"/>, so a file we wrote came back with every matrix
+    /// transposed and the first GEMM derived a degenerate M.</remarks>
     private static void WriteTensorInfo(BinaryWriter w, TensorEntry t)
     {
         WriteString(w, t.Name);
         int rank = t.Tensor.Shape.Rank;
         w.Write((uint)rank);
-        for (int i = 0; i < rank; i++)
+        for (int i = rank - 1; i >= 0; i--)
         {
             w.Write((ulong)t.Tensor.Shape[i]);
         }
