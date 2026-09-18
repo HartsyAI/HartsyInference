@@ -136,16 +136,16 @@ public static unsafe class MiniMaxH3PddKeyConverter
             if (group.Down is null || group.Up is null)
                 throw new HartsyInferenceException($"PDD target '{root}' is missing its down or up matrix.");
             ValidatePair(root, group.Down, group.Up);
-            int rank = (int)group.Down.Shape[0];
             layers.Add(new LoraLayer
             {
                 TargetKey = root + ".weight",
                 Target = LoraTarget.Transformer,
-                LoraDown = group.Down,
-                LoraUp = group.Up,
-                Alpha = group.Alpha ?? globalAlpha,
-                Rank = rank,
-                Variant = LoraVariant.StandardLora,
+                Delta = new StandardLoraDelta
+                {
+                    Down = group.Down,
+                    Up = group.Up,
+                    Alpha = group.Alpha ?? globalAlpha,
+                },
             });
         }
 
@@ -214,11 +214,14 @@ public static unsafe class MiniMaxH3PddKeyConverter
         {
             TargetKey = target + ".attn.qkv_proj.weight",
             Target = LoraTarget.Transformer,
-            LoraDown = fusedDown,
-            LoraUp = fusedUp,
-            Alpha = alpha * 3.0f,
-            Rank = rank * 3,
-            Variant = LoraVariant.StandardLora,
+            // The concatenated down matrix has 3·rank rows, so StandardLoraDelta derives the same rank the
+            // block-diagonal up matrix was built against, and alpha is tripled to keep alpha/rank unchanged.
+            Delta = new StandardLoraDelta
+            {
+                Down = fusedDown,
+                Up = fusedUp,
+                Alpha = alpha * 3.0f,
+            },
         });
     }
 
@@ -239,11 +242,7 @@ public static unsafe class MiniMaxH3PddKeyConverter
         {
             TargetKey = target + ".weight",
             Target = LoraTarget.Transformer,
-            LoraDown = down,
-            LoraUp = up,
-            Alpha = alpha,
-            Rank = (int)down.Shape[0],
-            Variant = LoraVariant.StandardLora,
+            Delta = new StandardLoraDelta { Down = down, Up = up, Alpha = alpha },
         });
     }
 

@@ -6,13 +6,9 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora.Mappers;
 
-/// <summary>Parses Kohya/sd-scripts SD1.5 and SDXL LoRA files into LoraLayer instances. Handles lora_unet_* (UNet), lora_te_* (CLIP-L for SD1.5), lora_te1_* (CLIP-L for SDXL), and lora_te2_* (CLIP-G for SDXL) prefixes with .lora_down.weight / .lora_up.weight / .alpha suffixes.</summary>
+/// <summary>Parses Kohya/sd-scripts SD1.5 and SDXL LoRA files into LoraLayer instances. Handles lora_unet_* (UNet), lora_te_* (CLIP-L for SD1.5), lora_te1_* (CLIP-L for SDXL), and lora_te2_* (CLIP-G for SDXL) prefixes with any suffix <see cref="LoraRoleSuffix"/> recognizes.</summary>
 public static class KohyaSdMapper
 {
-    private const string DownSuffix = ".lora_down.weight";
-    private const string UpSuffix = ".lora_up.weight";
-    private const string AlphaSuffix = ".alpha";
-
     /// <summary>Parses every LoRA layer in the file. The format parameter selects how lora_te*_ prefixes are routed (SD1.5 has lora_te_; SDXL has lora_te1_ / lora_te2_).</summary>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, LoraFormat format)
     {
@@ -22,8 +18,13 @@ public static class KohyaSdMapper
         Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
-            if (!TryClassifyRoleAndRoot(key, out LoraRole role, out string root))
+            if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
             {
+                continue;
+            }
+            if (role is LoraRole.Diff or LoraRole.BiasDiff)
+            {
+                Logs.Warning($"LoRA key '{key}' is a full-weight diff, which this format does not carry; skipping.");
                 continue;
             }
 
@@ -34,48 +35,11 @@ public static class KohyaSdMapper
             }
 
             LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, target, canonicalKey, key);
-
-            switch (role)
-            {
-                case LoraRole.Down:
-                    group.Down = loader.GetTensor(key);
-                    break;
-                case LoraRole.Up:
-                    group.Up = loader.GetTensor(key);
-                    break;
-                case LoraRole.Alpha:
-                    group.Alpha = ReadScalar(loader.GetTensor(key));
-                    break;
-            }
+            group.Assign(role, loader.GetTensor(key));
         }
 
         return LoraGroupBuffer.BuildLayers(groups,
-            sourceKey => $"LoRA group '{sourceKey}' is missing down or up matrix; skipping.");
-    }
-
-    private static bool TryClassifyRoleAndRoot(string key, out LoraRole role, out string root)
-    {
-        if (key.EndsWith(DownSuffix, StringComparison.Ordinal))
-        {
-            role = LoraRole.Down;
-            root = key[..^DownSuffix.Length];
-            return true;
-        }
-        if (key.EndsWith(UpSuffix, StringComparison.Ordinal))
-        {
-            role = LoraRole.Up;
-            root = key[..^UpSuffix.Length];
-            return true;
-        }
-        if (key.EndsWith(AlphaSuffix, StringComparison.Ordinal))
-        {
-            role = LoraRole.Alpha;
-            root = key[..^AlphaSuffix.Length];
-            return true;
-        }
-        role = default;
-        root = string.Empty;
-        return false;
+            sourceKey => $"LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
     }
 
     private static bool TryMapRoot(string root, LoraFormat format, out string canonicalKey, out LoraTarget target)
@@ -156,6 +120,4 @@ public static class KohyaSdMapper
             _ => throw new HartsyInferenceException($"Unsupported alpha dtype: {t.DType.Name}"),
         };
     }
-
-    internal enum LoraRole { Down, Up, Alpha }
 }

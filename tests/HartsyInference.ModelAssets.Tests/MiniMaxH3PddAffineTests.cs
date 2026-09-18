@@ -40,11 +40,7 @@ public sealed class MiniMaxH3PddAffineTests
         {
             TargetKey = "blocks.0.adaln_proj.linear.weight",
             Target = LoraTarget.Transformer,
-            LoraDown = down,
-            LoraUp = up,
-            Alpha = 1.0f,
-            Rank = 1,
-            Variant = LoraVariant.StandardLora,
+            Delta = new StandardLoraDelta { Down = down, Up = up, Alpha = 1.0f },
         };
 
         using MiniMaxH3PddRebaseResult result = MiniMaxH3PddPrunedRebaser.Rebase([layer], basis,

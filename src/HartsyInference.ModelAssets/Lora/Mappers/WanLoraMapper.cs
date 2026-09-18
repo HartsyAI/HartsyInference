@@ -1,5 +1,4 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -26,11 +25,11 @@ public static class WanLoraMapper
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, LoraFormat format,
         out IReadOnlyList<LoraFullWeightDiff> fullWeightDiffs)
     {
-        Dictionary<string, GroupBuffer> groups = [];
+        Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         List<LoraFullWeightDiff> diffs = [];
         foreach (string key in loader.Descriptors.Keys)
         {
-            if (!TryClassifyRole(key, out LoraRole role, out string root))
+            if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
                 continue;
 
             string? body = format switch
@@ -62,41 +61,13 @@ public static class WanLoraMapper
             }
 
             string canonicalKey = MapBodyToCanonical(body);
-            if (!groups.TryGetValue(canonicalKey, out GroupBuffer? group))
-            {
-                group = new GroupBuffer { FirstSourceKey = key };
-                groups[canonicalKey] = group;
-            }
-            switch (role)
-            {
-                case LoraRole.Down: group.Down = loader.GetTensor(key); break;
-                case LoraRole.Up: group.Up = loader.GetTensor(key); break;
-                case LoraRole.Alpha: group.Alpha = KohyaSdMapper.ReadScalar(loader.GetTensor(key)); break;
-            }
+            LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKey, key);
+            group.Assign(role, loader.GetTensor(key));
         }
 
-        List<LoraLayer> layers = new(groups.Count);
-        foreach ((string canonicalKey, GroupBuffer group) in groups)
-        {
-            if (group.Down is null || group.Up is null)
-            {
-                Logs.Warning($"Wan LoRA group '{group.FirstSourceKey}' missing down or up; skipping.");
-                continue;
-            }
-            int rank = (int)group.Down.Shape[0];
-            layers.Add(new LoraLayer
-            {
-                TargetKey = canonicalKey,
-                Target = LoraTarget.Transformer,
-                LoraDown = group.Down,
-                LoraUp = group.Up,
-                Alpha = group.Alpha ?? rank,
-                Rank = rank,
-                Variant = LoraVariant.StandardLora,
-            });
-        }
         fullWeightDiffs = diffs;
-        return layers;
+        return LoraGroupBuffer.BuildLayers(groups,
+            sourceKey => $"Wan LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
     }
 
     /// <summary>Maps a dotted module body to the canonical <c>WanVideoTransformer</c> weight key (pure, testable).
@@ -122,42 +93,5 @@ public static class WanLoraMapper
             || body.StartsWith("head.", StringComparison.Ordinal);
         string mapped = WanVideoCheckpointConverter.MapKey(body, original) ?? body;
         return mapped + suffix;
-    }
-
-    private static bool TryClassifyRole(string key, out LoraRole role, out string root)
-    {
-        foreach ((string suffix, LoraRole r) in _suffixRoles)
-        {
-            if (key.EndsWith(suffix, StringComparison.Ordinal))
-            {
-                role = r;
-                root = key[..^suffix.Length];
-                return true;
-            }
-        }
-        role = default;
-        root = string.Empty;
-        return false;
-    }
-
-    private static readonly (string Suffix, LoraRole Role)[] _suffixRoles =
-    [
-        (".lora_down.weight", LoraRole.Down),
-        (".lora_up.weight", LoraRole.Up),
-        (".lora_A.weight", LoraRole.Down),
-        (".lora_B.weight", LoraRole.Up),
-        (".alpha", LoraRole.Alpha),
-        (".diff", LoraRole.Diff),
-        (".diff_b", LoraRole.BiasDiff),
-    ];
-
-    private enum LoraRole { Down, Up, Alpha, Diff, BiasDiff }
-
-    private sealed class GroupBuffer
-    {
-        public required string FirstSourceKey { get; init; }
-        public Tensor? Down { get; set; }
-        public Tensor? Up { get; set; }
-        public float? Alpha { get; set; }
     }
 }
