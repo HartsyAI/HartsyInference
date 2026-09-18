@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.97
+
+- **MiniMax-H3 opens every component through the container**, so a GGUF build of the DiT, either VAE or the text
+  encoder loads like any other checkpoint. The planner learned to read a GGUF header in alpha.90, which left the
+  recipe as the only thing between an H3 GGUF and a generation — and meant asset resolution had to keep pretending
+  `.gguf` files were not there, since offering a candidate the recipe could not open only moved the failure later.
+- Norm promotion no longer goes through `CastTo`, which refuses a quantized source by design: decoding a block
+  layout is the dequantizer's job, and a GGUF build carries quantized norms.
+- **Q2_K and Q3_K dequantize on the GPU.** These were the two shipped H3 quants CUDA had no kernel for, and the gap
+  mattered more than the others: at 2.6 bits per weight a 6.7 GB Q2_K build expands roughly sixfold when the loader
+  has to widen it on the host, putting a model that would fit a 12 GB card out of reach of a 24 GB one.
+- **Planning no longer refuses an audio VAE it can actually load.** It demanded the unfused PyTorch weight-norm
+  parametrization for every convolution, but both forms are in circulation — the vendor release carries it, the
+  ComfyUI repack ships it collapsed — and the decoder and encoder load either. Eighteen tensors present under their
+  fused names were reported missing. That is the worst shape of planning error: the refusal is authoritative and the
+  capability it denies exists.
+- H3's text encoder reads its embedding row scale from wherever the fold left it. Reading only the companion key
+  made a container-opened checkpoint look like one with a missing scale, and the refusal below rejected the
+  published int8 build.
+
 ## alpha.96
 
 - **YuE2 loads its own published `int8_convrot` repack.** It was refused by name, on the grounds that the per-layer
