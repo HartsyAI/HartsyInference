@@ -1,10 +1,12 @@
 using HartsyInference.Core.Logging;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -74,10 +76,10 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         using QwenImageEditConditioning.References? references = refEdit
             ? QwenImageEditConditioning.Resolve(request.Img2Img?.InitImage, request.ReferenceImages) : null;
         bool editVision = references is not null && _multimodalEncoder is not null;
-        (int[] promptTokens, int promptDrop) = editVision
+        (WeightedTokenSequence promptTokens, int promptDrop) = editVision
             ? QwenImageEditConditioning.BuildTokens(_tokenizer, prompt, CountVisionTokens(references!))
             : EncodeWithTemplate(_tokenizer, prompt);
-        (int[] negTokens, int negDrop) = editVision
+        (WeightedTokenSequence negTokens, int negDrop) = editVision
             ? QwenImageEditConditioning.BuildTokens(_tokenizer, negative, CountVisionTokens(references!))
             : EncodeWithTemplate(_tokenizer, negative);
 
@@ -106,12 +108,13 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, negTokens, inner, bridge,
+            promptTokens.Tokens, negTokens.Tokens, inner, bridge,
             promptDropIndex: promptDrop, negativeDropIndex: negDrop,
             editRefImages: references?.Latent,
             editRefTimestepZero: references is not null && _refTimestepZero,
             editRefVisionImages: editVision ? references!.Vision : null,
-            controlNets: controlNets?.Conditionings);
+            controlNets: controlNets?.Conditionings,
+            promptWeights: promptTokens, negativeWeights: negTokens);
 
         return new ImageResult
         {
@@ -141,28 +144,36 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         return counts;
     }
 
-    /// <summary>Builds the Qwen-Image templated token sequence (real length, no padding — the pipeline has no attention mask) plus the prefix-drop index: the count of leading system-block + user-header tokens whose hidden states the pipeline discards (diffusers' <c>prompt_template_encode_start_idx</c>). Special tokens are inserted by id; the text between them is BPE'd per segment.</summary>
-    private static (int[] tokens, int dropIndex) EncodeWithTemplate(Qwen3Tokenizer tokenizer, string prompt)
+    /// <summary>Builds the Qwen-Image templated token sequence (real length, no padding — the pipeline has no attention mask) plus the prefix-drop index: the count of leading system-block + user-header tokens whose hidden states the pipeline discards (diffusers' <c>prompt_template_encode_start_idx</c>). Special tokens are inserted by id; the prompt's text is tokenized per emphasis span so each id carries its own weight, and the template ids carry weight 1.</summary>
+    internal static (WeightedTokenSequence tokens, int dropIndex) EncodeWithTemplate(Qwen3Tokenizer tokenizer, string prompt)
     {
-        List<int> ids = new List<int>(64);
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw(QwenImageSystemPrompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("user\n"));
-        int dropIndex = ids.Count;
-        ids.AddRange(tokenizer.EncodeRaw(prompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("assistant\n"));
-        if (ids.Count > MaxTokens)
-        {
-            ids.RemoveRange(MaxTokens, ids.Count - MaxTokens);
-        }
-        return (ids.ToArray(), dropIndex);
+        List<int> prefix = new List<int>(64);
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw(QwenImageSystemPrompt));
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        int dropIndex = prefix.Count;
+        List<int> suffix = new List<int>(8);
+        suffix.Add(Qwen3Tokenizer.ImEndId);
+        suffix.AddRange(tokenizer.EncodeRaw("\n"));
+        suffix.Add(Qwen3Tokenizer.ImStartId);
+        suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
+        WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
+            prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
+        return (Truncate(sequence, MaxTokens), dropIndex);
     }
+
+    /// <summary>diffusers truncates the templated sequence; the weights are truncated with it, because a weight array
+    /// longer than the ids it describes would shift every emphasis by the difference.</summary>
+    private static WeightedTokenSequence Truncate(WeightedTokenSequence sequence, int maxTokens) =>
+        sequence.Tokens.Length <= maxTokens
+            ? sequence
+            : new WeightedTokenSequence(sequence.Tokens[..maxTokens], sequence.Weights[..maxTokens])
+            {
+                UniformWeight = sequence.UniformWeight,
+            };
 
     /// <inheritdoc/>
     public void Dispose()

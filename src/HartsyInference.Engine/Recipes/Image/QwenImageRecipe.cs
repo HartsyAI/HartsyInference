@@ -33,6 +33,12 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora | ImageFeatures.ControlNet;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. The Qwen tokenizer discards weights, so the
+    /// prompt is encoded at weight 1 and each token's cond row is scaled afterwards — which on this family means after
+    /// the template prefix drop, the case SwarmUI's negative right-alignment offset exists for.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Qwen-Image's official sampling settings: 50 steps at true-CFG 4.0, 1024x1024 (diffusers <c>QwenImagePipeline.__call__</c>, mirrored by <c>GenerationDefaults.QwenImage</c>).</summary>

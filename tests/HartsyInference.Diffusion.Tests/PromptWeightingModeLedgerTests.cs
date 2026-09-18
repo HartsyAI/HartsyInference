@@ -143,7 +143,7 @@ public sealed class PromptWeightingModeLedgerTests
         "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "flux2", "hidream",
         "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video", "krea2", "lens",
         "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "mage-flow", "minimax-h3", "omnigen2",
-        "qwen-image", "sd3", "sdxl-refiner", "wan", "wan-21-1_3b", "wan-21-14b", "wan-22-5b", "wan-animate",
+        "sd3", "sdxl-refiner", "wan", "wan-21-1_3b", "wan-21-14b", "wan-22-5b", "wan-animate",
         "wan-animate-2", "wan-s2v", "wan-vace", "zeta-chroma", "zimage",
     ];
 

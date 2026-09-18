@@ -1,5 +1,7 @@
 using HartsyInference.Core.Logging;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
@@ -118,19 +120,21 @@ public static class QwenImageEditConditioning
     /// system-block and user-header tokens whose hidden states the pipeline discards). One <c>Picture i:</c> block is
     /// emitted per entry of <paramref name="visionTokenCounts"/>, each carrying that many <c>&lt;|image_pad|&gt;</c>
     /// placeholders for the tower's merged tokens.</summary>
-    public static (int[] Tokens, int DropIndex) BuildTokens(Qwen3Tokenizer tokenizer, string prompt,
+    public static (WeightedTokenSequence Tokens, int DropIndex) BuildTokens(Qwen3Tokenizer tokenizer, string prompt,
         IReadOnlyList<int> visionTokenCounts)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(visionTokenCounts);
-        List<int> ids = new List<int>(1024);
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw(SystemPrompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("user\n"));
-        int dropIndex = ids.Count;
+        List<int> prefix = new List<int>(1024);
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw(SystemPrompt));
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        int dropIndex = prefix.Count;
+        // The Picture blocks sit AFTER the drop index, so they reach the conditioning — but they are template, not
+        // prompt, and carry no emphasis of their own.
         for (int i = 0; i < visionTokenCounts.Count; i++)
         {
             int count = visionTokenCounts[i];
@@ -139,22 +143,24 @@ public static class QwenImageEditConditioning
                 throw new ArgumentOutOfRangeException(nameof(visionTokenCounts),
                     $"Reference {i + 1} reported {count} merged vision tokens; the template cannot address an empty image.");
             }
-            ids.AddRange(tokenizer.EncodeRaw($"Picture {i + 1}: "));
-            ids.Add(Qwen25VlMultimodalEncoder.VisionStartId);
+            prefix.AddRange(tokenizer.EncodeRaw($"Picture {i + 1}: "));
+            prefix.Add(Qwen25VlMultimodalEncoder.VisionStartId);
             for (int pad = 0; pad < count; pad++)
             {
-                ids.Add(Qwen25VlMultimodalEncoder.ImageTokenId);
+                prefix.Add(Qwen25VlMultimodalEncoder.ImageTokenId);
             }
-            ids.Add(Qwen25VlMultimodalEncoder.VisionEndId);
+            prefix.Add(Qwen25VlMultimodalEncoder.VisionEndId);
         }
-        ids.AddRange(tokenizer.EncodeRaw(prompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("assistant\n"));
+        List<int> suffix = new List<int>(8);
+        suffix.Add(Qwen3Tokenizer.ImEndId);
+        suffix.AddRange(tokenizer.EncodeRaw("\n"));
+        suffix.Add(Qwen3Tokenizer.ImStartId);
+        suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
         // Deliberately NOT truncated to the text-to-image path's 512 tokens: three references alone spend ~560
         // placeholder tokens, and ComfyUI's Qwen tokenizer imposes no limit on the edit template either.
-        return (ids.ToArray(), dropIndex);
+        WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
+            prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
+        return (sequence, dropIndex);
     }
 
     /// <summary>Aspect-preserving rescale to <paramref name="targetArea"/> pixels, each side snapped to a multiple of
