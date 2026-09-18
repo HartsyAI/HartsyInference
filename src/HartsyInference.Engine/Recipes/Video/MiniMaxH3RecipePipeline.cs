@@ -254,6 +254,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             throw new ArgumentException(
                 "MiniMax-H3 driving audio builds its own audio mask; supplying both is ambiguous.", nameof(request));
         }
+        RejectTimingEditsThatBreakLipSync(request);
         int frames = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
         // All-zero: every audio row is preserved from the track, so the source is the output and video follows it.
         float[] locked = new float[MiniMaxH3Geometry.AudioLatentFrames(frames)];
@@ -268,6 +269,41 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 Source = request.VideoAudioReference,
             },
         };
+    }
+
+    /// <summary>Refuses the output timing edits that would move the video relative to the track driving it.</summary>
+    /// <remarks><para>Frame edits are applied to the frames only: <c>VideoRecipeUtils.ToVideoFrames</c> drops the
+    /// leading frames and builds the boomerang, and a differing fps is muxed rather than resampled, while the
+    /// soundtrack is only trimmed or padded at its end. Each of those therefore slides the picture against audio that
+    /// did not move — a start trim offsets the whole clip, a boomerang leaves the reverse leg playing forward audio,
+    /// and an fps override changes the video's speed and not the track's.</para>
+    /// <para>Refusing rather than transforming the audio: lip sync is the entire point of driving audio, so a silent
+    /// desync is the worst available outcome, and the transforms are not obviously wanted even when they are possible
+    /// — reversed speech for a boomerang leg is not what anyone asked for. An end trim is allowed because the audio is
+    /// trimmed at its end too, which leaves the start aligned.</para></remarks>
+    internal static void RejectTimingEditsThatBreakLipSync(VideoRequest request)
+    {
+        if (request.TrimVideoStartFrames > 0)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 driving audio keeps the video locked to the supplied track, and trimming "
+                + $"{request.TrimVideoStartFrames} frames from the start would shift the picture against audio that "
+                + "does not move. Trim the track instead, or drop the start trim.", nameof(request));
+        }
+        if (request.VideoBoomerang)
+        {
+            throw new ArgumentException(
+                "MiniMax-H3 driving audio keeps the video locked to the supplied track, and a boomerang plays the "
+                + "frames back in reverse against a soundtrack that only runs forward. Drop the boomerang, or "
+                + "generate without driving audio.", nameof(request));
+        }
+        if (request.Fps is int fps && fps != MiniMaxH3Geometry.Fps)
+        {
+            throw new ArgumentException(
+                $"MiniMax-H3 driving audio keeps the video locked to the supplied track, and muxing at {fps} fps "
+                + $"instead of the native {MiniMaxH3Geometry.Fps} changes the video's speed without changing the "
+                + "track's. Leave fps unset, or generate without driving audio.", nameof(request));
+        }
     }
 
     /// <summary>One segment: the whole single-generation path, from geometry snapping through VAE decode.</summary>

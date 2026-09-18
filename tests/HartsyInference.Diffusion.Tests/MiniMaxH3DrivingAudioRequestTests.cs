@@ -28,6 +28,43 @@ public sealed class MiniMaxH3DrivingAudioRequestTests
         Assert.False(VideoService.RequestedFeatures(request).HasFlag(VideoFeatures.DrivingAudio));
     }
 
+    /// <summary>The output timing edits that would slide the picture against the track driving it.</summary>
+    /// <remarks>Frame edits reach the frames only — the leading frames are dropped, the boomerang is built, and a
+    /// differing fps is muxed rather than resampled — while the soundtrack is trimmed or padded at its end alone. Lip
+    /// sync is the whole point of driving audio, so each of these has to refuse rather than quietly desync.</remarks>
+    [Theory]
+    [InlineData("trim", "start")]
+    [InlineData("boomerang", "reverse")]
+    [InlineData("fps", "speed")]
+    public void TimingEditsThatWouldDesyncTheDrivenTrackAreRefused(string edit, string expectedInMessage)
+    {
+        VideoRequest request = edit switch
+        {
+            "trim" => new VideoRequest { Prompt = "test", VideoAudioReference = Track(), TrimVideoStartFrames = 4 },
+            "boomerang" => new VideoRequest { Prompt = "test", VideoAudioReference = Track(), VideoBoomerang = true },
+            _ => new VideoRequest { Prompt = "test", VideoAudioReference = Track(), Fps = 30 },
+        };
+
+        ArgumentException error = Assert.Throws<ArgumentException>(
+            () => MiniMaxH3RecipePipeline.RejectTimingEditsThatBreakLipSync(request));
+        Assert.Contains(expectedInMessage, error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>An END trim stays allowed: the soundtrack is trimmed at its end too, so the start stays aligned.</summary>
+    [Fact]
+    public void AnEndTrimIsStillAllowedWithDrivingAudio()
+    {
+        VideoRequest request = new VideoRequest
+        {
+            Prompt = "test",
+            VideoAudioReference = Track(),
+            TrimVideoEndFrames = 4,
+            Fps = 24,
+        };
+
+        MiniMaxH3RecipePipeline.RejectTimingEditsThatBreakLipSync(request);
+    }
+
     /// <summary>Reference audio describes the sound to aim for; driving audio fixes it. A request carrying only the
     /// former must not be classified as the latter, or planning would demand support the caller never asked for.</summary>
     [Fact]

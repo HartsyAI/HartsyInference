@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## alpha.84
 
+- Driving audio refuses the output timing edits that would slide the picture against it: a start trim, a boomerang,
+  or an fps other than the native 24. Frame edits reach the frames only, and the soundtrack is trimmed at its end
+  alone, so each of those quietly broke the lip sync the feature exists to provide.
 - Video: **MiniMax-H3 can be driven by a soundtrack you supply** (`--driving-audio`, `VideoRequest.VideoAudioReference`).
   H3 has no audio-driven mode of its own and its reference audio is a soft exhibit the generated soundtrack can
   drift away from, which is no use when the words have to match. The mechanism that does drive video is the one
