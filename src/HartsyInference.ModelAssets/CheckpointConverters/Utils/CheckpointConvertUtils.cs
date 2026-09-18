@@ -128,31 +128,34 @@ public static unsafe class CheckpointConvertUtils
         return match;
     }
 
-    /// <summary>Loads and merges shards, mapping each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers, and folding fp8_scaled companions via <see cref="ApplyFp8ScaledDequant"/>. On failure the loaders opened so far are disposed.</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadShards(
+    /// <summary>Opens every shard as one <see cref="Checkpoints.CheckpointSource"/> and maps each key through <paramref name="keyMap"/> (a null result drops the key), skipping <c>scaled_fp8</c> markers. On failure the source is disposed.</summary>
+    /// <remarks><para>The container folds the quantization companions across the merged set, before
+    /// <paramref name="keyMap"/> renames anything. Both halves of that order matter: safetensors sharding makes no
+    /// promise that a weight and its <c>.weight_scale</c> land in the same file, and a key map that renames
+    /// <c>.weight</c> has no rule for <c>.weight_scale</c>, so folding last would drop the scale and run the weight at
+    /// <c>1/scale</c> — noise at the end of a generation rather than a failure at load.</para>
+    /// <para>It also means a GGUF or a quantized repack of a sharded folder loads, which a raw safetensors merge
+    /// could not read at all.</para></remarks>
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadShards(
         string[] shards, int capacity, Func<string, string?> keyMap)
     {
-        Dictionary<string, Tensor> merged = new(capacity);
-        List<SafeTensorsLoader> loaders = new(shards.Length);
+        ArgumentNullException.ThrowIfNull(shards);
+        ArgumentNullException.ThrowIfNull(keyMap);
+        Checkpoints.CheckpointSource source = Checkpoints.CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
+            Dictionary<string, Tensor> merged = new(capacity);
+            foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                {
-                    if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
-                    string? mapped = keyMap(kvp.Key);
-                    if (mapped is not null) merged[mapped] = kvp.Value;
-                }
+                if (kvp.Key.EndsWith(".scaled_fp8") || kvp.Key == "scaled_fp8") continue;
+                string? mapped = keyMap(kvp.Key);
+                if (mapped is not null) merged[mapped] = kvp.Value;
             }
-            return (ApplyFp8ScaledDequant(merged), loaders);
+            return (merged, source);
         }
         catch
         {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            source.Dispose();
             throw;
         }
     }

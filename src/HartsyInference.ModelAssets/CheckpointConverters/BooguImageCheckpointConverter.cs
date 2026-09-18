@@ -10,7 +10,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 public sealed class BooguImageCheckpointConverter
 {
     /// <summary>Loads the Boogu transformer from <c>{root}/transformer/</c> (sharded). fp8 scale companions folded.</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTransformer(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadTransformer(string rootPath)
     {
         string dir = Path.Combine(rootPath, "transformer");
         string[] shards = CheckpointConvertUtils.DiscoverShards(dir, rootPath, "transformer", "Boogu");
@@ -18,7 +18,7 @@ public sealed class BooguImageCheckpointConverter
     }
 
     /// <summary>Loads the FLUX.1 VAE from <c>{root}/vae/</c>. Boogu ships the Comfy/ldm single-file VAE (<c>flux1_vae_bf16.safetensors</c>) with bare ldm keys (<c>decoder.mid.block_1.*</c>, <c>encoder.down.*</c>), so each key is remapped to the diffusers convention via <see cref="CheckpointConvertUtils.ConvertVaeKey"/> for <c>VaeEncoder</c>/<c>VaeDecoder</c> + <c>VaeConfig.Flux</c>.</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVae(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadVae(string rootPath)
     {
         string dir = Path.Combine(rootPath, "vae");
         if (!Directory.Exists(dir))
@@ -31,14 +31,14 @@ public sealed class BooguImageCheckpointConverter
     }
 
     /// <summary>Loads + remaps the Qwen3-VL-8B language tower from <c>{root}/mllm/</c> to the <c>LlamaStyleEncoder</c> convention (drops the vision tower and <c>lm_head</c>).</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTextEncoder(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadTextEncoder(string rootPath)
     {
         string[] shards = CheckpointConvertUtils.DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm", "Boogu");
         return CheckpointConvertUtils.LoadShards(shards, 800, CheckpointConvertUtils.RemapQwenLanguageKey);
     }
 
     /// <summary>Loads the Qwen3-VL-8B vision tower from <c>{root}/mllm/</c> (the <c>visual.*</c> subtree), re-rooted to bare keys (<c>patch_embed.*</c>, <c>blocks.{i}.*</c>, <c>merger.*</c>) for the Boogu vision encoder.</summary>
-    public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVisionTower(string rootPath)
+    public static (Dictionary<string, Tensor> Weights, Checkpoints.CheckpointSource Source) LoadVisionTower(string rootPath)
     {
         string[] shards = CheckpointConvertUtils.DiscoverShards(Path.Combine(rootPath, "mllm"), rootPath, "mllm", "Boogu");
         return CheckpointConvertUtils.LoadShards(shards, 600, RemapQwenVisionKey);

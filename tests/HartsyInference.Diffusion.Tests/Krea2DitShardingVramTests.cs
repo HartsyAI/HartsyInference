@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
@@ -37,7 +38,7 @@ public sealed class Krea2DitShardingVramTests
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/5] Loading Krea2 Turbo transformer from {rootDir}...");
-        (Dictionary<string, Tensor> txWeights, IReadOnlyList<SafeTensorsLoader> txLoaders) =
+        (Dictionary<string, Tensor> txWeights, CheckpointSource txSource) =
             Krea2CheckpointConverter.LoadTransformer(rootDir);
         _output.WriteLine($"  transformer={txWeights.Count} keys, {sw.Elapsed.TotalSeconds:F1}s");
 
@@ -107,7 +108,7 @@ public sealed class Krea2DitShardingVramTests
         }
         finally
         {
-            foreach (SafeTensorsLoader l in txLoaders) l.Dispose();
+            txSource.Dispose();
         }
     }
 

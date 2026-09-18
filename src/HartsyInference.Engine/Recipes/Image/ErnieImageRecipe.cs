@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -49,13 +50,25 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
         string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Ministral_3_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
             // ERNIE-Image ships the transformer as a sharded diffusers set; loading only the picked shard leaves half
-            // the keys missing (final_norm.linear.weight lives in shard 2), so every sibling shard is merged in.
+            // the keys missing (final_norm.linear.weight lives in shard 2), so every sibling shard is merged in —
+            // as one CheckpointSource, which folds the quantization companions once over the merge because a weight
+            // and its .weight_scale need not share a shard.
             Logs.Info($"[ErnieImageRecipe] Loading transformer: {Path.GetFileName(context.CheckpointPath)}.");
-            Dictionary<string, Tensor> transformerWeights = LoadShardedComponent(context.CheckpointPath, applyFp8Dequant: true, loaders);
+            CheckpointSource transformerSource = CheckpointSource.OpenShards(ResolveShardPaths(context.CheckpointPath));
+            loaders.Add(transformerSource);
+            Dictionary<string, Tensor> transformerWeights = new Dictionary<string, Tensor>(transformerSource.Weights.Count);
+            foreach (KeyValuePair<string, Tensor> kv in transformerSource.Weights)
+            {
+                if (kv.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kv.Key == "scaled_fp8") continue;
+                transformerWeights[kv.Key] = kv.Value;
+            }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends));
 
             Logs.Info($"[ErnieImageRecipe] Loading Ministral-3-3B text encoder: {Path.GetFileName(tePath)}.");
             Dictionary<string, Tensor> teWeights = ComponentLoader.Load(tePath, "ErnieImageRecipe", keyTransform: null, applyFp8Dequant: true, loaders);
@@ -96,7 +109,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[ErnieImageRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -108,48 +121,29 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     [GeneratedRegex(@"^(.*)-(\d+)-of-(\d+)\.safetensors$")]
     private static partial Regex ShardPattern();
 
-    /// <summary>Loads a component that may be split across diffusers shards, merging every sibling shard when <paramref name="filePath"/> follows the shard naming convention; degrades to a single-file load otherwise.</summary>
-    private static Dictionary<string, Tensor> LoadShardedComponent(string filePath, bool applyFp8Dequant, List<SafeTensorsLoader> loaders)
+    /// <summary>Every file of a component that may be split across diffusers shards: each sibling shard when <paramref name="filePath"/> follows the shard naming convention, the one path otherwise.</summary>
+    private static IReadOnlyList<string> ResolveShardPaths(string filePath)
     {
-        List<string> files;
         Match m = ShardPattern().Match(Path.GetFileName(filePath));
-        if (m.Success)
+        if (!m.Success)
         {
-            string dir = Path.GetDirectoryName(filePath) ?? ".";
-            string prefix = m.Groups[1].Value;
-            int width = m.Groups[2].Value.Length;
-            int total = int.Parse(m.Groups[3].Value);
-            files = new List<string>(total);
-            for (int i = 1; i <= total; i++)
-            {
-                files.Add(Path.Combine(dir, $"{prefix}-{i.ToString().PadLeft(width, '0')}-of-{total.ToString().PadLeft(width, '0')}.safetensors"));
-            }
+            return [filePath];
         }
-        else
+        string dir = Path.GetDirectoryName(filePath) ?? ".";
+        string prefix = m.Groups[1].Value;
+        int width = m.Groups[2].Value.Length;
+        int total = int.Parse(m.Groups[3].Value);
+        List<string> files = new List<string>(total);
+        for (int i = 1; i <= total; i++)
         {
-            files = new List<string> { filePath };
-        }
-
-        Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>();
-        foreach (string file in files)
-        {
-            if (!File.Exists(file))
+            string shard = Path.Combine(dir, $"{prefix}-{i.ToString().PadLeft(width, '0')}-of-{total.ToString().PadLeft(width, '0')}.safetensors");
+            if (!File.Exists(shard))
             {
-                throw new FileNotFoundException($"ERNIE-Image transformer shard missing: {file}");
+                throw new FileNotFoundException($"ERNIE-Image transformer shard missing: {shard}");
             }
-            SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(file);
-            loaders.Add(loader);
-            foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
-            {
-                if (kv.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kv.Key == "scaled_fp8")
-                {
-                    continue;
-                }
-                merged[kv.Key] = kv.Value;
-            }
+            files.Add(shard);
         }
-        return applyFp8Dequant ? CheckpointConvertUtils.ApplyFp8ScaledDequant(merged) : merged;
+        return files;
     }
 
     /// <summary>Ensures the ERNIE tokenizer.json is present under the models root, downloading it from <see cref="TokenizerRepo"/> on first use.</summary>
