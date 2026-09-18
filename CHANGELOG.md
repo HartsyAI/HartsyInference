@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.92
+
+- **Two backends on the shared residency cache would have handed out the same binding key.** The counter was a
+  static field inside the generic class, and such a field exists once per CLOSED type — so a cache over one buffer
+  type and a cache over another each started at 1. That is the collision the key exists to prevent, moved up a
+  level: a host tensor resident on two devices, which split placement makes ordinary, would carry both bindings
+  under one key and their finalizer-cleanup buckets would collide, so one backend's drain runs the other's device
+  cleanup. Latent until a second backend joined the base, which is the next step. The counter now lives on a
+  non-generic holder, with a test that two caches over different buffer types never share a key.
+
 ## alpha.91
 
 - **Vulkan's residency cache is now the shared one.** Its three caches, lookup order, tensor-binding lifecycle,
