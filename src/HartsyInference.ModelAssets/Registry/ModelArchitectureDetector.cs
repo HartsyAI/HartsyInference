@@ -35,10 +35,12 @@ public static class ModelArchitectureDetector
             !k.HasPrefix("conditioner.embedders.1.")),
 
         // ── SD3 / 3.5 (MMDiT) ────────────────────────────────────────────
+        // The Stability wrapper is optional: every published SD3/SD3.5 GGUF ships the MMDiT bare, and requiring
+        // the prefix left those files Unknown, so they never reached the SD3 recipe at all.
         (ModelArchitecture.StableDiffusion3, k =>
             k.HasPrefix("text_encoders.clip_g.") ||
-            k.HasPrefix("model.diffusion_model.joint_blocks.") ||
-            k.HasPrefix("model.diffusion_model.x_embedder.proj.")),
+            k.HasPrefixAfterOptional("model.diffusion_model.", "joint_blocks.") ||
+            k.HasPrefixAfterOptional("model.diffusion_model.", "x_embedder.proj.")),
 
         // ── SD1.5 (LDM single-file) ──────────────────────────────────────
         (ModelArchitecture.StableDiffusion15, k =>
