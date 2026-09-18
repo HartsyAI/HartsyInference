@@ -4,7 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
@@ -62,7 +62,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
-    /// <remarks>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post <see cref="WanVideoCheckpointConverter.LoadAndConvert"/>), not the raw checkpoint's own key names. Wan ships both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here (mirroring <see cref="VideoRecipeUtils.PeekSafeTensorKeys"/>) risks silently misclassifying a checkpoint whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</remarks>
+    /// <remarks>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post <see cref="WanVideoCheckpointConverter.Convert"/>), not the raw checkpoint's own key names. Wan ships both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here (mirroring <see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) risks silently misclassifying a checkpoint whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</remarks>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -177,15 +177,26 @@ public sealed class WanVideoRecipe : IVideoRecipe
     internal IVideoRecipePipeline ConstructBase(RecipeContext context, string? familyId)
     {
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ditLoader };
+        // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
+        // back is an IDisposable rather than a SafeTensorsLoader.
+        List<IDisposable> loaders = new List<IDisposable>();
         MergedLoraStack? loraStack = null;
         try
         {
+            // One container for either format: a Wan GGUF is a repack of this same file and keeps its tensor names,
+            // so nothing below needs to know which one arrived.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(source);
+            WanVideoCheckpointConverter.ConvertedWeights conv =
+                WanVideoCheckpointConverter.Convert(source.Weights, source.Header.Metadata);
             if (conv.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"Wan checkpoint '{context.CheckpointPath}' has no recognized transformer weights after conversion.");
             }
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation. Tracked immediately so a failure further down frees the
+            // widened copies rather than leaving them to the finalizer.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackend(conv.Transformer, context.Backend));
             bool isClipI2V = conv.Transformer.ContainsKey("condition_embedder.image_embedder.norm1.weight");
             int inChannels = conv.Transformer.TryGetValue("patch_embedding.weight", out Tensor? patchEmbed) ? (int)patchEmbed.Shape[1] : 0;
             WanVideoConfig config = ResolveConfig(familyId, isClipI2V, inChannels, conv.Transformer);
@@ -227,12 +238,15 @@ public sealed class WanVideoRecipe : IVideoRecipe
                         $"Wan low-noise expert '{swapPath}' is a Wan '{swapVariant}' variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
                 }
                 Logs.Info($"[WanVideoRecipe] Loading Wan low-noise expert: {swapPath} (boundary {config.BoundaryRatio:0.###}).");
-                (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader lowLoader) = WanVideoCheckpointConverter.LoadAndConvert(swapPath);
-                loaders.Add(lowLoader);
+                CheckpointSource lowSource = CheckpointSource.Open(swapPath);
+                loaders.Add(lowSource);
+                WanVideoCheckpointConverter.ConvertedWeights convLow =
+                    WanVideoCheckpointConverter.Convert(lowSource.Weights, lowSource.Header.Metadata);
                 if (convLow.Transformer.Count == 0)
                 {
                     throw new InvalidOperationException($"Wan low-noise expert '{swapPath}' has no recognized transformer weights after conversion.");
                 }
+                loaders.Add(QuantizedWeightPolicy.PrepareForBackend(convLow.Transformer, context.Backend));
                 WanVideoConfig lowConfig = WanConfigDetector.Detect(convLow.Transformer);
                 if (lowConfig.InnerDim != config.InnerDim || lowConfig.NumLayers != config.NumLayers)
                 {
@@ -280,7 +294,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
         {
             Logs.Error("[WanVideoRecipe] Construction failed.", ex);
             loraStack?.Dispose();
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -339,13 +353,14 @@ public sealed class WanVideoRecipe : IVideoRecipe
         S2V,
     }
 
-    /// <summary>Classifies a Wan checkpoint from its safetensors header keys. The extension took VACE from SwarmUI's model-class id; with no host classifier here the VACE branch sniffs its own signature weights, which are as unique to the variant as the Animate/S2V ones.</summary>
+    /// <summary>Classifies a Wan checkpoint from its header keys (safetensors or GGUF). The extension took VACE from SwarmUI's model-class id; with no host classifier here the VACE branch sniffs its own signature weights, which are as unique to the variant as the Animate/S2V ones.</summary>
     internal static WanVariant DetectVariant(string checkpointPath)
     {
-        IReadOnlySet<string> keys = VideoRecipeUtils.PeekSafeTensorKeys(checkpointPath);
+        IReadOnlySet<string> keys = VideoRecipeUtils.PeekCheckpointKeys(checkpointPath);
         // First, and by metadata: Animate-2's weights are indistinguishable from a plain I2V-14B's, so every
-        // key-based arm below would classify it as Base.
-        if (WanVideoCheckpointConverter.IsAnimate2Metadata(VideoRecipeUtils.PeekSafeTensorMetadata(checkpointPath)))
+        // key-based arm below would classify it as Base. A GGUF repack carries no __metadata__ at all, so an
+        // Animate-2 GGUF cannot be recognised and loads as the I2V-14B backbone it is key-for-key identical to.
+        if (WanVideoCheckpointConverter.IsAnimate2Metadata(VideoRecipeUtils.PeekCheckpointMetadata(checkpointPath)))
         {
             return WanVariant.Animate2;
         }
