@@ -52,7 +52,7 @@ public sealed record MiniMaxH3Assets
         {
             throw new FileNotFoundException(
                 $"MiniMax-H3 checkpoint not found at '{checkpointPath}' (expected a folder with a transformer/ "
-                + "subfolder, or the DiT .safetensors file itself).");
+                + "subfolder, or the DiT .safetensors or .gguf file itself).");
         }
         return FromFlat(checkpointPath, components);
     }
@@ -163,7 +163,7 @@ public sealed record MiniMaxH3Assets
                 {
                     continue;
                 }
-                string? best = Directory.EnumerateFiles(dir, "*.safetensors", SearchOption.AllDirectories)
+                string? best = EnumerateCheckpoints(dir, SearchOption.AllDirectories)
                     .Where(f => Matches(Path.GetFileName(f), hints))
                     .OrderBy(f => FormatRank(Path.GetFileName(f), preferQuantized))
                     .ThenBy(f => new FileInfo(f).Length)
@@ -212,12 +212,20 @@ public sealed record MiniMaxH3Assets
         {
             throw new FileNotFoundException($"MiniMax-H3 component folder not found: {dir}");
         }
-        string[] files = Directory.GetFiles(dir, "*.safetensors", SearchOption.TopDirectoryOnly);
-        if (files.Length == 0)
+        List<string> files = EnumerateCheckpoints(dir, SearchOption.TopDirectoryOnly).ToList();
+        if (files.Count == 0)
         {
-            files = Directory.GetFiles(dir, "*.safetensors", SearchOption.AllDirectories);
+            files = EnumerateCheckpoints(dir, SearchOption.AllDirectories).ToList();
         }
-        return files.Length > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
-            : throw new FileNotFoundException($"No .safetensors in {dir}.");
+        return files.Count > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
+            : throw new FileNotFoundException($"No .safetensors or .gguf in {dir}.");
     }
+
+    /// <summary>Every checkpoint file under <paramref name="dir"/>, in either container.</summary>
+    /// <remarks>Extension is only a way to find candidates here; what a file actually is gets settled by
+    /// <c>CheckpointSource.Sniff</c> when it is opened. Globbing for <c>.safetensors</c> alone made a GGUF build of any
+    /// component invisible to resolution, so the recipe reported the component missing rather than loading it.</remarks>
+    private static IEnumerable<string> EnumerateCheckpoints(string dir, SearchOption option) =>
+        Directory.EnumerateFiles(dir, "*.safetensors", option)
+            .Concat(Directory.EnumerateFiles(dir, "*.gguf", option));
 }
