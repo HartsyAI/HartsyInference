@@ -158,6 +158,19 @@ public sealed class GgufModelLoader : IDisposable
         }
     }
 
+    /// <summary>Resolves which architecture a loaded GGUF declares and which key mapper handles it — the declared
+    /// <c>general.architecture</c> when a mapper is registered for it, key heuristics otherwise.</summary>
+    /// <remarks>Public so a header-only read (<see cref="Checkpoints.CheckpointHeader"/>) maps keys exactly the way a
+    /// full load does; two copies of this resolution would drift and a planner would then validate different key names
+    /// than the recipe loads.</remarks>
+    /// <returns>The mapper, and the file's declared architecture (empty when it declared none).</returns>
+    public static (IGgufKeyMapper Mapper, string Architecture) ResolveMapping(GgufLoader loader)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        string architecture = ResolveArchitecture(loader);
+        return (ResolveMapper(loader, architecture), architecture);
+    }
+
     private static string ResolveArchitecture(GgufLoader loader)
     {
         if (loader.Metadata.ContainsKey("general.architecture"))
