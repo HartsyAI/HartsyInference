@@ -68,9 +68,11 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
             Lumina2CheckpointConverter.ConvertedWeights converted = Lumina2CheckpointConverter.Convert(source.Weights);
             Dictionary<string, Tensor> transformerWeights = VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.BF16], DType.F32);
             // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
-            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            // the first GEMM. Widened to F32 because that is what the cast above put the dense weights in — the
+            // default F16 would leave a GGUF build running a dtype mix the dense path never produces. Tracked
+            // immediately so a failure further down frees the widened copies.
             QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends);
+                QuantizedWeightPolicy.PrepareForBackends(transformerWeights, context.TransformerBackends, DType.F32);
             checkpoint = new CompositeDisposable(source, prepared);
 
             Lumina2Config config = Lumina2Config.FromWeights(transformerWeights);

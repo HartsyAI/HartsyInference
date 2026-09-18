@@ -220,6 +220,40 @@ public sealed class ImageConverterFoldedCompanionTests
     }
 
     [Fact]
+    public void ChromaCheckpointConverter_SplitsABlockQuantFusedQkvByteForByte()
+    {
+        // The split used to size its copies from DType.SizeInBytes, which is 0 for every block quant: on a GGUF it
+        // produced three correctly-shaped all-zero projections while the dense path stayed byte-perfect.
+        const int innerDim = 3072;
+        const int inDim = 64;
+        Tensor fused = new Tensor(new TensorShape(3 * innerDim, inDim), DType.Q8_0);
+        Span<byte> bytes = fused.AsSpan<byte>();
+        for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i % 251 + 1);
+        Dictionary<string, Tensor> folded = new() { ["double_blocks.0.img_attn.qkv.weight"] = fused };
+        ChromaCheckpointConverter.ConvertedWeights converted = ChromaCheckpointConverter.Convert(folded);
+        try
+        {
+            ReadOnlySpan<byte> source = fused.AsReadOnlySpan<byte>();
+            int chunkBytes = source.Length / 3;
+            int offset = 0;
+            foreach (string name in new[] { "to_q", "to_k", "to_v" })
+            {
+                Tensor split = converted.Transformer[$"transformer_blocks.0.attn.{name}.weight"];
+                Assert.Equal(DType.Q8_0, split.DType);
+                Assert.Equal(innerDim, (int)split.Shape[0]);
+                Assert.Equal(inDim, (int)split.Shape[1]);
+                Assert.True(split.AsReadOnlySpan<byte>().SequenceEqual(source.Slice(offset, chunkBytes)));
+                offset += chunkBytes;
+            }
+        }
+        finally
+        {
+            foreach (Tensor tensor in converted.Transformer.Values) tensor.Dispose();
+            fused.Dispose();
+        }
+    }
+
+    [Fact]
     public void ZetaChromaCheckpointConverter_RefusesToFuseSplitAttentionThatCarriesPerRowScales()
     {
         // Fusing Q/K/V along dim 0 concatenates rows, and int8_tensorwise scales are indexed by row. Keeping only

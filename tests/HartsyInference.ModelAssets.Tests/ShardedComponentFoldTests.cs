@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
@@ -43,9 +44,10 @@ public sealed unsafe class ShardedComponentFoldTests : IDisposable
             Path.Combine(_dir, "model-00001-of-00002.safetensors"),
             Path.Combine(_dir, "model-00002-of-00002.safetensors"),
         ];
-        // The key map renames only `.weight` — exactly the shape of map that used to drop the companion.
+        // Krea 2's real map, which renames only `.weight`. It used to carry a companion-suffix pre-rename purely so
+        // a later fold could still pair the two; that pre-rename is gone, and this is what replaced it.
         (Dictionary<string, Tensor> weights, Checkpoints.CheckpointSource source) = CheckpointConvertUtils.LoadShards(
-            shards, 8, key => key == "blocks.0.attn.wq.weight" ? "transformer_blocks.0.attn.to_q.weight" : key);
+            shards, 8, key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)));
         using (source)
         {
             Tensor mapped = Assert.Contains("transformer_blocks.0.attn.to_q.weight", weights);
