@@ -4,6 +4,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -68,20 +69,22 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         string? sparseBackendFailure = null;
         if (plan.Profile.Attention != VideoAttentionKind.Dense)
         {
-            sparseBackendSupported = string.Equals(
-                BackendFactory.Resolve(_engine.BackendSelector), "cuda", StringComparison.OrdinalIgnoreCase);
-            if (sparseBackendSupported)
+            // Ask the backend, not the selector's spelling: a backend that implements the native sparse profile
+            // answers for itself, and one that does not is refused below whatever it is called.
+            try
             {
-                try
-                {
-                    sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
-                }
-                catch (Exception error) when (error is CudaException or DllNotFoundException
-                    or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
-                    or NotSupportedException)
-                {
-                    RecordSparseBackendFailure(error);
-                }
+                sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
+            }
+            // Constructing the backend is part of the probe, so its construction failures are probe failures: a
+            // Vulkan loader present with no compatible device throws VulkanException, and an out-of-range ordinal
+            // throws ArgumentOutOfRangeException. Left unlisted they fault planning instead of producing the
+            // video.vsa.backend_unsupported issue this block exists to produce. Adding a backend package means
+            // adding its construction exception here, until the backend registry makes the probe generic.
+            catch (Exception error) when (error is CudaException or VulkanException or DllNotFoundException
+                or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
+                or NotSupportedException or ArgumentOutOfRangeException)
+            {
+                RecordSparseBackendFailure(error);
             }
         }
 
@@ -100,7 +103,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 {
                     Code = "video.vsa.backend_unsupported",
                     Severity = VideoPlanIssueSeverity.Error,
-                    Message = $"Profile '{plan.Profile.Id}' requires native CUDA sparse attention; "
+                    Message = $"Profile '{plan.Profile.Id}' requires native sparse attention; "
                         + $"backend '{_engine.BackendDescription}' cannot execute it"
                         + (sparseBackendFailure is null ? "." : $": {sparseBackendFailure}"),
                     Field = nameof(VideoRequest.SparseAttentionPolicy),
