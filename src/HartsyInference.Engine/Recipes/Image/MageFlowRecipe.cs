@@ -23,6 +23,11 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     public string Name => "mage-flow";
     public bool Matches(string familyId) => string.Equals(familyId, "mage-flow", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Mage-Flow's ComfyUI tokenizer subclasses the
+    /// Qwen3-VL one, which disables weights, so the prompt is encoded at weight 1 and each token's cond row is scaled
+    /// afterwards — on this family, after the system-prefix drop.</summary>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
+
     /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring

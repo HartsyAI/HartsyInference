@@ -43,7 +43,8 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop, int width,
         int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null, string? seamlessTiling = null,
         long variationSeed = -1, double variationSeedStrength = 0, string? samplerSelection = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null, Prompting.WeightedTokenSequence? condWeights = null,
+        Prompting.WeightedTokenSequence? uncondWeights = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
@@ -52,8 +53,9 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         bool useCfg = cfgScale > 1f && uncondTokens is not null;
 
         // 1. Text conditioning: Qwen3-VL-4B last_hidden_state, system prefix dropped.
-        Tensor condHidden = EncodeDropped(condTokens, condDrop);
-        Tensor? uncondHidden = useCfg ? EncodeDropped(uncondTokens!, uncondDrop) : null;
+        Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
+        Tensor? uncondHidden = useCfg
+            ? ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights) : null;
 
         // 1b. Edit: VAE-encode the reference image → packed ref tokens, appended in-context each forward. The DiT's
         // refGrids machinery gives them frame-axis-1 RoPE and drops them from the returned velocity. (The Qwen3-VL
@@ -157,6 +159,21 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         Tensor image = _vaeDecoder.Decode(Backend, finalLatent);
         finalLatent.Dispose();
         return image;
+    }
+
+    /// <summary>Scales each token's cond row by its weight AFTER the system-prefix drop — SwarmUI's CondScale
+    /// mechanism, whose right-alignment offset is negative here because of that drop. Adopts and disposes
+    /// <paramref name="hidden"/>, so the caller keeps exactly one tensor to release.</summary>
+    private Tensor ApplyTokenWeights(Tensor hidden, Prompting.WeightedTokenSequence? weights)
+    {
+        Tensor? scaled = weights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, hidden, null, weights).Cond;
+        if (scaled is null)
+        {
+            return hidden;
+        }
+        hidden.Dispose();
+        return scaled;
     }
 
     // Encode tokens through Qwen3-VL-4B; drop the leading system-prefix rows from the [1, S, 2560] hidden states.

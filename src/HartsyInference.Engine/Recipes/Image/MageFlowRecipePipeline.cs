@@ -1,5 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -7,6 +8,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.Mage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
@@ -63,8 +65,8 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         int height = Math.Clamp(reqH / 16 * 16, 128, 4096);
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? Random.Shared.Next(int.MaxValue);
 
-        (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
-        (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
+        (WeightedTokenSequence promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
+        (WeightedTokenSequence negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
 
         // Whether a checkpoint carries the encoder half is a property of the file, not of the family, so the recipe's
         // Supports bit (read before construction, to route the request) cannot express it. Refuse loudly here instead:
@@ -82,13 +84,14 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         using Img2ImgResolver.Img2ImgSpec? editSpec = Img2ImgResolver.Resolve(request.Img2Img, null, width, height);
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        Tensor image = _pipeline.GenerateFromTokens(promptTokens, promptDrop, useCfg ? negTokens : null, negDrop,
+        Tensor image = _pipeline.GenerateFromTokens(
+            promptTokens.Tokens, promptDrop, useCfg ? negTokens.Tokens : null, negDrop,
             width, height, steps, cfg, seed, editSpec?.SourceTensor, request.SeamlessTiling,
             request.VariationSeed?.Seed ?? -1, request.VariationSeed?.Strength ?? 0,
             // Mage-Flow takes primitives rather than a TextToImageRequest, so the sampler selection is threaded
             // explicitly. Validated by the resolver, which refuses an unavailable name instead of silently
             // substituting Euler.
-            SamplingParamResolver.ResolveSchedulerName(request), bridge);
+            SamplingParamResolver.ResolveSchedulerName(request), bridge, promptTokens, negTokens);
 
         byte[] rgb = ToRgbBytes(image, out int outW, out int outH);
         image.Dispose();
@@ -129,22 +132,30 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         return rgb;
     }
 
-    private static (int[] tokens, int dropIndex) EncodeWithTemplate(Qwen3Tokenizer tokenizer, string prompt)
+    /// <summary>Builds the chat-templated ids plus the per-token weights parsed from the prompt's emphasis grammar;
+    /// the template's own ids carry weight 1, and truncation cuts ids and weights together.</summary>
+    internal static (WeightedTokenSequence tokens, int dropIndex) EncodeWithTemplate(
+        Qwen3Tokenizer tokenizer, string prompt)
     {
-        List<int> ids = new(64) { Qwen3Tokenizer.ImStartId };
-        ids.AddRange(tokenizer.EncodeRaw(SystemPrompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("user\n"));
-        int dropIndex = ids.Count;
-        ids.AddRange(tokenizer.EncodeRaw(prompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("assistant\n"));
-        if (ids.Count > MaxTokens) ids.RemoveRange(MaxTokens, ids.Count - MaxTokens);
-        return (ids.ToArray(), dropIndex);
+        List<int> prefix = new(64) { Qwen3Tokenizer.ImStartId };
+        prefix.AddRange(tokenizer.EncodeRaw(SystemPrompt));
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        int dropIndex = prefix.Count;
+        List<int> suffix = new(8) { Qwen3Tokenizer.ImEndId };
+        suffix.AddRange(tokenizer.EncodeRaw("\n"));
+        suffix.Add(Qwen3Tokenizer.ImStartId);
+        suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
+        WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
+            prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
+        return (sequence.Tokens.Length <= MaxTokens
+            ? sequence
+            : new WeightedTokenSequence(sequence.Tokens[..MaxTokens], sequence.Weights[..MaxTokens])
+            {
+                UniformWeight = sequence.UniformWeight,
+            }, dropIndex);
     }
 
     public void Dispose()
