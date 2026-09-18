@@ -72,7 +72,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareForBackend(converted.Transformer, context.Backend);
+                QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
             // Tracked immediately so a failure further down frees the widened copies rather than
             // leaving them to the finalizer.
             checkpoint = new CompositeDisposable(source, prepared);

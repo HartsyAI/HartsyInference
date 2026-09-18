@@ -31,6 +31,27 @@ public static class QuantizedWeightPolicy
         return PrepareFor(weights, backend.SupportsResidentQuant, backend.Capabilities.Name, wideDType);
     }
 
+    /// <summary>Widens every weight that ANY of <paramref name="backends"/> cannot hold packed.</summary>
+    /// <remarks>A transformer's weights are one set of bytes shared by every device that executes its blocks, so the
+    /// question is not what the primary backend can read but what all of them can. Asking the primary alone is how a
+    /// CUDA host keeps an int8 weight packed and then hands it to a CPU or F16-less Vulkan shard that has no kernel for
+    /// it. The alternative — a differently-packed copy per device — costs a second full weight set to save a decode
+    /// that only the weaker device pays for.</remarks>
+    public static PreparedWeights PrepareForBackends(IDictionary<string, Tensor> weights,
+        IEnumerable<IBackend> backends, DType wideDType = default)
+    {
+        ArgumentNullException.ThrowIfNull(backends);
+        List<IBackend> resolved = backends.ToList();
+        if (resolved.Count == 0)
+            throw new ArgumentException("At least one backend must execute the weights.", nameof(backends));
+        if (resolved.Count == 1)
+            return PrepareForBackend(weights, resolved[0], wideDType);
+
+        string name = string.Join(" + ", resolved.Select(backend => backend.Capabilities.Name));
+        return PrepareFor(weights, dtype => resolved.TrueForAll(backend => backend.SupportsResidentQuant(dtype)),
+            name, wideDType);
+    }
+
     /// <summary>The same widening against an explicit capability predicate, for a consumer that is not a backend.</summary>
     /// <remarks>Offline tooling reads a checkpoint to re-quantize or inspect it with no device attached, and wants the
     /// same rule stated against whatever it can decode. Naming the consumer keeps the log line meaningful.</remarks>

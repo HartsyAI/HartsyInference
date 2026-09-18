@@ -1,6 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 
@@ -173,6 +175,40 @@ public sealed unsafe class LinearWeightRowsTests
             _ = viaSlice.DataPointer;
 
             AssertBitExact(viaSlice, viaRowRange, $"{dtype} hidden={hidden} range={name}");
+        }
+    }
+
+    /// <summary>The quant policy asked about a CUDA primary alone versus that primary plus a CPU peer.</summary>
+    /// <remarks>Transformer weights are one set of bytes shared by every device that executes the blocks. CUDA reports
+    /// it can hold Q8_0 packed, so asking it alone leaves the weight packed — and a DiT shard or context-parallel rank
+    /// on a device without that kernel is then handed something it cannot read and dies in its first Linear. Two real
+    /// backends rather than stubs, because the whole point is that the capability answers are the real ones.</remarks>
+    [Fact]
+    public void QuantPolicyIntersectsEveryBackendThatRunsTheBlocks()
+    {
+        using CudaBackend cuda = new CudaBackend(0, PtxDir());
+        using CpuBackend cpuBackend = new CpuBackend();
+        // Through IBackend: the CPU backend does not override the capability, so it answers with the interface default,
+        // which is the honest answer for a backend with no packed-weight kernels at all.
+        IBackend cpu = cpuBackend;
+        Assert.True(cuda.SupportsResidentQuant(DType.Q8_0), "CUDA should read Q8_0 packed.");
+        Assert.False(cpu.SupportsResidentQuant(DType.Q8_0), "The CPU backend has no packed-weight kernels.");
+
+        using Tensor packed = RandomQuantized(DType.Q8_0, new TensorShape(64, 256), 5);
+        Dictionary<string, Tensor> onlyCuda = new() { ["blocks.0.attn.to_q.weight"] = packed };
+        using (QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(onlyCuda, new IBackend[] { cuda }))
+        {
+            Assert.Equal(0, prepared.WidenedCount);
+            Assert.Same(packed, onlyCuda["blocks.0.attn.to_q.weight"]);
+        }
+
+        Dictionary<string, Tensor> bothDevices = new() { ["blocks.0.attn.to_q.weight"] = packed };
+        using (QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(bothDevices, new IBackend[] { cuda, cpu }))
+        {
+            Assert.Equal(1, prepared.WidenedCount);
+            Assert.Equal(DType.F16, bothDevices["blocks.0.attn.to_q.weight"].DType);
         }
     }
 
