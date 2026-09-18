@@ -22,7 +22,11 @@ public static class Nf4CompanionFold
     private const string QuantStatePrefix = ".quant_state.bitsandbytes__";
 
     /// <summary>Returns a dictionary with every NF4 weight dequantized and its companions removed; the input is returned unchanged when the checkpoint holds none.</summary>
-    public static Dictionary<string, Tensor> Apply(Dictionary<string, Tensor> source)
+    /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built
+    /// before a later weight refused. A checkpoint is decoded one weight at a time and a malformed companion set can
+    /// appear anywhere in it, so waiting for a successful return to learn what was allocated leaks everything decoded
+    /// up to the failure — gigabytes on a real file, and repeated on every retry.</param>
+    public static Dictionary<string, Tensor> Apply(Dictionary<string, Tensor> source, List<Tensor>? allocated = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         List<string>? stateKeys = null;
@@ -51,7 +55,9 @@ public static class Nf4CompanionFold
                 throw new NotSupportedException($"'{stateKey}' describes a weight '{weightKey}' the checkpoint does not contain.");
 
             Nf4QuantState state = Nf4QuantState.Parse(source[stateKey], stateKey);
-            result[weightKey] = Dequantize(packed, state, weightKey, source, consumed);
+            Tensor decoded = Dequantize(packed, state, weightKey, source, consumed);
+            allocated?.Add(decoded);
+            result[weightKey] = decoded;
             consumed.Add(stateKey);
             consumed.Add(weightKey);
         }

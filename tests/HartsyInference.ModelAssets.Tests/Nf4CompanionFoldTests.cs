@@ -143,6 +143,35 @@ public sealed unsafe class Nf4CompanionFoldTests
     }
 
     [Fact]
+    public void Apply_FreesWhatItAlreadyDecodedWhenALaterWeightRefuses()
+    {
+        // A checkpoint decodes one weight at a time and a malformed companion set can sit anywhere in it, so learning
+        // what was allocated only on a successful return leaks everything decoded before the failure — gigabytes on a
+        // real file, and again on every retry.
+        Dictionary<string, Tensor> weights = Layer("good.weight");
+        foreach (KeyValuePair<string, Tensor> entry in Layer("bad.weight",
+            json: "{\"quant_type\": \"nf4\", \"blocksize\": 8, \"shape\": [4, 4], \"dtype\": \"float32\"}"))
+        {
+            weights[entry.Key] = entry.Value;
+        }
+        List<Tensor> allocated = new List<Tensor>();
+        try
+        {
+            Assert.Throws<NotSupportedException>(() => Nf4CompanionFold.Apply(weights, allocated));
+
+            // The good weight decoded before the bad one refused, and the caller can now free it.
+            Assert.NotEmpty(allocated);
+            foreach (Tensor tensor in allocated) tensor.Dispose();
+            foreach (Tensor tensor in allocated)
+                Assert.Throws<ObjectDisposedException>(() => _ = tensor.DataPointer);
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
+    [Fact]
     public void Apply_ReturnsTheInputUntouchedWhenNothingIsNf4()
     {
         Dictionary<string, Tensor> weights = new() { ["blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(4, 8), DType.F32) };

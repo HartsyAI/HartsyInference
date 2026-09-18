@@ -161,11 +161,24 @@ public sealed class CheckpointSource : IDisposable
     {
         if (!options.FoldQuantCompanions)
             return weights;
-        Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights);
-        Dictionary<string, Tensor> normalized =
-            CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4);
-        CollectAllocations(weights, normalized, owned);
-        return normalized;
+        try
+        {
+            // The NF4 pass records each decoded weight as it goes rather than on return, because a malformed companion
+            // set anywhere in the file aborts the pass with everything before it already allocated.
+            Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights, owned);
+            Dictionary<string, Tensor> normalized =
+                CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4);
+            // Against `folded`, not `weights`: the NF4 decodes are already owned, and re-adding them here would
+            // dispose each one twice.
+            CollectAllocations(folded, normalized, owned);
+            return normalized;
+        }
+        catch
+        {
+            foreach (Tensor tensor in owned) tensor.Dispose();
+            owned.Clear();
+            throw;
+        }
     }
 
     /// <summary>Records every tensor <see cref="Normalize"/> allocated, so this source frees them with the file it borrowed the rest from.</summary>
