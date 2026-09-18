@@ -9,6 +9,7 @@ file trees, completed-task journals, or benchmark tables. Git preserves removed 
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
 | Architecture and task-specific instructions | [Agents/AGENTS.md](Agents/AGENTS.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
+| Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
 | Cross-cutting open work | [Checklists/ROADMAP.md](Checklists/ROADMAP.md) |
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |

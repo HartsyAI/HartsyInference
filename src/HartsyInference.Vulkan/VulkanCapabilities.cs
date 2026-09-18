@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends;
+
 namespace HartsyInference.Vulkan;
 
 /// <summary>Captured at startup from the chosen physical device; drives kernel selection and validation.</summary>
@@ -149,6 +151,20 @@ public sealed class VulkanCapabilities
 
     /// <summary>Nanoseconds per tick of <c>vkCmdWriteTimestamp2</c> results (<c>VkPhysicalDeviceLimits.timestampPeriod</c>). Used by <see cref="VulkanGpuTimer"/> to convert raw timestamp deltas into wall-clock GPU execution time.</summary>
     public required float TimestampPeriod { get; init; }
+
+    /// <summary>The vendor as the shared backend contract names it. A CPU implementation of Vulkan reports its
+    /// silicon vendor like any other device, so the device TYPE is checked first: llvmpipe answering "Intel" would
+    /// put a software rasterizer into a hardware comparison.</summary>
+    public GpuVendor Vendor => DeviceType == VkPhysicalDeviceType.Cpu
+        ? GpuVendor.Software
+        : VendorId switch
+        {
+            0x10DE => GpuVendor.Nvidia,
+            0x1002 => GpuVendor.Amd,
+            0x8086 => GpuVendor.Intel,
+            0x106B => GpuVendor.Apple,
+            _ => GpuVendor.Other,
+        };
 
     /// <summary>Returns vendor string suitable for logs / cache file names.</summary>
     public string VendorString => VendorId switch

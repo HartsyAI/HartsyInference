@@ -24,6 +24,22 @@ public interface IBackend : IDisposable
     /// <summary>When true, F32 GEMMs use full 32-bit compute instead of TF32 (needed by e.g. Zonos); no-op without TF32.</summary>
     bool HighPrecisionGemm { get => false; set { } }
 
+    /// <summary>Low-VRAM lever: when true (the default) a weight's fp8/quant→F16 cast is kept resident instead of
+    /// being recomputed per GEMM. Caching is faster but holds BOTH the packed weight and its cast on the device;
+    /// turning it off trades recompute for roughly a third of the weight footprint, which is what makes a large fp8
+    /// DiT fit a single 24 GB card. No-op on a backend that does not cache casts.</summary>
+    /// <remarks>On the interface because callers set it on EVERY placement backend — a text encoder or VAE on its own
+    /// GPU needs the same lever or the saving silently does not apply there. Reaching that through a type test means
+    /// each new backend is invisible to the policy until someone adds another arm to the chain.</remarks>
+    bool CacheWeightCasts { get => true; set { } }
+
+    /// <summary>Whether this backend's GEMM consumes fp8 operands natively instead of widening them first. Recipes
+    /// read it to decide whether an fp8 checkpoint can keep its weights packed.</summary>
+    /// <remarks>A property rather than a <see cref="BackendCapabilities"/> field because the backends that have such
+    /// a path gate it on a settable flag, and a capability snapshot taken at construction would disagree with the
+    /// flag the GEMM actually reads.</remarks>
+    bool NativeFp8Gemm => false;
+
     /// <summary>When true, <see cref="Conv2D"/> pads the width axis with wrapped edge pixels instead of zeros, so
     /// the model sees a horizontally-continuous canvas — the standard "seamless tiling" trick for textures/
     /// patterns. Independent of <see cref="SeamlessTilingY"/> (SwarmUI core's "X-Only"/"Y-Only"/"true" modes).

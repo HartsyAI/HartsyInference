@@ -1,7 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Cuda;
-using HartsyInference.Vulkan;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -13,26 +11,21 @@ namespace HartsyInference.Engine.Recipes;
 internal static class RecipeBackendFlags
 {
     /// <summary>Sets <c>CacheWeightCasts = false</c> (weights stay checkpoint-dtype resident, transient per-GEMM
-    /// dequant) on every placement backend. <paramref name="onlyWithoutNativeFp8Gemm"/> restricts the change to CUDA
-    /// backends lacking native FP8 GEMM — the Flux rule, where SM 8.9+ hardware wants the cache kept on.</summary>
+    /// dequant) on every placement backend. <paramref name="onlyWithoutNativeFp8Gemm"/> restricts the change to
+    /// backends lacking a native FP8 GEMM — the Flux rule, where SM 8.9+ hardware wants the cache kept on.</summary>
+    /// <remarks>Asks each backend what it is rather than testing its type. The type test named CUDA and Vulkan
+    /// explicitly, so a third backend would have been skipped silently — the flag would appear to apply and the VRAM
+    /// saving would not happen. A backend that does not cache casts takes the no-op default and is unaffected.</remarks>
     public static void DisableCacheWeightCasts(RecipeContext context, string logTag, bool onlyWithoutNativeFp8Gemm = false)
     {
         foreach (IBackend backend in context.AllBackends)
         {
-            if (backend is CudaBackend cudaBackend)
+            if (!backend.Device.IsGpu || (onlyWithoutNativeFp8Gemm && backend.NativeFp8Gemm))
             {
-                if (onlyWithoutNativeFp8Gemm && cudaBackend.EnableNativeFp8Gemm)
-                {
-                    continue;
-                }
-                cudaBackend.CacheWeightCasts = false;
-                Logs.Info($"[{logTag}] CacheWeightCasts disabled on {backend.GetType().Name} (checkpoint-dtype resident, transient per-GEMM dequant).");
+                continue;
             }
-            else if (backend is VulkanBackend vulkanBackend && !onlyWithoutNativeFp8Gemm)
-            {
-                vulkanBackend.CacheWeightCasts = false;
-                Logs.Info($"[{logTag}] CacheWeightCasts disabled on {backend.GetType().Name} (checkpoint-dtype resident, transient per-GEMM dequant).");
-            }
+            backend.CacheWeightCasts = false;
+            Logs.Info($"[{logTag}] CacheWeightCasts disabled on {backend.GetType().Name} (checkpoint-dtype resident, transient per-GEMM dequant).");
         }
     }
 }
