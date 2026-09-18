@@ -28,4 +28,23 @@ public sealed record QuantWeightInfo
 
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
+
+    /// <summary>Returns these companions narrowed to a contiguous run of weight rows, for a caller splitting a fused weight (QKV) or consuming one in windows.</summary>
+    /// <remarks><para><see cref="RowScale"/> is indexed by output row, so a row slice of the weight needs the matching
+    /// slice of the scale; a per-tensor scale (one element) covers every row and is shared as-is. <see cref="ConvRotGroupSize"/>
+    /// divides the <b>input</b> dimension, which a row split leaves alone.</para>
+    /// <para>NVFP4 refuses: <see cref="BlockScale"/> is padded to 128 rows and swizzled, so a row range of the weight is
+    /// not a row range of the scales, and slicing it would pair each row with another row's block scales — plausible
+    /// output, silently wrong.</para></remarks>
+    /// <param name="weightKey">The weight's checkpoint key, named in the refusal so the caller need not re-wrap it.</param>
+    public QuantWeightInfo SliceRows(long rowOffset, long rowCount, string weightKey)
+    {
+        if (BlockScale is not null)
+            throw new NotSupportedException(
+                $"'{weightKey}' is {Format}, whose block scales use a padded swizzled layout that does not slice by row. "
+                + "Dequantize it before splitting or windowing the weight.");
+        if (RowScale is null || RowScale.ElementCount == 1)
+            return this;
+        return this with { RowScale = RowScale.SliceRows(rowOffset, rowCount) };
+    }
 }

@@ -316,7 +316,18 @@ public static unsafe class CheckpointConvertUtils
         return d.ComputeByteCount(elementCount);
     }
 
-    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three [innerDim, inDim] weights under <c>{prefix}.{qName}.weight</c> etc. Quant-aware via <see cref="SliceByteCount"/>; the fused tensor's per-tensor fp8 scale is carried onto every split.</summary>
+    /// <summary>Carries a fused tensor's quantization companions onto one row-range slice of it.</summary>
+    /// <remarks>The two fp8 scalars are per-tensor and apply to every row unchanged. <see cref="QuantWeightInfo"/> is
+    /// narrowed to the slice's rows because its <c>RowScale</c> is indexed by them — a split that kept the fused scale
+    /// would give K and V rows Q's scales.</remarks>
+    private static void CarryQuantCompanions(Tensor fused, Tensor slice, long rowOffset, long rowCount, string sliceKey)
+    {
+        slice.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        slice.Fp8InputScaleFactor = fused.Fp8InputScaleFactor;
+        slice.QuantInfo = fused.QuantInfo?.SliceRows(rowOffset, rowCount, sliceKey);
+    }
+
+    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three [innerDim, inDim] weights under <c>{prefix}.{qName}.weight</c> etc. Quant-aware via <see cref="SliceByteCount"/>; the fused tensor's per-tensor fp8 scales and its per-row <see cref="Tensor.QuantInfo"/> companions are carried onto every split.</summary>
     public static void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
         string qName, string kName, string vName, Dictionary<string, Tensor> output)
     {
@@ -328,10 +339,11 @@ public static unsafe class CheckpointConvertUtils
         Tensor kWeight = new Tensor(splitShape, fused.DType);
         Tensor vWeight = new Tensor(splitShape, fused.DType);
         // The raw fp8 bytes alone are real_value/scale — dropping the factor runs every attention projection
-        // dozens of times too large → saturated softmax → pure-noise output.
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        // dozens of times too large → saturated softmax → pure-noise output. An int8_tensorwise weight has the
+        // same exposure through QuantInfo, and its per-row scale has to be split with the rows it indexes.
+        CarryQuantCompanions(fused, qWeight, 0, innerDim, $"{prefix}.{qName}.weight");
+        CarryQuantCompanions(fused, kWeight, innerDim, innerDim, $"{prefix}.{kName}.weight");
+        CarryQuantCompanions(fused, vWeight, 2L * innerDim, innerDim, $"{prefix}.{vName}.weight");
 
         byte* src = (byte*)fused.DataPointer;
         Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
@@ -354,9 +366,9 @@ public static unsafe class CheckpointConvertUtils
         Tensor kBias = new Tensor(splitShape, fused.DType);
         Tensor vBias = new Tensor(splitShape, fused.DType);
         // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        CarryQuantCompanions(fused, qBias, 0, innerDim, $"{prefix}.{qName}.bias");
+        CarryQuantCompanions(fused, kBias, innerDim, innerDim, $"{prefix}.{kName}.bias");
+        CarryQuantCompanions(fused, vBias, 2L * innerDim, innerDim, $"{prefix}.{vName}.bias");
 
         byte* src = (byte*)fused.DataPointer;
         Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
@@ -382,7 +394,18 @@ public static unsafe class CheckpointConvertUtils
             long halfBytes = SliceByteCount(source, source.ElementCount / 2);
             Tensor swapped = new Tensor(source.Shape, source.DType);
             if (!castToF32)
+            {
                 swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
+                swapped.Fp8InputScaleFactor = input.Fp8InputScaleFactor;
+            }
+            // The swap permutes rows, so a per-row scale would have to be permuted with them. Modulation tables are
+            // never shipped int8_tensorwise, and silently keeping the unpermuted scale is worse than a refusal.
+            if (input.QuantInfo is not null)
+            {
+                throw new NotSupportedException(
+                    $"SwapScaleShiftHalves cannot reorder a {input.QuantInfo.Format} weight: its per-row quantization "
+                    + "scales are indexed by the rows this swaps. Dequantize it first.");
+            }
 
             byte* src = (byte*)source.DataPointer;
             byte* dst = (byte*)swapped.DataPointer;
@@ -406,9 +429,9 @@ public static unsafe class CheckpointConvertUtils
         Tensor kWeight = new Tensor(splitShape, inProj.DType);
         Tensor vWeight = new Tensor(splitShape, inProj.DType);
         // Propagate fp8_scaled per-tensor scale — the raw fp8 bytes are real_value/scale; splits keep the fused tensor's factor.
-        qWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        CarryQuantCompanions(inProj, qWeight, 0, hiddenSize, $"{layerPrefix}.self_attn.q_proj.weight");
+        CarryQuantCompanions(inProj, kWeight, hiddenSize, hiddenSize, $"{layerPrefix}.self_attn.k_proj.weight");
+        CarryQuantCompanions(inProj, vWeight, 2L * hiddenSize, hiddenSize, $"{layerPrefix}.self_attn.v_proj.weight");
 
         byte* src = (byte*)inProj.DataPointer;
         long chunkBytes = hiddenSize * rowBytes;
@@ -433,9 +456,9 @@ public static unsafe class CheckpointConvertUtils
         Tensor kBias = new Tensor(splitShape, inProj.DType);
         Tensor vBias = new Tensor(splitShape, inProj.DType);
         // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        CarryQuantCompanions(inProj, qBias, 0, hiddenSize, $"{layerPrefix}.self_attn.q_proj.bias");
+        CarryQuantCompanions(inProj, kBias, hiddenSize, hiddenSize, $"{layerPrefix}.self_attn.k_proj.bias");
+        CarryQuantCompanions(inProj, vBias, 2L * hiddenSize, hiddenSize, $"{layerPrefix}.self_attn.v_proj.bias");
 
         byte* src = (byte*)inProj.DataPointer;
 
@@ -1117,6 +1140,11 @@ public static unsafe class CheckpointConvertUtils
             throw new ArgumentException($"ConcatRowsHost dtype mismatch: {a.DType} vs {b.DType}.");
         if (a.DType == DType.F8E4M3 && a.Fp8ScaleFactor != b.Fp8ScaleFactor)
             throw new ArgumentException("ConcatRowsHost: fp8 scales differ — call RequantizeToCommonFp8Scale first.");
+
+        // Row-concatenating two packed weights would need their per-row scales concatenated too; the fusion paths
+        // that call this unify fp8 scales first and have no int8/nvfp4 equivalent, so this refuses rather than drops.
+        if (a.QuantInfo is not null || b.QuantInfo is not null)
+            throw new ArgumentException("ConcatRowsHost cannot fuse weights carrying per-row quantization companions.");
 
         Tensor fused = new Tensor(new TensorShape(a.Shape[0] + b.Shape[0], a.Shape[1]), a.DType);
         long aBytes = a.ElementCount * a.DType.SizeInBytes;

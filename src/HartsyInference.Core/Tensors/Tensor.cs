@@ -418,6 +418,7 @@ public sealed unsafe class Tensor : IDisposable
 
         Tensor view = new(ptr, newShape, DType, Device);
         view.SetKeepAlive(this);
+        CopyQuantMetadataTo(view, rowsPreserved: RowsPreserved(newShape));
         return view;
     }
 
@@ -440,7 +441,71 @@ public sealed unsafe class Tensor : IDisposable
 
         Tensor view = new(ptr, newShape, newDType, Device);
         view.SetKeepAlive(this);
+        CopyQuantMetadataTo(view, rowsPreserved: RowsPreserved(newShape));
         return view;
+    }
+
+    /// <summary>Creates a view over a contiguous run of leading-dimension rows — no copy.</summary>
+    /// <remarks><para>Rows are the outermost axis, so a run of them is contiguous in memory and the view needs only a
+    /// byte offset. This is what lets a fused projection be consumed in windows, and a per-row quantization companion
+    /// be narrowed to match, without materializing either.</para>
+    /// <para>Block-quantized dtypes slice as long as a row is a whole number of blocks — blocks never span rows — which
+    /// is checked here because a partial block puts the offset mid-block and decodes garbage rather than failing.
+    /// The view roots this tensor for the same reason <see cref="Reshape"/> does.</para></remarks>
+    public Tensor SliceRows(long rowOffset, long rowCount)
+    {
+        void* ptr = DataPointer;
+
+        if (Shape.Rank < 1)
+            throw new HartsyInferenceException($"Cannot slice rows of a rank-{Shape.Rank} tensor.");
+        if (rowOffset < 0 || rowCount < 0 || rowOffset + rowCount > Shape[0])
+            throw new HartsyInferenceException(
+                $"Row slice [{rowOffset}..{rowOffset + rowCount}) is out of range for shape {Shape}.");
+
+        long rowElements = Shape[0] == 0 ? 0 : Shape.ElementCount / Shape[0];
+        if (DType.IsQuantized && rowElements % DType.BlockElementCount != 0)
+            throw new HartsyInferenceException(
+                $"Cannot slice rows of a {DType.Name} tensor with {rowElements} elements per row: not a multiple of the "
+                + $"{DType.BlockElementCount}-element quant block.");
+
+        Span<long> dims = stackalloc long[Shape.Rank];
+        Shape.CopyDimsTo(dims);
+        dims[0] = rowCount;
+
+        Tensor view = new((byte*)ptr + DType.ComputeByteCount(rowOffset * rowElements), new TensorShape(dims), DType, Device);
+        view.SetKeepAlive(this);
+        // Per-row companions are indexed by the rows this narrows, so they cannot ride along unchanged; the caller
+        // narrows QuantInfo itself (QuantWeightInfo.SliceRows) because only it knows the weight's key for the error.
+        view.Fp8ScaleFactor = Fp8ScaleFactor;
+        view.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        return view;
+    }
+
+    /// <summary>Whether <paramref name="newShape"/> keeps this tensor's leading dimension, the axis every per-row quantization companion is indexed by.</summary>
+    private bool RowsPreserved(TensorShape newShape) =>
+        Shape.Rank > 0 && newShape.Rank > 0 && newShape[0] == Shape[0];
+
+    /// <summary>Carries this tensor's quantization companions onto a view or copy of the same bytes.</summary>
+    /// <remarks><para>Bytes alone are not a weight: an <c>fp8_scaled</c> tensor without its factor is <c>real/scale</c>,
+    /// and an <c>int8_tensorwise</c> one without <see cref="QuantInfo"/> is raw int8 with no scale at all. Every path
+    /// that hands the same bytes to a new <see cref="Tensor"/> must come through here, or a converter that reshapes a
+    /// weight silently drops the scale and the model runs hundreds of times too large.</para>
+    /// <para>The two scalars are per-tensor and survive any reshape. <see cref="QuantInfo"/> does not: its
+    /// <c>RowScale</c> is indexed by the leading dimension, so a view that renumbers the rows would pair each row with
+    /// another row's scale. That refuses rather than guessing — there is no correct reindexing without knowing what
+    /// the new axes mean.</para></remarks>
+    private void CopyQuantMetadataTo(Tensor target, bool rowsPreserved)
+    {
+        target.Fp8ScaleFactor = Fp8ScaleFactor;
+        target.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        if (QuantInfo is null)
+            return;
+        if (!rowsPreserved)
+            throw new HartsyInferenceException(
+                $"Cannot view a {QuantInfo.Format} weight of shape {Shape} as {target.Shape}: its per-row quantization "
+                + "scales are indexed by the leading dimension, which this view renumbers. Dequantize first, or keep "
+                + "the row count.");
+        target.QuantInfo = QuantInfo;
     }
 
     /// <summary>Creates a contiguous copy on the specified device. Cross-device requires IBackend.CopyTo.</summary>
@@ -453,10 +518,7 @@ public sealed unsafe class Tensor : IDisposable
             Tensor copy = new Tensor(Shape, DType, Device);
             long byteSize = DType.ComputeByteCount(Shape.ElementCount);
             Buffer.MemoryCopy(ptr, copy.DataPointer, byteSize, byteSize);
-            // A byte-identical copy of an fp8_scaled tensor is still scaled — dropping the factor here would
-            // silently rescale the weight by 1/scale at the next GEMM.
-            copy.Fp8ScaleFactor = Fp8ScaleFactor;
-            copy.QuantInfo = QuantInfo;
+            CopyQuantMetadataTo(copy, rowsPreserved: true);
             return copy;
         }
 
