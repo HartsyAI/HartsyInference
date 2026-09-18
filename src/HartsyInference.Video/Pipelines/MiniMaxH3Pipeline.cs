@@ -802,9 +802,9 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Debug switches, read once at type init rather than per tensor: <see cref="Probe"/> and <see cref="Dump"/> are called several times per denoise step, so a per-call environment lookup would be wasted work.</summary>
-    private static readonly bool ProbeEnabled = EngineKnobs.H3Probe.Value;
+    private static bool ProbeEnabled => EngineKnobs.H3Probe.Value;
 
-    private static readonly string? DumpDir = EngineKnobs.H3Dump.Value;
+    private static string? DumpDir => EngineKnobs.H3Dump.Value;
 
     /// <summary>Logs min/max/mean/rms under <c>diagnostics.h3Probe</c>; no-op otherwise.</summary>
     private static void Probe(string label, Tensor t)

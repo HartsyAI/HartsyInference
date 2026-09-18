@@ -689,7 +689,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// Lens at its block 45). It samples EVERY block rather than block 0 because the residual — and with it V — grows
     /// with depth, so block 0 is the safest block in the stack and measuring only it would prove nothing. Host-side
     /// and synchronizing, hence the gate: it is a measurement tool, not something the forward path pays for.</summary>
-    private static readonly bool VProbeEnabled = EngineKnobs.H3Vprobe.Value;
+    private static bool VProbeEnabled => EngineKnobs.H3Vprobe.Value;
 
     /// <summary>F16's largest finite magnitude — the ceiling <see cref="VProbeEnabled"/> measures against.</summary>
     private const float F16Max = 65504f;

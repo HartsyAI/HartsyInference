@@ -24,7 +24,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 public sealed unsafe class LensPipeline : DiffusionPipelineBase
 {
     /// <summary>Strict opt-in (<c>LENS_DEBUG_STATS=1</c>) for the per-step D2H-sync/latency line. Off by default so nothing in the loop is tempted to read a <c>DataPointer</c> on a real run.</summary>
-    private static readonly bool DiagnosticStats = EngineKnobs.LensDebugStats.Value;
+    private static bool DiagnosticStats => EngineKnobs.LensDebugStats.Value;
 
     /// <summary>Upstream's <c>max(||comb||, 1e-12)</c> floor on the per-token combined norm.</summary>
     private const float RescaleNormFloor = 1e-12f;

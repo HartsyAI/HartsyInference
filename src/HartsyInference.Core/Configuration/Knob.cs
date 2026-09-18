@@ -27,10 +27,18 @@ public enum KnobDomain
 }
 
 /// <summary>One declared engine setting: its id, type, default, scope and domain, resolved through <see cref="KnobStore"/>.</summary>
-/// <remarks>Declaring a knob does not read anything — resolution happens on <see cref="Value"/>. Call sites that
-/// cache into a <c>static readonly</c> field keep exactly the binding time they had before the migration.
+/// <remarks>Declaring a knob does not read anything — resolution happens on <see cref="Value"/>, at the point of
+/// use, every time.
+/// <para><b>A <see cref="KnobScope.Runtime"/> knob must not be cached into a <c>static readonly</c> field.</b> Such a
+/// field is bound once at type-initialization and never re-read, which contradicts the scope's own promise that the
+/// value is read each generation and can be overridden per request: a <see cref="KnobProfileScope"/> pushed for one
+/// request could never reach it, and because the field is process-wide, whichever request touched the type first
+/// would decide for every later request and every device. That is what <c>KnobScopeIsEnforcedTests</c> checks. If a
+/// value genuinely is baked in when something is built, declare the knob <see cref="KnobScope.Construction"/> and say
+/// why — that scope exists precisely to make the freeze legible instead of accidental.</para>
 /// <para>Two knobs may share a <paramref name="legacyEnv"/> name with different defaults; <c>HARTSY_DIT_GRAPH</c>
-/// deliberately drives both an opt-in and a default-on flag so <c>=0</c> kills both and <c>=1</c> forces both.</para></remarks>
+/// deliberately drives both an opt-in and a default-on flag so <c>=0</c> kills both and <c>=1</c> forces both. A
+/// caller setting one of a pair must set both, or it changes only half of what the single name used to.</para></remarks>
 public sealed class Knob<T>
 {
     internal Knob(string id, string? legacyEnv, T defaultValue, KnobScope scope, KnobDomain domain, string summary,

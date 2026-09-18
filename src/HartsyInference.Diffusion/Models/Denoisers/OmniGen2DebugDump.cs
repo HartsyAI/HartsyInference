@@ -9,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// a Python reference dump.</summary>
 public static class OmniGen2DebugDump
 {
-    private static readonly string? _dir = EngineKnobs.Omnigen2DebugDir.Value;
+    private static string? _dir => EngineKnobs.Omnigen2DebugDir.Value;
     private static int _layerSeq;
 
     /// <summary>Whether the debug dump is currently active.</summary>

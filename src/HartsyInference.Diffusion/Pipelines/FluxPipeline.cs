@@ -48,7 +48,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private Tensor? _cachedNegT5;
 
     /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
-    private static readonly bool StatsEnabled = EngineKnobs.FluxStats.Value;
+    private static bool StatsEnabled => EngineKnobs.FluxStats.Value;
 
     /// <summary>Creates a new Flux pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,

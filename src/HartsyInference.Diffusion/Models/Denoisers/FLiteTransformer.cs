@@ -83,11 +83,11 @@ public sealed unsafe class FLiteTransformer : IDisposable
     }
 
     // Diagnostic (HARTSY_FLITE_PROBE=1): per-stage absmax — host sync per probe, debug only.
-    private static readonly bool FliteProbe = EngineKnobs.FliteProbe.Value;
+    private static bool FliteProbe => EngineKnobs.FliteProbe.Value;
     private static bool _probedOnce;
     // Binary stage dumps for the Python block-0 oracle (HARTSY_FLITE_DUMP=<dir>): raw F32 .bin per
     // stage on the FIRST forward only, plus a shapes manifest.
-    private static readonly string? FliteDumpDir = EngineKnobs.FliteDump.Value;
+    private static string? FliteDumpDir => EngineKnobs.FliteDump.Value;
     private static int _dumpForwardIndex = -1;
     private static unsafe void DumpBin(string name, Tensor t)
     {

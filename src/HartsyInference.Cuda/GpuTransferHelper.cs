@@ -111,7 +111,7 @@ internal static unsafe class GpuTransferHelper
     public static readonly bool AutoPromoteWeights = !EngineKnobs.NoAutopromote.Value;
 
     /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
-    private static readonly long _autoPromoteHeadroomBytes = EngineKnobs.AutopromoteHeadroomMb.Value << 20;
+    private static long _autoPromoteHeadroomBytes => EngineKnobs.AutopromoteHeadroomMb.Value << 20;
 
     /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are the most likely to be mutated scratch buffers.</summary>
     private const nuint AutoPromoteMinBytes = 1 << 20;
@@ -136,7 +136,7 @@ internal static unsafe class GpuTransferHelper
     private static readonly ConcurrentDictionary<nint, bool> _ambiguityWarned = new();
 
     /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
-    private static readonly bool _assertAmbient = EngineKnobs.AssertAmbient.Value;
+    private static bool _assertAmbient => EngineKnobs.AssertAmbient.Value;
 
     /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
     private static readonly State _unregistered = new();
@@ -393,11 +393,11 @@ internal static unsafe class GpuTransferHelper
     // distinguishable from ordinary activation traffic. Small misses are logged too — a DiT that re-uploads a
     // handful of tiny per-channel vectors every block hides thousands of them per step behind a trace that only
     // showed the megabyte-scale ones.
-    private static readonly bool _traceBigMisses = EngineKnobs.H2dTrace.Value;
+    private static bool _traceBigMisses => EngineKnobs.H2dTrace.Value;
     private static int _bigMissTraceCount;
 
     /// <summary>How many big misses to log; raise it to see past the text-encode phase into denoise.</summary>
-    private static readonly int _traceBigMissLimit = EngineKnobs.H2dTraceLimit.Value;
+    private static int _traceBigMissLimit => EngineKnobs.H2dTraceLimit.Value;
 
     /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
@@ -578,7 +578,7 @@ internal static unsafe class GpuTransferHelper
     /// still parked provably has no owner. Sweeping here rather than inside CacheActivation is what keeps the
     /// in-place case (where the displaced buffer is the op's own input) from being double-freed.</remarks>
     /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
-    private static readonly bool OrphanSweepEnabled = EngineKnobs.OrphanSweep.Value;
+    private static bool OrphanSweepEnabled => EngineKnobs.OrphanSweep.Value;
 
     internal static void SweepOrphans()
     {

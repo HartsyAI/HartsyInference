@@ -30,16 +30,16 @@ public readonly ref struct NvtxRange
 
     // ── Env-gated CPU wall-time profiler (HARTSY_PROFILE=1). Accumulates per-label (calls, ticks) across all
     // NvtxRange-wrapped ops, regardless of whether NVTX itself is available. Zero overhead when off. ──
-    internal static readonly bool ProfileEnabled = EngineKnobs.Profile.Value;
+    internal static bool ProfileEnabled => EngineKnobs.Profile.Value;
 
     /// <summary>HARTSY_PROFILE_SYNC=1: sync the compute stream on each range Dispose so per-op timing = GPU time.</summary>
-    internal static readonly bool ProfileSync = EngineKnobs.ProfileSync.Value;
+    internal static bool ProfileSync => EngineKnobs.ProfileSync.Value;
 
     /// <summary>HARTSY_PROFILE_FINE=1: enable sub-op ranges (see <see cref="PushFine"/>), off by default.</summary>
-    internal static readonly bool ProfileFine = EngineKnobs.ProfileFine.Value;
+    internal static bool ProfileFine => EngineKnobs.ProfileFine.Value;
 
     /// <summary>HARTSY_PROFILE_SHAPES=1: split selected op labels by shape, so one label's total can be attributed to the call regimes inside it. Off by default — it multiplies the label count.</summary>
-    internal static readonly bool ProfileShapes = EngineKnobs.ProfileShapes.Value;
+    internal static bool ProfileShapes => EngineKnobs.ProfileShapes.Value;
 
     private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
 
