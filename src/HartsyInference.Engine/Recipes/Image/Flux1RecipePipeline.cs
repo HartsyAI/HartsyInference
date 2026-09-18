@@ -8,7 +8,6 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
@@ -16,14 +15,15 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
 /// <param name="isDev">Selects the step fallback and whether the embedded distilled guidance is applied.</param>
+/// <param name="loaders">Whatever keeps the weights alive: the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file.</param>
 public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
-    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
+    List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
 {
     private readonly FluxPipeline _pipeline = pipeline;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
     private readonly bool _isDev = isDev;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
     private readonly IBackend _backend = backend;
 
@@ -175,7 +175,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         _t5Tokenizer.Dispose();
         // The LoRA stack owns the merged tensors the transformer references, so it outlives them by exactly this much.
         _loraStack?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

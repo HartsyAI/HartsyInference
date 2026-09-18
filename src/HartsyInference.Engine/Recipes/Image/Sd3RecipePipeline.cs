@@ -3,7 +3,6 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
@@ -11,14 +10,14 @@ using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>A constructed SD3 pipeline driven against the native <see cref="ImageRequest"/>. Both CLIPs share one BPE tokenizer (encoded once, reused for L and G); when a T5 encoder is present the prompt is additionally tokenized with the T5 SentencePiece plus its attention mask. Runs <see cref="Sd3Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Sd3Loader.Generate</c> drive path (text-to-image only). Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the checkpoint plus one loader per component resolved as a separate file, and must outlive the weights it mmaps.</summary>
+/// <summary>A constructed SD3 pipeline driven against the native <see cref="ImageRequest"/>. Both CLIPs share one BPE tokenizer (encoded once, reused for L and G); when a T5 encoder is present the prompt is additionally tokenized with the T5 SentencePiece plus its attention mask. Runs <see cref="Sd3Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Sd3Loader.Generate</c> drive path (text-to-image only). Wraps the constructed SD3 pipeline plus its tokenizers, taking ownership of every disposable. <paramref name="loaders"/> holds the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file, and must outlive the weights they map.</summary>
 public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer? t5Tokenizer,
-    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
+    List<IDisposable> loaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Sd3Pipeline _pipeline = pipeline;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly T5Tokenizer? _t5Tokenizer = t5Tokenizer;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
@@ -92,7 +91,7 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
         // The LoRA stack owns the merged tensors the transformer/CLIP encoders reference, so it outlives them
         // by exactly this much (same pattern as Flux1RecipePipeline/SdxlRecipePipeline).
         _loraStack?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

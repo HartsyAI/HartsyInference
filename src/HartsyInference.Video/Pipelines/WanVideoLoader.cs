@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -23,7 +24,7 @@ namespace HartsyInference.Video.Pipelines;
 /// directly.</para></summary>
 public sealed class WanVideoLoader : IDisposable
 {
-    private readonly List<SafeTensorsLoader> _loaders = [];
+    private readonly List<IDisposable> _loaders = [];
     private readonly List<IDisposable> _components = [];
     private readonly IBackend _backend;
     private readonly string? _umt5Path;
@@ -45,7 +46,7 @@ public sealed class WanVideoLoader : IDisposable
     }
 
     /// <summary>Loads a Wan DiT single-file checkpoint + VAE and constructs the matching pipeline.</summary>
-    /// <param name="ditPath">Single-file DiT safetensors (original-Wan or diffusers naming; fp8-scaled handled).</param>
+    /// <param name="ditPath">Single-file DiT checkpoint, safetensors or GGUF (original-Wan or diffusers naming; fp8-scaled handled).</param>
     /// <param name="vaePath">Wan VAE safetensors (z is validated against the DiT's predicted latent width).</param>
     public static WanVideoLoader Load(IBackend backend, string ditPath, string vaePath, WanVideoLoadOptions? options = null)
     {
@@ -67,9 +68,15 @@ public sealed class WanVideoLoader : IDisposable
 
     private void Build(string ditPath, string vaePath, WanVideoLoadOptions options)
     {
-        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) =
-            WanVideoCheckpointConverter.LoadAndConvert(ditPath);
-        _loaders.Add(ditLoader);
+        // One container for either format: a Wan GGUF is a repack of this same file and keeps its tensor names,
+        // so nothing below needs to know which one arrived.
+        CheckpointSource ditSource = CheckpointSource.Open(ditPath);
+        _loaders.Add(ditSource);
+        WanVideoCheckpointConverter.ConvertedWeights conv =
+            WanVideoCheckpointConverter.Convert(ditSource.Weights, ditSource.Header.Metadata);
+        // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the first
+        // GEMM, minutes into a generation.
+        _loaders.Add(QuantizedWeightPolicy.PrepareForBackend(conv.Transformer, _backend));
 
         WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
         if (options.FlowShift is float shift) cfg = cfg with { FlowShift = shift };
@@ -112,9 +119,11 @@ public sealed class WanVideoLoader : IDisposable
         WanVideoTransformer? transformer2 = null;
         if (moe)
         {
-            (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader lowLoader) =
-                WanVideoCheckpointConverter.LoadAndConvert(options.LowNoiseDitPath!);
-            _loaders.Add(lowLoader);
+            CheckpointSource lowSource = CheckpointSource.Open(options.LowNoiseDitPath!);
+            _loaders.Add(lowSource);
+            WanVideoCheckpointConverter.ConvertedWeights convLow =
+                WanVideoCheckpointConverter.Convert(lowSource.Weights, lowSource.Header.Metadata);
+            _loaders.Add(QuantizedWeightPolicy.PrepareForBackend(convLow.Transformer, _backend));
             transformer2 = new WanVideoTransformer(cfg);
             transformer2.LoadWeights(convLow.Transformer);
             _components.Add(transformer2);
@@ -163,7 +172,7 @@ public sealed class WanVideoLoader : IDisposable
         VacePipeline?.Dispose();
         foreach (IDisposable c in _components) c.Dispose();
         _components.Clear();
-        foreach (SafeTensorsLoader l in _loaders) l.Dispose();
+        foreach (IDisposable l in _loaders) l.Dispose();
         _loaders.Clear();
     }
 }

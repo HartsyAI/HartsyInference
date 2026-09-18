@@ -163,7 +163,7 @@ public sealed record MiniMaxH3Assets
                 {
                     continue;
                 }
-                string? best = Directory.EnumerateFiles(dir, "*.safetensors", SearchOption.AllDirectories)
+                string? best = EnumerateCheckpoints(dir, SearchOption.AllDirectories)
                     .Where(f => Matches(Path.GetFileName(f), hints))
                     .OrderBy(f => FormatRank(Path.GetFileName(f), preferQuantized))
                     .ThenBy(f => new FileInfo(f).Length)
@@ -212,12 +212,22 @@ public sealed record MiniMaxH3Assets
         {
             throw new FileNotFoundException($"MiniMax-H3 component folder not found: {dir}");
         }
-        string[] files = Directory.GetFiles(dir, "*.safetensors", SearchOption.TopDirectoryOnly);
-        if (files.Length == 0)
+        List<string> files = EnumerateCheckpoints(dir, SearchOption.TopDirectoryOnly).ToList();
+        if (files.Count == 0)
         {
-            files = Directory.GetFiles(dir, "*.safetensors", SearchOption.AllDirectories);
+            files = EnumerateCheckpoints(dir, SearchOption.AllDirectories).ToList();
         }
-        return files.Length > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
+        return files.Count > 0 ? files.OrderBy(f => f, StringComparer.Ordinal).First()
             : throw new FileNotFoundException($"No .safetensors in {dir}.");
     }
+
+    /// <summary>Every checkpoint file under <paramref name="dir"/> this recipe can actually load.</summary>
+    /// <remarks>Safetensors only, deliberately. <c>MiniMaxH3Recipe</c> still opens every component with
+    /// <c>SafeTensorsLoader</c>, so offering a <c>.gguf</c> as a candidate would select it in planning and then fail
+    /// during construction with a header error — later and less clearly than not offering it at all. The planner reads
+    /// GGUF headers already; this opens back up when the recipe's components do too, which is what H3 GGUF support
+    /// needs anyway (dequant kernels for the classic quants its community builds use, and norm promotion that does not
+    /// go through <c>CastTo</c>).</remarks>
+    private static IEnumerable<string> EnumerateCheckpoints(string dir, SearchOption option) =>
+        Directory.EnumerateFiles(dir, "*.safetensors", option);
 }

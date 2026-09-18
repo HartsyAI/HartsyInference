@@ -3,6 +3,7 @@ using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
@@ -24,19 +25,20 @@ public sealed class WanAnimate2CheckpointTests
     {
         if (!RealWeightGate.Require(_output.WriteLine, TestPaths.WanVideo.Animate2)) return;
 
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(TestPaths.WanVideo.Animate2);
-        Dictionary<string, Tensor> raw = loader.GetAllTensors();
+        // Opened through the container, so the int8 companions are folded before the rename pass — the partition
+        // below is therefore stated against the FILE's own inventory (Header.Descriptors), not the folded dict.
+        using CheckpointSource source = CheckpointSource.Open(TestPaths.WanVideo.Animate2);
+        IReadOnlyDictionary<string, SafeTensorDescriptor> raw = source.Header.Descriptors;
         _output.WriteLine($"file tensors: {raw.Count}");
         Assert.Equal(2263, raw.Count);
 
         HashSet<string> rawKeys = new HashSet<string>(raw.Keys, StringComparer.Ordinal);
         int rawInt8 = raw.Count(kvp => kvp.Value.DType == DType.I8);
 
-        Assert.True(WanVideoCheckpointConverter.IsAnimate2Metadata(loader.Metadata),
+        Assert.True(WanVideoCheckpointConverter.IsAnimate2Metadata(source.Header.Metadata),
             "__metadata__ did not declare model_type 'animate2'.");
         WanVideoCheckpointConverter.ConvertedWeights converted =
-            WanVideoCheckpointConverter.Convert(raw, loader.Metadata);
+            WanVideoCheckpointConverter.Convert(source.Weights, source.Header.Metadata);
         Assert.True(converted.IsAnimate2);
         Dictionary<string, Tensor> w = converted.Transformer;
 

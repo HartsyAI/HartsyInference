@@ -71,24 +71,14 @@ public interface IBackend : IDisposable
     /// can offset a device pointer override it.</summary>
     unsafe void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
     {
-        if (weight.DType.IsQuantized)
-            throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
-        using Tensor rows = new Tensor(new TensorShape(weightRowCount, weight.Shape[1]), weight.DType)
-        {
-            Fp8ScaleFactor = weight.Fp8ScaleFactor,
-        };
-        SliceRowsGeneric(rows, weight, weightRowOffset);
-        if (bias is null)
-        {
-            Linear(output, input, rows, null);
-            return;
-        }
-        // Bias is 1-D, one value per output channel, so it slices by ELEMENT — SliceRowsGeneric's row stride
-        // (its last dim is the whole vector) would offset by rowOffset*count instead.
-        using Tensor biasRows = new Tensor(new TensorShape(weightRowCount), bias.DType);
-        long biasOffsetBytes = bias.DType.ComputeByteCount(weightRowOffset);
-        long biasBytes = bias.DType.ComputeByteCount(weightRowCount);
-        Buffer.MemoryCopy((byte*)bias.DataPointer + biasOffsetBytes, biasRows.DataPointer, biasBytes, biasBytes);
+        // Rows are the outermost axis, so the window is a byte offset — including for a block-quantized weight, whose
+        // blocks never span rows. This used to refuse those outright, which is what made MiniMax-H3's chunked
+        // projections unreachable from a GGUF build: the chunking is how the model runs at all, and the weight it
+        // chunks is the one the quantization applies to.
+        using Tensor rows = weight.SliceRows(weightRowOffset, weightRowCount);
+        rows.QuantInfo = weight.QuantInfo?.SliceRows(weightRowOffset, weightRowCount, "the weight passed to LinearWeightRows");
+        // Bias is 1-D, one value per output channel, so its window is the same row range read as elements.
+        using Tensor? biasRows = bias?.SliceRows(weightRowOffset, weightRowCount);
         Linear(output, input, rows, biasRows);
     }
 
@@ -2400,6 +2390,14 @@ public interface IBackend : IDisposable
 
     /// <summary>True when <see cref="RelativeL1Distance"/> runs without pulling operands to the host; feature caching must gate on this.</summary>
     bool SupportsDeviceStepCacheGate => false;
+
+    /// <summary>True when this backend can hold a weight of <paramref name="dtype"/> <b>packed</b> and dequantize it inside a GEMM, rather than needing it materialized wide before the model loads.</summary>
+    /// <remarks><para>This is what decides whether a quantized checkpoint costs its on-disk size or four times it. A
+    /// backend answering false for a dtype does not fail — the loader dequantizes on the host instead, which is slower
+    /// and far larger but correct. Answering true for a dtype with no kernel is the failure that matters: the weight
+    /// reaches a GEMM that cannot read it and the model dies mid-generation rather than at load.</para>
+    /// <para>The default is the honest one for a backend with no packed-weight kernels at all.</para></remarks>
+    bool SupportsResidentQuant(DType dtype) => false;
 
     /// <summary>Marks a tensor's activation as surviving <see cref="FreeActivations()"/>, for cross-step state living only on-device.</summary>
     void PinActivation(Tensor tensor) { }

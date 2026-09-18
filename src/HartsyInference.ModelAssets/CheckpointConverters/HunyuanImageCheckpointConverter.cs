@@ -26,18 +26,15 @@ public sealed class HunyuanImageCheckpointConverter
         public required bool IsFp8Mix { get; init; }
     }
 
-    /// <summary>Loads and partitions a Hunyuan Image 2.1 single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
-    }
-
     /// <summary>Partitions a flat dict by key prefix. Original-Tencent layouts (GGUF repacks: <c>double_blocks.*.img_attn_qkv</c>, <c>txt_in.individual_token_refiner</c>, …) are remapped to diffusers naming first via <see cref="ConvertTencentToDiffusers"/>.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs. The fold here is kept because the Tencent remap above renames keys, and a
+    /// companion that survived into this dict would have to be paired before that rename; it is idempotent, so a
+    /// container that already folded costs a dictionary copy and nothing else.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> source)
     {
+        Dictionary<string, Tensor> allWeights = source as Dictionary<string, Tensor>
+            ?? new Dictionary<string, Tensor>(source, StringComparer.Ordinal);
         if (allWeights.ContainsKey("double_blocks.0.img_attn_qkv.weight") ||
             allWeights.ContainsKey("model.diffusion_model.double_blocks.0.img_attn_qkv.weight"))
         {

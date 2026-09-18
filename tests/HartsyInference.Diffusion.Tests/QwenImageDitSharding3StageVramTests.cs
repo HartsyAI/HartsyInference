@@ -6,6 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 
@@ -46,8 +47,9 @@ public sealed class QwenImageDitSharding3StageVramTests
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/5] Loading Qwen-Image Edit fp8 transformer from {checkpoint}...");
-        (QwenImageCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-            QwenImageCheckpointConverter.LoadAndConvert(checkpoint);
+        CheckpointSource loader = CheckpointSource.Open(checkpoint);
+        QwenImageCheckpointConverter.ConvertedWeights converted =
+            QwenImageCheckpointConverter.Convert(loader.Weights);
         _output.WriteLine($"  transformer={converted.Transformer.Count} keys, {sw.Elapsed.TotalSeconds:F1}s");
 
         try

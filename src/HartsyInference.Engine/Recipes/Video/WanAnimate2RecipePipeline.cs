@@ -45,13 +45,13 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     private readonly WanAnimate2Transformer _transformer;
     private readonly IWanVaeEncoder _vaeEncoder;
     private readonly ClipVisionEncoder _clipVision;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly ModelAssets.Lora.LoraStack? _loraStack;
 
     /// <summary>Wraps the constructed Animate-2 pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanAnimate2RecipePipeline(IBackend backend, WanAnimate2Pipeline pipeline, WanVideoConfig config,
         T5Tokenizer tokenizer, T5TextEncoder umt5, WanAnimate2Transformer transformer, IWanVaeEncoder vaeEncoder,
-        ClipVisionEncoder clipVision, List<SafeTensorsLoader> loaders, ModelAssets.Lora.LoraStack? loraStack = null)
+        ClipVisionEncoder clipVision, List<IDisposable> loaders, ModelAssets.Lora.LoraStack? loraStack = null)
     {
         _backend = backend;
         _pipeline = pipeline;
@@ -474,7 +474,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         _umt5.Dispose();
         _transformer.Dispose();
         (_vaeEncoder as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -7,6 +8,7 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
@@ -42,17 +44,21 @@ public sealed class Sd3Recipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor split-file CLIP-L / CLIP-G / T5 / VAE overrides from ImageRequest.Components
         // (the SwarmUI loader read input.Get(T2IParamTypes.ClipLModel/ClipGModel/T5XXLModel/VAE)); a component the
         // checkpoint omits currently always resolves to the canonical side model rather than a user-picked file.
-        (Sd3CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader mainLoader) = Sd3CheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        if (converted.Transformer.Count == 0)
-        {
-            mainLoader.Dispose();
-            throw new InvalidOperationException($"SD3: '{context.CheckpointPath}' contains no MMDiT transformer weights — not an SD3/SD3.5 diffusion model.");
-        }
-
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { mainLoader };
+        List<IDisposable> loaders = new List<IDisposable>();
         MergedLoraStack? loraStack = null;
         try
         {
+            // One container for either format: an SD3/SD3.5 GGUF is a repack of the same Stability file and keeps
+            // its MMDiT key names, so nothing below needs to know which one arrived. Quantized tensors stay packed
+            // and dequantize transiently per GEMM.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(source);
+            Sd3CheckpointConverter.ConvertedWeights converted = Sd3CheckpointConverter.Convert(source.Weights);
+            if (converted.Transformer.Count == 0)
+            {
+                throw new InvalidOperationException($"SD3: '{context.CheckpointPath}' contains no MMDiT transformer weights — not an SD3/SD3.5 diffusion model.");
+            }
+
             Dictionary<string, Tensor> clipLWeights = converted.ClipL;
             Dictionary<string, Tensor> clipGWeights = converted.ClipG;
             Dictionary<string, Tensor> t5Weights = converted.T5;
@@ -84,6 +90,13 @@ public sealed class Sd3Recipe : IArchitectureRecipe
                 vaeWeights = RequireWeights(staged, "VAE", path);
                 Logs.Info($"[Sd3Recipe] VAE resolved as a separate file: {path}.");
             }
+
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation. Tracked immediately — in place of the source it wraps, so a
+            // failure further down frees the widened copies rather than leaving them to the finalizer.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
+            loaders[0] = new CompositeDisposable(source, prepared);
 
             // Merge BEFORE LoadWeights, not after: the merge swaps dictionary entries, and device caches are
             // identity-keyed, so a tensor already captured by a layer would keep serving its stale copy
@@ -145,7 +158,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
         {
             Logs.Error("[Sd3Recipe] Construction failed.", ex);
             loraStack?.Dispose();
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -171,7 +184,7 @@ public sealed class Sd3Recipe : IArchitectureRecipe
     }
 
     /// <summary>Opens a resolved component file and hands its loader to <paramref name="loaders"/> for disposal, registering before the load so a failed parse still gets cleaned up.</summary>
-    private static SafeTensorsLoader OpenSide(List<SafeTensorsLoader> loaders, string path)
+    private static SafeTensorsLoader OpenSide(List<IDisposable> loaders, string path)
     {
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loaders.Add(loader);

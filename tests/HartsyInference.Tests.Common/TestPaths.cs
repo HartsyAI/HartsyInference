@@ -164,6 +164,11 @@ public static class TestPaths
         /// <summary>Wan-Animate-2 14B DiT (ComfyUI int8-convrot repack). Override with WAN_ANIMATE2_PATH.</summary>
         public static string Animate2      => Resolve("WAN_ANIMATE2_PATH",    Path.Combine(ModelsDir, "Stable-Diffusion", "Wan", "Animate2", "wan_animate_2_int8_convrot.safetensors"));
         public static string Umt5XxlSpiece => Tokenizers.Umt5XxlSpiece;
+        /// <summary>Wan2.1 T2V-1.3B Q8_0 GGUF repack (samuelchristlie/Wan2.1-T2V-1.3B-GGUF) — the quantized-container
+        /// gate for the family. Override with WAN_T2V_1_3B_GGUF.</summary>
+        public static string T2V1_3BGguf    => FirstExisting("WAN_T2V_1_3B_GGUF",
+            Path.Combine(ModelsDir, "diffusion_models", "Wan2.1-T2V-1.3B-Q8_0.gguf"),
+            Path.Combine(ModelsDir, "Stable-Diffusion", "Wan", "Wan2.1-T2V-1.3B-Q8_0.gguf"));
         /// <summary>Optional Wan LoRA applied by the generation test when present (kohya/musubi, Comfy diffusion_model, or diffusers-PEFT format).</summary>
         public static string LoraPath      => Resolve("WAN_LORA_PATH",        Path.Combine(ModelsDir, "Lora", "wan_lora.safetensors"));
         /// <summary>The lightx2v I2V-14B step-distill LoRA — the real-world Comfy repack carrying full-weight .diff/.diff_b entries. Override with WAN_LIGHTX2V_LORA_PATH.</summary>

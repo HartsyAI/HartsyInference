@@ -3,6 +3,7 @@ using System.Text.Json;
 using HartsyInference.Audio.Io;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Utilities;
@@ -10,6 +11,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vision.Clip;
@@ -349,7 +351,7 @@ internal static class VideoRecipeUtils
     }
 
     /// <summary>Loads the Wan family's umT5-XXL text encoder with its fp8 scale companions folded in, plus the matching 512-token tokenizer; the loader is registered in <paramref name="loaders"/> because it owns the weights' mmap.</summary>
-    internal static (T5TextEncoder Encoder, T5Tokenizer Tokenizer) LoadUmt5(string umt5Path, List<SafeTensorsLoader> loaders)
+    internal static (T5TextEncoder Encoder, T5Tokenizer Tokenizer) LoadUmt5(string umt5Path, List<IDisposable> loaders)
     {
         ArgumentNullException.ThrowIfNull(loaders);
         SafeTensorsLoader umt5Loader = new SafeTensorsLoader();
@@ -362,7 +364,7 @@ internal static class VideoRecipeUtils
     }
 
     /// <summary>Loads the Wan VAE at F32 (the precision this family's decode is validated at) and builds the matching decoder/encoder pair — the z=16 Wan2.1 modules when <paramref name="isWan21"/>, else the z=48 Wan2.2 ones. Both halves share one weight dict, so the encoder costs no extra load.</summary>
-    internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<SafeTensorsLoader> loaders)
+    internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<IDisposable> loaders)
     {
         ArgumentNullException.ThrowIfNull(loaders);
         (Dictionary<string, Tensor> vaeWeightsRaw, IReadOnlyList<SafeTensorsLoader> vaeLoaders) = LanceCheckpointConverter.LoadVae(vaePath);
@@ -437,14 +439,27 @@ internal static class VideoRecipeUtils
         }
     }
 
-    /// <summary>Reads the tensor-name set from a safetensors header (8-byte little-endian length + JSON map) without loading any tensor data — the cheap variant sniff the extension's <c>WanModelVariants.PeekKeys</c> does. Returns an empty set on any read error.</summary>
-    internal static IReadOnlySet<string> PeekSafeTensorKeys(string path)
+    /// <summary>Reads the tensor-name set from a checkpoint header without loading any tensor data — the cheap variant sniff the extension's <c>WanModelVariants.PeekKeys</c> does. Returns an empty set on any read error.</summary>
+    /// <remarks>A GGUF goes through <see cref="CheckpointHeader"/>, which maps its keys the same way a full load does;
+    /// safetensors keeps the hand-rolled JSON read, which touches the header bytes alone and so still answers for a
+    /// header-only file. Reading the raw bytes for a GGUF would classify every quantized checkpoint as whatever the
+    /// caller's no-keys fallback is — for Wan, the plain backbone, silently dropping a VACE or Animate build's
+    /// conditioning.</remarks>
+    internal static IReadOnlySet<string> PeekCheckpointKeys(string path)
     {
         HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             {
+                return keys;
+            }
+            if (CheckpointSource.Sniff(path) == ModelFormat.Gguf)
+            {
+                foreach (string key in CheckpointHeader.Read(path).Descriptors.Keys)
+                {
+                    keys.Add(key);
+                }
                 return keys;
             }
             using FileStream fs = File.OpenRead(path);
@@ -469,19 +484,31 @@ internal static class VideoRecipeUtils
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[VideoRecipe] Safetensors header peek failed for '{path}': {ex.Message}");
+            Logs.Warning($"[VideoRecipe] Checkpoint header peek failed for '{path}': {ex.Message}");
             return keys;
         }
     }
 
-    /// <summary>Reads the <c>__metadata__</c> string map from a safetensors header without loading tensor data. Wan-Animate-2 is key-for-key a Wan2.1 I2V-14B checkpoint, so <see cref="PeekSafeTensorKeys"/> cannot tell them apart and the metadata is the only signal. Returns an empty map on any read error.</summary>
-    internal static IReadOnlyDictionary<string, string> PeekSafeTensorMetadata(string path)
+    /// <summary>Reads the file-level metadata map from a checkpoint header without loading tensor data. Wan-Animate-2 is key-for-key a Wan2.1 I2V-14B checkpoint, so <see cref="PeekCheckpointKeys"/> cannot tell them apart and the metadata is the only signal. Returns an empty map on any read error.</summary>
+    /// <remarks>A GGUF's map is its KV block, which a repack writes from scratch — a real Wan GGUF carries
+    /// <c>general.architecture</c> and nothing else. The safetensors <c>__metadata__</c> a quantizer read is not
+    /// copied, so Animate-2's <c>config</c> declaration cannot survive a repack and an Animate-2 GGUF is
+    /// indistinguishable from the I2V-14B build it shares every tensor name with.</remarks>
+    internal static IReadOnlyDictionary<string, string> PeekCheckpointMetadata(string path)
     {
         Dictionary<string, string> metadata = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             {
+                return metadata;
+            }
+            if (CheckpointSource.Sniff(path) == ModelFormat.Gguf)
+            {
+                foreach (KeyValuePair<string, string> entry in CheckpointHeader.Read(path).Metadata)
+                {
+                    metadata[entry.Key] = entry.Value;
+                }
                 return metadata;
             }
             using FileStream fs = File.OpenRead(path);
@@ -510,7 +537,7 @@ internal static class VideoRecipeUtils
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[VideoRecipe] Safetensors metadata peek failed for '{path}': {ex.Message}");
+            Logs.Warning($"[VideoRecipe] Checkpoint metadata peek failed for '{path}': {ex.Message}");
             return metadata;
         }
     }

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -13,7 +13,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 ///
 /// <para><b>Wan2.2-Animate:</b> the animate-specific keys (<c>pose_patch_embedding.*</c>, <c>motion_encoder.enc.net_app.convs.{i}.*</c> / <c>enc.fc.{i}.*</c> / <c>dec.direction.weight</c>, <c>face_encoder.conv{1_local,2,3}.conv.*</c> / <c>out_proj.*</c> / <c>padding_tokens</c>, <c>face_adapter.fuser_blocks.{i}.*</c>, <c>ref_conv.*</c>) match NO rename rule and pass through unchanged — <c>WanAnimateTransformer.LoadWeights</c> expects them under their original names (pinned by <c>WanVideoCheckpointConverterTests.MapKey_AnimateKeys_PassThroughUnchanged</c>). The base i2v keys (<c>img_emb.proj.*</c>, <c>cross_attn.k_img</c>/<c>v_img</c>/<c>norm_k_img</c>) convert to the diffusers names as usual.</para>
 ///
-/// <para><b>Wan-Animate-2:</b> the checkpoint IS a Wan2.1 I2V-14B one — same 40 blocks, same <c>img_emb</c>, none of the V1 pose/face surface — so it renames through the same rules and is recognised only by its <c>__metadata__</c> (<see cref="IsAnimate2Metadata"/>). Its int8-convrot quantization needs no arm of its own: the <c>.weight_scale</c> / <c>.comfy_quant</c> companions ride the shared <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> pass.</para></summary>
+/// <para><b>Wan-Animate-2:</b> the checkpoint IS a Wan2.1 I2V-14B one — same 40 blocks, same <c>img_emb</c>, none of the V1 pose/face surface — so it renames through the same rules and is recognised only by its <c>__metadata__</c> (<see cref="IsAnimate2Metadata"/>). Its int8-convrot quantization needs no arm of its own: the <c>.weight_scale</c> / <c>.comfy_quant</c> companions ride the shared <see cref="CheckpointConvertUtils.AttachInt8QuantInfo"/> pass. A GGUF repack cannot be recognised at all: the quantizers rewrite the metadata block into GGUF's own <c>general.*</c> keys and carry no <c>config</c> entry, so an Animate-2 GGUF loads as the plain I2V-14B backbone it is key-for-key identical to.</para></summary>
 public sealed class WanVideoCheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];
@@ -139,9 +139,14 @@ public sealed class WanVideoCheckpointConverter
         return mapped;
     }
 
-    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer bucket. <paramref name="metadata"/> is the file's <c>__metadata__</c>, read only for the Animate-2 declaration.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, IReadOnlyDictionary<string, string>? metadata = null)
+    /// <summary>Converts a flat weight dictionary (single file or merged shards) to the diffusers-named transformer bucket. <paramref name="metadata"/> is the file's own metadata (safetensors <c>__metadata__</c> or the GGUF KV block), read only for the Animate-2 declaration.</summary>
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="CheckpointSource"/> does it
+    /// before any converter runs, because the rename pass below rewrites <c>.weight</c> without rewriting
+    /// <c>.weight_scale</c> and folding after the rename drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights,
+        IReadOnlyDictionary<string, string>? metadata = null)
     {
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(WanVideoCheckpointConverter));
         bool animate2 = IsAnimate2Metadata(metadata);
         if (animate2 && !HasAnimate2Structure(allWeights.Keys))
         {
@@ -149,9 +154,6 @@ public sealed class WanVideoCheckpointConverter
                 "Checkpoint declares model_type 'animate2' but carries the Animate-V1 pose/face conditioning modules "
                 + "(or no img_emb). Wan-Animate-2 has neither pose_patch_embedding nor motion_encoder/face_encoder/face_adapter.");
         }
-        // int8_tensorwise/fp8 companions move onto QuantInfo here, BEFORE the rename pass, so `.weight_scale` and
-        // `.comfy_quant` never reach MapKey.
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
         bool original = IsOriginalNaming(allWeights.Keys);
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
@@ -163,19 +165,11 @@ public sealed class WanVideoCheckpointConverter
         return new ConvertedWeights { Transformer = transformer, IsAnimate2 = animate2 };
     }
 
-    /// <summary>Loads a single safetensors file and converts. The caller owns the loader and disposes it once the weights are no longer referenced.</summary>
-    public static (ConvertedWeights Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
-    {
-        if (!File.Exists(checkpointPath))
-            throw new FileNotFoundException($"Wan-Video checkpoint not found: {checkpointPath}");
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ConvertedWeights converted = Convert(loader.GetAllTensors(), loader.Metadata);
-        return (converted, loader);
-    }
-
-    /// <summary>Loads a diffusers <c>transformer/</c> folder (sharded safetensors, already diffusers-named) and converts.</summary>
-    public static (ConvertedWeights Weights, List<SafeTensorsLoader> Loaders) LoadDiffusersFolder(string transformerDir)
+    /// <summary>Loads a diffusers <c>transformer/</c> folder (sharded, already diffusers-named) and converts.</summary>
+    /// <remarks>Each shard is opened through <see cref="CheckpointSource"/> rather than merged raw: a shard's
+    /// quantization companions sit beside the weights they describe, so folding per shard before the merge is both
+    /// correct and what <see cref="Convert"/> now requires.</remarks>
+    public static (ConvertedWeights Weights, List<IDisposable> Sources) LoadDiffusersFolder(string transformerDir)
     {
         if (!Directory.Exists(transformerDir))
             throw new DirectoryNotFoundException($"Wan-Video transformer dir not found: {transformerDir}");
@@ -184,23 +178,16 @@ public sealed class WanVideoCheckpointConverter
             throw new FileNotFoundException($"No safetensors shards found in: {transformerDir}");
         Array.Sort(shards, StringComparer.Ordinal);
 
-        List<SafeTensorsLoader> loaders = new(shards.Length);
-        Dictionary<string, Tensor> merged = new(2048);
+        // OpenShards, not a loop of Open: sharding makes no promise that a weight and its .weight_scale land in the
+        // same file, and folding each shard alone splits pairs that belong together.
+        CheckpointSource source = CheckpointSource.OpenShards(shards);
         try
         {
-            foreach (string shard in shards)
-            {
-                SafeTensorsLoader loader = new();
-                loader.Load(shard);
-                loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
-                    merged[kvp.Key] = kvp.Value;
-            }
-            return (Convert(merged), loaders);
+            return (Convert(source.Weights), new List<IDisposable> { source });
         }
         catch
         {
-            foreach (SafeTensorsLoader l in loaders) l.Dispose();
+            source.Dispose();
             throw;
         }
     }

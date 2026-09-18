@@ -10,7 +10,9 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -48,26 +50,15 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the loader read
         // T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the canonical SideModels entry.
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
-        IDisposable? ggufHandle = null;
+        IDisposable? checkpoint = null;
         try
         {
             // GGUF checkpoints (e.g. qwen-image Q5_K_M) stay quant-native: dequantizing a 20B Q4/Q5 file to F16 on
-            // the host needs ~40 GB RAM. The Linear path dequantizes per-GEMM on the GPU instead. The rank-2
-            // relabel converts ggml's [in, out] shape metadata to the [out, in] order the converters assume.
-            bool isGguf = context.CheckpointPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
-            QwenImageCheckpointConverter.ConvertedWeights converted;
-            if (isGguf)
-            {
-                GgufModelLoader.LoadedGgufModel gguf = GgufModelLoader.Load(context.CheckpointPath);
-                ggufHandle = gguf;
-                converted = QwenImageCheckpointConverter.Convert(GgufModelLoader.RelabelRank2ToPyTorchOrder(gguf.Weights));
-            }
-            else
-            {
-                (QwenImageCheckpointConverter.ConvertedWeights c, SafeTensorsLoader mainLoader) = QwenImageCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-                converted = c;
-                loaders.Add(mainLoader);
-            }
+            // the host needs ~40 GB RAM. The Linear path dequantizes per-GEMM on the GPU instead. The container
+            // handles the format difference, including ggml's [in, out] shape order, so the converter sees one dict.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            QwenImageCheckpointConverter.ConvertedWeights converted = QwenImageCheckpointConverter.Convert(source.Weights);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"Qwen-Image checkpoint '{Path.GetFileName(context.CheckpointPath)}' contains no transformer weights (looked for transformer_blocks.* / img_in.*).");
@@ -78,6 +69,13 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // placeholders for unreleased weights, so there is no auto-detection into them.
             QwenImageConfig config = QwenImageConfig.V1;
             QwenImageTransformer transformer = new QwenImageTransformer(config);
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
+            // Tracked immediately so a failure further down frees the widened copies rather than
+            // leaving them to the finalizer.
+            checkpoint = new CompositeDisposable(source, prepared);
             // Weights load as-is (fp8/fp16 kept for the quantized GEMM path) — the reference does NOT upcast the
             // transformer to F32.
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -227,7 +225,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             bool refTimestepZero = converted.Transformer.ContainsKey("__index_timestep_zero__");
             Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
             return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder,
-                multimodalEncoder, visionEncoder, refTimestepZero, loaders, ggufHandle, loraStack);
+                multimodalEncoder, visionEncoder, refTimestepZero, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {
@@ -236,7 +234,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             {
                 loader.Dispose();
             }
-            ggufHandle?.Dispose();
+            checkpoint?.Dispose();
             throw;
         }
     }

@@ -9,7 +9,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Tests.Common;
 using Xunit;
@@ -73,8 +73,10 @@ public sealed class FluxToolsControlImageRealWeightTests
 
         const int width = 512;
         const int height = 512;
-        (FluxCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) = FluxCheckpointConverter.LoadAndConvert(checkpointPath);
-        (FluxCheckpointConverter.ConvertedWeights donor, SafeTensorsLoader donorLoader) = FluxCheckpointConverter.LoadAndConvert(encoderDonorPath);
+        CheckpointSource loader = CheckpointSource.Open(checkpointPath);
+        FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
+        CheckpointSource donorLoader = CheckpointSource.Open(encoderDonorPath);
+        FluxCheckpointConverter.ConvertedWeights donor = FluxCheckpointConverter.Convert(donorLoader.Weights);
         _output.WriteLine($"Loaded {converted.Transformer.Count} transformer keys from the Canny checkpoint; "
             + $"{donor.ClipL.Count} CLIP-L + {donor.T5.Count} T5 + {donor.Vae.Count} VAE keys from the Dev donor.");
 

@@ -105,6 +105,11 @@ public sealed class GgufModelLoader : IDisposable
     }
 
     /// <summary>Relabels every rank-2 tensor's shape from GGUF's <c>[in, out]</c> (ggml <c>ne</c>) order to the <c>[out, in]</c> order the rest of the engine assumes for a matrix weight (matmul reads <c>N=Shape[0]</c>, <c>K=Shape[1]</c>; embeddings/heads are <c>[vocab, hidden]</c>). The underlying data is already row-major <c>[out, in]</c> — identical to an HF safetensors weight — so this is a pure metadata swap (a <see cref="Tensor.Reshape"/> that keeps borrowing the GGUF mmap, valid for quantized dtypes too since it touches no bytes). Diffusion GGUF converters must run their input through this before mapping keys, exactly as <c>GgufLanguageModel</c> does for LLM weights; skipping it leaves every Linear transposed and the first matmul derives a degenerate <c>M=0</c>.</summary>
+    /// <remarks>Rank 2 only, which is <b>not</b> the general ggml rule — <c>ne</c> reverses every axis, so a rank-4
+    /// convolution kernel is stored <c>[kw, kh, in, out]</c> and this leaves it that way. Kept as-is because the LLM
+    /// loaders calling it have rank-3 expert stacks that are already handled by their own splitters and would be
+    /// broken by a general reversal. New callers want <see cref="Checkpoints.CheckpointSource"/>, which reverses
+    /// every rank.</remarks>
     public static Dictionary<string, Tensor> RelabelRank2ToPyTorchOrder(IReadOnlyDictionary<string, Tensor> ggufWeights)
     {
         Dictionary<string, Tensor> relabeled = new(StringComparer.Ordinal);
@@ -113,6 +118,32 @@ public sealed class GgufModelLoader : IDisposable
             Tensor t = kv.Value;
             if (t.Shape.Rank == 2)
                 t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
+            relabeled[kv.Key] = t;
+        }
+        return relabeled;
+    }
+
+    /// <summary>Relabels every tensor's shape from ggml <c>ne</c> order to the engine's, reversing every axis.</summary>
+    /// <remarks>This is the general rule <see cref="RelabelRank2ToPyTorchOrder"/> approximates for matrices. It matters
+    /// the moment a checkpoint carries anything that is not a matrix: an SD1.5 UNet's convolution kernels are stored
+    /// <c>[kw, kh, in, out]</c>, and un-reversing only rank 2 leaves every one of them declaring its kernel width as
+    /// its output channel count. Metadata only — ggml's data is already row-major in the engine's order — so it is
+    /// valid for quantized dtypes, which it never reads.</remarks>
+    public static Dictionary<string, Tensor> RelabelToPyTorchOrder(IReadOnlyDictionary<string, Tensor> ggufWeights)
+    {
+        ArgumentNullException.ThrowIfNull(ggufWeights);
+        Dictionary<string, Tensor> relabeled = new(ggufWeights.Count, StringComparer.Ordinal);
+        Span<long> dims = stackalloc long[TensorShape.MaxRank];
+        foreach (KeyValuePair<string, Tensor> kv in ggufWeights)
+        {
+            Tensor t = kv.Value;
+            if (t.Shape.Rank >= 2)
+            {
+                Span<long> shapeDims = dims[..t.Shape.Rank];
+                t.Shape.CopyDimsTo(shapeDims);
+                shapeDims.Reverse();
+                t = t.Reshape(new TensorShape(shapeDims));
+            }
             relabeled[kv.Key] = t;
         }
         return relabeled;
@@ -156,6 +187,19 @@ public sealed class GgufModelLoader : IDisposable
             raw.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Resolves which architecture a loaded GGUF declares and which key mapper handles it — the declared
+    /// <c>general.architecture</c> when a mapper is registered for it, key heuristics otherwise.</summary>
+    /// <remarks>Public so a header-only read (<see cref="Checkpoints.CheckpointHeader"/>) maps keys exactly the way a
+    /// full load does; two copies of this resolution would drift and a planner would then validate different key names
+    /// than the recipe loads.</remarks>
+    /// <returns>The mapper, and the file's declared architecture (empty when it declared none).</returns>
+    public static (IGgufKeyMapper Mapper, string Architecture) ResolveMapping(GgufLoader loader)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        string architecture = ResolveArchitecture(loader);
+        return (ResolveMapper(loader, architecture), architecture);
     }
 
     private static string ResolveArchitecture(GgufLoader loader)

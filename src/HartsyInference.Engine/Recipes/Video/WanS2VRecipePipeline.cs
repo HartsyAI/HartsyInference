@@ -33,12 +33,12 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
     private readonly WanS2VAudioEncoder _audioEncoder;
     private readonly Wav2Vec2Encoder _wav2vec2;
     private readonly IWanVaeEncoder _vaeEncoder;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed S2V pipeline plus its encoders, taking ownership of every disposable.</summary>
     public WanS2VRecipePipeline(IBackend backend, WanS2VPipeline pipeline, WanVideoConfig config, T5Tokenizer tokenizer, T5TextEncoder umt5,
-        WanS2VTransformer transformer, WanS2VAudioEncoder audioEncoder, Wav2Vec2Encoder wav2vec2, IWanVaeEncoder vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
+        WanS2VTransformer transformer, WanS2VAudioEncoder audioEncoder, Wav2Vec2Encoder wav2vec2, IWanVaeEncoder vaeEncoder, List<IDisposable> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _backend = backend;
@@ -153,7 +153,7 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
         _umt5.Dispose();
         _transformer.Dispose();
         (_vaeEncoder as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

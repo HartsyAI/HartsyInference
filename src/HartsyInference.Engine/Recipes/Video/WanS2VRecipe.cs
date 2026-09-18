@@ -6,7 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
@@ -43,11 +43,22 @@ public sealed class WanS2VRecipe : IVideoRecipe
         string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ditLoader };
+        // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
+        // back is an IDisposable rather than a SafeTensorsLoader.
+        List<IDisposable> loaders = new List<IDisposable>();
         MergedLoraStack? loraStack = null;
         try
         {
+            // One container for either format: a Wan GGUF is a repack of this same file and keeps its tensor
+            // names, so nothing below needs to know which one arrived.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(source);
+            WanVideoCheckpointConverter.ConvertedWeights conv =
+                WanVideoCheckpointConverter.Convert(source.Weights, source.Header.Metadata);
+            // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
+            // first GEMM, minutes into a generation. Tracked immediately so a failure further down frees the
+            // widened copies rather than leaving them to the finalizer.
+            loaders.Add(QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends));
             Dictionary<string, Tensor> weights = conv.Transformer;
             WanVideoConfig config = WanConfigDetector.Detect(weights);
             if (!config.HasAudioConditioning)
@@ -102,7 +113,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[WanS2VRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

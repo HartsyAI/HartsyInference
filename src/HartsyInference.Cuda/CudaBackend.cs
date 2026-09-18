@@ -1766,15 +1766,14 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
-        // A row range addresses the weight by byte offset, which block-quantized layouts (super-block scales
-        // interleaved with packed nibbles) cannot express, and it makes the W8A8 int8 cache — keyed on the WHOLE
-        // weight — describe the wrong rows. Both are refused rather than silently mis-slicing; every fused-GEMV
-        // branch below is m<=8 (LLM decode) and so is unreachable from the chunked-DiT callers that need this.
+        // A row range is applied as a byte offset after cast resolution (see the offset below), so a block-quantized
+        // weight is served by the ordinary dequant-then-GEMM path: the whole weight materializes to gemmDtype and the
+        // range indexes that, never the packed bytes. What a range still cannot do is address the packed layout
+        // directly, so every branch that does — the W8A8 int8 cache keyed on the whole weight, the resident int8 and
+        // nvfp4 chains, the fused quantized GEMVs — excludes itself on rowRange rather than silently mis-slicing.
         bool rowRange = weightRowOffset != 0 || weightRowCount >= 0;
         if (rowRange)
         {
-            if (weight.DType.IsQuantized)
-                throw new NotSupportedException($"LinearWeightRows cannot row-slice block-quantized weights (got {weight.DType}).");
             if (bias is not null && bias.DType != output.DType)
                 throw new NotSupportedException(
                     $"LinearWeightRows needs bias dtype to match output ({bias.DType} vs {output.DType}) — a cast would rebase the slice.");
@@ -3803,6 +3802,16 @@ public sealed class CudaBackend : IBackend
     private bool _stepGraphCapturing;
 
     public bool SupportsF16Activations => true;
+
+    /// <summary>The GGUF block quants this backend dequantizes inside a GEMM, plus the ComfyUI packed formats its Linear branches read directly.</summary>
+    /// <remarks>Exactly the set <c>LaunchGgufDequantToF16</c> dispatches — anything else has no kernel and must arrive
+    /// wide. <c>I8</c> and <c>F4E2M1</c> are the int8_tensorwise and nvfp4 resident paths, which consume their scales
+    /// from <see cref="Tensor.QuantInfo"/>; fp8 is not listed because it is not a quantized dtype here, it is a storage
+    /// dtype with a scalar on the tensor.</remarks>
+    public bool SupportsResidentQuant(DType dtype) =>
+        dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
+        || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
+        || dtype == DType.I8 || dtype == DType.F4E2M1;
 
     /// <summary>True once the optional stepcache.ptx module is compiled/shipped; the step-cache stays disabled on CUDA without it.</summary>
     /// <remarks>Built via src/HartsyInference.Cuda/Kernels/dit/build.sh.</remarks>
