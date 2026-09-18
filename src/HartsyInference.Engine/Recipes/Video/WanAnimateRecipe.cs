@@ -67,10 +67,10 @@ public sealed class WanAnimateRecipe : IVideoRecipe
 
             // Merge BEFORE LoadWeights (identity-keyed device caches — same ordering as WanVideoRecipe). The
             // published relighting LoRA rides this path.
-            loraStack = Features.LoraApplier.BuildAndApply(
-                Features.LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                transformerWeights: conv.Transformer);
+            loraStack = Features.RecipeLoraMerge.Apply(
+                context,
+                new Features.LoraMergeTargets { Transformer = conv.Transformer },
+                "WanAnimateRecipe");
 
             WanAnimateTransformer transformer = new WanAnimateTransformer(config);
             transformer.LoadWeights(conv.Transformer);

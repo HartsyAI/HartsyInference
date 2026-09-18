@@ -57,8 +57,10 @@ public sealed class LensRecipe : IArchitectureRecipe
         MergedLoraStack? loraStack = null;
         LensPipelineBundle bundle = LensPipelineFactory.LoadFromComfyFiles(
             context.Backend, context.CheckpointPath, textEncoderPath, vaePath, config,
-            onTransformerWeights: transformerWeights => loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights));
+            onTransformerWeights: transformerWeights => loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = transformerWeights },
+                "LensRecipe"));
         try
         {
             GptOssTokenizer tokenizer = new GptOssTokenizer(vocabPath, mergesPath);

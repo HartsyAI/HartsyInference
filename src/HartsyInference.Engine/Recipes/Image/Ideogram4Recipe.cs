@@ -123,8 +123,10 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
             // ASSUMPTION, not verified against upstream: no reference for how `pipeline_ideogram4.py` applies a
             // LoRA to the pair exists (the checkpoint is non-commercial and has no community LoRA ecosystem yet).
             // Confirm against a real LoRA before treating this as settled.
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: condWeights);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = condWeights },
+                "Ideogram4Recipe");
             loraStack?.ApplyTo(uncondWeights, LoraTarget.Transformer, context.Backend);
 
             Ideogram4Transformer conditional = new Ideogram4Transformer(config);

@@ -167,8 +167,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             LtxVideo2Transformer transformer = new LtxVideo2Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = conv.Transformer },
+                "LtxVideo2Recipe");
             transformer.LoadWeights(conv.Transformer);
             LtxVideo2TextConnectors connectors = new LtxVideo2TextConnectors(config);
             connectors.LoadWeights(conv.Connectors);

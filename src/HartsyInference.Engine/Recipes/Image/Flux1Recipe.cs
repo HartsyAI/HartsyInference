@@ -128,11 +128,10 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras),
-                context.Backend,
-                transformerWeights: transformerWeights,
-                clipLWeights: clipLWeights);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = transformerWeights, ClipL = clipLWeights },
+                "Flux1Recipe");
 
             FluxTransformer transformer = new FluxTransformer(config);
             transformer.LoadWeights(transformerWeights);

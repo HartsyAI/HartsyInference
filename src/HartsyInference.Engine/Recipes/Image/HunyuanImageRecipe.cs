@@ -86,8 +86,10 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             // Tracked immediately so a failure further down frees the widened copies rather than
             // leaving them to the finalizer.
             checkpoint = new CompositeDisposable(source, prepared);
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = converted.Transformer },
+                "HunyuanImageRecipe");
             transformer.LoadWeights(converted.Transformer);
 
             // DiT sharding split point — byte-weighted: HunyuanImage's 20 double blocks are ~2× its 40 single

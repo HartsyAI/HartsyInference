@@ -12,7 +12,7 @@ namespace HartsyInference.ModelAssets.Tests;
 /// are NOT Flux-lineage <c>attn.qkv</c>: Ideogram 4's <c>layers.{i}.attention.qkv.weight</c> and F-Lite's bare
 /// <c>blocks.{i}.qkv.weight</c>.
 /// <para>This is the one LoRA failure mode with no runtime signal. A split-form LoRA whose attention keys find no home
-/// still merges its non-attention weights, so the merge count is non-zero, <c>LoraApplier</c>'s zero-match refusal never
+/// still merges its non-attention weights, so the merge count is non-zero, <c>RecipeLoraMerge</c>'s zero-match refusal never
 /// fires, and the generation succeeds — producing an image that is subtly under-LoRA'd and reads to the user as a weak
 /// LoRA rather than a bug. That is exactly what commit <c>fc975b71</c> found on Chroma (418 weights merged, visibly
 /// muted output) and fixed for <c>attn.qkv</c> only; these two spellings were still open when their families were

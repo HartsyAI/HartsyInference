@@ -363,6 +363,32 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Packed-quantization companions (per-row scales, ConvRot group size) when this tensor is a weight the backend consumes without dequantizing; null for dense and <c>fp8_scaled</c> weights.</summary>
     public QuantWeightInfo? QuantInfo { get; set; }
 
+    /// <summary>LoRA deltas every GEMM against this weight must add to its own result, instead of being merged into the bytes; null for an unpatched weight. See <see cref="Tensors.LowRankAdjunct"/> for why a block-quantized base cannot merge, and for the rule that this is never set on a shared base tensor.</summary>
+    public LowRankAdjunct? LowRankAdjunct { get; set; }
+
+    /// <summary>Returns a NEW tensor over these same bytes carrying <paramref name="adjunct"/>, leaving this one untouched.</summary>
+    /// <remarks>The identity matters more than the bytes. A converted-weight dictionary, a resident model and the
+    /// identity-keyed device cache all hold the base object, so writing <see cref="LowRankAdjunct"/> onto it would
+    /// leak one request's LoRA into the next request that reuses the cache entry — with nothing in the cache key to
+    /// tell them apart. The caller owns the returned view and disposes it exactly like a merged tensor; disposing it
+    /// does not free the borrowed bytes.</remarks>
+    public Tensor WithLowRankAdjunct(LowRankAdjunct adjunct)
+    {
+        ArgumentNullException.ThrowIfNull(adjunct);
+        // Rank-2 only, at the source. The delta is a GEMM addend, so a convolution has nothing to add it to — and
+        // refusing here is what keeps the list of ops that must handle an adjunct closed at the Linear family.
+        if (Shape.Rank != 2)
+            throw new HartsyInferenceException(
+                $"A LoRA adjunct applies only to a 2-D Linear weight; this one is {Shape} ({DType.Name}).");
+        void* ptr = DataPointer;
+
+        Tensor view = new(ptr, Shape, DType, Device);
+        view.SetKeepAlive(this);
+        CopyQuantMetadataTo(view, rowsPreserved: true);
+        view.LowRankAdjunct = adjunct;
+        return view;
+    }
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
     {
@@ -498,6 +524,18 @@ public sealed unsafe class Tensor : IDisposable
     {
         target.Fp8ScaleFactor = Fp8ScaleFactor;
         target.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        if (LowRankAdjunct is not null)
+        {
+            // The adjunct's up matrix is output-row-indexed and its down matrix input-column-indexed, so a view that
+            // renumbers either axis would pair rows with the wrong delta — the same silent-miss class QuantInfo guards.
+            long targetColumns = target.Shape.Rank > 0 ? target.Shape.ElementCount / target.Shape[0] : 0;
+            if (!rowsPreserved || targetColumns != LowRankAdjunct.InFeatures)
+                throw new HartsyInferenceException(
+                    $"Cannot view a LoRA-adjunct weight of shape {Shape} as {target.Shape}: the adjunct's "
+                    + $"[{LowRankAdjunct.OutFeatures}, {LowRankAdjunct.InFeatures}] delta is indexed by the axes this "
+                    + "view renumbers. Take the view before attaching the adjunct.");
+            target.LowRankAdjunct = LowRankAdjunct;
+        }
         if (QuantInfo is null)
             return;
         if (!rowsPreserved)

@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.94
+
+- **A LoRA now applies to a block-quantized base without requantizing it.** The classic codecs a GGUF uses have no
+  quantizer at all, and requantizing a merged result degrades both the base and the LoRA — so the delta rides on the
+  weight as a low-rank adjunct and is accumulated inside the GEMM, which is what ComfyUI-GGUF does per forward.
+- The adjunct is never written to the shared weight. Cached converted dictionaries, resident models and the
+  identity-keyed device cache all hold that object, so a patched base would have leaked one request's LoRA into the
+  next with nothing in the cache key to show for it. It rides a borrowed view that the stack owns and disposes.
+- **Every GEMM entry a patched weight can reach either applies the adjunct or refuses by name.** A quiet miss reads
+  as "the LoRA looks weak", never as an error, so `LinearImpl` was split and the accumulate moved into a wrapper
+  around the dozen fused paths that return early. The fused GELU and head-gate entries un-fuse instead of adding
+  afterwards, because the delta has to land before the activation.
+- **One call site for LoRA merging.** `LoraApplier` is gone and all 36 recipe sites go through `RecipeLoraMerge`,
+  which owns the merge-before-load invariant.
+- **A text-encoder LoRA strength now does something.** `TencStrength` reached the cache key but never the merge, so
+  the stack applied one strength to everything; CLIP-L, CLIP-G and the new `TextEncoder2` target take it properly.
+- **A DoRA adapter is now actually decomposed on a dense base.** The magnitude vector reached `LoraDelta.DoraScale`
+  and the decomposition was written and pinned against ComfyUI's reference, but nothing on the merge path called it —
+  so a DoRA file merged as a plain LoRA with its magnitudes dropped, no warning anywhere. The quantized path already
+  refused by name; only the dense one was silent, which is the exact failure the rest of this work exists to remove.
+  A DoRA aimed at one slice of a fused projection is refused instead: its normalizer is defined over a whole weight,
+  and on the input axis that is a column norm across every row, which a third of them cannot supply.
+- A stacked LoRA carrying layers for a component the caller passed no dictionary for now warns by target and count.
+  Adding `TextEncoder2` would otherwise have introduced exactly the silent partial merge this work is about — those
+  keys used to be skipped as unrecognized and would now parse cleanly into a target nothing consumes.
+
 ## alpha.93
 
 - **The shared residency cache now reclaims buffers an op displaces, and stops serving stale weights.** Four things

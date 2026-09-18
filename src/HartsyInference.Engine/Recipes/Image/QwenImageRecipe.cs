@@ -80,8 +80,10 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // transformer to F32.
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = converted.Transformer },
+                "QwenImageRecipe");
             transformer.LoadWeights(converted.Transformer);
 
             // fp8 single-file checkpoints (the Edit-2511 fp8mixed) on hardware without native FP8 GEMM cast each

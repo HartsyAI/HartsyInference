@@ -54,8 +54,10 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             Kandinsky5Transformer transformer = new Kandinsky5Transformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = transformerWeights },
+                "Kandinsky5VideoRecipe");
             transformer.LoadWeights(transformerWeights);
 
             Logs.Info($"[Kandinsky5VideoRecipe] Loading HunyuanVideo VAE (diffusers naming): {vaeDir}.");

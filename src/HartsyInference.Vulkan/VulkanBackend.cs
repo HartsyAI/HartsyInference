@@ -187,7 +187,7 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>Preloads weights to GPU memory. Cached by Tensor reference.</summary>
-    public void PreloadWeights(IEnumerable<Tensor> weights) => _xfer.PreloadWeights(weights);
+    public void PreloadWeights(IEnumerable<Tensor> weights) => _xfer.PreloadWeights(LowRankAdjunct.ExpandWeights(weights));
 
     /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c> exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever. Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
     public bool CacheWeightCasts
@@ -211,7 +211,7 @@ public sealed class VulkanBackend : IBackend
         _dispatchesSinceSubmit = 0;
     }
 
-    public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(weights);
+    public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(LowRankAdjunct.ExpandWeights(weights));
 
     /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
     public unsafe void OffloadActivation(Tensor tensor)
@@ -917,6 +917,8 @@ public sealed class VulkanBackend : IBackend
     public void MatMul(Tensor output, Tensor a, Tensor b)
     {
         using OpScope _ = EnterOp();
+        LowRankAdjunctGemm.RefuseAdjunct(a, "VulkanBackend.MatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "VulkanBackend.MatMul");
         DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
     }
 
@@ -925,10 +927,19 @@ public sealed class VulkanBackend : IBackend
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
-        using OpScope _ = EnterOp();
-        if (TryDispatchInt8Linear(output, input, weight, bias)) return;
-        // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
-        DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
+        using (OpScope _ = EnterOp())
+        {
+            if (!TryDispatchInt8Linear(output, input, weight, bias))
+            {
+                // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
+                DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
+            }
+        }
+        // Outside the scope: Accumulate re-enters through the public ops, exactly as an ordinary caller would.
+        if (weight.LowRankAdjunct is LowRankAdjunct adjunct)
+        {
+            LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
+        }
     }
 
     /// <summary>Opt-in INT8 dot-product GEMM path for <see cref="Linear"/> (<c>HARTSYINFERENCE_VK_INT8=1</c>), wiring the already-validated <see cref="MatMulInt8"/>/<see cref="Int8Quantizer"/> pair (bit-exact on the 3060 per <c>docs/Research/VULKAN_OPTIMIZATION.md</c>) into the normal model-code call path — the explicit open item both that doc and <c>ROADMAP.md</c> tracked as "wire the INT8 quantizer into Vulkan model loading." Re-quantizes BOTH weight and activation on EVERY call via the CPU-side <see cref="Int8Quantizer.RowwiseSymmetric"/> — correct and wired end-to-end, but not yet perf-optimal: caching the weight's quantized form across calls (weights don't change between calls, only activations do) is the natural follow-up and is intentionally NOT done here, to keep this pass bounded — a persistent per-weight INT8 cache needs its own lifecycle wiring (freed alongside <see cref="FreeWeights"/>) that deserves its own review, not a rushed addition here. Narrowly scoped to the plain 2-D F32 case (K%4==0, F32 in/out) on a device exposing the integer dot-product feature; anything else (F16, batched, non-4-divisible K, feature unavailable, opted out) falls through to the normal GEMM path completely unchanged.</summary>
@@ -969,6 +980,8 @@ public sealed class VulkanBackend : IBackend
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        LowRankAdjunctGemm.RefuseAdjunct(a, "VulkanBackend.BatchedMatMul");
+        LowRankAdjunctGemm.RefuseAdjunct(b, "VulkanBackend.BatchedMatMul");
         long batch = a.Shape[0];
         bool bIs2D = b.Shape.Rank == 2;
         if (bIs2D || batch == 1)
@@ -1332,6 +1345,7 @@ public sealed class VulkanBackend : IBackend
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
         using OpScope _ = EnterOp();
+        LowRankAdjunctGemm.RefuseAdjunct(weight, "VulkanBackend.Conv2D");
         int batch = (int)input.Shape[0];
         int inCh = (int)input.Shape[1];
         int inH = (int)input.Shape[2];

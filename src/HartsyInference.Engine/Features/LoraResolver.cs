@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="LoraApplier"/> can merge. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
+/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="RecipeLoraMerge"/> can apply. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
 public static class LoraResolver
 {
     /// <summary>One resolved LoRA: the on-disk file plus its diffusion-side and text-encoder-side strengths.</summary>
@@ -15,10 +15,10 @@ public static class LoraResolver
         /// <summary>Resolved on-disk path of the LoRA weights.</summary>
         public required string FilePath { get; init; }
 
-        /// <summary>Strength applied to UNet/Transformer/CLIP-G targets.</summary>
+        /// <summary>Strength applied to the diffusion body — the UNet or transformer.</summary>
         public required float ModelStrength { get; init; }
 
-        /// <summary>Strength applied to the CLIP-L text-encoder side; equals <see cref="ModelStrength"/> when unspecified.</summary>
+        /// <summary>Strength applied to EVERY text-encoder arm (CLIP-L, CLIP-G, T5/LLM), matching SwarmUI's <c>strength_clip</c>; equals <see cref="ModelStrength"/> when unspecified.</summary>
         public required float TencStrength { get; init; }
     }
 

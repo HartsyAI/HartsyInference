@@ -77,6 +77,8 @@ public interface IBackend : IDisposable
         // chunks is the one the quantization applies to.
         using Tensor rows = weight.SliceRows(weightRowOffset, weightRowCount);
         rows.QuantInfo = weight.QuantInfo?.SliceRows(weightRowOffset, weightRowCount, "the weight passed to LinearWeightRows");
+        // The adjunct's down matrix spans the whole input dimension the window keeps; only its up matrix is narrowed.
+        rows.LowRankAdjunct = weight.LowRankAdjunct?.SliceRows(weightRowOffset, weightRowCount);
         // Bias is 1-D, one value per output channel, so its window is the same row range read as elements.
         using Tensor? biasRows = bias?.SliceRows(weightRowOffset, weightRowCount);
         Linear(output, input, rows, biasRows);

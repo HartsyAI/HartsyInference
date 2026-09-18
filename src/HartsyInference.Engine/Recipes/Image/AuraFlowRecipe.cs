@@ -48,8 +48,10 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
         AuraFlowTransformer transformer = new AuraFlowTransformer(config);
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
         // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: converted.Transformer);
+        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            context,
+            new LoraMergeTargets { Transformer = converted.Transformer },
+            "AuraFlowRecipe");
         transformer.LoadWeights(converted.Transformer);
 
         T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.PileT5Xl);

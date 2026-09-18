@@ -68,8 +68,10 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
             ErnieImageTransformer transformer = new ErnieImageTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: transformerWeights);
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = transformerWeights },
+                "ErnieImageRecipe");
             transformer.LoadWeights(transformerWeights);
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux2);

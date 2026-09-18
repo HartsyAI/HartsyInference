@@ -14,4 +14,7 @@ public enum LoraTarget
 
     /// <summary>Targets the CLIP-G (OpenCLIP bigG) text encoder weight dictionary — SDXL only.</summary>
     ClipG,
+
+    /// <summary>Targets the second text encoder: the T5/umT5/Llama/Qwen-class encoder a modern pipeline pairs with CLIP, or its only encoder when it has no CLIP arm at all.</summary>
+    TextEncoder2,
 }

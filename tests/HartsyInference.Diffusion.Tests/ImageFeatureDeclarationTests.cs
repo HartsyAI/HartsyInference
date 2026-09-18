@@ -55,12 +55,12 @@ public sealed class ImageFeatureDeclarationTests
         "hunyuan-image", "lens", "lance-image",
     ];
 
-    /// <summary>Every family whose recipe calls <c>LoraApplier.BuildAndApply</c> before its transformer's
+    /// <summary>Every family whose recipe calls <c>RecipeLoraMerge.Apply</c> before its transformer's
     /// <c>LoadWeights</c>. As of 2026-08-20 that is every image family except <c>sdxl-refiner</c>.
     /// <para>Declaring the bit without wiring the merge is the failure this pin exists for, and it is silent in the
     /// worst way: the request passes the feature gate, the LoRA is never merged, and the user gets a normal image
     /// they read as "the LoRA is too weak". That is the exact regression commit <c>fc975b71</c> hardened
-    /// <c>LoraApplier</c> against for the zero-key-match case; this covers the no-call-at-all case, which no runtime
+    /// <c>RecipeLoraMerge</c> against for the zero-key-match case; this covers the no-call-at-all case, which no runtime
     /// check can catch because nothing ever asks.</para>
     /// <para><c>sdxl-refiner</c> is excluded deliberately, not pending — see the reasoning on
     /// <c>SdxlRefinerRecipe.Supports</c>. Its UNet layout means an SDXL LoRA names nothing in it.</para></summary>

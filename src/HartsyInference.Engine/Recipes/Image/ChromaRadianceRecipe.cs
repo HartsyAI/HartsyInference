@@ -59,8 +59,10 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
         ChromaRadianceTransformer transformer = new ChromaRadianceTransformer(config);
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
         // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = LoraApplier.BuildAndApply(
-            LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
+        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            context,
+            new LoraMergeTargets { Transformer = conv.Transformer },
+            "ChromaRadianceRecipe");
         transformer.LoadWeights(conv.Transformer);
 
         // 2. T5-XXL + its embedded tokenizer. No VAE — Radiance is pixel-space.

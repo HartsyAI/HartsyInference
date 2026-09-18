@@ -77,8 +77,10 @@ public sealed class WanVaceRecipe : IVideoRecipe
             WanVaceTransformer transformer = new WanVaceTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: conv.Transformer);
+            loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = conv.Transformer },
+                "WanVaceRecipe");
             transformer.LoadWeights(conv.Transformer);
 
             (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);

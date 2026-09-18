@@ -6,7 +6,7 @@ namespace HartsyInference.Diffusion.Sampling;
 /// <para><b>An unknown name throws.</b> The engine used to map any unrecognized sampler onto Euler with a log line —
 /// so a workflow asking for <c>dpmpp_2m_sde_karras</c> silently got a different picture, and the user concluded the
 /// engine was broken rather than that the sampler was missing. A named refusal is the same trade
-/// <c>LoraApplier</c> already makes for a zero-match LoRA, for the same reason: the failure has to reach whoever can
+/// <c>RecipeLoraMerge</c> already makes for a zero-match LoRA, for the same reason: the failure has to reach whoever can
 /// act on it.</para></summary>
 public static class SamplerRegistry
 {

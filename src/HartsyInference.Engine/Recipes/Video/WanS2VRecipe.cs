@@ -74,8 +74,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
             WanS2VTransformer transformer = new WanS2VTransformer(config);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            loraStack = LoraApplier.BuildAndApply(
-                LoraResolver.Resolve(context.Loras), context.Backend, transformerWeights: weights);
+            loraStack = RecipeLoraMerge.Apply(context, new LoraMergeTargets { Transformer = weights }, "WanS2VRecipe");
             transformer.LoadWeights(weights);
             WanS2VAudioEncoder audioEncoder = new WanS2VAudioEncoder(config.AudioLayers, config.AudioDim, config.InnerDim, config.AudioTokens);
             audioEncoder.LoadWeights(weights);
