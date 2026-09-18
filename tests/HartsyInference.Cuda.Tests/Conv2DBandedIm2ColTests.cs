@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -41,7 +42,7 @@ public sealed unsafe class Conv2DBandedIm2ColTests
     {
         // Pre-set HARTSY_IM2COL_BAND_MB (e.g. 99999) to compare the unbanded path's noise floor.
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HARTSY_IM2COL_BAND_MB")))
-            Environment.SetEnvironmentVariable("HARTSY_IM2COL_BAND_MB", "1");
+            KnobStore.Set(EngineKnobs.Im2colBandMb, 1L);
         if (!CudaContext.IsAvailable())
         {
             _output.WriteLine("SKIPPED: CUDA unavailable");
@@ -81,7 +82,7 @@ public sealed unsafe class Conv2DBandedIm2ColTests
         _output.WriteLine($"banded Conv2D vs CPU: max_err={maxErr:E3} over {n} elements");
         cpuOut.Dispose();
         cudaOut.Dispose();
-        Environment.SetEnvironmentVariable("HARTSY_IM2COL_BAND_MB", null);
+        KnobStore.Clear(EngineKnobs.Im2colBandMb);
         // TF32 GEMM tolerance vs CPU F32: measured noise floor at this shape is 6.48e-3 for BOTH the banded
         // and unbanded paths (identical to 1e-6 — banding itself is exact); bound leaves 2× headroom.
         Assert.True(maxErr < 1.5e-2, $"banded Conv2D diverges from CPU: max_err {maxErr:E3}");

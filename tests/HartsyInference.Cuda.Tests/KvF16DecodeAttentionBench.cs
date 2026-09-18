@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -80,7 +81,7 @@ public sealed unsafe class KvF16DecodeAttentionBench
             {
                 foreach (bool splitOff in new[] { false, true })
                 {
-                    Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", splitOff ? "1" : null);
+                    KnobStore.Clear(EngineKnobs.FlashSplitOff);
                     Tensor[] kk = f16 ? kF16 : kF32, vv = f16 ? vF16 : vF32;
                     for (int i = 0; i < warmup; i++)
                         b.FlashAttention(outT, q, kk[i % rotation], vv[i % rotation], lk, group, true, lk - 1, scale);
@@ -102,7 +103,7 @@ public sealed unsafe class KvF16DecodeAttentionBench
                         + $"mean={mean,7:F2} us  min={us[0],7:F2}  max={us[^1],7:F2}  spread={(us[^1] - us[0]),6:F2}");
                 }
             }
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_OFF", null);
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
             foreach (Tensor t in keep) t.Dispose();
         }
     }

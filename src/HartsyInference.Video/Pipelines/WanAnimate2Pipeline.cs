@@ -56,7 +56,7 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
 
     /// <summary>Explicit driving-cache dtype override; unset = auto. See <see cref="WanAnimate2DrivingCachePolicy"/>,
     /// which owns the resolution.</summary>
-    public const string Bf16DrivingCacheSwitch = WanAnimate2DrivingCachePolicy.EnvironmentVariable;
+    public const string Bf16DrivingCacheSwitch = WanAnimate2DrivingCachePolicy.Setting;
 
     /// <summary>Measured per-token activation slope of the Animate denoise loop, reused here — the block internals
     /// are the same Wan i2v ones, and the binding constraint is activations rather than weights.</summary>

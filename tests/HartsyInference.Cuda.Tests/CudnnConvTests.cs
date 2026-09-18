@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -66,10 +67,9 @@ public sealed unsafe class CudnnConvTests
         using Tensor weight = To16(wF32, dt);
         using Tensor bias = To16(bF32, dt);
 
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_CONV_CUDNN");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_CONV_CUDNN", "1");
+            KnobStore.Set(EngineKnobs.ConvCudnn, true);
             using Tensor outCudnn = new(new TensorShape(batch, outCh, outH, outW), dt);
             bool engaged;
             using (CudaBackend cudnnBackend = new(0, ptxDir))
@@ -80,7 +80,7 @@ public sealed unsafe class CudnnConvTests
                 engaged = cudnnBackend.CudnnConvEngaged;
             }
 
-            Environment.SetEnvironmentVariable("HARTSY_CONV_CUDNN", "0");
+            KnobStore.Set(EngineKnobs.ConvCudnn, false);
             using Tensor outIm2Col = new(new TensorShape(batch, outCh, outH, outW), dt);
             using (CudaBackend im2colBackend = new(0, ptxDir))
             {
@@ -105,7 +105,7 @@ public sealed unsafe class CudnnConvTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_CONV_CUDNN", prev);
+            KnobStore.Clear(EngineKnobs.ConvCudnn);
         }
     }
 }

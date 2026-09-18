@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -76,8 +77,7 @@ public sealed unsafe class CudnnConvBenchmark
     private static double TimeConv(string ptxDir, string flag, Tensor input, Tensor weight, Tensor bias,
         Tensor output, int stride, int pad, int warmup, int iters, out bool engaged)
     {
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_CONV_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_CONV_CUDNN", flag);
+        KnobStore.Clear(EngineKnobs.ConvCudnn);
         try
         {
             using CudaBackend backend = new(0, ptxDir);
@@ -91,6 +91,6 @@ public sealed unsafe class CudnnConvBenchmark
             engaged = backend.CudnnConvEngaged;
             return sw.Elapsed.TotalMilliseconds / iters;
         }
-        finally { Environment.SetEnvironmentVariable("HARTSY_CONV_CUDNN", prev); }
+        finally { KnobStore.Clear(EngineKnobs.ConvCudnn); }
     }
 }

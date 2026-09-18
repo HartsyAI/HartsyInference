@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
@@ -222,8 +223,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
         const int heads = 4, s = 64, d = 64;
         float scale = 1f / MathF.Sqrt(d);
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
         try
         {
             using CudaBackend backend = new(0, PtxDir());
@@ -251,7 +251,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", prev);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
 }

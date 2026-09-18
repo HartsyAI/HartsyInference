@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Recipes;
@@ -64,11 +65,13 @@ public sealed class WanAnimate2RealWeightGenerationTests
         return proc.ExitCode;
     }
 
+    /// <summary>Applies knob overrides for one generation and clears them afterwards. Was a list of environment
+    /// variables, which nothing reads any more — the settings never reached the engine and every arm of these
+    /// comparisons was silently running the default configuration.</summary>
     private static VideoGenerationResult RunGeneration(
-        (string Key, string? Value)[] env, int width = 384, int height = 384, int frames = 21)
+        Action[] overrides, int width = 384, int height = 384, int frames = 21)
     {
-        (string Key, string? Value)[] saved = env.Select(e => (e.Key, Environment.GetEnvironmentVariable(e.Key))).ToArray();
-        foreach ((string key, string? value) in env) Environment.SetEnvironmentVariable(key, value);
+        foreach (Action apply in overrides) apply();
         try
         {
             string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
@@ -97,7 +100,9 @@ public sealed class WanAnimate2RealWeightGenerationTests
         }
         finally
         {
-            foreach ((string key, string? value) in saved) Environment.SetEnvironmentVariable(key, value);
+            KnobStore.Clear(EngineKnobs.SdpaNoF16);
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+            KnobStore.Clear(EngineKnobs.Animate2Bf16DrivingCache);
         }
     }
 
@@ -145,8 +150,8 @@ public sealed class WanAnimate2RealWeightGenerationTests
         if (!RealWeightGate.Require(_output.WriteLine, DistilledCheckpoint, DrivingVideoPath)) return;
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
-        VideoGenerationResult nonTiledF32 = RunGeneration([("HARTSY_SDPA_NO_F16", "1")]);
-        VideoGenerationResult tiledF32 = RunGeneration([("HARTSY_SDPA_NO_F16", "1"), ("HARTSY_SDPA_FORCE_TILED", "1")]);
+        VideoGenerationResult nonTiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true)]);
+        VideoGenerationResult tiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)]);
 
         Assert.Equal(nonTiledF32.Frames.Count, tiledF32.Frames.Count);
         VideoFrame a = nonTiledF32.Frames[0], b = tiledF32.Frames[0];
@@ -186,7 +191,7 @@ public sealed class WanAnimate2RealWeightGenerationTests
         if (!RealWeightGate.Require(_output.WriteLine, DistilledCheckpoint, DrivingVideoPath)) return;
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
-        VideoGenerationResult result = RunGeneration([("HARTSY_ANIMATE2_BF16_DRIVING_CACHE", "off")]);
+        VideoGenerationResult result = RunGeneration([() => KnobStore.Set(EngineKnobs.Animate2Bf16DrivingCache, "off")]);
         Assert.NotEmpty(result.Frames);
         VideoFrame first = result.Frames[0];
 
@@ -210,11 +215,11 @@ public sealed class WanAnimate2RealWeightGenerationTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
         OutOfVramException ex = Assert.Throws<OutOfVramException>(() => RunGeneration(
-            [("HARTSY_ANIMATE2_BF16_DRIVING_CACHE", "off")], width: 1280, height: 1280, frames: 161));
+            [() => KnobStore.Set(EngineKnobs.Animate2Bf16DrivingCache, "off")], width: 1280, height: 1280, frames: 161));
 
         _output.WriteLine(ex.Message);
         Assert.Contains("F32 driving cache", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("HARTSY_ANIMATE2_BF16_DRIVING_CACHE", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("vram.animate2Bf16DrivingCache", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("BF16 driving cache", ex.Message, StringComparison.Ordinal);
     }
 }

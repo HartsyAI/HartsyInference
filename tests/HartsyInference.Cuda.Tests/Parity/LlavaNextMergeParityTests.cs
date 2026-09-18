@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Multimodal;
@@ -39,7 +40,7 @@ public sealed class LlavaNextMergeParityTests
 
         using SiglipVlmEncoder tower = SiglipVlmEncoder.Load(Mmproj);
         using CudaBackend backend = new(0, Path.Combine(AppContext.BaseDirectory, "Ptx"));
-        Environment.SetEnvironmentVariable("HARTSY_VLM_DUMP", DumpDir);
+        KnobStore.Clear(EngineKnobs.VlmDump);
 
         Tensor imageNewline = tower.Weights["model.image_newline"];
         int[] pinpointsFlat = tower.Metadata.GetIntArray("clip.vision.image_grid_pinpoints")!;

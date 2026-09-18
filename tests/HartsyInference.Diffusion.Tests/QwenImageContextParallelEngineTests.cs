@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -133,7 +134,7 @@ public sealed class QwenImageContextParallelEngineTests
     [Fact]
     public async Task ContextParallel_RealEngine_MatchedFp8Regime_WithinGatedToleranceOfBaseline()
     {
-        Environment.SetEnvironmentVariable("HARTSY_FP8_NATIVE", "0");
+        KnobStore.Set(EngineKnobs.Fp8Native, false);
 
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -1101,9 +1102,9 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Linear_CoopmatPartialM_NonMultipleOf16_MatchesCpu(int M, bool hasBias)
     {
         if (!VulkanAvailable()) return;
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", "1");
+        KnobStore.Set(EngineKnobs.VkProfile, true);
         using VulkanBackend backend = new();
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
+        KnobStore.Clear(EngineKnobs.VkProfile);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
         // This test specifically exercises coopmat1's partial-M kernel — coopmat2 (default ON since
         // 2026-07-31) would otherwise engage first and handle any M transparently, masking what this
@@ -1160,9 +1161,9 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Linear_CoopmatAlignedM_StillUsesOriginalKernel()
     {
         if (!VulkanAvailable()) return;
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", "1");
+        KnobStore.Set(EngineKnobs.VkProfile, true);
         using VulkanBackend backend = new();
-        Environment.SetEnvironmentVariable("HARTSYINFERENCE_VK_PROFILE", null);
+        KnobStore.Clear(EngineKnobs.VkProfile);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
         // Specifically checking coopmat1's own engagement — coopmat2 (default ON since 2026-07-31) would
         // otherwise handle this shape first, which is not what this test exists to check.

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -104,7 +105,7 @@ public sealed class QwenImageFp8PrecisionDiagnosticTests
                 using Tensor packedLatent = RandF32(new TensorShape(1, hPacked * wPacked, patchDim), seed: 1, scale: 0.5f);
                 using Tensor encoderHidden = RandF32(new TensorShape(1, 32, config.ContextDim), seed: 2, scale: 0.2f);
 
-                Environment.SetEnvironmentVariable("QWEN_IMAGE_DEBUG_DIR", dumpDir);
+                KnobStore.Clear(EngineKnobs.QwenImageDebugDir);
                 streamBackend.PreloadWeights(transformer.EnumerateSharedWeights());
                 int loadedBlock = -1;
                 transformer.BeforeBlockForward = i =>
@@ -117,7 +118,7 @@ public sealed class QwenImageFp8PrecisionDiagnosticTests
                 using Tensor referenceVelocity = transformer.Forward(streamBackend, packedLatent, encoderHidden, timestep: 0.5f, hPacked, wPacked);
                 AssertFinite(referenceVelocity);
                 transformer.BeforeBlockForward = null;
-                Environment.SetEnvironmentVariable("QWEN_IMAGE_DEBUG_DIR", null);
+                KnobStore.Clear(EngineKnobs.QwenImageDebugDir);
                 _output.WriteLine($"  streamed forward done, {sw.Elapsed.TotalSeconds:F1}s total.");
 
                 TensorShape imgShape = new(1, hPacked * wPacked, config.HiddenSize);
@@ -160,7 +161,7 @@ public sealed class QwenImageFp8PrecisionDiagnosticTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("QWEN_IMAGE_DEBUG_DIR", null);
+            KnobStore.Clear(EngineKnobs.QwenImageDebugDir);
             try { Directory.Delete(dumpDir, recursive: true); } catch { /* best-effort cleanup, not test-relevant */ }
         }
     }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -62,8 +63,7 @@ public sealed unsafe class CudnnSdpaRetryTests
 
         const int d = 64, heads = 4, s = 32;
         float scale = 1f / MathF.Sqrt(d);
-        string? prevEnv = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
         try
         {
             using CudaBackend backend = new(0, ptxDir);
@@ -121,7 +121,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", prevEnv);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
 
@@ -135,8 +135,7 @@ public sealed unsafe class CudnnSdpaRetryTests
 
         const int d = 128, heads = 4, s = 32;
         float scale = 1f / MathF.Sqrt(d);
-        string? prevEnv = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
         try
         {
             using CudaBackend backend = new(0, ptxDir);
@@ -165,7 +164,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", prevEnv);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
 }

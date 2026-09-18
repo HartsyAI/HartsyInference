@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
@@ -48,8 +49,7 @@ public sealed unsafe class Sd3GpuResidencyTests
         weights["pos_embed.pos_embed"] = Sd3WeightBuilder.Rand(
             new TensorShape(1, 7 * 7, config.HiddenSize), seed: 901, scale: 0.03f);
 
-        string? priorDebugDir = Environment.GetEnvironmentVariable("SD3_DEBUG_DIR");
-        Environment.SetEnvironmentVariable("SD3_DEBUG_DIR", null);
+        KnobStore.Clear(EngineKnobs.Sd3DebugDir);
         try
         {
             using Tensor latent = Sd3WeightBuilder.Rand(
@@ -88,7 +88,7 @@ public sealed unsafe class Sd3GpuResidencyTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("SD3_DEBUG_DIR", priorDebugDir);
+            KnobStore.Clear(EngineKnobs.Sd3DebugDir);
             Sd3WeightBuilder.DisposeAll(weights);
         }
     }

@@ -7,7 +7,7 @@ namespace HartsyInference.Video.Pipelines;
 
 /// <summary>Resolves whether the Wan-Animate-2 driving cache is stored in BF16 (half the bytes, a divergence from
 /// the F32 reference forward) or F32 (exact numerics, 2x the bytes — 18.3 GiB at 480x800/61f). The env var
-/// <see cref="EnvironmentVariable"/> is the explicit override; unset means <b>auto</b>: the global low-VRAM policy
+/// <see cref="Setting"/> is the explicit override; unset means <b>auto</b>: the global low-VRAM policy
 /// is honoured first, then free VRAM is measured and F32 is kept only where its cache plus the activation reserve
 /// still fits beside a streamed DiT. Backends that report no VRAM (CPU) resolve to F32 so parity tests keep exact
 /// numerics.</summary>
@@ -16,9 +16,13 @@ namespace HartsyInference.Video.Pipelines;
 /// the geometry's byte demands, which the global policy never sees.</remarks>
 public static class WanAnimate2DrivingCachePolicy
 {
-    /// <summary>The env var: <c>1</c>/<c>true</c>/<c>on</c> = BF16, <c>0</c>/<c>false</c>/<c>off</c> = F32,
+    /// <summary>The setting: <c>1</c>/<c>true</c>/<c>on</c> = BF16, <c>0</c>/<c>false</c>/<c>off</c> = F32,
     /// <c>auto</c>/unset = decide from the low-VRAM policy and measured free VRAM.</summary>
-    public const string EnvironmentVariable = "HARTSY_ANIMATE2_BF16_DRIVING_CACHE";
+    /// <remarks>The dotted setting id, not the legacy environment name it used to be read from. Naming the
+    /// environment variable in a log or an error tells the reader to export something nothing reads — the value
+    /// comes from <see cref="EngineKnobs.Animate2Bf16DrivingCache"/>, reachable by <c>--set</c> or the settings
+    /// file.</remarks>
+    public const string Setting = "vram.animate2Bf16DrivingCache";
 
     /// <summary>The last env value logged, so a stable setting announces itself once per process.</summary>
     private static string? _lastLogged;
@@ -71,7 +75,7 @@ public static class WanAnimate2DrivingCachePolicy
     {
         if (envForced is bool forced)
         {
-            decidedBy = $"{EnvironmentVariable} override";
+            decidedBy = $"{Setting} override";
             return forced;
         }
         if (globalMode == LowVramMode.ForceOn)
@@ -109,16 +113,16 @@ public static class WanAnimate2DrivingCachePolicy
         if (normalized == "1" || normalized.Equals("true", StringComparison.OrdinalIgnoreCase)
             || normalized.Equals("on", StringComparison.OrdinalIgnoreCase))
         {
-            if (log) Logs.Info($"[WanAnimate2] {EnvironmentVariable}={value} — driving cache pinned to BF16.");
+            if (log) Logs.Info($"[WanAnimate2] {Setting}={value} — driving cache pinned to BF16.");
             return true;
         }
         if (normalized == "0" || normalized.Equals("false", StringComparison.OrdinalIgnoreCase)
             || normalized.Equals("off", StringComparison.OrdinalIgnoreCase))
         {
-            if (log) Logs.Info($"[WanAnimate2] {EnvironmentVariable}={value} — driving cache pinned to F32.");
+            if (log) Logs.Info($"[WanAnimate2] {Setting}={value} — driving cache pinned to F32.");
             return false;
         }
-        if (log) Logs.Warning($"[WanAnimate2] Unrecognized {EnvironmentVariable}='{value}' — using auto. "
+        if (log) Logs.Warning($"[WanAnimate2] Unrecognized {Setting}='{value}' — using auto. "
             + "Valid: auto, on/1/true (BF16), off/0/false (F32).");
         return null;
     }
