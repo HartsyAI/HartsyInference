@@ -1,6 +1,7 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -8,6 +9,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
@@ -54,7 +56,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        SafeTensorsLoader? zLoader = null;
+        IDisposable? checkpoint = null;
         SafeTensorsLoader? qwenLoader = null;
         SafeTensorsLoader? vaeLoader = null;
         ZImageTransformer? transformer = null;
@@ -66,11 +68,19 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         HashSet<Tensor> constructionOwnedVaeCasts = new(ReferenceEqualityComparer.Instance);
         try
         {
-            // 1. Load + convert the Z-Image transformer (checkpoint carries only these weights).
-            (ZImageCheckpointConverter.ConvertedWeights zConv, zLoader) =
-                ZImageCheckpointConverter.LoadAndConvert(context.CheckpointPath);
+            // 1. Load + convert the Z-Image transformer (checkpoint carries only these weights). One container for
+            // either format: the FP8Mix repack, a BF16 file and a GGUF all reach the converter as one dict.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            ZImageCheckpointConverter.ConvertedWeights zConv = ZImageCheckpointConverter.Convert(
+                source.Weights, ZImageCheckpointConverter.DetectVariantFromFileName(context.CheckpointPath));
             if (zConv.Transformer.Count == 0)
                 throw new InvalidOperationException("Z-Image checkpoint has no transformer weights.");
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(zConv.Transformer, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(source, prepared);
 
             bool isBase = zConv.Variant != ZImageCheckpointConverter.CheckpointVariant.Turbo;
             if (zConv.Variant == ZImageCheckpointConverter.CheckpointVariant.Unknown)
@@ -158,7 +168,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             Logs.Info("[ZImageRecipe] Z-Image ready.");
             return new ZImageRecipePipeline(pipeline, qwen, tokenizer, transformer, vae, vaeEncoder,
                 transformerWeightTensors, qwenWeightTensors, ownedVaeWeights, context.Backend,
-                context.TextEncoderBackendOrDefault, isBase ? BaseDefaults : FamilyDefaults, zLoader, qwenLoader,
+                context.TextEncoderBackendOrDefault, isBase ? BaseDefaults : FamilyDefaults, checkpoint, qwenLoader,
                 vaeLoader, loraStack);
         }
         catch
@@ -178,7 +188,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             if (transformer is not null) TryCleanup(transformer.Dispose, "transformer");
             if (vaeLoader is not null) TryCleanup(vaeLoader.Dispose, "VAE loader");
             if (qwenLoader is not null) TryCleanup(qwenLoader.Dispose, "Qwen loader");
-            if (zLoader is not null) TryCleanup(zLoader.Dispose, "transformer loader");
+            if (checkpoint is not null) TryCleanup(checkpoint.Dispose, "checkpoint");
             throw;
         }
     }

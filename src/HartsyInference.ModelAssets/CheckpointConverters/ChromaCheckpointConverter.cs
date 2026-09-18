@@ -28,10 +28,13 @@ public sealed class ChromaCheckpointConverter
     private const int InnerDim = 3072;
     private const int MlpDim = 12288;
 
-    /// <summary>Converts a flat Chroma single-file weight dictionary to diffusers naming. Folds any ComfyUI / BFL fp8_scaled companion tensors into <see cref="Tensor.Fp8ScaleFactor"/> first.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    /// <summary>Converts a flat Chroma single-file weight dictionary to diffusers naming.</summary>
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because this converter renames and splits <c>.weight</c> without renaming
+    /// <c>.weight_scale</c>, and folding after that drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(ChromaCheckpointConverter));
 
         Dictionary<string, Tensor> transformer = new(2000);
 
@@ -231,16 +234,6 @@ public sealed class ChromaCheckpointConverter
         return false;
     }
 
-    /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader (the caller is responsible for disposing the loader once weights are no longer needed).</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        Dictionary<string, Tensor> raw = loader.GetAllTensors();
-        ConvertedWeights converted = Convert(raw);
-        return (converted, loader);
-    }
-
     /// <summary>Returns the maximum index <c>i</c> seen for keys of the form <c>{prefix}{i}.*</c>, or -1 if absent.</summary>
     private static int MaxIndex(Dictionary<string, Tensor> source, string prefix)
     {
@@ -279,109 +272,61 @@ public sealed class ChromaCheckpointConverter
         output[key] = chunk;
     }
 
-    /// <summary>Splits a BFL fused QKV weight+bias along dim 0 into three diffusers-named tensors. Reuses the row-copy pattern from <see cref="FluxCheckpointConverter"/>; identical layout per dim 0 split.</summary>
-    private static unsafe void SplitFusedQkv(Dictionary<string, Tensor> source,
+    /// <summary>Splits a BFL fused QKV weight+bias along dim 0 into three diffusers-named tensors. Quant-aware via <see cref="CheckpointConvertUtils.SplitRows"/>, which carries the fused tensor's fp8 scales and per-row companions onto each piece.</summary>
+    private static void SplitFusedQkv(Dictionary<string, Tensor> source,
         string weightKey, string biasKey, string dstPrefix,
         string qName, string kName, string vName, int innerDim, Dictionary<string, Tensor> output, bool fp8Blocks)
     {
+        string[] names = [qName, kName, vName];
+        int[] rows = [innerDim, innerDim, innerDim];
+
         if (source.TryGetValue(weightKey, out Tensor? wFused))
         {
-            int inDim = (int)wFused.Shape[1];
-            long chunkBytes = (long)innerDim * inDim * wFused.DType.SizeInBytes;
-            TensorShape splitShape = new TensorShape(innerDim, inDim);
-            byte* src = (byte*)wFused.DataPointer;
-            string[] names = [qName, kName, vName];
-
-            // One chunk at a time: copy, publish (possibly requantizing to fp8 and freeing the copy), then the next.
-            for (int c = 0; c < names.Length; c++)
+            string[] keys = [$"{dstPrefix}.{qName}.weight", $"{dstPrefix}.{kName}.weight", $"{dstPrefix}.{vName}.weight"];
+            Tensor[] chunks = CheckpointConvertUtils.SplitRows(wFused, rows, keys);
+            for (int c = 0; c < chunks.Length; c++)
             {
-                Tensor chunk = new Tensor(splitShape, wFused.DType);
-                chunk.Fp8ScaleFactor = wFused.Fp8ScaleFactor;
-                Buffer.MemoryCopy(src + c * chunkBytes, (void*)chunk.DataPointer, chunkBytes, chunkBytes);
-                EmitSplit(output, $"{dstPrefix}.{names[c]}.weight", chunk, fp8Blocks);
+                EmitSplit(output, keys[c], chunks[c], fp8Blocks);
             }
         }
 
         if (source.TryGetValue(biasKey, out Tensor? bFused))
         {
-            long elemBytes = bFused.DType.SizeInBytes;
-            long chunkBytes = (long)innerDim * elemBytes;
-            TensorShape splitShape = new TensorShape(innerDim);
-
-            Tensor qB = new Tensor(splitShape, bFused.DType);
-            Tensor kB = new Tensor(splitShape, bFused.DType);
-            Tensor vB = new Tensor(splitShape, bFused.DType);
-            // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-            qB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
-            kB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
-            vB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
-
-            byte* src = (byte*)bFused.DataPointer;
-            Buffer.MemoryCopy(src, (void*)qB.DataPointer, chunkBytes, chunkBytes);
-            Buffer.MemoryCopy(src + chunkBytes, (void*)kB.DataPointer, chunkBytes, chunkBytes);
-            Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vB.DataPointer, chunkBytes, chunkBytes);
-
-            output[$"{dstPrefix}.{qName}.bias"] = qB;
-            output[$"{dstPrefix}.{kName}.bias"] = kB;
-            output[$"{dstPrefix}.{vName}.bias"] = vB;
+            string[] keys = [$"{dstPrefix}.{qName}.bias", $"{dstPrefix}.{kName}.bias", $"{dstPrefix}.{vName}.bias"];
+            Tensor[] chunks = CheckpointConvertUtils.SplitRows(bFused, rows, keys);
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                output[keys[c]] = chunks[c];
+            }
         }
     }
 
     /// <summary>Splits Chroma's single-block fused <c>linear1.weight</c> [3*inner + mlpDim, inner] along dim 0 into <c>(to_q, to_k, to_v, proj_mlp)</c>. Same layout as <see cref="FluxCheckpointConverter"/>'s splitter.</summary>
-    private static unsafe void SplitFusedLinear1Weight(Dictionary<string, Tensor> source, string srcKey,
+    private static void SplitFusedLinear1Weight(Dictionary<string, Tensor> source, string srcKey,
         string dstPrefix, Dictionary<string, Tensor> output, bool fp8Blocks)
     {
         if (!source.TryGetValue(srcKey, out Tensor? fused)) return;
 
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
-        long qkvChunkBytes = (long)InnerDim * rowBytes;
-        byte* src = (byte*)fused.DataPointer;
-        string[] names = ["attn.to_q", "attn.to_k", "attn.to_v", "proj_mlp"];
-
-        // One chunk at a time: copy, publish (possibly requantizing to fp8 and freeing the copy), then the next.
-        for (int c = 0; c < names.Length; c++)
+        string[] keys = [$"{dstPrefix}.attn.to_q.weight", $"{dstPrefix}.attn.to_k.weight",
+            $"{dstPrefix}.attn.to_v.weight", $"{dstPrefix}.proj_mlp.weight"];
+        Tensor[] chunks = CheckpointConvertUtils.SplitRows(fused, [InnerDim, InnerDim, InnerDim, MlpDim], keys);
+        for (int c = 0; c < chunks.Length; c++)
         {
-            int rows = c == 3 ? MlpDim : InnerDim;
-            long chunkBytes = (long)rows * rowBytes;
-            Tensor chunk = new Tensor(new TensorShape(rows, inDim), fused.DType);
-            chunk.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-            Buffer.MemoryCopy(src + c * qkvChunkBytes, (void*)chunk.DataPointer, chunkBytes, chunkBytes);
-            EmitSplit(output, $"{dstPrefix}.{names[c]}.weight", chunk, fp8Blocks);
+            EmitSplit(output, keys[c], chunks[c], fp8Blocks);
         }
     }
 
-    private static unsafe void SplitFusedLinear1Bias(Dictionary<string, Tensor> source, string srcKey,
+    private static void SplitFusedLinear1Bias(Dictionary<string, Tensor> source, string srcKey,
         string dstPrefix, Dictionary<string, Tensor> output)
     {
         if (!source.TryGetValue(srcKey, out Tensor? fused)) return;
 
-        long elemBytes = fused.DType.SizeInBytes;
-        TensorShape qkvShape = new TensorShape(InnerDim);
-        TensorShape mlpShape = new TensorShape(MlpDim);
-
-        Tensor qB = new Tensor(qkvShape, fused.DType);
-        Tensor kB = new Tensor(qkvShape, fused.DType);
-        Tensor vB = new Tensor(qkvShape, fused.DType);
-        Tensor mlpB = new Tensor(mlpShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        mlpB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        long qkvChunkBytes = (long)InnerDim * elemBytes;
-        long mlpChunkBytes = (long)MlpDim * elemBytes;
-
-        Buffer.MemoryCopy(src, (void*)qB.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + qkvChunkBytes, (void*)kB.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 2 * qkvChunkBytes, (void*)vB.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 3 * qkvChunkBytes, (void*)mlpB.DataPointer, mlpChunkBytes, mlpChunkBytes);
-
-        output[$"{dstPrefix}.attn.to_q.bias"] = qB;
-        output[$"{dstPrefix}.attn.to_k.bias"] = kB;
-        output[$"{dstPrefix}.attn.to_v.bias"] = vB;
-        output[$"{dstPrefix}.proj_mlp.bias"] = mlpB;
+        string[] keys = [$"{dstPrefix}.attn.to_q.bias", $"{dstPrefix}.attn.to_k.bias",
+            $"{dstPrefix}.attn.to_v.bias", $"{dstPrefix}.proj_mlp.bias"];
+        Tensor[] chunks = CheckpointConvertUtils.SplitRows(fused, [InnerDim, InnerDim, InnerDim, MlpDim], keys);
+        for (int c = 0; c < chunks.Length; c++)
+        {
+            output[keys[c]] = chunks[c];
+        }
     }
 }

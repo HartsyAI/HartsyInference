@@ -431,6 +431,71 @@ public static unsafe class CheckpointConvertUtils
         output[$"{prefix}.{vName}.bias"] = vBias;
     }
 
+    /// <summary>Splits a fused tensor along dim 0 into row ranges of the given sizes, carrying its quantization companions onto every piece.</summary>
+    /// <remarks><para>The general form of <see cref="SplitQkvWeight"/>, for the fused projections that are not three
+    /// equal thirds — Chroma's 4-way <c>linear1</c>, a QKV whose K and V are grouped smaller than Q. Byte offsets come
+    /// from <see cref="SliceByteCount"/>, never from <c>DType.SizeInBytes</c>, which is 0 for every block quant and
+    /// would copy nothing at all while the dense path stayed correct.</para>
+    /// <para>Companions are narrowed before the first allocation, because that narrowing can refuse and a refusal
+    /// afterwards would strand every piece allocated so far.</para></remarks>
+    /// <param name="fused">The fused tensor; rank 1 (a bias) or rank 2 (a weight).</param>
+    /// <param name="rowCounts">Row counts per piece, in order, summing to <c>fused.Shape[0]</c>.</param>
+    /// <param name="sliceKeys">The engine key each piece will be published under, used in the refusal message.</param>
+    public static Tensor[] SplitRows(Tensor fused, IReadOnlyList<int> rowCounts, IReadOnlyList<string> sliceKeys)
+    {
+        ArgumentNullException.ThrowIfNull(fused);
+        ArgumentNullException.ThrowIfNull(rowCounts);
+        ArgumentNullException.ThrowIfNull(sliceKeys);
+        if (rowCounts.Count != sliceKeys.Count)
+            throw new ArgumentException($"{rowCounts.Count} row counts but {sliceKeys.Count} keys.", nameof(sliceKeys));
+        if (fused.Shape.Rank is not (1 or 2))
+            throw new NotSupportedException($"Cannot row-split a rank-{fused.Shape.Rank} tensor ('{sliceKeys[0]}').");
+
+        long innerDim = fused.Shape.Rank == 2 ? fused.Shape[1] : 1;
+        long totalRows = 0;
+        for (int i = 0; i < rowCounts.Count; i++) totalRows += rowCounts[i];
+        if (totalRows != fused.Shape[0])
+            throw new InvalidOperationException(
+                $"Split of '{sliceKeys[0]}' asks for {totalRows} rows but the fused tensor has {fused.Shape[0]}.");
+
+        QuantWeightInfo?[] narrowed = new QuantWeightInfo?[rowCounts.Count];
+        if (fused.QuantInfo is not null)
+        {
+            long rowOffset = 0;
+            for (int i = 0; i < rowCounts.Count; i++)
+            {
+                narrowed[i] = fused.QuantInfo.SliceRows(rowOffset, rowCounts[i], sliceKeys[i]);
+                rowOffset += rowCounts[i];
+            }
+        }
+
+        Tensor?[] pieces = new Tensor?[rowCounts.Count];
+        try
+        {
+            byte* src = (byte*)fused.DataPointer;
+            long byteOffset = 0;
+            for (int i = 0; i < rowCounts.Count; i++)
+            {
+                long chunkBytes = SliceByteCount(fused, rowCounts[i] * innerDim);
+                TensorShape shape = fused.Shape.Rank == 2
+                    ? new TensorShape(rowCounts[i], innerDim) : new TensorShape(rowCounts[i]);
+                Tensor piece = new Tensor(shape, fused.DType);
+                pieces[i] = piece;
+                CarryQuantCompanions(fused, piece, narrowed[i]);
+                Buffer.MemoryCopy(src + byteOffset, (void*)piece.DataPointer, chunkBytes, chunkBytes);
+                byteOffset += chunkBytes;
+            }
+        }
+        catch
+        {
+            foreach (Tensor? piece in pieces) piece?.Dispose();
+            throw;
+        }
+        Tensor[] result = new Tensor[pieces.Length];
+        for (int i = 0; i < pieces.Length; i++) result[i] = pieces[i]!;
+        return result;
+    }
+
     /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
     /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
     public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)

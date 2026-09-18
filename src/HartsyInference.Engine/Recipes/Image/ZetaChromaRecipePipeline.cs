@@ -17,8 +17,8 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Zeta-Chroma pipeline driven against the native <see cref="ImageRequest"/>. Owns the Qwen3-4B encoder + tokenizer (the text-encoder forward lives outside <see cref="ZetaChromaPipeline"/>): it encodes the prompt (and, for CFG, the negative) into caption embeddings, then runs <see cref="ZetaChromaPipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>ZetaChromaLoader.Generate</c> drive path, with the Z-Image preload→encode→free staging around the ~8 GB encoder. Wraps the constructed Zeta-Chroma pipeline plus its text stack, taking ownership of every disposable.</summary>
 public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline, ZetaChromaConfig config,
-    LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, SafeTensorsLoader checkpointLoader,
-    SafeTensorsLoader qwenLoader, MergedLoraStack? loraStack = null) : IRecipePipeline
+    LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, IBackend backend, IDisposable checkpoint,
+    IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>Qwen3 right-pads EncodeChat output with BosTokenId (151643); the real length ends at the first such pad.</summary>
     private const int Qwen3PadTokenId = 151643;
@@ -28,8 +28,8 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
     private readonly LlamaStyleEncoder _qwen = qwen;
     private readonly Qwen3Tokenizer _tokenizer = tokenizer;
     private readonly IBackend _backend = backend;
-    private readonly SafeTensorsLoader _checkpointLoader = checkpointLoader;
-    private readonly SafeTensorsLoader _qwenLoader = qwenLoader;
+    private readonly IDisposable _checkpoint = checkpoint;
+    private readonly IReadOnlyList<IDisposable> _sideModelLoaders = sideModelLoaders;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
 
@@ -170,8 +170,11 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
         _pipeline.Dispose();
         _qwen.Dispose();
         _tokenizer.Dispose();
-        _checkpointLoader.Dispose();
-        _qwenLoader.Dispose();
+        _checkpoint.Dispose();
+        foreach (IDisposable loader in _sideModelLoaders)
+        {
+            loader.Dispose();
+        }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
     }

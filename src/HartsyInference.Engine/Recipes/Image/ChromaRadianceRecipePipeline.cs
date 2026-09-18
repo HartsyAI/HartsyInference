@@ -14,13 +14,13 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Chroma Radiance pipeline driven against the native <see cref="ImageRequest"/>. <see cref="ChromaRadiancePipeline"/> owns the T5-XXL encoder, so this only tokenizes the prompt/negative (plus the tokenizer attention masks the "first padding token unmasked" rule needs) and calls <see cref="ChromaRadiancePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>ChromaRadianceLoader.Generate</c> drive path; the decode is pixel-space, so no VAE is involved. Wraps the constructed Chroma Radiance pipeline plus its tokenizer, taking ownership of every disposable.</summary>
 public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline, ChromaRadianceConfig config, T5Tokenizer tokenizer,
-    SafeTensorsLoader checkpointLoader, SafeTensorsLoader t5Loader, MergedLoraStack? loraStack = null) : IRecipePipeline
+    IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly ChromaRadiancePipeline _pipeline = pipeline;
     private readonly ChromaRadianceConfig _config = config;
     private readonly T5Tokenizer _tokenizer = tokenizer;
-    private readonly SafeTensorsLoader _checkpointLoader = checkpointLoader;
-    private readonly SafeTensorsLoader _t5Loader = t5Loader;
+    private readonly IDisposable _checkpoint = checkpoint;
+    private readonly IReadOnlyList<IDisposable> _sideModelLoaders = sideModelLoaders;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
 
@@ -88,8 +88,11 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
     {
         _pipeline.Dispose();
         _tokenizer.Dispose();
-        _checkpointLoader.Dispose();
-        _t5Loader.Dispose();
+        _checkpoint.Dispose();
+        foreach (IDisposable loader in _sideModelLoaders)
+        {
+            loader.Dispose();
+        }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
     }

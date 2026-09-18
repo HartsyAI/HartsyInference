@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -7,7 +7,7 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 public sealed class ZetaChromaCheckpointConverter
 {
     /// <summary>Partitions a flat dict of Zeta-Chroma safetensors keys (delegates to the Z-Image partitioner), then normalizes split diffusers-style attention (<c>to_q/to_k/to_v</c>, <c>to_out.0</c>, <c>norm_q/norm_k</c> — the layout newer Zeta releases ship) to the fused Z-Image naming (<c>qkv</c>, <c>out</c>, <c>q_norm/k_norm</c>).</summary>
-    public static ZImageCheckpointConverter.ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
+    public static ZImageCheckpointConverter.ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights)
     {
         ZImageCheckpointConverter.ConvertedWeights converted = ZImageCheckpointConverter.Convert(allWeights);
         FuseSplitAttention(converted.Transformer);
@@ -28,10 +28,29 @@ public sealed class ZetaChromaCheckpointConverter
             Tensor q = weights[qKey];
             Tensor k = weights[prefix + "to_k.weight"];
             Tensor v = weights[prefix + "to_v.weight"];
-            long qBytes = q.DType.ComputeByteCount(q.ElementCount);
-            long kBytes = k.DType.ComputeByteCount(k.ElementCount);
-            long vBytes = v.DType.ComputeByteCount(v.ElementCount);
+            // Refused before anything is allocated: an int8_tensorwise weight's scales are indexed by output row, so
+            // a concatenation along dim 0 would need its scales concatenated too, and keeping only Q's would run K
+            // and V at the wrong magnitude with no symptom until the image comes out as noise.
+            if (q.QuantInfo is not null || k.QuantInfo is not null || v.QuantInfo is not null)
+            {
+                throw new NotSupportedException(
+                    $"Zeta-Chroma '{prefix}' ships split attention in {q.QuantInfo?.Format ?? "a per-row quantized"} "
+                    + "format, whose per-row scales cannot be fused here. Use a build with fused qkv weights.");
+            }
+            if (q.Fp8ScaleFactor != k.Fp8ScaleFactor || q.Fp8ScaleFactor != v.Fp8ScaleFactor)
+            {
+                throw new NotSupportedException(
+                    $"Zeta-Chroma '{prefix}' has per-tensor fp8 scales that differ across Q/K/V "
+                    + $"({q.Fp8ScaleFactor}/{k.Fp8ScaleFactor}/{v.Fp8ScaleFactor}); one fused weight carries only one.");
+            }
+            // Block quants pack fixed-size blocks that never span a row, so the concatenation is byte-exact only
+            // while each row is a whole number of blocks — which SliceByteCount validates.
+            long qBytes = CheckpointConvertUtils.SliceByteCount(q, q.ElementCount);
+            long kBytes = CheckpointConvertUtils.SliceByteCount(k, k.ElementCount);
+            long vBytes = CheckpointConvertUtils.SliceByteCount(v, v.ElementCount);
             Tensor fused = new Tensor(new TensorShape(q.Shape[0] + k.Shape[0] + v.Shape[0], q.Shape[1]), q.DType);
+            fused.Fp8ScaleFactor = q.Fp8ScaleFactor;
+            fused.Fp8InputScaleFactor = q.Fp8InputScaleFactor;
             byte* dst = (byte*)fused.DataPointer;
             Buffer.MemoryCopy((void*)q.DataPointer, dst, qBytes, qBytes);
             Buffer.MemoryCopy((void*)k.DataPointer, dst + qBytes, kBytes, kBytes);
@@ -45,16 +64,6 @@ public sealed class ZetaChromaCheckpointConverter
             if (weights.Remove(prefix + "norm_q.weight", out Tensor? nq)) weights[prefix + "q_norm.weight"] = nq;
             if (weights.Remove(prefix + "norm_k.weight", out Tensor? nk)) weights[prefix + "k_norm.weight"] = nk;
         }
-    }
-
-    /// <summary>Loads and partitions a Zeta-Chroma single-file checkpoint.</summary>
-    public static (ZImageCheckpointConverter.ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(
-        string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        ZImageCheckpointConverter.ConvertedWeights converted = Convert(loader.GetAllTensors());
-        return (converted, loader);
     }
 
     /// <summary>True when a partitioned Z-Image-family transformer dict is a Zeta-Chroma pixel checkpoint (the <c>dec_net.*</c> decoder head replaces <c>final_layer.*</c>).</summary>

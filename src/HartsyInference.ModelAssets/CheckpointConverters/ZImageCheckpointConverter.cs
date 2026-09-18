@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -33,36 +33,20 @@ public sealed class ZImageCheckpointConverter
         public CheckpointVariant Variant { get; init; }
     }
 
-    /// <summary>Loads and partitions a Z-Image single-file checkpoint.</summary>
-    public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
-    {
-        SafeTensorsLoader loader = new();
-        try
-        {
-            loader.Load(checkpointPath);
-            ConvertedWeights converted = Convert(loader.GetAllTensors(), DetectVariantFromFileName(checkpointPath));
-            return (converted, loader);
-        }
-        catch
-        {
-            loader.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>Partitions a flat dict of Z-Image safetensors keys.</summary>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights,
+    /// <remarks>Quantization companions are expected to be folded already — <see cref="Checkpoints.CheckpointSource"/>
+    /// does it before any converter runs, because a converter strips key prefixes that its <c>.weight_scale</c>
+    /// companion does not share, and folding after that pairs nothing and drops the scale silently.</remarks>
+    public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> allWeights,
         CheckpointVariant variant = CheckpointVariant.Unknown)
     {
-        // Step 1: fold per-tensor weight_scale companions into Fp8ScaleFactor on each FP8 weight,
-        // drop the .weight_scale and .comfy_quant metadata keys.
-        Dictionary<string, Tensor> dequanted = ApplyFp8WeightScales(allWeights);
+        CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(ZImageCheckpointConverter));
 
-        Dictionary<string, Tensor> transformer = new(dequanted.Count);
+        Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> vae = new();
         Dictionary<string, Tensor> textEncoder = new();
 
-        foreach (KeyValuePair<string, Tensor> kvp in dequanted)
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;
@@ -200,47 +184,5 @@ public sealed class ZImageCheckpointConverter
                 return true;
         }
         return false;
-    }
-
-    /// <summary>Folds ComfyUI <c>fp8_scaled</c> per-tensor scale companions into <see cref="Tensor.Fp8ScaleFactor"/>. Z-Image uses the suffix <c>.weight_scale</c> (Flux uses <c>.scale_weight</c>; same idea, different naming). Also drops <c>.comfy_quant</c> metadata blobs (27-byte U8 tensors that describe the quantization config — purely informational).</summary>
-    private static unsafe Dictionary<string, Tensor> ApplyFp8WeightScales(Dictionary<string, Tensor> source)
-    {
-        Dictionary<string, Tensor> scales = new();
-        foreach (KeyValuePair<string, Tensor> kvp in source)
-        {
-            if (kvp.Key.EndsWith(".weight_scale", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".weight_scale".Length];
-                scales[baseKey] = kvp.Value;
-            }
-        }
-        if (scales.Count == 0)
-            return source;
-
-        Dictionary<string, Tensor> result = new(source.Count - 2 * scales.Count);
-        foreach (KeyValuePair<string, Tensor> kvp in source)
-        {
-            // Drop scale and quant-metadata companions.
-            if (kvp.Key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
-                kvp.Key.EndsWith(".comfy_quant", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            // For an FP8 weight tensor with a matching scale companion, attach the scale.
-            if (kvp.Value.DType == DType.F8E4M3 &&
-                kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
-            {
-                string baseKey = kvp.Key[..^".weight".Length];
-                if (scales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
-                {
-                    float scale = ((float*)scaleT.DataPointer)[0];
-                    kvp.Value.Fp8ScaleFactor = scale;
-                }
-            }
-
-            result[kvp.Key] = kvp.Value;
-        }
-        return result;
     }
 }

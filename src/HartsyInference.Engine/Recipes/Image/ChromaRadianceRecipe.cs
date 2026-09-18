@@ -4,7 +4,9 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -40,47 +42,68 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
         // input.Get(T2IParamTypes.T5XXLModel)); this always takes the canonical SideModels entry.
         string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        // 1. Load + convert (same converter as Chroma; the radiance keys pass through).
-        (ChromaCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader loader) = ChromaCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        if (conv.Transformer.Count == 0)
+        List<IDisposable> loaders = new List<IDisposable>();
+        IDisposable? checkpoint = null;
+        try
         {
-            loader.Dispose();
-            throw new InvalidOperationException("Chroma Radiance checkpoint has no recognized transformer weights after conversion.");
-        }
-        if (!ChromaRadianceConfig.IsRadiance(conv.Transformer))
-        {
-            loader.Dispose();
-            throw new InvalidOperationException(
-                "Checkpoint converted but has no Radiance pixel-decoder keys (nerf_image_embedder.*). " +
-                "This looks like a vanilla Chroma checkpoint — load it as a 'chroma' model instead.");
-        }
-        ChromaRadianceConfig config = ChromaRadianceConfig.FromWeights(conv.Transformer);
-        Logs.Info($"[ChromaRadianceRecipe] Architecture: pixel-space, patch={config.PatchSize}, nerf hidden={config.NerfHidden}.");
-        ChromaRadianceTransformer transformer = new ChromaRadianceTransformer(config);
-        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
-        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
-            context,
-            new LoraMergeTargets { Transformer = conv.Transformer },
-            "ChromaRadianceRecipe");
-        transformer.LoadWeights(conv.Transformer);
+            // 1. Load + convert (same converter as Chroma; the radiance keys pass through). The container hides the
+            // format difference, so a GGUF or fp8_scaled repack reaches the same converter unchanged.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            ChromaCheckpointConverter.ConvertedWeights conv = ChromaCheckpointConverter.Convert(source.Weights);
+            if (conv.Transformer.Count == 0)
+            {
+                throw new InvalidOperationException("Chroma Radiance checkpoint has no recognized transformer weights after conversion.");
+            }
+            if (!ChromaRadianceConfig.IsRadiance(conv.Transformer))
+            {
+                throw new InvalidOperationException(
+                    "Checkpoint converted but has no Radiance pixel-decoder keys (nerf_image_embedder.*). " +
+                    "This looks like a vanilla Chroma checkpoint — load it as a 'chroma' model instead.");
+            }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM. Tracked immediately so a failure further down frees the widened copies.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(conv.Transformer, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(source, prepared);
 
-        // 2. T5-XXL + its embedded tokenizer. No VAE — Radiance is pixel-space.
-        SafeTensorsLoader t5Loader = new SafeTensorsLoader();
-        t5Loader.Load(t5Path);
-        Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
-        if (t5Weights.Count == 0)
-        {
-            t5Loader.Dispose();
-            loader.Dispose();
-            throw new InvalidOperationException($"T5 model file '{t5Path}' has no usable T5 tensors.");
-        }
-        T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
-        t5.LoadWeights(t5Weights);
-        T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 512);
+            ChromaRadianceConfig config = ChromaRadianceConfig.FromWeights(conv.Transformer);
+            Logs.Info($"[ChromaRadianceRecipe] Architecture: pixel-space, patch={config.PatchSize}, nerf hidden={config.NerfHidden}.");
+            ChromaRadianceTransformer transformer = new ChromaRadianceTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = conv.Transformer },
+                "ChromaRadianceRecipe");
+            transformer.LoadWeights(conv.Transformer);
 
-        ChromaRadiancePipeline pipeline = new ChromaRadiancePipeline(context.Backend, t5, transformer, config);
-        Logs.Info("[ChromaRadianceRecipe] Chroma Radiance ready (mid-pretraining checkpoint — output is validation-gated).");
-        return new ChromaRadianceRecipePipeline(pipeline, config, tokenizer, loader, t5Loader, loraStack);
+            // 2. T5-XXL + its embedded tokenizer. No VAE — Radiance is pixel-space.
+            SafeTensorsLoader t5Loader = new SafeTensorsLoader();
+            t5Loader.Load(t5Path);
+            loaders.Add(t5Loader);
+            Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
+            if (t5Weights.Count == 0)
+            {
+                throw new InvalidOperationException($"T5 model file '{t5Path}' has no usable T5 tensors.");
+            }
+            T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
+            t5.LoadWeights(t5Weights);
+            T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 512);
+
+            ChromaRadiancePipeline pipeline = new ChromaRadiancePipeline(context.Backend, t5, transformer, config);
+            Logs.Info("[ChromaRadianceRecipe] Chroma Radiance ready (mid-pretraining checkpoint — output is validation-gated).");
+            return new ChromaRadianceRecipePipeline(pipeline, config, tokenizer, checkpoint, loaders, loraStack);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[ChromaRadianceRecipe] Construction failed.", ex);
+            foreach (IDisposable loader in loaders)
+            {
+                loader.Dispose();
+            }
+            checkpoint?.Dispose();
+            throw;
+        }
     }
 }

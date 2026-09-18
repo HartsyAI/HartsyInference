@@ -5,8 +5,10 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
@@ -44,75 +46,96 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        // 1. Load + convert the Chroma transformer.
-        (ChromaCheckpointConverter.ConvertedWeights zConv, SafeTensorsLoader zLoader) = ChromaCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        if (zConv.Transformer.Count == 0)
+        List<IDisposable> loaders = new List<IDisposable>();
+        IDisposable? checkpoint = null;
+        try
         {
-            zLoader.Dispose();
-            throw new InvalidOperationException("Chroma checkpoint has no recognized transformer weights after conversion.");
-        }
-        ChromaConfig config = ChromaConfig.V1;
-        Logs.Info($"[ChromaRecipe] Building transformer ({config.HiddenSize} hidden, {config.Depth} double / {config.DepthSingleBlocks} single).");
-        ChromaTransformer transformer = new ChromaTransformer(config);
-        // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
-        // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
-            context,
-            new LoraMergeTargets { Transformer = zConv.Transformer },
-            "ChromaRecipe");
-        transformer.LoadWeights(zConv.Transformer);
+            // 1. Load + convert the Chroma transformer. One container for either format: a Chroma GGUF is a repack of
+            // this same file under the same BFL key names, so the converter cannot tell them apart.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            checkpoint = source;
+            ChromaCheckpointConverter.ConvertedWeights zConv = ChromaCheckpointConverter.Convert(source.Weights);
+            if (zConv.Transformer.Count == 0)
+            {
+                throw new InvalidOperationException("Chroma checkpoint has no recognized transformer weights after conversion.");
+            }
+            // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
+            // the first GEMM, minutes into a generation. Tracked immediately so a failure further down frees the
+            // widened copies rather than leaving them to the finalizer.
+            QuantizedWeightPolicy.PreparedWeights prepared =
+                QuantizedWeightPolicy.PrepareForBackends(zConv.Transformer, context.TransformerBackends);
+            checkpoint = new CompositeDisposable(source, prepared);
 
-        // DiT sharding split point — byte-weighted: Chroma's 19 double blocks are ~2× its 38 single blocks,
-        // so a count-proportional split would misallocate by GBs. Computed post-load (needs live free VRAM).
-        int ditShardSplitBlock = 0;
-        if (context.DitShardBackend is not null)
-        {
-            ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
-                context.Backend, context.DitShardBackend, transformer.BlockCount,
-                transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
-            Logs.Info($"[ChromaRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
-                + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend "
-                + "(sequential dual-pass CFG; the step graph is disabled while sharded).");
-        }
+            ChromaConfig config = ChromaConfig.V1;
+            Logs.Info($"[ChromaRecipe] Building transformer ({config.HiddenSize} hidden, {config.Depth} double / {config.DepthSingleBlocks} single).");
+            ChromaTransformer transformer = new ChromaTransformer(config);
+            // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
+            // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+                context,
+                new LoraMergeTargets { Transformer = zConv.Transformer },
+                "ChromaRecipe");
+            transformer.LoadWeights(zConv.Transformer);
 
-        // 2. Load T5-XXL + its embedded tokenizer.
-        SafeTensorsLoader t5Loader = new SafeTensorsLoader();
-        t5Loader.Load(t5Path);
-        Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
-        if (t5Weights.Count == 0)
-        {
-            t5Loader.Dispose();
-            zLoader.Dispose();
-            throw new InvalidOperationException($"T5 model file '{t5Path}' has no usable T5 tensors.");
-        }
-        T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
-        t5.LoadWeights(t5Weights);
-        T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 512);
+            // DiT sharding split point — byte-weighted: Chroma's 19 double blocks are ~2× its 38 single blocks,
+            // so a count-proportional split would misallocate by GBs. Computed post-load (needs live free VRAM).
+            int ditShardSplitBlock = 0;
+            if (context.DitShardBackend is not null)
+            {
+                ditShardSplitBlock = DitShardPlanner.SplitBlockByBytes(
+                    context.Backend, context.DitShardBackend, transformer.BlockCount,
+                    transformer.EnumerateBlockRangeWeights, transformer.EnumerateSharedWeights());
+                Logs.Info($"[ChromaRecipe] DiT sharding enabled: blocks [0,{ditShardSplitBlock}) on the primary "
+                    + $"backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend "
+                    + "(sequential dual-pass CFG; the step graph is disabled while sharded).");
+            }
 
-        // 3. Load the Flux VAE (Chroma reuses it verbatim).
-        (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
-        if (vaeWeights.Count == 0)
-        {
-            vaeLoader.Dispose();
-            t5Loader.Dispose();
-            zLoader.Dispose();
-            throw new InvalidOperationException($"VAE file '{vaePath}' has no usable VAE tensors.");
-        }
-        // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
-        // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
-        vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
-        VaeDecoder vae = new VaeDecoder(VaeConfig.Chroma);
-        vae.LoadWeights(vaeWeights);
+            // 2. Load T5-XXL + its embedded tokenizer.
+            SafeTensorsLoader t5Loader = new SafeTensorsLoader();
+            t5Loader.Load(t5Path);
+            loaders.Add(t5Loader);
+            Dictionary<string, Tensor> t5Weights = LoaderPrefixUtils.StripT5XxlPrefix(t5Loader.GetAllTensors());
+            if (t5Weights.Count == 0)
+            {
+                throw new InvalidOperationException($"T5 model file '{t5Path}' has no usable T5 tensors.");
+            }
+            T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
+            t5.LoadWeights(t5Weights);
+            T5Tokenizer tokenizer = new T5Tokenizer(maxLength: 512);
 
-                VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Chroma, vaeWeights, "ChromaRecipe");
-        ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config)
+            // 3. Load the Flux VAE (Chroma reuses it verbatim).
+            (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
+            loaders.Add(vaeLoader);
+            if (vaeWeights.Count == 0)
+            {
+                throw new InvalidOperationException($"VAE file '{vaePath}' has no usable VAE tensors.");
+            }
+            // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —
+            // the SDXL-VAE precision policy; LoadFluxVaeF32 force-upcasts to F32, this recovers BF16 where safe.
+            vaeWeights = VaePrecisionHelper.CastVaeWeights(vaeWeights, VaePrecisionHelper.PreferredVaeDtype(context.Backend));
+            VaeDecoder vae = new VaeDecoder(VaeConfig.Chroma);
+            vae.LoadWeights(vaeWeights);
+
+            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Chroma, vaeWeights, "ChromaRecipe");
+            ChromaPipeline pipeline = new ChromaPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config)
+            {
+                TextEncoderBackend = context.TextEncoderBackendOrDefault,
+                VaeBackend = context.VaeBackendOrDefault,
+                DitShardBackend = context.DitShardBackend,
+                DitShardSplitBlock = ditShardSplitBlock,
+            };
+            Logs.Info("[ChromaRecipe] Chroma ready.");
+            return new ChromaRecipePipeline(pipeline, tokenizer, checkpoint, loaders, loraStack);
+        }
+        catch (Exception ex)
         {
-            TextEncoderBackend = context.TextEncoderBackendOrDefault,
-            VaeBackend = context.VaeBackendOrDefault,
-            DitShardBackend = context.DitShardBackend,
-            DitShardSplitBlock = ditShardSplitBlock,
-        };
-        Logs.Info("[ChromaRecipe] Chroma ready.");
-        return new ChromaRecipePipeline(pipeline, tokenizer, zLoader, t5Loader, vaeLoader, loraStack);
+            Logs.Error("[ChromaRecipe] Construction failed.", ex);
+            foreach (IDisposable loader in loaders)
+            {
+                loader.Dispose();
+            }
+            checkpoint?.Dispose();
+            throw;
+        }
     }
 }
