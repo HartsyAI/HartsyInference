@@ -1,4 +1,5 @@
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -146,5 +147,39 @@ public sealed class BackendSelectorTests
         using InferenceEngine explicitZero = new InferenceEngine("cuda", 0);
         using InferenceEngine legacy = new InferenceEngine("cuda");
         Assert.Equal(legacy.BackendSelector, explicitZero.BackendSelector);
+    }
+
+    /// <summary>A device kind is one that takes an ordinal — the test callers must use instead of <c>StartsWith("cuda")</c>,
+    /// which reads "not CPU, therefore CUDA" and routed Vulkan requests onto CUDA.</summary>
+    [Theory]
+    [InlineData("cuda", true)]
+    [InlineData("vulkan", true)]
+    [InlineData("cpu", false)]
+    [InlineData("auto", false)]
+    public void IsDeviceKind_Names_The_Kinds_That_Take_An_Ordinal(string kind, bool expected)
+    {
+        Assert.Equal(expected, BackendFactory.IsDeviceKind(kind));
+    }
+
+    /// <summary>A registered recipe name resolves as its own family id. The video error text advertises these names as
+    /// "currently drivable", and the Wan compat classes exist ONLY there — no catalog entry carries them — so before
+    /// this they were advertised, accepted on the command line, and then rejected as family 'unknown'.</summary>
+    [Theory]
+    [InlineData("wan-22-5b")]
+    [InlineData("wan-21-14b")]
+    [InlineData("wan")]
+    public void A_Registered_Recipe_Name_Resolves_As_Its_Own_Family(string familyId)
+    {
+        ModelSpec spec = new() { Requested = familyId, Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
+        Assert.Equal(familyId, InferenceEngine.ResolveVideoFamilyId(spec));
+    }
+
+    /// <summary>A name no registry knows still falls through to header detection rather than being invented — the caller
+    /// gets the "unregistered family" plan error naming what IS drivable, not a recipe lookup that cannot be satisfied.</summary>
+    [Fact]
+    public void An_Unregistered_Name_Does_Not_Become_Its_Own_Family()
+    {
+        ModelSpec spec = new() { Requested = "not-a-real-family", Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
+        Assert.NotEqual("not-a-real-family", InferenceEngine.ResolveVideoFamilyId(spec));
     }
 }

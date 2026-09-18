@@ -16,11 +16,14 @@ public static class DeviceGate
     private static readonly IDisposable _noop = new NoopReleaser();
 
     /// <summary>Acquires the generation slot for <paramref name="backend"/>'s device; dispose the returned token to
-    /// release. No-op (returns immediately) for CPU backends or when same-GPU concurrency is enabled. Acquire this
+    /// release. No-op (returns immediately) for CPU backends or when same-GPU concurrency is enabled. Every device
+    /// backend gates, not only CUDA — two Vulkan generations on one card contend for its VRAM exactly as two CUDA
+    /// ones do. Ordinals are shared across kinds, so cuda:0 and vulkan:0 take one gate; that over-serializes only
+    /// when they are genuinely different cards, which is the safe direction. Acquire this
     /// INNERMOST — after any engine/slot locks — so lock order stays consistent process-wide.</summary>
     public static async Task<IDisposable> AcquireAsync(IBackend backend, CancellationToken cancel = default)
     {
-        if (_concurrent || backend is null || backend.Device.Type != DeviceType.Cuda)
+        if (_concurrent || backend is null || !backend.Device.IsGpu)
         {
             return _noop;
         }
@@ -32,7 +35,7 @@ public static class DeviceGate
     /// <summary>Synchronous form for non-async generation paths.</summary>
     public static IDisposable Acquire(IBackend backend, CancellationToken cancel = default)
     {
-        if (_concurrent || backend is null || backend.Device.Type != DeviceType.Cuda)
+        if (_concurrent || backend is null || !backend.Device.IsGpu)
         {
             return _noop;
         }
@@ -131,7 +134,7 @@ public static class DeviceGate
     {
         foreach (IBackend? backend in backends)
         {
-            if (backend is not null && backend.Device.Type == DeviceType.Cuda)
+            if (backend is not null && backend.Device.IsGpu)
             {
                 yield return backend.Device.Ordinal;
             }

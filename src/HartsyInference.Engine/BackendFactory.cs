@@ -311,7 +311,9 @@ public static class BackendFactory
     }
 
     /// <summary>Whether <paramref name="kind"/> names a backend that runs on a selectable device.</summary>
-    private static bool IsDeviceKind(string kind) => kind == "cuda" || kind == "vulkan";
+    /// <remarks>Public so callers stop spelling the test as <c>StartsWith("cuda")</c>: a device selector that is not
+    /// CPU is not therefore CUDA, and that assumption silently routed non-CUDA requests onto CUDA.</remarks>
+    public static bool IsDeviceKind(string kind) => kind == "cuda" || kind == "vulkan";
 
     /// <summary>Throws when <paramref name="selector"/> cannot resolve to a constructible backend on this machine,
     /// without constructing one — syntax plus a driver device-count query only. Lets a host surface a bad

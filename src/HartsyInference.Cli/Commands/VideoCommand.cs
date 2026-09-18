@@ -6,7 +6,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a video (frame sequence) from a prompt with any registered video family. CUDA-only.</summary>
+/// <summary>Generates a video (frame sequence) from a prompt with any registered video family.</summary>
 /// <remarks>Validation-pending per family — see <c>docs/Checklists/MODEL_STATUS_VIDEO.md</c>.</remarks>
 public sealed class VideoCommand : Command<VideoCommand.Settings>
 {
@@ -33,10 +33,12 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Confirm a detected H3 model profile. This cannot override incompatible tensors or hashes; --profile remains Engine tuning.")]
         public string? ModelProfile { get; init; }
 
-        /// <summary>Compute backend (must be cuda for video).</summary>
+        /// <summary>Compute backend selector.</summary>
+        /// <remarks>A sparse-attention profile (MiniMax-H3 VSA) still refuses a backend without a native kernel for
+        /// it; the planner says so by name. Dense families are not restricted by backend.</remarks>
         [CommandOption("-b|--backend")]
-        [Description("Backend (video requires cuda).")]
-        public string Backend { get; init; } = "cuda";
+        [Description("Backend: auto, cpu, cuda, or vulkan.")]
+        public string Backend { get; init; } = "auto";
 
         /// <summary>Negative prompt.</summary>
         [CommandOption("-n|--negative")]

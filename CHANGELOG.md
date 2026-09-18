@@ -6,6 +6,28 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.85
+
+- **`--backend vulkan` now reaches Vulkan for text generation.** `TextService` derived its device key as "not CPU,
+  therefore CUDA", so every non-CPU selector became `cuda:{ordinal}`: a Vulkan engine silently ran its LLM on CUDA,
+  and on a machine with no CUDA device it failed with a driver error instead of generating. The key now carries the
+  resolved kind as well as the ordinal, and the slot builds its backend through `BackendFactory.Create` like every
+  other modality — so an unknown device key reports the selectors that exist rather than naming CUDA and CPU as the
+  only choices. Every Vulkan LLM measurement taken before this was a CUDA measurement.
+- Same-device generation gating covers every device backend rather than CUDA alone. Two Vulkan generations on one
+  card contend for its VRAM exactly as two CUDA ones do, and were running concurrently by default.
+- **A registered recipe name is accepted as a family id.** The video planner's own error text advertises the
+  drivable families, but several of them — the Wan compat classes — exist only as recipe names, with no catalog
+  entry behind them. `-m wan-22-5b` was therefore listed as drivable, accepted, and then refused as family
+  'unknown'. A name either registry knows now resolves as itself; a name neither knows still falls through to
+  header detection, so an unregistered model keeps reporting what IS drivable.
+- Video sparse attention is gated on what the backend can execute rather than on the spelling of the selector. The
+  check compared the resolved selector against the string "cuda" before asking the capability, so a backend that
+  implements the profile could never be reached through it. A backend without the native kernel is still refused,
+  by name, with no dense fallback.
+- `hartsy video` and `hartsy world` default to `--backend auto` and no longer describe themselves as CUDA-only.
+  Neither ever enforced it: the restriction is per-profile (H3's sparse attention), not per-command.
+
 ## alpha.82
 
 - Audio: **SheetSage2 transcribes a recording into a score.** With the symbolic half from alpha.81, the model is

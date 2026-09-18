@@ -68,20 +68,17 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         string? sparseBackendFailure = null;
         if (plan.Profile.Attention != VideoAttentionKind.Dense)
         {
-            sparseBackendSupported = string.Equals(
-                BackendFactory.Resolve(_engine.BackendSelector), "cuda", StringComparison.OrdinalIgnoreCase);
-            if (sparseBackendSupported)
+            // Ask the backend, not the selector's spelling: a backend that implements the native sparse profile
+            // answers for itself, and one that does not is refused below whatever it is called.
+            try
             {
-                try
-                {
-                    sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
-                }
-                catch (Exception error) when (error is CudaException or DllNotFoundException
-                    or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
-                    or NotSupportedException)
-                {
-                    RecordSparseBackendFailure(error);
-                }
+                sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
+            }
+            catch (Exception error) when (error is CudaException or DllNotFoundException
+                or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
+                or NotSupportedException)
+            {
+                RecordSparseBackendFailure(error);
             }
         }
 
@@ -100,7 +97,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 {
                     Code = "video.vsa.backend_unsupported",
                     Severity = VideoPlanIssueSeverity.Error,
-                    Message = $"Profile '{plan.Profile.Id}' requires native CUDA sparse attention; "
+                    Message = $"Profile '{plan.Profile.Id}' requires native sparse attention; "
                         + $"backend '{_engine.BackendDescription}' cannot execute it"
                         + (sparseBackendFailure is null ? "." : $": {sparseBackendFailure}"),
                     Field = nameof(VideoRequest.SparseAttentionPolicy),
