@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.ModelAssets.Gguf;
@@ -80,6 +81,9 @@ public sealed class GgufGpuDequantTests
         try
         {
             FillQ2_K(src, superBlocks);
+            // A fixture whose mins were all zero would certify a kernel that dropped the dmin term entirely.
+            byte* scales = (byte*)src.DataPointer;
+            Assert.Contains(Enumerable.Range(0, 16), i => (scales[i] >> 4) != 0);
             using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
             using Tensor gpuOut = RunGpuDequant(src, totalElems);
             CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
@@ -99,6 +103,7 @@ public sealed class GgufGpuDequantTests
         try
         {
             FillQ3_K(src, superBlocks);
+            AssertQ3KFixtureExercisesBothHighBitBranches(src, superBlocks);
             using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
             using Tensor gpuOut = RunGpuDequant(src, totalElems);
             CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
@@ -279,6 +284,26 @@ public sealed class GgufGpuDequantTests
             byte* qs = block + 6;
             for (int i = 0; i < 16; i++) qs[i] = (byte)((i * 11 + b * 17) & 0xFF);
         }
+    }
+
+    /// <summary>Proves the Q3_K fixture actually reaches both sides of the inverted high bit. Without this a kernel
+    /// that always subtracted 4 — or never did — could match the CPU codec on a fixture that only ever took one
+    /// branch, and the test would certify a sign error.</summary>
+    private static unsafe void AssertQ3KFixtureExercisesBothHighBitBranches(Tensor t, int superBlocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        bool sawSet = false, sawClear = false;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* hmask = p + sb * 110;
+            for (int element = 0; element < 256; element++)
+            {
+                int h = element >> 7, r = element & 127, j = r >> 5, o = r & 31;
+                bool bit = (hmask[16 * (o >> 4) + (o & 15)] & (1u << (4 * h + j))) != 0;
+                if (bit) sawSet = true; else sawClear = true;
+            }
+        }
+        Assert.True(sawSet && sawClear, "The Q3_K fixture must produce both high-bit branches.");
     }
 
     /// <summary>Q2_K super-block: 16 scale bytes (4-bit scale | 4-bit min), 64 quant bytes, then d and dmin.
