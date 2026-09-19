@@ -84,9 +84,16 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         TextToImageRequest request,
         float guidanceScale = 3.5f,
         Action<GenerationProgress>? onProgress = null,
-        RegionalPlan? regionalPlan = null)
+        RegionalPlan? regionalPlan = null,
+        Prompting.WeightedTokenSequence? promptWeights = null)
     {
         ThrowIfDisposed();
+        if (promptWeights is not null && promptWeights.Weights.Length != promptTokenIds.Length)
+        {
+            throw new ArgumentException(
+                $"Weights describe {promptWeights.Weights.Length} tokens but {promptTokenIds.Length} were passed.",
+                nameof(promptWeights));
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -160,6 +167,15 @@ _transformer.InvalidateStepGraph(Backend);
             if (_cachedTextEmbeddings != textEmbeddings) _cachedTextEmbeddings?.Dispose();
             _cachedPromptKey = (int[])promptTokenIds.Clone();
             _cachedTextEmbeddings = textEmbeddings;
+        }
+        // CondScale weighting (SwarmText.py:256-271) on a per-request copy: the cache above is keyed on token ids
+        // alone, and a weighted prompt tokenizes to the same ids, so scaling the cached tensor would leak into the
+        // next plain request and compound across repeats.
+        Tensor? weightedText = promptWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, textEmbeddings, null, promptWeights).Cond;
+        if (weightedText is not null)
+        {
+            textEmbeddings = weightedText;
         }
         int txtSeqLen = (int)textEmbeddings.Shape[1];
 
@@ -428,6 +444,15 @@ _transformer.InvalidateStepGraph(Backend);
         // textEmbeddings is a cross-generation cache entry — not disposed here. extendedText (region-extended)
         // is rebuilt fresh every generation — always disposed.
         extendedText?.Dispose();
+        // Per-request copy shadowing the cached embeddings; the unweighted original stays in the cache. The graph
+        // route pins step-invariant conditioning with PreloadWeights, and that is this tensor when the prompt is
+        // weighted — so the device entry has to be released by identity before the host storage goes, or every
+        // weighted generation strands a conditioning buffer and hands the next one a new signature to flip on.
+        if (weightedText is not null)
+        {
+            Backend.FreeWeights([weightedText]);
+            weightedText.Dispose();
+        }
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
 

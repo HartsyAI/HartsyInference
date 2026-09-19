@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -92,7 +93,9 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_EmitsOnePaddedPictureBlockPerReference()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (int[] tokens, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [7, 3]);
+        (WeightedTokenSequence sequence, int dropIndex) =
+            QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [7, 3]);
+        int[] tokens = sequence.Tokens;
         Assert.Equal(2, tokens.Count(t => t == Qwen25VlMultimodalEncoder.VisionStartId));
         Assert.Equal(2, tokens.Count(t => t == Qwen25VlMultimodalEncoder.VisionEndId));
         Assert.Equal(10, tokens.Count(t => t == Qwen25VlMultimodalEncoder.ImageTokenId));
@@ -112,7 +115,8 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_DropIndexEndsTheUserHeader()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (int[] tokens, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4]);
+        (WeightedTokenSequence sequence, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4]);
+        int[] tokens = sequence.Tokens;
         int secondImStart = Array.IndexOf(tokens, Qwen3Tokenizer.ImStartId,
             Array.IndexOf(tokens, Qwen3Tokenizer.ImStartId) + 1);
         Assert.Equal(secondImStart + 3, dropIndex);
@@ -124,7 +128,8 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_IsNotTruncatedToTheTextToImageWindow()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (int[] tokens, _) = QwenImageEditConditioning.BuildTokens(tokenizer, "compose these", [196, 196, 196]);
+        (WeightedTokenSequence sequence, _) = QwenImageEditConditioning.BuildTokens(tokenizer, "compose these", [196, 196, 196]);
+        int[] tokens = sequence.Tokens;
         Assert.Equal(588, tokens.Count(t => t == Qwen25VlMultimodalEncoder.ImageTokenId));
         Assert.True(tokens.Length > 512);
         // The assistant header is the last thing emitted, so truncation anywhere would lose it.

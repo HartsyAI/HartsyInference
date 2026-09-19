@@ -55,4 +55,10 @@ public enum VideoFeatures
     /// driving speech, or the track MiniMax-H3 holds every audio row fixed at while the video denoises. Distinct
     /// from <see cref="ReferenceAudios"/>, which only describes the sound to aim for.</summary>
     DrivingAudio = 8192,
+
+    /// <summary>Per-token prompt weighting. Like the image side's counterpart this is never requested by a
+    /// conditioning object, so it is not checked against the request; <c>VideoService</c> queries it to decide whether
+    /// <c>&lt;weight[N]:&gt;</c> becomes <c>(text:N)</c> or collapses to its inner text. Derived from
+    /// <see cref="IVideoRecipe.PromptWeighting"/>, never declared directly.</summary>
+    PromptWeighting = 16384,
 }

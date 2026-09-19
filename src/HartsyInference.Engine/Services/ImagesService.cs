@@ -42,25 +42,20 @@ public sealed class ImagesService : IImagesService
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
 
-                // SwarmUI's 2026-09-01 prompt-parser update now resolves <weight[N]:text>/<alternate:...>/
-                // <fromto[N]:...> as literal tags in the final prompt text handed to every backend, in place of
-                // the Comfy-native (word:1.5)/[a|b]/[a:b:N] syntax it used to emit for the same constructs. Flatten
-                // them here, upstream of every recipe pipeline and of segment/region tag parsing below, so no
-                // pipeline ever sees literal tag garbage. <weight[N]:...> converts back to the (text:N) parens
-                // grammar WeightedConditioning/PromptWeighting already implement (restoring SD1.5/SDXL weighting to
-                // parity with pre-update behavior) for the recipes that declare ImageFeatures.PromptWeighting; for
-                // everything else it collapses to its inner text, because an LLM-conditioned DiT has no token-weight
-                // machinery and would read the parens and digits as prose. <alternate:>/<fromto[N]:> flatten to
-                // their first ("step 0") value as a safety net for every architecture that doesn't declare
-                // ImageFeatures.PromptScheduling — those two recipes (SDXL/SD1.5 today) get the raw tags preserved
-                // instead, so PromptTagScheduling can build a real per-step ConditioningSchedule further down.
+                // Upstream of every pipeline AND of the segment/region parsing below, so no pipeline sees a raw
+                // tag; what survives is whatever the resolved recipe declares it can act on.
                 ImageFeatures promptFeatures = _engine.SupportedFeatures(spec);
                 bool schedulingSupported = (promptFeatures & ImageFeatures.PromptScheduling) != 0;
-                bool weightingSupported = (promptFeatures & ImageFeatures.PromptWeighting) != 0;
+                PromptWeightingMode weightingMode = _engine.PromptWeightingFor(spec);
+                // Kept because preparation is per-family and destructive: once the base's mode has collapsed
+                // <weight[N]:x> to x, a refiner from a family that CAN weight has nothing left to weight.
+                string rawPrompt = resolved.Prompt;
+                string? rawNegativePrompt = resolved.NegativePrompt;
                 resolved = resolved with
                 {
-                    Prompt = PromptTagFlattening.Flatten(resolved.Prompt, !schedulingSupported, weightingSupported),
-                    NegativePrompt = PromptTagFlattening.Flatten(resolved.NegativePrompt, !schedulingSupported, weightingSupported),
+                    Prompt = PromptFeatureFlattening.Prepare(resolved.Prompt, weightingMode, schedulingSupported),
+                    NegativePrompt =
+                        PromptFeatureFlattening.Prepare(resolved.NegativePrompt, weightingMode, schedulingSupported),
                 };
 
                 // Base-prompt tag-leak fix: <segment:>/<clear:> text must not reach the BASE (full-canvas) pass's
@@ -84,7 +79,8 @@ public sealed class ImagesService : IImagesService
                 // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.
                 // The classic SDXL-on-SDXL pair is skipped here — SdxlRecipePipeline keeps that internally, with
                 // RefinerStage.IsSdxlInternalPair as the single routing decision both sides consult.
-                result = RefinerStage.Apply(_engine, spec, basePass, result, progress, cancel);
+                result = RefinerStage.Apply(
+                    _engine, spec, basePass, result, progress, cancel, rawPrompt, rawNegativePrompt);
 
                 // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
                 // composes on top of whatever the ordinary inpaint-only-masked path above already produced —

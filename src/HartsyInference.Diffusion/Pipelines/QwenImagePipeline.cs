@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -113,9 +114,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         IReadOnlyList<Tensor>? editRefImages = null,
         bool editRefTimestepZero = false,
         IReadOnlyList<Tensor>? editRefVisionImages = null,
-        IReadOnlyList<Adapters.QwenImageControlNetConditioning>? controlNets = null)
+        IReadOnlyList<Adapters.QwenImageControlNetConditioning>? controlNets = null,
+        WeightedTokenSequence? promptWeights = null,
+        WeightedTokenSequence? negativeWeights = null)
     {
         ThrowIfDisposed();
+        RequireMatchingWeights(promptTokenIds, promptWeights, nameof(promptWeights));
+        RequireMatchingWeights(negativeTokenIds, negativeWeights, nameof(negativeWeights));
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -348,6 +353,21 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 _cachedUncondKey = (int[])negativeTokenIds.Clone();
                 _cachedUncondDrop = negativeDropIndex;
             }
+        }
+
+        // Weighting runs after the template trim, on a copy: the cache above is keyed on token ids alone, and a
+        // weighted prompt tokenizes to the same ids, so an in-place scale would leak into the next plain request.
+        Tensor? weightedCond = promptWeights is null
+            ? null : CondTokenWeights.Apply(TextEncoderBackend, condHidden, null, promptWeights).Cond;
+        if (weightedCond is not null)
+        {
+            condHidden = weightedCond;
+        }
+        Tensor? weightedUncond = uncondHidden is null || negativeWeights is null
+            ? null : CondTokenWeights.Apply(TextEncoderBackend, uncondHidden, null, negativeWeights).Cond;
+        if (weightedUncond is not null)
+        {
+            uncondHidden = weightedUncond;
         }
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
@@ -936,6 +956,9 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
         condHiddenRank1?.Dispose();
         uncondHiddenRank1?.Dispose();
+        // Per-request copies; the unweighted originals they shadow stay in the cross-generation cache.
+        weightedCond?.Dispose();
+        weightedUncond?.Dispose();
         if (streamer is not null)
         {
             // Streamed path always tears down regardless of KEEP_MODELS: nothing was fully resident to keep, and the
@@ -1230,6 +1253,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     }
 
     /// <summary>Drops the first <paramref name="drop"/> sequence positions from a <c>[1, seq, hidden]</c> F32 hidden-state tensor, returning <c>[1, seq-drop, hidden]</c>. Used to discard the system+user-header template prefix from Qwen-Image text conditioning (the kept tail = prompt content + assistant suffix, matching diffusers' <c>split_hidden_states[drop_idx:]</c>). No-op clone guard if drop is out of range.</summary>
+    /// <summary>Token weights are matched to conditioning rows by position, so a weight array that does not describe
+    /// the token sequence it came with would silently shift every emphasis onto a neighbouring word.</summary>
+    private static void RequireMatchingWeights(int[] tokenIds, WeightedTokenSequence? weights, string name)
+    {
+        if (weights is not null && weights.Weights.Length != tokenIds.Length)
+        {
+            throw new ArgumentException(
+                $"Weights describe {weights.Weights.Length} tokens but {tokenIds.Length} were passed.", name);
+        }
+    }
+
     private static Tensor DropPrefixHiddenStates(Tensor hidden, int drop)
     {
         long batch = hidden.Shape[0];

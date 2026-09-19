@@ -205,6 +205,37 @@ public sealed class Qwen3Tokenizer : IDisposable
         return (result, realLen);
     }
 
+    /// <summary>The template ids <see cref="EncodeChat"/> wraps around the prompt, so a caller that needs per-token
+    /// prompt weights can tokenize the prompt itself and still reproduce the template. NOTE that the prefix here ends
+    /// with <c>user\n</c> as its own BPE call, whereas <see cref="EncodeChat"/> merges it with the prompt — the two
+    /// agree except when the prompt begins with whitespace, so an UNWEIGHTED prompt must keep using
+    /// <see cref="EncodeChat"/>.</summary>
+    public (int[] Prefix, int[] Suffix) ChatTemplateIds(bool includeThinkBlock = true)
+    {
+        ThrowIfDisposed();
+        List<int> prefix = new(8) { _imStartId };
+        AppendBpe(prefix, "user\n");
+        List<int> suffix = new(16) { _imEndId };
+        AppendBpe(suffix, "\n");
+        suffix.Add(_imStartId);
+        AppendBpe(suffix, "assistant\n");
+        if (includeThinkBlock)
+        {
+            suffix.Add(_thinkStartId);
+            AppendBpe(suffix, "\n\n");
+            suffix.Add(_thinkEndId);
+            AppendBpe(suffix, "\n\n");
+        }
+        return (prefix.ToArray(), suffix.ToArray());
+    }
+
+    /// <summary>The fixed window <see cref="EncodeChat"/> truncates and right-pads to.</summary>
+    public int MaxLength => _maxLength;
+
+    /// <summary>The id <see cref="EncodeChat"/> right-pads with — resolved from the loaded tokenizer rather than the
+    /// <see cref="BosTokenId"/> constant, which is only the fallback.</summary>
+    public int PadTokenId => _bosTokenId;
+
     private void AppendBpe(List<int> dst, string text)
     {
         IReadOnlyList<int> ids = EncodeBpe(text);

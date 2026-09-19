@@ -6,6 +6,31 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.99
+
+- **`(word:1.5)` reaches five more families the way SwarmUI means it.** Prompt weighting worked only on SD1.5 and
+  SDXL, because the code that applied it was written against `ClipTextEncoder` and nothing else could reach it.
+  Qwen-Image, Flux.2 and Mage-Flow now apply the mechanism ComfyUI would apply to them, and SD1.5/SDXL keep theirs
+  unchanged.
+- The mechanism is not a per-family opinion. SwarmUI runs one probe —
+  `use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)"))` (`SwarmText.py:553`) — so a
+  family blends on the encoder output only when EVERY tokenizer arm keeps weights, and one weight-keeping arm puts
+  the whole family back on the blend. Reading that rule rather than grepping for `disable_weights` moved four
+  families off the mode the plan had assumed for them, Lumina2 among them.
+- **A recipe may not declare a mode its pipeline cannot act on**, and a test now enforces it. The declaration is
+  what keeps the `(text:N)` parens in the prompt; a family that declared weighting without applying it would hand
+  the parens and the digits to its encoder as prose — worse than not weighting at all. Thirty-three ledgered
+  families therefore still declare nothing, each with its reason recorded.
+- **Weighting on Kandinsky5 is a no-op, and that IS parity.** SwarmUI selects the blend for it, but
+  `Kandinsky5TEModel.encode_token_weights` returns the Qwen conditioning plus CLIP-L's pooled vector and discards
+  the blended hidden states, so the weights never reach the model. Implementing the blend there would have broken
+  parity rather than achieved it.
+- **The refiner prepares the caller's prompt for its own family**, rather than inheriting whatever the base was
+  left with. Preparation is destructive in both directions: a weighting base's `(text:N)` grammar would reach a
+  refiner whose encoder reads parens as prose, and — the direction easier to miss — an unweighted base collapses
+  `<weight[1.5]:x>` to `x` before a refiner that *can* weight ever sees it, so the emphasis is silently gone.
+  Neither is recoverable from a prompt already resolved for someone else.
+
 ## alpha.98
 
 - **A per-request setting was silently ignored for 53 of the engine's knobs.** `KnobScope.Runtime` declares a knob

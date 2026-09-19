@@ -359,7 +359,28 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
     /// the same family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree
     /// with the pipeline that will actually run.</summary>
-    internal ImageFeatures SupportedFeatures(ModelSpec spec) => ResolveRecipe(spec).Supports;
+    internal ImageFeatures SupportedFeatures(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return recipe.Supports
+            | (AppliesWeighting(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
+    }
+
+    /// <summary>Whether a declared mode means the emphasis grammar must survive prompt flattening. The feature bit is
+    /// derived from the mode here rather than declared per recipe so the two can never disagree — a recipe that set the
+    /// bit without a mode would keep the parens and hand its encoder the digits as prose.</summary>
+    private static bool AppliesWeighting(Diffusion.Prompting.PromptWeightingMode mode) =>
+        mode != Diffusion.Prompting.PromptWeightingMode.None;
+
+    /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
+    /// registry lookup the construction path uses.</summary>
+    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec) =>
+        ResolveRecipe(spec).PromptWeighting;
+
+    /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
+    internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
+        VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec))?.PromptWeighting
+        ?? Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The officially recommended defaults for <paramref name="spec"/>: the constructed pipeline's
     /// variant-resolved numbers when it declares them, else the recipe's family-level ones. Resolved through the same
@@ -397,13 +418,16 @@ public sealed class InferenceEngine : IInferenceEngine
     internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
     {
         IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        return recipe switch
+        VideoFeatures declared = recipe switch
         {
             null => VideoFeatures.None,
             Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(spec.LocalPath),
             Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(spec.LocalPath),
             _ => recipe.Supports,
         };
+        return recipe is not null && AppliesWeighting(recipe.PromptWeighting)
+            ? declared | VideoFeatures.PromptWeighting
+            : declared;
     }
 
     /// <summary>The sampler/schedule selection the video recipe for <paramref name="spec"/> accepts. Resolved through

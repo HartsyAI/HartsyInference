@@ -20,7 +20,12 @@ public sealed class Sd15Recipe : IArchitectureRecipe
     public ImageFeatures Supports =>
         ImageFeatures.Lora | ImageFeatures.ControlNet | ImageFeatures.IpAdapter
         | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.VariationSeed | ImageFeatures.SeamlessTiling | ImageFeatures.Refiner
-        | ImageFeatures.PromptScheduling | ImageFeatures.PromptWeighting;
+        | ImageFeatures.PromptScheduling;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>; applied by
+    /// <c>WeightedConditioning</c>, which blends each token's CLIP output against the empty-prompt baseline.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd15", StringComparison.OrdinalIgnoreCase);

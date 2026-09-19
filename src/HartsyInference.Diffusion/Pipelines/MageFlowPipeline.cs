@@ -43,17 +43,24 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     public Tensor GenerateFromTokens(int[] condTokens, int condDrop, int[]? uncondTokens, int uncondDrop, int width,
         int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null, string? seamlessTiling = null,
         long variationSeed = -1, double variationSeedStrength = 0, string? samplerSelection = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null, Prompting.WeightedTokenSequence? condWeights = null,
+        Prompting.WeightedTokenSequence? uncondWeights = null)
     {
         ThrowIfDisposed();
+        RequireMatchingWeights(condTokens, condWeights, nameof(condWeights));
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
         // explicitly rather than read off a request — this pipeline takes primitives, not a TextToImageRequest.
         using IDisposable seamlessScope = BeginSeamlessTiling(seamlessTiling);
         bool useCfg = cfgScale > 1f && uncondTokens is not null;
+        if (useCfg)
+        {
+            RequireMatchingWeights(uncondTokens!, uncondWeights, nameof(uncondWeights));
+        }
 
         // 1. Text conditioning: Qwen3-VL-4B last_hidden_state, system prefix dropped.
-        Tensor condHidden = EncodeDropped(condTokens, condDrop);
-        Tensor? uncondHidden = useCfg ? EncodeDropped(uncondTokens!, uncondDrop) : null;
+        Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
+        Tensor? uncondHidden = useCfg
+            ? ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights) : null;
 
         // 1b. Edit: VAE-encode the reference image → packed ref tokens, appended in-context each forward. The DiT's
         // refGrids machinery gives them frame-axis-1 RoPE and drops them from the returned velocity. (The Qwen3-VL
@@ -157,6 +164,32 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         Tensor image = _vaeDecoder.Decode(Backend, finalLatent);
         finalLatent.Dispose();
         return image;
+    }
+
+    /// <summary>Scales each token's cond row by its weight AFTER the system-prefix drop — SwarmUI's CondScale
+    /// mechanism, whose right-alignment offset is negative here because of that drop. Adopts and disposes
+    /// <paramref name="hidden"/>, so the caller keeps exactly one tensor to release.</summary>
+    /// <summary>Token weights are matched to conditioning rows by position — right-aligned — so a weight array that
+    /// does not describe the tokens it arrived with would not fail, it would shift every emphasis onto a neighbouring
+    /// word. This pipeline is public and takes primitives, so the pairing is the caller's to get right and ours to
+    /// check; Qwen-Image and Flux.2 already refuse the same mismatch.</summary>
+    private static void RequireMatchingWeights(int[] tokenIds, Prompting.WeightedTokenSequence? weights, string name)
+    {
+        if (weights is not null && weights.Weights.Length != tokenIds.Length)
+            throw new ArgumentException(
+                $"Weights describe {weights.Weights.Length} tokens but {tokenIds.Length} were passed.", name);
+    }
+
+    private Tensor ApplyTokenWeights(Tensor hidden, Prompting.WeightedTokenSequence? weights)
+    {
+        Tensor? scaled = weights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, hidden, null, weights).Cond;
+        if (scaled is null)
+        {
+            return hidden;
+        }
+        hidden.Dispose();
+        return scaled;
     }
 
     // Encode tokens through Qwen3-VL-4B; drop the leading system-prefix rows from the [1, S, 2560] hidden states.

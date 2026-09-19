@@ -56,9 +56,21 @@ public static class RefinerStage
     }
 
     /// <summary>Runs the generic refiner pass over <paramref name="baseResult"/> when the request asks for one, else returns it unchanged. <paramref name="request"/> must be the defaults-resolved, segment-stripped base request (its prompt is what conditions the refine).</summary>
+    /// <summary>Resolves the caller's own prompt for the refiner's family. Mirrors what <c>ImagesService</c> does for
+    /// the base pass, including the segment strip: a <c>&lt;segment:&gt;</c> sub-prompt is meant for its own masked
+    /// denoise, never for a full-canvas pass, and the refiner is a full-canvas pass.</summary>
+    internal static string? PrepareForRefiner(string? prompt, Diffusion.Prompting.PromptWeightingMode mode,
+        bool schedulingSupported)
+    {
+        if (prompt is null) return null;
+        string prepared = Diffusion.Prompting.PromptFeatureFlattening.Prepare(prompt, mode, schedulingSupported);
+        return SegmentRefinement.HasSegmentParts(prepared) ? SegmentRefinement.StripSegmentText(prepared) : prepared;
+    }
+
     internal static ImageResult Apply(
         InferenceEngine engine, ModelSpec baseSpec, ImageRequest request, ImageResult baseResult,
-        IProgress<StepPreview>? progress, CancellationToken cancel)
+        IProgress<StepPreview>? progress, CancellationToken cancel, string? rawPrompt = null,
+        string? rawNegativePrompt = null)
     {
         RefinerResolver.RefinerSpec? spec = RefinerResolver.Resolve(
             request.Refiner,
@@ -131,8 +143,21 @@ public static class RefinerStage
             }
         }
 
+        // The prompt reaching here was prepared for the BASE family, and the two families need not agree: a refiner
+        // that cannot weight must not inherit the parens and read them as prose, and one that CAN must not be handed
+        // a prompt the base already stripped the emphasis out of. Preparing the caller's own text a second time
+        // against the refiner's mode is the only thing that answers both, since neither direction can be recovered
+        // from a prompt already resolved for someone else.
+        Diffusion.Prompting.PromptWeightingMode refinerWeighting = engine.PromptWeightingFor(refinerSpec);
+        bool refinerScheduling = (refinerFeatures & ImageFeatures.PromptScheduling) != 0;
+        string refinePrompt =
+            PrepareForRefiner(rawPrompt ?? request.Prompt, refinerWeighting, refinerScheduling) ?? request.Prompt;
+        string? refineNegative = PrepareForRefiner(
+            rawNegativePrompt ?? request.NegativePrompt, refinerWeighting, refinerScheduling);
         ImageRequest refineRequest = request with
         {
+            Prompt = refinePrompt,
+            NegativePrompt = refineNegative,
             Width = width,
             Height = height,
             Steps = spec.Steps,

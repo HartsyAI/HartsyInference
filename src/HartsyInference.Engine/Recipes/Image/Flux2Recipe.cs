@@ -34,6 +34,13 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// gained an <c>attnBias</c> slot (mirroring <see cref="FluxTransformer"/>'s), wired through <see cref="Flux2Pipeline.GenerateFromTokens"/>
     /// and <see cref="Flux2RecipePipeline.BuildRegionalPlan"/> — real-weight verified with a two-region prompt.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <summary>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Flux.2 text stack — Klein's Qwen3, the
+    /// 8B Klein and Dev's Mistral — disables weights in ComfyUI, so the prompt is encoded at weight 1 and each token's
+    /// cond row is scaled afterwards. Nothing is trimmed off this family's encoder output, so the alignment offset
+    /// is 0.</summary>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
+
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 

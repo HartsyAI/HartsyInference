@@ -6,6 +6,11 @@ public static class VideoRecipeRegistry
 {
     private static readonly List<IVideoRecipe> _recipes = BuildDefaults();
 
+    /// <summary>The families this build ships, captured before <see cref="Register"/> can add to them —
+    /// a catalogue-wide invariant must not be widened by a recipe a test or an out-of-tree package registered
+    /// at runtime, and there is no unregister to undo one.</summary>
+    public static IReadOnlyList<string> DefaultNames { get; } = [.. _recipes.Select(r => r.Name)];
+
     /// <summary>The recipe that handles <paramref name="familyId"/>, or null when none is registered yet.</summary>
     public static IVideoRecipe? Resolve(string familyId)
     {
