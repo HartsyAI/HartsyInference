@@ -81,6 +81,11 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   yet"). Speed/ceiling detail: `benchmarks/scoreboards/VIDEO.md`.
 
 ### Wan / LTX open items
+- [x] **LTX-Video (0.9/0.9.5/13B) weights prompts — DONE 2026-09-19 (alpha.130).** ComfyBlend on its plain
+  T5-XXL arm. The empty baseline rides the SAME three-row encode batch as the prompt and negative, so it shares
+  their padding and layer selection rather than merely resembling them, and the blend lands at the full 128-token
+  window before the pad drop — the weights describe the padded rows and the baseline is only subtractable while
+  both still have them. (LTX-2 is a different stack, is CondScale, and is still unwired.)
 - [x] **The whole Wan family weights prompts — DONE 2026-09-19 (alpha.130).** `WanVideoRecipe` was wired in
   alpha.115; the four variant recipe classes (`wan-animate`, `wan-animate-2`, `wan-s2v`, `wan-vace`) are separate
   classes with their own prompt paths and so never inherited it. The blend now lives once in `VideoRecipeUtils`
