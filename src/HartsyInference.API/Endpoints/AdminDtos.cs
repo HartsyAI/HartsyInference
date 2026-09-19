@@ -7,6 +7,29 @@ public sealed class PullModelRequest
     public string Model { get; set; } = "";
 }
 
+/// <summary>Request body for <c>POST /admin/models/quantize</c>. Precision is a request field rather than a
+/// server setting on purpose: which precision a file is written at describes that file, not this machine.</summary>
+public sealed class QuantizeModelRequest
+{
+    /// <summary>Checkpoint to read; any container the engine can open, including a GGUF being made smaller.</summary>
+    public string ModelPath { get; set; } = "";
+
+    /// <summary>File to write.</summary>
+    public string Out { get; set; } = "";
+
+    /// <summary>Output format: <c>gguf</c>, <c>fp8-scaled</c> or <c>int8-convrot</c>.</summary>
+    public string Format { get; set; } = "gguf";
+
+    /// <summary>GGUF precision preset; ignored by the other formats.</summary>
+    public string Quant { get; set; } = "Q8_0";
+
+    /// <summary>Value for the output's <c>general.architecture</c>, which is how a reader picks a key mapper.</summary>
+    public string? Architecture { get; set; }
+
+    /// <summary>Whether an existing output may be replaced.</summary>
+    public bool Overwrite { get; set; }
+}
+
 /// <summary>Request body for <c>POST /admin/backend</c>.</summary>
 public sealed class SetBackendRequest
 {

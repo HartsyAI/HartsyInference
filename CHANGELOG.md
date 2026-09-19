@@ -34,6 +34,15 @@ stable release will require. Dates are UTC.
 
 ## alpha.111
 
+## alpha.114
+
+- **`POST /admin/models/quantize`** exposes offline quantization over the API, with the same formats and presets
+  the CLI takes so a caller does not have to learn two vocabularies for one operation.
+- It is synchronous on purpose. A caller that gets a 200 has a finished file on disk; a multi-GB write that
+  reported success before it was durable is the sort of thing nobody notices until the file is loaded.
+- Validation happens before the filesystem is touched, so a bad format or preset is a 400 rather than a
+  partially-written file.
+
 ## alpha.113
 
 - **A LoRA can be merged into a convolution weight.** SD1.5 and SDXL UNets are mostly convolution, so a LoCon or
