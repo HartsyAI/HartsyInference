@@ -1,5 +1,6 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Logging;
@@ -79,15 +80,64 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     ///   <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
     ///   <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step packed-latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="FluxPipeline"/>).</item>
     /// </list></summary>
+    /// <summary>Encodes one conditioning tensor per distinct scheduled variant, applying that variant's OWN token
+    /// weights. The text encoder is loaded once for the whole set and freed once after, because it cannot be
+    /// resident alongside the DiT — paying that eviction per variant would dominate a two-variant prompt.</summary>
+    private List<Tensor> EncodeScheduledVariants(Prompting.ScheduledPrompt schedule, Stopwatch sw)
+    {
+        Logs.Info($"Flux.2: encoding {schedule.Variants.Count} scheduled prompt variants "
+            + $"(<alternate:>/<fromto[N]:>) across {schedule.StepToVariant.Length} steps.");
+        if (_ditResident)
+        {
+            _transformer.InvalidateStepGraph(Backend);
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        List<Tensor> encoded = new List<Tensor>(schedule.Variants.Count);
+        try
+        {
+            foreach (Prompting.WeightedTokenSequence variant in schedule.Variants)
+            {
+                Tensor hidden = _textEncoder.EncodeMultiLayer(Backend, [variant.Tokens], _hiddenLayers);
+                // Host-materialize before the next variant's forward, for the same reason the single-prompt path
+                // does it: the encoder's device intermediates are reclaimed below and these must survive that.
+                _ = hidden.DataPointer;
+                if (!variant.IsUniformlyUnweighted)
+                {
+                    Tensor weighted = Prompting.CondTokenWeights.Apply(Backend, hidden, null, variant).Cond
+                        ?? throw new HartsyInferenceException("Weighted conditioning returned no tensor.");
+                    hidden.Dispose();
+                    hidden = weighted;
+                    _ = hidden.DataPointer;
+                }
+                encoded.Add(hidden);
+            }
+        }
+        catch
+        {
+            foreach (Tensor partial in encoded) partial.Dispose();
+            throw;
+        }
+        Backend.FreeWeights(_textEncoder.EnumerateWeights());
+        Backend.FreeActivations();
+        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms "
+            + $"({encoded.Count} variants, seqLen={encoded[0].Shape[1]})");
+        return encoded;
+    }
+
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         TextToImageRequest request,
         float guidanceScale = 3.5f,
         Action<GenerationProgress>? onProgress = null,
         RegionalPlan? regionalPlan = null,
-        Prompting.WeightedTokenSequence? promptWeights = null)
+        Prompting.WeightedTokenSequence? promptWeights = null,
+        Prompting.ScheduledPrompt? promptSchedule = null)
     {
         ThrowIfDisposed();
+        // <alternate:>/<fromto[N]:> resolved to one tokenized variant per distinct step-text. A schedule whose
+        // branches collapse to the same text is not scheduled at all and stays on the single-encode path below.
+        bool scheduled = promptSchedule is { IsScheduled: true };
         if (promptWeights is not null && promptWeights.Weights.Length != promptTokenIds.Length)
         {
             throw new ArgumentException(
@@ -134,7 +184,17 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
 
         // ── 1. Text encoder forward (with cross-generation prompt-embedding cache) ──
         Tensor textEmbeddings;
-        if (_cachedPromptKey is not null && promptTokenIds.AsSpan().SequenceEqual(_cachedPromptKey))
+        // Owned by this request when scheduled — one entry per distinct variant, disposed at the tail. The
+        // cross-generation prompt cache is keyed on a single token array and is deliberately bypassed here
+        // rather than given a composite key: a scheduled prompt is the rare case, and a wrong cache hit across
+        // variants would serve one branch's conditioning for another's steps.
+        List<Tensor>? scheduledText = null;
+        if (scheduled)
+        {
+            scheduledText = EncodeScheduledVariants(promptSchedule!, sw);
+            textEmbeddings = scheduledText[promptSchedule!.IndexForStep(0)];
+        }
+        else if (_cachedPromptKey is not null && promptTokenIds.AsSpan().SequenceEqual(_cachedPromptKey))
         {
             Logs.Info("Flux.2 prompt-embedding cache HIT — skipping the text-encoder phase.");
             textEmbeddings = _cachedTextEmbeddings!;
@@ -171,7 +231,7 @@ _transformer.InvalidateStepGraph(Backend);
         // CondScale weighting (SwarmText.py:256-271) on a per-request copy: the cache above is keyed on token ids
         // alone, and a weighted prompt tokenizes to the same ids, so scaling the cached tensor would leak into the
         // next plain request and compound across repeats.
-        Tensor? weightedText = promptWeights is null
+        Tensor? weightedText = promptWeights is null || scheduled
             ? null : Prompting.CondTokenWeights.Apply(Backend, textEmbeddings, null, promptWeights).Cond;
         if (weightedText is not null)
         {
@@ -183,6 +243,15 @@ _transformer.InvalidateStepGraph(Backend);
         // follow text in Flux.2's joint [txt|img] attention, matching the "text first" concat every block already
         // uses). Collapses to the base path when no plan is given. ──
         bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
+        if (scheduled && hasRegions)
+        {
+            // The region stream is built once, off whichever conditioning is current, and its attention bias is
+            // sized from that. Switching the base conditioning per step would leave both stale, and silently:
+            // the shapes still line up. Refused by name instead.
+            throw new NotSupportedException(
+                "A regional prompt and a per-step scheduling tag (<alternate:>/<fromto[N]:>) cannot be combined on "
+                + "Flux.2: the regional text stream is built once from the base conditioning. Drop one of the two.");
+        }
         Tensor? extendedText = null;
         List<(int Start, int End)>? regionRanges = null;
         List<float[]>? regionGridMasks = null;
@@ -289,8 +358,16 @@ _transformer.InvalidateStepGraph(Backend);
 
         float[] timestepTable = scheduler.Timesteps.ToArray();
 
+        // `!scheduled`: the graph pins step-invariant conditioning with PreloadWeights and replays one captured
+        // op sequence, so conditioning that changes per step is exactly what capture cannot express.
         bool graphRoute = drainFree && packedSourceLatent is null && stepCacheInst is null && !hasRegions
-            && !nonDefaultSampler && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
+            && !scheduled && !nonDefaultSampler && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
+        if (scheduled && drainFree && packedSourceLatent is null && stepCacheInst is null && !hasRegions
+            && !nonDefaultSampler && _transformer.StepGraphEnabled && Backend.StepGraphSupported)
+        {
+            Logs.Info("Flux.2: step-graph capture skipped — the prompt schedules its conditioning per step, which a "
+                + "captured graph cannot vary. Output is unaffected; the step is slower.");
+        }
         if (graphRoute)
         {
             Tensor fixedLatent = _transformer.PrepareGraphLatent(Backend, packedLatent);
@@ -303,6 +380,10 @@ _transformer.InvalidateStepGraph(Backend);
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
+            if (scheduled)
+            {
+                textEmbeddings = scheduledText![promptSchedule!.IndexForStep(i)];
+            }
 
             if (graphRoute)
             {
@@ -444,6 +525,11 @@ _transformer.InvalidateStepGraph(Backend);
         // textEmbeddings is a cross-generation cache entry — not disposed here. extendedText (region-extended)
         // is rebuilt fresh every generation — always disposed.
         extendedText?.Dispose();
+        // Scheduled variants never entered the cross-generation cache, so this request owns every one of them.
+        if (scheduledText is not null)
+        {
+            foreach (Tensor scheduledVariant in scheduledText) scheduledVariant.Dispose();
+        }
         // Per-request copy shadowing the cached embeddings; the unweighted original stays in the cache. The graph
         // route pins step-invariant conditioning with PreloadWeights, and that is this tensor when the prompt is
         // weighted — so the device entry has to be released by identity before the host storage goes, or every

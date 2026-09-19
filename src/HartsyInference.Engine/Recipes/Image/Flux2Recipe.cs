@@ -33,7 +33,11 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <para><see cref="ImageFeatures.Regional"/> added 2026-08-11 (Tier 3.7): <see cref="Flux2Transformer"/>'s double/single blocks
     /// gained an <c>attnBias</c> slot (mirroring <see cref="FluxTransformer"/>'s), wired through <see cref="Flux2Pipeline.GenerateFromTokens"/>
     /// and <see cref="Flux2RecipePipeline.BuildRegionalPlan"/> — real-weight verified with a two-region prompt.</para></remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora
+        // Declared only because Flux2RecipePipeline builds a ScheduledPrompt and Flux2Pipeline selects per step.
+        // The bit is what keeps <alternate:>/<fromto[N]:> in the prompt at all, so declaring it without consuming
+        // one would hand the encoder the literal tag text as prose.
+        | ImageFeatures.PromptScheduling;
 
     /// <summary>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Flux.2 text stack — Klein's Qwen3, the
     /// 8B Klein and Dev's Mistral — disables weights in ComfyUI, so the prompt is encoded at weight 1 and each token's

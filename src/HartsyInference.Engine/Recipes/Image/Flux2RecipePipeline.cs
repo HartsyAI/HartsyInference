@@ -51,6 +51,11 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         // TODO(E-IMG-4/5): img2img, NegativePrompt/CfgScale mapping, and user component overrides are deferred.
         WeightedTokenSequence tokens = Tokenize(prompt);
         WeightedTokenSequence? promptWeights = tokens.IsUniformlyUnweighted ? null : tokens;
+        // <alternate:>/<fromto[N]:> survive ImagesService only because this recipe declares
+        // ImageFeatures.PromptScheduling; each distinct step-text is tokenized through the SAME Tokenize above, so a
+        // branch carrying its own emphasis is weighted per branch. Null when the prompt schedules nothing, which
+        // keeps an ordinary request byte-identical on the single-encode path.
+        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(prompt, steps, Tokenize);
 
         // Resolved at the 16-rounded size Flux2Pipeline validates against.
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
@@ -80,7 +85,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
 
             (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
                 tokens.Tokens, inner, guidanceScale: guidance, onProgress: bridge, regionalPlan: regionalPlan,
-                promptWeights: promptWeights);
+                promptWeights: promptWeights, promptSchedule: promptSchedule);
 
             return new ImageResult
             {
