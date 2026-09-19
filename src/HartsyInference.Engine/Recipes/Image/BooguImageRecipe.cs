@@ -29,6 +29,13 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// tower for the text-and-image-dropped embedding, which is still deferred.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.BooguImageTransformer"/> names its stacks <c>double_stream_layers.{i}</c>, <c>noise_refiner.{i}</c>, <c>context_refiner.{i}</c> and <c>ref_image_refiner.{i}</c> — none of which the bare-root LoRA detector recognized before the same change.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1927</c> →
+    /// <c>boogu.BooguTokenizer</c>, a <c>Qwen3VLTokenizer</c> subclass, which disables weights
+    /// (<c>qwen3vl.py:187</c>).</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
 
