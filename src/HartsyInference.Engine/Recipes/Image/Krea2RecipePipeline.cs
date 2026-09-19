@@ -202,13 +202,7 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
         WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
             prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
-        // Truncating the ids without their weights would shift every emphasis off the word it belongs to.
-        return (sequence.Tokens.Length <= MaxTokens
-            ? sequence
-            : new WeightedTokenSequence(sequence.Tokens[..MaxTokens], sequence.Weights[..MaxTokens])
-            {
-                UniformWeight = sequence.UniformWeight,
-            }, dropIndex);
+        return (sequence.Truncate(MaxTokens), dropIndex);
     }
 
     /// <inheritdoc/>

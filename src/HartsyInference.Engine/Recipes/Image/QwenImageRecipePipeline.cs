@@ -176,18 +176,8 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
         WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
             prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
-        return (Truncate(sequence, MaxTokens), dropIndex);
+        return (sequence.Truncate(MaxTokens), dropIndex);
     }
-
-    /// <summary>diffusers truncates the templated sequence; the weights are truncated with it, because a weight array
-    /// longer than the ids it describes would shift every emphasis by the difference.</summary>
-    private static WeightedTokenSequence Truncate(WeightedTokenSequence sequence, int maxTokens) =>
-        sequence.Tokens.Length <= maxTokens
-            ? sequence
-            : new WeightedTokenSequence(sequence.Tokens[..maxTokens], sequence.Weights[..maxTokens])
-            {
-                UniformWeight = sequence.UniformWeight,
-            };
 
     /// <inheritdoc/>
     public void Dispose()
