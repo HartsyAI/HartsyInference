@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.130
+
+- **The four Wan variant recipes honour `(word:N)` too: Wan-Animate, Wan-Animate-2, Wan S2V and Wan VACE.** Each
+  is a separate recipe class from `WanVideoRecipe` with its own prompt path, which is why declaring the mode on
+  the parent never reached them. That is the whole Wan family wired, and takes the deliberately-unwired ledger
+  from 22 registered families to 18.
+- **The blend is hoisted into `VideoRecipeUtils` rather than copied four times**, and `WanVideoRecipePipeline`
+  delegates to it, so there is one definition of how this family weights a prompt instead of five that can drift.
+- Wan-Animate-2 carries a third conditioning stream — the driving clip's own prompt — and it is weighted as its
+  own leaf, which is what SwarmUI's `encode_leaves` does per leaf. Its empty baseline rides the same four-row
+  batch, for the reason the two-stream form already gave: the baseline has to share the padding and the layer
+  selection exactly, and a second pass cannot guarantee that.
+- umT5 pads to a fixed window, so ONE empty encode matches any prompt's shape. That is what makes ComfyBlend
+  cheap for this family, and it is not true of every ComfyBlend family — a family whose conditioning length
+  tracks its prompt needs a per-prompt baseline instead.
+- The token/weight pairing is now unit-tested once for all five recipes. The invariant worth naming: EOS and pad
+  rows weigh exactly 1. They are not part of the prompt, and blending them would pull the padding toward the
+  empty encode along with the words — a whole-sequence drift that reads as the weighting being far too strong.
+
 ## alpha.129
 
 - **Six more families honour `(word:N)` prompt weighting: Z-Image, Boogu, Zeta-Chroma, Lens, ERNIE-Image and

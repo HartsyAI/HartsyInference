@@ -81,6 +81,15 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   yet"). Speed/ceiling detail: `benchmarks/scoreboards/VIDEO.md`.
 
 ### Wan / LTX open items
+- [x] **The whole Wan family weights prompts — DONE 2026-09-19 (alpha.130).** `WanVideoRecipe` was wired in
+  alpha.115; the four variant recipe classes (`wan-animate`, `wan-animate-2`, `wan-s2v`, `wan-vace`) are separate
+  classes with their own prompt paths and so never inherited it. The blend now lives once in `VideoRecipeUtils`
+  and all five delegate to it. Wan-Animate-2's driving stream is weighted as its own leaf and its empty baseline
+  rides the same four-row batch. umT5's fixed window is what makes one empty encode valid for any prompt.
+  Real-weight verified on `wan2.2_ti2v_5B_fp16` through the hoisted helper; the token/weight pairing is
+  unit-tested for all five (EOS and pad rows weigh exactly 1, or the blend drags the padding toward the empty
+  encode along with the words). The three variants with no local checkpoint — Animate, S2V, VACE — are covered by
+  those two and by being one-line call sites onto the same function, not by their own generation.
 - [x] **Wan `EndFrame` wiring DONE 2026-08-11 for `wan-22-5b`** — symmetric per-frame-timestep-0 pinning
   alongside the existing first-frame conditioning, real-weight verified (`WanEndFrameRealWeightTests.cs`).
   `wan-21-1_3b` shares the same code path but stays narrowed pending a local 1.3B checkpoint to verify against.
