@@ -28,10 +28,15 @@ stable release will require. Dates are UTC.
   blocks, not a per-row op: `MaskRows` is F32-only and the DiT activation is F16 on the fast path. The key bias is
   a `[1,1,1,Skv]` additive mask, which SDPA broadcasts over every query without materializing the Sq x Skv
   duplicate. Like the regional bias, a live weight excludes the step cache, the captured graph and DiT sharding.
-- **Two combinations are refused by name instead of silently dropped.** Regional prompting plus attention weights
-  drive the same attention bias, and SwarmUI resolves that clash by overwriting `attn_mask` — which would discard
-  the regional conditioning with no sign of it. img2img and masked inpaint reach the transformer through the
-  pixel-space route, which has no bias surface at all. Both read as "emphasis is weak" when they fail quietly.
+- **A weighted region works; a weighted base prompt alongside one does not, and says so.** A region is its own
+  leaf — which is what SwarmUI's `encode_leaves` does per region — so it gets the cond-scale half; the region
+  already owns the attention bias, leaving no slot for the patch. But the base encode covers the region tags too,
+  so weighting BOTH would land two sets of weights on the same conditioning rows; that is refused by name. With
+  regions present the base drops the weight grammar in both its spellings (SwarmUI's `<weight[N]:>` tag and the
+  literal `(word:N)` a CLI user types), so its token ids are what they were before this change.
+- **img2img and masked inpaint with attention weights are refused too**, because those run the pixel-space route,
+  which reaches the transformer with no bias surface at all. Both of these read as "emphasis is weak" when they
+  fail quietly, which is why neither is a warning.
 - `ModelSpecificEnhancements` is now a request field, defaulting on to match
   `UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)`, with `hartsy image --no-model-enhancements` to
   turn it off.

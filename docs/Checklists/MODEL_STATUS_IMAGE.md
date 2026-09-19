@@ -218,9 +218,13 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   than the half that was already there, not nothing. `(fox:0.5)` vs `(fox:1.5)` is 25.14, confirming the two
   directions are genuinely different operations rather than one scaled. All outputs are coherent foxes; at a 6-step
   turbo checkpoint and a single weighted word the *visual* direction is subtle, and the numbers above are what the
-  gate rests on. Regional prompting + attention weights, and img2img/masked inpaint + attention weights, are
-  refused by name (the first shares the attention bias — SwarmUI overwrites `attn_mask`, silently dropping the
-  regions; the second runs the pixel-space route, which has no bias surface).
+  gate rests on. A weighted REGION works and takes the cond-scale half (`<region:…>a red (fox:1.0)` is
+  byte-identical to the unweighted region, `(fox:0.5)` differs); weighting the base prompt AND a region in the
+  same request is refused by name, because the base encode covers the region tags and the two sets of weights
+  would land on the same rows. img2img and masked inpaint with attention weights are refused for a different
+  reason — the pixel-space route has no attention-bias surface. **Not verified:** Krea 2's true-CFG branch is
+  unreachable on the turbo checkpoint (`Krea2RecipePipeline` pins `cfg` to the turbo default, so `useCfg` is
+  always false), so the weighted-negative path has no runtime coverage.
 - [x] **The SDXL pooled/ADM vector follows the prompt schedule — DONE 2026-09-11.** `SdxlPipeline` switched the
   hidden-state tensor per step but kept handing every UNet and ControlNet call the one pooled encode, so a
   scheduled prompt paired (for example) a later step's "dog" hidden states with variant 0's "cat" ADM
