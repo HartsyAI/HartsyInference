@@ -161,7 +161,7 @@ public sealed class PromptWeightingModeLedgerTests
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "anima", "flux1", "hidream",
+        "anima", "hidream",
         "hunyuan-image", "hunyuan-video", "kandinsky5", "kandinsky5-video",
         "ltx-2.5-distilled", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
         "sd3", "sdxl-refiner",

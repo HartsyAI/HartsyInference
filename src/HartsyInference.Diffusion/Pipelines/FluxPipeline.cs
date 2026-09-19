@@ -46,6 +46,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private int[]? _cachedNegKey;
     private Tensor? _cachedNegClipPooled;
     private Tensor? _cachedNegT5;
+    // The ComfyBlend baseline: the SAME T5 on the empty prompt. Flux's T5 pads to a fixed window (256 or 512 by
+    // checkpoint variant), so this does not depend on the prompt and is encoded once for the pipeline's lifetime.
+    // Only ever built when a request actually carries a weight, so an unweighted workload never pays for it.
+    private Tensor? _cachedEmptyT5;
 
     /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
     private static bool StatsEnabled => EngineKnobs.FluxStats.Value;
@@ -71,8 +75,25 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes arbitrary text through this pipeline's own T5-XXL encoder — the same encoder instance and backend the base prompt uses, so a region's caption lands in the identical embedding space. For regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s <c>encodeRegion</c> delegate); the recipe pipeline owns the T5 tokenizer, this owns the T5 encoder, so neither side alone can do this. Returns a <c>[1, L, hidden]</c> tensor; disposal is the caller's responsibility (<see cref="Prompting.RegionalPromptResolver.DisposeRegions"/> covers it once the region is attached to a <see cref="Prompting.RegionalPlan"/>).</summary>
-    public Tensor EncodeRegionText(int[] tokenIds, int[]? attentionMask = null) =>
-        _t5.Encode(TextEncoderBackend, [tokenIds], attentionMask is null ? null : [attentionMask]);
+    /// <param name="weights">Per-token weights for this region's own leaf, with <paramref name="emptyTokenIds"/>
+    /// its baseline. Regions are not cached, so the blend replaces the tensor outright.</param>
+    public Tensor EncodeRegionText(int[] tokenIds, int[]? attentionMask = null,
+        float[]? weights = null, int[]? emptyTokenIds = null, int[]? emptyAttentionMask = null)
+    {
+        Tensor cond = _t5.Encode(TextEncoderBackend, [tokenIds], attentionMask is null ? null : [attentionMask]);
+        if (weights is null || emptyTokenIds is null)
+        {
+            return cond;
+        }
+        using Tensor empty = _t5.Encode(TextEncoderBackend, [emptyTokenIds],
+            emptyAttentionMask is null ? null : [emptyAttentionMask]);
+        if (Prompting.ComfyBlend.Apply(TextEncoderBackend, cond, empty, weights) is not Tensor blended)
+        {
+            return cond;
+        }
+        cond.Dispose();
+        return blended;
+    }
 
     /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
     /// <list type="bullet">
@@ -99,9 +120,18 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         Tensor? kontextRefImage = null,
         Tensor? reduxImageEmbeds = null,
         float reduxApplyStartFraction = 0f,
-        IReadOnlyList<Adapters.FluxControlNetConditioning>? fluxControlNets = null)
+        IReadOnlyList<Adapters.FluxControlNetConditioning>? fluxControlNets = null,
+        float[]? promptWeights = null,
+        float[]? negativeWeights = null,
+        int[]? emptyTokenIdsT5 = null,
+        int[]? emptyAttentionMaskT5 = null)
     {
         ThrowIfDisposed();
+        if ((promptWeights is not null || negativeWeights is not null) && emptyTokenIdsT5 is null)
+        {
+            throw new ArgumentNullException(nameof(emptyTokenIdsT5),
+                "ComfyBlend needs the empty-prompt baseline, and only the caller owns the tokenizer that pads it.");
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -205,7 +235,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         int[]? negKey = doTrueCfg
             ? BuildPromptCacheKey(negPromptTokenIdsL ?? promptTokenIdsL, negPromptEosPositionL, negPromptTokenIdsT5!)
             : null;
-        bool condHit = _cachedCondKey is not null && condKey.AsSpan().SequenceEqual(_cachedCondKey);
+        // A weighted request needs the baseline, and the encoder weights are freed after each encode — so the
+        // first weighted request must take the encode branch even on an otherwise perfect cache hit.
+        bool needEmpty = (promptWeights is not null || negativeWeights is not null) && _cachedEmptyT5 is null;
+        bool condHit = !needEmpty && _cachedCondKey is not null && condKey.AsSpan().SequenceEqual(_cachedCondKey);
         bool negHit = !doTrueCfg || (_cachedNegKey is not null && negKey!.AsSpan().SequenceEqual(_cachedNegKey));
 
         Tensor clipPooled;
@@ -252,6 +285,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             int[][] batchTokenIdsT5 = [promptTokenIdsT5];
             int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
             t5Embeddings = _t5.Encode(TextEncoderBackend, batchTokenIdsT5, batchMaskT5);
+            if (needEmpty)
+            {
+                _cachedEmptyT5 = _t5.Encode(TextEncoderBackend, [emptyTokenIdsT5!],
+                    emptyAttentionMaskT5 is null ? null : [emptyAttentionMaskT5]);
+                _ = _cachedEmptyT5.DataPointer;
+            }
 
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={t5Embeddings.Shape[1]})");
             LogTensorStats("CLIP pooled", clipPooled);
@@ -306,6 +345,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 _cachedNegT5 = negT5Embeddings;
             }
         }
+
+        // On a per-request COPY. The cache above is keyed on token ids, and a weighted prompt tokenizes to the
+        // same ids once the grammar is off, so blending in place would hand the next plain request this one's
+        // emphasis. Flux applies no trim to its T5 output, which is what lets the cached tensor stay plain and
+        // still share the baseline's shape.
+        Tensor? blendedT5 = promptWeights is null || _cachedEmptyT5 is null
+            ? null : Prompting.ComfyBlend.Apply(TextEncoderBackend, t5Embeddings, _cachedEmptyT5, promptWeights);
+        if (blendedT5 is not null) t5Embeddings = blendedT5;
+        Tensor? blendedNegT5 = negT5Embeddings is null || negativeWeights is null || _cachedEmptyT5 is null
+            ? null : Prompting.ComfyBlend.Apply(TextEncoderBackend, negT5Embeddings, _cachedEmptyT5, negativeWeights);
+        if (blendedNegT5 is not null) negT5Embeddings = blendedNegT5;
 
         int txtSeqLen = (int)t5Embeddings.Shape[1];
         if (doTrueCfg && (int)negT5Embeddings!.Shape[1] != txtSeqLen)
@@ -1118,6 +1168,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
+        // Per-request copies, not the cached originals.
+        blendedT5?.Dispose();
+        blendedNegT5?.Dispose();
+
         return (rgbData, width, height, seed);
     }
 
@@ -1163,6 +1217,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         _cachedNegClipPooled?.Dispose();
         _cachedNegClipPooled = null;
         _cachedNegT5?.Dispose();
+        _cachedEmptyT5?.Dispose();
         _cachedNegT5 = null;
         _cachedNegKey = null;
     }

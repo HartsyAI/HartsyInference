@@ -33,6 +33,14 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         | ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.IpAdapter | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.Refiner;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:771</c> →
+    /// <c>flux.FluxTokenizer</c> = clip_l + <c>T5XXLTokenizer</c>, neither of which disables weights. Only the T5
+    /// arm is blendable here: CLIP-L contributes its POOLED vector and its hidden states are discarded, and
+    /// ComfyUI's blend rewrites hidden states only — so wiring the CLIP arm would be a no-op.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024 (<c>GenerationDefaults.FluxDev</c>); a Schnell checkpoint narrows this to 4 steps via <see cref="Flux1RecipePipeline.VariantDefaults"/>.</summary>
