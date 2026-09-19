@@ -63,6 +63,15 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
     /// <remarks>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post <see cref="WanVideoCheckpointConverter.Convert"/>), not the raw checkpoint's own key names. Wan ships both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here (mirroring <see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) risks silently misclassifying a checkpoint whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Wan's tokenizer chain reaches
+    /// <c>UMT5XXlTokenizer</c>, which sets no <c>disable_weights</c>, so the weights survive tokenization and
+    /// ComfyUI blends them into the encoder OUTPUT. Applied by <c>WanVideoRecipePipeline</c>, which encodes the
+    /// empty-prompt baseline in the same batch.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
+    /// <inheritdoc/>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))

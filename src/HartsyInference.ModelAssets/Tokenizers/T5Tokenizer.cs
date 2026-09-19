@@ -19,6 +19,10 @@ public sealed class T5Tokenizer : IDisposable
 
     private readonly Tokenizer _tokenizer;
     private readonly int _maxLength;
+
+    /// <summary>The fixed window <see cref="Encode"/> pads to. Exposed because a caller building its own weighted
+    /// id array has to pad it identically — a weight array shorter than the ids it describes shifts every emphasis.</summary>
+    public int MaxLength => _maxLength;
     private int _disposed;
 
     /// <summary>Creates a T5 tokenizer using the canonical T5 SentencePiece protobuf embedded in this assembly. Same vocabulary as T5-base / T5-small / T5-XXL — the encoder model size differs but the tokenizer is identical. Use the path/stream overloads only if you need to override with a non-standard SentencePiece model.</summary>

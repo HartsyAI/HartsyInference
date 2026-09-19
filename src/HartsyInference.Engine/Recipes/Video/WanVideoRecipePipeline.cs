@@ -11,6 +11,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Video.Pipelines;
 using HartsyInference.Vision.Clip;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
@@ -82,13 +83,39 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             (width, height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
         }
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
+        // umT5 keeps token weights (ComfyUI sets no disable_weights on its tokenizer), so Wan is a ComfyBlend
+        // family: the prompt is encoded at face value and the OUTPUT is blended toward the empty-prompt encode,
+        // z = (z - z_empty)*w + z_empty. Parsing first tells us whether any of that is needed at all — an
+        // unweighted prompt takes the original single path and stays byte-identical.
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(prompt);
+        bool weighted = PromptWeighting.HasWeights(spans);
         int[] negTokens = _tokenizer.Encode(negative);
+        Tensor promptEmbeds, negEmbeds;
         // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
         // cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
         // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
-        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
+        if (weighted)
+        {
+            (int[] weightedTokens, float[] tokenWeights) = BuildWeightedTokens(spans);
+            // The empty encode rides the SAME batch rather than a second pass: ComfyUI's baseline is this encoder
+            // on its own empty-token batch, so it has to share the padding and the layer selection exactly.
+            (promptEmbeds, negEmbeds, Tensor emptyEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+                _textBackend, _umt5, _config.TextDim, weightedTokens, negTokens, _tokenizer.Encode(""));
+            using (emptyEmbeds)
+            {
+                Tensor? blended = ComfyBlend.Apply(_textBackend, promptEmbeds, emptyEmbeds, tokenWeights);
+                if (blended is not null)
+                {
+                    promptEmbeds.Dispose();
+                    promptEmbeds = blended;
+                }
+            }
+        }
+        else
+        {
+            (promptEmbeds, negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+                _textBackend, _umt5, _config.TextDim, _tokenizer.Encode(prompt), negTokens);
+        }
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {
@@ -267,5 +294,23 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+    }
+
+    /// <summary>Tokenizes weighted spans the way <see cref="T5Tokenizer.Encode"/> does — each span alone, then EOS
+    /// and pad to the fixed window — carrying a weight per id. The pad and EOS rows weigh 1: they are not part of
+    /// the prompt, and weighting them would blend the padding toward the empty encode along with the words.</summary>
+    private (int[] Tokens, float[] Weights) BuildWeightedTokens(IReadOnlyList<WeightedSpan> spans)
+    {
+        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _tokenizer.EncodeRaw, [], []);
+        int window = _tokenizer.MaxLength;
+        int[] tokens = new int[window];
+        float[] weights = new float[window];
+        Array.Fill(weights, 1f);
+        int real = Math.Min(built.Tokens.Length, window - 1);
+        Array.Copy(built.Tokens, tokens, real);
+        Array.Copy(built.Weights, weights, real);
+        tokens[real] = T5Tokenizer.EosTokenId;
+        for (int i = real + 1; i < window; i++) tokens[i] = T5Tokenizer.PadTokenId;
+        return (tokens, weights);
     }
 }
