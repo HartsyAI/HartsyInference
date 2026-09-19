@@ -205,12 +205,25 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         return outp;
     }
 
-    private static Tensor ReshapeConvToLinear(Tensor conv, int outDim, int inDim)
+    /// <summary>Relabels the conv weight as the linear <c>[outDim, inDim]</c> it is multiplied as. Any rank works —
+    /// safetensors ship rank 5, a GGUF build folds the leading pair to rank 4, and the tests build it already flat —
+    /// because row-major they are all the same bytes; what may never differ is the element COUNT, since this copies a
+    /// fixed span and a short source would silently serve a truncated weight.</summary>
+    internal static Tensor ReshapeConvToLinear(Tensor conv, int outDim, int inDim)
     {
-        Tensor src = TensorCasts.EnsureF32(conv);
+        if (conv.ElementCount != (long)outDim * inDim)
+            throw new InvalidOperationException(
+                $"Vision patch embedding {conv.Shape} holds {conv.ElementCount} elements; the tower expects "
+                + $"{(long)outDim * inDim} for a [{outDim}, {inDim}] projection.");
+        // A GGUF build can carry this weight block-quantized, and CastTo refuses a quantized source by design:
+        // decoding a block layout is the dequantizer's job, not a dtype conversion's. Same call, for the same
+        // reason, as the DiT's norm promotion in MiniMaxH3Recipe.
+        Tensor src = conv.DType.IsQuantized
+            ? ModelAssets.Gguf.GgufDequantizer.Dequantize(conv, DType.F32) : TensorCasts.EnsureF32(conv);
         Tensor outp = new Tensor(new TensorShape(outDim, inDim), DType.F32);
         long bytes = (long)outDim * inDim * sizeof(float);
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)outp.DataPointer, bytes, bytes);
+        if (!ReferenceEquals(src, conv)) src.Dispose();
         return outp;
     }
 
