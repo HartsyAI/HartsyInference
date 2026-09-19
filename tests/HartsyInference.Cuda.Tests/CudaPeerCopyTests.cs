@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -80,8 +81,7 @@ public sealed unsafe class CudaPeerCopyTests
 
             // The source backend's device copy must SURVIVE the boundary copy — CopyFromPeer exists precisely to
             // avoid the interface default's demote-on-host-read.
-            Assert.True(src.TransferState.ActivationCache.ContainsKey(activation),
-                "the boundary copy evicted the source backend's resident activation");
+            Assert.Equal(GpuResidencyTier.Activation, src.TransferState.TierOf(activation));
 
             activation.Dispose();
         }
@@ -109,8 +109,7 @@ public sealed unsafe class CudaPeerCopyTests
             dst.CopyFromPeer(moved, activation, src);
             Assert.Equal(0, dst.GetPeerCopyCount());
             Assert.Equal(expected, ((float*)moved.DataPointer)[0], 3);
-            Assert.True(src.TransferState.ActivationCache.ContainsKey(activation),
-                "the boundary copy evicted the source backend's resident activation");
+            Assert.Equal(GpuResidencyTier.Activation, src.TransferState.TierOf(activation));
 
             activation.Dispose();
         }

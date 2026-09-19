@@ -6,6 +6,41 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.103
+
+- **The residency cache answers questions about a tensor now, instead of handing out its dictionaries.**
+  `TierOf(tensor)`, `IsPinnedActivation`, `OwnsBuffer` and the four counts land on `GpuTransferHelper.State`, and the
+  ~35 test assertions that reached into `WeightCache`/`ActivationCache`/`WeightCastCache`/`PinnedActivations`/
+  `CachedPointers` now ask those instead. The collections are an implementation of residency, not the definition of
+  it, and every assertion written against them was coupled to that choice — which matters immediately, because the
+  shared `GpuResidencyCache<TBuffer>` keeps them `protected` and those are the teardown and isolation tests that have
+  to keep working across the migration.
+- **`GpuResidencyTier` makes "resident as both" unrepresentable, and `TierOf` throws when it happens anyway.** A
+  lookup checks weights first, so a tensor in both tiers has its activation — the bytes an op just wrote — shadowed
+  by a stale weight on every later read. That is the auto-promote-discards-device-writes bug, and until now nothing
+  asserted it could not occur: `PreloadWeight` tests only the weight cache before inserting, so a tensor computed as
+  an activation and then preloaded was the plausible route in. The whole CUDA suite passes with the check live,
+  including the RoPE-table lifecycle tests that take exactly that route, so the invariant is now a tested fact
+  rather than an assumption the shared cache was about to be built on. The check stays on the query surface and off
+  the production lookups deliberately: a guard at the weight-cast call site would fire after `CopyToDevice` had
+  already served the stale bytes, crashing the generation somewhere unrelated to the cause. Guarding the read
+  itself is a design call for the migration, not for this PR.
+- **The write that could create that state is guarded, at the write.** `RegisterCachedWeight` refuses to make a
+  tensor a weight while it is still a live activation. Nothing could reach that state today, but only by accident:
+  all three callers read `DataPointer` to find the host bytes to upload, which fires the activation's sync callback
+  and evicts the entry. An invariant held by a side effect of an unrelated read is one line from being lost — a
+  caller uploading from a pinned or mapped buffer would never touch `DataPointer`, and `CudaStreamingWeightCache`
+  is already most of the way there. The check sits where the state would be established rather than where it would
+  be noticed, and weight registration is a load-time path, so it costs a dictionary probe per weight.
+- `HartsyInference.Cuda` references `HartsyInference.Gpu` for the first time. Nothing depends on it yet beyond the
+  enum — it is landed here, on its own, so the package-graph change is proven separately from the cache migration
+  that needs it. Verified by packing rather than by building: `HartsyInference.Cuda.nupkg` declares
+  `HartsyInference.Gpu 2.0.0-alpha.103`, which is the claim that matters at publish time.
+- **The publish workflow's partial-release guard did not know `HartsyInference.Gpu` exists.** That list is there to
+  refuse a release where one project failed to pack, precisely so consumers pinning exact versions do not find a
+  dependency missing from the feed — and `Gpu` has been shipping unguarded since it was created, with `Vulkan`
+  already depending on it. This PR adds a second dependent, so it adds the package to the list.
+
 ## alpha.102
 
 - **Six more Runtime knobs were frozen, in mutable statics the previous check did not look at.** The scope lint

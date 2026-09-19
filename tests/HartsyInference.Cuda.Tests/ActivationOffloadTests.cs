@@ -1,5 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Utilities;
 using Xunit;
@@ -48,15 +49,15 @@ public sealed unsafe class ActivationOffloadTests
         using Tensor activation = Activation(cuda, source, shape);
 
         GpuTransferHelper.State state = GpuTransferHelper.CurrentState;
-        Assert.True(state.ActivationCache.TryGetValue(activation, out (ulong gpuPtr, nuint bytes) entry),
-            "Scale must leave its output in the activation cache for this test to mean anything.");
-        ulong devicePtr = entry.gpuPtr;
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(activation));
+        Assert.True(GpuTransferHelper.TryGetCachedDevice(activation, out ulong devicePtr),
+            "Scale must leave its output on the device for this test to mean anything.");
 
         cuda.OffloadActivation(activation);
 
-        Assert.False(state.ActivationCache.ContainsKey(activation));
-        Assert.DoesNotContain(devicePtr, state.CachedPointers);
-        Assert.DoesNotContain(activation, state.PinnedActivations);
+        Assert.NotEqual(GpuResidencyTier.Activation, state.TierOf(activation));
+        Assert.False(state.OwnsBuffer(devicePtr));
+        Assert.False(state.IsPinnedActivation(activation));
 
         float* src = (float*)source.DataPointer;
         float* got = (float*)activation.DataPointer;
@@ -121,7 +122,7 @@ public sealed unsafe class ActivationOffloadTests
             _ = consumer.DataPointer;
         }
 
-        bool promoted = GpuTransferHelper.CurrentState.WeightCache.ContainsKey(activation);
+        bool promoted = GpuTransferHelper.CurrentState.TierOf(activation) == GpuResidencyTier.Weight;
         Assert.Equal(!bulk, promoted);
     }
 
@@ -135,24 +136,24 @@ public sealed unsafe class ActivationOffloadTests
         using Tensor small = Activation(cuda, source, new TensorShape(256, 1024));     // 1 MB
 
         GpuTransferHelper.State state = GpuTransferHelper.CurrentState;
-        Assert.True(state.ActivationCache.ContainsKey(big));
-        Assert.True(state.ActivationCache.ContainsKey(mid));
-        Assert.True(state.ActivationCache.ContainsKey(small));
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(big));
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(mid));
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(small));
 
         Assert.Equal(0, cuda.OffloadActivations(0));
 
         // Largest-first: the 4 MB entry alone covers a 3 MB target, so the walk must stop there.
         long freed = cuda.OffloadActivations(3L << 20);
         Assert.Equal(4L << 20, freed);
-        Assert.False(state.ActivationCache.ContainsKey(big));
-        Assert.True(state.ActivationCache.ContainsKey(mid));
-        Assert.True(state.ActivationCache.ContainsKey(small));
+        Assert.NotEqual(GpuResidencyTier.Activation, state.TierOf(big));
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(mid));
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(small));
 
         // Over-large target drains what is left and reports exactly that, not the target.
         long rest = cuda.OffloadActivations(1L << 30);
         Assert.Equal(3L << 20, rest);
-        Assert.False(state.ActivationCache.ContainsKey(mid));
-        Assert.False(state.ActivationCache.ContainsKey(small));
+        Assert.NotEqual(GpuResidencyTier.Activation, state.TierOf(mid));
+        Assert.NotEqual(GpuResidencyTier.Activation, state.TierOf(small));
         Assert.Equal(0, cuda.OffloadActivations(1L << 30));
     }
 
@@ -181,7 +182,7 @@ public sealed unsafe class ActivationOffloadTests
             Assert.True(cache.ShouldCompute(cuda, blockIn));
             cache.StoreResidual(cuda, blockIn, blockOut);
 
-            Assert.Empty(GpuTransferHelper.CurrentState.PinnedActivations);
+            Assert.Equal(0, GpuTransferHelper.CurrentState.PinnedActivationCount);
 
             using Tensor applied = cache.ApplyResidual(cuda, blockIn);
             float* expected = (float*)blockOut.DataPointer;

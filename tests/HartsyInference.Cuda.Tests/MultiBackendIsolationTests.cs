@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 using HartsyInference.Cuda;
 using Xunit;
 using Xunit.Abstractions;
@@ -257,10 +258,10 @@ public sealed unsafe class MultiBackendIsolationTests
             Assert.Equal(b1, b2, 5);
 
             // Each backend caches ITS weight only — the sibling's cache is untouched.
-            Assert.True(backendA.TransferState.WeightCache.ContainsKey(weightA));
-            Assert.False(backendA.TransferState.WeightCache.ContainsKey(weightB));
-            Assert.True(backendB.TransferState.WeightCache.ContainsKey(weightB));
-            Assert.False(backendB.TransferState.WeightCache.ContainsKey(weightA));
+            Assert.Equal(GpuResidencyTier.Weight, backendA.TransferState.TierOf(weightA));
+            Assert.NotEqual(GpuResidencyTier.Weight, backendA.TransferState.TierOf(weightB));
+            Assert.Equal(GpuResidencyTier.Weight, backendB.TransferState.TierOf(weightB));
+            Assert.NotEqual(GpuResidencyTier.Weight, backendB.TransferState.TierOf(weightA));
 
             backendA.FreeWeights(new[] { weightA });
             backendB.FreeWeights(new[] { weightB });
@@ -304,7 +305,7 @@ public sealed unsafe class MultiBackendIsolationTests
             backendB.Dispose();
 
             // A's weight is still resident (B's EvictAll must only hit B's state)...
-            Assert.True(backendA.TransferState.WeightCache.ContainsKey(weightA));
+            Assert.Equal(GpuResidencyTier.Weight, backendA.TransferState.TierOf(weightA));
             long hitsBefore = backendA.TransferState.Hits;
 
             // ...and A still computes correctly, via a cache HIT (not a silent re-upload after a wipe).
@@ -337,15 +338,15 @@ public sealed unsafe class MultiBackendIsolationTests
 
         backendA.Scale(carried, host, 1f);
         backendA.PinActivation(carried);
-        Assert.Contains(carried, backendA.TransferState.PinnedActivations);
+        Assert.True(backendA.TransferState.IsPinnedActivation(carried));
 
         // Simulate a sharded forward/exception leaving backend B as the thread's ambient transfer state.
         backendB.Fill(other, 1f);
         backendA.UnpinActivation(carried);
 
-        Assert.DoesNotContain(carried, backendA.TransferState.PinnedActivations);
+        Assert.False(backendA.TransferState.IsPinnedActivation(carried));
         backendA.FreeActivations(trimPool: false);
-        Assert.False(backendA.TransferState.ActivationCache.ContainsKey(carried));
+        Assert.NotEqual(GpuResidencyTier.Activation, backendA.TransferState.TierOf(carried));
     }
 
     /// <summary>One tensor carrying activation bindings from TWO backends must keep BOTH: with the old single-slot
@@ -374,19 +375,19 @@ public sealed unsafe class MultiBackendIsolationTests
 
             backendA.Linear(shared, inputA, weightA, bias: null);
             backendA.Sync();
-            Assert.True(backendA.TransferState.ActivationCache.ContainsKey(shared), "A should hold shared's activation");
+            Assert.Equal(GpuResidencyTier.Activation, backendA.TransferState.TierOf(shared));
 
             // B writes its own result into the SAME tensor object — the cross-backend in-place reuse that used to
             // orphan A's binding. (B reads inputB/weightB, allocates its own output buffer, re-binds shared.)
             backendB.Linear(shared, inputB, weightB, bias: null);
             backendB.Sync();
-            Assert.True(backendB.TransferState.ActivationCache.ContainsKey(shared), "B should hold shared's activation");
+            Assert.Equal(GpuResidencyTier.Activation, backendB.TransferState.TierOf(shared));
 
             // Multi-slot: BOTH backends' dispose hooks must fire, emptying both caches — under the single-slot
             // scheme A's entry (and its device buffer) survived the Dispose as an unfreeable leak.
             shared.Dispose();
-            Assert.False(backendA.TransferState.ActivationCache.ContainsKey(shared), "A leaked its activation entry after Dispose");
-            Assert.False(backendB.TransferState.ActivationCache.ContainsKey(shared), "B leaked its activation entry after Dispose");
+            Assert.NotEqual(GpuResidencyTier.Activation, backendA.TransferState.TierOf(shared));
+            Assert.NotEqual(GpuResidencyTier.Activation, backendB.TransferState.TierOf(shared));
 
             backendA.FreeWeights(new[] { weightA });
             backendB.FreeWeights(new[] { weightB });
