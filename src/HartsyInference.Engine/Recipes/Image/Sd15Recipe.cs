@@ -39,7 +39,12 @@ public sealed class Sd15Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        (Sd15CheckpointConverter.ConvertedWeights converted, HartsyInference.ModelAssets.SafeTensors.SafeTensorsLoader loader) = Sd15CheckpointConverter.LoadAndConvert(context.CheckpointPath);
+        // One container for either format, and it folds fp8/int8 companions before the converter sees them —
+        // an SD1.5 fp8_scaled or GGUF UNet was previously invisible to this recipe.
+        HartsyInference.ModelAssets.Checkpoints.CheckpointSource loader =
+            HartsyInference.ModelAssets.Checkpoints.CheckpointSource.Open(context.CheckpointPath);
+        Sd15CheckpointConverter.ConvertedWeights converted = Sd15CheckpointConverter.Convert(
+            new Dictionary<string, HartsyInference.Core.Tensors.Tensor>(loader.Weights, StringComparer.Ordinal));
         if (converted.UNet.Count == 0 || converted.ClipL.Count == 0 || converted.Vae.Count == 0)
         {
             loader.Dispose();

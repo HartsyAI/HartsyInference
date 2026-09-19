@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.110
+
+- **SD1.5 and SDXL open through the container**, the last two recipes still calling `SafeTensorsLoader` directly.
+  A `fp8_scaled` or GGUF UNet of either was invisible to them, and companion scales went unfolded.
+- SDXL's checkpoint mapping is now `using`-scoped. It was disposed only on the failure branch, so a successful
+  construction left it open for the life of the pipeline.
+
 ## alpha.109
 
 - **LTX (0.9.x and 2.x) and HunyuanVideo open through the container.** Wan was flipped in Phase A; these three

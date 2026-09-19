@@ -44,8 +44,12 @@ public sealed class SdxlRecipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
-            SdxlCheckpointConverter.LoadAndConvert(context.CheckpointPath);
+        // One container for either format, and it folds fp8/int8 companions before the converter sees them —
+        // an SDXL fp8_scaled or GGUF UNet was previously invisible to this recipe.
+        using HartsyInference.ModelAssets.Checkpoints.CheckpointSource loader =
+            HartsyInference.ModelAssets.Checkpoints.CheckpointSource.Open(context.CheckpointPath);
+        SdxlCheckpointConverter.ConvertedWeights converted = SdxlCheckpointConverter.Convert(
+            new Dictionary<string, HartsyInference.Core.Tensors.Tensor>(loader.Weights, StringComparer.Ordinal));
         MergedLoraStack? loraStack = null;
         try
         {
@@ -91,7 +95,6 @@ public sealed class SdxlRecipe : IArchitectureRecipe
         finally
         {
             // Safe: ToOwnedF32 copied every weight out of the mmap.
-            loader.Dispose();
         }
     }
 }
