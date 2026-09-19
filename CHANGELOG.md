@@ -8,6 +8,17 @@ stable release will require. Dates are UTC.
 
 ## alpha.111
 
+## alpha.113
+
+- **A LoRA can be merged into a convolution weight.** SD1.5 and SDXL UNets are mostly convolution, so a LoCon or
+  LyCORIS adapter targeting conv layers had its deltas silently skipped — counted as unmatched and stepped over.
+- The delta arrives flattened to `[out, in*kh*kw]` while the weight is `[out, in, kh, kw]`. Row-major those are
+  the same bytes in the same order, so the previous rank-2-only gate was conservative rather than necessary; the
+  add only needed the two shapes to agree.
+- **DoRA on a convolution is refused by name.** Its magnitude vector normalizes by a row norm of the weight as a
+  matrix, and a convolution has no such matrix until it is flattened — which axis the vector then describes is the
+  file's choice, not ours.
+
 ## alpha.112
 
 - **`hartsy quantize --format` writes ComfyUI's two safetensors quant shapes as well as GGUF.** `fp8-scaled`
