@@ -848,7 +848,7 @@ internal static unsafe class GpuTransferHelper
     }
 
     /// <summary>True when this backend's activation cache currently holds a device copy of <paramref name="tensor"/>.</summary>
-    internal static bool HasCachedActivation(Tensor tensor) => IsActivationCached(tensor);
+    internal static bool HasCachedActivation(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
 
     /// <summary>The device pointer already backing <paramref name="tensor"/>, without uploading anything. For an op that OVERWRITES its destination in full: <see cref="CopyToDevice"/> would stage the host bytes over PCIe first, and the very next line discards them.</summary>
     internal static bool TryGetCachedDevice(Tensor tensor, out ulong gpuPtr)
@@ -1083,13 +1083,9 @@ internal static unsafe class GpuTransferHelper
     // to reach into private fields.
 
     /// <summary>True if the weight is currently cached on the device. Streaming uploads check this to skip already-resident tensors.</summary>
-    /// <summary>True when this backend holds <paramref name="weight"/> as a resident weight.</summary>
-    /// <remarks>Routed through <see cref="State.TierOf"/> rather than reading the dictionary directly, so the
-    /// at-most-one-tier invariant is checked on this path too. It is the one that matters most: a table computed as
-    /// an activation and then preloaded is exactly how a tensor could end up in both.</remarks>
-    internal static bool IsWeightCached(Tensor weight) => Resolve().TierOf(weight) == GpuResidencyTier.Weight;
+    internal static bool IsWeightCached(Tensor weight) => Resolve().WeightCache.ContainsKey(weight);
 
-    internal static bool IsActivationCached(Tensor tensor) => Resolve().TierOf(tensor) == GpuResidencyTier.Activation;
+    internal static bool IsActivationCached(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
 
     /// <summary>Registers an already-uploaded weight in the cache. The caller is responsible for the alloc + H2D copy (sync or async); this just records the tensor → dptr mapping and bumps the byte counter.</summary>
     internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)
