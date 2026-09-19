@@ -23,6 +23,14 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Reference editing only: OmniGen2 conditions on VAE-encoded reference latents with dual
     /// text/image guidance, so there is no denoise-strength knob to honour.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1906</c> →
+    /// <c>omnigen2.Omnigen2Tokenizer</c> → <c>Qwen25_3BTokenizer</c>; its llama-template wrapper does not pass
+    /// <c>disable_weights</c>, so weights survive tokenization and the blend runs on the encoder output.
+    /// OmniGen2 does not pad, so the empty baseline is built per prompt rather than cached.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
