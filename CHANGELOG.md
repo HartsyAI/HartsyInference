@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.107
+
+- **Qwen-Image and Mage-Flow schedule their conditioning per step**, finishing C.2 for every family that applies
+  prompt weighting. Each distinct step-text is tokenized through the recipe's own template, so a branch carrying
+  its own `(word:1.5)` emphasis is weighted per branch, encoded once inside the single text-encoder-resident
+  window, and selected by step.
+- Both recipes flatten for their base ids. Declaring `PromptScheduling` is what stops the tag being collapsed
+  upstream, so the raw tag text reaches the recipe and would otherwise be tokenized as prose — the bug the Flux.2
+  gate caught, avoided here by construction.
+- Qwen-Image narrows two things that assume fixed conditioning: its cross-generation prompt cache is keyed on a
+  single token array and is bypassed, and its first-block step cache is calibrated on drift between consecutive
+  steps under fixed conditioning, so a reused feature would carry one branch's text into another's step. The
+  activation reserve is sized from the longest variant rather than whichever is current.
+- Which families declare the scheduling bit is now ledgered. Whether a pipeline really consumes a schedule cannot
+  be checked by reflection, and declaring it without one is silently wrong rather than an error.
+
 ## alpha.106
 
 - **The shared residency cache learns that weights and transients can need different allocators.** A new
@@ -51,6 +67,7 @@ stable release will require. Dates are UTC.
   so a gate that silently skips is a gate that silently passes.
 - `TestPaths.Llm` gains Qwen3-4B Q4_K_M: a different family and a different quantization from the Llama beside it,
   so a swap between them crosses the dequantize path as well as the residency cache.
+
 
 ## alpha.104
 

@@ -33,7 +33,11 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     /// in-context reference tokens rather than noising it, so <c>Creativity</c> has nothing to select. Declaring
     /// <see cref="ImageFeatures.Img2Img"/> here would accept a creativity value the family cannot honour.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. Mage-Flow drives <see cref="HartsyInference.Diffusion.Models.Denoisers.QwenImageTransformer"/> (<c>QwenImageConfig.MageFlow</c>), so its blocks are the canonical <c>transformer_blocks.{i}</c> and Qwen-Image LoRA files map identically. A K-quant GGUF build refuses the merge by name, same boundary as every other family.</para></remarks>
-    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+    public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora
+        // Declared only because MageFlowRecipePipeline builds a ScheduledPrompt and MageFlowPipeline selects per
+        // step. The bit is what keeps <alternate:>/<fromto[N]:> in the prompt at all, so declaring it without
+        // consuming one would hand the encoder the literal tag text as prose.
+        | ImageFeatures.PromptScheduling;
 
     /// <summary>Base Mage-Flow: 30 steps at CFG 5.0, 1024×1024 (model card).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 5.0f, Width = 1024, Height = 1024 };

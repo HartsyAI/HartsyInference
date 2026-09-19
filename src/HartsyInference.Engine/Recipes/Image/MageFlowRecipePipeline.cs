@@ -65,8 +65,16 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         int height = Math.Clamp(reqH / 16 * 16, 128, 4096);
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? Random.Shared.Next(int.MaxValue);
 
-        (WeightedTokenSequence promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
-        (WeightedTokenSequence negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
+        // ImagesService now leaves <alternate:>/<fromto[N]:> raw for this recipe, so everything outside the
+        // schedule builder needs them collapsed to their step-0 value or the literal tag text is tokenized as
+        // prose. Same split the SDXL, Flux.2 and Qwen-Image recipes make, for the same reason.
+        (WeightedTokenSequence promptTokens, int promptDrop) =
+            EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(prompt));
+        (WeightedTokenSequence negTokens, int negDrop) =
+            EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(negative));
+        // Only the positive prompt schedules: the scheduling tags live in the prompt the user wrote.
+        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(
+            prompt, steps, text => EncodeWithTemplate(_tokenizer, text).tokens);
 
         // Whether a checkpoint carries the encoder half is a property of the file, not of the family, so the recipe's
         // Supports bit (read before construction, to route the request) cannot express it. Refuse loudly here instead:
@@ -91,7 +99,7 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
             // Mage-Flow takes primitives rather than a TextToImageRequest, so the sampler selection is threaded
             // explicitly. Validated by the resolver, which refuses an unavailable name instead of silently
             // substituting Euler.
-            SamplingParamResolver.ResolveSchedulerName(request), bridge, promptTokens, negTokens);
+            SamplingParamResolver.ResolveSchedulerName(request), bridge, promptTokens, negTokens, promptSchedule);
 
         byte[] rgb = ToRgbBytes(image, out int outW, out int outH);
         image.Dispose();

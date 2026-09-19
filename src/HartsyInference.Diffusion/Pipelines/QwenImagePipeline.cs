@@ -1,4 +1,5 @@
 using HartsyInference.Diffusion.Sampling;
+using HartsyInference.Core.Exceptions;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
@@ -116,9 +117,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         IReadOnlyList<Tensor>? editRefVisionImages = null,
         IReadOnlyList<Adapters.QwenImageControlNetConditioning>? controlNets = null,
         WeightedTokenSequence? promptWeights = null,
-        WeightedTokenSequence? negativeWeights = null)
+        WeightedTokenSequence? negativeWeights = null,
+        ScheduledPrompt? promptSchedule = null)
     {
         ThrowIfDisposed();
+        // A schedule whose branches collapse to one text is not scheduled and stays on the single-encode path.
+        bool scheduled = promptSchedule is { IsScheduled: true };
         RequireMatchingWeights(promptTokenIds, promptWeights, nameof(promptWeights));
         RequireMatchingWeights(negativeTokenIds, negativeWeights, nameof(negativeWeights));
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -239,13 +243,18 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             foreach (Tensor sigImg in sigSource)
                 editSig = editSig * 1000003L ^ ImageSignature.Compute(sigImg);
         }
-        bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex && _cachedEditSig == editSig
+        // Deliberately never hits when scheduled: the cache is keyed on a single token array, and a hit across
+        // variants would serve one branch's conditioning for another branch's steps.
+        bool condHit = !scheduled && _cachedCond is not null && _cachedCondDrop == promptDropIndex
+            && _cachedEditSig == editSig
             && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
         bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondDrop == negativeDropIndex
             && _cachedEditSig == editSig
             && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativeTokenIds));
         Tensor condHidden;
         Tensor? uncondHidden = null;
+        // Owned by this request when scheduled — never enters the cross-generation cache, so this disposes them.
+        List<Tensor>? scheduledCond = null;
         if (condHit && uncondHit)
         {
             condHidden = _cachedCond!;
@@ -298,13 +307,40 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 }
             }
 
-            condHidden = visionEncode ? _multimodalEncoder!.Encode(TextEncoderBackend, promptTokenIds, visionImages)
-                : _textEncoder.Encode(TextEncoderBackend, [promptTokenIds]);
-            if (promptDropIndex > 0)
+            Tensor EncodeCond(int[] ids)
             {
-                Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
-                condHidden.Dispose();
-                condHidden = trimmed;
+                Tensor hidden = visionEncode
+                    ? _multimodalEncoder!.Encode(TextEncoderBackend, ids, visionImages)
+                    : _textEncoder.Encode(TextEncoderBackend, [ids]);
+                if (promptDropIndex > 0)
+                {
+                    Tensor trimmed = DropPrefixHiddenStates(hidden, promptDropIndex);
+                    hidden.Dispose();
+                    hidden = trimmed;
+                }
+                return hidden;
+            }
+
+            if (scheduled)
+            {
+                // The base ids are NOT encoded for a scheduled prompt: every step reads a variant, so a base encode
+                // would be a full Qwen-VL forward whose output is immediately discarded. All variants share this one
+                // TE-resident window, because the encoder cannot coexist with the DiT and paying the evict/preload
+                // per variant would dominate a two-variant prompt.
+                Logs.Info($"[QwenImage] encoding {promptSchedule!.Variants.Count} scheduled prompt variants "
+                    + $"(<alternate:>/<fromto[N]:>) across {promptSchedule.StepToVariant.Length} steps.");
+                scheduledCond = new List<Tensor>(promptSchedule.Variants.Count);
+                foreach (WeightedTokenSequence variantTokens in promptSchedule.Variants)
+                {
+                    Tensor hidden = EncodeCond(variantTokens.Tokens);
+                    _ = hidden.DataPointer;
+                    scheduledCond.Add(hidden);
+                }
+                condHidden = scheduledCond[promptSchedule.IndexForStep(0)];
+            }
+            else
+            {
+                condHidden = EncodeCond(promptTokenIds);
             }
 
             if (useCfg)
@@ -341,23 +377,51 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             if (uncondHidden is not null) _ = uncondHidden.DataPointer;
             TextEncoderBackend.FreeActivations();
 
-            _cachedCond?.Dispose();
-            _cachedCond = condHidden;
-            _cachedCondKey = (int[])promptTokenIds.Clone();
-            _cachedCondDrop = promptDropIndex;
-            _cachedEditSig = editSig;
-            if (useCfg)
+            // A scheduled generation caches NEITHER side. The two halves share `_cachedEditSig`, so caching the
+            // unconditional alone would leave that signature describing this request while `_cachedCond` still
+            // holds an earlier one — a later repeat of that earlier prompt would then hit on both and pair the old
+            // conditional with this request's unconditional. The conditional itself is uncacheable here anyway:
+            // the key is a single token array and there are several variants.
+            if (!scheduled)
             {
-                _cachedUncond?.Dispose();
-                _cachedUncond = uncondHidden;
-                _cachedUncondKey = (int[])negativeTokenIds.Clone();
-                _cachedUncondDrop = negativeDropIndex;
+                _cachedCond?.Dispose();
+                _cachedCond = condHidden;
+                _cachedCondKey = (int[])promptTokenIds.Clone();
+                _cachedCondDrop = promptDropIndex;
+                _cachedEditSig = editSig;
+                if (useCfg)
+                {
+                    _cachedUncond?.Dispose();
+                    _cachedUncond = uncondHidden;
+                    _cachedUncondKey = (int[])negativeTokenIds.Clone();
+                    _cachedUncondDrop = negativeDropIndex;
+                }
             }
         }
 
+        // Not cached for a scheduled generation (see above), so this request owns it and must free it. Captured
+        // before the weighting below shadows the reference with its copy.
+        Tensor? scheduledUncond = scheduled ? uncondHidden : null;
+
         // Weighting runs after the template trim, on a copy: the cache above is keyed on token ids alone, and a
         // weighted prompt tokenizes to the same ids, so an in-place scale would leak into the next plain request.
-        Tensor? weightedCond = promptWeights is null
+        if (scheduled)
+        {
+            // Each branch carries its own emphasis, so weighting is per variant rather than once on the base.
+            for (int v = 0; v < scheduledCond!.Count; v++)
+            {
+                WeightedTokenSequence variantTokens = promptSchedule!.Variants[v];
+                if (variantTokens.IsUniformlyUnweighted) continue;
+                Tensor weightedVariant = CondTokenWeights.Apply(
+                    TextEncoderBackend, scheduledCond[v], null, variantTokens).Cond
+                    ?? throw new HartsyInferenceException("Weighted conditioning returned no tensor.");
+                scheduledCond[v].Dispose();
+                scheduledCond[v] = weightedVariant;
+            }
+            // Re-read: the entries above may have been replaced by their weighted copies.
+            condHidden = scheduledCond[promptSchedule!.IndexForStep(0)];
+        }
+        Tensor? weightedCond = promptWeights is null || scheduled
             ? null : CondTokenWeights.Apply(TextEncoderBackend, condHidden, null, promptWeights).Cond;
         if (weightedCond is not null)
         {
@@ -582,6 +646,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         CpKvExchange? cpExchange = null;
         Tensor? condHiddenRank1 = null;
         Tensor? uncondHiddenRank1 = null;
+        List<Tensor>? scheduledCondRank1 = null;
         if (cpEnabled)
         {
             // Row split proportional to post-preload free VRAM (activations and exchange traffic scale with the
@@ -592,7 +657,20 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             (long free1, _) = CpBackends![1].GetVramInfo();
             cpPlan = CpSequencePlan.Create(hPacked, wPacked, [free0, free1]);
             cpExchange = new CpKvExchange(cpPlan);
-            condHiddenRank1 = HostCloneTensor(condHidden);
+            // Rank 1 needs a clone of EVERY variant, not just the one current at setup: the loop switches
+            // condHidden per step, and a rank-1 copy frozen at the step-0 variant would have rank 0 computing its
+            // rows against one branch while rank 1 computed its rows against another — the halves of one image
+            // disagreeing about the prompt, with no error to show for it.
+            if (scheduled)
+            {
+                scheduledCondRank1 = new List<Tensor>(scheduledCond!.Count);
+                foreach (Tensor variantHidden in scheduledCond) scheduledCondRank1.Add(HostCloneTensor(variantHidden));
+                condHiddenRank1 = scheduledCondRank1[promptSchedule!.IndexForStep(0)];
+            }
+            else
+            {
+                condHiddenRank1 = HostCloneTensor(condHidden);
+            }
             if (useCfg) uncondHiddenRank1 = HostCloneTensor(uncondHidden!);
             RecordCpDecision($"active(rows {cpPlan.Ranks[0].FrameCount}+{cpPlan.Ranks[1].FrameCount})");
         }
@@ -633,7 +711,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // Edit variants append packed reference tokens after the noise tokens, so the forward's real image-side
             // length is the latent's own — not imgSeqLen, which counts only the noise grid.
             int forwardImgSeqLen = (int)packedLatent.Shape[1] + (int)(packedEditRef?.Shape[1] ?? 0);
+            // Longest variant, not the current one: the reserve has to cover every step the loop will run.
             int txtSeqLen = (int)condHidden.Shape[1];
+            if (scheduled)
+            {
+                foreach (Tensor variantHidden in scheduledCond!)
+                    txtSeqLen = Math.Max(txtSeqLen, (int)variantHidden.Shape[1]);
+            }
             long reserve = EstimateActivationReserveBytes(txtSeqLen, forwardImgSeqLen, _config.HiddenSize) + sharedBytes;
 
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "QwenImage", Backend);
@@ -763,7 +847,19 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // CONSECUTIVE steps, and a second-order sampler evaluates twice inside one step at different sigmas —
             // a drift signature it was never calibrated for. ROADMAP §6 records that failure on HiDream as a flat,
             // textureless colour field rather than a mild degradation. Narrowed for that generation, same as graphs.
-            bool cacheEligible = !nonDefaultSampler && (stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate));
+            // `!scheduled`: the step cache is a first-block cache calibrated on the drift between CONSECUTIVE
+            // steps under fixed conditioning. A scheduled prompt changes the conditioning mid-loop, so a reused
+            // feature would carry one branch's text into another's step — narrowed the same way a second-order
+            // sampler is above.
+            bool cacheEligible = !nonDefaultSampler && !scheduled
+                && (stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate));
+            if (scheduled)
+            {
+                int variantForStep = promptSchedule!.IndexForStep(i);
+                condHidden = scheduledCond![variantForStep];
+                // Both ranks move together or neither does.
+                if (scheduledCondRank1 is not null) condHiddenRank1 = scheduledCondRank1[variantForStep];
+            }
             DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
             DeviceFeatureCache? stepUncondCache = cacheEligible ? uncondCache : null;
 
@@ -954,8 +1050,21 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             CpBackends[1].FreeActivations();
             cpExchange.Dispose();
         }
-        condHiddenRank1?.Dispose();
+        if (scheduledCondRank1 is not null)
+        {
+            foreach (Tensor variantClone in scheduledCondRank1) variantClone.Dispose();
+        }
+        else
+        {
+            condHiddenRank1?.Dispose();
+        }
         uncondHiddenRank1?.Dispose();
+        // Scheduled conditioning never entered the cross-generation cache, so this request owns all of it.
+        if (scheduledCond is not null)
+        {
+            foreach (Tensor variantHidden in scheduledCond) variantHidden.Dispose();
+        }
+        scheduledUncond?.Dispose();
         // Per-request copies; the unweighted originals they shadow stay in the cross-generation cache.
         weightedCond?.Dispose();
         weightedUncond?.Dispose();
