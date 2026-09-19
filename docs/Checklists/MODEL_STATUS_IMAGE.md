@@ -212,8 +212,9 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   weights once the grammar is off. **The gate found a bug no test had:** the unweighted path was byte-identical
   before and after the change, but `(fox:1.0)` was NOT byte-identical to plain `fox` — it reached the encoder as
   literal parens, because flattening rewrites SwarmUI's `<weight[N]:>` tag while a literal `(word:N)` typed at a
-  CLI arrives untouched. Real-weight verified per family at 768², seed 1 (see the PR for the table); Z-Image also
-  on its true-CFG path with a weighted negative. Lens' `ChatTemplateIds` assertion caught a second wrong
+  CLI arrives untouched. Real-weight verified per family at 768², seed 1 — `(fox:1.0)` byte-identical to plain
+  everywhere (same md5), `(fox:0.5)` moving 5.18-17.78 mean-abs-pixel; Z-Image also on its true-CFG path with a
+  weighted negative. Lens' `ChatTemplateIds` assertion caught a second wrong
   assumption on its first run — `DefaultTxtOffset` counts the stripped PREFIX alone, not the whole wrapper.
 - [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
   SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
