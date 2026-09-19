@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.118
+
+- **A quantized video build keeps the semantics of the build it came from.** Video planning resolves by exact
+  file hash, so a checkpoint quantized here is a stranger to it — an H3-class output planned as an unknown base
+  and the task, acceleration and step count its source declared were simply gone. `QuantizationService` writes
+  `<output>.hartsy-video-profile.json` when the SOURCE's hash resolves to a known artifact, and writes nothing
+  when it does not: inventing provenance for a file nobody has verified is worse than leaving it unknown.
+- **Quantizing a large block-quantized source now refuses instead of being OOM-killed.** Every tensor is widened
+  to F32 before the writer sees it, so requantizing a 13 GB Q4_K checkpoint wants about 74 GiB — and the process
+  died with no message, no partial file and nothing to read. It measures that from the real element counts and
+  says so up front, with the numbers.
+
 ## alpha.117
 
 - **Twenty-seven Vulkan ops were dispatching outside an op scope.** The scope is what suppresses the batched
