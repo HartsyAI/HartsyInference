@@ -24,6 +24,15 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>HiDream shares the Flux.1 VAE, so its encoder half rides the encode-parity gate that already
     /// covers that config; the img2img path in HiDreamPipeline was built for this.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: HiDream's own <c>clip_target</c>
+    /// returns None, so the TE loads through <c>sd.py:1995</c> → <c>hidream.HiDreamTokenizer</c>, whose
+    /// clip_l/clip_g arms keep weights — which is what selects the blend. Only T5 and Llama are blended here
+    /// though: HiDream discards both CLIP arms' hidden states and keeps their pooled vectors, and the blend
+    /// rewrites hidden states, so wiring CLIP would be a no-op.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
