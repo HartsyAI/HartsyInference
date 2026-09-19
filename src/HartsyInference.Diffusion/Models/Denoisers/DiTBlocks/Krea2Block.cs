@@ -79,7 +79,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
     // device-resident — no per-op DataPointer D2H sync barriers around the attention/FFN GEMMs. AffineScaleShift →
     // DiTUtils.Modulate (AddScalar(scale,+1) + AffineBroadcastLastDim, same (1+scale) convention); GatedResidual →
     // GatedResidualLastDim; the [6,hidden]-table split → SliceRows + Add (B=1; B>1 keeps the host loop).
-    public Tensor Forward(IBackend backend, Tensor hidden, Tensor tembMod, FluxRope rope, int batch, int seqLen, Tensor? attnBias = null)
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor tembMod, FluxRope rope, int batch, int seqLen, Tensor? attnBias = null, Tensor? vRowScale = null)
     {
         // 6 modulation vectors [B, hidden] = tembMod.unflatten(6, hidden) + scale_shift_table. These stay F32 (tiny
         // per-channel vectors); the F16 norm/modulate/gate kernels take an F16 activation + F32 params.
@@ -92,7 +92,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         Tensor preIn = DiTUtils.Modulate(backend, n1, mod[1], mod[0], hShape); // (1+prescale)·n1 + preshift (follows n1 dtype)
         n1.Dispose();
 
-        Tensor attnOut = _attn.Forward(backend, preIn, rope, batch, seqLen, attnBias);
+        Tensor attnOut = _attn.Forward(backend, preIn, rope, batch, seqLen, attnBias, vRowScale);
         preIn.Dispose();
         Tensor h1 = new Tensor(hShape, act);
         backend.GatedResidualLastDim(h1, hidden, attnOut, mod[2]);            // h + pregate·attn

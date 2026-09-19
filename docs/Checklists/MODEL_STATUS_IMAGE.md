@@ -201,6 +201,32 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
+  SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
+  scaling, so `CondScaleWithAttention` is not two alternatives but two things applied together; the mode ledger
+  refused the `CondScale`-only declaration that was tried first. The cond-scale half right-aligns each token's
+  weight onto the conditioning rows that survive the template trim and scales them on a per-request COPY (the
+  prompt-embedding cache is keyed on token ids, which are identical with and without weights). The attention half
+  splits by direction as `SwarmText.py:281-312` does: `w < 1` multiplies that token's VALUE rows post-projection,
+  `w > 1` adds `(w-1)*2` to every query's logit for that KEY position. Cond slots only — Krea 2's negative pass is
+  a separate forward that already runs unbiased, so passing the scale on the cond call alone *is* the patch's
+  `cond_or_uncond` filter. Real-weight verified on `krea2_turbo_fp8_scaled` (768², 6 steps, seed 1, cfg 1):
+  `(fox:1.0)` is **byte-identical** to the plain prompt (same md5, 0.0000 mean-abs-pixel), `(fox:0.5)` sits 17.93
+  from plain and `(fox:1.5)` 14.34. The control that makes this non-vacuous is `--no-model-enhancements`, which
+  disables the attention half alone: `(fox:0.5)` moves **21.72** when it is re-enabled and `(fox:1.5)` **9.23**,
+  both larger than the 11.70 / 11.67 that cond scaling alone contributes — so the attention slot is doing more
+  than the half that was already there, not nothing. `(fox:0.5)` vs `(fox:1.5)` is 25.14, confirming the two
+  directions are genuinely different operations rather than one scaled. All outputs are coherent foxes; at a 6-step
+  turbo checkpoint and a single weighted word the *visual* direction is subtle, and the numbers above are what the
+  gate rests on. The true-CFG branch — where the cond-only filter and the weighted NEGATIVE first matter — is
+  unreachable on the turbo checkpoint (`Krea2RecipePipeline` pins `cfg` to the turbo default), so it was gated on
+  the **non-turbo base** build instead (`krea2-raw-1_0-krea-2-base-fp8`, 768², 12 steps, seed 1, cfg 3.5,
+  negative `blurry, low quality`): `(fox:1.0)` + `(blurry:1.0)` is byte-identical to the plain pair, and
+  `(fox:0.5)` + `(blurry:1.5)` sits 28.36 from it. A weighted REGION works and takes the cond-scale half
+  (`<region:…>a red (fox:1.0)` is byte-identical to the unweighted region at 0.0000, `(fox:0.5)` sits 6.55 from it);
+  weighting the base prompt AND a region in the same request is refused by name, because the base encode covers
+  the region tags and the two sets of weights would land on the same rows. img2img and masked inpaint with
+  attention weights are refused for a different reason — the pixel-space route has no attention-bias surface.
 - [x] **The SDXL pooled/ADM vector follows the prompt schedule — DONE 2026-09-11.** `SdxlPipeline` switched the
   hidden-state tensor per step but kept handing every UNet and ControlNet call the one pooled encode, so a
   scheduled prompt paired (for example) a later step's "dog" hidden states with variant 0's "cat" ADM

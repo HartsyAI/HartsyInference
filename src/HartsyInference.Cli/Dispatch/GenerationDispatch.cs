@@ -70,6 +70,9 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             RemoveBackground = parameters.GetBool("remove-background", false) ? true : null,
+            // SwarmUI's own default is on (UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)), so the
+            // flag turns the extras OFF rather than on.
+            ModelSpecificEnhancements = !parameters.GetBool("no-model-enhancements", false),
             Img2Img = BuildImg2Img(parameters),
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths

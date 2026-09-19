@@ -27,6 +27,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Path to a .safetensors/.gguf diffusion checkpoint of any registered family; pair it with -m <family> when the layout is ambiguous.")]
         public string? ModelPath { get; init; }
 
+        /// <summary>Turns off the per-family extras SwarmUI gates on <c>ModelSpecificEnhancements</c>.</summary>
+        [CommandOption("--no-model-enhancements")]
+        [Description("Disable the per-family extras SwarmUI gates on its ModelSpecificEnhancements toggle (Krea 2's joint-attention prompt-weight patch). Default: enabled, matching SwarmUI.")]
+        public bool NoModelEnhancements { get; init; }
+
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
@@ -218,6 +223,10 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         if (settings.RemoveBackground)
         {
             parameters.Put("remove-background", "true");
+        }
+        if (settings.NoModelEnhancements)
+        {
+            parameters.Put("no-model-enhancements", "true");
         }
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 

@@ -25,4 +25,12 @@ public sealed record WeightedTokenSequence(int[] Tokens, float[] Weights)
     /// <summary>The single weight shared by every non-empty span, or null when the spans disagree — SwarmUI's
     /// <c>uniform_weight</c> (<c>SwarmText.py:464-472</c>), which selects the whole-cond + pooled fallback.</summary>
     public float? UniformWeight { get; init; }
+
+    /// <summary>Cuts the sequence to the encoder's token limit, ids and weights together. Truncating the ids alone
+    /// would leave a weight array longer than what it describes, and every weighting step matches the two by
+    /// position — so the emphasis would land on a neighbouring word rather than simply be dropped.</summary>
+    public WeightedTokenSequence Truncate(int maxTokens) =>
+        Tokens.Length <= maxTokens
+            ? this
+            : new WeightedTokenSequence(Tokens[..maxTokens], Weights[..maxTokens]) { UniformWeight = UniformWeight };
 }

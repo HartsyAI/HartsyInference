@@ -1,5 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -64,8 +65,26 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         }
 
         // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter are deferred.
-        (int[] promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, prompt);
-        (int[] negTokens, int negDrop) = EncodeWithTemplate(_tokenizer, negative);
+        // Declaring a weighting mode is what stops ImagesService collapsing `(word:N)`, so everything outside the
+        // weighted builder needs the grammar off the text first — the same split every other wired family makes.
+        //
+        // The base encode takes the WHOLE prompt, region tags included, which is what it has always done. That
+        // makes a region's own `(word:N)` show up in the base weights too, where it would scale rows belonging to
+        // the tag text and trip the regional refusal on a prompt whose base carries no emphasis at all. So when
+        // regions are present the base drops the weight grammar entirely and the regions carry their own; a base
+        // that really is weighted is refused by name below rather than quietly losing its emphasis.
+        bool hasRegionParts = RegionalPromptResolver.HasRegionParts(prompt);
+        if (hasRegionParts && RegionalPromptWeightSplit.BaseTextCarriesWeight(prompt))
+        {
+            throw new NotSupportedException(
+                "Krea 2 cannot weight the base prompt and a region in the same request: the base encode covers the "
+                + "region tags too, so the two sets of weights would land on the same conditioning rows. Move the "
+                + "emphasis inside the region, or drop the region tags.");
+        }
+        (WeightedTokenSequence promptTokens, int promptDrop) =
+            EncodeWithTemplate(_tokenizer, RegionalPromptWeightSplit.BaseText(prompt, hasRegionParts));
+        (WeightedTokenSequence negTokens, int negDrop) =
+            EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(negative));
 
         // Resolved at the *snapped* size: Krea 2 rounds to a multiple of 16 above and the pipeline validates the
         // source against those same rounded dimensions.
@@ -74,6 +93,7 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
             new TextToImageRequest
             {
                 SeamlessTiling = request.SeamlessTiling,
+                ModelSpecificEnhancements = request.ModelSpecificEnhancements,
                     VariationSeed = request.VariationSeed?.Seed ?? -1,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
@@ -97,8 +117,9 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
             regionalPlan = BuildRegionalPlan(prompt, width, height, steps);
 
             (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-                promptTokens, useCfg ? negTokens : null, inner, bridge,
-                promptDropIndex: promptDrop, negativeDropIndex: negDrop, regionalPlan: regionalPlan);
+                promptTokens.Tokens, useCfg ? negTokens.Tokens : null, inner, bridge,
+                promptDropIndex: promptDrop, negativeDropIndex: negDrop, regionalPlan: regionalPlan,
+                promptWeights: promptTokens, negativeWeights: useCfg ? negTokens : null);
 
             return new ImageResult
             {
@@ -133,32 +154,35 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
         return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
         {
-            (int[] regionTokens, int regionDrop) = EncodeWithTemplate(_tokenizer, text);
-            return _pipeline.EncodeRegionText(regionTokens, regionDrop);
+            // Region text carries its own emphasis and is encoded as its own leaf, which is what SwarmUI's
+            // encode_leaves does per region. Only the cond-scale half reaches it: the region already owns the
+            // attention bias, and the pipeline refuses regions combined with the base prompt's attention weights.
+            (WeightedTokenSequence regionTokens, int regionDrop) =
+                EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(text));
+            return _pipeline.EncodeRegionText(regionTokens.Tokens, regionDrop, regionTokens);
         });
     }
 
     /// <summary>Builds the Krea 2 templated token sequence plus the prefix-drop index (the leading system-block + user-header positions whose hidden states the pipeline discards — Krea 2's <c>prompt_template_encode_start_idx</c>).</summary>
-    private static (int[] tokens, int dropIndex) EncodeWithTemplate(Qwen3Tokenizer tokenizer, string prompt)
+    private static (WeightedTokenSequence tokens, int dropIndex) EncodeWithTemplate(
+        Qwen3Tokenizer tokenizer, string prompt)
     {
-        List<int> ids = new List<int>(64);
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw(Krea2SystemPrompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("user\n"));
-        int dropIndex = ids.Count;
-        ids.AddRange(tokenizer.EncodeRaw(prompt));
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        ids.AddRange(tokenizer.EncodeRaw("\n"));
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        ids.AddRange(tokenizer.EncodeRaw("assistant\n"));
-        if (ids.Count > MaxTokens)
-        {
-            ids.RemoveRange(MaxTokens, ids.Count - MaxTokens);
-        }
-        return (ids.ToArray(), dropIndex);
+        List<int> prefix = new List<int>(64);
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw(Krea2SystemPrompt));
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        int dropIndex = prefix.Count;
+        List<int> suffix = new List<int>(8);
+        suffix.Add(Qwen3Tokenizer.ImEndId);
+        suffix.AddRange(tokenizer.EncodeRaw("\n"));
+        suffix.Add(Qwen3Tokenizer.ImStartId);
+        suffix.AddRange(tokenizer.EncodeRaw("assistant\n"));
+        WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
+            prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
+        return (sequence.Truncate(MaxTokens), dropIndex);
     }
 
     /// <inheritdoc/>

@@ -64,6 +64,15 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     /// <see cref="QwenImageVaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint
     /// (per-step latent blend + final pixel recomposite, same as Z-Image). Strength=0 short-circuits to byte-identical
     /// pass-through.</para></summary>
+    /// <summary>Token weights are matched to conditioning rows by position, so a weight array that does not
+    /// describe the tokens it arrived with shifts every emphasis onto a neighbouring word rather than failing.</summary>
+    private static void RequireMatchingWeights(int[] tokenIds, Prompting.WeightedTokenSequence? weights, string name)
+    {
+        if (weights is not null && weights.Weights.Length != tokenIds.Length)
+            throw new ArgumentException(
+                $"Weights describe {weights.Weights.Length} tokens but {tokenIds.Length} were passed.", name);
+    }
+
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[]? negativeTokenIds,
@@ -71,9 +80,16 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null,
         int promptDropIndex = 34,
         int negativeDropIndex = 34,
-        RegionalPlan? regionalPlan = null)
+        RegionalPlan? regionalPlan = null,
+        Prompting.WeightedTokenSequence? promptWeights = null,
+        Prompting.WeightedTokenSequence? negativeWeights = null)
     {
         ThrowIfDisposed();
+        RequireMatchingWeights(promptTokenIds, promptWeights, nameof(promptWeights));
+        if (negativeTokenIds is not null)
+        {
+            RequireMatchingWeights(negativeTokenIds, negativeWeights, nameof(negativeWeights));
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -151,6 +167,15 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 _cachedUncondDrop = negativeDropIndex;
             }
         }
+        // CondScale weighting on a per-request copy: the cache above is keyed on token ids alone, and a weighted
+        // prompt tokenizes to the same ids, so scaling the cached tensor would leak into the next plain request.
+        Tensor? weightedCond = promptWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, condHidden, null, promptWeights).Cond;
+        if (weightedCond is not null) condHidden = weightedCond;
+        Tensor? weightedUncond = uncondHidden is null || negativeWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, uncondHidden, null, negativeWeights).Cond;
+        if (weightedUncond is not null) uncondHidden = weightedUncond;
+
         // The TE is ALWAYS freed after encode, even under HARTSY_KEEP_MODELS: its ~4-8 GB is exactly the
         // headroom the VAE decode's im2col needs at 1024² (keeping TE+DiT+VAE resident OOM'd: the decode
         // requested 6.9 GB with 69 MB free). Re-encoding costs ~1 s/gen; keeping the 13 GB DiT saves ~2 s.
@@ -170,6 +195,49 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         List<float[]>? regionGridMasks = null;
         float[]? regionWeights = null;
         int condTxtSeqLen = (int)condHidden.Shape[1];
+
+        // ── SwarmUI's joint-attention token-weight patch (attn1_token_weight_patch), Krea 2's alone ──
+        // COND slots only, mirroring `cond_or_uncond == 0`: the negative pass below already runs unbiased, so
+        // passing the scale only on the cond call is that filter, not an approximation of it. Text leads the joint
+        // concat, so a cond row index is already a joint index — the same thing SwarmUI's `seq == img_slice[1]`
+        // guard establishes for itself.
+        Prompting.TextTokenWeights? attnWeights =
+            request.ModelSpecificEnhancements && promptWeights is not null && promptWeights.Weights.Length > 0
+                ? Prompting.TextTokenWeights.TryBuild(promptWeights.Weights, condTxtSeqLen)
+                : null;
+        if (attnWeights is not null && hasRegions)
+        {
+            // Both want the attention bias, and SwarmUI resolves the clash by overwriting `attn_mask` outright —
+            // which would drop regional conditioning with no sign of it. Refused by name instead.
+            throw new NotSupportedException(
+                "Krea 2 cannot combine regional prompting with attention token weights: both drive the same "
+                + "attention bias. Drop the `(word:N)` emphasis from the base prompt, or the region tags.");
+        }
+        if (attnWeights is not null && (isImg2Img || isMaskedInpaint))
+        {
+            // RunForward (pixel space) reaches the transformer through a path with no bias surface, so the patch
+            // would be dropped silently — exactly the class of miss that reads as "emphasis is weak".
+            throw new NotSupportedException(
+                "Krea 2's attention token weights are wired on the patched-latent route only; img2img and masked "
+                + "inpaint run the pixel-space route. Use a plain prompt, or turn model-specific enhancements off "
+                + "to keep the cond-scale half alone.");
+        }
+        int jointSeqLen = condTxtSeqLen + imageSeqLen;
+        float[]? attnVRowScale = attnWeights?.BuildValueRowScale(jointSeqLen);
+        // Step-invariant, so built once rather than per step: it depends only on the prompt and the geometry.
+        Tensor? attnKeyBias = null;
+        if (attnWeights?.BuildKeyLogitBias(jointSeqLen) is float[] keyBias)
+        {
+            // [1,1,1,Skv] — one key row broadcast over every query, which is exactly what an additive per-key
+            // logit bias is; SDPA stores it without materializing the Sq x Skv duplicate.
+            attnKeyBias = new Tensor(new TensorShape(1, 1, 1, jointSeqLen), DType.F32);
+            keyBias.CopyTo(attnKeyBias.AsSpan<float>());
+        }
+        if (attnWeights is not null && DitShardBackend is not null)
+        {
+            Logs.Warning("[Krea2Pipeline] Attention token weights are active — DiT sharding v1 has no attnBias "
+                + "surface (ForwardPatchedSharded), running this generation unsharded on the primary backend.");
+        }
         if (hasRegions)
         {
             (extendedCond, condTxtSeqLen, regionRanges, regionGridMasks) =
@@ -357,6 +425,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // arithmetic between them. Narrowing for that generation is the established precedent here; silently capturing
         // the wrong sequence is not.
         bool graphMode = fastPath && !useCfg && condCache is null && streamer is null && DitShardBackend is null && !hasRegions
+            && attnWeights is null
             && !nonDefaultSampler && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
         Tensor? patchLatent = null;
         if (fastPath)
@@ -432,7 +501,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                                 {
                                     // The negative pass runs against the unextended uncondHidden, no bias — same
                                     // convention FluxPipeline uses (regions are positive-conditioning-only).
-                                    Tensor condV = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, bias);
+                                    Tensor condV = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked,
+                                        stepCondCache, bias ?? attnKeyBias, attnVRowScale);
                                     Tensor uncondV = RunForwardPatched(x, t, uncondHidden!, hPacked, wPacked, stepUncondCache);
                                     combined = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
                                     uncondV.Dispose();
@@ -440,7 +510,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                                 }
                                 else
                                 {
-                                    combined = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked, stepCondCache, bias);
+                                    combined = RunForwardPatched(x, t, hasRegions ? extendedCond! : condHidden, hPacked, wPacked,
+                                        stepCondCache, bias ?? attnKeyBias, attnVRowScale);
                                 }
                                 return new DenoisePrediction(combined, combined);
                             }
@@ -554,6 +625,11 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // gens for repeat prompts) — do NOT dispose here. They're released on cache eviction / pipeline Dispose.
         // extendedCond (region-extended) is rebuilt fresh every generation — always disposed.
         extendedCond?.Dispose();
+        // The weighted conditioning is a per-request copy, NOT the cached original — the cache is keyed on token
+        // ids, which are identical with and without weights, so the copy is what keeps the next plain request clean.
+        weightedCond?.Dispose();
+        weightedUncond?.Dispose();
+        attnKeyBias?.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
@@ -643,14 +719,15 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
     /// <summary>Routes one patchified-space denoise step through <see cref="DitShardBackend"/>'s block-range split when configured, else the normal single-backend path. Sharding excludes step-cache (see <see cref="Krea2Transformer.ForwardPatchedSharded"/>) — <paramref name="stepCache"/> is only honored on the unsharded path; callers still pass it unconditionally, matching the existing call sites. <paramref name="attnBias"/> (regional prompting, Tier 3.7) is excluded from sharding the same way — <see cref="Krea2Transformer.ForwardPatchedSharded"/> has no bias parameter at all — so a non-null bias forces the unsharded path regardless of <see cref="DitShardBackend"/>; callers must log this once per generation (see <c>GenerateFromTokens</c>), not silently drop the conditioning.</summary>
     private Tensor RunForwardPatched(Tensor patchLatent, float t, Tensor encoderHidden, int hPacked, int wPacked,
-        DeviceFeatureCache? stepCache, Tensor? attnBias = null)
+        DeviceFeatureCache? stepCache, Tensor? attnBias = null, ReadOnlyMemory<float> vRowScale = default)
     {
-        if (DitShardBackend is not null && attnBias is null)
+        if (DitShardBackend is not null && attnBias is null && vRowScale.IsEmpty)
         {
             return _transformer.ForwardPatchedSharded(Backend, DitShardBackend, patchLatent, t, encoderHidden,
                 hPacked, wPacked, DitShardSplitBlock);
         }
-        return _transformer.ForwardPatched(Backend, patchLatent, t, encoderHidden, hPacked, wPacked, stepCache, attnBias);
+        return _transformer.ForwardPatched(Backend, patchLatent, t, encoderHidden, hPacked, wPacked, stepCache,
+            attnBias, vRowScale);
     }
 
     /// <summary>Pixel-space counterpart of <see cref="RunForwardPatched"/> (img2img / masked-inpaint path).</summary>
@@ -749,7 +826,27 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes one region's prompt text (Tier 3.7) through the SAME tapped-layer encode the base prompt uses — the caller (recipe layer) must template + drop-index the region text identically to the base prompt (<c>Krea2RecipePipeline.EncodeWithTemplate</c>), since <see cref="EncodeTapped"/> has no template logic of its own.</summary>
-    public Tensor EncodeRegionText(int[] tokenIds, int dropIndex) => EncodeTapped(tokenIds, dropIndex);
+    /// <param name="weights">Per-token weights for <paramref name="tokenIds"/>, or null for an unweighted region.
+    /// Regions are scaled here rather than by the caller because the template trim happens inside
+    /// <see cref="EncodeTapped"/>, and the weights are right-aligned against the rows that survive it. Only the
+    /// cond-scale half applies: a region already owns the attention bias, so there is no slot left for the patch.
+    /// </param>
+    public Tensor EncodeRegionText(int[] tokenIds, int dropIndex, Prompting.WeightedTokenSequence? weights = null)
+    {
+        RequireMatchingWeights(tokenIds, weights, nameof(weights));
+        Tensor cond = EncodeTapped(tokenIds, dropIndex);
+        if (weights is null)
+        {
+            return cond;
+        }
+        Tensor? scaled = Prompting.CondTokenWeights.Apply(Backend, cond, null, weights).Cond;
+        if (scaled is null)
+        {
+            return cond;
+        }
+        cond.Dispose();
+        return scaled;
+    }
 
     /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops the first <paramref name="dropIndex"/> token positions (the chat-template system prefix).</summary>
     private unsafe Tensor EncodeTapped(int[] tokenIds, int dropIndex)

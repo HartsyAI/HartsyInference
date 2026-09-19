@@ -65,7 +65,11 @@ public sealed unsafe class Krea2Attention
     // FluxRope.ApplyGpuGqa — WanRopeInterleaved is single-tensor with an explicit head count, so GQA
     // (numHeads != numKvHeads) rotates Q and K with their own counts on the pre-permute [B, S, H, D] layout,
     // bit-identical to the host ForwardSingle. B>1 keeps the host ForwardSingle fallback (post-permute).
-    public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen, Tensor? attnBias = null)
+    /// <param name="vRowScale">SwarmUI's <c>attn1_token_weight_patch</c> value-row scale, already expanded to
+    /// <c>v</c>'s own shape and dtype so the multiply is a plain elementwise op. Null on every path but Krea 2's
+    /// weighted joint attention.</param>
+    public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen, Tensor? attnBias = null,
+        Tensor? vRowScale = null)
     {
         TensorShape qHeads = new TensorShape(batch, seqLen, _numHeads, _headDim);
         TensorShape kvHeads = new TensorShape(batch, seqLen, _numKvHeads, _headDim);
@@ -86,6 +90,24 @@ public sealed unsafe class Krea2Attention
         backend.Linear(k, x, _toK!, null);
         Tensor v = new Tensor(kvHeads, act);
         backend.Linear(v, x, _toV!, null);
+        if (vRowScale is not null)
+        {
+            if (vRowScale.ElementCount != v.ElementCount || vRowScale.DType != act)
+            {
+                // The caller expands the scale from the config's kv geometry; a block built with different
+                // geometry would make Mul read past the end of the smaller buffer rather than fail.
+                throw new ArgumentException(
+                    $"Value-row scale is {vRowScale.Shape} {vRowScale.DType} but v is {v.Shape} {act}.", nameof(vRowScale));
+            }
+            // Post-projection and before the head permute: [B, S, H_kv, D] is byte-identical to the [B, S, H_kv*D]
+            // that SwarmUI indexes, so scaling a token position scales it across every kv head, as the patch does.
+            // Elementwise Mul rather than MaskRows because MaskRows is F32-only and this activation is F16 on the
+            // DiT fast path; the expanded scale is built once per forward and shared by all 28 blocks.
+            Tensor scaled = new Tensor(kvHeads, act);
+            backend.Mul(scaled, v, vRowScale);
+            v.Dispose();
+            v = scaled;
+        }
         Tensor gate = new Tensor(flatShape, act);
         backend.Linear(gate, x, _toGate!, null);
 
