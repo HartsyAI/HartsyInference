@@ -22,6 +22,15 @@ public sealed class WanAnimateRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>Wan-Animate drives from the init image as the pose/motion reference.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Wan variant class
+    /// resolves to <c>wan.WanT5Tokenizer</c> → <c>UMT5XXlTokenizer</c>, which does NOT disable weights,
+    /// so the mechanism is the encoder-output blend rather than a cond scale. Wan-Animate is a separate
+    /// recipe class from <c>WanVideoRecipe</c> with its own prompt path, which is why it needed its own
+    /// wiring rather than inheriting one.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingVideo | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);

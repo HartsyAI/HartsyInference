@@ -201,6 +201,15 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [x] **AuraFlow, Chroma and Chroma-Radiance weight prompts — DONE 2026-09-19 (alpha.130).** The first image
+  families on the ComfyBlend mechanism rather than CondScale: their ComfyUI tokenizers keep weights, so the blend
+  runs on the encoder OUTPUT against the same encoder's empty-prompt baseline. `T5WeightedConditioning` is the
+  shared piece. **The three needed two opposite caching strategies and the trim is what decides it:** AuraFlow has
+  none, so its cached conditioning still shares the baseline's shape and it caches the plain encode, blending a
+  per-request copy; Chroma and Chroma-Radiance trim to the kept tokens before caching, so they blend before the
+  trim and carry the weights in the cache key instead. Getting that backwards produces a bug that only appears on
+  the SECOND generation of a weighted prompt. AuraFlow's gate also caught a disposal bug — the baseline was being
+  freed in the cache-eviction block right after being encoded, which only a weighted run reaches.
 - [x] **Six more families weight prompts — DONE 2026-09-19 (alpha.129): Z-Image, Boogu, Zeta-Chroma, Lens,
   ERNIE-Image, Ideogram 4.** All six disable weights in their ComfyUI tokenizer, so the mechanism is `CondScale`.
   The shared piece is `TemplatedPromptTokens`: a chat-template renderer usually BPEs the prompt together with the
@@ -216,6 +225,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   everywhere (same md5), `(fox:0.5)` moving 5.18-17.78 mean-abs-pixel; Z-Image also on its true-CFG path with a
   weighted negative. Lens' `ChatTemplateIds` assertion caught a second wrong
   assumption on its first run — `DefaultTxtOffset` counts the stripped PREFIX alone, not the whole wrapper.
+  The region-weighting paths are gated too: for both Z-Image and Ideogram 4 a weighted region at `(fox:1.0)` is
+  byte-identical to the unweighted region and `(fox:0.5)` differs, and weighting the base prompt alongside a
+  region is refused by name. (Ideogram 4's region runs were still outstanding when alpha.129 merged — they were
+  waiting on a long-running SwarmUI service holding 16 GB of the 24 GB card — and passed once it freed.)
 - [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
   SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
   scaling, so `CondScaleWithAttention` is not two alternatives but two things applied together; the mode ledger

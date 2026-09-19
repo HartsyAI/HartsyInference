@@ -68,10 +68,8 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
         byte[] controlRgb = VideoRecipeUtils.ResizeRgb24(control, width, height);
         Tensor controlClip = VideoRecipeUtils.TileRgbToClip(controlRgb, width, height, numFrames);
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
-        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-            _backend, _umt5, _config.TextDim, promptTokens, negTokens);
+        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWeightedWanPrompts(
+            _backend, _umt5, _tokenizer, _config.TextDim, prompt, negative);
 
         TextToImageRequest inner = new TextToImageRequest
         {

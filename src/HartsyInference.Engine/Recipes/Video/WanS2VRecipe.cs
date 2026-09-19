@@ -29,6 +29,15 @@ public sealed class WanS2VRecipe : IVideoRecipe
     /// arrives in <c>VideoRequest.VideoAudioReference</c> — the field that now classifies as this feature — and
     /// <c>WanS2VRecipePipeline.Generate</c> throws without it, so leaving it undeclared had the generic planner
     /// refuse the family's own mandatory input before construction.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Wan variant class
+    /// resolves to <c>wan.WanT5Tokenizer</c> → <c>UMT5XXlTokenizer</c>, which does NOT disable weights,
+    /// so the mechanism is the encoder-output blend rather than a cond scale. Wan S2V is a separate
+    /// recipe class from <c>WanVideoRecipe</c> with its own prompt path, which is why it needed its own
+    /// wiring rather than inheriting one. Its audio conditioning is untouched — only the text stream weights.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora | VideoFeatures.DrivingAudio;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);

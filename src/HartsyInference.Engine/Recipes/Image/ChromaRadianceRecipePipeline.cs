@@ -33,10 +33,12 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
         int steps = request.Steps ?? _config.DefaultSteps;
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar.
+        (int[] promptTokens, float[]? promptWeights) = T5WeightedConditioning.Tokenize(_tokenizer, prompt);
+        (int[] negTokens, float[]? negativeWeights) = T5WeightedConditioning.Tokenize(_tokenizer, negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+        int[] emptyTokens = T5WeightedConditioning.EmptyTokens(_tokenizer);
 
         // Radiance is pixel-space, so no VAE encoder is involved — the source pixels are the clean sample. The
         // pipeline validates against the unpadded request size and pads source and mask alongside the latent itself.
@@ -64,7 +66,8 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, negTokens, promptMask, negMask, inner, bridge);
+            promptTokens, negTokens, promptMask, negMask, inner, bridge,
+            promptWeights, negativeWeights, emptyTokens, T5Tokenizer.CreateAttentionMask(emptyTokens));
 
         return new ImageResult
         {
