@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.131
+
+- **Flux.1 and Anima honour `(word:N)`**, taking the deliberately-unwired ledger from 14 registered families
+  to 12. Both are dual-encoder families where only ONE arm can be blended, and wiring the other would have been
+  a no-op that looked like coverage.
+- **Flux.1: the T5 arm only.** CLIP-L contributes its POOLED vector and its hidden states are disposed
+  immediately after the EOS extraction — ComfyUI's blend rewrites hidden states, so there is nothing on that arm
+  for it to act on. Flux applies no trim to its T5 output, so it takes AuraFlow's shape rather than Chroma's: the
+  cache keeps the PLAIN conditioning, which still shares the baseline's shape, and the blend lands on a
+  per-request copy after the fetch.
+- **Anima: the Qwen-3 arm only.** Its T5 side is an id lookup inside the adapter (`embed[t5_ids]`), not an
+  encoder output, so there is nothing to interpolate — that text only needs the grammar taken off, or the parens
+  reach the lookup as prose. ComfyUI's own Anima text encoder drops that arm's weights the same way. The blend
+  lands on the full padded window before the real-length slice, and the Qwen-3 padding is mirrored rather than
+  assumed: EOS then BOS-as-pad, since Qwen3 has no dedicated pad token.
+- Flux.1's regions weight per leaf and a base prompt weighted alongside one is refused — the fourth family to
+  need that split, reusing `RegionalPromptWeightSplit` rather than reimplementing it.
+
 ## alpha.130
 
 - **Nine more families honour `(word:N)`**, taking the deliberately-unwired ledger from 22 registered families
