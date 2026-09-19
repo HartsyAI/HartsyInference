@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.121
+
+- **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole
+  output after each tensor, which re-registered earlier companions on every later pass and missed the fp8 weight
+  itself — that one reuses the source's key, so a "not already in the source" test excluded it and nothing freed
+  it. It now diffs against the keys present before the call.
+- **The quantizer's memory refusal measured the wrong number.** `TotalAvailableMemoryBytes` is total physical RAM
+  where no cgroup limit applies, so it reported 62 GiB "available" on a machine with 54 free — a job could pass
+  the check and still be OOM-killed, which is the failure the check exists to replace. It reads `MemAvailable` on
+  Linux, and passing it is documented as necessary rather than sufficient.
+- **Prompt weighting reached Wan's streaming path.** That entry point encoded its own prompt and never got the
+  blend, so `(word:1.5)` meant one thing batched and another streamed. Both share one encode now.
+- An int8 convolution weight reaching the LoRA merge hit ConvRot's internal rank-2 assertion — reachable only
+  because convolution targets were allowed through at all. Refused by name instead.
+
 ## alpha.120
 
 - **`QkvSplitNorm` runs on Vulkan**, the one op on the Flux/DiT path whose host default was a TRUE fallback rather
@@ -42,6 +57,7 @@ stable release will require. Dates are UTC.
   and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
   wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
   precision rather than a disagreement.
+
 
 ## alpha.118
 
