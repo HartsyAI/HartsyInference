@@ -43,7 +43,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Activations exempt from <see cref="OffloadActivations"/> — cross-step state that must not move.</summary>
     protected readonly HashSet<Tensor> Pinned = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>A resident weight's dtype conversions, keyed by weight then by target dtype name. A quantized or fp8
+    /// <summary>A resident weight's dtype conversions, keyed by weight then by target dtype. A quantized or fp8
     /// weight is converted once and reused, instead of being converted again by every GEMM that reads it.
     ///
     /// <para>Only WEIGHTS are cached this way. An activation changes every step, so a keyed entry would never be hit
@@ -51,7 +51,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <remarks>Each entry carries its own size: a conversion's byte count is not the weight's — that is the whole
     /// point of converting — so a backend that needs the size to free an allocation cannot recompute it from the
     /// tensor.</remarks>
-    protected readonly Dictionary<Tensor, Dictionary<string, (TBuffer Buffer, long Bytes)>> WeightCasts = new(ReferenceEqualityComparer.Instance);
+    protected readonly Dictionary<Tensor, Dictionary<DType, (TBuffer Buffer, long Bytes)>> WeightCasts = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>Every buffer the cache owns. A backend frees its own op temporaries through
     /// <see cref="ReleaseIfNotCached"/>, which consults this so a temporary that has since been cached — an output
@@ -93,8 +93,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
     // ── What a backend must provide ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>Allocates <paramref name="bytes"/> of device memory.</summary>
+    /// <summary>Allocates <paramref name="bytes"/> of device memory for an op output or temporary.</summary>
     protected abstract TBuffer AllocateDevice(long bytes);
+
+    /// <summary>Allocates device memory for a RESIDENT WEIGHT, which may need a different allocator.</summary>
+    /// <remarks>Weights and transients can have different lifetimes and therefore different free paths. CUDA is the
+    /// case that forces this: a preloaded weight comes from <c>cuMemAlloc</c> and is released with <c>cuMemFree</c>,
+    /// deliberately kept out of the stream-ordered pool that every transient uses, because it is freed
+    /// synchronously. Routing weights through <see cref="AllocateDevice"/> would hand a pool block to a synchronous
+    /// free — an error on that API, not a style question. Backends with one allocator ignore this.</remarks>
+    protected virtual TBuffer AllocateWeight(long bytes) => AllocateDevice(bytes);
 
     /// <summary>Releases a device allocation. May be deferred: the cache never assumes the memory is reclaimed by
     /// the time this returns, only that it has been handed back.</summary>
@@ -112,9 +120,23 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
     // ── Hooks for the parts that really are per-backend ──────────────────────────────────────────────────
 
-    /// <summary>Called after a fresh upload that was not cached, for a backend that tracks transient buffers — to
-    /// free them at its next flush, or to promote a tensor uploaded twice into a resident weight.</summary>
+    /// <summary>Called after a fresh upload that was not cached, for a backend that tracks transient buffers so it
+    /// can free them at its next flush.</summary>
     protected virtual void OnTransientUploaded(TBuffer buffer, Tensor source) { }
+
+    /// <summary>Offers a cache miss to the backend before the cache allocates a transient for it. Returning true
+    /// means the backend has made the tensor resident itself and <paramref name="buffer"/> is what the caller
+    /// should use.</summary>
+    /// <remarks>A separate hook from <see cref="OnTransientUploaded"/> because it is a different moment and, for
+    /// the backend that needs it, a different buffer. CUDA promotes a twice-uploaded tensor to a resident weight
+    /// here, BEFORE any transient exists, into a freshly allocated persistent buffer — so a post-upload hook could
+    /// only promote the pool block it was handed (wrong allocator for a weight) or upload the same bytes twice.
+    /// Fires after the miss is counted, so promotion still reads as a miss exactly as it did before.</remarks>
+    protected virtual bool TryMakeResidentOnMiss(Tensor tensor, long bytes, out TBuffer? buffer)
+    {
+        buffer = default;
+        return false;
+    }
 
     /// <summary>Whether this buffer belongs to something else and must never be freed individually — a graph arena
     /// owns its allocations wholesale.</summary>
@@ -190,6 +212,10 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
         Interlocked.Increment(ref _misses);
         long bytes = ByteSize(tensor);
+        if (TryMakeResidentOnMiss(tensor, bytes, out TBuffer? resident))
+        {
+            return resident!;
+        }
         TBuffer fresh = AllocateDevice(bytes);
         Upload(fresh, tensor, bytes);
         OnTransientUploaded(fresh, tensor);
@@ -377,6 +403,15 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// and owns the lifetime, so a host read should not silently undo it.</remarks>
     protected void PromoteToWeight(Tensor tensor, TBuffer buffer)
     {
+        // A tensor may not be resident in both tiers: a lookup checks weights first, so an activation left behind
+        // here would be shadowed by this weight on every later read. Today's only caller fires on a miss, where the
+        // tensor is in neither, but this is a general seam and the invariant is cheap to keep rather than assume.
+        if (Activations.Remove(tensor, out (TBuffer Buffer, long Bytes) displaced) && !Equals(displaced.Buffer, buffer))
+        {
+            Pinned.Remove(tensor);
+            OnActivationEvicted(tensor, displaced.Buffer);
+            Park(displaced.Buffer, displaced.Bytes);
+        }
         Weights[tensor] = buffer;
         CachedBuffers.Add(buffer);
         PendingOrphans.Remove(buffer);
@@ -419,7 +454,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Releases every cached conversion of one weight.</summary>
     private void ReleaseWeightCasts(Tensor weight)
     {
-        if (!WeightCasts.Remove(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
+        if (!WeightCasts.Remove(weight, out Dictionary<DType, (TBuffer Buffer, long Bytes)>? casts))
         {
             return;
         }
@@ -442,8 +477,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return false;
         }
-        if (WeightCasts.TryGetValue(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts)
-            && casts.TryGetValue(want.Name, out (TBuffer Buffer, long Bytes) hit))
+        if (WeightCasts.TryGetValue(weight, out Dictionary<DType, (TBuffer Buffer, long Bytes)>? casts)
+            && casts.TryGetValue(want, out (TBuffer Buffer, long Bytes) hit))
         {
             Interlocked.Increment(ref _hits);
             buffer = hit.Buffer;
@@ -456,12 +491,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// cache-owned, so a later <see cref="ReleaseIfNotCached"/> leaves it alone.</summary>
     public void StoreWeightCast(Tensor weight, DType want, TBuffer buffer, long bytes)
     {
-        if (!WeightCasts.TryGetValue(weight, out Dictionary<string, (TBuffer Buffer, long Bytes)>? casts))
+        if (!WeightCasts.TryGetValue(weight, out Dictionary<DType, (TBuffer Buffer, long Bytes)>? casts))
         {
-            casts = new Dictionary<string, (TBuffer, long)>(StringComparer.Ordinal);
+            casts = new Dictionary<DType, (TBuffer, long)>();
             WeightCasts[weight] = casts;
         }
-        casts[want.Name] = (buffer, bytes);
+        casts[want] = (buffer, bytes);
         CachedBuffers.Add(buffer);
     }
 
@@ -497,7 +532,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         MakeCurrent();
         long bytes = ByteSize(weight);
-        TBuffer buffer = AllocateDevice(bytes);
+        TBuffer buffer = AllocateWeight(bytes);
         Upload(buffer, weight, bytes);
         Weights[weight] = buffer;
         CachedBuffers.Add(buffer);
@@ -561,7 +596,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         Weights.Clear();
 
-        foreach (Dictionary<string, (TBuffer Buffer, long Bytes)> casts in WeightCasts.Values)
+        foreach (Dictionary<DType, (TBuffer Buffer, long Bytes)> casts in WeightCasts.Values)
         {
             foreach ((TBuffer cast, long castBytes) in casts.Values)
             {
