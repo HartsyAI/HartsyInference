@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.105
+
+- **Swapping one model for another in a single process is now tested, and the test can fail.** Load, generate,
+  tear down, load something else — the ordinary shape of a long-running server, and the scenario the
+  `State.Unregistered` guard was written for after a GGUF model switch crashed. Nothing exercised it: the
+  byte-identity harness runs one model per CLI invocation, and the CUDA suite's backends come and go without a
+  second model taking their place. It alternates an orderly dispose with abandoning both model and backend, since
+  only the latter leaves a queued cleanup pointing at a state the GC may already have collected.
+- **It asserts device memory comes back, which is the assertion with teeth.** All three bugs the Vulkan half of
+  this work produced were teardown leaks — invisible to a single generation, and to any test that builds one
+  backend and stops. Disabling `cuMemFree` makes this test fail with 16 GB unreturned across four swaps; that is
+  what it is for.
+- **The measurement needs a pool trim, and finding that out was the interesting part.** Before the trim it
+  reported 6.9 GB "unreturned" on a perfectly healthy run: every activation free goes through `cuMemFreeAsync`,
+  which hands the block back to the stream-ordered mempool, and a pooled block still counts as USED in
+  `cuMemGetInfo` until trimmed. Measuring without the trim would have reported a leak every time.
+- Recorded honestly: the soak does **not** reproduce the original crash. That needs a `ConditionalWeakTable`
+  finalized and then resurrected, a GC-timing window no test can force — verified by removing the retirement guard
+  entirely and watching the soak still pass. What it does cover is the swap working end to end, every state
+  retiring, and the memory returning.
+- Missing models make it skip, as the suite's convention is — except under `HARTSY_REQUIRE_MODEL_SWAP_SOAK=1`,
+  which turns absence into a failure. These tests print `SKIPPED` and return, which xunit records as a **pass**,
+  so a gate that silently skips is a gate that silently passes.
+- `TestPaths.Llm` gains Qwen3-4B Q4_K_M: a different family and a different quantization from the Llama beside it,
+  so a swap between them crosses the dequantize path as well as the residency cache.
+
 ## alpha.104
 
 - **Flux.2 schedules its conditioning per step.** `<alternate:a, b>` and `<fromto[N]:a, b>` reached it as prose or

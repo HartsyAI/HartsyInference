@@ -422,6 +422,14 @@ public static class TestPaths
         /// placement change — the exact-token-parity oracle vs the same model unsharded.</summary>
         public static string Llama32_1BQ8 => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"));
 
+        /// <summary>Qwen3-4B, Q4_K_M GGUF. A different family AND a different quantization from the Llama above,
+        /// so swapping between the two crosses the dequantize path as well as the device residency cache.</summary>
+        /// <remarks>Qwen3.5-0.8B would be smaller, but it is the wrong shape for a residency test: a hybrid
+        /// Gated-DeltaNet listed in <c>GgufLanguageModel.SsmArchitectures</c> whose delta-rule runs host-side, so
+        /// it would leave much of the device work unexercised. Qwen3-32B is the right shape but does not fit
+        /// alongside a second model on one card.</remarks>
+        public static string Qwen3_4BQ4KM => Resolve("QWEN3_4B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-4B-Q4_K_M.gguf"));
+
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
         /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
         public static string Qwen3_32BQ4KM => Resolve("QWEN3_32B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-32B-Q4_K_M.gguf"));
