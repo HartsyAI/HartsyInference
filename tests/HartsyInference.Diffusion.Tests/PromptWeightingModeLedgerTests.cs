@@ -164,7 +164,7 @@ public sealed class PromptWeightingModeLedgerTests
         "hidream",
         "hunyuan-image", "hunyuan-video", "kandinsky5", "kandinsky5-video",
         "ltx-2.5-distilled", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
-        "sd3", "sdxl-refiner",
+        "sdxl-refiner",
     ];
 
     private readonly ITestOutputHelper _output;

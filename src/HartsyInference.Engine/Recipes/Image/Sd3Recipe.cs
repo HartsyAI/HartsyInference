@@ -23,6 +23,14 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>SD3's VAE encoder is constructed alongside the decoder, and Sd3Pipeline implements the blend-on-vanilla masked path.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:584</c> →
+    /// <c>sd3_clip.SD3Tokenizer</c> = clip_l + clip_g + t5xxl, none of which disables weights. SD3 is the only
+    /// wired family whose CLIP HIDDEN states reach the DiT, so all three arms blend rather than T5 alone; the
+    /// pooled vector is taken before the blend, as the reference reads <c>first_pooled</c> before its loop.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner;
 
     /// <inheritdoc/>
