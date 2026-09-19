@@ -20,6 +20,9 @@ stable release will require. Dates are UTC.
   the caller's arithmetic.
 - The fold is accepted as that exact shape, not as "rank 4 that multiplies out": `[1152,6,16,16]` is still refused,
   and the refusal names both forms it would have taken.
+- A patch embedding that is itself block-quantized is decoded rather than cast. Our own GGUF policies quantize
+  rank>1 non-norm weights, and this is one; `CastTo` refuses a quantized source by design, so letting the shape
+  through at preflight without decoding here would only have moved the same failure into construction.
 
 ## alpha.99
 

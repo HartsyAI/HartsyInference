@@ -3,6 +3,7 @@ using Xunit;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Planning;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Gguf.Codecs;
 using HartsyInference.Diffusion.Models.TextEncoders;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -97,5 +98,31 @@ public sealed class MiniMaxH3GgufConvFoldTests
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
             () => MiniMaxH3TextEncoder.PatchEmbedInChannels(patchProj, (int)Hidden));
         Assert.Contains("does not divide", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The patch embedding may itself be block-quantized — our own GGUF policies quantize rank&gt;1 non-norm
+    /// weights, and this is one. <c>CastTo</c> refuses a quantized source by design, so accepting the shape at
+    /// preflight without decoding the blocks here would only have moved the failure from planning into construction.
+    /// </summary>
+    [Fact]
+    public unsafe void AQuantizedPatchEmbeddingIsDecodedRatherThanCastAndRefused()
+    {
+        const int OutDim = 8, InDim = 256;
+        using Tensor dense = new Tensor(new TensorShape(OutDim, InDim), DType.F32);
+        Span<float> values = new Span<float>((void*)dense.DataPointer, OutDim * InDim);
+        for (int i = 0; i < values.Length; i++) values[i] = MathF.Sin(i * 0.05f);
+
+        using Tensor quantized = new Tensor(new TensorShape(OutDim, InDim), DType.Q8_0);
+        IGgufCodec codec = GgufCodecRegistry.Get(DType.Q8_0);
+        codec.QuantizeFromF32((float*)dense.DataPointer, (byte*)quantized.DataPointer, OutDim * InDim);
+
+        using Tensor linear = Qwen3VlVisionEncoder.ReshapeConvToLinear(quantized, OutDim, InDim);
+        Assert.Equal(DType.F32, linear.DType);
+        Assert.Equal(2, linear.Shape.Rank);
+        Assert.Equal(OutDim, (int)linear.Shape[0]);
+        Assert.Equal(InDim, (int)linear.Shape[1]);
+        // Q8_0 round-trips closely; the point is that real values arrive, not that they are bit-exact.
+        ReadOnlySpan<float> got = new ReadOnlySpan<float>((void*)linear.DataPointer, OutDim * InDim);
+        for (int i = 0; i < got.Length; i++) Assert.InRange(got[i] - values[i], -0.02f, 0.02f);
     }
 }
